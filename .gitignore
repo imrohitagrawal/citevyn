@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+logs/
+
+# Build
+dist/
+build/
+
+# Node, if frontend is added later
+node_modules/
+.next/
+coverage/
+
+# Docker/local data
+*.db
+*.sqlite
+data/
+tmp/
