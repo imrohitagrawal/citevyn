@@ -107,8 +107,10 @@ async def ping_database() -> dict[str, Any]:
     """Run a trivial query and return a health summary.
 
     Never includes connection strings, credentials, or stack traces in the
-    return value — anything captured in the error path is passed through
-    :func:`app.core.logging.build_log_event` for redaction.
+    return value — anything captured in the error path is logged with
+    a fixed class-name label rather than the exception value itself,
+    so SQLAlchemy internals (which can include the DSN in some
+    failure modes) cannot reach the log stream.
     """
     engine = get_engine()
     started = time.perf_counter()
@@ -116,37 +118,38 @@ async def ping_database() -> dict[str, Any]:
         async with engine.connect() as connection:
             await connection.exec_driver_sql("SELECT 1")
     except SQLAlchemyError:
-        return _ping_failed(started, "SQLAlchemyError")
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        # noqa-style: only the literal class-name string is logged.
+        logger.warning(
+            build_log_event(
+                "database_ping_failed",
+                error_type="SQLAlchemyError",
+                latency_ms=latency_ms,
+            )
+        )
+        return {
+            "status": "unhealthy",
+            "latency_ms": latency_ms,
+            "error_type": "SQLAlchemyError",
+        }
     except Exception:  # pragma: no cover - defensive
-        return _ping_failed(started, "Exception")
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        logger.warning(
+            build_log_event(
+                "database_ping_failed",
+                error_type="Exception",
+                latency_ms=latency_ms,
+            )
+        )
+        return {
+            "status": "unhealthy",
+            "latency_ms": latency_ms,
+            "error_type": "Exception",
+        }
 
     return {
         "status": "healthy",
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-    }
-
-
-def _ping_failed(started: float, error_label: str) -> dict[str, Any]:
-    """Build the unhealthy payload + log line for a failed ping.
-
-    The label is a fixed string (class name from the caller), not a
-    taint source. The exception object itself is not passed through
-    to keep CodeQL's clear-text-logging flow analysis happy and to
-    guarantee no SQLAlchemy internals (which may carry the DSN) end
-    up in a log line.
-    """
-    latency_ms = round((time.perf_counter() - started) * 1000, 2)
-    logger.warning(
-        build_log_event(
-            "database_ping_failed",
-            error_type=error_label,
-            latency_ms=latency_ms,
-        )
-    )
-    return {
-        "status": "unhealthy",
-        "latency_ms": latency_ms,
-        "error_type": error_label,
     }
 
     return {
