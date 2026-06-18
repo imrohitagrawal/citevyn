@@ -114,12 +114,16 @@ class VectorRetriever:
             return []
 
         embedding = await self._embedder.embed(question)
+        # ``Chunk.embedding`` is a pgvector column that lands in
+        # Phase 2 (see ``app/models/chunks.py`` docstring); the
+        # type checker cannot see the attribute because it has not
+        # been declared on the ORM model yet.
         stmt = (
             select(Chunk, Document)
             .join(Document, Chunk.document_id == Document.document_id)
             .where(Document.status == DocumentStatus.active)
-            .where(Chunk.embedding.is_not(None))
-            .order_by(Chunk.embedding.cosine_distance(embedding))
+            .where(Chunk.embedding.is_not(None))  # type: ignore[attr-defined]
+            .order_by(Chunk.embedding.cosine_distance(embedding))  # type: ignore[attr-defined]
             .limit(limit)
         )
         if self._active_index_version is not None:
@@ -130,7 +134,7 @@ class VectorRetriever:
         rows = (await self._session.execute(stmt)).all()
         results: list[RetrievedChunk] = []
         for chunk, doc in rows:
-            distance = chunk.embedding.cosine_distance(embedding)
+            distance = chunk.embedding.cosine_distance(embedding)  # type: ignore[attr-defined]
             score = max(0.0, 1.0 - float(distance))
             results.append(
                 RetrievedChunk(

@@ -28,7 +28,7 @@ from app.retrieval.exact import ExactRetriever
 from app.retrieval.keyword import KeywordRetriever
 from app.retrieval.rerank import Reranker
 from app.retrieval.types import EvidenceHit, RetrievedChunk
-from app.retrieval.vector import VectorRetriever
+from app.retrieval.vector import Embedder, VectorRetriever
 from app.routing.intent import Intent
 
 
@@ -38,7 +38,7 @@ class HybridRetriever:
         session: AsyncSession,
         *,
         active_index_version: str | None = None,
-        embedder=None,
+        embedder: Embedder | None = None,
         reranker: Reranker | None = None,
     ) -> None:
         self._session = session
