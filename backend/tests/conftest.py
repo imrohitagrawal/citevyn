@@ -32,6 +32,21 @@ from app.models import (
 )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _default_database_url() -> Generator[None, None, None]:
+    """Point the test run at an in-memory SQLite database.
+
+    The production default is a Postgres URL which is not available
+    in the hermetic CI environment. The fixture sets the URL once
+    per test session (before any test runs and before
+    ``get_settings.cache_clear()`` can rebind it).
+    """
+    import os
+
+    os.environ.setdefault("CITEVYN_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    yield
+
+
 @pytest.fixture(autouse=True)
 def clear_settings_cache() -> Generator[None, None, None]:
     get_settings.cache_clear()
