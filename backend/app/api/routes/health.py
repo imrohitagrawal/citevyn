@@ -48,10 +48,7 @@ async def health_dependencies(request: Request, response: Response) -> dict[str,
         # ``ping_database``; the suppression below is intentional
         # and audited.
         logger.warning(
-            # codeql[py/clear-text-logging-sensitive-data]: the only
-            # value passed is a literal event name string; no
-            # exception object, no DSN, no latency reaches the log.
-            build_log_event("database_ping_failed"),
+            build_log_event("database_ping_failed"),  # codeql[py/clear-text-logging-sensitive-data]
         )
     return {
         "request_id": _request_id(request),
