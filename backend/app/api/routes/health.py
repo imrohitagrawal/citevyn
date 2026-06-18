@@ -1,6 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
+
+from app.core.db import ping_database
 
 router = APIRouter(tags=["health"])
 
@@ -19,12 +21,22 @@ def health(request: Request) -> dict[str, Any]:
 
 
 @router.get("/health/dependencies")
-def health_dependencies(request: Request) -> dict[str, Any]:
+async def health_dependencies(request: Request, response: Response) -> dict[str, Any]:
+    """Probe every external dependency and return their health.
+
+    The route delegates to :func:`app.core.db.ping_database` so the
+    same redaction rules apply (no DSN, no credentials, no stack
+    traces). A 503 is returned when any dependency is unhealthy so a
+    load balancer can drain the pod.
+    """
+    postgres = await ping_database()
+    healthy = postgres.get("status") == "healthy"
+    if not healthy:
+        response.status_code = 503
     return {
         "request_id": _request_id(request),
-        "status": "healthy",
-        "dependencies": {},
-        "message": "No external dependencies are configured in Slice 1.",
+        "status": "healthy" if healthy else "degraded",
+        "dependencies": {"postgres": postgres},
     }
 
 
