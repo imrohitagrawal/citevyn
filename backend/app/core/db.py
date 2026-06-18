@@ -14,7 +14,6 @@ exception.
 
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -28,8 +27,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.core.config import Settings, get_settings
-
-logger = logging.getLogger("citevyn.db")
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
@@ -127,8 +124,3 @@ async def ping_database() -> dict[str, Any]:
 def _elapsed_ms(started: float) -> float:
     """Return wall-clock milliseconds since ``started`` (perf_counter)."""
     return round((time.perf_counter() - started) * 1000, 2)
-
-    return {
-        "status": "healthy",
-        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
-    }
