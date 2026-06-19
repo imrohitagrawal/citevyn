@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.13.0",
     "aiosqlite>=0.20.0",
     "fastapi>=0.115.0",
+    "httpx>=0.27.0",
     "psycopg[binary]>=3.2.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.6.0",
@@ -17,17 +18,22 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.27.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.8.0",
     "pyright>=1.1.390",
 ]
 
+[project.scripts]
+citevyn-worker = "app.worker.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "postgres: tests that require a real Postgres + pgvector service (set CITEVYN_PG_TEST_URL).",
+]
 
 [tool.ruff]
 line-length = 100

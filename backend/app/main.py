@@ -17,6 +17,8 @@ from app.answer.orchestrator import OrchestratorError
 from app.api.routes.health import router as health_router
 from app.api.routes.messages import router as messages_router
 from app.api.routes.sessions import router as sessions_router
+from app.core.config import get_settings
+from app.core.cors import configure_cors
 from app.core.errors import (
     APIErrorCode,
     ErrorDetail,
@@ -29,15 +31,18 @@ from app.core.middleware import RequestIDMiddleware, get_current_request_id
 
 def create_app() -> FastAPI:
     configure_logging()
+    settings = get_settings()
 
     app = FastAPI(
         title="CiteVyn AI Backend",
-        version="0.1.0",
+        version="0.8.0",
         description=(
-            "Slice 7 backend: HTTP routes for sessions and messages, "
-            "wired to the Slice 4–6 answer engine."
+            "Slice 8 backend: HTTP routes for sessions, messages, "
+            "search, health, and admin; wired to the Slice 4–6 "
+            "answer engine and the Slice 8 ingestion worker."
         ),
     )
+    configure_cors(app, settings)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health_router)
     app.include_router(sessions_router)
