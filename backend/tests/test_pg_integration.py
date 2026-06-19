@@ -59,11 +59,29 @@ def _pg_url() -> str:
     return url
 
 
+def _pg_url_with_schema(schema: str) -> str:
+    """Build a Postgres URL whose default ``search_path`` is ``schema``.
+
+    Alembic opens its own connection from the URL we hand it; setting
+    ``search_path`` on the fixture's connection does not propagate.
+    libpq accepts ``options=-c search_path=<schema>`` as a connection
+    parameter, which psycopg applies on every new connection. The
+    schema name comes from ``pg_schema`` and is URL-safe (``[a-z0-9_]``).
+    """
+    base = _pg_url()
+    separator = "&" if "?" in base else "?"
+    return f"{base}{separator}options=-c search_path={schema}"
+
+
 @pytest.fixture
 def alembic_pg_config() -> Iterator[AlembicConfig]:
     """Yield an Alembic config pointed at the PG test database.
 
     The connection itself is the per-test schema, applied below.
+    The tests that consume this fixture must call
+    ``cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(...))``
+    once they know the schema name so Alembic's connection inherits
+    ``search_path``.
     """
     cfg = AlembicConfig(str(ALEMBIC_INI))
     cfg.set_main_option("script_location", str(REPO_ROOT / "db"))
@@ -104,6 +122,7 @@ def pg_schema() -> Iterator[str]:
 def test_alembic_upgrade_head_creates_all_tables(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
+    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -145,6 +164,7 @@ def test_uuid_columns_are_native_uuid_on_postgres(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
     """GUID columns must be real ``uuid`` on Postgres, not CHAR(36)."""
+    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     # Every GUID-typed column across the schema. Built from a tuple
@@ -185,6 +205,7 @@ def test_uuid_columns_are_native_uuid_on_postgres(
 
 def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str) -> None:
     """Smoke-test the application ORM against real Postgres."""
+    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -207,3 +228,41 @@ def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str
     assert row is not None
     assert row[0] == "demo_user"
     assert row[1] == "admin"
+
+
+def test_chunks_embedding_is_bytea_on_postgres(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """Slice 8 step 4: ``chunks.embedding`` lands as ``bytea`` on Postgres.
+
+    Migration ``0003`` declares the column as ``LargeBinary``, which
+    Postgres renders as ``bytea``. The future ``pgvector`` migration
+ will swap the column type to ``vector(<dim>)`` and this
+    assertion will need to be updated.
+
+    The test also confirms the column is nullable so existing rows
+    survive the upgrade.
+    """
+    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
+    alembic_upgrade(alembic_pg_config, "head")
+
+    engine = create_engine(_pg_url())
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {pg_schema}"))
+            row = conn.execute(
+                text(
+                    "SELECT data_type, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'chunks' "
+                    "AND column_name = 'embedding'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+    finally:
+        engine.dispose()
+
+    assert row is not None, "chunks.embedding column not found after migration"
+    data_type, is_nullable = row
+    assert data_type == "bytea", f"expected bytea, got {data_type}"
+    assert is_nullable == "YES", "embedding should be nullable"

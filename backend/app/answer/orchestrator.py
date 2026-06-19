@@ -3,7 +3,7 @@
 Wires together the Slice 4 seams (domain guardrail, intent router,
 hybrid retrieval, LLM client, citation validator) and the Slice 5
 answer cache with the Slice 2 persistence (Session, Message,
-RetrievedEvidence, AuditEvent). The HTTP route in Slice 7 calls
+RetrievedEvidence). The HTTP route in Slice 7 calls
 :meth:`Orchestrator.ask` and maps the returned dict to the
 ``/v1/sessions/{id}/messages`` response shape.
 
@@ -44,8 +44,6 @@ from app.llm.factory import build_llm_client
 from app.llm.protocol import LLMClient
 from app.llm.validation import validate_citations
 from app.models import (
-    AuditAction,
-    AuditEvent,
     Confidence,
     Message,
     MessageRole,
@@ -796,32 +794,25 @@ class Orchestrator:
     ) -> None:
         """Persist an ``ask_question`` audit event.
 
-        The ``metadata`` JSON carries the retrieval strategy, source
-        version hash, and any error reason so a SRE can reconstruct
-        the trace from the audit log alone.
+        The :mod:`app.services.audit` helper owns the row shape so the
+        SRE dashboard's parser doesn't have to special-case the
+        orchestrator's output.
         """
         user_id = await self._ensure_user(session_id)
-        full_metadata: dict[str, Any] = {
-            "request_id": request_id,
-            "session_id": str(session_id),
-            "message_id": str(message_id),
-            "domain": domain.value,
-            "intent": intent.value,
-            "outcome": outcome,
-        }
-        full_metadata.update(metadata)
-        self._session.add(
-            AuditEvent(
-                user_id=user_id,
-                role=UserRole.demo_user,
-                action=AuditAction.ask_question,
-                resource_type="message",
-                resource_id=str(message_id),
-                timestamp=_utcnow(),
-                metadata_=full_metadata,
-            )
+        from app.services.audit import record_ask_question
+
+        await record_ask_question(
+            self._session,
+            user_id=user_id,
+            role=UserRole.demo_user,
+            request_id=request_id,
+            session_id=session_id,
+            message_id=message_id,
+            domain=domain.value,
+            intent=intent.value,
+            outcome=outcome,
+            extra=metadata,
         )
-        await self._session.flush()
 
     async def _backfill_cache_metadata(
         self,

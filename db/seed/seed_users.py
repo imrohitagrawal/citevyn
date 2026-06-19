@@ -17,7 +17,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
 from sqlalchemy import select  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 from app.core.config import get_settings  # noqa: E402
 from app.models import User, UserRole  # noqa: E402

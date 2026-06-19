@@ -8,15 +8,20 @@ uniform error envelope. Every 4xx/5xx response flows through
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.answer.orchestrator import OrchestratorError
+from app.api.routes.admin import router as admin_router
 from app.api.routes.health import router as health_router
 from app.api.routes.messages import router as messages_router
+from app.api.routes.search import router as search_router
 from app.api.routes.sessions import router as sessions_router
+from app.core.config import get_settings
+from app.core.cors import configure_cors
 from app.core.errors import (
     APIErrorCode,
     ErrorDetail,
@@ -29,19 +34,24 @@ from app.core.middleware import RequestIDMiddleware, get_current_request_id
 
 def create_app() -> FastAPI:
     configure_logging()
+    settings = get_settings()
 
     app = FastAPI(
         title="CiteVyn AI Backend",
-        version="0.1.0",
+        version="0.8.0",
         description=(
-            "Slice 7 backend: HTTP routes for sessions and messages, "
-            "wired to the Slice 4–6 answer engine."
+            "Slice 8 backend: HTTP routes for sessions, messages, "
+            "search, health, and admin; wired to the Slice 4–6 "
+            "answer engine and the Slice 8 ingestion worker."
         ),
     )
+    configure_cors(app, settings)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health_router)
     app.include_router(sessions_router)
     app.include_router(messages_router)
+    app.include_router(search_router)
+    app.include_router(admin_router)
 
     # Exception handlers are defined at module scope (below) so pyright
     # can see them as referenced symbols; the FastAPI decorator binds
@@ -78,18 +88,47 @@ async def _orchestrator_error_handler(request: Request, exc: OrchestratorError) 
     )
 
 
+def _redact_input(value: object) -> str:
+    """Return a length marker for ``value`` suitable for an error envelope.
+
+    Pure function — no I/O, no logging, deterministic. Lives next
+    to :func:`_validation_error_handler` because that's the only
+    caller; if a second route ever needs the same scrub, move
+    it to :mod:`app.core.errors`.
+    """
+    if isinstance(value, str):
+        return f"<{len(value)} chars redacted>"
+    return "<redacted>"
+
+
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Map a FastAPI request-validation error to 422 with the envelope.
 
     FastAPI's default 422 shape is not the same as the standard
     envelope; we re-shape it so the client only needs one parser.
+
+    The Pydantic ``errors()`` payload contains an ``input`` key
+    that echoes the offending value. For a chat-style API the
+    body may include user-provided text or, in a future slice,
+    pasted tokens — we don't want those echoed back through the
+    error envelope. :func:`_redact_input` strips the value to a
+    length marker so the client can still tell "the body was
+    rejected" without seeing the contents.
     """
+    redacted_errors: list[dict[str, Any]] = [
+        (
+            {**raw, "input": _redact_input(raw["input"])}
+            if "input" in raw
+            else dict(raw)
+        )
+        for raw in exc.errors()
+    ]
     envelope = ErrorEnvelope(
         request_id=_resolve_request_id(request),
         error=ErrorDetail(
             code=APIErrorCode.validation_error,
             message="Request body or parameters failed validation.",
-            details={"errors": exc.errors()},
+            details={"errors": redacted_errors},
         ),
     )
     return JSONResponse(
