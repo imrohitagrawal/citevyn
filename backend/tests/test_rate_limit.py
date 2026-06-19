@@ -114,3 +114,36 @@ def test_zero_window_seconds_rejected() -> None:
     """A non-positive window is invalid — sliding windows need a width."""
     with pytest.raises(ValueError):
         RateLimiter(window_seconds=0)
+
+
+def test_negative_window_seconds_rejected() -> None:
+    """A negative window is invalid for the same reason as zero."""
+    with pytest.raises(ValueError):
+        RateLimiter(window_seconds=-1)
+
+
+async def test_concurrent_hits_do_not_burst_the_limit() -> None:
+    """``2 * limit`` concurrent hits must still let only ``limit`` through.
+
+    The implementation guards bucket mutation with an
+    :class:`asyncio.Lock`. A regression that drops the lock
+    (e.g. a future "optimisation") would let bursts slip
+    through — this test pins the contract.
+    """
+    import asyncio
+
+    limit = DEFAULT_LIMIT_DEMO_USER
+    limiter = RateLimiter(window_seconds=60)
+
+    async def hit() -> bool:
+        try:
+            await limiter.check(user_id="concurrent_user", role="demo_user")
+            return True
+        except Exception:
+            return False
+
+    results = await asyncio.gather(*(hit() for _ in range(2 * limit)))
+    accepted = sum(1 for ok in results if ok)
+    rejected = sum(1 for ok in results if not ok)
+    assert accepted == limit, f"expected exactly {limit} accepted, got {accepted}"
+    assert rejected == limit, f"expected exactly {limit} rejected, got {rejected}"

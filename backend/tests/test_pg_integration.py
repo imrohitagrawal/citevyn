@@ -207,3 +207,40 @@ def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str
     assert row is not None
     assert row[0] == "demo_user"
     assert row[1] == "admin"
+
+
+def test_chunks_embedding_is_bytea_on_postgres(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """Slice 8 step 4: ``chunks.embedding`` lands as ``bytea`` on Postgres.
+
+    Migration ``0003`` declares the column as ``LargeBinary``, which
+    Postgres renders as ``bytea``. The future ``pgvector`` migration
+ will swap the column type to ``vector(<dim>)`` and this
+    assertion will need to be updated.
+
+    The test also confirms the column is nullable so existing rows
+    survive the upgrade.
+    """
+    alembic_upgrade(alembic_pg_config, "head")
+
+    engine = create_engine(_pg_url())
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {pg_schema}"))
+            row = conn.execute(
+                text(
+                    "SELECT data_type, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'chunks' "
+                    "AND column_name = 'embedding'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+    finally:
+        engine.dispose()
+
+    assert row is not None, "chunks.embedding column not found after migration"
+    data_type, is_nullable = row
+    assert data_type == "bytea", f"expected bytea, got {data_type}"
+    assert is_nullable == "YES", "embedding should be nullable"

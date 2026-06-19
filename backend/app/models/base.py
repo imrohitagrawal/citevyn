@@ -9,11 +9,12 @@ tests can run hermetically without needing a Postgres server.
 from __future__ import annotations
 
 import enum
+import pickle
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import CHAR, DateTime, String, TypeDecorator
+from sqlalchemy import CHAR, DateTime, LargeBinary, String, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -147,3 +148,65 @@ def uuid_column(*, primary_key: bool = False, **kwargs: Any) -> Mapped[uuid.UUID
 def string_pk(**kwargs: Any) -> Mapped[str]:
     """String primary key (used for ``users.user_id`` and ``index_versions``)."""
     return mapped_column(String(128), primary_key=True, **kwargs)
+
+
+class PickledEmbedding(TypeDecorator):  # type: ignore[type-arg]
+    """Portable column type for ``list[float]`` embeddings.
+
+    Stores the list as pickle bytes. On SQLite this is a ``BLOB``;
+    on Postgres the same declaration becomes ``bytea``. The
+    decorator round-trips Python lists transparently.
+
+    Design notes
+    ------------
+    * The contract is :class:`list` of :class:`float`. NumPy
+      arrays (or any object with a ``.tolist()`` method) are
+      the caller's responsibility to convert *before* assigning
+      to the column. The embedder pipeline normalises to
+      ``list[float]`` at the producer; this decorator is
+      intentionally strict so a future regression that lets an
+      ndarray through is loud, not silent.
+    * ``None`` is preserved as ``None`` (the column is
+      nullable). Empty list pickles to a non-None blob, so
+      callers that want "no embedding" must set ``None``.
+    * Pickle protocol is left at the default (Python's current
+      HIGHEST_PROTOCOL) — embeddings are produced in the same
+      process that reads them, so cross-version safety is not
+      a constraint.
+    * The future ``pgvector`` migration (``0004``) will swap
+      this column to ``vector(<dim>)`` on Postgres; the
+      decorator's pickle contract still works on SQLite for
+      tests, and the production path can read the
+      ``vector`` column directly via a new decorator.
+    * **Security:** never accept pickle bytes from network input.
+      The column is written by the worker / orchestrator, never
+      by an HTTP route. Adding a route that takes raw bytes
+      here would be a remote-code-execution vector. If a future
+      client ever needs to push embeddings over the wire,
+      serialise as JSON (or ``np.save``/``np.load`` as a flat
+      float32 buffer) and decode on the server.
+    """
+
+    impl = LargeBinary
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> bytes | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise TypeError(
+                "embedding must be a list[float]; "
+                f"got {type(value).__name__}. "
+                "Convert numpy arrays with .tolist() at the producer."
+            )
+        return pickle.dumps(value)
+
+    def process_result_value(self, value: Any, dialect: Any) -> list[float] | None:
+        if value is None:
+            return None
+        # ``value`` arrives as ``bytes`` on both backends. We
+        # produced the bytes ourselves in :meth:`process_bind_param`
+        # by pickling a plain ``list[float]``, so the unpickled
+        # value is already a plain list — no further normalisation
+        # is needed and a defensive ``tolist()`` would be dead code.
+        return list(pickle.loads(value))

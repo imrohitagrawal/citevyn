@@ -8,6 +8,8 @@ also creates an active :class:`IndexVersion` row).
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from app.models.enums import IndexStatus, TermType
@@ -268,3 +270,170 @@ def test_max_results_constant_is_a_positive_int() -> None:
     assert isinstance(MAX_RESULTS, int)
     assert MAX_RESULTS >= 1
     assert MAX_RESULTS <= 100
+
+
+@pytest.mark.asyncio
+async def test_exact_lookup_pins_to_specific_index_version(session) -> None:
+    """An explicit non-active ``index_version`` is honoured (replay path).
+
+    Two non-active index versions both contain a term that the
+    active index does not. Passing the version key returns the
+    row; passing the other version returns nothing. This locks
+    the replay / debugging branch the docstring advertises.
+    """
+    await _seed(session)
+    from datetime import UTC, datetime
+
+    from app.models.documents import Document
+    from app.models.enums import DocumentStatus
+    from app.models.exact_terms import ExactTerm
+    from app.models.index_versions import IndexVersion
+
+    # Two non-active index versions, both inactive. (active is
+    # the seeded row; we explicitly avoid promoting ours so the
+    # active-row filter would skip them.)
+    now = datetime.now(UTC)
+    v_old = IndexVersion(
+        index_version="v-old-replay",
+        status=IndexStatus.candidate,
+        source_version_hash="sha256:replay-old",
+        created_at=now,
+        promoted_at=None,
+    )
+    v_new = IndexVersion(
+        index_version="v-new-replay",
+        status=IndexStatus.candidate,
+        source_version_hash="sha256:replay-new",
+        created_at=now,
+        promoted_at=None,
+    )
+    session.add_all([v_old, v_new])
+    await session.flush()
+
+    # Only v_old has the term we're looking for.
+    doc_old = Document(
+        index_version=v_old.index_version,
+        source_name="replay-old-src",
+        product_area="replay",
+        source_url="https://example.com/old",
+        title="Replay old",
+        content_checksum="x" * 64,
+        last_fetched_at=now,
+        status=DocumentStatus.active,
+    )
+    session.add(doc_old)
+    await session.flush()
+
+    session.add(
+        ExactTerm(
+            term_text="--replay-flag",
+            product_area="replay",
+            term_type=TermType.flag,
+            document_id=doc_old.document_id,
+            chunk_id=uuid.uuid4(),
+        )
+    )
+    await session.flush()
+
+    # Pin to the version that has the row.
+    hits = await exact_lookup(
+        session,
+        term="--replay-flag",
+        product_area="replay",
+        index_version=v_old.index_version,
+    )
+    assert len(hits) == 1
+    assert hits[0].index_version == v_old.index_version
+    assert hits[0].term_text == "--replay-flag"
+
+    # Pin to the version that does not have the row.
+    hits_other = await exact_lookup(
+        session,
+        term="--replay-flag",
+        product_area="replay",
+        index_version=v_new.index_version,
+    )
+    assert hits_other == []
+
+
+@pytest.mark.asyncio
+async def test_exact_lookup_pinned_version_skips_active_filter(session) -> None:
+    """A pinned (non-active) version returns rows even if not currently active.
+
+    Locks the difference between ``"active"`` and a specific
+    string: with the latter, the ``status='active'`` filter is
+    skipped entirely. Without the test, a regression that
+    *also* filters on active when a key is supplied would pass
+    every other test in this file.
+    """
+    await _seed(session)
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models.documents import Document
+    from app.models.enums import DocumentStatus
+    from app.models.exact_terms import ExactTerm
+    from app.models.index_versions import IndexVersion
+
+    # Confirm the active row is "v1-..." (seed value), and add a
+    # candidate (not active) version with its own term.
+    active = (
+        await session.execute(
+            select(IndexVersion).where(IndexVersion.status == IndexStatus.active)
+        )
+    ).scalar_one()
+    assert active.status is IndexStatus.active
+
+    candidate = IndexVersion(
+        index_version="v-candidate-1",
+        status=IndexStatus.candidate,
+        source_version_hash="sha256:cand",
+        created_at=datetime.now(UTC),
+        promoted_at=None,
+    )
+    session.add(candidate)
+    await session.flush()
+
+    doc = Document(
+        index_version=candidate.index_version,
+        source_name="cand-src",
+        product_area="cand",
+        source_url="https://example.com/cand",
+        title="Candidate",
+        content_checksum="y" * 64,
+        last_fetched_at=datetime.now(UTC),
+        status=DocumentStatus.active,
+    )
+    session.add(doc)
+    await session.flush()
+
+    session.add(
+        ExactTerm(
+            term_text="--cand-only",
+            product_area="cand",
+            term_type=TermType.flag,
+            document_id=doc.document_id,
+            chunk_id=uuid.uuid4(),
+        )
+    )
+    await session.flush()
+
+    # With 'active', the candidate's row is invisible.
+    hits_active = await exact_lookup(
+        session,
+        term="--cand-only",
+        product_area="cand",
+        index_version="active",
+    )
+    assert hits_active == []
+
+    # With the explicit candidate key, the row is found even
+    # though that index is not active.
+    hits_candidate = await exact_lookup(
+        session,
+        term="--cand-only",
+        product_area="cand",
+        index_version=candidate.index_version,
+    )
+    assert len(hits_candidate) == 1

@@ -369,3 +369,32 @@ def test_health_index_ready_when_active_present(
         assert body["active_index"]["index_version"] == "v1"
         assert body["active_index"]["promoted_at"] is not None
         assert body["previous_good_index"] is None
+
+
+def test_search_exact_422_redacts_user_input(app_with_seeded_session) -> None:
+    """The 422 envelope must not echo back user-provided input.
+
+    Pydantic's default ``errors()`` includes an ``input`` key
+    with the offending value verbatim. We strip that to
+    ``<N chars redacted>`` (string) or ``<redacted>`` (other) so
+    a chat payload (or, in a future slice, a pasted token) is
+    never round-tripped through the error response.
+
+    We use ``term_type="bogus"`` (not in the
+    :class:`TermType` enum) to force a validation error after
+    Pydantic has captured the offending input.
+    """
+    sensitive = "user-pasted-secret-value-that-must-not-leak"
+    with TestClient(app_with_seeded_session) as client:
+        response = client.post(
+            "/v1/search/exact",
+            json={"term": sensitive, "product_area": "codex", "term_type": "bogus"},
+            headers={"Authorization": f"Bearer {API_KEY}"},
+        )
+        assert response.status_code == 422
+        body_str = response.text
+        assert sensitive not in body_str, (
+            f"422 envelope leaked the offending input: {body_str}"
+        )
+        # The redactor's marker is in the body.
+        assert "redacted" in body_str

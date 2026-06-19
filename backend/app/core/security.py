@@ -9,6 +9,7 @@ and the rate limiter rely on.
 
 from __future__ import annotations
 
+import secrets
 from typing import Annotated
 
 from fastapi import Depends, Header, Request
@@ -95,8 +96,6 @@ def require_admin_api_key(
     # ``secrets.compare_digest`` to avoid a timing oracle — a naive
     # ``==`` would let an attacker measure the prefix-match time to
     # narrow down the key.
-    import secrets
-
     if not secrets.compare_digest(x_admin_api_key, expected):
         raise error_response(
             request_id=request_id,

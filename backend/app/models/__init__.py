@@ -6,7 +6,7 @@ which Alembic consults to autogenerate migrations.
 
 from app.models.answer_cache import AnswerCache
 from app.models.audit_events import AuditEvent
-from app.models.base import GUID, Base, TimestampMixin
+from app.models.base import GUID, Base, PickledEmbedding, TimestampMixin
 from app.models.chunks import Chunk
 from app.models.documents import Document
 from app.models.enums import (
@@ -54,6 +54,7 @@ __all__ = [
     "JobStatus",
     "Message",
     "MessageRole",
+    "PickledEmbedding",
     "RetrievedEvidence",
     "RetrievalType",
     "Session",
