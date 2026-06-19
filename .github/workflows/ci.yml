@@ -2,13 +2,13 @@
 # in-memory SQLite suite plus the static checks documented in
 # backend/README.md.
 #
-# A second `postgres-migrations` job is provided as a commented-out
-# stub. It runs `alembic upgrade head` against a real Postgres
-# service to catch things SQLite forgives, then runs the `postgres`
-# pytest marker. It is intentionally not enabled in Slice 2 / Slice
-# 3+; enable it once the Postgres integration test marker is wired
-# up and the `0002_promote_strenum_to_native` migration is
-# exercised in CI.
+# A second `postgres-migrations` job runs after `test` succeeds. It
+# spins up a real Postgres service, applies every Alembic migration
+# (``alembic upgrade head``), and runs the `postgres`-marked
+# integration tests against the same database. This catches drift
+# between the SQLAlchemy models and the schema (e.g. native ENUM
+# promotion in migration 0002, JSONB in migration 0003) before it
+# can ship to production.
 
 name: ci
 
@@ -44,54 +44,63 @@ jobs:
         # opt-in and gated by an env var, so this is hermetic.
         run: uv run pytest -m "not postgres" -v
 
-  # ---------------------------------------------------------------------------
-  # Slice 3+ — enable this job once the Postgres integration test marker
-  # (Follow-up A) is merged. To enable, remove the leading `# ` on the
-  # `postgres-migrations:` key, the two `needs:` references, and the
-  # services block. The job will:
-  #   * spin up a real Postgres service
-  #   * set CITEVYN_PG_TEST_URL to point at it
-  #   * run `alembic upgrade head` (exercises 0001 + 0002)
-  #   * run the `postgres`-marked integration tests
-  # ---------------------------------------------------------------------------
-  # postgres-migrations:
-  #   name: alembic upgrade head on real Postgres
-  #   runs-on: ubuntu-latest
-  #   needs: test
-  #   services:
-  #     postgres:
-  #       image: postgres:16
-  #       env:
-  #         POSTGRES_USER: citevyn
-  #         POSTGRES_PASSWORD: citevyn
-  #         POSTGRES_DB: citevyn_pg_test
-  #       ports:
-  #         - 5432:5432
-  #       options: >-
-  #         --health-cmd "pg_isready -U citevyn"
-  #         --health-interval 5s
-  #         --health-timeout 5s
-  #         --health-retries 10
-  #   env:
-  #     CITEVYN_PG_TEST_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_pg_test
-  #   defaults:
-  #     run:
-  #       # ``alembic.ini`` declares ``script_location = db`` relative
-  #       # to CWD; running from the repo root matches the
-  #       # ``backend/README.md`` convention. The pytest step still
-  #       # uses ``backend`` because pyproject.toml and the venv live
-  #       # there.
-  #       working-directory: .
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: "3.12"
-  #     - run: pip install --upgrade pip uv
-  #     - name: Sync dependencies
-  #       run: uv sync --group dev
-  #     - name: Alembic upgrade head against Postgres
-  #       run: uv run alembic -c db/alembic.ini upgrade head
-  #     - name: Postgres integration tests
-  #       working-directory: backend
-  #       run: uv run pytest -m postgres -v
+  postgres-migrations:
+    name: alembic + postgres integration tests
+    runs-on: ubuntu-latest
+    needs: test
+    # Only run on internal pushes / PRs from this repo. Forks do
+    # not get a Postgres service — it would be wasted compute and
+    # we don't trust secrets on fork PRs.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: citevyn
+          POSTGRES_PASSWORD: citevyn
+          POSTGRES_DB: citevyn_pg_test
+        ports:
+          - 5432:5432
+        # Health-check the service so downstream steps don't race
+        # the boot. ``pg_isready`` returns 0 once Postgres accepts
+        # connections.
+        options: >-
+          --health-cmd "pg_isready -U citevyn -d citevyn_pg_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # ``CITEVYN_DATABASE_URL`` is what ``db/env.py`` reads when
+      # applying migrations. ``CITEVYN_PG_TEST_URL`` is what the
+      # pytest ``postgres`` marker looks at. Point both at the same
+      # service so alembic and pytest agree on the target database.
+      CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_pg_test
+      CITEVYN_PG_TEST_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_pg_test
+    defaults:
+      run:
+        # ``alembic.ini`` declares ``script_location = db`` relative
+        # to CWD; running from the repo root matches the
+        # ``backend/README.md`` convention. The pytest step still
+        # uses ``backend`` because pyproject.toml and the venv live
+        # there.
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --upgrade pip uv
+      - name: Sync dependencies
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Alembic upgrade head against Postgres
+        # Exercises every migration (0001 initial schema,
+        # 0002 promote StrEnum to native PG ENUM, 0003 add
+        # chunks.embedding) against a real Postgres engine. Any
+        # SQLAlchemy-vs-schema drift fails here.
+        run: uv run alembic -c db/alembic.ini upgrade head
+      - name: Postgres integration tests
+        working-directory: backend
+        # The ``postgres`` marker is opt-in and gated by
+        # ``CITEVYN_PG_TEST_URL``; the URL above enables it.
+        run: uv run pytest -m postgres -v
