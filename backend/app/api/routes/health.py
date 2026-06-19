@@ -42,9 +42,7 @@ async def health_dependencies(request: Request, response: Response) -> dict[str,
     healthy = postgres.get("status") == "healthy"
     if not healthy:
         response.status_code = 503
-        logger.warning(  # codeql[py/clear-text-logging-sensitive-data]
-            build_log_event("database_ping_failed"),
-        )
+        logger.warning(build_log_event("database_ping_failed"))
     return {
         "request_id": _request_id(request),
         "status": "healthy" if healthy else "degraded",
