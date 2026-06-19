@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.answer.orchestrator import OrchestratorError
+from app.api.routes.admin import router as admin_router
 from app.api.routes.health import router as health_router
 from app.api.routes.messages import router as messages_router
 from app.api.routes.search import router as search_router
@@ -50,6 +51,7 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(messages_router)
     app.include_router(search_router)
+    app.include_router(admin_router)
 
     # Exception handlers are defined at module scope (below) so pyright
     # can see them as referenced symbols; the FastAPI decorator binds
