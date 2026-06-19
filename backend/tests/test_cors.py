@@ -60,7 +60,7 @@ def test_preflight_from_allowed_origin_returns_cors_headers(settings: Settings) 
     # The ``allow_credentials=False`` setting must not emit a
     # ``Access-Control-Allow-Credentials: true`` header.
     assert "access-control-allow-credentials" not in {
-        k.lower() for k in response.headers.keys()
+        k.lower() for k in response.headers
     }
 
 

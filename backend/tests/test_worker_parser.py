@@ -63,7 +63,11 @@ def test_parse_full_claude_api_fixture() -> None:
     """The Claude API fixture parses to one H1 + three H2 blocks."""
     from pathlib import Path
 
-    raw = (Path("tests/fixtures/sources/claude_api.md")).read_text(encoding="utf-8")
+    # Resolve relative to *this* test file so the test works
+    # regardless of pytest's CWD (CI uses ``backend``, local
+    # ``make`` invocations use the repo root).
+    fixture = Path(__file__).resolve().parent / "fixtures" / "sources" / "claude_api.md"
+    raw = fixture.read_text(encoding="utf-8")
     parsed = parse_markdown(raw)
     assert parsed.title == "Claude API Reference"
     assert [b.heading for b in parsed.blocks] == [

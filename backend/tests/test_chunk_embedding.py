@@ -14,6 +14,7 @@ import pickle
 from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from app.models.base import PickledEmbedding
@@ -23,7 +24,7 @@ from app.models.enums import DocumentStatus
 from app.models.index_versions import IndexStatus, IndexVersion
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def active_index_version(session) -> str:
     """Insert an active IndexVersion row and a parent Document.
 

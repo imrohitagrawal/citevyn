@@ -31,9 +31,13 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import defaultdict, deque
+from typing import TYPE_CHECKING
 
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
+
+if TYPE_CHECKING:
+    from app.core.config import Settings
 
 # Default limits the limiter uses when ``Settings.rate_limit_*_per_hour``
 # is not provided (e.g. the limiter is exercised in a unit test that
@@ -124,13 +128,13 @@ def _too_many_requests() -> Exception:
 _limiter: RateLimiter | None = None
 
 
-def get_limiter(settings) -> RateLimiter:
+def get_limiter(settings: Settings) -> RateLimiter:
     """Return the process-wide :class:`RateLimiter`, building it lazily.
 
-    ``settings`` is typed as a loose object so this module does not
-    import :class:`Settings` (which would create a circular import
-    with :mod:`app.core.config`). Callers pass
-    ``get_settings()`` directly.
+    ``settings`` is typed via :class:`Settings` (forwarded through
+    :data:`TYPE_CHECKING`) so this module does not import
+    :mod:`app.core.config` at runtime and create a circular import.
+    Callers pass ``get_settings()`` directly.
     """
     global _limiter
     if _limiter is None or _limiter.window_seconds != settings.rate_limit_window_seconds:
@@ -148,7 +152,7 @@ async def enforce_rate_limit(
     *,
     user_id: str,
     role: str,
-    settings,
+    settings: Settings,
 ) -> None:
     """Apply the rate limit for an authenticated request.
 

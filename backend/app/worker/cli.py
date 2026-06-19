@@ -65,7 +65,7 @@ def _cmd_list_sources() -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     """Ingest all sources (or the one named by ``--source``)."""
     settings = get_settings()
-    runner = _build_runner(settings)
+    runner = _build_runner(settings, index_version=args.index_version)
     sessionmaker = get_sessionmaker()
     sources = _resolve_sources(args.source)
     return asyncio.run(_drive(runner, sessionmaker, sources, args.index_version))
@@ -127,15 +127,23 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_runner(settings: Settings) -> IngestionRunner:
-    """Build the runner with the default fetcher + embedder."""
+def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
+    """Build the runner with the default fetcher + embedder.
+
+    ``index_version`` is plumbed into the constructor (not defaulted
+    here) so the CLI's ``--index-version`` flag is actually honored
+    end-to-end. The runner uses it to (a) write the
+    :class:`IndexVersion` row during ``ensure_index_version``, (b)
+    stamp every :class:`Document` / :class:`Chunk` row it creates,
+    and (c) satisfy the FK on ``documents``.
+    """
     fetcher = build_fetcher(_pick_first_source())  # build default-root LocalFetcher
     embedder = build_embedder()
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
         source_version_hash=settings.source_version_hash,
-        index_version="v-local",
+        index_version=index_version,
     )
 
 

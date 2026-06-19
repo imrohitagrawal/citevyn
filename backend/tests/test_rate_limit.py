@@ -8,6 +8,7 @@ sliding-window logic in isolation. Route-level integration with
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app.core.errors import APIErrorCode
 from app.core.rate_limit import (
@@ -64,8 +65,9 @@ async def test_eviction_after_window_expires(limiter: RateLimiter) -> None:
     # Fill the bucket to the limit.
     for _ in range(DEFAULT_LIMIT_DEMO_USER):
         await limiter.check(user_id=user, role="demo_user")
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as exc_info:
         await limiter.check(user_id=user, role="demo_user")
+    assert exc_info.value.status_code == 429
     # Wait for the window to elapse (1.1s to avoid the boundary).
     await asyncio.sleep(1.1)
     # After the window, the bucket is empty and the next call succeeds.
@@ -76,8 +78,9 @@ async def test_different_users_have_separate_buckets(limiter: RateLimiter) -> No
     """User A's overflow does not affect user B's bucket."""
     for _ in range(DEFAULT_LIMIT_DEMO_USER):
         await limiter.check(user_id="alice", role="demo_user")
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as exc_info:
         await limiter.check(user_id="alice", role="demo_user")
+    assert exc_info.value.status_code == 429
     # Bob has his own bucket.
     await limiter.check(user_id="bob", role="demo_user")
 
@@ -94,8 +97,9 @@ async def test_overflow_does_not_record_hit(limiter: RateLimiter) -> None:
         await limiter.check(user_id=user, role="demo_user")
     # Several overflowed calls.
     for _ in range(5):
-        with pytest.raises(Exception):
+        with pytest.raises(HTTPException) as exc_info:
             await limiter.check(user_id=user, role="demo_user")
+        assert exc_info.value.status_code == 429
     # The bucket still has exactly the original count, so eviction
     # after the window elapses leaves a fresh bucket.
     assert len(limiter._buckets[user]) == DEFAULT_LIMIT_DEMO_USER  # noqa: SLF001 (test introspection)
@@ -106,8 +110,9 @@ async def test_unknown_role_falls_back_to_demo_user(limiter: RateLimiter) -> Non
     user = "u1"
     for _ in range(DEFAULT_LIMIT_DEMO_USER):
         await limiter.check(user_id=user, role="mystery_role")
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as exc_info:
         await limiter.check(user_id=user, role="mystery_role")
+    assert exc_info.value.status_code == 429
 
 
 def test_zero_window_seconds_rejected() -> None:
