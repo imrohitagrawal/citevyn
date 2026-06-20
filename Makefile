@@ -60,9 +60,9 @@ lint: ## Run ruff on backend/
 typecheck: ## Run pyright strict on backend/
 	cd backend && uv run pyright
 
-test: ## Run the pytest suite (excludes postgres-marked tests)
+test: ## Run the pytest suite (excludes postgres-marked tests; uses in-memory SQLite)
 	cd backend && uv sync --group dev
-	cd backend && uv run pytest -m "not postgres" -q
+	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
 
 ci: lint typecheck test ## Run the deterministic CI gate used by .github/workflows/pr-quality.yml
 	@echo "make ci: all checks passed"
