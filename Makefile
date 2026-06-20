@@ -61,6 +61,7 @@ typecheck: ## Run pyright strict on backend/
 	cd backend && uv run pyright
 
 test: ## Run the pytest suite (excludes postgres-marked tests)
+	cd backend && uv sync --group dev
 	cd backend && uv run pytest -m "not postgres" -q
 
 ci: lint typecheck test ## Run the deterministic CI gate used by .github/workflows/pr-quality.yml
