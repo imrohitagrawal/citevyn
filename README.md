@@ -62,7 +62,10 @@ cd backend && uv run uvicorn app.main:app --reload
 
 # 5. Smoke test
 curl -s http://localhost:8000/health
-curl -s -H "X-API-Key: local-demo-key" -H "Content-Type: application/json" \
+# Use whatever key matches your CITEVYN_DEMO_API_KEY. The
+# .env.example ships ``local-demo-key`` as the local default.
+curl -s -H "X-API-Key: $CITEVYN_DEMO_API_KEY" \
+     -H "Content-Type: application/json" \
      -d '{"query":"How do I install Claude Code?"}' \
      http://localhost:8000/v1/ask | jq
 ```
