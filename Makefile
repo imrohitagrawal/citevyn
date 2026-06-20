@@ -15,7 +15,7 @@ DB_URL ?= postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn
 API_KEY ?= local-demo-key
 export CITEVYN_DATABASE_URL := $(DB_URL)
 
-.PHONY: help db-up db-down migrate seed demo stop smoke clean
+.PHONY: help db-up db-down migrate seed demo stop smoke clean lint typecheck test ci
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -52,3 +52,17 @@ smoke: ## Run end-to-end smoke (db-up + migrate + seed + uvicorn + curl + stop)
 clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + .smoke-* artefacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	rm -rf .pytest_cache .ruff_cache .smoke-uvicorn.log .smoke-uvicorn.pid .smoke-last-response.json
+
+# ─────────────────────────── Code quality (used by make ci and the pr-quality workflow) ───────────────────────────
+lint: ## Run ruff on backend/
+	cd backend && uv run ruff check .
+
+typecheck: ## Run pyright strict on backend/
+	cd backend && uv run pyright
+
+test: ## Run the pytest suite (excludes postgres-marked tests; uses in-memory SQLite)
+	cd backend && uv sync --group dev
+	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
+
+ci: lint typecheck test ## Run the deterministic CI gate used by .github/workflows/pr-quality.yml
+	@echo "make ci: all checks passed"
