@@ -41,13 +41,11 @@ x-app-defaults: &app-defaults
     - .env
   environment: &app-env
     # Non-secret overrides that differ from the host-side defaults
-    # in .env.example. The Docker network hostnames (``db``,
-    # ``redis``) are NOT reachable from outside the compose
-    # network, so the connection strings here are the
-    # docker-internal variants. The host-side overrides live in
-    # .env.example (used by ``make dev`` for local uvicorn).
-    CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@db:5432/citevyn
-    CITEVYN_REDIS_URL: redis://redis:6379/0
+    # in .env.example. Connection strings live in infra/docker/.env
+    # (``env_file:`` above) so secrets do not leak into ``docker
+    # compose config`` output or ``/proc/1/environ`` — the .env
+    # file uses the docker-internal hostnames (``db``, ``redis``)
+    # which are not reachable from outside the compose network.
     CITEVYN_ENVIRONMENT: production
     CITEVYN_RATE_LIMIT_ENABLED: "true"
     CITEVYN_RATE_LIMIT_WINDOW_SECONDS: "3600"

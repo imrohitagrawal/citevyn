@@ -296,10 +296,7 @@ class RedisRateLimiter:
                 self._window_seconds + 1,
             )
         except (redis.exceptions.RedisError, OSError) as exc:
-            # ``get_current_request_id`` is None-safe so the
-            # envelope still carries a request id even when
-            # middleware is bypassed in tests.
-            request_id = get_current_request_id() or ""
+            request_id = get_current_request_id()
             raise error_response(
                 request_id=request_id,
                 code=APIErrorCode.index_unavailable,
@@ -316,7 +313,7 @@ class RedisRateLimiter:
 
 def _too_many_requests() -> Exception:
     """Build a 429 :class:`HTTPException` carrying the standard error envelope."""
-    request_id = get_current_request_id() or ""
+    request_id = get_current_request_id()
     return error_response(
         request_id=request_id,
         code=APIErrorCode.rate_limited,

@@ -149,7 +149,7 @@ class IngestionJobDetailResponse(BaseModel):
 
 def _request_id(request: Request) -> str:
     """Return the request id stamped on :class:`Request` by the middleware."""
-    return str(getattr(request.state, "request_id", "") or get_current_request_id() or "")
+    return str(getattr(request.state, "request_id", "") or get_current_request_id())
 
 
 def _http_404(message: str, *, request_id: str) -> HTTPException:

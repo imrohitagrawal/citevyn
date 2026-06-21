@@ -109,7 +109,7 @@ def create_app() -> FastAPI:
 
 def _resolve_request_id(request: Request) -> str:
     """Return the request id stamped on :class:`Request` by the middleware."""
-    return str(getattr(request.state, "request_id", "") or get_current_request_id() or "")
+    return str(getattr(request.state, "request_id", "") or get_current_request_id())
 
 
 async def _orchestrator_error_handler(request: Request, exc: OrchestratorError) -> JSONResponse:

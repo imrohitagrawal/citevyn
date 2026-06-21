@@ -13,8 +13,17 @@ from app.core.logging import build_log_event
 request_id_context: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 
-def get_current_request_id() -> str | None:
-    return request_id_context.get()
+def get_current_request_id() -> str:
+    """Return the current request id, or ``""`` if called outside a request.
+
+    The internal :data:`request_id_context` sentinel is ``None`` (no
+    request in flight). Callers — error envelopes, log lines —
+    don't care about that distinction: they want a printable string
+    to put in the envelope's ``request_id`` field. Collapsing
+    ``None`` to ``""`` at the boundary keeps every callsite free of
+    ``or ""`` defensive guards.
+    """
+    return request_id_context.get() or ""
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):

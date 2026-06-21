@@ -41,7 +41,7 @@ def require_demo_api_key(
     one shape for every 401 (instead of FastAPI's default
     ``{"detail": "..."}`` body).
     """
-    request_id = str(getattr(request.state, "request_id", "") or get_current_request_id() or "")
+    request_id = str(getattr(request.state, "request_id", "") or get_current_request_id())
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise error_response(
             request_id=request_id,
@@ -76,7 +76,7 @@ def require_admin_api_key(
     * rotating the admin key is a single env-var change, not a
       rotation of the public key
     """
-    request_id = str(getattr(request.state, "request_id", "") or get_current_request_id() or "")
+    request_id = str(getattr(request.state, "request_id", "") or get_current_request_id())
     expected = settings.admin_api_key
     if not expected:
         # ``admin_api_key == ""`` is a deploy-time misconfiguration.
