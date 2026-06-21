@@ -73,13 +73,19 @@ def client() -> Generator[TestClient, None, None]:
     have left a closed fakeredis or in-process limiter behind.
     """
     db_module.reset_engine()
-    # Reset process-wide limiter + redis client caches so a
-    # previous test's closed handle doesn't leak into this app.
+    # Reset process-wide limiter + redis client + LLM factory
+    # caches so a previous test's closed handle doesn't leak into
+    # this app. (The LLM factory singleton in particular survived
+    # between tests until this was added — a test that ran
+    # ``get_llm_client`` with one Settings would have handed the
+    # next test a stale client built from a different Settings.)
     import app.core.rate_limit as rate_limit
     import app.core.redis_client as redis_client
+    from app.llm import factory as llm_factory
 
     rate_limit.reset_limiter()
     redis_client.reset_redis_client()
+    llm_factory.reset_llm_client()
     with TestClient(create_app()) as app:
         yield app
 
