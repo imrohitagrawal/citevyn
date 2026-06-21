@@ -107,7 +107,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "fakeredis", extras = ["lua"], specifier = ">=2.20.0" },
+    { name = "fakeredis", extras = ["lua"], specifier = ">=2.36.2" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
