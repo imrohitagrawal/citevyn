@@ -89,7 +89,7 @@ jobs:
 
       - name: Log in to GHCR
         # GITHUB_TOKEN works for the same-org registry.
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
