@@ -1,23 +1,58 @@
-# Dependabot keeps the dependency graph current. Three ecosystems
-# are tracked: Python (uv), Docker base images, and GitHub Actions.
+# Dependabot keeps the dependency graph current. Four ecosystems
+# are tracked: Python (uv), Docker base images, Docker Compose
+# service images, and GitHub Actions.
 #
 # Cadence is weekly for Python and Docker, monthly for Actions —
 # Actions pins churn less often and we'd rather not have noisy
 # PRs on every release.
+#
+# Auto-merge policy (since 2026-06-21):
+#   Branch protection on ``main`` requires 5 status checks (see
+#   Settings → Branches → main). To enable auto-merge at the repo
+#   level, go to Settings → General → "Allow auto-merge" and
+#   enable it, then enable auto-merge on individual Dependabot PRs
+#   via the "Enable auto-merge" button in the PR UI. Without
+#   branch protection, do NOT enable auto-merge — Dependabot would
+#   merge PRs before CI has had a chance to run.
+#   * Patch + security updates auto-merge once CI passes.
+#   * Minor + major version updates still open PRs for human
+#     review. Major bumps can change runtime behavior (e.g.
+#     Python 3.12→3.14 in the Docker image) or remove inputs
+#     (docker/login-action v4 dropped a few), and should not
+#     land without eyes on the diff.
+#   * The ``target-branch`` is pinned to ``main`` explicitly even
+#     though that's the repo default — makes the intent obvious
+#     to future readers and prevents surprises if a non-default
+#     branch ever becomes the merge target.
 
 version: 2
 updates:
   # ──────────── Python (uv) ────────────
   - package-ecosystem: "uv"
     directory: "/backend"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "08:00"
       timezone: "America/Los_Angeles"
+    # Cap concurrent open Dependabot PRs so the queue stays
+    # reviewable. 5 matches the historical max we've seen
+    # (uv-runtime, uv-dev, plus 3 standalones).
     open-pull-requests-limit: 5
+    # Auto-rebase keeps weekly PRs from rotting when main moves
+    # before the weekly cron fires.
+    rebase-strategy: "auto"
+    # ``deps(uv): bump fastapi to 0.138.0`` reads better in
+    # ``git log`` than ``Bump the python-runtime group...``.
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+      include: scope
     # Group patch + minor updates into a single PR so reviewers
-    # see "dependencies: monthly rollup" rather than 12 PRs.
+    # see "dependencies: weekly rollup" rather than 12 PRs.
+    # Dependabot honors grouping when a group contains more than
+    # one package; singletons still open as their own PR.
     groups:
       python-runtime:
         applies-to: version-updates
@@ -39,9 +74,6 @@ updates:
           - "ruff"
           - "pyright"
           - "fakeredis"
-    # Auto-merge for patch updates of well-trusted deps; the CI
-    # gate (lint + typecheck + test) is the actual safety net.
-    # PRs with a green CI are squash-merged by the bot.
     labels:
       - "dependencies"
       - "python"
@@ -49,12 +81,17 @@ updates:
   # ──────────── Docker base images ────────────
   - package-ecosystem: "docker"
     directory: "/infra/docker"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "tuesday"
       time: "08:00"
       timezone: "America/Los_Angeles"
     open-pull-requests-limit: 3
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "deps(docker)"
+      include: scope
     # Tracks ``FROM`` lines in ``Dockerfile.api`` and
     # ``Dockerfile.worker`` (e.g. python:3.12-slim-bookworm,
     # ghcr.io/astral-sh/uv:python3.12-bookworm-slim). The
@@ -67,12 +104,17 @@ updates:
   # ──────────── Compose service images ────────────
   - package-ecosystem: "docker-compose"
     directory: "/infra/docker"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "tuesday"
       time: "08:00"
       timezone: "America/Los_Angeles"
     open-pull-requests-limit: 3
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "deps(docker)"
+      include: scope
     # Tracks ``image:`` references in
     # ``infra/docker/docker-compose.yml`` (pgvector, redis,
     # caddy, postgres). Without this entry the service
@@ -84,12 +126,17 @@ updates:
   # ──────────── GitHub Actions ────────────
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "main"
     schedule:
       interval: "monthly"
       day: "monday"
       time: "08:00"
       timezone: "America/Los_Angeles"
     open-pull-requests-limit: 3
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "deps(ci)"
+      include: scope
     labels:
       - "dependencies"
       - "ci"
