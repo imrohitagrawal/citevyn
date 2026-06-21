@@ -267,22 +267,44 @@ class RedisRateLimiter:
         the script returns ``allowed == 0`` the hit is rejected and
         nothing is added to the bucket — a flood of rejected
         requests cannot pin a legitimate user out.
+
+        Failure mode: if Redis is unreachable (connection refused,
+        timeout, MOVED redirection) we fail **closed** by raising
+        503. Fail-open would let a Redis outage disable rate
+        limiting entirely, which is the worst possible outcome
+        for a security control. Operators can re-enable traffic
+        by fixing Redis; the 503s are visible in the access log
+        so an outage is not silent.
         """
+        import redis.exceptions  # local import — the stub backend
+        # doesn't need this code path.
+
         limit = self.limit_for(role=role)
         now = time.time()
         cutoff = now - self._window_seconds
         member = f"{now:.6f}:{uuid.uuid4().hex}"
         key = self._bucket_key(user_id)
-        allowed, _count = await self._client.eval(  # type: ignore[union-attr]
-            self._script_body,
-            1,  # number of KEYS
-            key,
-            cutoff,
-            member,
-            now,
-            limit,
-            self._window_seconds + 1,
-        )
+        try:
+            allowed, _count = await self._client.eval(  # type: ignore[union-attr]
+                self._script_body,
+                1,  # number of KEYS
+                key,
+                cutoff,
+                member,
+                now,
+                limit,
+                self._window_seconds + 1,
+            )
+        except (redis.exceptions.RedisError, OSError) as exc:
+            # ``get_current_request_id`` is None-safe so the
+            # envelope still carries a request id even when
+            # middleware is bypassed in tests.
+            request_id = get_current_request_id() or ""
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.index_unavailable,
+                message="Rate limiter is temporarily unavailable.",
+            ) from exc
         if not int(allowed):
             raise _too_many_requests()
 
@@ -347,14 +369,18 @@ def get_limiter(settings: Settings) -> _LimiterLike:
 def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
     """Return True if the cached limiter was built from the same settings.
 
-    We only check the fields the limiter's construction consumed; a
-    redis URL rotation is also handled by :mod:`app.core.redis_client`
-    (the redis client itself resets when its URL changes).
+    We compare the operator-tunable fields the limiter's construction
+    consumed: window length, per-role limits, and whether the redis
+    path is active. The ``uses_redis`` check matters because the
+    choice of in-process vs Redis path is driven by whether
+    ``settings.redis_url`` is set — flipping it without rebuilding
+    the limiter would silently leave the old path in place.
     """
     return (
         limiter.window_seconds == settings.rate_limit_window_seconds
         and limiter.limit_for(role="demo_user") == settings.rate_limit_demo_user_per_hour
         and limiter.limit_for(role="admin") == settings.rate_limit_admin_per_hour
+        and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
 

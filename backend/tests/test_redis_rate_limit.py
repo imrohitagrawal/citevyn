@@ -143,3 +143,33 @@ def test_redis_limiter_rejects_empty_prefix() -> None:
             admin_per_window=10,
             key_prefix="",
         )
+
+
+async def test_redis_limiter_fails_closed_on_redis_outage(monkeypatch) -> None:
+    """When the Redis EVAL raises, the limiter must fail closed (503), not open.
+
+    A fail-open limiter would let a Redis outage silently disable
+    the rate-limit control. The contract under test is
+    documented in :class:`rate_limit.RedisRateLimiter.check`.
+    """
+    from fastapi import HTTPException
+
+    from app.core.errors import APIErrorCode
+
+    class _BrokenClient:
+        async def eval(self, *args, **kwargs):  # noqa: ANN001
+            import redis.exceptions
+
+            raise redis.exceptions.ConnectionError("simulated outage")
+
+    broken_limiter = rate_limit.RedisRateLimiter(
+        client=_BrokenClient(),  # type: ignore[arg-type]
+        window_seconds=60,
+        demo_user_per_window=3,
+        admin_per_window=10,
+        key_prefix="citevyn:rl:test",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await broken_limiter.check(user_id="alice", role="demo_user")
+    assert exc_info.value.status_code == 503
+    assert APIErrorCode.index_unavailable.value in str(exc_info.value.detail)

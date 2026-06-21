@@ -67,7 +67,11 @@ def get_redis_client() -> redis_async.Redis:
     if _client is not None:
         # URL changed (or was cleared) since the last call. Close the
         # previous pool so we don't leak file descriptors, then drop
-        # the reference.
+        # the reference. We must do the close asynchronously because
+        # the redis-py pool shutdown awaits pending commands.
+        old_client = _client
+        _client = None
+        _client_url = None
         try:
             import asyncio
 
@@ -76,18 +80,25 @@ def get_redis_client() -> redis_async.Redis:
             except RuntimeError:
                 loop = None
             if loop is not None and loop.is_running():
-                _logger.warning(
-                    "redis_client_url_changed_no_live_close",
-                    extra={"old_url": _redact_url(_client_url or ""), "new_url": _redact_url(url)},
-                )
+                # Schedule the close on the live loop so we don't
+                # block the request thread. If the task raises,
+                # log it; nothing else can do.
+                async def _close() -> None:
+                    try:
+                        await old_client.aclose()
+                    except Exception:  # pragma: no cover - defensive
+                        _logger.exception(
+                            "redis_client_close_failed",
+                            extra={"old_url": _redact_url(url)},
+                        )
+
+                loop.create_task(_close())
             else:
                 # No live loop in this code path (e.g. test fixture).
                 # The pool will be reaped when the process exits.
                 pass
         except Exception:  # pragma: no cover - defensive
             _logger.exception("redis_client_close_failed")
-        _client = None
-        _client_url = None
     # Imported lazily so the ``redis`` package is only required when
     # a Redis URL is configured. Tests that never set
     # ``CITEVYN_REDIS_URL`` therefore don't pay the import cost.
