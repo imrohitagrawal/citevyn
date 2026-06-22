@@ -1,0 +1,8 @@
+id: claude_code_006
+title: Claude Code no-answer (install)
+type: no_answer
+area: claude_code
+question: How do I install Claude Code?
+answer_style: short
+expect_no_answer: true
+expect_domain: unsupported

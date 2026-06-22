@@ -1,0 +1,10 @@
+id: gemini_api_001
+title: Gemini API streaming
+type: answer
+area: gemini_api
+question: Does the Gemini API support streaming?
+answer_style: short
+expect_answer_contains:
+- streaming
+expect_citations_min: 1
+expect_domain: gemini_api

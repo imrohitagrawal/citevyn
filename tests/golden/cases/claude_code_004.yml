@@ -1,0 +1,8 @@
+id: claude_code_004
+title: Claude Code exact lookup miss
+type: search
+area: claude_code
+search_term: CLAUDE_CODE_FLAG
+search_term_type: env_var
+search_product_area: claude_code
+expect_search_total_ge: 0

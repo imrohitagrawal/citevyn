@@ -1,0 +1,11 @@
+id: claude_api_005
+title: Claude API cache hit
+type: cache
+area: claude_api
+question: What is the Claude API rate limit?
+answer_style: short
+first_assert:
+  cache_hit: false
+second_assert:
+  cache_hit: true
+expect_domain: claude_api

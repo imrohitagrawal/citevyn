@@ -1,0 +1,11 @@
+id: cross_001
+title: Cross all rate limits
+type: answer
+area: cross
+question: What are the rate limits for Claude API?
+answer_style: short
+expect_answer_contains:
+- rate limit
+- '50'
+expect_citations_min: 1
+expect_domain: claude_api

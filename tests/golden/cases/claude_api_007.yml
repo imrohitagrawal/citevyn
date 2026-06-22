@@ -1,0 +1,12 @@
+id: claude_api_007
+title: Claude API multi-turn
+type: multi_turn
+area: claude_api
+messages:
+- role: user
+  content: What is the Claude API rate limit?
+- role: user
+  content: Can you tell me more about that limit?
+expect_last_domain: claude_api
+expect_last_answer_contains:
+- rate limit

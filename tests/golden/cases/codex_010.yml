@@ -1,0 +1,7 @@
+id: codex_010
+title: Codex routing via openai codex
+type: answer
+area: codex
+question: openai codex --model gpt-4
+answer_style: short
+expect_domain: codex

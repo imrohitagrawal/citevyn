@@ -1,0 +1,10 @@
+id: cross_007
+title: Cross multi-turn cross-topic
+type: multi_turn
+area: cross
+messages:
+- role: user
+  content: How do I use Codex?
+- role: user
+  content: What about Claude API?
+expect_last_domain: claude_api

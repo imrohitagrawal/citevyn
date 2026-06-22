@@ -1,0 +1,6 @@
+id: claude_api_009
+title: Claude API empty question 422
+type: unsupported
+area: claude_api
+question: ''
+expect_http_422: true

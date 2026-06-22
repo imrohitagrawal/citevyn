@@ -1,0 +1,12 @@
+id: gemini_api_009
+title: Gemini API long question
+type: answer
+area: gemini_api
+question: I am building a real-time chat feature and I want to use the Gemini API to stream partial responses back to the
+  user so they see tokens appearing incrementally rather than waiting for the full completion. Is that possible and what parameter
+  do I pass?
+answer_style: short
+expect_answer_contains:
+- stream
+expect_citations_min: 1
+expect_domain: gemini_api

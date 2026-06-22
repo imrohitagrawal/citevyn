@@ -1,0 +1,11 @@
+id: codex_005
+title: Codex cache hit
+type: cache
+area: codex
+question: How do I pick a model in Codex?
+answer_style: short
+first_assert:
+  cache_hit: false
+second_assert:
+  cache_hit: true
+expect_domain: codex

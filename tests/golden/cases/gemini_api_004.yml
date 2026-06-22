@@ -1,0 +1,8 @@
+id: gemini_api_004
+title: Gemini API exact lookup miss
+type: search
+area: gemini_api
+search_term: GEMINI_STREAM
+search_term_type: env_var
+search_product_area: gemini_api
+expect_search_total_ge: 0

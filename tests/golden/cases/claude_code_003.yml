@@ -1,0 +1,11 @@
+id: claude_code_003
+title: Claude Code step-by-step
+type: answer
+area: claude_code
+question: How do I configure Claude Code to allow or deny tools?
+answer_style: step_by_step
+expect_answer_contains:
+- permissions
+- tools
+expect_citations_min: 1
+expect_domain: claude_code

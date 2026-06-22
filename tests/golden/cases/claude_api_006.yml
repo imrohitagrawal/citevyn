@@ -1,0 +1,8 @@
+id: claude_api_006
+title: Claude API no-answer (pricing)
+type: no_answer
+area: claude_api
+question: How much does the Claude API cost per token?
+answer_style: short
+expect_no_answer: true
+expect_domain: unsupported

@@ -1,0 +1,7 @@
+id: claude_api_010
+title: Claude API domain routing
+type: answer
+area: claude_api
+question: Claude API authentication X-API-Key
+answer_style: short
+expect_domain: claude_api

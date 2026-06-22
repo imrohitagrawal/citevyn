@@ -1,0 +1,14 @@
+id: claude_api_001
+title: Claude API rate limit
+type: answer
+area: claude_api
+question: What is the rate limit for the Claude API?
+answer_style: short
+expect_answer_contains:
+- rate limit
+- '50'
+expect_citations_min: 1
+expect_domain: claude_api
+expect_intent: faq
+expect_confidence: high
+expect_retrieval_strategy: hybrid

@@ -1,0 +1,10 @@
+id: gemini_api_002
+title: Gemini API how to stream
+type: answer
+area: gemini_api
+question: How do I enable streaming in the Gemini API?
+answer_style: short
+expect_answer_contains:
+- stream=true
+expect_citations_min: 1
+expect_domain: gemini_api

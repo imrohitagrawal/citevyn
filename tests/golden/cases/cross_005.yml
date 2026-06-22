@@ -1,0 +1,8 @@
+id: cross_005
+title: Cross off-topic
+type: no_answer
+area: cross
+question: What is the capital of France?
+answer_style: short
+expect_no_answer: true
+expect_domain: unsupported

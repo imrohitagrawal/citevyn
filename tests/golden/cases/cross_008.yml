@@ -1,0 +1,7 @@
+id: cross_008
+title: Cross step-by-step mixed
+type: answer
+area: cross
+question: How do I start using both Claude Code and Codex?
+answer_style: step_by_step
+expect_citations_min: 1

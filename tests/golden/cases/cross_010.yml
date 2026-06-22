@@ -1,0 +1,8 @@
+id: cross_010
+title: Cross very short question
+type: answer
+area: cross
+question: rate limit
+answer_style: short
+expect_citations_min: 1
+expect_domain: claude_api
