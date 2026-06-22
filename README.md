@@ -18,7 +18,7 @@ treated as a feature, not a failure.
 | Database            | Production    | Postgres 16 + pgvector (semantic search)                    |
 | Cache / rate-limit  | Production    | Redis 7 sliding-window limiter (per-user, per-route)        |
 | TLS termination     | Production    | Caddy v2 (auto-issued Let's Encrypt)                        |
-| Frontend            | In development| React + Vite, served separately                             |
+| Frontend            | Optional preview| React + Vite; build via `make demo-frontend`              |
 | Test coverage       | 361 passed    | pytest + httpx AsyncClient; postgres-marker opt-in          |
 | CI                  | 2 jobs        | pytest + lint (SQLite), alembic + postgres integration      |
 

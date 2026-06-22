@@ -34,8 +34,10 @@ build/
 node_modules/
 .next/
 coverage/
-frontend/
-package-lock.json
+# frontend/ — node_modules and build artefacts only; source files are tracked
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
 
 # Docker/local data
 *.db

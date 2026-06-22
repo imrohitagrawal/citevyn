@@ -35,7 +35,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help db-up db-down migrate seed demo stop smoke clean lint typecheck test ci \
+.PHONY: help db-up db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
         build push deploy refresh logs backup restore
 
 help: ## Show this help
@@ -88,6 +88,10 @@ seed: ## Seed demo users + catalog (idempotent)
 
 demo: db-up migrate seed ## Bring up db, migrate, seed (one-shot)
 	@echo "Demo stack is up. Run 'make stop' to tear down."
+
+demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
+	cd frontend && npm ci && npm run build
+	@echo "Frontend bundle written to frontend/dist. Serve it behind the API, or open frontend/dist/index.html directly."
 
 stop: db-down ## Tear the demo stack down
 
