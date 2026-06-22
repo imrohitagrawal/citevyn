@@ -1579,7 +1579,7 @@ def validate_llm_provider(settings: Settings) -> None:
         or settings.llm_provider in UNSUPPORTED_LLM_PROVIDERS
     ):
         raise LLMProviderNotConfigured(
-            f"CITEVYN_LLM_PROVIDER='{settings.llm_provider}' is not allowed "
+            f"CITEVYN_LLM_PROVIDER={settings.llm_provider!r} is not allowed "
             f"when CITEVYN_ENVIRONMENT='production'. Set "
             f"CITEVYN_LLM_PROVIDER to 'anthropic' and provide the matching API key. "
             f"(gemini and router are pending Slice 9b.)"
