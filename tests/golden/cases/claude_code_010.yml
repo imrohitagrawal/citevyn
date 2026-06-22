@@ -1,0 +1,8 @@
+id: claude_code_010
+title: Claude Code routing via cli
+type: answer
+area: claude_code
+question: claude-code configure permissions
+answer_style: short
+expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code

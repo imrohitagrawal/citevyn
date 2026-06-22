@@ -1,0 +1,10 @@
+id: claude_code_002
+title: Claude Code permissions file
+type: answer
+area: claude_code
+question: What is the permissions file in Claude Code?
+answer_style: short
+expect_citations_min: 1
+expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code
+expect_answer_cites_index: true

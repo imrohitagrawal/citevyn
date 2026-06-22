@@ -1,0 +1,8 @@
+id: gemini_api_008
+title: Gemini API routing via google
+type: answer
+area: gemini_api
+question: google gemini streaming responses
+answer_style: short
+expect_domain: gemini_api
+expect_citation_url_contains: docs.example.com/gemini

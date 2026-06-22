@@ -1,0 +1,7 @@
+id: codex_006
+title: Codex no-answer (vision)
+type: no_answer
+area: codex
+question: What is the square root of 1764?
+answer_style: short
+expect_domain: unsupported

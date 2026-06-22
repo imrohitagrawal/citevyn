@@ -167,10 +167,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_stub_llm_in_production(self) -> "Settings":
-        if self.environment == "production" and self.llm_provider == "stub":
+        # ``stub`` is the dev-only deterministic LLM. ``""`` is the
+        # reserved router placeholder for Slice 9b. Both must never
+        # reach production — the demo build would otherwise silently
+        # serve the stub answer. ``anthropic`` and ``gemini`` are
+        # the only production-allowed providers.
+        if self.environment != "production":
+            return self
+        if self.llm_provider in ("stub", ""):
             raise ValueError(
-                "CITEVYN_LLM_PROVIDER='stub' is not allowed when "
-                "CITEVYN_ENVIRONMENT='production'. Set "
+                f"CITEVYN_LLM_PROVIDER={self.llm_provider!r} is not allowed "
+                "when CITEVYN_ENVIRONMENT='production'. Set "
                 "CITEVYN_LLM_PROVIDER to 'anthropic' or 'gemini' and "
                 "provide the matching API key."
             )

@@ -1,0 +1,9 @@
+id: claude_api_004
+title: Claude API exact lookup
+type: search
+area: claude_api
+search_term: CLAUDE_API_RATE_LIMIT
+search_term_type: environment_variable
+search_product_area: claude_api
+expect_search_total_ge: 1
+expect_search_hit_product_area: claude_api

@@ -1,0 +1,10 @@
+id: codex_008
+title: Codex API key requirement
+type: answer
+area: codex
+question: Does Codex need an API key?
+answer_style: short
+expect_citations_min: 1
+expect_domain: codex
+expect_citation_url_contains: docs.example.com/codex
+expect_answer_cites_index: true

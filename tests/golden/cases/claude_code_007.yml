@@ -1,0 +1,9 @@
+id: claude_code_007
+title: Claude Code multi-turn
+type: multi_turn
+area: claude_code
+messages:
+- role: user
+  content: Tell me about Claude Code permissions.
+- role: user
+  content: What are the permissions for claude_code?

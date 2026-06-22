@@ -1,0 +1,10 @@
+id: claude_api_003
+title: Claude API step-by-step
+type: answer
+area: claude_api
+question: Explain the Claude API rate limits and how to handle them.
+answer_style: step_by_step
+expect_citations_min: 1
+expect_domain: claude_api
+expect_citation_url_contains: docs.example.com/claude
+expect_answer_cites_index: true

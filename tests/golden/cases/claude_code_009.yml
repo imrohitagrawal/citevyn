@@ -1,0 +1,9 @@
+id: claude_code_009
+title: Claude Code long question
+type: answer
+area: claude_code
+question: I need help setting up the permissions configuration for my Claude Code installation so that it properly allows
+  or denies tools based on my preferences. Can you explain how the permissions file works?
+answer_style: short
+expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code

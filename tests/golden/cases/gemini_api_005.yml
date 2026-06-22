@@ -1,0 +1,12 @@
+id: gemini_api_005
+title: Gemini API cache hit
+type: cache
+area: gemini_api
+question: Does the Gemini API support streaming?
+answer_style: short
+first_assert:
+  cache_hit: false
+second_assert:
+  cache_hit: true
+expect_domain: gemini_api
+expect_citation_url_contains: docs.example.com/gemini

@@ -1,0 +1,10 @@
+id: claude_api_002
+title: Claude API authentication
+type: answer
+area: claude_api
+question: How do I authenticate with the Claude API?
+answer_style: short
+expect_citations_min: 1
+expect_domain: claude_api
+expect_citation_url_contains: docs.example.com/claude
+expect_answer_cites_index: true

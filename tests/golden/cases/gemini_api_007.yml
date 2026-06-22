@@ -1,0 +1,9 @@
+id: gemini_api_007
+title: Gemini API multi-turn
+type: multi_turn
+area: gemini_api
+messages:
+- role: user
+  content: Does Gemini API support streaming?
+- role: user
+  content: What parameter do I pass?

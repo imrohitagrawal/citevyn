@@ -1,0 +1,7 @@
+id: claude_api_008
+title: Claude API style validation 400
+type: unsupported
+area: claude_api
+question: Tell me about rate limits
+answer_style: verbose
+expect_http_422: true

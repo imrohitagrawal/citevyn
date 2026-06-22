@@ -1,0 +1,7 @@
+id: claude_api_006
+title: Claude API no-answer (pricing)
+type: no_answer
+area: claude_api
+question: What is the capital of France?
+answer_style: short
+expect_domain: unsupported

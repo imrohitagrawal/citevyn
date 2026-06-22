@@ -1,0 +1,6 @@
+id: cross_006
+title: Cross codex vs claude confusion
+type: answer
+area: cross
+question: Do both Codex and Claude API need API keys?
+answer_style: short

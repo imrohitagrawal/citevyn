@@ -1,0 +1,7 @@
+id: claude_code_006
+title: Claude Code no-answer (install)
+type: no_answer
+area: claude_code
+question: Who is the CEO of Apple?
+answer_style: short
+expect_domain: unsupported

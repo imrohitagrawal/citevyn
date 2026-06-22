@@ -1,0 +1,8 @@
+id: claude_code_008
+title: Claude Code cross-topic
+type: answer
+area: claude_code
+question: What is the rate limit for Claude Code?
+answer_style: short
+expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code

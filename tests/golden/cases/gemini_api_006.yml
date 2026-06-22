@@ -1,0 +1,7 @@
+id: gemini_api_006
+title: Gemini API no-answer (pricing)
+type: no_answer
+area: gemini_api
+question: What is the largest ocean?
+answer_style: short
+expect_domain: unsupported

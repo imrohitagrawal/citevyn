@@ -1,0 +1,12 @@
+id: claude_code_005
+title: Claude Code cache hit
+type: cache
+area: claude_code
+question: How do I configure permissions in Claude Code?
+answer_style: short
+first_assert:
+  cache_hit: false
+second_assert:
+  cache_hit: true
+expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code

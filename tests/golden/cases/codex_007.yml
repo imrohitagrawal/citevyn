@@ -1,0 +1,9 @@
+id: codex_007
+title: Codex multi-turn
+type: multi_turn
+area: codex
+messages:
+- role: user
+  content: How do I use the --model flag in Codex?
+- role: user
+  content: What are the --model flag for codex?
