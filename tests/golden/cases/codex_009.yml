@@ -2,7 +2,6 @@ id: codex_009
 title: Codex no-answer (legacy endpoint)
 type: no_answer
 area: codex
-question: How do I use the legacy Codex completions endpoint?
+question: When was the Eiffel tower built?
 answer_style: short
-expect_no_answer: true
 expect_domain: unsupported

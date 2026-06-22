@@ -21,3 +21,18 @@ The runner does NOT start uvicorn or touch Postgres; it reuses the
 invoke from a Makefile target, a nightly workflow, and a unit
 test alike.
 """
+
+from .cases import GoldenCase, filter_cases, load_cases
+from .runner import run_all, run_case
+from .scoring import CaseResult, Check, summarize
+
+__all__ = [
+    "GoldenCase",
+    "CaseResult",
+    "Check",
+    "filter_cases",
+    "load_cases",
+    "run_all",
+    "run_case",
+    "summarize",
+]

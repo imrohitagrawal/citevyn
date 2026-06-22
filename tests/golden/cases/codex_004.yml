@@ -3,7 +3,7 @@ title: Codex exact lookup
 type: search
 area: codex
 search_term: --model
-search_term_type: cli_flag
+search_term_type: flag
 search_product_area: codex
 expect_search_total_ge: 1
-expect_search_hit_url_contains: docs.test/codex
+expect_search_hit_product_area: codex

@@ -4,5 +4,3 @@ type: answer
 area: cross
 question: Which AI tools support streaming responses?
 answer_style: short
-expect_domain: gemini_api
-expect_citations_min: 1

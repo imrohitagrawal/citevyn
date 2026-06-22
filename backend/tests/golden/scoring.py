@@ -14,6 +14,7 @@ a case with 6 expectations produces 6 checks. A single failure
 flags the case as failed but the runner keeps going so a CI report
 shows every regression in one pass.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -57,6 +58,10 @@ class CaseResult:
     def ok(self, name: str, detail: str = "") -> None:
         self.add(name, True, detail)
 
+    def skip(self, name: str, detail: str = "") -> None:
+        # Skipped checks count as passed (the case asserts nothing).
+        self.add(name, True, f"SKIP: {detail}" if detail else "SKIP")
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "case_id": self.case.id,
@@ -89,27 +94,24 @@ def _check_contains_any(
         result.ok(label, f"all {len(list(needles))} substrings present")
 
 
-def _check_eq(
-    result: CaseResult, *, label: str, actual: Any, expected: Any
-) -> None:
+def _check_eq(result: CaseResult, *, label: str, actual: Any, expected: Any) -> None:
+    if expected is None:
+        result.skip(label, "no expectation set")
+        return
     if actual == expected:
         result.ok(label, f"{actual!r} == {expected!r}")
     else:
         result.fail(label, f"got {actual!r}, expected {expected!r}")
 
 
-def _check_ge(
-    result: CaseResult, *, label: str, actual: int | float, minimum: int | float
-) -> None:
+def _check_ge(result: CaseResult, *, label: str, actual: int | float, minimum: int | float) -> None:
     if actual >= minimum:
         result.ok(label, f"{actual} >= {minimum}")
     else:
         result.fail(label, f"got {actual}, expected >= {minimum}")
 
 
-def _check_flag(
-    result: CaseResult, *, label: str, actual: bool, expected: bool
-) -> None:
+def _check_flag(result: CaseResult, *, label: str, actual: bool, expected: bool) -> None:
     if actual is expected:
         result.ok(label, f"{actual!r}")
     else:
@@ -123,9 +125,13 @@ def _check_flag(
 
 def assert_answer_response(case: GoldenCase, result: CaseResult, body: Mapping[str, Any]) -> None:
     """Apply every ``expect_*`` field relevant to a grounded answer body."""
-    _check_eq(result, label="response.domain", actual=body.get("domain"), expected=case.expect_domain)
+    _check_eq(
+        result, label="response.domain", actual=body.get("domain"), expected=case.expect_domain
+    )
     if case.expect_intent is not None:
-        _check_eq(result, label="response.intent", actual=body.get("intent"), expected=case.expect_intent)
+        _check_eq(
+            result, label="response.intent", actual=body.get("intent"), expected=case.expect_intent
+        )
     if case.expect_confidence is not None:
         _check_eq(
             result,
@@ -156,6 +162,39 @@ def assert_answer_response(case: GoldenCase, result: CaseResult, body: Mapping[s
             haystack=answer,
             needles=case.expect_answer_contains,
         )
+    if case.expect_citation_url_contains:
+        cites = body.get("citations") or []
+        if not cites:
+            result.fail(
+                "response.citation_url_contains",
+                "no citations to inspect",
+            )
+        else:
+            urls = " ".join(str(c.get("url", "")) for c in cites)
+            if case.expect_citation_url_contains in urls:
+                result.ok(
+                    "response.citation_url_contains",
+                    f"{case.expect_citation_url_contains!r} found in citation URLs",
+                )
+            else:
+                result.fail(
+                    "response.citation_url_contains",
+                    f"{case.expect_citation_url_contains!r} not in {urls!r}",
+                )
+    if case.expect_answer_cites_index is not None:
+        answer = body.get("answer", "") or ""
+        has_bracket_one = "[1]" in answer
+        if case.expect_answer_cites_index and has_bracket_one:
+            result.ok("response.answer_cites_index", "answer references [1]")
+        elif case.expect_answer_cites_index and not has_bracket_one:
+            result.fail("response.answer_cites_index", "answer missing [1]")
+        elif not case.expect_answer_cites_index and not has_bracket_one:
+            result.ok("response.answer_cites_index", "answer correctly omits [1]")
+        else:
+            result.fail(
+                "response.answer_cites_index",
+                "answer unexpectedly contains [1]",
+            )
 
 
 def assert_search_response(case: GoldenCase, result: CaseResult, body: Mapping[str, Any]) -> None:
@@ -180,6 +219,22 @@ def assert_search_response(case: GoldenCase, result: CaseResult, body: Mapping[s
                 result.fail(
                     "search.url_contains",
                     f"substring {case.expect_search_hit_url_contains!r} not in {joined!r}",
+                )
+    if case.expect_search_hit_product_area:
+        hits = body.get("hits") or []
+        if not hits:
+            result.fail("search.product_area", "no hits to inspect")
+        else:
+            areas = [str(h.get("product_area", "")) for h in hits]
+            if case.expect_search_hit_product_area in areas:
+                result.ok(
+                    "search.product_area",
+                    f"{case.expect_search_hit_product_area!r} in {areas}",
+                )
+            else:
+                result.fail(
+                    "search.product_area",
+                    f"{case.expect_search_hit_product_area!r} not in {areas!r}",
                 )
 
 

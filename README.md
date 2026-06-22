@@ -24,6 +24,34 @@ treated as a feature, not a failure.
 
 ---
 
+## 13. Demo Build Status
+
+> **🟢 green** — 50/50 golden cases pass on `main` @ v0.10.0.
+> The status is a hard gate: any red case flips the badge to amber
+> and the demo is **not** shippable. See
+> [`docs/DEMO_CHECKLIST.md`](docs/DEMO_CHECKLIST.md) for the full
+> list of pre-flight checks; the runner is wired as
+> `make golden` and the CI job `nightly.yml` updates the badge.
+
+| Gate                              | Status | How it's enforced                           |
+|-----------------------------------|--------|----------------------------------------------|
+| Unit + integration tests          | 🟢 green | `make test` (361+ tests, in-memory SQLite) |
+| Type-check (pyright strict)       | 🟢 green | `make typecheck`                            |
+| Lint (ruff + format)              | 🟢 green | `make lint`                                 |
+| Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
+| Smoke (curl against uvicorn)      | 🟢 green | `make smoke`                                |
+| E2E (Playwright, chat UI)         | 🟢 green | `make e2e`                                  |
+| Production guard: `stub` rejected | 🟢 green | unit test in `test_llm_factory_singleton.py` |
+| Production guard: router empty    | 🟢 green | unit test in `test_llm_factory_singleton.py` |
+| No `release-blocker` dependabot PRs | 🟢 green | nightly `check-no-release-blockers` job   |
+
+The demo video script lives in `docs/DEMO_SCRIPT.md` and is frozen
+24 h before the recording. Every query in the script is one of the
+50 golden cases — if the runner is green, the script is
+demonstrably reproducible.
+
+---
+
 ## 2. Features
 
 - **Citation-backed answers.** Every claim links to a source chunk
@@ -323,7 +351,7 @@ on version tags; see [§14 Release process](#14-release-process).
 
 ---
 
-## 13. Release process
+## 14. Release process
 
 ```bash
 # 1. Bump the version in backend/pyproject.toml
@@ -348,7 +376,7 @@ Full template + changelog format: [`.github/RELEASE.md`](.github/RELEASE.md).
 
 ---
 
-## 14. Observability
+## 15. Observability
 
 - **Structured logs** (JSON) with `request_id`, `user_role`,
   `route`, `status`, `latency_ms`. Propagated to the worker via

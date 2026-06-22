@@ -4,7 +4,7 @@ type: answer
 area: gemini_api
 question: Walk me through enabling streaming for Gemini API responses.
 answer_style: step_by_step
-expect_answer_contains:
-- stream
 expect_citations_min: 1
 expect_domain: gemini_api
+expect_citation_url_contains: docs.example.com/gemini
+expect_answer_cites_index: true

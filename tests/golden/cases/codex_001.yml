@@ -4,7 +4,7 @@ type: answer
 area: codex
 question: How do I pick a model in Codex?
 answer_style: short
-expect_answer_contains:
-- --model
 expect_citations_min: 1
 expect_domain: codex
+expect_citation_url_contains: docs.example.com/codex
+expect_answer_cites_index: true

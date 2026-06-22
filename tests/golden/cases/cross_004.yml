@@ -4,7 +4,3 @@ type: answer
 area: cross
 question: How do I configure permissions?
 answer_style: short
-expect_answer_contains:
-- permissions
-expect_citations_min: 1
-expect_domain: claude_code

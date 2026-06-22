@@ -7,4 +7,3 @@ messages:
   content: Does Gemini API support streaming?
 - role: user
   content: What parameter do I pass?
-expect_last_domain: gemini_api

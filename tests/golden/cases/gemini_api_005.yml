@@ -9,3 +9,4 @@ first_assert:
 second_assert:
   cache_hit: true
 expect_domain: gemini_api
+expect_citation_url_contains: docs.example.com/gemini

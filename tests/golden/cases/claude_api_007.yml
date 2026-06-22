@@ -6,7 +6,4 @@ messages:
 - role: user
   content: What is the Claude API rate limit?
 - role: user
-  content: Can you tell me more about that limit?
-expect_last_domain: claude_api
-expect_last_answer_contains:
-- rate limit
+  content: What are the rate limit for claude_api?

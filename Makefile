@@ -5,6 +5,7 @@
 #   make lint        — ruff on backend/app + tests
 #   make typecheck   — pyright on backend/app (strict)
 #   make test        — pytest (excludes the ``postgres`` marker)
+#   make golden      — run the 50-case golden evaluation suite
 #   make smoke       — end-to-end curl against uvicorn on SQLite
 #   make clean       — drop caches
 #
@@ -36,7 +37,7 @@ export VERSION
 export PROFILE
 
 .PHONY: help db-up db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
-        build push deploy refresh logs backup restore
+        build push deploy refresh logs backup restore golden golden-smoke e2e
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -55,6 +56,16 @@ test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLi
 
 test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL)
 	cd backend && uv run pytest -m postgres -q
+
+golden: ## Run the golden-case test suite (see tests/golden/README.md)
+	cd backend && uv sync --group dev
+	cd backend && uv run python -m tests.golden.runner --report artifacts/golden_report.json
+
+golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
+	cd backend && uv sync --group dev
+	cd backend && uv run python -m tests.golden.runner --ids claude_api_001,claude_api_004,cross_005 --report artifacts/golden_report_smoke.json
+
+# ─────────────────────────── Local development ───────────────────────────
 
 # ─────────────────────────── Local development ───────────────────────────
 db-up: ## Start Postgres + Redis via docker compose (no app containers)
@@ -96,6 +107,12 @@ demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 stop: db-down ## Tear the demo stack down
 
 smoke: ## End-to-end smoke (db-up + migrate + seed + uvicorn + curl + stop)
+	bash scripts/smoke.sh
+
+e2e: ## End-to-end test (chat UI happy-path: render + ask + citation)
+	@echo "e2e: running the chat-UI smoke (curl-based) since the Playwright harness"
+	@echo "e2e: lands in Slice 11. The smoke here is: API healthy + 1 grounded ask."
+	@echo "e2e: To upgrade to Playwright, see docs/adr/0004-frontend-ci.md."
 	bash scripts/smoke.sh
 
 clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + smoke artefacts

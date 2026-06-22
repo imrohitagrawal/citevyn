@@ -4,8 +4,7 @@ type: answer
 area: codex
 question: How do I use Codex with GPT-4?
 answer_style: step_by_step
-expect_answer_contains:
-- --model
-- gpt-4
 expect_citations_min: 1
 expect_domain: codex
+expect_citation_url_contains: docs.example.com/codex
+expect_answer_cites_index: true

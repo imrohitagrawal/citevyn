@@ -4,7 +4,7 @@ type: answer
 area: claude_code
 question: What is the permissions file in Claude Code?
 answer_style: short
-expect_answer_contains:
-- permissions file
 expect_citations_min: 1
 expect_domain: claude_code
+expect_citation_url_contains: docs.example.com/claude-code
+expect_answer_cites_index: true

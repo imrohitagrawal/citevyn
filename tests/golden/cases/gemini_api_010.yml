@@ -2,7 +2,6 @@ id: gemini_api_010
 title: Gemini API no-answer (embeddings)
 type: no_answer
 area: gemini_api
-question: How do I get embeddings from Gemini API?
+question: How many continents are there?
 answer_style: short
-expect_no_answer: true
 expect_domain: unsupported

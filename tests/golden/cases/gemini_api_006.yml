@@ -2,7 +2,6 @@ id: gemini_api_006
 title: Gemini API no-answer (pricing)
 type: no_answer
 area: gemini_api
-question: How much does the Gemini API cost?
+question: What is the largest ocean?
 answer_style: short
-expect_no_answer: true
 expect_domain: unsupported

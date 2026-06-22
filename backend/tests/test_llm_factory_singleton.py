@@ -138,6 +138,27 @@ def test_settings_constructor_rejects_stub_in_production() -> None:
         Settings(environment="production", llm_provider="stub")
 
 
+def test_settings_constructor_rejects_empty_llm_provider_in_production() -> None:
+    """Empty ``CITEVYN_LLM_PROVIDER`` (the Slice 9b router placeholder)
+    must be rejected in production. Otherwise the orchestrator would
+    resolve a no-op client and the demo would never be reproducible.
+    """
+    from app.core.config import Settings
+
+    with pytest.raises(Exception, match="not allowed when.*production"):
+        Settings(environment="production", llm_provider="")
+
+
+def test_settings_constructor_accepts_empty_llm_provider_in_development() -> None:
+    """The router placeholder is allowed in dev so Slice 9b can be
+    iterated without a real LLM key. The runner.py lru_caches settings
+    by env, so the dev path stays stable.
+    """
+    from app.core.config import Settings
+
+    Settings(environment="development", llm_provider="")
+
+
 def test_validate_llm_provider_accepts_stub_in_development() -> None:
     """Stub is fine in local / test environments."""
     from app.core.config import Settings

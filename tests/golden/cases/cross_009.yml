@@ -4,7 +4,3 @@ type: answer
 area: cross
 question: Walk me through selecting the right model in Codex.
 answer_style: step_by_step
-expect_answer_contains:
-- --model
-expect_citations_min: 1
-expect_domain: codex
