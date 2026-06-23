@@ -69,6 +69,17 @@ golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 
 # ─────────────────────────── Local development ───────────────────────────
 db-up: ## Start Postgres + Redis via docker compose (no app containers)
+	@# Compose env_file: refs on every service require the file to
+	# exist on disk, even for services behind other profiles. On a
+	# fresh clone we bootstrap from prod.env.example with a clearly
+	# dev-only POSTGRES_PASSWORD. The shared guard in
+	# _env_guard.sh refuses to run any prod entry point
+	# (deploy/refresh/backup/restore) while these stubs are present.
+	@if [[ ! -f infra/docker/.env ]]; then \
+	  echo "infra/docker/.env missing; bootstrapping from prod.env.example (DEV ONLY)"; \
+	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=dev-only-change-me|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|' \
+	    infra/docker/prod.env.example > infra/docker/.env; \
+	fi
 	$(COMPOSE) up -d db redis
 	@echo "Waiting for Postgres to accept connections…"
 	@for i in $$(seq 1 60); do \
@@ -148,8 +159,10 @@ restore: ## Restore a pg_dump file (usage: make restore FILE=path)
 	# Source the env file so docker compose + the backup container
 	# can read POSTGRES_PASSWORD (the ``backup`` service has it
 	# in env_file, which docker compose requires to be present
-	# at run-time).
+	# at run-time). The shared guard refuses to run if the .env
+	# is still the dev-only stub that ``make demo`` writes.
 	@if [[ ! -f infra/docker/.env ]]; then echo "error: infra/docker/.env not found; copy prod.env.example first" >&2; exit 1; fi
+	@( source infra/docker/scripts/_env_guard.sh infra/docker ) || exit 1
 	@set -a; . infra/docker/.env; set +a; \
 	docker compose --profile backup run --rm \
 		backup sh -c "pg_restore --clean --if-exists --no-owner --no-privileges \

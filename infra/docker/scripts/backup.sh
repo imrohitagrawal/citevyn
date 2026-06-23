@@ -22,6 +22,10 @@ if [[ ! -f .env ]]; then
     echo "error: .env not found at ${COMPOSE_DIR}/.env" >&2
     exit 1
 fi
+# Refuse to back up with the dev-only stub that ``make demo``
+# auto-generates; share the guard with deploy.sh / refresh.sh.
+# shellcheck source=infra/docker/scripts/_env_guard.sh
+source "${COMPOSE_DIR}/scripts/_env_guard.sh" "${COMPOSE_DIR}"
 
 mkdir -p ./backups
 

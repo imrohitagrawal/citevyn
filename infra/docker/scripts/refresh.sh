@@ -29,6 +29,11 @@ if [[ ! -f .env ]]; then
     echo "       copy prod.env.example to .env and fill in the values" >&2
     exit 1
 fi
+# Refuse to refresh with the dev-only stub that ``make demo``
+# auto-generates; share the guard with deploy.sh so the entry
+# points cannot drift out of sync.
+# shellcheck source=infra/docker/scripts/_env_guard.sh
+source "${COMPOSE_DIR}/scripts/_env_guard.sh" "${COMPOSE_DIR}"
 
 # Pull VERSION from the environment or fall back to ``dev``.
 VERSION="${VERSION:-dev}"

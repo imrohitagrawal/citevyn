@@ -31,6 +31,11 @@ if [[ ! -f .env ]]; then
     echo "error: .env not found at ${COMPOSE_DIR}/.env" >&2
     exit 1
 fi
+# Reuse the dev-stub guard shared by deploy / refresh / backup
+# so the entry points cannot drift out of sync. The guard
+# needs the compose dir as $1 (see _env_guard.sh).
+# shellcheck source=infra/docker/scripts/_env_guard.sh
+source "${COMPOSE_DIR}/scripts/_env_guard.sh" "${COMPOSE_DIR}"
 
 VERSION="${VERSION:-dev}"
 export VERSION
