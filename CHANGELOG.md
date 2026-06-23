@@ -48,6 +48,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CITEVYN_RATE_LIMIT_ENABLED=false` for the run.
 - The `runner.py` CLI was wired to `--report-path` but the argparse
   flag is `--report`. Make targets corrected.
+- `make demo` on a fresh clone: `${CITEVYN_ACME_EMAIL:?…}` aborted
+  compose parsing on the caddy service even when caddy was behind
+  the `prod` profile, and every service's `env_file: - .env`
+  required the gitignored file to exist. The ACME interpolation now
+  falls back to a dev default; `make db-up` bootstraps
+  `infra/docker/.env` from `prod.env.example` with clearly-marked
+  stub secrets; and `infra/docker/scripts/_env_guard.sh` is sourced
+  by `deploy.sh`/`refresh.sh`/`backup.sh`/`make restore` to refuse
+  any prod entry point while the stubs are still in place.
 
 ## [0.9.1] — 2026-05-12
 

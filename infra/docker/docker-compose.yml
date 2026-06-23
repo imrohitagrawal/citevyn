@@ -174,16 +174,18 @@ services:
     logging: *default-logging
     env_file:
       # ACME email + CA override (staging for smoke, prod for
-      # real). The compose substitution ``${VAR:-default}`` is
-      # not safe for the email field (no default), so we list
-      # it as required via the env_file.
+      # real). The real-secret check lives in
+      # infra/docker/scripts/_env_guard.sh.
       - .env
     environment:
       # ACME email is required for Let's Encrypt to notify the
-      # operator about expiring certs. If unset, Caddy uses an
-      # empty address and the LE registration will fail at the
-      # first request.
-      CITEVYN_ACME_EMAIL: ${CITEVYN_ACME_EMAIL:?CITEVYN_ACME_EMAIL must be set in .env}
+      # operator about expiring certs. The dev-time default
+      # below keeps `make demo` working on a fresh clone with no
+      # .env file (Caddy is behind the prod profile and isn't
+      # started by `make demo` anyway, but compose still parses
+      # the full file during interpolation). The real-secret
+      # check lives in infra/docker/scripts/_env_guard.sh.
+      CITEVYN_ACME_EMAIL: ${CITEVYN_ACME_EMAIL:-dev@local.invalid}
       CITEVYN_ACME_CA: ${CITEVYN_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
     ports:
       - "80:80"
