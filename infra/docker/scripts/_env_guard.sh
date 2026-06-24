@@ -19,7 +19,12 @@
 #   - asserts the .env file exists
 #   - asserts POSTGRES_PASSWORD and CITEVYN_ADMIN_API_KEY are not
 #     the dev-only stubs the Makefile bootstrap writes
-#   - exits non-zero with a remediation message if either fails
+#   - asserts CITEVYN_ACME_EMAIL is set and is not the dev-time
+#     default ``dev@local.invalid`` (the Caddy service uses that
+#     address to register with Let's Encrypt, so a missing or
+#     default value silently disables cert-expiry notifications
+#     on the prod host)
+#   - exits non-zero with a remediation message if any fails
 # ────────────────────────────────────────────────────────────────────────────
 
 if [[ -z "${1:-}" ]]; then
@@ -39,5 +44,36 @@ if grep -q '^POSTGRES_PASSWORD=dev-only-change-me$' "${_GUARD_COMPOSE_DIR}/.env"
     echo "error: .env still has dev-only stub secrets from 'make demo'." >&2
     echo "       Replace POSTGRES_PASSWORD and CITEVYN_ADMIN_API_KEY" >&2
     echo "       (e.g. openssl rand -hex 32) and re-run." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# ACME email: a missing value or the docker-compose dev default
+# would silently register Caddy with Let's Encrypt using
+# dev@local.invalid, losing cert-expiry notifications. The
+# guard refuses both so a real operator email is required before
+# any prod entry point runs.
+#
+# We ``source`` the .env in a subshell so the variables don't
+# leak into the caller's environment (deploy.sh / refresh.sh /
+# backup.sh / the make restore target each set -a / . .env
+# themselves in a controlled way later).
+if ! (
+    set -a
+    # shellcheck source=/dev/null
+    . "${_GUARD_COMPOSE_DIR}/.env"
+    set +a
+    if [[ -z "${CITEVYN_ACME_EMAIL:-}" ]]; then
+        echo "error: CITEVYN_ACME_EMAIL is not set in .env." >&2
+        echo "       This is the email Let's Encrypt uses to" >&2
+        echo "       notify the operator about expiring certs." >&2
+        exit 1
+    fi
+    if [[ "${CITEVYN_ACME_EMAIL}" == "dev@local.invalid" ]]; then
+        echo "error: CITEVYN_ACME_EMAIL is still the dev-time default" >&2
+        echo "       (dev@local.invalid). Set a real operator email" >&2
+        echo "       in .env before running a prod entry point." >&2
+        exit 1
+    fi
+); then
     return 1 2>/dev/null || exit 1
 fi
