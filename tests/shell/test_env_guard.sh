@@ -11,14 +11,20 @@
 # Exit code 0 = all pass, 1 = at least one failure.
 #
 # These tests guard against regressions in the four critical paths:
-#   1. stub POSTGRES_PASSWORD / CITEVYN_ADMIN_API_KEY — rejected
+#   1. stub POSTGRES_PASSWORD / CITEVYN_ADMIN_API_KEY / CITEVYN_ACME_EMAIL
 #   2. missing CITEVYN_ACME_EMAIL — rejected
 #   3. CITEVYN_ACME_EMAIL=dev@local.invalid — rejected
-#   4. real secrets + real ACME email — accepted
-# Plus three edge cases found during the security review:
+#   4. real secrets + real ACME email — accepted (incl. single- and
+#      double-quoted values; the guard strips a matched pair)
+# Plus six edge cases found during security review:
 #   5. CRLF .env with stubs is still rejected (regression: bare ``$`` anchor)
 #   6. CRLF .env with ACME=dev@local.invalid\r is still rejected
 #   7. CITEVYN_ACME_EMAIL with trailing whitespace matches the default
+#   8. .env with a stray non-zero command (false) is rejected
+#   9. .env file mode is tightened to 0600 by the guard as a side effect
+#  10. CITEVYN_ACME_EMAIL='ops@example.com' (single-quoted) is accepted
+#      with quotes stripped — regression for the bash-quote-preservation
+#      bypass
 # ────────────────────────────────────────────────────────────────────────────
 
 set -uo pipefail
@@ -134,6 +140,77 @@ assert_guard "ACME=dev@local.invalid with trailing spaces is rejected" \
     1 \
     "dev-time default" \
     "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=dev@local.invalid   "$'\n'
+
+# 8. Stub CITEVYN_ACME_EMAIL (Makefile bootstrap now rewrites it too).
+assert_guard "stub CITEVYN_ACME_EMAIL is rejected" \
+    1 \
+    "dev-only stub secrets" \
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=dev-only-change-me"$'\n'
+
+# 9. C1 (ruthless-critic): single-quoted ACME value. Bash preserves
+# the quote chars literally when sourced; without the strip-quotes
+# logic the guard would accept ``'ops@example.com'`` and Caddy would
+# forward the literal-quoted string to Let's Encrypt. The guard
+# strips a matched pair of leading/trailing single or double quotes,
+# so the value passed downstream is plain ``ops@example.com``.
+assert_guard "single-quoted ACME email is accepted (quotes stripped)" \
+    0 \
+    "" \
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL='ops@example.com'"$'\n'
+
+assert_guard "double-quoted ACME email is accepted (quotes stripped)" \
+    0 \
+    "" \
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=\"ops@example.com\""$'\n'
+
+# 10. C2 (ruthless-critic): garbage command in .env. A stray
+# non-zero command (here ``false``) on the last line of a
+# .env file should make the guard fail-closed with a clear
+# error. Without the explicit ``_source_rc`` capture, the
+# subshell would silently continue past the ``false``, see
+# the valid CITEVYN_ACME_EMAIL, and accept the .env.
+assert_guard ".env with stray non-zero command is rejected" \
+    1 \
+    "failed to source" \
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'"false"$'\n'
+
+# ─────────────────────── C3: chmod 600 ───────────────────────
+# The guard tightens the .env file mode to 0600 as a side effect.
+# This is independent of the stub / ACME / quote logic — even a
+# manually-created .env (e.g. ``cp prod.env.example .env``) should
+# end up with mode 0600 after the guard runs.
+
+echo
+echo "chmod 600 side-effect"
+
+# Start with a deliberately permissive mode, then run the guard
+# with a real-secret .env, then check the mode.
+chmod_test() {
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    printf '%s' "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n' > "${tmpdir}/.env"
+    chmod 0644 "${tmpdir}/.env"
+
+    bash -c "source '${GUARD}' '${tmpdir}'" >/dev/null 2>&1
+
+    local mode
+    # ``stat -f %Lp`` is BSD/macOS; ``stat -c %a`` is GNU/Linux.
+    # Use ls for portability.
+    mode="$(ls -l "${tmpdir}/.env" | awk '{print $1}')"
+
+    if [[ "${mode}" == "-rw-------"* ]]; then
+        PASS=$((PASS + 1))
+        echo "  ok  .env mode tightened to 0600 (saw ${mode})"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL .env mode not 0600 (saw ${mode})"
+        FAILURES+=("  [.env mode] expected -rw-------, got ${mode}")
+    fi
+
+    rm -rf "${tmpdir}"
+}
+
+chmod_test
 
 # ─────────────────────── Summary ───────────────────────
 
