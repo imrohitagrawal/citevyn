@@ -39,8 +39,13 @@ if [[ ! -f "${_GUARD_COMPOSE_DIR}/.env" ]]; then
     return 1 2>/dev/null || exit 1
 fi
 
-if grep -q '^POSTGRES_PASSWORD=dev-only-change-me$' "${_GUARD_COMPOSE_DIR}/.env" \
-   || grep -q '^CITEVYN_ADMIN_API_KEY=dev-only-change-me$' "${_GUARD_COMPOSE_DIR}/.env"; then
+# ``^...=dev-only-change-me\r?$`` matches LF-terminated lines
+# by default and CRLF-terminated ones (a .env edited on Windows
+# or written via a CRLF-emitting pipeline) optionally. Without
+# the ``\r?`` allowance, CRLF .env files would silently bypass
+# the stub guard.
+if grep -qE '^POSTGRES_PASSWORD=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
+   || grep -qE '^CITEVYN_ADMIN_API_KEY=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env"; then
     echo "error: .env still has dev-only stub secrets from 'make demo'." >&2
     echo "       Replace POSTGRES_PASSWORD and CITEVYN_ADMIN_API_KEY" >&2
     echo "       (e.g. openssl rand -hex 32) and re-run." >&2
@@ -54,21 +59,40 @@ fi
 # any prod entry point runs.
 #
 # We ``source`` the .env in a subshell so the variables don't
-# leak into the caller's environment (deploy.sh / refresh.sh /
-# backup.sh / the make restore target each set -a / . .env
-# themselves in a controlled way later).
+# leak into the caller's environment. The shell scripts
+# (deploy.sh / refresh.sh / backup.sh) delegate everything to
+# ``docker compose``, which reads .env on its own — they never
+# need CITEVYN_ACME_EMAIL in their own shell. The ``make
+# restore`` target sources .env later in a controlled ``set
+# -a`` block, so leaking it here would be redundant at best
+# and confusing at worst.
+#
+# The value is trimmed before comparison: a CRLF-terminated
+# .env (e.g. edited on Windows) would otherwise retain a ``\r``
+# and slip past the equality check, registering a literal
+# ``dev@local.invalid\r`` (or any other value plus ``\r``)
+# with Let's Encrypt.
 if ! (
     set -a
     # shellcheck source=/dev/null
     . "${_GUARD_COMPOSE_DIR}/.env"
     set +a
-    if [[ -z "${CITEVYN_ACME_EMAIL:-}" ]]; then
+    _acme_email="${CITEVYN_ACME_EMAIL:-}"
+    # Strip trailing CR / LF / space / tab. Parameter expansion
+    # does this in two steps: the inner ``${var%%[$'\r\n ']}``
+    # strips one trailing whitespace char; we loop because the
+    # value could end with multiple of them (e.g. CRLF plus a
+    # space from a careless ``echo value >> .env``).
+    while [[ "${_acme_email}" =~ [[:space:]]$ ]]; do
+        _acme_email="${_acme_email%%[[:space:]]}"
+    done
+    if [[ -z "${_acme_email}" ]]; then
         echo "error: CITEVYN_ACME_EMAIL is not set in .env." >&2
         echo "       This is the email Let's Encrypt uses to" >&2
         echo "       notify the operator about expiring certs." >&2
         exit 1
     fi
-    if [[ "${CITEVYN_ACME_EMAIL}" == "dev@local.invalid" ]]; then
+    if [[ "${_acme_email}" == "dev@local.invalid" ]]; then
         echo "error: CITEVYN_ACME_EMAIL is still the dev-time default" >&2
         echo "       (dev@local.invalid). Set a real operator email" >&2
         echo "       in .env before running a prod entry point." >&2

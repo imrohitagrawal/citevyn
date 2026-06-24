@@ -79,6 +79,7 @@ db-up: ## Start Postgres + Redis via docker compose (no app containers)
 	  echo "infra/docker/.env missing; bootstrapping from prod.env.example (DEV ONLY)"; \
 	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=dev-only-change-me|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|' \
 	    infra/docker/prod.env.example > infra/docker/.env; \
+	  chmod 600 infra/docker/.env; \
 	  echo ""; \
 	  echo "  ⚠  infra/docker/.env contains DEV-ONLY stub secrets."; \
 	  echo "     Running \`docker compose --profile prod up -d\` directly"; \
