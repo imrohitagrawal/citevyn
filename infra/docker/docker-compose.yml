@@ -62,7 +62,7 @@ services:
   # to the public network. The production security boundary is
   # Caddy on :443; Postgres is never reachable from the internet.
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg18
     container_name: citevyn-db
     restart: unless-stopped
     logging: *default-logging
@@ -86,7 +86,7 @@ services:
       start_period: 30s
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: citevyn-redis
     restart: unless-stopped
     logging: *default-logging
@@ -211,7 +211,7 @@ services:
   # ──────────────── One-shot backup (backup profile) ────────────────
   backup:
     profiles: ["backup"]
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: citevyn-backup
     logging: *default-logging
     restart: "no"
