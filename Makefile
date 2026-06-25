@@ -77,8 +77,19 @@ db-up: ## Start Postgres + Redis via docker compose (no app containers)
 	# (deploy/refresh/backup/restore) while these stubs are present.
 	@if [[ ! -f infra/docker/.env ]]; then \
 	  echo "infra/docker/.env missing; bootstrapping from prod.env.example (DEV ONLY)"; \
-	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=dev-only-change-me|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|' \
+	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=dev-only-change-me|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|; s|^CITEVYN_ACME_EMAIL=.*|CITEVYN_ACME_EMAIL=dev-only-change-me|' \
 	    infra/docker/prod.env.example > infra/docker/.env; \
+	  chmod 600 infra/docker/.env; \
+	  echo ""; \
+	  echo "  ⚠  infra/docker/.env contains DEV-ONLY stub secrets."; \
+	  echo "     Running \`docker compose --profile prod up -d\` directly"; \
+	  echo "     will start the prod stack with these stubs. The shared"; \
+	  echo "     guard in infra/docker/scripts/_env_guard.sh refuses to"; \
+	  echo "     run deploy/refresh/backup/restore against this file,"; \
+	  echo "     but it cannot intercept a raw docker compose invocation."; \
+	  echo "     Remove infra/docker/.env and copy prod.env.example"; \
+	  echo "     with real secrets before going to prod."; \
+	  echo ""; \
 	fi
 	$(COMPOSE) up -d db redis
 	@echo "Waiting for Postgres to accept connections…"
