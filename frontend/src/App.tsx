@@ -3,7 +3,7 @@
  *
  * Manages:
  * - Theme (light/dark, respects OS preference until toggled)
- * - Style variant (core, softly, devtools, devtools-alt, universal)
+ * - Style variant (core, softly, devtools, devtools-alt, universal, browser-core, editorial-studio)
  * - Session state for the RAG API
  * - View routing (chat, exact, about)
  *
@@ -11,280 +11,503 @@
  * visitors keep their preference.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { ApiClientError, type AskResponse, type SessionId } from "./lib/types";
-import { StyleDock } from "./components/StyleDock";
-import { TopBar } from "./components/TopBar";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import type { AskResponse, SessionId } from "./lib/types";
+import { ApiClientError } from "./lib/types";
+
 import { ChatView } from "./components/ChatView";
-import { AboutView } from "./components/AboutView";
 import { ExactSearchView } from "./components/ExactSearchView";
-import { ToastRegion } from "./components/Toast";
-import { useToast } from "./hooks/useToast";
+import { AboutView } from "./components/AboutView";
 import { LandingView } from "./components/LandingView";
 import { SoftlyApp } from "./components/SoftlyApp";
 import { DevToolsApp } from "./components/DevToolsApp";
 import { TerminalApp } from "./components/TerminalApp";
 import { UniversalApp } from "./components/UniversalApp";
+import { BrowserCoreApp } from "./components/BrowserCoreApp";
+import { EditorialStudioApp } from "./components/EditorialStudioApp";
+import { UniversalLandingApp } from "./components/UniversalLandingApp";
+import { useSoftChat } from "./lib/useSoftChat";
+import { TopBar, type ViewId } from "./components/TopBar";
+import { ToastRegion, type Toast, type ToastKind } from "./components/Toast";
 
-export type ViewId = "chat" | "exact" | "about";
-export type StyleId = "core" | "softly" | "devtools" | "devtools-alt" | "universal";
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
 
-interface AppProps {
-  /** Override the style via URL param (?style=universal etc.) */
-  styleOverride?: StyleId;
+export type Theme = "light" | "dark";
+export type StyleId = "core" | "softly" | "devtools" | "devtools-alt" | "universal" | "browser-core" | "editorial-studio" | "landing";
+
+const THEME_STORAGE_KEY = "citevyn:theme";
+const SESSION_STORAGE_KEY = "citevyn:session-id";
+const VIEW_STORAGE_KEY = "citevyn:view";
+const STYLE_STORAGE_KEY = "citevyn:style";
+
+/**
+ * Read the initial theme. Order:
+ *   1. ``localStorage[citevyn:theme]`` if set.
+ *   2. The user's ``prefers-color-scheme`` media query.
+ *   3. ``"light"`` as the fallback.
+ */
+function readInitialTheme(): Theme {
+  if (typeof window === "undefined") return "light";
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === "light" || stored === "dark") return stored;
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+    return "dark";
+  }
+  return "light";
 }
 
-export function App({ styleOverride }: AppProps) {
-  // ── View routing ──────────────────────────────────────────
-  const [view, setView] = useState<ViewId>("chat");
+function readInitialStyle(): StyleId {
+  if (typeof window === "undefined") return "core";
+  // URL query param takes priority so shared links (?style=universal etc.)
+  // are respected even when localStorage has a previously-selected style.
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = params.get("style");
+  if (
+    fromUrl === "core" ||
+    fromUrl === "softly" ||
+    fromUrl === "devtools" ||
+    fromUrl === "devtools-alt" ||
+    fromUrl === "universal" ||
+    fromUrl === "browser-core" ||
+    fromUrl === "editorial-studio" ||
+    fromUrl === "landing"
+  ) {
+    return fromUrl;
+  }
+  const stored = window.localStorage.getItem(STYLE_STORAGE_KEY);
+  if (
+    stored === "core" ||
+    stored === "softly" ||
+    stored === "devtools" ||
+    stored === "devtools-alt" ||
+    stored === "universal" ||
+    stored === "browser-core" ||
+    stored === "editorial-studio" ||
+    stored === "landing"
+  ) {
+    return stored;
+  }
+  return "core";
+}
 
-  // ── Theme (light / dark) ──────────────────────────────────
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    return (
-      (localStorage.getItem("citevyn:theme") as "light" | "dark") ??
-      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
-    );
+/** Apply the theme to the ``<html>`` element. */
+function applyTheme(theme: Theme) {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
+/** Apply the landing style to the ``<html>`` element. */
+function applyStyle(style: StyleId) {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-style", style);
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+export function App() {
+  const [theme, setTheme] = useState<Theme>(readInitialTheme);
+  const [styleId, setStyleId] = useState<StyleId>(readInitialStyle);
+  const [view, setView] = useState<ViewId>(() => {
+    if (typeof window === "undefined") return "chat";
+    const v = window.localStorage.getItem(VIEW_STORAGE_KEY);
+    return v === "chat" || v === "exact" || v === "about" ? v : "chat";
   });
 
-  // ── Style variant ──────────────────────────────────────────
-  const [styleId, setStyleId] = useState<StyleId>(() => {
-    // URL param takes priority
-    const params = new URLSearchParams(window.location.search);
-    const fromUrl = params.get("style") as StyleId | null;
-    if (fromUrl && isStyleId(fromUrl)) return fromUrl;
-
-    // Stored preference
-    const stored = localStorage.getItem("citevyn:style") as StyleId | null;
-    if (stored && isStyleId(stored)) return stored;
-
-    return "core";
-  });
-
-  // ── Session state ──────────────────────────────────────────
+  // Session state — id persists; everything else is in memory
+  // and resets on reload.
   const [sessionId, setSessionId] = useState<SessionId | null>(() => {
     if (typeof window === "undefined") return null;
-    return localStorage.getItem("citevyn:session_id") as SessionId | null;
+    return window.localStorage.getItem(SESSION_STORAGE_KEY);
   });
   const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
   const [messageCount, setMessageCount] = useState(0);
   const [indexVersion, setIndexVersion] = useState<string | null>(null);
   const [answerPolicyVersion, setAnswerPolicyVersion] = useState<string | null>(null);
 
-  // ── Toast notifications ─────────────────────────────────────
-  const { toasts, addToast, removeToast } = useToast();
+  // Softly chat is a parallel, self-contained session so the two
+  // landing experiences don't fight over message state.
+  const softlyChat = useSoftChat();
 
-  // ── Persist preferences ────────────────────────────────────
+  // Toast queue.
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Persist theme on change.
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
+    applyTheme(theme);
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
 
+  // Persist + apply the landing style.
   useEffect(() => {
-    document.documentElement.setAttribute("data-style", styleId);
-    if (styleId !== "universal") {
-      localStorage.setItem("citevyn:style", styleId);
-    }
+    applyStyle(styleId);
+    window.localStorage.setItem(STYLE_STORAGE_KEY, styleId);
   }, [styleId]);
 
-  // ── Handlers ────────────────────────────────────────────────
-  const handleThemeToggle = useCallback(() => {
-    setTheme((prev) => {
-      const next = prev === "light" ? "dark" : "light";
-      localStorage.setItem("citevyn:theme", next);
-      return next;
-    });
+  // Persist view on change.
+  useEffect(() => {
+    window.localStorage.setItem(VIEW_STORAGE_KEY, view);
+  }, [view]);
+
+  // Persist session id on change.
+  useEffect(() => {
+    if (sessionId) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    } else {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  }, [sessionId]);
+
+  // ---------------------------------------------------------------------
+  // Toast helpers
+  // ---------------------------------------------------------------------
+
+  const pushToast = useCallback(
+    (kind: ToastKind, title: string, message: string, requestId?: string, durationMs = 5000) => {
+      const id = Date.now() + Math.floor(Math.random() * 1000);
+      setToasts((prev) => [...prev, { id, kind, title, message, requestId, durationMs }]);
+    },
+    [],
+  );
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const handleStyleChange = useCallback((id: StyleId) => {
-    setStyleId(id);
-    if (id !== "universal") {
-      localStorage.setItem("citevyn:style", id);
-    }
-  }, []);
+  const handleError = useCallback(
+    (err: ApiClientError) => {
+      if (err.isRateLimited()) {
+        pushToast(
+          "warning",
+          "Rate limit reached",
+          "Try again in a minute. The demo allows 30 requests per hour.",
+          err.hasEnvelope() && typeof err.body === "object" ? (err.body as Record<string, unknown>).request_id as string | undefined : undefined,
+          8000,
+        );
+      } else if (err.isServerError()) {
+        pushToast(
+          "error",
+          `Server error ${err.status}`,
+          err.message,
+          err.hasEnvelope() && typeof err.body === "object" ? (err.body as Record<string, unknown>).request_id as string | undefined : undefined,
+        );
+      } else if (err.status === 0) {
+        pushToast("error", "Network error", err.message, undefined, 6000);
+      } else {
+        pushToast(
+          "error",
+          `Request failed (${err.status})`,
+          err.message,
+          err.hasEnvelope() && typeof err.body === "object" ? (err.body as Record<string, unknown>).request_id as string | undefined : undefined,
+        );
+      }
+    },
+    [pushToast],
+  );
+
+  // ---------------------------------------------------------------------
+  // Session lifecycle
+  // ---------------------------------------------------------------------
 
   const handleSessionCreated = useCallback((id: SessionId) => {
     setSessionId(id);
     setSessionStartedAt(new Date().toISOString());
-    localStorage.setItem("citevyn:session_id", id);
   }, []);
 
   const handleResponseMetadata = useCallback((response: AskResponse) => {
-    setMessageCount((n) => n + 1);
-    if (response.index_version) setIndexVersion(response.index_version);
-    if (response.policy_version) setAnswerPolicyVersion(response.policy_version);
+    setMessageCount((c) => c + 1);
+    if (response.source_version_hash) setIndexVersion(response.source_version_hash);
+    if (response.answer_policy_version) setAnswerPolicyVersion(response.answer_policy_version);
   }, []);
 
   const handleNewSession = useCallback(() => {
     setSessionId(null);
     setSessionStartedAt(null);
     setMessageCount(0);
-    setIndexVersion(null);
-    setAnswerPolicyVersion(null);
-    localStorage.removeItem("citevyn:session_id");
+    // Index/policy versions stay — they belong to the backend, not
+    // the session.
+    setView("chat");
   }, []);
 
-  const handleError = useCallback(
-    (error: ApiClientError) => {
-      if (error.status === 429) {
-        addToast({
-          kind: "warning",
-          title: "Rate limited",
-          message: "Too many requests. Please wait a moment.",
-        });
-      } else {
-        addToast({
-          kind: "error",
-          title: "Something went wrong",
-          message: error.message || "An unexpected error occurred.",
-        });
-      }
-    },
-    [addToast]
-  );
-
-  const handleSwitchView = useCallback((v: ViewId) => {
-    setView(v);
+  const handleLaunchChat = useCallback((initialPrompt?: string) => {
+    setView("chat");
+    // The ChatView will read its own state; we hand off the initial
+    // prompt via a window-level event so we don't need to thread
+    // state through a router.
+    if (initialPrompt && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("citevyn:set-prompt", { detail: initialPrompt }));
+    }
   }, []);
 
-  // ── Derived state ───────────────────────────────────────────
+  // ---------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------
+
+  const main = useMemo(() => {
+    switch (view) {
+      case "chat":
+        return (
+          <ChatView
+            sessionId={sessionId}
+            sessionStartedAt={sessionStartedAt}
+            messageCount={messageCount}
+            indexVersion={indexVersion}
+            answerPolicyVersion={answerPolicyVersion}
+            onSessionCreated={handleSessionCreated}
+            onError={handleError}
+            onResponseMetadata={handleResponseMetadata}
+            onNewSession={handleNewSession}
+            onSwitchView={setView}
+          />
+        );
+      case "exact":
+        return <ExactSearchView onError={handleError} />;
+      case "about":
+        return <AboutView />;
+    }
+  }, [
+    view,
+    sessionId,
+    sessionStartedAt,
+    messageCount,
+    indexVersion,
+    answerPolicyVersion,
+    handleSessionCreated,
+    handleError,
+    handleResponseMetadata,
+    handleNewSession,
+  ]);
+
+  // Softly, DevTools, Terminal, Universal, BrowserCore, and EditorialStudio
+  // are all complete replacements for the brutalist landing when the chat view is
+  // active; for the other views we always fall back to the TopBar +
+  // brutalist layout so non-chat screens keep the global navigation.
   const showAlternateShell =
     view === "chat" &&
     (styleId === "softly" ||
       styleId === "devtools" ||
       styleId === "devtools-alt" ||
-      styleId === "universal");
+      styleId === "universal" ||
+      styleId === "browser-core" ||
+      styleId === "editorial-studio") ||
+    styleId === "landing";
 
-  // ── App shell class ─────────────────────────────────────────
   const appClass = [
     "app",
     styleId === "softly" ? "app--softly" : "",
     styleId === "devtools" ? "app--devtools" : "",
     styleId === "devtools-alt" ? "app--devtools-alt" : "",
     styleId === "universal" ? "app--universal" : "",
+    styleId === "browser-core" ? "app--browser-core" : "",
+    styleId === "editorial-studio" ? "app--editorial-studio" : "",
+    styleId === "landing" ? "app--landing" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
-  // ── Render ──────────────────────────────────────────────────
   return (
     <div className={appClass}>
-      {/* Toast notifications */}
-      <ToastRegion toasts={toasts} onDismiss={removeToast} />
+      {!showAlternateShell && (
+        <TopBar
+          view={view}
+          onViewChange={setView}
+          theme={theme}
+          onThemeToggle={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          styleId={styleId}
+          onStyleChange={setStyleId}
+        />
+      )}
 
-      {/* Alternate shells (Softly, DevTools, Terminal, Universal) */}
-      {showAlternateShell && (
+      {showAlternateShell ? (
+        // Each non-core style is fully self-contained: it owns its
+        // own nav (or none), its own hero, its own chat surface, and
+        // (for styles that hide the top bar) its own style dock so
+        // the user can always return to Core.
         <>
           {styleId === "softly" && (
             <SoftlyApp
-              theme={theme}
-              onThemeToggle={handleThemeToggle}
-              sessionId={sessionId}
-              messageCount={messageCount}
-              onSessionCreated={handleSessionCreated}
-              onError={handleError}
-              onResponseMetadata={handleResponseMetadata}
-              onNewSession={handleNewSession}
-              onSwitchView={handleSwitchView}
+              messages={softlyChat.messages}
+              sessionId={softlyChat.sessionId}
+              isBusy={softlyChat.isBusy}
+              onSend={softlyChat.send}
+              onRetry={softlyChat.retry}
             />
           )}
           {styleId === "devtools" && (
             <DevToolsApp
-              theme={theme}
-              onThemeToggle={handleThemeToggle}
               sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
               messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
               onSessionCreated={handleSessionCreated}
               onError={handleError}
               onResponseMetadata={handleResponseMetadata}
               onNewSession={handleNewSession}
-              onSwitchView={handleSwitchView}
+              onSwitchView={setView}
             />
           )}
           {styleId === "devtools-alt" && (
             <TerminalApp
-              theme={theme}
-              onThemeToggle={handleThemeToggle}
               sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
               messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
               onSessionCreated={handleSessionCreated}
               onError={handleError}
               onResponseMetadata={handleResponseMetadata}
               onNewSession={handleNewSession}
-              onSwitchView={handleSwitchView}
+              onSwitchView={setView}
             />
           )}
           {styleId === "universal" && (
             <UniversalApp
-              theme={theme}
-              onThemeToggle={handleThemeToggle}
               sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
               messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
               onSessionCreated={handleSessionCreated}
               onError={handleError}
               onResponseMetadata={handleResponseMetadata}
               onNewSession={handleNewSession}
-              onSwitchView={handleSwitchView}
+              onSwitchView={setView}
+            />
+          )}
+          {styleId === "browser-core" && (
+            <BrowserCoreApp
+              sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
+              messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
+              onSessionCreated={handleSessionCreated}
+              onError={handleError}
+              onResponseMetadata={handleResponseMetadata}
+              onNewSession={handleNewSession}
+              onSwitchView={setView}
+            />
+          )}
+          {styleId === "editorial-studio" && (
+            <EditorialStudioApp
+              sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
+              messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
+              onSessionCreated={handleSessionCreated}
+              onError={handleError}
+              onResponseMetadata={handleResponseMetadata}
+              onNewSession={handleNewSession}
+              onSwitchView={setView}
+            />
+          )}
+          {styleId === "landing" && (
+            <UniversalLandingApp
+              sessionId={sessionId}
+              sessionStartedAt={sessionStartedAt}
+              messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
+              onSessionCreated={handleSessionCreated}
+              onError={handleError}
+              onResponseMetadata={handleResponseMetadata}
+              onNewSession={handleNewSession}
+              onSwitchView={setView}
+            />
+          )}
+          <StyleDock
+            styleId={styleId}
+            onStyleChange={setStyleId}
+            theme={theme}
+            onThemeToggle={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          />
+        </>
+      ) : (
+        <>
+          {view === "chat" ? (
+            main
+          ) : (
+            <main className="app__main app__main--standalone" key={view}>
+              {main}
+            </main>
+          )}
+
+          {/* Landing-style framing only shown around the chat surface. */}
+          {view === "chat" && (
+            <LandingView
+              sessionId={sessionId}
+              messageCount={messageCount}
+              indexVersion={indexVersion}
+              answerPolicyVersion={answerPolicyVersion}
+              onLaunchChat={handleLaunchChat}
             />
           )}
         </>
       )}
 
-      {/* Core shell (TopBar + view) */}
-      {!showAlternateShell && (
-        <>
-          <TopBar
-            view={view}
-            theme={theme}
-            onThemeToggle={handleThemeToggle}
-            onSwitchView={handleSwitchView}
-          />
-
-          <main className="app__main">
-            {view === "chat" && (
-              <LandingView>
-                <ChatView
-                  sessionId={sessionId}
-                  sessionStartedAt={sessionStartedAt}
-                  messageCount={messageCount}
-                  indexVersion={indexVersion}
-                  answerPolicyVersion={answerPolicyVersion}
-                  onSessionCreated={handleSessionCreated}
-                  onError={handleError}
-                  onResponseMetadata={handleResponseMetadata}
-                  onNewSession={handleNewSession}
-                  onSwitchView={handleSwitchView}
-                />
-              </LandingView>
-            )}
-
-            {view === "about" && <AboutView />}
-            {view === "exact" && (
-              <ExactSearchView onError={handleError} />
-            )}
-          </main>
-        </>
-      )}
-
-      {/* Style dock for alternate shells */}
-      {showAlternateShell && (
-        <StyleDock
-          currentStyle={styleId}
-          onStyleChange={handleStyleChange}
-          theme={theme}
-          onThemeToggle={handleThemeToggle}
-        />
-      )}
+      <ToastRegion toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
 
-// ── Helpers ────────────────────────────────────────────────────
-function isStyleId(value: string): value is StyleId {
+// ---------------------------------------------------------------------------
+// StyleDock
+//
+// Tiny floating switcher shown only when the user is in a non-core
+// shell (Softly, DevTools, Terminal, Universal) so they can hop back
+// to Core without losing the global TopBar (which is hidden in
+// those modes).
+// ---------------------------------------------------------------------------
+
+interface StyleDockProps {
+  styleId: StyleId;
+  onStyleChange: (styleId: StyleId) => void;
+  theme: Theme;
+  onThemeToggle: () => void;
+}
+
+function StyleDock({ styleId, onStyleChange, theme, onThemeToggle }: StyleDockProps) {
+  const options: ReadonlyArray<{ id: StyleId; label: string }> = [
+    { id: "core", label: "Core" },
+    { id: "universal", label: "Universal" },
+    { id: "softly", label: "Softly" },
+    { id: "devtools", label: "DevTools" },
+    { id: "devtools-alt", label: "Terminal" },
+    { id: "browser-core", label: "Browser" },
+    { id: "editorial-studio", label: "Editorial" },
+    { id: "landing", label: "Landing" },
+  ];
   return (
-    value === "core" ||
-    value === "softly" ||
-    value === "devtools" ||
-    value === "devtools-alt" ||
-    value === "universal"
+    <div className="style-dock" role="group" aria-label="Switch landing style" data-testid="style-dock">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          className={"style-dock__btn" + (styleId === o.id ? " style-dock__btn--active" : "")}
+          aria-pressed={styleId === o.id}
+          onClick={() => onStyleChange(o.id)}
+          data-testid={`style-dock-${o.id}`}
+        >
+          {o.label}
+        </button>
+      ))}
+      <span className="style-dock__sep" aria-hidden="true" />
+      <button
+        type="button"
+        className="style-dock__btn style-dock__btn--icon"
+        aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        onClick={onThemeToggle}
+        data-testid="style-dock-theme-toggle"
+      >
+        {theme === "dark" ? "☀" : "☾"}
+      </button>
+    </div>
   );
 }

@@ -18,6 +18,9 @@ import "./styles/chat-enhancements.css";
 import "./styles/softly.css";
 import "./styles/devtools.css";
 import "./styles/universal.css";
+import "./styles/browser-core.css";
+import "./styles/editorial-studio.css";
+import "./styles/universal-landing.css";
 import { App } from "./App";
 
 const root = document.getElementById("root");
