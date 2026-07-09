@@ -4,7 +4,7 @@
  * flow is explicitly re-checked in dark.
  */
 import { test, expect } from "@playwright/test";
-import { gotoApp, ensureTheme, enterChat, waitStreamDone } from "./helpers";
+import { gotoApp, ensureTheme, enterChat, waitStreamDone, TOKENS, SEMANTIC } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await gotoApp(page);
@@ -36,13 +36,19 @@ test.describe("Hero", () => {
       .poll(async () => (await q.textContent())!.trim(), { timeout: 15000, intervals: [400] })
       .not.toBe(first);
     const dots = page.locator(".progress-dot");
-    // The pill width animates 7→22px over .3s; let it settle before measuring.
-    await page.waitForTimeout(400);
-    const widths = await dots.evaluateAll((els) => els.map((e) => getComputedStyle(e).width));
-    const actives = await dots.evaluateAll((els) => els.map((e) => e.classList.contains("active")));
-    const pillIdx = widths.findIndex((w) => parseFloat(w) >= 20);
-    expect(actives.filter(Boolean).length).toBe(1);
-    expect(actives[pillIdx]).toBe(true); // the pill is the active one
+    // The pill width animates 7→22px over .3s and the .active class flips on the
+    // same cycle. Poll the real settled invariant — exactly one dot ≥20px wide,
+    // exactly one .active, and they are the same dot — instead of a fixed sleep
+    // that can read mid-transition under load.
+    await expect
+      .poll(async () => {
+        const widths = await dots.evaluateAll((els) => els.map((e) => getComputedStyle(e).width));
+        const actives = await dots.evaluateAll((els) => els.map((e) => e.classList.contains("active")));
+        const pillIdx = widths.findIndex((w) => parseFloat(w) >= 20);
+        const activeCount = actives.filter(Boolean).length;
+        return activeCount === 1 && pillIdx >= 0 && actives[pillIdx] === true;
+      }, { timeout: 5000 })
+      .toBe(true);
   });
 
   test("placeholder rotates over time (not stuck after first tick)", async ({ page }) => {
@@ -105,8 +111,15 @@ test.describe("Question ticker", () => {
     });
     expect(anim.name).toBe("cv-scroll");
     expect(anim.dur).toBe("60s");
-    await track.hover({ force: true, position: { x: 40, y: 10 } });
-    await expect.poll(async () => track.evaluate((el) => getComputedStyle(el).animationPlayState)).toBe("paused");
+    // Hover the STATIONARY strip, not the track: the track is width:max-content
+    // and translateX-animated, so its bounding box extends far off-screen left
+    // and a position-relative hover lands nowhere. The strip is stable and the
+    // track fills it, so `.ticker-track:hover` still matches and pauses it.
+    const strip = page.locator(".ticker-strip");
+    await strip.hover({ force: true, position: { x: 200, y: 25 } });
+    await expect
+      .poll(async () => track.evaluate((el) => getComputedStyle(el).animationPlayState))
+      .toBe("paused");
   });
 
   test("list is duplicated (16 pills) with fade masks; a pill enters chat", async ({ page }) => {
@@ -406,5 +419,282 @@ test.describe("Mobile", () => {
       const h = await page.locator(sel).first().evaluate((el) => el.getBoundingClientRect().height);
       expect(h, `${sel} touch target`).toBeGreaterThanOrEqual(44);
     }
+  });
+
+  test("every interactive control clears the 44px touch-target floor on mobile", async ({ page }) => {
+    // Landing-view controls.
+    for (const sel of [".nav-link", ".faq-toggle", ".ticker-chip", ".demo-question"]) {
+      const h = await page.locator(sel).first().evaluate((el) => el.getBoundingClientRect().height);
+      expect(h, `${sel} touch target`).toBeGreaterThanOrEqual(44);
+    }
+    // Chat-view control lives on the other screen.
+    await enterChat(page);
+    const sh = await page.locator(".suggestion-btn").first().evaluate((el) => el.getBoundingClientRect().height);
+    expect(sh, ".suggestion-btn touch target").toBeGreaterThanOrEqual(44);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2 hardening — streaming order, pulse count, hover, cadence, dedup, wiring
+// ---------------------------------------------------------------------------
+test.describe("Hero card sizing + cadence", () => {
+  test("answer card holds a min-height so it can't collapse between empty and streamed states", async ({ page }) => {
+    const h = await page.locator(".card-content").evaluate((el) => el.getBoundingClientRect().height);
+    expect(h).toBeGreaterThanOrEqual(322);
+  });
+
+  test("placeholder cadence brackets the ~3.2s interval", async ({ page }) => {
+    const input = page.locator("#hero-input");
+    // Sync to a change boundary so we measure a full cycle, not a partial one.
+    const start = (await input.getAttribute("placeholder"))!;
+    await expect.poll(async () => input.getAttribute("placeholder"), { timeout: 6000 }).not.toBe(start);
+    const base = (await input.getAttribute("placeholder"))!;
+    // Well before the next tick (~3.2s away) it is unchanged.
+    await page.waitForTimeout(1500);
+    expect(await input.getAttribute("placeholder")).toBe(base);
+    // Past the 3.2s boundary it has advanced.
+    await expect.poll(async () => input.getAttribute("placeholder"), { timeout: 3000 }).not.toBe(base);
+  });
+});
+
+test.describe("Streaming order + duplicate pulse", () => {
+  test("bot answer streams incrementally; sources appear only after the caret is gone", async ({ page }) => {
+    await enterChat(page);
+    await page.locator(".chat-input").fill("How does Claude Code work?");
+    await page.keyboard.press("Enter");
+    // Catch a mid-stream frame: partial text present, caret present, zero sources.
+    const partialLen = (await (await page.waitForFunction(() => {
+      const content = document.querySelector(".message.bot-msg .content");
+      const cursor = document.querySelector(".message.bot-msg .typing-cursor");
+      const sources = document.querySelectorAll(".message.bot-msg .source-card").length;
+      const len = content ? (content.textContent || "").trim().length : 0;
+      return cursor && sources === 0 && len > 0 ? len : false;
+    }, { timeout: 8000 })).jsonValue()) as number;
+    expect(partialLen).toBeGreaterThan(0);
+    await waitStreamDone(page);
+    const finalLen = (await page.locator(".message.bot-msg .content").innerText()).trim().length;
+    expect(finalLen).toBeGreaterThan(partialLen); // grew incrementally, not 0→full
+    expect(await page.locator(".message.bot-msg .source-card").count()).toBeGreaterThan(0);
+  });
+
+  test("duplicate re-ask pulses exactly 3 times, and re-fires on a second duplicate", async ({ page }) => {
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    // A newer message so #cv-msg-0 is no longer the newest.
+    await input.fill("How do I install the Codex CLI?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    const original = page.locator("#cv-msg-0");
+
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
+    expect(await original.evaluate((el) => getComputedStyle(el).animationIterationCount)).toBe("3");
+    // Pulse clears after the ~2.1s highlight reset.
+    await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName), { timeout: 4000 }).toBe("none");
+    // Second duplicate (case-insensitive) → the pulse re-fires (guards flashExisting reset-to-restart).
+    await input.fill("what is claude code?");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
+  });
+});
+
+test.describe("Marquee structure + card hover", () => {
+  test("marquee iterates infinitely and the second half duplicates the first", async ({ page }) => {
+    const track = page.locator(".ticker-track");
+    expect(await track.evaluate((el) => getComputedStyle(el).animationIterationCount)).toBe("infinite");
+    const labels = await page.locator(".ticker-chip").allInnerTexts();
+    expect(labels).toHaveLength(16);
+    expect(labels.slice(0, 8)).toEqual(labels.slice(8, 16));
+  });
+
+  test("persona/step/feature cards lift on hover and settle back on unhover", async ({ page }) => {
+    const translateY = (t: string) => (t === "none" ? 0 : parseFloat(t.slice(0, -1).split(",").pop()!));
+    for (const sel of [".persona-card", ".step-card", ".feature-card"]) {
+      const card = page.locator(sel).first();
+      await card.scrollIntoViewIfNeeded();
+      await card.hover();
+      // Poll the SETTLED translateY (the .18s transition starts at identity, so a
+      // bare not-"none" check can read the mid-transition matrix(…,0)).
+      await expect
+        .poll(async () => translateY(await card.evaluate((el) => getComputedStyle(el).transform)))
+        .toBeLessThan(-1); // ≈ translateY(-3px)
+      // Unhover: park the pointer off the card; transform returns to identity.
+      await page.mouse.move(2, 2);
+      await expect.poll(async () => card.evaluate((el) => getComputedStyle(el).transform)).toBe("none");
+    }
+  });
+});
+
+test.describe("Wiring: suggestions + personas send their own label", () => {
+  for (let i = 0; i < 4; i++) {
+    test(`chat suggestion ${i} sends exactly its own label`, async ({ page }) => {
+      await enterChat(page);
+      const btn = page.locator(".suggestion-btn").nth(i);
+      const label = (await btn.innerText()).trim();
+      await btn.click();
+      await expect(page.locator(".message.user-msg")).toHaveText(label);
+    });
+  }
+
+  for (let c = 0; c < 3; c++) {
+    for (let b = 0; b < 2; b++) {
+      test(`persona card ${c} button ${b} asks exactly its own question`, async ({ page }) => {
+        const btn = page.locator(".persona-card").nth(c).locator(".persona-q-btn").nth(b);
+        const q = (await btn.locator("span").first().innerText()).trim();
+        await btn.click();
+        await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+        await expect(page.locator(".message.user-msg").first()).toHaveText(q);
+      });
+    }
+  }
+});
+
+test.describe("Chat composer + refusal/dedup content", () => {
+  test("send button sends on click and is a no-op on empty input", async ({ page }) => {
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    await input.fill("What is Claude Code?");
+    await page.locator(".send-button").click();
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    await waitStreamDone(page);
+    const before = await page.locator(".message.user-msg").count();
+    await input.fill("");
+    await page.locator(".send-button").click();
+    await page.waitForTimeout(250);
+    expect(await page.locator(".message.user-msg").count()).toBe(before);
+  });
+
+  test("refusal shows the exact badge label + a non-empty body; dedup is case/whitespace-insensitive", async ({ page }) => {
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    await input.fill("What is the best laptop to buy?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    await expect(page.locator(".message.bot-msg .refusal-badge")).toHaveText("⚠ NO SOURCE — REFUSED");
+    expect((await page.locator(".message.bot-msg .content").innerText())).toContain("I can answer questions about");
+
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    const before = await page.locator(".message.user-msg").count();
+    // Same question with different case + surrounding whitespace → no new bubble.
+    await input.fill("   what is claude code?   ");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    expect(await page.locator(".message.user-msg").count()).toBe(before);
+  });
+
+  test("Get Pro twice adds only one Pro user bubble", async ({ page }) => {
+    await page.locator(".pricing-card.featured .cta").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await waitStreamDone(page);
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    // Back to landing and hit Get Pro again — the duplicate guard keeps it at one.
+    await page.locator(".back-button").click();
+    await page.locator(".pricing-card.featured .cta").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(
+      page.locator(".message.user-msg", { hasText: "What do I get with CiteVyn Pro?" })
+    ).toHaveCount(1);
+  });
+});
+
+test.describe("Reduced motion (full sweep)", () => {
+  test("shake, cv-pulse, and the typing caret are all disabled under prefers-reduced-motion", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    // Caret: landing.css sets animation:none under reduced motion.
+    expect(await page.locator(".typing-caret").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+    // Empty-ask shake: duration collapsed to ~0 (reset.css blanket rule).
+    await page.locator(".ask-button").click();
+    const box = page.locator(".hero-input-box");
+    await expect(box).toHaveClass(/shake/);
+    expect(parseFloat(await box.evaluate((el) => getComputedStyle(el).animationDuration))).toBeLessThan(0.05);
+    // Duplicate pulse: duration collapsed to ~0.
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () =>
+      page.locator("#cv-msg-0").evaluate((el) => getComputedStyle(el).animationName)
+    ).toBe("cv-pulse");
+    expect(parseFloat(await page.locator("#cv-msg-0").evaluate((el) => getComputedStyle(el).animationDuration))).toBeLessThan(0.05);
+  });
+});
+
+test.describe("Dark-theme parity for previously light-only flows", () => {
+  test("demo refusal badge is amber with zero sources in dark mode", async ({ page }) => {
+    await ensureTheme(page, "dark");
+    await page.locator(".demo-question").nth(3).click(); // laptop (refusal)
+    await waitStreamDone(page);
+    const badge = page.locator(".demo-right .refusal-badge");
+    await expect(badge).toBeVisible();
+    expect(await badge.evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.amber);
+    expect(await page.locator(".demo-right .source-card").count()).toBe(0);
+  });
+
+  test("hero empty-ask amber border resolves on the dark input box", async ({ page }) => {
+    await ensureTheme(page, "dark");
+    await page.locator(".ask-button").click();
+    const box = page.locator(".hero-input-box");
+    await expect(box).toHaveClass(/shake/);
+    await expect.poll(async () => box.evaluate((el) => getComputedStyle(el).borderColor)).toBe(SEMANTIC.amber);
+  });
+
+  test("sourced demo answer shows readable source cards in dark", async ({ page }) => {
+    await ensureTheme(page, "dark");
+    await page.locator(".demo-question").nth(1).click(); // codex-flag (sourced)
+    await waitStreamDone(page);
+    await expect(page.locator(".demo-right .source-card").first()).toBeVisible();
+    // Title reads on the dark surface as --ink; number badge stays dark-on-yellow.
+    expect(await page.locator(".demo-right .source-title").first().evaluate((el) => getComputedStyle(el).color)).toBe(TOKENS.dark.ink);
+    expect(await page.locator(".demo-right .source-number").first().evaluate((el) => getComputedStyle(el).color)).toBe(TOKENS.light.ink); // --hl-ink
+  });
+
+  test("Get-Pro flow streams the honest not-live reply in dark", async ({ page }) => {
+    await ensureTheme(page, "dark");
+    await page.locator(".pricing-card.featured .cta").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await expect(page.locator(".message.user-msg")).toHaveText("What do I get with CiteVyn Pro?");
+    await waitStreamDone(page);
+    await expect(page.locator(".message.bot-msg")).toContainText("Pro isn't live yet");
+  });
+});
+
+test.describe("Timer cleanup / no post-unmount state updates", () => {
+  test("leaving a streaming chat mid-stream raises no console/page errors", async ({ page }) => {
+    // The hook's streamBot schedules scroll timeouts + a streaming interval that
+    // reference #chat-list. Bailing back to landing tears ChatView down while
+    // those timers are still pending — the guards must keep them from firing into
+    // a torn-down view (no "Cannot read properties of null", no React warning).
+    const errors: string[] = [];
+    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    page.on("pageerror", (e) => errors.push(String(e)));
+
+    // Distinct questions so each one actually streams (dedup would suppress a repeat).
+    const qs = [
+      "How does Claude Code work?",
+      "How do I install the Codex CLI?",
+      "How do I get a Gemini API key?",
+    ];
+    for (const q of qs) {
+      await enterChat(page);
+      await page.locator(".chat-input").fill(q);
+      await page.keyboard.press("Enter");
+      // A prior iteration's stream may still be running (its interval survives the
+      // view switch — exactly the leak we're probing), so target the NEWEST cursor.
+      await expect(page.locator(".message.bot-msg .typing-cursor").last()).toBeVisible();
+      await page.locator(".back-button").click(); // unmount ChatView mid-stream
+      await expect(page.locator("#top")).toBeVisible();
+      await page.waitForTimeout(400); // let the orphaned timers fire
+    }
+    expect(errors, errors.join("\n")).toEqual([]);
   });
 });

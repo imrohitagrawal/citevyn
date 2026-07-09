@@ -97,7 +97,15 @@ test.describe("CiteVyn Landing Page", () => {
       // Toggle dark
       const themeBtn = page.locator(".theme-toggle");
       await themeBtn.click();
-      await page.waitForTimeout(200);
+      // Poll the real condition (root --bg flipped to the dark token) rather than
+      // a fixed sleep that can read before React has applied data-theme under load.
+      await expect
+        .poll(async () =>
+          page.evaluate(() =>
+            getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()
+          )
+        )
+        .toBe("#161618");
 
       // Get dark background color for contrast calculation
       const bgColor = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
@@ -419,17 +427,15 @@ test.describe("CiteVyn Landing Page", () => {
       const ticker = page.locator(".ticker-track");
       await expect(ticker).toBeVisible();
 
-      // Wait for animation to start (it begins on mount)
-      await page.waitForTimeout(500);
-
-      // Force stop animation via JS before hovering (making element stable)
-      // Hover with force to bypass stability check since marquee is always moving
-      await ticker.hover({ force: true, position: { x: 50, y: 10 } });
-      await page.waitForTimeout(200);
-
-      // Check that animation is paused
-      const animProp = await ticker.evaluate(el => getComputedStyle(el).animationPlayState);
-      expect(animProp).toBe("paused");
+      // Hover the STATIONARY strip, not the track: the track is width:max-content
+      // and translateX-animated, so its bounding box runs far off-screen left and
+      // a position-relative hover lands nowhere. The strip is stable and the
+      // track fills it, so `.ticker-track:hover` still matches and pauses it.
+      const strip = page.locator(".ticker-strip");
+      await strip.hover({ force: true, position: { x: 200, y: 25 } });
+      await expect
+        .poll(async () => ticker.evaluate(el => getComputedStyle(el).animationPlayState))
+        .toBe("paused");
     });
 
     test("hero card auto-plays and cycles 3 QAs", async ({ page }) => {

@@ -41,6 +41,52 @@ for (const theme of THEMES) {
       expect(ctaBg).toBe(T.ink); // inverted panel
     });
 
+    test("every hero/section region renders on a themed page canvas (never browser-default white)", async ({ page }) => {
+      // §D2 P0: the page canvas itself must be the themed --bg. reset.css set
+      // `body { background: var(--surface-base) }`, but --surface-base is only
+      // defined for the data-style="softly/devtools" skins — undefined for the
+      // default light/dark themes, so body resolved to transparent and every
+      // bg-less section (hero, personas, how, why, demo, pricing) painted on the
+      // browser-default white. In dark mode that made the light --ink hero title
+      // nearly invisible.
+      const bodyBg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+      expect(bodyBg, "page canvas (body) background").toBe(T.bg);
+      expect(bodyBg).not.toBe("rgba(0, 0, 0, 0)"); // not transparent
+      expect(bodyBg).not.toBe("rgb(255, 255, 255)"); // not browser-default white
+
+      // Every major region either sets its own themed bg or inherits the page
+      // canvas. Walk the ancestor chain to the first painted background and
+      // assert it is a known theme token — never transparent-all-the-way-up.
+      const THEMED = new Set([T.bg, T.surface, T.surface2]);
+      const regions = [".hero", ".ticker-strip", "#who", "#how", "#why", "#demo", "#pricing"];
+      for (const sel of regions) {
+        const effective = await page.locator(sel).first().evaluate((start) => {
+          let el: Element | null = start;
+          while (el) {
+            const bg = getComputedStyle(el).backgroundColor;
+            if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return bg;
+            el = el.parentElement;
+          }
+          return "rgba(0, 0, 0, 0)"; // reached <html> with nothing painted
+        });
+        expect(THEMED.has(effective), `${sel} effective bg "${effective}" must be a theme token`).toBe(true);
+      }
+    });
+
+    test("ticker edge fades are 80px and blend to the theme --bg", async ({ page }) => {
+      // The marquee fade masks (::before/::after) sit on the ticker-strip. They
+      // must be 80px wide and blend to the current theme --bg (not a stale color).
+      const strip = page.locator(".ticker-strip");
+      for (const pseudo of ["::before", "::after"]) {
+        const width = await strip.evaluate((el, p) => getComputedStyle(el, p).width, pseudo);
+        expect(width, `${pseudo} width`).toBe("80px");
+        const bgi = await strip.evaluate((el, p) => getComputedStyle(el, p).backgroundImage, pseudo);
+        expect(bgi, `${pseudo} gradient`).toContain("linear-gradient");
+        // The gradient's opaque stop is the theme --bg rgb triple.
+        expect(bgi, `${pseudo} references --bg`).toContain(T.bg);
+      }
+    });
+
     test("headings resolve to --ink and beat the body text they sit above", async ({ page }) => {
       // Root-cause rule from §2A: a heading must never be darker than its body.
       const h1 = await page.locator(".hero-title").evaluate((el) => getComputedStyle(el).color);

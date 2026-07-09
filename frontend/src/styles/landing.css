@@ -18,6 +18,14 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   margin: 0;
+  /* Page canvas. reset.css points body at --surface-base, which is only defined
+   * for the data-style="softly/devtools" skins — undefined here, so body would
+   * paint transparent (browser-default white) and every bg-less section (hero,
+   * personas, how, why, demo, pricing) would sit on white, making the light
+   * --ink hero title nearly invisible in dark mode. Anchor it to the themed
+   * --bg/--ink so one root-var flip repaints the whole page. */
+  background: var(--bg);
+  color: var(--ink);
 }
 
 ::selection {
@@ -2017,12 +2025,21 @@ footer {
     overflow: hidden;
   }
 
-  /* Touch-target floor: primary interactive controls are >=44px on mobile. */
+  /* Touch-target floor: interactive controls are >=44px tall on mobile.
+   * .ticker-chip is already flex-centered, so min-height alone grows it; the
+   * nav links are inline anchors, so they also need a flex box to honor it. */
   .ask-button,
   .cta-button,
   .theme-toggle,
   .send-button,
-  .back-button {
+  .back-button,
+  .ticker-chip {
+    min-height: 44px;
+  }
+
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
     min-height: 44px;
   }
 }
