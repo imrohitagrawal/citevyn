@@ -40,6 +40,10 @@
   /* Text drawn ON the yellow --hl accent. Fixed dark value in BOTH themes,
    * because --hl stays a light yellow in light and dark mode alike. */
   --hl-ink: #1c1b19;
+  /* Gradient stop for the small ".highlight-phrase" underline band. On the
+   * light page a shallow band is legible; in dark mode the dark --hl-ink text
+   * needs a fuller yellow fill so glyph-tops don't blend into the dark bg. */
+  --hl-phrase-band: 62%;
 
   /* ----- Text ----- */
   --text-primary: #1c1b19;
@@ -169,6 +173,9 @@
   --hl: #f6c453;
   --hl-soft: #3a3320;
   --hl-ink: #1c1b19;
+  /* Dark mode: fuller yellow fill so the dark highlighter text stays legible
+   * over the dark page background even at small sizes (see tokens.css light). */
+  --hl-phrase-band: 12%;
 
   /* ----- Text ----- */
   --text-primary: #f0efe9;
@@ -233,6 +240,8 @@
     /* ----- Brand highlight ----- */
     --hl: #f6c453;
     --hl-soft: #3a3320;
+    --hl-ink: #1c1b19;
+    --hl-phrase-band: 12%;
 
     /* ----- Text ----- */
     --text-primary: #f0efe9;

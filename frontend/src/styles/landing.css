@@ -1134,7 +1134,10 @@ body {
 }
 
 .highlight-phrase {
-  background: linear-gradient(transparent 62%, var(--hl) 62%);
+  background: linear-gradient(
+    transparent var(--hl-phrase-band),
+    var(--hl) var(--hl-phrase-band)
+  );
   padding: 0 2px;
 }
 
@@ -1508,6 +1511,13 @@ body {
   border: 1px solid var(--border-2);
   background: transparent;
   color: var(--ink);
+}
+
+/* Enterprise "Contact sales" is a true no-op: a disabled button is inert to
+ * both mouse and keyboard, and removed from the tab order. */
+.cta:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .feature-list {
@@ -2065,6 +2075,14 @@ footer {
 .source-badge.one,
 .citation-chip,
 .popular-badge,
-.cta-pill {
+.cta-pill,
+.highlight,
+.highlight-phrase {
   color: var(--hl-ink);
+}
+
+/* Exception: the CTA banner is an inverted --ink panel, so its highlighter
+ * keeps light --bg text over the yellow band (design: color:var(--bg)). */
+.cta-banner .highlight {
+  color: var(--bg);
 }

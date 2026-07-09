@@ -522,6 +522,7 @@ export function useLandingState() {
 
   const heroItem = KB[state.hero.key] || KB["claude-code"];
   const heroDots = HERO_ORDER.map((k) => ({
+    active: k === state.hero.key,
     style: {
       width: k === state.hero.key ? "22px" : "7px",
       height: "7px",

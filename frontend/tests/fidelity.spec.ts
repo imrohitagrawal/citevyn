@@ -79,6 +79,22 @@ for (const theme of THEMES) {
       }
     });
 
+    test("highlighter-band text is dark ink on the page, light on the inverted CTA (both themes)", async ({ page }) => {
+      // §B3 Option B: highlighted words read as dark-on-yellow (real-highlighter
+      // look) in dark mode too — not light --ink text bleeding over the yellow
+      // band. The inverted CTA banner keeps its light --bg highlight (per design:
+      // color:var(--bg) on the dark panel).
+      for (const sel of [".hero-title .highlight", ".highlight-phrase"]) {
+        const el = page.locator(sel).first();
+        await expect(el, sel).toBeVisible();
+        expect(await el.evaluate((n) => getComputedStyle(n).color), `${sel} text`)
+          .toBe(TOKENS.light.ink); // #1c1b19 (= --hl-ink) in BOTH themes
+      }
+      const ctaHl = page.locator(".cta-banner .highlight");
+      await expect(ctaHl).toBeVisible();
+      expect(await ctaHl.evaluate((n) => getComputedStyle(n).color)).toBe(T.bg);
+    });
+
     test("hero highlighter is a yellow linear-gradient underlay", async ({ page }) => {
       const bgi = await page.locator(".highlight").first().evaluate((el) => getComputedStyle(el).backgroundImage);
       expect(bgi).toContain("linear-gradient");

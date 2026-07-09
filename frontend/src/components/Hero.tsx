@@ -22,7 +22,7 @@ interface HeroProps {
     showSources: boolean;
     sources: Array<{ n: string; title: string; url: string }>;
   };
-  heroDots: Array<{ style: React.CSSProperties }>;
+  heroDots: Array<{ active: boolean; style: React.CSSProperties }>;
 }
 
 export function Hero({
@@ -209,7 +209,7 @@ export function Hero({
             <div className="progress-container">
               <div className="progress-dots">
                 {heroDots.map((dot, i) => (
-                  <span key={i} className={`progress-dot${i === 0 ? " active" : ""}`} style={dot.style} />
+                  <span key={i} className={`progress-dot${dot.active ? " active" : ""}`} style={dot.style} />
                 ))}
               </div>
               <span className="progress-text">

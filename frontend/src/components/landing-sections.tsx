@@ -530,9 +530,15 @@ export function Pricing({
             </div>
             <p>{tier.desc}</p>
             <button
-              onClick={tier.name === "Pro" ? onGetPro : onOpenChat}
+              onClick={
+                tier.name === "Pro"
+                  ? onGetPro
+                  : tier.name === "Enterprise"
+                    ? undefined
+                    : onOpenChat
+              }
+              disabled={tier.name === "Enterprise"}
               className={`cta ${tier.featured ? "cta-filled" : "cta-outlined"}`}
-              style={tier.name === "Enterprise" ? { pointerEvents: "none", opacity: 0.5 } : undefined}
             >
               {tier.cta}
             </button>
@@ -597,12 +603,20 @@ export function FAQ({
       <div className="faq-list">
         {faqDefs.map((item, i) => (
           <div key={i} className="faq-item">
-            <button onClick={() => toggleFaq(i)} className="faq-toggle">
+            <button
+              onClick={() => toggleFaq(i)}
+              className="faq-toggle"
+              id={`faq-toggle-${i}`}
+              aria-expanded={openFaq === i}
+              aria-controls={`faq-answer-${i}`}
+            >
               <span>{item.q}</span>
               <span className="faq-sign">{openFaq === i ? "−" : "+"}</span>
             </button>
             {openFaq === i && (
-              <p className="faq-answer">{item.a}</p>
+              <p className="faq-answer" id={`faq-answer-${i}`}>
+                {item.a}
+              </p>
             )}
           </div>
         ))}

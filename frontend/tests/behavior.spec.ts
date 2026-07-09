@@ -29,6 +29,22 @@ test.describe("Hero", () => {
     expect(seen.size).toBeGreaterThanOrEqual(3);
   });
 
+  test("progress pill + active class both track the current Q&A", async ({ page }) => {
+    const q = page.locator(".card-content .message-text").first();
+    const first = (await q.textContent())!.trim();
+    await expect
+      .poll(async () => (await q.textContent())!.trim(), { timeout: 15000, intervals: [400] })
+      .not.toBe(first);
+    const dots = page.locator(".progress-dot");
+    // The pill width animates 7→22px over .3s; let it settle before measuring.
+    await page.waitForTimeout(400);
+    const widths = await dots.evaluateAll((els) => els.map((e) => getComputedStyle(e).width));
+    const actives = await dots.evaluateAll((els) => els.map((e) => e.classList.contains("active")));
+    const pillIdx = widths.findIndex((w) => parseFloat(w) >= 20);
+    expect(actives.filter(Boolean).length).toBe(1);
+    expect(actives[pillIdx]).toBe(true); // the pill is the active one
+  });
+
   test("placeholder rotates over time (not stuck after first tick)", async ({ page }) => {
     const input = page.locator("#hero-input");
     const seen = new Set<string>();
@@ -164,6 +180,21 @@ test.describe("Pricing", () => {
     await page.locator(".pricing-card").nth(0).locator(".cta").click();
     await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
   });
+
+  test("Contact sales is inert to keyboard too (true no-op)", async ({ page }) => {
+    const cta = page.locator(".pricing-card").nth(2).locator(".cta");
+    await cta.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[data-screen-label="Chat"]')).toHaveCount(0);
+    await expect(cta).toBeDisabled();
+  });
+
+  test("Enterprise CTA is out of the tab order (disabled → not focusable)", async ({ page }) => {
+    const cta = page.locator(".pricing-card").nth(2).locator(".cta");
+    await cta.focus().catch(() => {});
+    const focusedIsCta = await cta.evaluate((el) => el === document.activeElement);
+    expect(focusedIsCta).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -179,6 +210,20 @@ test.describe("FAQ", () => {
     await expect(items.nth(0).locator(".faq-answer")).toHaveCount(0);
     await expect(items.nth(2).locator(".faq-answer")).toBeVisible();
     await expect(page.locator(".faq-answer")).toHaveCount(1);
+  });
+
+  test("toggles expose aria-expanded and aria-controls linkage", async ({ page }) => {
+    const toggles = page.locator(".faq-toggle");
+    await expect(toggles.nth(0)).toHaveAttribute("aria-expanded", "true");
+    await expect(toggles.nth(1)).toHaveAttribute("aria-expanded", "false");
+    // aria-controls references the open answer panel by id.
+    const controls = await toggles.nth(0).getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    await expect(page.locator(`#${controls}`)).toBeVisible();
+    // Toggling item 3 collapses item 1 and expands item 3.
+    await toggles.nth(2).click();
+    await expect(toggles.nth(0)).toHaveAttribute("aria-expanded", "false");
+    await expect(toggles.nth(2)).toHaveAttribute("aria-expanded", "true");
   });
 });
 
