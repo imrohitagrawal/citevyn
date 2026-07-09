@@ -122,3 +122,92 @@ plan at `2026-07-09-citevyn-landing-bugfix-hardening.md`) before starting.
 - START HERE next: Deliverable 2 (test-thoroughness hardening), first task =
   **Hero card `min-height:322`** assertion. Do NOT change production code except
   where a test uncovers a genuine bug.
+
+---
+
+## Handover — Deliverable 2 complete  (2026-07-09)
+- Branch / commit: `fix/citevyn-landing-hardening` @ `5f1c2b4` (this handover note is a
+  follow-up commit on top, mirroring the D1 pattern)
+- What changed (all TDD — failing/target test first):
+  - **PRODUCTION (only 2 edits, both a genuine bug a test uncovered):**
+    `src/styles/landing.css`:
+    - **P0 fix** — `body { background: var(--bg); color: var(--ink) }`. Root cause:
+      `reset.css` set `body { background: var(--surface-base) }`, but `--surface-base`
+      is defined ONLY under `:root[data-style="softly|devtools|devtools-alt"]` — it is
+      undefined for the default `[data-theme="light|dark"]`, so `body` painted
+      transparent → every bg-less section (hero, ticker gaps, personas, how, why, demo,
+      pricing) sat on the browser-default white, making the light `--ink` hero title
+      nearly invisible in dark mode. Anchored the page canvas to the themed
+      `--bg`/`--ink` so one root-var flip repaints the whole page. Token-clean (no hex).
+    - **Mobile a11y fix** — extended the `@media (max-width:900px)` 44px touch-target
+      rule to `.ticker-chip` (measured 40.25px) and `.nav-link` (measured 33px; it's an
+      inline `<a>`, so it also got `display:inline-flex; align-items:center` to honor
+      `min-height`). Uncovered by the new "44px touch-target floor" sweep. Others already
+      passed (`.faq-toggle` 65.5, `.demo-question` 50.5, `.suggestion-btn` 47).
+  - **TESTS:**
+    - `tests/fidelity.spec.ts` — +2 tests × both themes (=+4): the P0 fail-first
+      "themed page canvas" section-background sweep (asserts `body` bg == `--bg` and
+      every region resolves to a themed bg via ancestor-walk, never white), and the
+      ticker 80px edge-fade masks (`::before`/`::after` width 80px + gradient to `--bg`).
+    - `tests/behavior.spec.ts` — +26 tests: mobile touch-target sweep; hero
+      `.card-content` min-height≥322; placeholder ~3.2s cadence bracket; streaming
+      incremental + sources-only-after-caret ordering; duplicate pulse iteration-count
+      `3` + re-fire on 2nd duplicate; marquee `infinite` + first-8-labels == last-8;
+      persona/step/feature card hover-lift (settled translateY<0, reverts); 4 chat
+      suggestions + 6 persona buttons each send their own label (parametrized);
+      send-button click path + empty no-op; refusal exact badge text + non-empty body +
+      case/whitespace-insensitive dedup; Get-Pro-twice single bubble; reduced-motion
+      full sweep (shake/pulse/caret disabled); dark-theme parity (demo refusal amber+0
+      sources, hero empty-ask amber border, sourced demo source cards readable, Get-Pro
+      flow); timer-cleanup (ChatView unmount mid-stream → no console/page errors).
+    - `tests/landing.spec.ts` — flake fixes only (see below).
+- Decisions made:
+  - **P1 flakes fixed at the source (now green under DEFAULT parallelism, not just
+    `--workers=1`):**
+    - *Both marquee-hover tests* (`behavior.spec.ts` + `landing.spec.ts`) — root cause:
+      `.ticker-track` is `width:max-content` + `translateX`-animated, so its bounding box
+      runs far off-screen left and a `position`-relative hover lands nowhere. Fixed by
+      hovering the STATIONARY `.ticker-strip` (the track fills it, so `.ticker-track:hover`
+      still matches).
+    - *progress-pill* — replaced the fixed `waitForTimeout(400)` with a poll of the
+      settled invariant (exactly one dot ≥20px wide, exactly one `.active`, same dot).
+    - *`[dark]` heading-contrast* (`landing.spec.ts`) — replaced the 200ms sleep after
+      the theme toggle with a poll on the root `--bg` flipping to `#161618`.
+  - **Timer-cleanup: Playwright instead of Vitest.** jsdom hangs in this sandbox (a
+    trivial `--environment=jsdom` smoke test produced zero output for >2min; node-env
+    passed in 1.8s), so a Vitest+renderHook unit test was not runnable here. The plan
+    explicitly allowed "OR a landing→chat→back navigation loop"; implemented that
+    (unmount ChatView mid-stream, assert no console/page errors — the `if (list)` guards
+    in `streamBot`/`flashExisting` keep the orphaned timers from throwing). Removed the
+    vitest.config.ts + `src/hooks/useLandingState.test.ts` I had drafted.
+  - **Code review (general-purpose reviewer): "Ready to merge — Yes."** All findings
+    Minor (one redundant-but-harmless `color:var(--ink)` line — kept, the plan directs
+    it and it's self-documenting; two low-risk timing brackets — accepted). Reviewer
+    independently confirmed the P0 root cause, token-cleanliness, and that all three
+    flake fixes are correct root-cause fixes.
+- Test tally: type-check ✅ | lint:css ✅ | test:ui **108 passed (3.3m, DEFAULT
+  parallelism — isolated run)** | test:visual **22 passed (33.7s, isolated)**.
+  (Net +30 test:ui over D1's 78: +4 fidelity, +26 behavior.)
+- New/changed baselines: regenerated **9 dark** visual snapshots (all legit — the P0 fix
+  repaints the dark page canvas #161618) and eyeballed each: `hero-dark`, `ticker-dark`
+  (fully masked → the change was only the 1px strip border edge), `personas-dark`,
+  `how-it-works-dark`, `comparison-dark`, `demo-dark`, `pricing-dark`, `faq-dark`
+  (sliver of sticky-header backdrop at top), `chat-empty-dark`. **Light baselines were
+  byte-identical** (unchanged) — `git status` flagged only the 9 dark PNGs.
+- Gotchas for next chat:
+  - **Do NOT `pkill -f esbuild`** — Vite's dev server spawns an esbuild child; killing it
+    leaves the server serving `index.html` (HTTP 200) but unable to transform JS, so the
+    React app never mounts and EVERY test fails at `gotoApp` waiting for `.theme-toggle`.
+    If that happens, `lsof -ti tcp:3000 | xargs kill -9` and restart `npm run dev`.
+  - **jsdom hangs here** — don't add Vitest/jsdom unit tests expecting them to run; use
+    Playwright. `npm test` (`vitest run`) with no config would also try to run the
+    `*.spec.ts` playwright files under vitest — leave it alone.
+  - **Do NOT run `test:ui` and `test:visual` concurrently / back-to-back on 5 workers** —
+    machine contention caused a one-off `comparison-light` "two consecutive stable
+    screenshots" flake (0.03 ratio) and a transient empty-Ask amber-border miss. Both
+    passed clean when run isolated. Run heavy suites one at a time.
+  - Playwright's `| tail` / `--reporter=line` buffer output until the run ends, so
+    interim reads of the piped output file look empty — wait for completion.
+- START HERE next: Deliverable 3 (code-quality / taste refactors), first task = **H1
+  (`askHero` self-contained)**. The now-hardened suite is the regression net — run the
+  FULL suite after EACH refactor task and change NO tests to accommodate a refactor.
