@@ -1,11 +1,9 @@
 /**
  * Application entry point.
  *
- * Mounts :func:`App` into ``<div id="root">`` (see ``index.html``).
- * Imports the global stylesheets in the order required for the
- * cascade: tokens first, then reset, then app-level styles.
- * Component-level styles are imported alongside their components
- * (Vite extracts them per-route by default).
+ * Mounts App into <div id="root"> (see index.html).
+ * Imports styles: tokens, reset, and landing styles.
+ * Component styles are imported alongside LandingPage (Vite extracts them).
  */
 
 import { StrictMode } from "react";
@@ -13,12 +11,8 @@ import { createRoot } from "react-dom/client";
 
 import "./styles/tokens.css";
 import "./styles/reset.css";
-import "./styles/app.css";
-import "./styles/chat-enhancements.css";
-import "./styles/softly.css";
-import "./styles/devtools.css";
-import "./styles/universal.css";
-import { App } from "./App";
+import "./styles/landing.css";
+import App from "./App";
 
 const root = document.getElementById("root");
 if (!root) {
