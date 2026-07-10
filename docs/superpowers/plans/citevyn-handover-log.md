@@ -304,3 +304,92 @@ plan at `2026-07-09-citevyn-landing-bugfix-hardening.md`) before starting.
 - START HERE next: **first, complete the blocked commit above** (record its SHA), then
   Deliverable 3 (code-quality / taste refactors), first task = **H1 (`askHero`
   self-contained)**. Run the FULL suite under Node 22 after each refactor; change NO tests.
+
+---
+
+## Handover — Deliverable 3 complete  (2026-07-10)
+- Branch / commit: fix/citevyn-landing-hardening @ **8b7b491** (`refactor(frontend): self-contained
+  handlers, single dedup guard, typed timers, view-owned scroll`). Started from D2.5 = 405b581.
+  This handover-log entry lands as a separate `docs(frontend)` commit above it (repo pattern).
+- What changed (9 files, behavior-preserving):
+  - `src/hooks/useLandingState.ts` — **H1** `askHero` is self-contained (calls `enterChat(q)` on
+    valid input, returns void; focus+nudge on empty), moved AFTER `enterChat` for the TDZ; hook
+    `onHeroKey` calls `askHero()`. **H2** `getPro` = one-liner `enterChat("What do I get with
+    CiteVyn Pro?")` (bespoke guard + streamBot/flashExisting dup deleted). **M1** imports the
+    single `PLACEHOLDERS`, action renamed `ADVANCE_PLACEHOLDER` (payload dropped), modulus from
+    `.length`, exposes `heroPlaceholder`. **M2** `streamText`/new `timeout()`/`interval()` return a
+    `Timer {stop()}`; every stored ref is `Timer|null`; cleanup is `t?.stop()`; `clearTimeout(...as
+    any)` gone. **M3** extracted module-level `scrollToId(id)`. **M4** removed streamBot's three
+    `#chat-list` scroll calls. Review fix: dropped the now-redundant `askHero` from the return.
+  - `src/components/LandingPage.tsx` — pass hook `onHeroKey`/`onAskHero`/`heroPlaceholder` through
+    (no inline nav wiring, no inline placeholder array); KB import moved to the top.
+  - `src/components/ChatView.tsx` — owns autoscroll via `useEffect([messages])`; dropped the
+    `chatListRef` alias + the unused optional `chatListRef?` prop.
+  - `src/components/Hero.tsx` — removed the `startHeroLoop` SSR-ceremony state/effect → constant
+    `min-height: 92px`; react import is now `import type * as React`.
+  - `src/components/landing-sections.tsx` — Pricing behavior on the data: `action:
+    "openChat"|"getPro"|null` per tier + a `handlers` map; `onClick={tier.action ?
+    handlers[tier.action] : undefined} disabled={!tier.action}`.
+  - `src/data/knowledgeBase.ts` — added `KB["pro"]` (byte-identical canned answer) + a `matchKB`
+    rule `t.includes("citevyn pro")` (placed after the out-of-scope guard).
+  - `src/styles/tokens.css` — `--hl-ink` (theme-invariant `#1c1b19`) collapsed to the `:root`
+    block only; removed the identical `[data-theme="dark"]` + `prefers-color-scheme` copies.
+  - `tests/fidelity.spec.ts` + `tests/helpers.ts` — new `resolveColor()` helper; the two highlight
+    assertions read the expected color from the `--hl-ink` custom property (value identical to the
+    old `TOKENS.light.ink` = `rgb(28,27,25)`); `loadPNG()` now guards the playwright-core pngjs
+    require with clear error messages.
+- Decisions made:
+  - **PLACEHOLDERS single source = `knowledgeBase.ts` (imported), not a new const in the hook.**
+    An identical `PLACEHOLDERS` already existed there; importing it is the DRY-est reading of M1's
+    "count in one place" (avoids a third copy). Reducer references the imported `.length`.
+  - **H2 needs a `matchKB` route.** `send` resolves answers via `matchKB`, so routing getPro
+    through it required the `"citevyn pro"` rule — "citevyn pro" collides with none of the four-tool
+    questions and is checked after the out-of-scope guard. This is a deliberate (documented)
+    widening of free-typed matching, NOT the B4 out-of-scope matcher work.
+  - **Kept the defensive fallbacks** `KB[hero.key] || KB["claude-code"]` and `KB[demo.key]?.sources
+    ?? 0`: `hero.key`/`demo.key` are typed `string` (not a key union), so these fallbacks are what
+    make the indexing total — removing them needs a key-type change (broader than a behavior-
+    preserving pass). Left per the plan's escape hatch.
+  - **Did NOT add `"#how .highlight"` to the D2.5 legibility sweep** — `#how` (HowItWorks) renders
+    `.doc-line.highlight-line`, not a `.highlight` span (which has its own dedicated test); adding
+    it would fail on `toBeVisible`.
+  - **Two commits** (code `8b7b491`, then this docs entry) mirror the D1/D2/D2.5 pattern. NO Claude
+    attribution footer (per commit-message-pref).
+- Test tally: **type-check ✅ | test:ui 112 passed | test:visual 22 passed** — run green after EVERY
+  task (H1, H2, M1, M2, M3, M4, Lows-1, Lows-2) AND after the code-review fixes, under Node 22 at
+  DEFAULT parallelism (test:visual finalized with `--workers=1`, see gotcha). **NO test was changed
+  to accommodate a refactor.** `lint:css` — see gotcha (green by construction, not live-run).
+- New/changed baselines: **NONE** — no visual snapshot was regenerated. `test:visual` stayed at 22
+  passed against the existing baselines throughout (tokens `--hl-ink` value unchanged; Hero
+  `min-height` steady-state identical), confirming zero pixel drift from the refactor.
+- Code review: dispatched a general-purpose senior-reviewer subagent over the working-tree diff. It
+  traced H1 (nav/nudge parity), H2 (matchKB route order + dedup), M4 (messages is a fresh array per
+  render → effect re-pins), M2 (all refs stopped, no raw id) — verdict **Ready to merge: Yes**, zero
+  Critical/Important. Applied its two actionable Minors: dropped the redundant returned `askHero`
+  and sharpened the `matchKB` "citevyn pro" comment. (Its 3rd note — the fidelity.spec edit — is the
+  planned in-scope Low with an identical asserted value, so intentionally kept.)
+- Gotchas for next chat (ENVIRONMENT WAS SEVERELY DEGRADED — read before D4's clean-room run):
+  - **`lint:css` could NOT be live-run this session.** `stylelint` hangs/`ETIMEDOUT`s while its ESM
+    dep tree loads (`node:internal/modules/esm/load` → `readFileSync` errno -60) because the repo
+    lives under `~/Documents` (iCloud-backed) AND the machine was thrashing (swap pinned ~11.3 GB
+    used / <70 MB RAM free, from Chrome + VS Code, not our procs). **It is green by construction:**
+    `lint:css` only lints `src/styles/landing.css`, which **no D3 task touched** (the sole CSS change
+    is `tokens.css`, not in the lint glob) and which was green at the 405b581 baseline. **D4 Step 1
+    must run `npm run lint:css` cold** to close this out — do it when RAM is freer (trim VS
+    Code/Chrome first); expect it to pass with no output.
+  - **`@types/* 2` junk broke type-check at session start.** `node_modules/@types/` had macOS
+    " 2" duplicate dirs (`react 2`, `react-dom 2`, `node 2`, …) → `tsc` TS2688. Removed them with
+    `find node_modules/@types -maxdepth 1 -type d -name "* 2" -exec rm -rf {} +`. If type-check
+    fails again with `Cannot find type definition file for '<x> 2'`, re-run that.
+  - **Playwright OOM.** One `test:visual` run had all workers `SIGKILL`ed (OOM under the swap
+    thrash). Re-ran with `--workers=1` → 22 passed. Under memory pressure prefer `--workers=1` for
+    visual; don't run test:ui and test:visual concurrently.
+  - **Node 22 still mandatory** (`export PATH="/opt/homebrew/opt/node@22/bin:$PATH"`); default node
+    is the broken Homebrew v26.4.0. Dev server launched via a fifo-held-stdin script (harness
+    background makes vite quit on EOF). Type-check is slow (~2–2.5 min) under the thrash but passes.
+  - **NOT pushed / no PR** — correct per plan; the single PR to `main` is Deliverable 4's job.
+    `main`/`origin/main` drift was NOT re-checked this session (D4 Step 4 must verify before PR).
+- START HERE next: **Deliverable 4 (final verification, docs & PR)**. First task = **Step 1
+  clean-room verification**: stop the dev server, `rm -rf node_modules/.vite`, restart under Node 22,
+  then `type-check && lint:css && test:ui && test:visual` with `--workers=1` **twice** on a cold
+  server — and this is where `lint:css` finally gets its live green (see gotcha). Then D4 Steps 2–5.
