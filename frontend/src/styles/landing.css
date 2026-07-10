@@ -242,7 +242,7 @@ body {
 }
 
 .highlight {
-  background: linear-gradient(transparent 60%, var(--hl) 60%);
+  background: linear-gradient(transparent var(--hl-band), var(--hl) var(--hl-band));
   padding: 0 3px;
 }
 
@@ -953,6 +953,10 @@ body {
 }
 
 .doc-line.highlight-line {
+  /* Override the 7px skeleton-bar height so the yellow box grows to hold its
+   * text instead of clipping it to a sliver. Scoped to .highlight-line only —
+   * the other three grey bars keep height: 7px (100/84/66 widths). */
+  height: auto;
   width: fit-content;
   font-size: 11px;
   line-height: 1.5;
@@ -2099,7 +2103,10 @@ footer {
 }
 
 /* Exception: the CTA banner is an inverted --ink panel, so its highlighter
- * keeps light --bg text over the yellow band (design: color:var(--bg)). */
+ * keeps light --bg text over the yellow band (design: color:var(--bg)). Its
+ * light text never had the dark-on-dark problem, so it keeps the faithful 60%
+ * underline band in BOTH themes (don't let dark's fuller --hl-band reach it). */
 .cta-banner .highlight {
   color: var(--bg);
+  --hl-band: 60%;
 }

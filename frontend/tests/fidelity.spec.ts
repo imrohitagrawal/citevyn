@@ -7,7 +7,15 @@
  * yellow accent, muted headings, drifted skeleton widths).
  */
 import { test, expect } from "@playwright/test";
-import { TOKENS, SEMANTIC, gotoApp, ensureTheme, enterChat, type ThemeName } from "./helpers";
+import {
+  TOKENS,
+  SEMANTIC,
+  gotoApp,
+  ensureTheme,
+  enterChat,
+  highlightBackdropBrightFraction,
+  type ThemeName,
+} from "./helpers";
 
 const THEMES: ThemeName[] = ["light", "dark"];
 
@@ -141,6 +149,27 @@ for (const theme of THEMES) {
       expect(await ctaHl.evaluate((n) => getComputedStyle(n).color)).toBe(T.bg);
     });
 
+    test("highlighter band actually sits BEHIND the letters, not just under them (D2.5 legibility)", async ({ page }) => {
+      // §D2.5 Bug 1: B3 darkened highlighted words to --hl-ink, but the band is
+      // `linear-gradient(transparent 60%, --hl 60%)` — only the bottom 40% is
+      // yellow. In DARK mode the cap region of the dark letters then sits on the
+      // dark page/card canvas and is half-invisible ("check,", "I don't know.").
+      // Sample a pixel row through the cap region: the backdrop must be BRIGHT
+      // (yellow band, or the light canvas in light mode) so dark ink is legible.
+      // Dark-mode canvas (#161618/#1e1e21) is NOT bright, so a 60% band FAILS in
+      // dark. Light mode is unaffected (light canvas is already bright) — the fix
+      // must not change light-mode appearance.
+      for (const sel of [".hero-title .highlight", "#why .highlight", ".highlight-phrase"]) {
+        const el = page.locator(sel).first();
+        await expect(el, sel).toBeVisible();
+        const bright = await highlightBackdropBrightFraction(el);
+        expect(
+          bright,
+          `${sel} [${theme}] cap-row bright fraction (dark ink needs a bright backdrop)`
+        ).toBeGreaterThan(0.5);
+      }
+    });
+
     test("hero highlighter is a yellow linear-gradient underlay", async ({ page }) => {
       const bgi = await page.locator(".highlight").first().evaluate((el) => getComputedStyle(el).backgroundImage);
       expect(bgi).toContain("linear-gradient");
@@ -189,6 +218,26 @@ for (const theme of THEMES) {
       expect(await hl.evaluate((el) => getComputedStyle(el).width)).not.toBe(
         await lines.nth(0).evaluate((el) => getComputedStyle(el).width)
       ); // fit-content, not a full bar
+    });
+
+    test("how-it-works highlight-line is tall enough to hold its text, not a 7px sliver (D2.5)", async ({ page }) => {
+      // §D2.5 Bug 2: `.doc-line.highlight-line` inherits `height: 7px` from the
+      // `.doc-line` skeleton-bar rule, so the yellow box is a sliver and its text
+      // ("Use --model to pick a model per run.") overflows below it. The box must
+      // be at least as tall as its font-size so it actually contains the text.
+      const hl = page.locator(".doc-line.highlight-line");
+      const { h, fs } = await hl.evaluate((el) => ({
+        h: el.getBoundingClientRect().height,
+        fs: parseFloat(getComputedStyle(el).fontSize),
+      }));
+      expect(h, `highlight-line height ${h}px must be ≥ font-size ${fs}px`).toBeGreaterThanOrEqual(fs);
+
+      // The other three grey skeleton bars must stay 7px (the height override is
+      // scoped to .highlight-line only).
+      const plain = page.locator(".doc-skeleton .doc-line:not(.highlight-line)");
+      for (const bar of await plain.all()) {
+        expect(await bar.evaluate((el) => getComputedStyle(el).height)).toBe("7px");
+      }
     });
 
     test("comparison: generic card red badge/underlines, CiteVyn card ink border + yellow badge", async ({ page }) => {

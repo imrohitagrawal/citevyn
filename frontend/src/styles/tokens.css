@@ -44,6 +44,10 @@
    * light page a shallow band is legible; in dark mode the dark --hl-ink text
    * needs a fuller yellow fill so glyph-tops don't blend into the dark bg. */
   --hl-phrase-band: 62%;
+  /* Same idea for the large ".highlight" headings. Light mode keeps the
+   * faithful 60% underline band; dark mode fills nearly the whole line so the
+   * dark --hl-ink caps sit on yellow, not on the dark page canvas behind. */
+  --hl-band: 60%;
 
   /* ----- Text ----- */
   --text-primary: #1c1b19;
@@ -176,6 +180,7 @@
   /* Dark mode: fuller yellow fill so the dark highlighter text stays legible
    * over the dark page background even at small sizes (see tokens.css light). */
   --hl-phrase-band: 12%;
+  --hl-band: 12%;
 
   /* ----- Text ----- */
   --text-primary: #f0efe9;
@@ -242,6 +247,7 @@
     --hl-soft: #3a3320;
     --hl-ink: #1c1b19;
     --hl-phrase-band: 12%;
+    --hl-band: 12%;
 
     /* ----- Text ----- */
     --text-primary: #f0efe9;

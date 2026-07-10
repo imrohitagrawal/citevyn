@@ -5,7 +5,60 @@
  * (`CiteVyn Landing v2.dc.html` — LIGHT/DARK var blocks). Tests assert computed
  * styles against these so any drift from the design fails the build.
  */
-import { Page, expect } from "@playwright/test";
+import { Page, expect, type Locator } from "@playwright/test";
+import path from "path";
+import { createRequire } from "module";
+
+// This spec runs as an ESM module, so `require` is not global — synthesize one.
+const require = createRequire(import.meta.url);
+
+/**
+ * Decode a PNG buffer using the pngjs that Playwright already bundles, so the
+ * legibility tests can sample real rendered pixels without adding a dependency.
+ */
+function loadPNG(): { sync: { read(buf: Buffer): { width: number; height: number; data: Buffer } } } {
+  const base = path.dirname(require.resolve("playwright-core"));
+  return require(path.join(base, "lib", "utilsBundle.js")).PNG;
+}
+
+/** Rec.601 luma of an 8-bit RGB triple (0..255). */
+function luma(r: number, g: number, b: number) {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/**
+ * Screenshot a highlighter span and measure how much of a horizontal pixel row
+ * through the CAP region of its FIRST text line is a "bright" backdrop — i.e. a
+ * legible surface behind the dark --hl-ink letters (either the yellow band or,
+ * in light mode, the light page canvas). The dark-mode page/card canvas is NOT
+ * bright, so a heading whose yellow band only covers the bottom 40% leaves its
+ * cap region sitting on the dark canvas and reads as dark-ink-on-dark.
+ *
+ * Returns the fraction of pixels in that row with luma ≥ `threshold`. Using the
+ * first client rect keeps this correct even when an inline highlight wraps.
+ */
+export async function highlightBackdropBrightFraction(
+  el: Locator,
+  { fracY = 0.3, threshold = 100 }: { fracY?: number; threshold?: number } = {}
+): Promise<number> {
+  await el.scrollIntoViewIfNeeded();
+  const geo = await el.evaluate((node) => {
+    const rects = (node as Element).getClientRects();
+    const box = (node as Element).getBoundingClientRect();
+    return { firstLineH: rects[0]?.height ?? box.height, boxH: box.height };
+  });
+  const buf = await el.screenshot();
+  const png = loadPNG().sync.read(buf);
+  const { width, height, data } = png;
+  const scale = height / geo.boxH; // device px per CSS px (DPR 1 here → ≈1)
+  const y = Math.min(height - 1, Math.max(0, Math.round(fracY * geo.firstLineH * scale)));
+  let bright = 0;
+  for (let x = 0; x < width; x++) {
+    const i = (y * width + x) * 4;
+    if (luma(data[i], data[i + 1], data[i + 2]) >= threshold) bright++;
+  }
+  return width > 0 ? bright / width : 0;
+}
 
 /** Design tokens as computed-style rgb() strings, per theme. */
 export const TOKENS = {
