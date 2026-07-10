@@ -211,3 +211,96 @@ plan at `2026-07-09-citevyn-landing-bugfix-hardening.md`) before starting.
 - START HERE next: Deliverable 3 (code-quality / taste refactors), first task = **H1
   (`askHero` self-contained)**. The now-hardened suite is the regression net — run the
   FULL suite after EACH refactor task and change NO tests to accommodate a refactor.
+
+---
+
+## Handover — Deliverable 2.5 complete  (2026-07-10)
+- Branch / commit: `fix/citevyn-landing-hardening` @ **`5b35457`**
+  (D2.5 = the B3 highlight-legibility HOTFIX; base was `4137f4a`). This handover note
+  is a follow-up commit on top, mirroring the D1/D2 pattern.
+- What changed (all TDD — failing legibility tests written & confirmed RED first):
+  - `src/styles/tokens.css` — new **`--hl-band`** token in all three theme blocks
+    (light `60%`, dark `12%`, `prefers-color-scheme:dark` `12%`). Mirrors the existing
+    `--hl-phrase-band` idea for the large `.highlight` headings.
+  - `src/styles/landing.css`:
+    - **Bug 1** — `.highlight` gradient stop now `var(--hl-band)` instead of a hardcoded
+      `60%`, so in DARK mode the yellow backs the FULL text (caps on yellow, not on the
+      dark canvas). Light keeps the faithful 60% underline band → light appearance
+      unchanged.
+    - `.cta-banner .highlight` gets `--hl-band: 60%` so the inverted CTA "citing."
+      keeps its 60% band in BOTH themes (its text is light `var(--bg)`, never had the
+      dark-on-dark problem — excluded from the fuller dark fill).
+    - **Bug 2** — `.doc-line.highlight-line { height: auto }` (scoped) so the yellow box
+      grows to hold "Use --model to pick a model per run." instead of clipping to the 7px
+      skeleton-bar height. The other three grey bars stay 7px (100/84/66).
+  - `tests/helpers.ts` — new `highlightBackdropBrightFraction()` helper: element-screenshots
+    a highlight span, decodes it via the pngjs Playwright already bundles
+    (`playwright-core/lib/utilsBundle.js`, loaded through `createRequire` since the specs
+    are ESM), and samples a pixel row through the FIRST-line cap region, returning the
+    fraction of "bright" (luma ≥ 100) backdrop pixels.
+  - `tests/fidelity.spec.ts` — +2 tests × both themes (=+4):
+    1. **Highlight-backdrop legibility** — for `.hero-title .highlight`, `#why .highlight`,
+       `.highlight-phrase`, asserts the cap-row backdrop is majority-bright (dark ink needs
+       a bright backdrop). Confirmed RED on old code: dark hero/why cap-row bright fraction
+       = 0 (dark-on-dark); light already passed (light canvas is bright → light untouched).
+    2. **doc-line height** — `.doc-line.highlight-line` bounding height ≥ its font-size, and
+       the three plain skeleton bars stay `7px`. RED on old code (7px < 11px).
+- Decisions made:
+  - **Theme-aware legibility, not "always yellow".** The real invariant is "dark `--hl-ink`
+    text must sit on a BRIGHT backdrop." In light mode the page canvas is already bright, so
+    light keeps the 60% band (design unchanged, as the plan requires); only dark needed the
+    fuller fill. This is exactly why the test fails in dark only on old code.
+  - **Pixel-sampling is the deliverable.** The old tests only checked the text *color value*
+    and the baselines were captured from the broken render — that's how these bugs hid. The
+    new test looks at actual rendered pixels behind the glyphs.
+  - Both bugs **visually verified** with 3× zoomed element screenshots in dark AND light
+    (hero "check,", why "I don't know.", the `.highlight-phrase`, and the doc-line box) —
+    all legible; light hero highlight keeps the faithful underline look.
+- Test tally: type-check ✅ | lint:css ✅ | test:ui **112 passed (1.3m, DEFAULT parallelism)**
+  | test:visual **22 passed** (all under Node 22 — see env gotcha). Net +4 test:ui over D2's
+  108 (the 2 new fidelity tests × 2 themes).
+- New/changed baselines (regenerated under Node 22 + a clean `npm ci`, each eyeballed):
+  - `hero-dark` — "check," now backed by full yellow (was a 60% band leaving caps on dark).
+  - `comparison-dark` — "#why .highlight" + `.highlight-phrase` fully yellow-backed.
+  - `how-it-works-dark` / `how-it-works-light` — doc-line box now holds its text (Bug 2).
+    NOTE: Playwright's `--update-snapshots` will NOT overwrite a baseline whose diff is under
+    `maxDiffPixelRatio` (0.02) — the hero/why highlight is a small fraction of the section,
+    so I had to `rm` `hero-dark`/`comparison-dark` first to force regeneration from the fixed
+    render (else the broken baseline persists silently — the same trap that hid these bugs).
+  - `demo-dark` / `demo-light` — **NOT a D2.5 CSS change** (the demo section contains zero
+    `.highlight`/`.highlight-phrase`/`.doc-line` — verified). These drifted by **1px height**
+    (598→599) purely from the `npm ci` reinstall's sub-pixel render delta; regenerated so the
+    suite is self-consistent under the current toolchain. Content confirmed identical/correct.
+- Gotchas for next chat (IMPORTANT — environment was badly degraded this session):
+  - **Commit landed as `5b35457`** (10 files: landing.css, tokens.css, fidelity.spec.ts,
+    helpers.ts, + the 6 baseline PNGs above). It was blocked for a long stretch by
+    `fatal: mmap failed: Operation timed out` while the machine thrashed (`vm.swapusage`
+    peaked ~20GB used / ~16MB RAM free — mostly VS Code + system, not our processes); it
+    went through once swap use dropped to ~12GB. **Watch for this**: under heavy memory
+    pressure git mmap and vite startup both stall/time out — free RAM (trim VS Code) before
+    running heavy git/test/dev commands. The pre-existing `M docs/.../2026-07-09-...bugfix-
+    hardening.md` edit and the unrelated `D .agents/skills/e2e-testing-patterns/references/
+    details.md` deletion were deliberately left OUT of this commit (not ours).
+  - **NOT pushed / no PR** — correct per plan: all deliverables land on
+    `fix/citevyn-landing-hardening`; the single PR to `main` is Deliverable 4's job.
+  - **Node toolchain was broken & repaired.** The machine's default `node` is a Homebrew
+    **v26.4.0** build whose ESM loader intermittently throws `ERR_INVALID_PACKAGE_CONFIG`
+    (rollup/vite/react-dom) under load, AND `node_modules` had a corrupted `@babel/core`
+    (`_debug is not a function`) so `@vitejs/plugin-react` failed with
+    `babel$1.transformAsync is not a function` → HTTP 500 on every module → app never
+    mounted (all Playwright tests timed out at `.theme-toggle`). **Fix applied:** installed
+    **Node 22 LTS** (`brew install node@22`, non-invasive — default node NOT relinked) and
+    ran **`npm ci`** to repair the tree. Everything below assumes Node 22:
+    `export PATH="/opt/homebrew/opt/node@22/bin:$PATH"` before `npm run dev` / playwright.
+  - **Dev server:** the original long-running `npm run dev` was killed (with the user's
+    explicit consent) to clear a corrupt `.vite` optimize cache. I restarted it under Node 22
+    via a fifo-stdin launcher (the harness's background `< /dev/null` makes vite quit on EOF;
+    a held-open fifo keeps it alive) — script at
+    `<session scratchpad>/launch_vite.sh`. I then **stopped it again** to free memory for the
+    git commit, so **no dev server is currently running** — restart with Node 22 before the
+    next Playwright run. `node node_modules/vite/bin/vite.js` under Node 22 serves fine.
+  - Standalone `.mjs` helper scripts must live INSIDE `frontend/` (module resolution) and be
+    run with the Node 22 binary; under the broken v26.4.0 they crash on import.
+- START HERE next: **first, complete the blocked commit above** (record its SHA), then
+  Deliverable 3 (code-quality / taste refactors), first task = **H1 (`askHero`
+  self-contained)**. Run the FULL suite under Node 22 after each refactor; change NO tests.
