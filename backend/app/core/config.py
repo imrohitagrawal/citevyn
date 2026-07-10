@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     # silently accept a stub provider in production.
 
     @model_validator(mode="after")
-    def _reject_stub_llm_in_production(self) -> "Settings":
+    def _reject_stub_llm_in_production(self) -> Settings:
         # ``stub`` is the dev-only deterministic LLM. ``""`` is the
         # reserved router placeholder for Slice 9b. Both must never
         # reach production — the demo build would otherwise silently
@@ -184,7 +184,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _require_anthropic_api_key_in_production(self) -> "Settings":
+    def _require_anthropic_api_key_in_production(self) -> Settings:
         if (
             self.environment == "production"
             and self.llm_provider == "anthropic"
@@ -198,7 +198,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _reject_default_admin_key_in_production(self) -> "Settings":
+    def _reject_default_admin_key_in_production(self) -> Settings:
         # ``local-admin-key`` is the dev default and is publicly known
         # (it lives in the open-source repo). Reject it in production
         # so a misconfigured deploy cannot accept it as the admin

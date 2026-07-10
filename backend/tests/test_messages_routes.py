@@ -38,9 +38,7 @@ DEMO_BEARER = "Bearer local-demo-key"
 
 
 @pytest.fixture
-def in_memory_client(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> Generator[TestClient, None, None]:
+def in_memory_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[TestClient]:
     """A TestClient backed by a per-test SQLite file under tmp_path.
 
     A temp file is shared across connections; ``:memory:`` would give
@@ -72,7 +70,7 @@ def in_memory_client(
 @pytest.fixture
 def seeded_app(
     in_memory_client: TestClient,
-) -> Generator[TestClient, None, None]:
+) -> Generator[TestClient]:
     """Yield the in-memory client after seeding the catalog + index."""
     factory = get_sessionmaker()
 
