@@ -393,3 +393,65 @@ plan at `2026-07-09-citevyn-landing-bugfix-hardening.md`) before starting.
   clean-room verification**: stop the dev server, `rm -rf node_modules/.vite`, restart under Node 22,
   then `type-check && lint:css && test:ui && test:visual` with `--workers=1` **twice** on a cold
   server — and this is where `lint:css` finally gets its live green (see gotcha). Then D4 Steps 2–5.
+
+---
+
+## Handover — Deliverable 4 complete  (2026-07-11)
+- Branch / commit: `fix/citevyn-landing-hardening` @ **`1c27aac`** (`docs(frontend): Deliverable 4
+  final status …`) over D3 code `8b7b491`. Pushed; **PR #41 OPEN → main**, `MERGEABLE`.
+- **PR:** https://github.com/imrohitagrawal/citevyn/pull/41
+- What changed: **no product/test/config code** (D4 is verification only). Added
+  `docs/superpowers/plans/citevyn-landing-final-status.md` (Step 3 deliverables/status doc:
+  defect table, contrast/legibility invariants, final tally, base reconciliation, env notes) and
+  this handover entry.
+- **Step 1 — clean-room verification (cold server, Node 22, `--workers=1`), REAL output:**
+  - `type-check` (`tsc -b`) ✅ no errors (live, 4:44 under memory pressure).
+  - `lint:css` ✅ **exit 0, 0 violations** — see gotcha: run via a fresh non-iCloud stylelint,
+    same version (17.14.0) + same rules, against byte-identical `landing.css`. Closes the D3
+    carry-over must-do.
+  - `test:ui` (112) **twice**: run A `exit 0` — 111 passed + **1 flaky** (retried→passed);
+    run B `exit 0` — **112 passed, 0 flaky**.
+  - `test:visual` (22) **twice**: run A `22 passed` (exit 0); run B `22 passed` (exit 0).
+- **Step 2 — manual dark/light pass** (verify skill, bespoke browser driver on the running app,
+  NOT the suite): **B1 PASS** (Enterprise CTA `disabled`, Enter → 0 chat screens), **B2 PASS**
+  (at settled state across 3 samples the ≥20px pill and `.active` are the SAME dot; it tracks the
+  cycle — the one transient mismatch was a mid-width-animation read), **B5 PASS**
+  (`aria-expanded` initial `[true,false…]`, after opening #2 exactly one `true` + `aria-controls`
+  panel exists). Screenshots eyeballed: `hero-dark` (dark canvas, "check," fully yellow-backed dark
+  ink), `how-it-works-dark` (`--model` doc-line box holds its text), `chat-dark` (streams, ink
+  bubble). Saved under `/private/tmp/cv-pw/verify/`.
+- **Step 4 — base reconciled:** `git fetch`; `origin/main` @ `dceeba0` is 4 ahead of the branch
+  base — those 4 are unrelated Dependabot Docker bumps (`infra/docker/docker-compose.yml`).
+  `git merge-tree` branch vs `origin/main` → **0 conflicts**. PR merges cleanly.
+- Decisions made:
+  - **`--retries=2` for the twice-over test runs**, matching this repo's own CI
+    (`retries: process.env.CI ? 2 : 0`), chosen by the user given the environment. Local
+    `retries:0` surfaced a *different* transient flake each pass (run1 `landing.spec.ts:299`
+    refusal — page reloaded mid-test; run2 `fidelity` dark — execution-context destroyed by
+    navigation; run3 `behavior.spec.ts:247` nav-scroll 5s poll timeout). All had every product
+    sibling green and cleared on retry; run B of test:ui needed none (clean 112). **Not product
+    regressions** — memory-pressure timing + the reused dev server watching Playwright's
+    `retain-on-failure` artifacts (Playwright output was relocated to `/private/tmp/cv-pw` to keep
+    writes out of the Vite-watched tree).
+  - **Step 3 doc = a NEW file**, not an edit to the plan — the plan file carries a pre-existing
+    unrelated ` M` edit that must stay out of commits.
+- Test tally: type-check ✅ | lint:css ✅ | test:ui **112** (green ×2) | test:visual **22** (green ×2)
+  = **134** total.
+- New/changed baselines: **none** regenerated in D4.
+- Gotchas encountered (environment SEVERELY degraded — swap pinned ~14 GB, Chrome ~14–16 GB):
+  - **`lint:css` still could not run via `npm run lint:css`.** Root cause pinned this session:
+    the repo is under iCloud-backed `~/Documents` and `node_modules` deps are **dataless
+    placeholders** (`ls -lO` → `[compressed,dataless]`); reads stall downloading them, and under
+    memory pressure macOS **evicts** them faster than they materialize (the dataless count *grew*
+    while cat-ing). A fresh `stylelint@17.14.0` in `/tmp` (non-iCloud) installed in 4s and linted
+    the copied `landing.css` in <1s — same version, same rules → clean. This is the recommended
+    workaround until the repo is off iCloud "Optimize Storage".
+  - **git commit/push stalled** (mmap under memory pressure) + a stale `.git/index.lock` from a
+    prior session (dated 22:39). Removed the stale lock; ran commit/push in the background with
+    `-c core.fsmonitor=false` → both landed.
+  - Node 22 mandatory; dev server via fifo-held-stdin launcher (`sleep infinity` is invalid on
+    macOS — vite tolerated the EOF and stayed up anyway). Cleaned stale prior-session procs
+    (a Playwright test-server on broken node, a second fifo-vite).
+- START HERE next: **Deliverable 4 is complete.** Remaining human steps: review & merge PR #41
+  (all four deliverables land in one PR). Post-merge, delete the branch and reconcile the local
+  `main`/`origin/main` divergence if desired.
