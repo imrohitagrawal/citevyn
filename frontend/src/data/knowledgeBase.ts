@@ -126,6 +126,15 @@ export const KB: Record<string, KBEntry> = {
     a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using indexed official documentation. I don't have credible source material in this assistant to answer that.",
     sources: [],
   },
+  // Canned answer for the "Get Pro" pricing CTA. Keyed like any other entry so
+  // it routes through the single `send` path (and its one dedup guard) instead
+  // of a bespoke handler.
+  "pro": {
+    q: "What do I get with CiteVyn Pro?",
+    tag: "PRICING",
+    a: "Pro isn't live yet — CiteVyn is an MVP demo, and everything here is free to try. Pro will add higher rate limits, exact lookups, saved history, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
+    sources: [],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -189,6 +198,13 @@ export function matchKB(text: string): KBEntry {
       a: GENERIC_REFUSAL,
       sources: [],
     };
+  }
+
+  // CiteVyn Pro pricing CTA. The "Get Pro" button routes its canned question
+  // here; any free-typed question mentioning "citevyn pro" resolves the same
+  // way (deliberate — the demo KB now knows about Pro).
+  if (t.includes("citevyn pro")) {
+    return KB["pro"];
   }
 
   // Gemini key / setup

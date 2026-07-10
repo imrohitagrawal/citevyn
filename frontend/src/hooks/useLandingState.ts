@@ -6,7 +6,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useReducer } from "react";
-import { matchKB, KB, type Source } from "../data/knowledgeBase";
+import { matchKB, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
 
 // ---------------------------------------------------------------------------
 // State
@@ -51,7 +51,7 @@ interface AppState {
 type Action =
   | { type: "SET_HERO_INPUT"; value: string }
   | { type: "SET_CHAT_INPUT"; value: string }
-  | { type: "SET_PH_INDEX"; index: number }
+  | { type: "ADVANCE_PLACEHOLDER" }
   | { type: "SET_HERO_NUDGE"; value: boolean }
   | { type: "SET_HIGHLIGHT"; index: number }
   | { type: "SET_OPEN_FAQ"; index: number }
@@ -94,10 +94,11 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, heroInput: action.value };
     case "SET_CHAT_INPUT":
       return { ...state, chatInput: action.value };
-    case "SET_PH_INDEX":
+    case "ADVANCE_PLACEHOLDER":
       // Increment off the *current* state so the interval isn't stuck on a
-      // value captured at mount time. Payload is ignored (kept for the action shape).
-      return { ...state, phIndex: (state.phIndex + 1) % 5 };
+      // value captured at mount time. Modulus derives from the single
+      // PLACEHOLDERS source so adding a phrase needs no other edit.
+      return { ...state, phIndex: (state.phIndex + 1) % PLACEHOLDERS.length };
     case "SET_HERO_NUDGE":
       return { ...state, heroNudge: action.value };
     case "SET_HIGHLIGHT":
@@ -134,29 +135,61 @@ function reducer(state: AppState, action: Action): AppState {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming helper
+// Timers
 // ---------------------------------------------------------------------------
 
+/**
+ * A stoppable handle. Every timer (interval or timeout) is stored as one of
+ * these so teardown is a uniform `t.stop()` — no juggling clearInterval vs
+ * clearTimeout by hand.
+ */
+interface Timer {
+  stop: () => void;
+}
+
+function timeout(fn: () => void, ms: number): Timer {
+  const id = setTimeout(fn, ms);
+  return { stop: () => clearTimeout(id) };
+}
+
+function interval(fn: () => void, ms: number): Timer {
+  const id = setInterval(fn, ms);
+  return { stop: () => clearInterval(id) };
+}
+
+/**
+ * Word-by-word streaming into `onChunk`; calls `onDone` once the full string
+ * has been emitted. Returns a {@link Timer} that closes over its own
+ * `clearInterval` so the caller can stop it without knowing it's an interval.
+ */
 function streamText(
   full: string,
   onChunk: (chunk: string) => void,
   onDone?: () => void,
   delay = 26,
-): ReturnType<typeof setInterval> {
+): Timer {
   // Split on whitespace (capturing group preserves whitespace tokens)
   const words = full.split(/(\s+)/);
   let i = 0;
-  const timer = setInterval(() => {
+  const id = setInterval(() => {
     i++;
     if (i >= words.length) {
-      clearInterval(timer);
+      clearInterval(id);
       onChunk(full);
       onDone?.();
       return;
     }
     onChunk(words.slice(0, i).join(""));
   }, delay);
-  return timer;
+  return { stop: () => clearInterval(id) };
+}
+
+/** Smooth-scroll the section with `id` into view below the ~72px fixed header. */
+function scrollToId(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const y = el.getBoundingClientRect().top + window.pageYOffset - 72;
+  window.scrollTo({ top: y, behavior: "smooth" });
 }
 
 // ---------------------------------------------------------------------------
@@ -164,13 +197,13 @@ function streamText(
 // ---------------------------------------------------------------------------
 
 interface TimerRefs {
-  heroLoop: ReturnType<typeof setInterval> | null;
-  demoTimer: ReturnType<typeof setInterval> | null;
-  chatTimer: ReturnType<typeof setInterval> | null;
-  placeholderTimer: ReturnType<typeof setInterval> | null;
-  heroPause: ReturnType<typeof setTimeout> | null;
-  nudgeTimeout: ReturnType<typeof setTimeout> | null;
-  highlightTimeout: ReturnType<typeof setTimeout> | null;
+  heroLoop: Timer | null;
+  demoTimer: Timer | null;
+  chatTimer: Timer | null;
+  placeholderTimer: Timer | null;
+  heroPause: Timer | null;
+  nudgeTimeout: Timer | null;
+  highlightTimeout: Timer | null;
 }
 
 export function useLandingState() {
@@ -194,8 +227,8 @@ export function useLandingState() {
   useEffect(() => {
     playHeroLoop();
 
-    timers.current.placeholderTimer = setInterval(
-      () => dispatch({ type: "SET_PH_INDEX", index: 0 }),
+    timers.current.placeholderTimer = interval(
+      () => dispatch({ type: "ADVANCE_PLACEHOLDER" }),
       3200,
     );
 
@@ -214,10 +247,8 @@ export function useLandingState() {
     window.addEventListener("keydown", onKeyDown);
 
     return () => {
-      // Clean up all timers
-      Object.values(timers.current).forEach((timer) => {
-        if (timer !== null) clearTimeout(timer as any);
-      });
+      // Clean up all timers — each knows how to stop itself.
+      Object.values(timers.current).forEach((timer) => timer?.stop());
       window.removeEventListener("keydown", onKeyDown);
     };
   }, []);
@@ -244,7 +275,7 @@ export function useLandingState() {
         (chunk) => dispatch({ type: "SET_HERO", hero: { text: chunk } }),
         () => {
           dispatch({ type: "SET_HERO", hero: { streaming: false, showSources: true } });
-          timers.current.heroPause = setTimeout(play, 4600);
+          timers.current.heroPause = timeout(play, 4600);
         },
       );
     };
@@ -293,31 +324,9 @@ export function useLandingState() {
     [],
   );
 
-  const onHeroKey = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") askHero();
-    },
-    [state.heroInput],
-  );
-
   const onFocusHero = useCallback(() => {
     heroRef.current?.focus();
   }, []);
-
-  const askHero = useCallback(() => {
-    const q = state.heroInput.trim();
-    if (!q) {
-      // Empty ask: focus the box, shake + amber border + inline warning
-      heroRef.current?.focus();
-      dispatch({ type: "SET_HERO_NUDGE", value: true });
-      timers.current.nudgeTimeout = setTimeout(
-        () => dispatch({ type: "SET_HERO_NUDGE", value: false }),
-        3000,
-      );
-      return;
-    }
-    return q;
-  }, [state.heroInput]);
 
   const onChatInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -353,36 +362,24 @@ export function useLandingState() {
 
   const streamBot = useCallback(
     (text: string, extra: { refusal?: boolean; finalSources: Source[] }) => {
+      // Autoscroll is owned by ChatView's useEffect([messages]): every dispatch
+      // below produces a new `messages` array, so the view re-pins to the bottom
+      // after each add / streamed chunk / finish. The hook no longer reaches into
+      // #chat-list directly.
       dispatch({
         type: "ADD_MESSAGE",
         message: { role: "bot", text: "", streaming: true, sources: [], ...extra },
       });
 
-      // Auto-scroll after adding message
-      setTimeout(() => {
-        const list = document.getElementById("chat-list");
-        if (list) list.scrollTop = list.scrollHeight;
-      }, 0);
-
       timers.current.chatTimer = streamText(
         text,
-        (chunk) => {
-          dispatch({ type: "UPDATE_LAST_MESSAGE", text: chunk });
-          setTimeout(() => {
-            const list = document.getElementById("chat-list");
-            if (list) list.scrollTop = list.scrollHeight;
-          }, 0);
-        },
+        (chunk) => dispatch({ type: "UPDATE_LAST_MESSAGE", text: chunk }),
         () => {
           dispatch({
             type: "FINISH_LAST_MESSAGE",
             sources: extra.finalSources,
             refusal: extra.refusal,
           });
-          setTimeout(() => {
-            const list = document.getElementById("chat-list");
-            if (list) list.scrollTop = list.scrollHeight;
-          }, 0);
         },
       );
     },
@@ -409,7 +406,7 @@ export function useLandingState() {
         }, 40);
       }, 10);
 
-      timers.current.highlightTimeout = setTimeout(
+      timers.current.highlightTimeout = timeout(
         () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
         2100,
       );
@@ -433,6 +430,31 @@ export function useLandingState() {
     window.scrollTo({ top: 0 });
   }, []);
 
+  // Hero "Ask" is self-contained: on a valid question it navigates into chat
+  // itself; on empty input it focuses the box and nudges. Defined *after*
+  // `enterChat` so its useCallback dependency is in scope (no temporal-dead-zone).
+  const askHero = useCallback(() => {
+    const q = state.heroInput.trim();
+    if (!q) {
+      // Empty ask: focus the box, shake + amber border + inline warning
+      heroRef.current?.focus();
+      dispatch({ type: "SET_HERO_NUDGE", value: true });
+      timers.current.nudgeTimeout = timeout(
+        () => dispatch({ type: "SET_HERO_NUDGE", value: false }),
+        3000,
+      );
+      return;
+    }
+    enterChat(q);
+  }, [state.heroInput, enterChat]);
+
+  const onHeroKey = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") askHero();
+    },
+    [askHero],
+  );
+
   // Submit the chat composer (button click or Enter). Trims, clears the input,
   // then routes the question through `send` (which handles the duplicate guard).
   const submitChat = useCallback(() => {
@@ -453,28 +475,13 @@ export function useLandingState() {
   // Pricing / Pro flow
   // ---------------------------------------------------------------------------
 
-  const getPro = useCallback(() => {
-    const q = "What do I get with CiteVyn Pro?";
-    dispatch({ type: "SET_SCREEN", screen: "chat" });
-    window.scrollTo({ top: 0 });
-
-    // Wait 80ms for chat view to render before sending
-    setTimeout(() => {
-      const norm = q.toLowerCase();
-      const existing = state.messages.findIndex(
-        (m) => m.role === "user" && m.text.trim().toLowerCase() === norm
-      );
-      if (existing !== -1) {
-        flashExisting(existing);
-        return;
-      }
-      dispatch({ type: "ADD_MESSAGE", message: { role: "user", text: q } });
-      streamBot(
-        "Pro isn't live yet — CiteVyn is an MVP demo, and everything here is free to try. Pro will add higher rate limits, exact lookups, saved history, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
-        { refusal: false, finalSources: [] },
-      );
-    }, 80);
-  }, [state.messages, streamBot, flashExisting]);
+  // "Get Pro" is just another question. Route it through `enterChat` → `send`
+  // so the single dedup guard + streaming path handle it (the canned answer
+  // lives in the KB as the "pro" entry, matched by `matchKB`).
+  const getPro = useCallback(
+    () => enterChat("What do I get with CiteVyn Pro?"),
+    [enterChat],
+  );
 
   // ---------------------------------------------------------------------------
   // FAQ
@@ -493,24 +500,14 @@ export function useLandingState() {
   const goSection = useCallback(
     (e: React.MouseEvent, id: string) => {
       e.preventDefault();
-      // If on chat view, return to landing first (nav links work from both views)
+      // Nav links work from both views. From chat, return to landing first,
+      // then scroll once React has remounted the sections.
       if (state.screen === "chat") {
         dispatch({ type: "SET_SCREEN", screen: "landing" });
         window.scrollTo({ top: 0 });
-        // Give React time to remount the landing sections, then scroll
-        setTimeout(() => {
-          const el = document.getElementById(id);
-          if (el) {
-            const y = el.getBoundingClientRect().top + window.pageYOffset - 72;
-            window.scrollTo({ top: y, behavior: "smooth" });
-          }
-        }, 80);
+        setTimeout(() => scrollToId(id), 80);
       } else {
-        const el = document.getElementById(id);
-        if (el) {
-          const y = el.getBoundingClientRect().top + window.pageYOffset - 72;
-          window.scrollTo({ top: y, behavior: "smooth" });
-        }
+        scrollToId(id);
       }
     },
     [state.screen],
@@ -519,6 +516,8 @@ export function useLandingState() {
   // ---------------------------------------------------------------------------
   // Derived data
   // ---------------------------------------------------------------------------
+
+  const heroPlaceholder = PLACEHOLDERS[state.phIndex];
 
   const heroItem = KB[state.hero.key] || KB["claude-code"];
   const heroDots = HERO_ORDER.map((k) => ({
@@ -627,7 +626,6 @@ export function useLandingState() {
   return {
     state,
     dispatch,
-    askHero,
     enterChat,
     backToLanding,
     selectDemo,
@@ -636,6 +634,7 @@ export function useLandingState() {
     toggleFaq,
     goSection,
     heroItem,
+    heroPlaceholder,
     heroDots,
     marqueeItems,
     demoQuestions,

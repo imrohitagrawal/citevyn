@@ -14,6 +14,7 @@ import {
   ensureTheme,
   enterChat,
   highlightBackdropBrightFraction,
+  resolveColor,
   type ThemeName,
 } from "./helpers";
 
@@ -113,7 +114,9 @@ for (const theme of THEMES) {
     });
 
     test("text on the yellow --hl accent stays dark in both themes", async ({ page }) => {
-      // The exact bug the current suite missed. --hl-ink is fixed #1c1b19.
+      // The exact bug the current suite missed. Read --hl-ink from the token
+      // itself so the assertion tracks the source of truth, not a copy.
+      const hlInk = await resolveColor(page, "var(--hl-ink)");
       const onYellow = [
         ".logo-badge",
         ".ticker-tag",
@@ -129,7 +132,7 @@ for (const theme of THEMES) {
         const bg = await el.evaluate((n) => getComputedStyle(n).backgroundColor);
         const color = await el.evaluate((n) => getComputedStyle(n).color);
         expect(bg, `${sel} bg`).toBe(T.hl);
-        expect(color, `${sel} text`).toBe(TOKENS.light.ink); // #1c1b19 in both themes
+        expect(color, `${sel} text`).toBe(hlInk); // --hl-ink, #1c1b19 in both themes
       }
     });
 
@@ -138,11 +141,12 @@ for (const theme of THEMES) {
       // look) in dark mode too — not light --ink text bleeding over the yellow
       // band. The inverted CTA banner keeps its light --bg highlight (per design:
       // color:var(--bg) on the dark panel).
+      const hlInk = await resolveColor(page, "var(--hl-ink)");
       for (const sel of [".hero-title .highlight", ".highlight-phrase"]) {
         const el = page.locator(sel).first();
         await expect(el, sel).toBeVisible();
         expect(await el.evaluate((n) => getComputedStyle(n).color), `${sel} text`)
-          .toBe(TOKENS.light.ink); // #1c1b19 (= --hl-ink) in BOTH themes
+          .toBe(hlInk); // --hl-ink, #1c1b19 in BOTH themes
       }
       const ctaHl = page.locator(".cta-banner .highlight");
       await expect(ctaHl).toBeVisible();

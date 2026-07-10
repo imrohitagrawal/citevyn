@@ -442,7 +442,21 @@ export function InteractiveDemo({
 // Pricing
 // ---------------------------------------------------------------------------
 
-const tierDefs = [
+// `action` names the CTA behavior as data, so the JSX doesn't branch on the
+// tier name: "openChat"/"getPro" resolve to a handler below; null = inert
+// (a true no-op, rendered disabled and out of the tab order).
+type TierAction = "openChat" | "getPro" | null;
+
+const tierDefs: Array<{
+  name: string;
+  price: string;
+  unit: string;
+  desc: string;
+  cta: string;
+  featured: boolean;
+  action: TierAction;
+  features: string[];
+}> = [
   {
     name: "Demo",
     price: "$0",
@@ -450,6 +464,7 @@ const tierDefs = [
     desc: "Try citation-backed answers across all four tools.",
     cta: "Start asking",
     featured: false,
+    action: "openChat",
     features: [
       "All four tools: Claude, Claude Code, Codex, Gemini",
       "Citations on every factual answer",
@@ -464,6 +479,7 @@ const tierDefs = [
     desc: "For developers who live in the docs.",
     cta: "Get Pro",
     featured: true,
+    action: "getPro",
     features: [
       "Everything in Demo",
       "Higher rate limits & faster models",
@@ -479,6 +495,7 @@ const tierDefs = [
     desc: "For teams with private docs and governance needs.",
     cta: "Contact sales",
     featured: false,
+    action: null,
     features: [
       "Private documentation connectors",
       "More sources (ChatGPT, Cursor) & scheduled refresh",
@@ -496,6 +513,10 @@ export function Pricing({
   onGetPro: () => void;
   onOpenChat: () => void;
 }) {
+  const handlers: Record<Exclude<TierAction, null>, () => void> = {
+    openChat: onOpenChat,
+    getPro: onGetPro,
+  };
   return (
     <section id="pricing" className="section">
       <div className="section-header centered">
@@ -530,14 +551,8 @@ export function Pricing({
             </div>
             <p>{tier.desc}</p>
             <button
-              onClick={
-                tier.name === "Pro"
-                  ? onGetPro
-                  : tier.name === "Enterprise"
-                    ? undefined
-                    : onOpenChat
-              }
-              disabled={tier.name === "Enterprise"}
+              onClick={tier.action ? handlers[tier.action] : undefined}
+              disabled={!tier.action}
               className={`cta ${tier.featured ? "cta-filled" : "cta-outlined"}`}
             >
               {tier.cta}

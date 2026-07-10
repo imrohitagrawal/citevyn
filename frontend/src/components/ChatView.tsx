@@ -22,7 +22,6 @@ interface ChatViewProps {
   onChatKey: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onSendClick: () => void;
   onBackClick: () => void;
-  chatListRef?: React.RefObject<HTMLDivElement>;
 }
 
 export function ChatView({
@@ -35,10 +34,10 @@ export function ChatView({
   onSendClick,
   onBackClick,
 }: ChatViewProps) {
-  const internalChatListRef = useRef<HTMLDivElement>(null);
-  const chatListRef = internalChatListRef;
+  const chatListRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when new messages are added
+  // Auto-scroll to bottom when new messages are added (or a chunk streams in):
+  // this view owns autoscroll — the hook no longer touches #chat-list.
   useEffect(() => {
     if (chatListRef.current) {
       chatListRef.current.scrollTop = chatListRef.current.scrollHeight;

@@ -6,6 +6,7 @@
  */
 
 import { useLandingState } from "../hooks/useLandingState";
+import { KB } from "../data/knowledgeBase";
 import { Header } from "./Header";
 import { Hero } from "./Hero";
 import {
@@ -40,11 +41,13 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     onChatKey,
     submitChat,
     onFocusHero,
-    askHero,
+    onHeroKey,
+    onAskHero,
     getPro,
     goSection,
     enterChat,
     heroItem,
+    heroPlaceholder,
     heroDots,
     marqueeItems,
     demoQuestions,
@@ -75,27 +78,13 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
           <main id="top" data-screen-label="Landing">
         <Hero
           heroInput={state.heroInput}
-          heroPlaceholder={[
-            "Ask about Claude, Codex, Gemini…",
-            "Does Claude Code cost money?",
-            "How do I get a Gemini API key?",
-            "What does --model do in Codex?",
-            "Which Claude models are available?",
-          ][state.phIndex]}
+          heroPlaceholder={heroPlaceholder}
           heroNudge={state.heroNudge}
           heroBoxShake={state.heroNudge}
           heroRef={heroRef}
           onHeroInput={onHeroInput}
-          onHeroKey={(e) => {
-            if (e.key === "Enter") {
-              const q = askHero();
-              if (q) enterChat(q);
-            }
-          }}
-          onAskHero={() => {
-            const q = askHero();
-            if (q) enterChat(q);
-          }}
+          onHeroKey={onHeroKey}
+          onAskHero={onAskHero}
           onFocusHero={onFocusHero}
           heroChips={heroChips}
           hero={{
@@ -168,6 +157,3 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     </>
   );
 }
-
-// Stub imports for KB — used inline
-import { KB } from "../data/knowledgeBase";

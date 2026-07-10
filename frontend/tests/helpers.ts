@@ -17,8 +17,25 @@ const require = createRequire(import.meta.url);
  * legibility tests can sample real rendered pixels without adding a dependency.
  */
 function loadPNG(): { sync: { read(buf: Buffer): { width: number; height: number; data: Buffer } } } {
-  const base = path.dirname(require.resolve("playwright-core"));
-  return require(path.join(base, "lib", "utilsBundle.js")).PNG;
+  let bundle: { PNG?: { sync?: { read?: unknown } } };
+  try {
+    const base = path.dirname(require.resolve("playwright-core"));
+    bundle = require(path.join(base, "lib", "utilsBundle.js"));
+  } catch (e) {
+    throw new Error(
+      "Could not load Playwright's bundled pngjs from " +
+        "playwright-core/lib/utilsBundle.js — the highlight-legibility tests decode " +
+        "PNGs with it. Is playwright-core installed under Node 22? Original error: " +
+        (e as Error).message,
+    );
+  }
+  if (typeof bundle?.PNG?.sync?.read !== "function") {
+    throw new Error(
+      "Playwright's bundled utils no longer expose PNG.sync.read; the pngjs decode " +
+        "path in tests/helpers.ts (loadPNG) needs updating to the new location/shape.",
+    );
+  }
+  return bundle.PNG as { sync: { read(buf: Buffer): { width: number; height: number; data: Buffer } } };
 }
 
 /** Rec.601 luma of an 8-bit RGB triple (0..255). */
@@ -134,6 +151,22 @@ export async function ensureTheme(page: Page, theme: ThemeName) {
 export async function enterChat(page: Page) {
   await page.locator(".cta-button", { hasText: "Try the demo" }).click();
   await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+}
+
+/**
+ * Resolve a CSS color expression (e.g. `var(--hl-ink)`) to its computed rgb()
+ * string by probing a throwaway element. Lets a test assert against the ACTUAL
+ * token value rather than a hardcoded copy that could silently drift.
+ */
+export async function resolveColor(page: Page, value: string): Promise<string> {
+  return page.evaluate((v) => {
+    const probe = document.createElement("span");
+    probe.style.color = v;
+    document.body.appendChild(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  }, value);
 }
 
 /** Computed CSS property for the first match of a locator. */

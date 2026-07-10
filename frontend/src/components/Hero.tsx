@@ -2,7 +2,7 @@
  * Hero — Two-column hero section with input + auto-playing answer card.
  */
 
-import { useEffect, useState } from "react";
+import type * as React from "react";
 
 interface HeroProps {
   heroInput: string;
@@ -39,13 +39,6 @@ export function Hero({
   hero,
   heroDots,
 }: HeroProps) {
-  const [startHeroLoop, setStartHeroLoop] = useState(false);
-
-  useEffect(() => {
-    // Start auto-play after mount (avoids SSR issues)
-    setStartHeroLoop(true);
-  }, []);
-
   return (
     <section className="hero">
       <div className="hero-container">
@@ -179,9 +172,7 @@ export function Hero({
               <div style={{ minWidth: 0, flex: 1 }}>
                 <p
                   className="bot-message"
-                  style={{
-                    minHeight: startHeroLoop ? "92px" : "auto",
-                  }}
+                  style={{ minHeight: "92px" }}
                 >
                   {hero.text}
                   {hero.streaming && (
