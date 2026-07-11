@@ -69,6 +69,22 @@ services:
     environment:
       POSTGRES_DB: citevyn
       POSTGRES_USER: citevyn
+      # pgvector/pgvector:pg18 (Postgres 18) refuses to initdb when the
+      # data volume is mounted directly at /var/lib/postgresql/data (the
+      # pre-18 convention this file uses). Point PGDATA at a subdirectory
+      # of that mount so initdb runs below the mount root, which
+      # sidesteps the pg18 layout check.
+      #
+      # CAUTION: this changes where Postgres looks for the cluster. On a
+      # fresh volume initdb creates it under .../data/pgdata — correct.
+      # But if a volume ALREADY holds a cluster at the mount root
+      # (.../data/PG_VERSION, i.e. the old no-PGDATA layout), the
+      # entrypoint won't find it at the subdir and will initdb a NEW
+      # EMPTY cluster there, silently orphaning the old data. Only
+      # introduce PGDATA on greenfield volumes; before deploying against
+      # any existing volume, confirm it has no root-layout cluster (or
+      # migrate it into the subdir first).
+      PGDATA: /var/lib/postgresql/data/pgdata
     env_file:
       - .env
     volumes:

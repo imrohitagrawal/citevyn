@@ -71,13 +71,18 @@ golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 db-up: ## Start Postgres + Redis via docker compose (no app containers)
 	@# Compose env_file: refs on every service require the file to
 	# exist on disk, even for services behind other profiles. On a
-	# fresh clone we bootstrap from prod.env.example with a clearly
-	# dev-only POSTGRES_PASSWORD. The shared guard in
-	# _env_guard.sh refuses to run any prod entry point
-	# (deploy/refresh/backup/restore) while these stubs are present.
+	# fresh clone we bootstrap from prod.env.example. POSTGRES_PASSWORD
+	# is set to the repo-wide local dev credential ``citevyn`` so the
+	# bootstrapped db matches DB_URL / smoke.sh / config.py / CI and
+	# ``make migrate`` connects without an auth mismatch. ADMIN_API_KEY
+	# and ACME_EMAIL stay at the ``dev-only-change-me`` stub: the shared
+	# guard in _env_guard.sh is an OR over all three fields, so those two
+	# still make it refuse every prod entry point (deploy/refresh/backup/
+	# restore). The guard also rejects POSTGRES_PASSWORD=citevyn, so a
+	# prod deploy that reuses this dev db password is caught too.
 	@if [[ ! -f infra/docker/.env ]]; then \
 	  echo "infra/docker/.env missing; bootstrapping from prod.env.example (DEV ONLY)"; \
-	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=dev-only-change-me|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|; s|^CITEVYN_ACME_EMAIL=.*|CITEVYN_ACME_EMAIL=dev-only-change-me|' \
+	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=citevyn|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|; s|^CITEVYN_ACME_EMAIL=.*|CITEVYN_ACME_EMAIL=dev-only-change-me|' \
 	    infra/docker/prod.env.example > infra/docker/.env; \
 	  chmod 600 infra/docker/.env; \
 	  echo ""; \

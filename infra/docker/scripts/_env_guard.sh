@@ -66,10 +66,16 @@ chmod 600 "${_GUARD_COMPOSE_DIR}/.env" 2>/dev/null || true
 # or written via a CRLF-emitting pipeline) optionally. Without
 # the ``\r?`` allowance, CRLF .env files would silently bypass
 # the stub guard.
-if grep -qE '^POSTGRES_PASSWORD=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
+#
+# POSTGRES_PASSWORD also rejects ``citevyn`` — the repo-wide local
+# dev credential the ``make db-up`` bootstrap now writes (and that
+# DB_URL / smoke.sh / config.py / CI all use). It is never a valid
+# prod secret, so a prod deploy that left it in place must be refused
+# just like the ``dev-only-change-me`` stub.
+if grep -qE '^POSTGRES_PASSWORD=(dev-only-change-me|citevyn)\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
    || grep -qE '^CITEVYN_ADMIN_API_KEY=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
    || grep -qE '^CITEVYN_ACME_EMAIL=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env"; then
-    echo "error: .env still has dev-only stub secrets from 'make demo'." >&2
+    echo "error: .env still has dev-only stub secrets from the 'make db-up' bootstrap." >&2
     echo "       Replace POSTGRES_PASSWORD, CITEVYN_ADMIN_API_KEY," >&2
     echo "       and CITEVYN_ACME_EMAIL" >&2
     echo "       (the first two via e.g. openssl rand -hex 32; the" >&2
@@ -122,29 +128,39 @@ if ! (
         echo "       the failing line." >&2
         exit 1
     fi
-    _acme_email="${CITEVYN_ACME_EMAIL:-}"
-    # Strip trailing CR / LF / space / tab. The loop handles
-    # pathological inputs (CRLF plus spaces from a careless
-    # ``echo value >> .env``) by peeling one trailing whitespace
-    # char at a time until none remain.
-    while [[ "${_acme_email}" =~ [[:space:]]$ ]]; do
-        _acme_email="${_acme_email%%[[:space:]]}"
-    done
-    # Strip a matched pair of leading/trailing single or double
-    # quotes. Bash preserves the quote chars literally when the
-    # value is sourced, so an operator who hand-wrote
-    # ``CITEVYN_ACME_EMAIL='ops@example.com'`` would otherwise
-    # have the quote characters baked into the value Let's
-    # Encrypt receives. docker compose's env-file parser strips
-    # one matched pair — we mirror that here.
-    if [[ ${#_acme_email} -ge 2 ]]; then
-        _first="${_acme_email:0:1}"
-        _last="${_acme_email: -1}"
-        if [[ "${_first}" == "'" && "${_last}" == "'" ]] \
-           || [[ "${_first}" == '"' && "${_last}" == '"' ]]; then
-            _acme_email="${_acme_email:1:-1}"
+    # Normalize a sourced value the way docker compose's env-file parser does
+    # before comparing: peel trailing CR/LF/space/tab, then strip a matched pair
+    # of surrounding single/double quotes. Bash preserves the quote chars
+    # literally when sourcing, so without this a QUOTED value slips past a naive
+    # ``==`` (or the anchored greps above): docker compose would run
+    # POSTGRES_PASSWORD="citevyn" / CITEVYN_ADMIN_API_KEY="dev-only-change-me"
+    # with the weak/known value while the guard sees the quotes and waves it
+    # through. The loop peels one trailing whitespace char at a time so a CRLF
+    # plus stray spaces (``echo value >> .env``) is fully trimmed.
+    _strip() {
+        local v="$1"
+        while [[ "${v}" =~ [[:space:]]$ ]]; do v="${v%%[[:space:]]}"; done
+        if [[ ${#v} -ge 2 ]]; then
+            local f="${v:0:1}" l="${v: -1}"
+            if [[ "${f}" == "'" && "${l}" == "'" ]] \
+               || [[ "${f}" == '"' && "${l}" == '"' ]]; then
+                v="${v:1:-1}"
+            fi
         fi
+        printf '%s' "${v}"
+    }
+    # Quote/whitespace-aware re-check of the two secrets the greps above match
+    # only literally. Same OR-over-fields contract, now bypass-resistant.
+    _pw="$(_strip "${POSTGRES_PASSWORD:-}")"
+    _admin="$(_strip "${CITEVYN_ADMIN_API_KEY:-}")"
+    if [[ "${_pw}" == "dev-only-change-me" || "${_pw}" == "citevyn" \
+          || "${_admin}" == "dev-only-change-me" ]]; then
+        echo "error: .env still has dev-only stub secrets (POSTGRES_PASSWORD /" >&2
+        echo "       CITEVYN_ADMIN_API_KEY) even after quote/whitespace" >&2
+        echo "       normalization. Replace them with strong secrets and re-run." >&2
+        exit 1
     fi
+    _acme_email="$(_strip "${CITEVYN_ACME_EMAIL:-}")"
     if [[ -z "${_acme_email}" ]]; then
         echo "error: CITEVYN_ACME_EMAIL is not set in .env." >&2
         echo "       This is the email Let's Encrypt uses to notify" >&2
