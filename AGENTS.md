@@ -85,3 +85,16 @@ stale path and they review the wrong tree.
 Run the review proactively — before declaring done, pushing, or opening/merging a PR —
 without waiting to be asked. Address findings before moving on. Read `AGENTS.md`,
 `code_review.md`, and the session memory files at the start of every work session.
+
+## Open-work awareness
+
+At the start of every work session, and before planning any new change, review the
+**open follow-ups** so nothing already tracked is re-implemented, overlooked, or
+contradicted:
+
+1. Read [`docs/BACKLOG.md`](docs/BACKLOG.md) — the in-repo index of tracked follow-ups.
+2. Check the live list: `gh issue list --state open` (GitHub is the source of truth).
+
+Cross-check both against the task at hand. When you open, close, or supersede a GitHub
+issue, update the matching row in `docs/BACKLOG.md` in the same change so the index and
+GitHub never drift.
