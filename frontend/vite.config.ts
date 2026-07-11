@@ -1,4 +1,5 @@
-import { defineConfig } from "vite";
+/// <reference types="vitest/config" />
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // Vite config for the CiteVyn web UI.
@@ -47,5 +48,19 @@ export default defineConfig({
   preview: {
     port: 4173,
     strictPort: true,
+  },
+  // Vitest unit-test config. Playwright (e2e/) is separate; unit tests
+  // live next to the code they cover as ``*.test.ts(x)`` and run in a
+  // jsdom environment so the React hooks can be exercised headlessly.
+  // ``globals: false`` — tests import ``describe``/``it``/``vi`` from
+  // ``vitest`` explicitly so tsc's ``noUnusedLocals`` stays happy and
+  // no ambient global types leak into the app build.
+  test: {
+    environment: "jsdom",
+    globals: false,
+    setupFiles: ["./src/test/setup.ts"],
+    css: false,
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    exclude: ["e2e/**", "node_modules/**"],
   },
 });

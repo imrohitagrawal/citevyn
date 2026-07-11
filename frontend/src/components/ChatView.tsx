@@ -22,6 +22,8 @@ interface ChatViewProps {
   onChatKey: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   onSendClick: () => void;
   onBackClick: () => void;
+  /** When true the chat is wired to the real backend, not canned answers. */
+  live?: boolean;
 }
 
 export function ChatView({
@@ -33,6 +35,7 @@ export function ChatView({
   onChatKey,
   onSendClick,
   onBackClick,
+  live = false,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
 
@@ -50,7 +53,9 @@ export function ChatView({
         <button onClick={onBackClick} className="back-button">
           ← Back to landing
         </button>
-        <span className="demo-badge">DEMO — canned responses</span>
+        <span className="demo-badge">
+          {live ? "LIVE — backend answers" : "DEMO — canned responses"}
+        </span>
       </div>
 
       <div ref={chatListRef} id="chat-list" className="chat-container">
@@ -130,7 +135,8 @@ export function ChatView({
           </button>
         </div>
         <p className="composer-hint">
-          CiteVyn answers from indexed official docs. This is a demo with canned responses.
+          CiteVyn answers from indexed official docs.{" "}
+          {live ? "Answers come from the live backend." : "This is a demo with canned responses."}
         </p>
       </div>
     </main>

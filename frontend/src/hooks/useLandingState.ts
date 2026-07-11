@@ -7,6 +7,10 @@
 
 import React, { useCallback, useEffect, useRef, useReducer } from "react";
 import { matchKB, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
+import { askQuestion, createSession, isLiveMode } from "../lib/api";
+import { citationsToSources } from "../lib/citations";
+import { ApiClientError } from "../lib/types";
+import { useToast } from "./useToast";
 
 // ---------------------------------------------------------------------------
 // State
@@ -220,6 +224,25 @@ export function useLandingState() {
 
   const heroRef = useRef<HTMLInputElement>(null);
 
+  // Toast surface for transport/rate-limit errors on the live path.
+  const { toasts, addToast, removeToast } = useToast();
+
+  // Whether the chat is wired to the real backend. Read once per render;
+  // flips only when the ``VITE_API_LIVE`` build-time env changes.
+  const live = isLiveMode();
+
+  // Backend session, created lazily and reused across questions. The
+  // promise ref de-dupes concurrent creation so two quick asks share
+  // one session rather than opening two.
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionPromiseRef = useRef<Promise<string> | null>(null);
+
+  // Normalized questions whose last live attempt FAILED. The dedup guard
+  // suppresses re-asking a question that was answered, but a transport
+  // failure is not an answer — the user is told to retry, so a failed
+  // question must be allowed back through.
+  const failedQuestionsRef = useRef<Set<string>>(new Set());
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -334,6 +357,99 @@ export function useLandingState() {
     [],
   );
 
+  // Create the backend session at most once. On failure the promise
+  // cache is cleared so the next ask can retry cleanly rather than
+  // being permanently wedged on a rejected promise.
+  const ensureSession = useCallback(async (): Promise<string> => {
+    if (sessionIdRef.current) return sessionIdRef.current;
+    if (!sessionPromiseRef.current) {
+      sessionPromiseRef.current = createSession()
+        .then((res) => {
+          sessionIdRef.current = res.session_id;
+          return res.session_id;
+        })
+        .catch((err) => {
+          sessionPromiseRef.current = null;
+          throw err;
+        });
+    }
+    return sessionPromiseRef.current;
+  }, []);
+
+  // Map an API/transport failure to a toast plus an inline refusal-styled
+  // bot message. The inline copy is the durable surface — the toast
+  // auto-dismisses, but a failed answer should stay legible in the
+  // transcript. ``streamBot`` is a stable callback defined below.
+  const handleApiError = useCallback(
+    (err: unknown) => {
+      const apiErr = err instanceof ApiClientError ? err : null;
+      let title = "Something went wrong";
+      let message = "The request failed. Please try again in a moment.";
+      if (apiErr?.isRateLimited()) {
+        title = "Rate limit reached";
+        message =
+          apiErr.message ||
+          "You've hit the demo rate limit — wait a minute and try again.";
+      } else if (apiErr?.isServerError()) {
+        title = "Backend unavailable";
+        message = apiErr.message || "The answer service is temporarily unavailable.";
+      } else if (apiErr) {
+        message = apiErr.message || message;
+      }
+      addToast({ kind: "error", title, message });
+      streamBot(message, { refusal: true, finalSources: [] });
+    },
+    // streamBot is a stable useCallback([]) declared below; intentionally
+    // omitted to avoid a forward-reference in the dependency array.
+    [addToast],
+  );
+
+  // Live answer path: ensure a session, ask the backend, and drive the
+  // same streaming bubble the demo uses off the real answer + citations.
+  const sendLive = useCallback(
+    async (text: string) => {
+      const norm = text.trim().toLowerCase();
+      try {
+        const sessionId = await ensureSession();
+        const resp = await askQuestion(sessionId, text);
+        failedQuestionsRef.current.delete(norm);
+        streamBot(resp.answer, {
+          refusal: resp.unsupported || resp.no_answer,
+          finalSources: citationsToSources(resp.citations ?? []),
+        });
+      } catch (err) {
+        // A 404 means the backend session expired or was evicted; drop the
+        // cached id so the next attempt creates a fresh session instead of
+        // wedging on the dead one forever.
+        if (err instanceof ApiClientError && err.status === 404) {
+          sessionIdRef.current = null;
+          sessionPromiseRef.current = null;
+        }
+        // Remember the failure so the dedup guard lets the user retry it.
+        failedQuestionsRef.current.add(norm);
+        handleApiError(err);
+      }
+    },
+    [ensureSession, handleApiError],
+  );
+
+  // Route a question to the backend (live) or the canned KB (demo). Shared
+  // by the first-ask and retry paths so both behave identically.
+  const routeQuestion = useCallback(
+    (text: string) => {
+      if (live) {
+        void sendLive(text);
+        return;
+      }
+      const hit = matchKB(text);
+      streamBot(hit.a, {
+        refusal: !!hit.refusal,
+        finalSources: hit.sources || [],
+      });
+    },
+    [live, sendLive],
+  );
+
   const send = useCallback(
     (text: string) => {
       const norm = text.trim().toLowerCase();
@@ -343,21 +459,26 @@ export function useLandingState() {
         (m) => m.role === "user" && m.text.trim().toLowerCase() === norm
       );
       if (existing !== -1) {
+        // A prior attempt that FAILED is allowed to retry rather than just
+        // flashing the original bubble — the guard only suppresses a
+        // question that was actually answered.
+        if (failedQuestionsRef.current.has(norm)) {
+          failedQuestionsRef.current.delete(norm);
+          routeQuestion(text);
+          return;
+        }
         flashExisting(existing);
         return;
       }
 
-      const hit = matchKB(text);
       dispatch({
         type: "ADD_MESSAGE",
         message: { role: "user", text },
       });
-      streamBot(hit.a, {
-        refusal: !!hit.refusal,
-        finalSources: hit.sources || [],
-      });
+
+      routeQuestion(text);
     },
-    [state.messages],
+    [state.messages, routeQuestion],
   );
 
   const streamBot = useCallback(
@@ -652,5 +773,8 @@ export function useLandingState() {
     submitChat,
     onFocusHero,
     screen: state.screen,
+    live,
+    toasts,
+    removeToast,
   };
 }
