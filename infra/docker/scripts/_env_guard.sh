@@ -66,7 +66,13 @@ chmod 600 "${_GUARD_COMPOSE_DIR}/.env" 2>/dev/null || true
 # or written via a CRLF-emitting pipeline) optionally. Without
 # the ``\r?`` allowance, CRLF .env files would silently bypass
 # the stub guard.
-if grep -qE '^POSTGRES_PASSWORD=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
+#
+# POSTGRES_PASSWORD also rejects ``citevyn`` — the repo-wide local
+# dev credential the ``make db-up`` bootstrap now writes (and that
+# DB_URL / smoke.sh / config.py / CI all use). It is never a valid
+# prod secret, so a prod deploy that left it in place must be refused
+# just like the ``dev-only-change-me`` stub.
+if grep -qE '^POSTGRES_PASSWORD=(dev-only-change-me|citevyn)\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
    || grep -qE '^CITEVYN_ADMIN_API_KEY=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env" \
    || grep -qE '^CITEVYN_ACME_EMAIL=dev-only-change-me\r?$' "${_GUARD_COMPOSE_DIR}/.env"; then
     echo "error: .env still has dev-only stub secrets from 'make demo'." >&2
