@@ -61,33 +61,51 @@ def _pg_url() -> str:
 
 
 def _pg_url_with_schema(schema: str) -> str:
-    """Build a Postgres URL whose default ``search_path`` is ``schema``.
+    """Build a Postgres URL whose ``search_path`` is ``<schema>,public``.
 
     Alembic opens its own connection from the URL we hand it; setting
     ``search_path`` on the fixture's connection does not propagate.
     libpq accepts ``options=-c search_path=<schema>`` as a connection
     parameter, which psycopg applies on every new connection. The
     schema name comes from ``pg_schema`` and is URL-safe (``[a-z0-9_]``).
+
+    ``public`` is appended (second, so the isolated schema still wins for
+    unqualified CREATEs) because the ``pgvector`` extension is installed
+    database-wide and its ``vector`` type / ``vector_cosine_ops`` opclass live in
+    whichever schema first created it. In CI, ``alembic upgrade head`` runs against
+    ``public`` before this per-schema test suite, so the type lives in ``public``;
+    without ``public`` on the path, ``ALTER TABLE ... vector(1536)`` fails with
+    ``type "vector" does not exist``. Production is unaffected (it runs in
+    ``public``, which is always on the default path).
     """
     base = _pg_url()
     separator = "&" if "?" in base else "?"
-    return f"{base}{separator}options=-c search_path={schema}"
+    return f"{base}{separator}options=-c search_path={schema},public"
 
 
-@pytest.fixture
-def alembic_pg_config() -> Iterator[AlembicConfig]:
-    """Yield an Alembic config pointed at the PG test database.
+def _alembic_config_for_schema(schema: str) -> AlembicConfig:
+    """Build an Alembic config isolated to ``schema``.
 
-    The connection itself is the per-test schema, applied below.
-    The tests that consume this fixture must call
-    ``cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(...))``
-    once they know the schema name so Alembic's connection inherits
-    ``search_path``.
+    Sets the connection ``search_path`` to ``<schema>,public`` (so the shared
+    pgvector ``vector`` type resolves) and pins alembic's ``version_table_schema``
+    to ``schema`` (so its ``alembic_version`` lookup does not resolve to a
+    ``public`` copy via the search_path). See ``db/env.py``.
     """
     cfg = AlembicConfig(str(ALEMBIC_INI))
     cfg.set_main_option("script_location", str(REPO_ROOT / "db"))
-    cfg.set_main_option("sqlalchemy.url", _pg_url())
-    yield cfg
+    cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(schema))
+    cfg.set_main_option("version_table_schema", schema)
+    return cfg
+
+
+@pytest.fixture
+def alembic_pg_config(pg_schema: str) -> Iterator[AlembicConfig]:
+    """Yield an Alembic config isolated to the per-test ``pg_schema``.
+
+    Both the ``search_path`` and alembic's ``version_table_schema`` are already
+    configured, so consuming tests just call ``alembic_upgrade(cfg, "head")``.
+    """
+    yield _alembic_config_for_schema(pg_schema)
 
 
 @pytest.fixture
@@ -123,7 +141,6 @@ def pg_schema() -> Iterator[str]:
 def test_alembic_upgrade_head_creates_all_tables(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -165,7 +182,6 @@ def test_uuid_columns_are_native_uuid_on_postgres(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
     """GUID columns must be real ``uuid`` on Postgres, not CHAR(36)."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     # Every GUID-typed column across the schema. Built from a tuple
@@ -206,7 +222,6 @@ def test_uuid_columns_are_native_uuid_on_postgres(
 
 def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str) -> None:
     """Smoke-test the application ORM against real Postgres."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -241,7 +256,6 @@ def test_chunks_embedding_is_pgvector_on_postgres(
     ``USER-DEFINED`` with ``udt_name = 'vector'``. The column stays nullable so
     rows without an embedding survive.
     """
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -269,7 +283,6 @@ def test_chunks_embedding_is_pgvector_on_postgres(
 
 def test_chunks_embedding_has_hnsw_index(alembic_pg_config: AlembicConfig, pg_schema: str) -> None:
     """Migration ``0004`` creates the HNSW cosine index used by retrieval."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -295,7 +308,6 @@ def test_index_versions_has_embedding_stamp_columns(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
     """Migration ``0004`` adds the Tier 3 provenance stamp columns."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -325,7 +337,6 @@ def test_migration_0004_downgrade_restores_bytea(
     exercises ``downgrade`` end-to-end: upgrade to head, downgrade to 0003, and
     assert the schema shape returned to bytea + no stamp columns.
     """
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
     alembic_downgrade(alembic_pg_config, "0003")
 
@@ -374,10 +385,7 @@ async def test_vector_retriever_returns_ranked_hits_on_postgres(pg_schema: str) 
     from app.retrieval.vector import VectorRetriever
 
     # Build the schema via alembic on a sync engine, then work async in-schema.
-    cfg = AlembicConfig(str(ALEMBIC_INI))
-    cfg.set_main_option("script_location", str(REPO_ROOT / "db"))
-    cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
-    alembic_upgrade(cfg, "head")
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
 
     settings = Settings()  # embedding_dim=1536, provider=stub
     embedder = build_embedder(settings)

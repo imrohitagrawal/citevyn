@@ -80,7 +80,17 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        # ``version_table_schema`` defaults to ``None`` (the connection's default
+        # schema) — production behavior is unchanged. The Postgres integration
+        # tests set it to their isolated per-test schema so alembic's
+        # ``alembic_version`` lookup does not resolve to a ``public`` copy via the
+        # ``search_path`` (which must include ``public`` to resolve the shared
+        # ``pgvector`` ``vector`` type/opclass).
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=config.get_main_option("version_table_schema"),
+        )
 
         with context.begin_transaction():
             context.run_migrations()
