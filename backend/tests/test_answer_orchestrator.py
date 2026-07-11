@@ -537,3 +537,155 @@ async def test_strategy_for_labels_from_evidence_not_intent() -> None:
     assert Orchestrator._strategy_for(Intent.exact_lookup, []) is RetrievalStrategy.none
     # non-exact intent with evidence → hybrid
     assert Orchestrator._strategy_for(Intent.faq, all_exact) is RetrievalStrategy.hybrid_reranked
+
+
+# ---------------------------------------------------------------------------
+# #58: the orchestrator resolves the active index version ONCE and threads it
+# into the DEFAULT retriever (no injection), so the persisted evidence trace
+# contains only active-version documents. The ""→None trap: on a database with
+# no active index, ask() must pass None (status-only filter), not "" (which
+# would filter on ``index_version == ""``, match nothing, and blank every
+# answer to no_answer).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_codex_doc(
+    session: Any,
+    *,
+    index_version: str,
+    doc_status: str = "active",
+) -> uuid.UUID:
+    """Seed one codex ``Document`` + ``Chunk`` at ``index_version`` sharing the
+    marker keyword ``zorptastic``. Returns the document id. No ``IndexVersion``
+    row is created here — callers control which version (if any) is active."""
+    from datetime import UTC, datetime
+
+    from app.models import Chunk, Document
+
+    now = datetime.now(UTC)
+    doc = Document(
+        document_id=uuid.uuid4(),
+        index_version=index_version,
+        source_name="codex",
+        product_area="codex",
+        source_url=f"https://docs.example.com/{index_version}",
+        title=f"Codex {index_version}",
+        content_checksum=f"sha256:{index_version}",
+        last_fetched_at=now,
+        last_indexed_at=now,
+        status=doc_status,  # type: ignore[arg-type]
+    )
+    session.add(doc)
+    await session.flush()
+    session.add(
+        Chunk(
+            chunk_id=uuid.uuid4(),
+            document_id=doc.document_id,
+            product_area="codex",
+            section_path="/x",
+            heading="H",
+            parent_heading=None,
+            chunk_text=f"The codex zorptastic behaviour in {index_version}.",
+            context_summary="zorptastic",
+            exact_terms=[],
+            chunk_order=0,
+            content_checksum=f"sha256:{index_version}-chunk",
+        )
+    )
+    await session.flush()
+    return doc.document_id
+
+
+async def _persisted_evidence_versions(session: Any) -> set[str]:
+    """Return the set of ``Document.index_version`` values referenced by every
+    persisted ``RetrievedEvidence`` row (via its chunk → document)."""
+    from app.models import Chunk, Document
+
+    rows = (await session.execute(select(RetrievedEvidence))).scalars().all()
+    versions: set[str] = set()
+    for ev in rows:
+        chunk = await session.get(Chunk, ev.chunk_id)
+        assert chunk is not None
+        doc = await session.get(Document, chunk.document_id)
+        assert doc is not None
+        versions.add(doc.index_version)
+    return versions
+
+
+async def test_ask_default_retriever_scopes_to_active_index_version(session: Any) -> None:
+    """Wiring proof: the default retriever the orchestrator builds is scoped to
+    the active index version, so a prior version's (still status=active) docs
+    never enter the evidence trace. Fails before the fix (default retriever was
+    built with active_index_version=None → both versions retrieved)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add_all(
+        [
+            IndexVersion(
+                index_version="v-old",
+                status=IndexStatus.previous_good,
+                source_version_hash="sha256:v-old",
+                created_at=now - timedelta(hours=1),
+                promoted_at=now - timedelta(hours=1),
+            ),
+            IndexVersion(
+                index_version="v-active",
+                status=IndexStatus.active,
+                source_version_hash="sha256:v-active",
+                created_at=now,
+                promoted_at=now,
+            ),
+        ]
+    )
+    await session.flush()
+    await _seed_codex_doc(session, index_version="v-old")
+    await _seed_codex_doc(session, index_version="v-active")
+    await session.commit()
+
+    # No injected retriever → the orchestrator builds the DEFAULT one in ask().
+    orch = Orchestrator(_settings(), session)
+    await orch.ask(
+        question="codex zorptastic behaviour",
+        request_id="req-58-scope",
+        session_id=uuid.uuid4(),
+    )
+
+    versions = await _persisted_evidence_versions(session)
+    assert versions == {"v-active"}, f"prior-version docs leaked into the trace: {versions}"
+
+
+async def test_ask_no_active_index_still_answers_status_only(session: Any) -> None:
+    """The ""→None trap: with NO active IndexVersion, ask() must scope the
+    default retriever with None (status-only), NOT "" — so a status=active doc is
+    still retrieved instead of every answer collapsing to no_answer on a fresh /
+    un-promoted database."""
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    # A candidate index exists but nothing is promoted to active.
+    session.add(
+        IndexVersion(
+            index_version="v1",
+            status=IndexStatus.candidate,
+            source_version_hash="sha256:v1",
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    await _seed_codex_doc(session, index_version="v1")
+    await session.commit()
+
+    orch = Orchestrator(_settings(), session)
+    await orch.ask(
+        question="codex zorptastic behaviour",
+        request_id="req-58-noactive",
+        session_id=uuid.uuid4(),
+    )
+
+    # The doc was retrieved despite no active index — evidence trace is non-empty.
+    versions = await _persisted_evidence_versions(session)
+    assert versions == {"v1"}, "no-active-index must fall back to status-only, not blank out"
