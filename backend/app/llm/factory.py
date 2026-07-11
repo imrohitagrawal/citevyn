@@ -18,6 +18,9 @@ import logging
 
 from app.core.config import Settings
 from app.llm.anthropic import AnthropicLLMClient
+from app.llm.fallback import FallbackLLMClient
+from app.llm.gemini import GeminiLLMClient
+from app.llm.openrouter import OpenRouterLLMClient
 from app.llm.protocol import LLMClient
 from app.llm.stub import StubLLMClient
 
@@ -78,18 +81,63 @@ def build_llm_client(settings: Settings) -> LLMClient:
             timeout_seconds=settings.anthropic_timeout_seconds,
         )
     if settings.llm_provider == "gemini":
-        # 9b will wire a real GeminiClient. Until then, fall back to
-        # the stub so the factory does not raise on a value the user
-        # already set; the startup validator above rejects stub in
-        # production so this branch is reachable only in dev/test.
-        return StubLLMClient(model=f"stub-{settings.llm_model}")
+        return _build_gemini_with_fallback(settings)
     if settings.llm_provider == "router":
-        # Same deferral as GeminiClient — lands in 9b. The user has
-        # requested a multi-provider adapter (Gemini + secondary
-        # router) so we accept the env value and stub through until
-        # the real client is wired.
-        return StubLLMClient(model=f"stub-{settings.llm_model}")
+        return _build_openrouter(settings)
     return StubLLMClient(model=f"stub-{settings.llm_model}")
+
+
+def _build_openrouter(settings: Settings) -> OpenRouterLLMClient:
+    """Build the OpenRouter client. Raises if no key is configured."""
+    return OpenRouterLLMClient(
+        model=settings.openrouter_model,
+        api_key=settings.openrouter_api_key,
+        api_base=settings.openrouter_api_base,
+        timeout_seconds=settings.openrouter_timeout_seconds,
+    )
+
+
+def _build_gemini_with_fallback(settings: Settings) -> LLMClient:
+    """Build the Gemini client, wrapped with an OpenRouter fallback.
+
+    Resolution order for ``CITEVYN_LLM_PROVIDER=gemini``:
+
+    * Gemini key set + OpenRouter key set → Gemini primary, OpenRouter
+      backstop (:class:`FallbackLLMClient`).
+    * Gemini key set only → Gemini alone.
+    * Gemini key unset but OpenRouter key set → OpenRouter alone (so a
+      single key of either kind is enough to get real answers).
+    * Neither key set → the stub in non-production so the app still boots;
+      production is already blocked from ``stub`` by the startup validator,
+      and a keyless real provider raises there via the client constructors.
+    """
+    has_gemini = bool(settings.gemini_api_key)
+    has_router = bool(settings.openrouter_api_key)
+
+    if not has_gemini and not has_router:
+        if settings.environment == "production":
+            raise RuntimeError(
+                "CITEVYN_LLM_PROVIDER=gemini requires CITEVYN_GEMINI_API_KEY "
+                "(or CITEVYN_OPENROUTER_API_KEY for the fallback) in production."
+            )
+        _logger.warning("gemini_provider_no_key_using_stub")
+        return StubLLMClient(model=f"stub-{settings.gemini_model}")
+
+    if not has_gemini:
+        # The no-key case returned above, so reaching here without a Gemini key
+        # means the OpenRouter key is present — use it directly.
+        return _build_openrouter(settings)
+
+    gemini = GeminiLLMClient(
+        model=settings.gemini_model,
+        api_key=settings.gemini_api_key,
+        api_base=settings.gemini_api_base,
+        timeout_seconds=settings.gemini_timeout_seconds,
+        thinking_budget=settings.gemini_thinking_budget,
+    )
+    if not has_router:
+        return gemini
+    return FallbackLLMClient(primary=gemini, secondary=_build_openrouter(settings))
 
 
 # ---------------------------------------------------------------------------

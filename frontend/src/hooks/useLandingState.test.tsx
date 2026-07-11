@@ -147,6 +147,32 @@ describe("useLandingState — live send path", () => {
     expect(mockCreateSession).toHaveBeenCalledTimes(1);
     expect(mockAskQuestion).toHaveBeenCalledTimes(2);
   });
+
+  it("does not bleed text between two concurrent live answers (stable-id targeting)", async () => {
+    // Distinct answers whose word-streams overlap. Before stable-id targeting,
+    // UPDATE_LAST_MESSAGE wrote every chunk into the tail bubble, so the second
+    // answer's stream bled into the first's bubble and left a stuck cursor.
+    mockAskQuestion
+      .mockResolvedValueOnce(askResponse({ answer: "Answer ONE here.", citations: [] }))
+      .mockResolvedValueOnce(askResponse({ answer: "Answer TWO here.", citations: [] }));
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => {
+      result.current.send("First question");
+      result.current.send("Second question");
+    });
+    await settle();
+
+    const bots = result.current.state.messages.filter((m) => m.role === "bot");
+    expect(bots).toHaveLength(2);
+    // Each bubble carries exactly one full answer — no interleaving/bleed.
+    expect(bots.map((b) => b.text).sort()).toEqual(["Answer ONE here.", "Answer TWO here."]);
+    // No bubble is left mid-stream with a blinking cursor.
+    expect(bots.every((b) => b.streaming === false)).toBe(true);
+    // Every message has a unique stable id.
+    const ids = result.current.state.messages.map((m) => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });
 
 describe("useLandingState — live error path", () => {
