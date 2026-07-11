@@ -150,11 +150,20 @@ jobs:
       - name: Sync dependencies (alembic lives in the backend venv)
         working-directory: backend
         run: uv sync --group dev
-      - name: Fresh volume — tear down any pre-existing stack + data
-        # GitHub runners are ephemeral (fresh by default), but be
-        # explicit: the greenfield boot is the exact regression case, so
-        # never rely on a pre-seeded volume.
-        run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
+      - name: Bootstrap .env + fresh volume (tear down any pre-existing stack)
+        # ``make env-bootstrap`` writes infra/docker/.env from
+        # prod.env.example (dev-only stub secrets) — REQUIRED before any
+        # ``docker compose`` call because the compose file's
+        # ``env_file: .env`` refs make even ``down`` fail if it's absent.
+        # GitHub runners are ephemeral (fresh by default), but the
+        # ``down -v`` is explicit: the greenfield boot is the exact
+        # regression case, so never rely on a pre-seeded volume. Doing
+        # the bootstrap here (not only inside make ci-smoke) also means
+        # the ``always()`` teardown below has a .env to parse even if the
+        # smoke fails early.
+        run: |
+          make env-bootstrap
+          docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
       - name: Boot DB stack on a fresh volume, verify it serves, migrate
         # ``make ci-smoke`` = db-up (fresh boot + pg_isready) + db-verify
         # (SELECT 1 + CREATE EXTENSION vector) + migrate (alembic upgrade

@@ -36,7 +36,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
         build push deploy refresh logs backup restore golden golden-smoke e2e
 
 help: ## Show this help
@@ -68,18 +68,22 @@ golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 # ─────────────────────────── Local development ───────────────────────────
 
 # ─────────────────────────── Local development ───────────────────────────
-db-up: ## Start Postgres + Redis via docker compose (no app containers)
+env-bootstrap: ## Create infra/docker/.env from prod.env.example if absent (DEV-ONLY stub secrets)
 	@# Compose env_file: refs on every service require the file to
-	# exist on disk, even for services behind other profiles. On a
-	# fresh clone we bootstrap from prod.env.example. POSTGRES_PASSWORD
-	# is set to the repo-wide local dev credential ``citevyn`` so the
-	# bootstrapped db matches DB_URL / smoke.sh / config.py / CI and
-	# ``make migrate`` connects without an auth mismatch. ADMIN_API_KEY
-	# and ACME_EMAIL stay at the ``dev-only-change-me`` stub: the shared
-	# guard in _env_guard.sh is an OR over all three fields, so those two
-	# still make it refuse every prod entry point (deploy/refresh/backup/
-	# restore). The guard also rejects POSTGRES_PASSWORD=citevyn, so a
-	# prod deploy that reuses this dev db password is caught too.
+	# exist on disk, even for services behind other profiles — so ANY
+	# ``docker compose`` invocation (including ``down -v``) fails if
+	# .env is missing. This target is a prerequisite of db-up and is
+	# also run first by the CI smoke so the pre-boot ``down -v`` has a
+	# .env to parse. On a fresh clone we bootstrap from prod.env.example.
+	# POSTGRES_PASSWORD is set to the repo-wide local dev credential
+	# ``citevyn`` so the bootstrapped db matches DB_URL / smoke.sh /
+	# config.py / CI and ``make migrate`` connects without an auth
+	# mismatch. ADMIN_API_KEY and ACME_EMAIL stay at the
+	# ``dev-only-change-me`` stub: the shared guard in _env_guard.sh is
+	# an OR over all three fields, so those two still make it refuse
+	# every prod entry point (deploy/refresh/backup/restore). The guard
+	# also rejects POSTGRES_PASSWORD=citevyn, so a prod deploy that
+	# reuses this dev db password is caught too.
 	@if [[ ! -f infra/docker/.env ]]; then \
 	  echo "infra/docker/.env missing; bootstrapping from prod.env.example (DEV ONLY)"; \
 	  sed -E 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=citevyn|; s|^CITEVYN_ADMIN_API_KEY=.*|CITEVYN_ADMIN_API_KEY=dev-only-change-me|; s|^CITEVYN_ACME_EMAIL=.*|CITEVYN_ACME_EMAIL=dev-only-change-me|' \
@@ -96,6 +100,8 @@ db-up: ## Start Postgres + Redis via docker compose (no app containers)
 	  echo "     with real secrets before going to prod."; \
 	  echo ""; \
 	fi
+
+db-up: env-bootstrap ## Start Postgres + Redis via docker compose (no app containers)
 	$(COMPOSE) up -d db redis
 	@echo "Waiting for Postgres to accept connections…"
 	@for i in $$(seq 1 60); do \
