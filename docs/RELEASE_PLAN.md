@@ -248,6 +248,10 @@ Do not release if:
 4. Scheduled source refresh.
 5. Evaluation dashboard.
 6. Better reranking.
+7. Real SSE streaming for chat answers — stream tokens as generated instead of the
+   client-side reveal; needs a new backend `text/event-stream` endpoint ([#61](https://github.com/imrohitagrawal/citevyn/issues/61)).
+8. Frontend hardening: gate the composer while a live answer is in flight to prevent
+   concurrent-send stream interleave ([#62](https://github.com/imrohitagrawal/citevyn/issues/62)).
 
 ## 12. V2 Roadmap
 
