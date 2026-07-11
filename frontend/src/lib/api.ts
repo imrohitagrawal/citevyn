@@ -50,6 +50,17 @@ const API_DEMO_KEY = import.meta.env.VITE_API_DEMO_KEY ?? "local-demo-key";
 /** Default user id for session creation. */
 const API_DEMO_USER_ID = import.meta.env.VITE_API_DEMO_USER_ID ?? "demo_user";
 
+/**
+ * Whether the chat should hit the real backend instead of the canned
+ * ``knowledgeBase`` demo. Read at call time (not module load) so tests
+ * can flip it with ``vi.stubEnv`` and so a future in-app toggle can
+ * override it without a rebuild. Only the exact string ``"true"``
+ * enables live mode; anything else (including unset) stays in demo.
+ */
+export function isLiveMode(): boolean {
+  return import.meta.env.VITE_API_LIVE === "true";
+}
+
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
 // ---------------------------------------------------------------------------
@@ -189,12 +200,17 @@ export async function askQuestion(
 
 /** Look up an exact term. */
 export async function exactSearch(body: ExactSearchRequest): Promise<ExactSearchResponse> {
+  // The backend's ``ExactSearchRequest`` names this field ``limit``
+  // (see ``backend/app/api/routes/search.py``). The client contract
+  // in ``types.ts`` exposes it as ``max_results`` for readability, so
+  // we translate at the wire boundary here — sending ``max_results``
+  // would be silently ignored and the server would always cap at 10.
   return apiFetch<ExactSearchResponse>("/v1/search/exact", {
     method: "POST",
     body: JSON.stringify({
       product_area: body.product_area,
       term: body.term,
-      max_results: body.max_results ?? 10,
+      limit: body.max_results ?? 10,
     }),
   });
 }

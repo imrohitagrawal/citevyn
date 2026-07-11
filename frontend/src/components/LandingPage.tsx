@@ -22,6 +22,7 @@ import {
   Footer,
 } from "./landing-sections";
 import { ChatView } from "./ChatView";
+import { ToastHost } from "./ToastHost";
 
 // ---------------------------------------------------------------------------
 // Component
@@ -58,6 +59,9 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     toggleFaq,
     backToLanding,
     screen,
+    live,
+    toasts,
+    removeToast,
   } = useLandingState();
 
   const dark = theme === "dark";
@@ -151,9 +155,12 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onChatKey={onChatKey}
             onSendClick={submitChat}
             onBackClick={backToLanding}
+            live={live}
           />
         </>
       )}
+
+      <ToastHost toasts={toasts} onDismiss={removeToast} />
     </>
   );
 }
