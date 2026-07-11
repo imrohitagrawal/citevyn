@@ -113,3 +113,58 @@ jobs:
         # The ``postgres`` marker is opt-in and gated by
         # ``CITEVYN_PG_TEST_URL``; the URL above enables it.
         run: uv run pytest -m postgres -v
+
+  compose-db-smoke:
+    name: docker compose db-stack smoke (fresh volume, pg18)
+    runs-on: ubuntu-latest
+    # Bound the whole job: db-up already caps its pg_isready wait at
+    # 60s, but the image pull inside ``docker compose up`` is otherwise
+    # unbounded (it would ride GitHub's 6h default). 15 min is generous
+    # for pull + boot + migrate (~2-3 min typical) while still failing
+    # fast on a hung pull or a crash-looping container.
+    timeout-minutes: 15
+    # Independent of ``test`` / ``postgres-migrations``: this job proves
+    # the REAL compose stack boots, which is orthogonal to Python lint
+    # or migration correctness. Running in parallel gives a clean,
+    # standalone infra signal.
+    #
+    # No secrets are required — ``make db-up`` bootstraps infra/docker/.env
+    # from prod.env.example with the dev-only ``citevyn`` bootstrap
+    # password (the prod _env_guard.sh path is never taken here), so this
+    # is safe to run on fork PRs too and needs no ``if:`` fork guard.
+    #
+    # WHY THIS EXISTS: ``docker compose config`` (run elsewhere) only
+    # proves the YAML parses, and ``postgres-migrations`` uses a pg16
+    # SERVICE CONTAINER — NEITHER boots the actual compose ``db`` service
+    # (pgvector/pgvector:pg18 with the PGDATA subdir fix). A regression of
+    # the PGDATA layout, the pg18 image, or the .env bootstrap password
+    # would sail through CI and only crash-loop on a real greenfield
+    # deploy. This job closes that gap (issue #52).
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install uv
+        run: pip install --upgrade pip uv
+      - name: Sync dependencies (alembic lives in the backend venv)
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Fresh volume — tear down any pre-existing stack + data
+        # GitHub runners are ephemeral (fresh by default), but be
+        # explicit: the greenfield boot is the exact regression case, so
+        # never rely on a pre-seeded volume.
+        run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
+      - name: Boot DB stack on a fresh volume, verify it serves, migrate
+        # ``make ci-smoke`` = db-up (fresh boot + pg_isready) + db-verify
+        # (SELECT 1 + CREATE EXTENSION vector) + migrate (alembic upgrade
+        # head, which also proves the bootstrap password matches DB_URL).
+        # db-up bootstraps infra/docker/.env from prod.env.example; the
+        # 60s pg_isready wait inside db-up is the bounded health gate.
+        run: make ci-smoke
+      - name: Capture db logs on failure (example creds only — no secrets)
+        if: failure()
+        run: docker compose -f infra/docker/docker-compose.yml logs db
+      - name: Tear down + destroy the fresh volume (always)
+        if: always()
+        run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans

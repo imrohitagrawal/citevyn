@@ -36,7 +36,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help db-up db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
+.PHONY: help db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
         build push deploy refresh logs backup restore golden golden-smoke e2e
 
 help: ## Show this help
@@ -105,6 +105,32 @@ db-up: ## Start Postgres + Redis via docker compose (no app containers)
 	  sleep 1; \
 	done; \
 	echo "Postgres did not become ready in 60s" >&2; exit 1
+
+db-verify: ## Assert the composed db truly SERVES (SELECT 1 + pgvector) — a container that boots but can't serve is a FAIL
+	@# ``docker compose config`` only proves the YAML parses; ``db-up``
+	# only waits for pg_isready. This target proves the pg18 cluster
+	# actually accepts a live query AND that the pgvector extension the
+	# app depends on can be created — so a half-broken boot (wrong
+	# PGDATA layout, missing pgvector image) surfaces as a hard failure
+	# rather than a false green. ``-v ON_ERROR_STOP=1`` makes psql exit
+	# non-zero on any SQL error so ``make`` propagates it.
+	@echo "Verifying the composed db serves a live query…"
+	docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "SELECT 1;"
+	@echo "Verifying the pgvector extension can be created…"
+	docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;"
+	@echo "db-verify: OK — the composed pg18 db is serving."
+
+ci-smoke: db-up db-verify migrate ## Fresh-volume DB-stack boot smoke used by .github/workflows/ci.yml (Closes #52)
+	@# Single source of truth for "does the real compose DB boot on a
+	# greenfield volume?". db-up boots db+redis (bootstrapping .env from
+	# prod.env.example) and waits for pg_isready; db-verify proves it
+	# serves + pgvector works; migrate applies every Alembic migration
+	# against the composed pg18 DB, which also proves the bootstrap
+	# POSTGRES_PASSWORD matches DB_URL (an auth mismatch fails here).
+	# The CALLER owns volume lifecycle: run ``$(COMPOSE) down -v`` before
+	# (fresh) and after (teardown). We deliberately do NOT down -v here
+	# so ``make ci-smoke`` never nukes a developer's local data volume.
+	@echo "ci-smoke: composed pg18 DB booted on a fresh volume, serves, and migrates cleanly."
 
 db-down: ## Stop the docker-compose db stack (keeps volumes)
 	$(COMPOSE) down
