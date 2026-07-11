@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.embeddings import Embedder
 from app.models.chunks import Chunk
 from app.models.documents import Document
 from app.models.enums import (
@@ -51,7 +52,6 @@ from app.models.index_versions import IndexVersion
 from app.models.ingestion_jobs import IngestionJob
 from app.worker.allowlist import SourceSpec
 from app.worker.chunker import ChunkDraft, chunk_document
-from app.worker.embedder import Embedder
 from app.worker.exact_terms import extract_terms
 from app.worker.fetchers import Fetcher, FetchError  # noqa: F401  re-export
 from app.worker.parser import ParseError, parse_markdown  # noqa: F401  re-export
@@ -107,10 +107,12 @@ class IngestionRunner:
         building against?" fingerprint. ``index_version`` is
         the key the runner writes to. ``embedding_provider`` and
         ``embedding_model`` are the provenance stamped onto the
-        :class:`IndexVersion` (Tier 3 guardrail, #51) so the read
-        path can be checked against the embedder that built the
-        index; ``None`` leaves the stamp unset (e.g. ad-hoc test
-        runs). The CLI defaults are good for the MVP; production
+        :class:`IndexVersion` (Tier 3 groundwork, #51) — WRITE-ONLY
+        today (nothing reads it yet); a future enforcement check will
+        compare the read-path embedder against it. See
+        ``docs/ADR/0003-embeddings-provider.md``. ``None`` leaves the
+        stamp unset (e.g. ad-hoc test runs). The CLI defaults are good
+        for the MVP; production
         swaps them for real values from the operator-issued source
         feed.
         """

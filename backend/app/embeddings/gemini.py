@@ -30,6 +30,7 @@ retrieval (see the ADR). ``embed`` never returns a wrong-space vector.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, cast
@@ -52,6 +53,12 @@ _ERROR_BODY_LOG_LIMIT = 500
 # cheap proxy so an oversized chunk fails fast with a clear message instead of a
 # cryptic 400 from upstream. ~8k chars comfortably exceeds any real doc chunk.
 _MAX_INPUT_CHARS = 8000
+
+# ``batchEmbedContents`` caps the number of contents per request (~100). A single
+# document can produce more chunks than that, so ``embed_documents`` splits the
+# input into provider-safe sub-batches rather than sending one oversized request
+# that the provider would reject with a 400.
+_EMBED_BATCH_SIZE = 100
 
 
 def _extract_values(embedding: Any, *, dim: int) -> list[float]:
@@ -92,6 +99,7 @@ class GeminiEmbedder:
         dim: int,
         timeout_seconds: float,
         max_retries: int = 2,
+        retry_backoff_seconds: float = 0.5,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key:
@@ -104,6 +112,9 @@ class GeminiEmbedder:
         self._dim = dim
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
+        # Exponential backoff base between retries. On a 429 an immediate retry
+        # just hammers the provider that asked us to slow down. Tests pass 0.0.
+        self._retry_backoff_seconds = retry_backoff_seconds
         self._owns_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -132,11 +143,24 @@ class GeminiEmbedder:
         return _extract_values(data.get("embedding"), dim=self._dim)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of documents (``RETRIEVAL_DOCUMENT``) in one call."""
+        """Embed a batch of documents (``RETRIEVAL_DOCUMENT``).
+
+        The input is split into provider-safe sub-batches of at most
+        ``_EMBED_BATCH_SIZE`` so a document with more chunks than the provider's
+        per-request cap does not fail as one oversized request. Results are
+        concatenated in input order.
+        """
         if not texts:
             return []
         for text in texts:
             self._guard_input(text)
+        out: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_BATCH_SIZE):
+            out.extend(await self._embed_batch(texts[start : start + _EMBED_BATCH_SIZE]))
+        return out
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        """Embed one provider-safe sub-batch (``<= _EMBED_BATCH_SIZE`` texts)."""
         url = f"{self._api_base}/v1beta/models/{self._model}:batchEmbedContents"
         payload = {
             "requests": [
@@ -146,7 +170,7 @@ class GeminiEmbedder:
                     "taskType": "RETRIEVAL_DOCUMENT",
                     "outputDimensionality": self._dim,
                 }
-                for text in texts
+                for text in batch
             ]
         }
         data = await self._post(url, payload, label="batchEmbedContents")
@@ -154,7 +178,7 @@ class GeminiEmbedder:
         if not isinstance(embeddings, list):
             raise EmbedderUnavailable("Gemini embeddings response missing 'embeddings' array")
         embeddings_list = cast(list[Any], embeddings)
-        if len(embeddings_list) != len(texts):
+        if len(embeddings_list) != len(batch):
             raise EmbedderUnavailable(
                 "Gemini embeddings batch response count did not match the request"
             )
@@ -184,7 +208,10 @@ class GeminiEmbedder:
         """
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
         last_exc: Exception | None = None
-        for _attempt in range(self._max_retries + 1):
+        for attempt in range(self._max_retries + 1):
+            if attempt > 0 and self._retry_backoff_seconds > 0:
+                # Exponential backoff before a retry (attempt 1 → base, 2 → 2×base…).
+                await asyncio.sleep(self._retry_backoff_seconds * (2 ** (attempt - 1)))
             try:
                 response = await self._http_client.post(url, json=payload, headers=headers)
             except httpx.TimeoutException as exc:

@@ -134,25 +134,47 @@ index version**, with queries always using the model that built the active index
 |---|---|---|
 | **Tier 1** | Same-provider retry on transient errors (429/503/timeout) — same model, same vector space, pure resilience | **Shipped** |
 | **Tier 2** | Provider *choice* via config (`CITEVYN_EMBEDDING_PROVIDER`); the chosen provider builds AND queries the index → always correct. No failover | **Shipped (Gemini wired; Voyage/OpenAI can be added behind the seam)** |
-| **Tier 3 guardrail** | Stamp `provider + model + dim` onto `IndexVersion` so a query embedder can be checked against the model that built the active index | **Shipped (the stamp only)** |
+| **Tier 3 groundwork** | *Write* `provider + model + dim` onto `IndexVersion` — provenance for debugging/observability and a future enforcement check | **Shipped (stamp is WRITTEN ONLY)** |
+| **Tier 3 enforcement** | *Read* the stamp and refuse/degrade a query whose embedder does not match the model that built the active index | **Deferred** |
 | **Tier 3 failover** | Automatic re-ingest under a secondary provider + query-time model matching driven off the stamp | **Deferred** |
+
+> ⚠️ **The stamp is provenance, NOT a live guardrail (yet).** Nothing on the read
+> path reads `IndexVersion.embedding_provider/model/dim`. So there is **no runtime
+> protection** against querying an index with a different embedder than built it. The
+> **dimension** mismatch is caught (boot guard: `embedding_dim` must equal the
+> `vector(1536)` column). A **same-dimension provider/model swap without re-ingest**
+> (e.g. `stub → gemini`, both 1536) is **NOT** caught and silently corrupts rankings.
+> The only current mitigation is the **manual** "re-ingest on provider switch"
+> procedure (RUNBOOK §3.4a). Making this a real guardrail is the first deferred item.
 
 ## Deferred / Future Work
 
-Revisit these **only if Gemini proves insufficient** in practice:
+Revisit these **only if Gemini proves insufficient** in practice — EXCEPT item 1, which
+is a correctness safety net worth doing whenever a second embedder becomes reachable:
 
-1. **Tier 3 cross-provider failover machinery** — build on the `IndexVersion` stamp:
-   detect Gemini outage at ingest → build a fallback index version under Voyage/OpenAI;
-   query-time selects the embedder matching the active index's stamp. Guarded so a
-   provider/dim mismatch between query and index is impossible.
-2. **Additional providers behind the seam** — Voyage `voyage-3` (1024) and OpenAI
+1. **Tier 3 enforcement (read the stamp) — TOP FOLLOW-UP.** At boot and/or per-query,
+   compare the current embedder's `provider/model/dim` against the active
+   `IndexVersion` stamp; on mismatch, **degrade the vector arm to `[]` with a loud
+   log** (or refuse to serve) rather than returning silently-corrupted rankings.
+   Closes the gap called out above and by the review. Suggested homes:
+   `app/answer/orchestrator.py` (read path) / `app/embeddings/factory.py` (guard).
+2. **Scope the read path to the active index version.** `HybridRetriever` is built with
+   `active_index_version=None`, and `promote` flips `IndexVersion.status` without
+   demoting the prior version's `Document` rows — so two active index versions would be
+   queried together (benign today: single provider, re-ingest reuses the `v-local`
+   key). This must be closed before the "re-ingest as a *new* index version" failover
+   pattern is used, or old-vector-space chunks mix into ranking. (Pre-existing wiring
+   gap, not introduced by #51.)
+3. **Tier 3 cross-provider failover machinery** — build on 1 + 2: detect provider
+   outage at ingest → build a fallback index version under Voyage/OpenAI; query-time
+   selects the embedder matching the active index's stamp.
+4. **Additional providers behind the seam** — Voyage `voyage-3` (1024) and OpenAI
    `text-embedding-3-small` (1536) clients, selectable by `CITEVYN_EMBEDDING_PROVIDER`.
-3. **CI pgvector image** — CI's `postgres:16` service must become
-   `pgvector/pgvector:pg16` for the postgres-marked pgvector test to run in CI
-   (addressed as part of this change; noted here for traceability).
-4. **Batching / rate-limit tuning** — ingest embeds per-chunk today; batch the
-   `embedContent` calls if corpus size grows enough to matter.
-5. **Corpus growth via `refresh_sources.sh`** — the upstream-snapshot ingestion module
+5. **Rate-limit / backoff tuning** — ingest now batches (`_EMBED_BATCH_SIZE=100`) with
+   exponential retry backoff; revisit the batch size / `Retry-After` handling at scale.
+6. **HNSW recall at scale** — selective `WHERE` (product_area/index_version) post-filters
+   the ANN scan; raise `hnsw.ef_search` or use partitioned/partial indexes for large corpora.
+7. **Corpus growth via `refresh_sources.sh`** — the upstream-snapshot ingestion module
    (`db/ingest/`) referenced by `scripts/refresh_sources.sh` still does not exist; real
    (licensed) corpus refresh is a separate effort.
 

@@ -36,6 +36,7 @@ def _client(handler, *, dim: int = 4, max_retries: int = 2) -> GeminiEmbedder:
         dim=dim,
         timeout_seconds=5.0,
         max_retries=max_retries,
+        retry_backoff_seconds=0.0,  # keep retry tests instant
         http_client=http_client,
     )
 
@@ -103,6 +104,58 @@ async def test_embed_documents_batch_happy_path() -> None:
     assert "batchEmbedContents" in str(seen["url"])
     assert seen["count"] == 2
     assert seen["taskType"] == "RETRIEVAL_DOCUMENT"
+
+
+async def test_embed_documents_splits_into_provider_safe_batches(monkeypatch) -> None:
+    """More texts than the batch cap → multiple requests, concatenated in order."""
+    import app.embeddings.gemini as gem
+
+    monkeypatch.setattr(gem, "_EMBED_BATCH_SIZE", 2)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        n = len(json.loads(request.content)["requests"])
+        calls.append(n)
+        # Echo a distinct first-coordinate per item so order is checkable.
+        base = sum(calls[:-1])  # items embedded before this batch
+        return httpx.Response(
+            200,
+            json={"embeddings": [{"values": [float(base + i), 0.0, 0.0, 0.0]} for i in range(n)]},
+        )
+
+    client = _client(handler, dim=4)
+    try:
+        vectors = await client.embed_documents(["a", "b", "c", "d", "e"])
+    finally:
+        await client.aclose()
+
+    # 5 texts, cap 2 → batches of [2, 2, 1].
+    assert calls == [2, 2, 1]
+    assert len(vectors) == 5
+    # Order preserved across batch boundaries: first coord is the global index.
+    assert [v[0] for v in vectors] == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+async def test_embed_documents_sub_batch_count_mismatch_raises() -> None:
+    """A count mismatch within a sub-batch surfaces as EmbedderUnavailable."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Ask for N, return N-1.
+        import json
+
+        n = len(json.loads(request.content)["requests"])
+        return httpx.Response(
+            200, json={"embeddings": [{"values": [0.1, 0.2, 0.3, 0.4]}] * (n - 1)}
+        )
+
+    client = _client(handler, dim=4)
+    try:
+        with pytest.raises(EmbedderUnavailable, match="count did not match"):
+            await client.embed_documents(["a", "b"])
+    finally:
+        await client.aclose()
 
 
 async def test_embed_documents_empty_batch_makes_no_request() -> None:
@@ -234,6 +287,45 @@ async def test_transient_error_is_retried_then_succeeds() -> None:
 
     assert vector == [0.1, 0.2, 0.3, 0.4]
     assert calls["n"] == 2  # one retry
+
+
+async def test_retry_applies_exponential_backoff(monkeypatch) -> None:
+    """A transient failure sleeps with the configured backoff before retrying."""
+    import app.embeddings.gemini as gem
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(gem.asyncio, "sleep", _fake_sleep)
+
+    n = {"i": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        n["i"] += 1
+        if n["i"] <= 2:
+            return httpx.Response(503, text="busy")
+        return httpx.Response(200, json={"embedding": {"values": [0.1, 0.2, 0.3, 0.4]}})
+
+    # backoff base 0.25 → attempt 1 sleeps 0.25, attempt 2 sleeps 0.5.
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=_API_BASE)
+    client = GeminiEmbedder(
+        model="gemini-embedding-001",
+        api_key="em-test",
+        api_base=_API_BASE,
+        dim=4,
+        timeout_seconds=5.0,
+        max_retries=2,
+        retry_backoff_seconds=0.25,
+        http_client=http_client,
+    )
+    try:
+        await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert sleeps == [0.25, 0.5]
 
 
 # ---------------------------------------------------------------------------

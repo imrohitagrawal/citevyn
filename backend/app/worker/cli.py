@@ -28,9 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
-from app.embeddings import validate_embedder_provider
+from app.embeddings import build_embedder, validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
-from app.worker.embedder import build_embedder
 from app.worker.fetchers import build_fetcher
 from app.worker.runner import IngestionRunner, RunResult, ensure_index_version
 

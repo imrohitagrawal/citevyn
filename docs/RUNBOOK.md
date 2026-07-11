@@ -195,13 +195,16 @@ both fail fast at startup if the provider/key/dimension are misconfigured.
    image ships it; a managed Postgres (RDS/Cloud SQL/Azure) may require the
    extension to be pre-allowlisted or a superuser-style grant before
    `alembic upgrade head`.
-2. **Embeddings are model-specific — you must re-ingest after switching
-   providers.** An index built under the stub (or a different model) holds
-   vectors in a different space; querying it with Gemini returns meaningless
-   results. After enabling Gemini, re-run ingestion (`citevyn-worker run`) to
-   rebuild the index, then promote it. `IndexVersion.embedding_provider/model/dim`
-   records which embedder built each index. `CITEVYN_EMBEDDING_DIM` must stay at
-   1536 (the `vector(1536)` column); changing it requires a new migration.
+2. **Embeddings are model-specific — you MUST re-ingest after switching
+   providers/models. This is not enforced at runtime.** An index built under the
+   stub (or a different model) holds vectors in a different space; querying it with
+   Gemini returns meaningless results **with no error**. There is currently **no
+   runtime guardrail** for a same-dimension model swap — `IndexVersion.embedding_provider/model/dim`
+   is recorded but not yet read (see ADR-0003, Tier 3 enforcement, deferred). So the
+   discipline is manual: after enabling or changing the embedder, **re-run ingestion
+   (`citevyn-worker run`) to rebuild the index, then promote it.** The dimension IS
+   guarded — `CITEVYN_EMBEDDING_DIM` must stay 1536 (the `vector(1536)` column) or the
+   app refuses to boot; changing it requires a new migration.
 
 **Degraded mode:** if the embedding provider is transiently down, the vector arm
 returns no hits (logged as `vector_retrieval_degraded_embedder_unavailable`) and
