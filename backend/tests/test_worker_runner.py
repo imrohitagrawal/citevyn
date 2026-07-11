@@ -216,6 +216,40 @@ async def test_ensure_index_version_creates_candidate(
     assert await _index_version_count(session) == 1
 
 
+@pytest.mark.asyncio
+async def test_ensure_index_version_stamps_and_refreshes_embedding_provenance(
+    session: AsyncSession,
+) -> None:
+    """The Tier-3 stamp is written on create and refreshed on re-ingest.
+
+    Covers ``ensure_index_version``'s existing-row branch: a rebuild under a
+    different embedder must not keep a stale provider/model/dim stamp."""
+    created = await ensure_index_version(
+        session,
+        index_version="v-stamp",
+        source_version_hash="sha256:s1",
+        embedding_provider="stub",
+        embedding_model="gemini-embedding-001",
+        embedding_dim=1536,
+    )
+    assert created.embedding_provider == "stub"
+    assert created.embedding_model == "gemini-embedding-001"
+    assert created.embedding_dim == 1536
+
+    # Re-ingest the same index_version under a different embedder → stamp refreshed.
+    refreshed = await ensure_index_version(
+        session,
+        index_version="v-stamp",
+        source_version_hash="sha256:s1",
+        embedding_provider="gemini",
+        embedding_model="gemini-embedding-001",
+        embedding_dim=1536,
+    )
+    assert refreshed.index_version == created.index_version
+    assert refreshed.embedding_provider == "gemini"
+    assert await _index_version_count(session) == 1
+
+
 # ---------------------------------------------------------------------------
 # End-to-end over all sources
 # ---------------------------------------------------------------------------

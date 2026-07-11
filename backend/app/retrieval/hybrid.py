@@ -19,10 +19,13 @@ when intent is ``exact_lookup``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.middleware import get_current_request_id
+from app.embeddings import EmbedderUnavailable
 from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.keyword import KeywordRetriever
@@ -30,6 +33,8 @@ from app.retrieval.rerank import Reranker
 from app.retrieval.types import EvidenceHit, RetrievedChunk
 from app.retrieval.vector import Embedder, VectorRetriever
 from app.routing.intent import Intent
+
+_logger = logging.getLogger("citevyn.retrieval")
 
 
 class HybridRetriever:
@@ -82,14 +87,18 @@ class HybridRetriever:
             # only keyword+vector and merge against the known-empty exact list.
             keyword_hits, vector_hits = await asyncio.gather(
                 keyword.retrieve(question, product_area=product_area, limit=limit),
-                vector.retrieve(question, product_area=product_area, limit=limit),
+                self._safe_vector_retrieve(
+                    vector, question, product_area=product_area, limit=limit
+                ),
             )
             exact_hits = []
         else:
             exact_hits, keyword_hits, vector_hits = await asyncio.gather(
                 exact.retrieve(question, product_area=product_area, limit=limit),
                 keyword.retrieve(question, product_area=product_area, limit=limit),
-                vector.retrieve(question, product_area=product_area, limit=limit),
+                self._safe_vector_retrieve(
+                    vector, question, product_area=product_area, limit=limit
+                ),
             )
 
         merged = _merge(question, exact_hits, keyword_hits, vector_hits)
@@ -100,6 +109,33 @@ class HybridRetriever:
         for idx, hit in enumerate(reranked, start=1):
             hit.rank = idx
         return reranked
+
+    async def _safe_vector_retrieve(
+        self,
+        vector: VectorRetriever,
+        question: str,
+        *,
+        product_area: str,
+        limit: int,
+    ) -> list[RetrievedChunk]:
+        """Run the vector arm, degrading to ``[]`` if the embedder is unavailable.
+
+        The vector arm is the only retriever that depends on an external embedding
+        provider. If that provider is transiently down (:class:`EmbedderUnavailable`),
+        the request should still be answerable from the exact-term and keyword
+        arms rather than 500-ing the whole query. We therefore degrade the vector
+        arm to no hits, but log a WARNING server-side so the degradation is
+        observable and never silent. Genuine database errors from the pgvector
+        query are NOT caught here — they propagate as real failures.
+        """
+        try:
+            return await vector.retrieve(question, product_area=product_area, limit=limit)
+        except EmbedderUnavailable:
+            _logger.warning(
+                "vector_retrieval_degraded_embedder_unavailable",
+                extra={"request_id": get_current_request_id()},
+            )
+            return []
 
 
 def _merge(

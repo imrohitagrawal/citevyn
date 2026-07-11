@@ -45,6 +45,13 @@ class SourceSpec:
     title: str
     fetcher: str
     location: str
+    # Official upstream URL this fixture paraphrases. Stamped onto
+    # :class:`Document.source_url` so citations resolve to a real source. The
+    # fixtures under ``tests/fixtures/sources`` are original, license-clean
+    # summaries — not verbatim copies — of the page at this URL (see
+    # docs/ADR/0003-embeddings-provider.md). Defaults to "" so ad-hoc
+    # ``SourceSpec`` constructions (tests) need not supply it.
+    source_url: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +72,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         title="Claude API Reference",
         fetcher="local",
         location="tests/fixtures/sources/claude_api.md",
+        source_url="https://docs.anthropic.com/en/api/overview",
     ),
     SourceSpec(
         name="claude_code",
@@ -72,6 +80,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         title="Claude Code Reference",
         fetcher="local",
         location="tests/fixtures/sources/claude_code.md",
+        source_url="https://docs.anthropic.com/en/docs/claude-code/overview",
     ),
     SourceSpec(
         name="codex",
@@ -79,6 +88,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         title="Codex CLI Reference",
         fetcher="local",
         location="tests/fixtures/sources/codex.md",
+        source_url="https://developers.openai.com/codex/cli/",
     ),
     SourceSpec(
         name="gemini_api",
@@ -86,6 +96,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         title="Gemini API Reference",
         fetcher="local",
         location="tests/fixtures/sources/gemini_api.md",
+        source_url="https://ai.google.dev/gemini-api/docs",
     ),
 )
 

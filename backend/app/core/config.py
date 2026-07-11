@@ -105,10 +105,20 @@ class Settings(BaseSettings):
     openrouter_model: str = "google/gemini-2.5-flash"
     openrouter_timeout_seconds: float = Field(default=15.0, gt=0.0)
 
-    # --- Retrieval (Slice 4+) ---
-    embedding_provider: str = "stub"
-    embedding_model: str = "voyage-3"
-    embedding_dim: int = Field(default=1024, ge=1)
+    # --- Retrieval / embeddings (Slice 4+ / #51) ---
+    # Provider seam mirroring the LLM factory. "stub" is the deterministic,
+    # keyless offline default (hermetic tests, local dev); "gemini" uses
+    # gemini-embedding-001 via CITEVYN_GEMINI_API_KEY (the same key as the LLM).
+    # See docs/ADR/0003-embeddings-provider.md for the provider decision.
+    embedding_provider: str = "stub"  # "stub" | "gemini"
+    embedding_model: str = "gemini-embedding-001"
+    # 1536 is the largest recommended Gemini Matryoshka output size that fits
+    # under pgvector's 2000-dim index limit. The pgvector column is
+    # vector(embedding_dim); changing this value requires a new migration to
+    # keep the column dimension in lock-step (see migration 0004).
+    embedding_dim: int = Field(default=1536, ge=1, le=2000)
+    embedding_timeout_seconds: float = Field(default=15.0, gt=0.0)
+    embedding_max_retries: int = Field(default=2, ge=0)
     retrieval_top_k: int = Field(default=6, ge=1)
     retrieval_max_candidates: int = Field(default=20, ge=1)
 
@@ -216,6 +226,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CITEVYN_ANTHROPIC_API_KEY must be set when "
                 "CITEVYN_LLM_PROVIDER='anthropic' and "
+                "CITEVYN_ENVIRONMENT='production'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_gemini_key_for_embeddings_in_production(self) -> "Settings":
+        # The Gemini embedder reads ``gemini_api_key``. In production with the
+        # gemini embedding provider selected, a missing key would only fail on the
+        # first ingest/query (lazy build); fail at parse time instead so a
+        # misconfigured deploy is caught at boot.
+        if (
+            self.environment == "production"
+            and self.embedding_provider == "gemini"
+            and not self.gemini_api_key
+        ):
+            raise ValueError(
+                "CITEVYN_GEMINI_API_KEY must be set when "
+                "CITEVYN_EMBEDDING_PROVIDER='gemini' and "
                 "CITEVYN_ENVIRONMENT='production'."
             )
         return self

@@ -28,8 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
+from app.embeddings import build_embedder, validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
-from app.worker.embedder import build_embedder
 from app.worker.fetchers import build_fetcher
 from app.worker.runner import IngestionRunner, RunResult, ensure_index_version
 
@@ -87,6 +87,9 @@ async def _drive(
             session,
             index_version=index_version,
             source_version_hash=runner.source_version_hash,
+            embedding_provider=runner.embedding_provider,
+            embedding_model=runner.embedding_model,
+            embedding_dim=runner.embedding_dim,
         )
         await session.commit()
 
@@ -137,13 +140,20 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     stamp every :class:`Document` / :class:`Chunk` row it creates,
     and (c) satisfy the FK on ``documents``.
     """
+    # Fail fast on a bad embedding config (unknown provider, stub-in-prod, or a
+    # dimension that does not match the pgvector column) so a standalone worker
+    # cannot silently build a hash-only or wrong-dim index. Mirrors the API's
+    # startup guard in app.main.
+    validate_embedder_provider(settings)
     fetcher = build_fetcher(_pick_first_source())  # build default-root LocalFetcher
-    embedder = build_embedder()
+    embedder = build_embedder(settings)
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
         source_version_hash=settings.source_version_hash,
         index_version=index_version,
+        embedding_provider=settings.embedding_provider,
+        embedding_model=settings.embedding_model,
     )
 
 

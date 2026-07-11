@@ -1,87 +1,25 @@
 """Vector retrieval (pgvector).
 
-On Postgres, performs a cosine-distance query against the ``embedding``
-column added in migration ``0003``. On SQLite (the hermetic test
-engine), the column doesn't exist, so the retriever returns ``[]``.
+On Postgres, performs a cosine-distance query against the ``embedding`` pgvector
+column (migration ``0004``) using the ``<=>`` operator and the HNSW index. On
+SQLite (the hermetic test engine), pgvector does not exist, so the retriever
+returns ``[]`` — the rest of the pipeline (exact + keyword) still runs.
 
-A :class:`StubEmbedder` is shipped for tests and offline development.
-It produces deterministic hash-bucketed vectors so the same text always
-embeds to the same point. ``AnthropicEmbeddingsClient`` is the
-production placeholder, gated by ``CITEVYN_EMBEDDING_PROVIDER=anthropic``.
+The :class:`Embedder` seam, :class:`StubEmbedder`, and :func:`build_embedder` now
+live in :mod:`app.embeddings` (one provider seam shared by the write and read
+paths). They are re-exported here for backward compatibility.
 """
 
 from __future__ import annotations
 
-import hashlib
-import math
-from typing import Protocol
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
+from app.embeddings import Embedder, StubEmbedder, build_embedder
 from app.models import Chunk, Document, DocumentStatus
 from app.retrieval.types import RetrievedChunk
 
-
-class Embedder(Protocol):
-    async def embed(self, text: str) -> list[float]: ...
-
-
-class StubEmbedder:
-    """Deterministic, in-process embedder.
-
-    Same input → same vector. The vector is normalized to unit length
-    so cosine distance is well defined. The hash bucket mod the
-    dimension produces a stable point per text, which lets us write
-    hermetic vector tests without a real embedding model.
-    """
-
-    def __init__(self, dim: int) -> None:
-        self._dim = dim
-
-    async def embed(self, text: str) -> list[float]:
-        if not text:
-            return [0.0] * self._dim
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        # Use the first 32 bytes (256 bits) and bucket into dim slots.
-        ints = [b for b in digest]
-        # Stretch the bytes into ``dim`` floats by repeating the digest.
-        raw: list[float] = []
-        i = 0
-        while len(raw) < self._dim:
-            raw.append((ints[i % len(ints)] - 128) / 128.0)
-            i += 1
-        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
-        return [x / norm for x in raw]
-
-
-class AnthropicEmbeddingsClient:
-    """Production embedder placeholder. Throws until an HTTP impl ships."""
-
-    def __init__(self, *, model: str, api_key: str | None, api_base: str) -> None:
-        if not api_key:
-            raise RuntimeError(
-                "CITEVYN_ANTHROPIC_API_KEY is required when CITEVYN_EMBEDDING_PROVIDER=anthropic"
-            )
-        self._model = model
-        self._api_key = api_key
-        self._api_base = api_base
-
-    async def embed(self, text: str) -> list[float]:  # pragma: no cover - network
-        raise NotImplementedError(
-            "AnthropicEmbeddingsClient is a placeholder; wire httpx before enabling."
-        )
-
-
-def build_embedder(settings: Settings) -> Embedder:
-    if settings.embedding_provider == "anthropic":
-        return AnthropicEmbeddingsClient(
-            model=settings.embedding_model,
-            api_key=settings.anthropic_api_key,
-            api_base=settings.anthropic_api_base,
-        )
-    return StubEmbedder(dim=settings.embedding_dim)
+__all__ = ["Embedder", "StubEmbedder", "VectorRetriever", "build_embedder"]
 
 
 class VectorRetriever:
@@ -103,27 +41,27 @@ class VectorRetriever:
         product_area: str | None = None,
         limit: int = 10,
     ) -> list[RetrievedChunk]:
-        # Vector search is only meaningful when an embedder is wired
-        # AND the database supports it. The hermetic test engine is
-        # SQLite (no pgvector); the production engine is Postgres. We
-        # detect the dialect at runtime and bail out cleanly on
-        # SQLite so the rest of the pipeline can still run.
+        # Vector search is only meaningful when an embedder is wired AND the
+        # database supports pgvector. The hermetic test engine is SQLite (no
+        # pgvector); the production engine is Postgres. Detect the dialect at
+        # runtime and bail out cleanly on SQLite so the rest of the pipeline can
+        # still run. The dialect guard runs BEFORE the ``<=>`` query is built, so
+        # the pgvector operator is never emitted against a non-pgvector backend.
         if self._embedder is None:
             return []
         if not self._session.bind or self._session.bind.dialect.name != "postgresql":
             return []
 
         embedding = await self._embedder.embed(question)
-        # ``Chunk.embedding`` is a pgvector column that lands in
-        # Phase 2 (see ``app/models/chunks.py`` docstring); the
-        # type checker cannot see the attribute because it has not
-        # been declared on the ORM model yet.
+        # Compute the cosine distance in the database and select it as a column
+        # so results carry a real score and are ordered by the HNSW index.
+        distance = Chunk.embedding.cosine_distance(embedding).label("distance")  # type: ignore[attr-defined]
         stmt = (
-            select(Chunk, Document)
+            select(Chunk, Document, distance)
             .join(Document, Chunk.document_id == Document.document_id)
             .where(Document.status == DocumentStatus.active)
             .where(Chunk.embedding.is_not(None))  # type: ignore[attr-defined]
-            .order_by(Chunk.embedding.cosine_distance(embedding))  # type: ignore[attr-defined]
+            .order_by(distance)
             .limit(limit)
         )
         if self._active_index_version is not None:
@@ -133,9 +71,9 @@ class VectorRetriever:
 
         rows = (await self._session.execute(stmt)).all()
         results: list[RetrievedChunk] = []
-        for chunk, doc in rows:
-            distance = chunk.embedding.cosine_distance(embedding)  # type: ignore[attr-defined]
-            score = max(0.0, 1.0 - float(distance))
+        for chunk, doc, dist in rows:
+            # Cosine distance is in [0, 2]; convert to a [0, 1]-ish similarity.
+            score = max(0.0, 1.0 - float(dist))
             results.append(
                 RetrievedChunk(
                     chunk_id=chunk.chunk_id,

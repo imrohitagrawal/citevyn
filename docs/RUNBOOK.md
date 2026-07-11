@@ -179,6 +179,37 @@ The wedged job will be marked `failed` on next startup (or by
 the next worker's poll if `restart: on-failure` is configured
 on the job row).
 
+### 3.4a Embeddings: enabling the real provider (#51)
+
+**Context:** By default `CITEVYN_EMBEDDING_PROVIDER=stub` (deterministic,
+non-semantic). Semantic vector retrieval needs the real embedder.
+
+**To enable:** set `CITEVYN_EMBEDDING_PROVIDER=gemini` and provide
+`CITEVYN_GEMINI_API_KEY` (the same key as the LLM). The API and the worker
+both fail fast at startup if the provider/key/dimension are misconfigured.
+
+**Two operational gotchas:**
+
+1. **Migration `0004` runs `CREATE EXTENSION IF NOT EXISTS vector`.** This needs
+   a role with permission to create extensions. The `pgvector/pgvector:pg*`
+   image ships it; a managed Postgres (RDS/Cloud SQL/Azure) may require the
+   extension to be pre-allowlisted or a superuser-style grant before
+   `alembic upgrade head`.
+2. **Embeddings are model-specific — you MUST re-ingest after switching
+   providers/models. This is not enforced at runtime.** An index built under the
+   stub (or a different model) holds vectors in a different space; querying it with
+   Gemini returns meaningless results **with no error**. There is currently **no
+   runtime guardrail** for a same-dimension model swap — `IndexVersion.embedding_provider/model/dim`
+   is recorded but not yet read (see ADR-0003, Tier 3 enforcement, deferred). So the
+   discipline is manual: after enabling or changing the embedder, **re-run ingestion
+   (`citevyn-worker run`) to rebuild the index, then promote it.** The dimension IS
+   guarded — `CITEVYN_EMBEDDING_DIM` must stay 1536 (the `vector(1536)` column) or the
+   app refuses to boot; changing it requires a new migration.
+
+**Degraded mode:** if the embedding provider is transiently down, the vector arm
+returns no hits (logged as `vector_retrieval_degraded_embedder_unavailable`) and
+answers still come from exact-term + keyword retrieval — the request does not fail.
+
 ### 3.5 Caddy won't issue the certificate
 
 **Symptom:** `curl https://citevyn.example.com/health` returns

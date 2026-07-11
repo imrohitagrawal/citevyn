@@ -98,6 +98,70 @@ async def test_vector_retriever_returns_empty_without_embedder(seeded_session) -
     assert await r.retrieve("anything", product_area=Domain.claude_api.value) == []
 
 
+async def test_hybrid_degrades_when_embedder_unavailable(seeded_session) -> None:
+    """A transient embedder outage degrades the vector arm to [] with a WARN,
+    so exact+keyword still answer instead of the whole query 500-ing (#51 review).
+
+    A handler is attached directly to the ``citevyn.retrieval`` logger (rather than
+    caplog, which depends on propagation/root state that other tests mutate) so the
+    "logged, not silent" assertion is deterministic under any test ordering."""
+    import logging
+
+    from app.embeddings import EmbedderUnavailable
+
+    class _RaisingVector:
+        async def retrieve(self, question, *, product_area, limit):
+            raise EmbedderUnavailable("Gemini embeddings returned 503")
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("citevyn.retrieval")
+    handler = _Capture()
+    logger.addHandler(handler)
+    # Neutralise any logging-config side effect from earlier tests (a dependency's
+    # dictConfig can flip .disabled on pre-existing loggers). Production only calls
+    # basicConfig, which never disables loggers, so this is test hygiene, not a
+    # behavior change.
+    prev_level, logger.level = logger.level, logging.WARNING
+    prev_disabled, logger.disabled = logger.disabled, False
+    try:
+        h = HybridRetriever(seeded_session, active_index_version="v1")
+        result = await h._safe_vector_retrieve(
+            _RaisingVector(),  # type: ignore[arg-type]
+            "anything",
+            product_area=Domain.claude_api.value,
+            limit=5,
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.level = prev_level
+        logger.disabled = prev_disabled
+
+    assert result == []
+    assert any("vector_retrieval_degraded" in r.getMessage() for r in records)
+
+
+async def test_hybrid_does_not_swallow_generic_errors(seeded_session) -> None:
+    """A non-EmbedderUnavailable error is a real failure and must propagate."""
+
+    class _BrokenVector:
+        async def retrieve(self, question, *, product_area, limit):
+            raise RuntimeError("database exploded")
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    with pytest.raises(RuntimeError, match="database exploded"):
+        await h._safe_vector_retrieve(
+            _BrokenVector(),  # type: ignore[arg-type]
+            "anything",
+            product_area=Domain.claude_api.value,
+            limit=5,
+        )
+
+
 async def test_hybrid_short_circuits_on_exact_lookup(seeded_session) -> None:
     h = HybridRetriever(seeded_session, active_index_version="v1")
     hits = await h.retrieve(

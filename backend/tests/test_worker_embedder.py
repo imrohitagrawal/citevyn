@@ -1,106 +1,92 @@
-"""Tests for :mod:`app.worker.embedder` (Slice 8 step 6).
+"""Tests for the :class:`app.embeddings.StubEmbedder` via the worker seam.
 
-The embedder's contract is ``list[float]`` — the numpy
-``.tolist()`` branch used to live on
-:class:`PickledEmbedding` and was pushed out to the
-producer. These tests pin the contract:
+As of #51 the embedder is the unified async seam in :mod:`app.embeddings`,
+re-exported from :mod:`app.worker.embedder` for backward compatibility. These
+tests pin the stub contract used by the ingest path:
 
-* ``StubEmbedder.embed`` returns a plain list, not a numpy
-  array. The numpy gate skips cleanly when numpy isn't
-  installed.
+* ``embed`` / ``embed_documents`` are async and return plain ``list[float]``.
 * The output is deterministic — same text → same vector.
-* The output has the configured dim.
-* Two distinct inputs produce vectors that are not equal.
+* The output has the configured dim and is unit-normalised (so cosine distance
+  against the pgvector column is well defined).
+* ``build_embedder`` returns the stub by default (provider="stub", no key).
 """
 
 from __future__ import annotations
 
-import pytest
+import math
 
+from app.core.config import Settings
 from app.worker.embedder import StubEmbedder, build_embedder
 
 
-def test_stub_embedder_returns_plain_list() -> None:
-    """``embed`` returns a Python ``list``, not numpy."""
+async def test_stub_embedder_returns_plain_list() -> None:
+    """``embed`` returns a Python ``list[float]``, not numpy."""
     embedder = StubEmbedder(dim=16)
-    vector = embedder.embed("hello world")
+    vector = await embedder.embed("hello world")
     assert isinstance(vector, list)
     assert all(isinstance(v, float) for v in vector)
 
 
-def test_stub_embedder_dim_matches_configured_value() -> None:
+async def test_stub_embedder_dim_matches_configured_value() -> None:
     """The output length equals ``embedder.dim``."""
     embedder = StubEmbedder(dim=128)
-    assert len(embedder.embed("anything")) == 128
+    assert len(await embedder.embed("anything")) == 128
 
 
-def test_stub_embedder_is_deterministic() -> None:
+async def test_stub_embedder_is_deterministic() -> None:
     """Same text → same vector across calls."""
     embedder = StubEmbedder(dim=64)
-    a = embedder.embed("claude opus")
-    b = embedder.embed("claude opus")
+    a = await embedder.embed("claude opus")
+    b = await embedder.embed("claude opus")
     assert a == b
 
 
-def test_stub_embedder_distinct_inputs_diverge() -> None:
+async def test_stub_embedder_distinct_inputs_diverge() -> None:
     """Different text → different vector."""
     embedder = StubEmbedder(dim=64)
-    a = embedder.embed("claude opus")
-    b = embedder.embed("gemini flash")
+    a = await embedder.embed("claude opus")
+    b = await embedder.embed("gemini flash")
     assert a != b
 
 
-def test_stub_embedder_values_in_unit_interval() -> None:
-    """Values are in [0, 1] (the digest byte / 255 mapping)."""
+async def test_stub_embedder_is_unit_normalised() -> None:
+    """Non-empty vectors have length ~1 so cosine distance is well defined."""
     embedder = StubEmbedder(dim=64)
-    vector = embedder.embed("rate limit env var")
-    assert all(0.0 <= v <= 1.0 for v in vector)
+    vector = await embedder.embed("rate limit env var")
+    assert math.isclose(math.sqrt(sum(x * x for x in vector)), 1.0, rel_tol=1e-9)
 
 
-def test_stub_embedder_accepts_numpy_array_via_tolist() -> None:
-    """If a future embedder uses numpy, ``tolist()`` is the seam.
-
-    The :class:`StubEmbedder` doesn't need numpy. This
-    test asserts the contract that *if* a numpy array
-    somehow arrived at the producer, the producer's
-    responsibility is to convert it — NOT the storage
-    layer's. We use numpy to demonstrate the producer
-    side; the decorator test in
-    :mod:`tests.test_chunk_embedding` already proves the
-    storage layer rejects numpy.
-
-    Skipped when numpy is not installed.
-    """
-    pytest.importorskip("numpy")
-    import numpy as np
-
+async def test_stub_embedder_empty_text_is_zero_vector() -> None:
+    """Empty text embeds to the zero vector (honest 'no signal')."""
     embedder = StubEmbedder(dim=32)
-
-    # Pretend a real embedder returns an ndarray. The
-    # producer (a future ``VoyageEmbedder``) calls
-    # ``.tolist()`` to satisfy the contract.
-    raw = np.linspace(-1.0, 1.0, 32, dtype="float32")
-    converted: list[float] = list(raw.tolist())  # producer seam
-
-    # The stub doesn't care about the input — it just
-    # returns its own vector. The point of this test is
-    # that the producer's ``.tolist()`` is well-defined
-    # and the contract is honored.
-    vector = embedder.embed("anything")
-    assert isinstance(vector, list)
-    assert len(vector) == 32
-    # The converted array satisfies the contract too.
-    assert isinstance(converted, list)
-    assert all(isinstance(v, float) for v in converted)
+    vector = await embedder.embed("")
+    assert vector == [0.0] * 32
 
 
-def test_build_embedder_returns_stub() -> None:
-    """The default factory returns a :class:`StubEmbedder`."""
-    embedder = build_embedder()
+async def test_stub_embed_documents_batches_in_order() -> None:
+    """``embed_documents`` returns one vector per input, preserving order."""
+    embedder = StubEmbedder(dim=8)
+    texts = ["alpha", "beta", "gamma"]
+    vectors = await embedder.embed_documents(texts)
+    assert len(vectors) == 3
+    # Each document vector equals the single-embed of the same text (same space).
+    for text, vector in zip(texts, vectors, strict=True):
+        assert vector == await embedder.embed(text)
+
+
+async def test_stub_embed_documents_empty_batch() -> None:
+    """An empty batch returns an empty list (no error)."""
+    embedder = StubEmbedder(dim=8)
+    assert await embedder.embed_documents([]) == []
+
+
+def test_build_embedder_returns_stub_by_default() -> None:
+    """The default factory (provider='stub') returns a :class:`StubEmbedder`."""
+    embedder = build_embedder(Settings())
     assert isinstance(embedder, StubEmbedder)
 
 
-def test_stub_embedder_dim_is_exposed() -> None:
-    """The ``dim`` property is reachable without instantiating a vector."""
-    embedder = StubEmbedder(dim=256)
+def test_build_embedder_stub_dim_follows_settings() -> None:
+    """The stub's dim is driven by ``Settings.embedding_dim``."""
+    embedder = build_embedder(Settings(embedding_dim=256))
     assert embedder.dim == 256

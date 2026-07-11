@@ -12,9 +12,9 @@ import enum
 import pickle
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import CHAR, DateTime, LargeBinary, String, TypeDecorator
+from sqlalchemy import CHAR, DateTime, Float, LargeBinary, String, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -210,3 +210,81 @@ class PickledEmbedding(TypeDecorator):  # type: ignore[type-arg]
         # value is already a plain list — no further normalisation
         # is needed and a defensive ``tolist()`` would be dead code.
         return list(pickle.loads(value))
+
+
+class EmbeddingVector(TypeDecorator):  # type: ignore[type-arg]
+    """Portable embedding column: pgvector on Postgres, pickled blob on SQLite.
+
+    This is the ``0004`` successor to :class:`PickledEmbedding`. On Postgres the
+    column is a real ``vector(embedding_dim)`` (migration ``0004``), so the
+    pgvector cosine-distance operator (``<=>``) runs in the database and the HNSW
+    index is used. On SQLite — the hermetic test engine, which has no pgvector —
+    the column falls back to a pickled ``list[float]`` blob so the test suite runs
+    without a vector database.
+
+    Design notes
+    ------------
+    * **Dimension source of truth** is ``Settings.embedding_dim``, resolved lazily
+      in :meth:`load_dialect_impl` so importing the model does not force a settings
+      load. Postgres DDL is owned by the alembic migration, not ORM ``create_all``;
+      the ORM ``Vector(dim)`` is used for bind/result processing and query
+      compilation.
+    * **List contract**, identical to :class:`PickledEmbedding`: the value is a
+      ``list[float]``; numpy arrays are the producer's responsibility to convert.
+      The strictness keeps a future ndarray regression loud, not silent.
+    * **Comparators** (``cosine_distance``/``l2_distance``/``max_inner_product``)
+      emit the pgvector operators. They are only ever executed on Postgres — the
+      retriever short-circuits before building the query on any other dialect.
+    * **Security:** as with :class:`PickledEmbedding`, never accept pickle bytes
+      from network input; embeddings are written by the worker/orchestrator only.
+    """
+
+    impl = LargeBinary
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        if dialect.name == "postgresql":
+            from pgvector.sqlalchemy import Vector
+
+            from app.core.config import get_settings
+
+            return dialect.type_descriptor(Vector(get_settings().embedding_dim))
+        return dialect.type_descriptor(LargeBinary())
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise TypeError(
+                "embedding must be a list[float]; "
+                f"got {type(value).__name__}. "
+                "Convert numpy arrays with .tolist() at the producer."
+            )
+        if dialect.name == "postgresql":
+            # pgvector's ``Vector`` impl renders the list as a vector literal.
+            return cast(list[float], value)
+        return pickle.dumps(value)
+
+    def process_result_value(self, value: Any, dialect: Any) -> list[float] | None:
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            # pgvector returns a list-like (or numpy array); normalise to list.
+            return [float(v) for v in value]
+        return list(pickle.loads(value))
+
+    class comparator_factory(TypeDecorator.Comparator):  # type: ignore[type-arg]
+        """Expose the pgvector distance operators on the mapped column.
+
+        Mirrors ``pgvector.sqlalchemy.Vector``'s own comparator so
+        ``Chunk.embedding.cosine_distance(vec)`` compiles to ``embedding <=> :vec``.
+        """
+
+        def cosine_distance(self, other: Any) -> Any:
+            return self.op("<=>", return_type=Float)(other)
+
+        def l2_distance(self, other: Any) -> Any:
+            return self.op("<->", return_type=Float)(other)
+
+        def max_inner_product(self, other: Any) -> Any:
+            return self.op("<#>", return_type=Float)(other)
