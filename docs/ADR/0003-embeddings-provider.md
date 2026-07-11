@@ -168,13 +168,16 @@ items 3–7 → **#59**.
    stamp → allow (backward compat). Homes: `app/retrieval/hybrid.py` (enforcement, reuses
    the `_safe_vector_retrieve` degrade seam) + `app/embeddings/factory.py` (identity
    helper); wired in `app/answer/orchestrator.py::_default_retriever`.
-2. **Scope the read path to the active index version.** `HybridRetriever` is built with
-   `active_index_version=None`, and `promote` flips `IndexVersion.status` without
-   demoting the prior version's `Document` rows — so two active index versions would be
-   queried together (benign today: single provider, re-ingest reuses the `v-local`
-   key). This must be closed before the "re-ingest as a *new* index version" failover
-   pattern is used, or old-vector-space chunks mix into ranking. (Pre-existing wiring
-   gap, not introduced by #51.)
+2. **Scope the read path to the active index version — SHIPPED (#58).** The orchestrator
+   now resolves the active index version once per `ask` and threads it into the default
+   `HybridRetriever` (`app/answer/orchestrator.py::_default_retriever`), which scopes all
+   three arms to `Document.index_version == active`. The no-active-index case passes
+   `None` (the `"" → None` conversion) so retrieval falls back to a status-only filter and
+   a fresh / un-promoted database still answers rather than filtering to nothing. `promote`
+   already keeps the `IndexVersion` active-singleton (demotes the prior active row to
+   `previous_good`), so no `Document`-row backfill was needed — read scoping is correct even
+   for pre-existing multi-version data. This closes the failover invariant required by
+   item 3. (Pre-existing wiring gap, not introduced by #51.)
 3. **Tier 3 cross-provider failover machinery** — build on 1 + 2: detect provider
    outage at ingest → build a fallback index version under Voyage/OpenAI; query-time
    selects the embedder matching the active index's stamp.

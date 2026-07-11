@@ -13,7 +13,6 @@ in the same change.
 
 | Issue | Title | Area | Priority | Origin |
 |---|---|---|---|---|
-| [#58](https://github.com/imrohitagrawal/citevyn/issues/58) | Retrieval: scope read path to active index version (promote should demote prior docs) | retrieval | Medium (blocks failover) | #51 / PR #56, ADR-0003 F2 |
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
 | [#65](https://github.com/imrohitagrawal/citevyn/issues/65) | Cache: answer-cache key omits embedder identity — degrade WARN silenced on cache hits + stale degraded answers persist to TTL | cache / observability | Low (obs + recovery-latency; un-cached path correct) | #57 / PR #64, ADR-0003 |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |

@@ -390,6 +390,107 @@ async def test_hybrid_retrieve_answers_from_keyword_on_mismatch(seeded_session) 
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
 
 
+# ---------------------------------------------------------------------------
+# #58: scope the read path to the active index version. With two index versions
+# present (one active, one prior ``previous_good``) whose ``Document`` rows are
+# BOTH ``status=active``, retrieval must return ONLY active-version documents —
+# old-vector-space chunks from a prior version must never mix into ranking, or
+# the ADR-0003 failover invariant breaks. Exercised via the KEYWORD arm because
+# the vector arm is inert on SQLite.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_two_versions(session) -> tuple:
+    """Seed an ACTIVE (``v-active``) and a PRIOR (``v-old``, ``previous_good``)
+    index version, each with one codex doc whose chunk shares the marker keyword
+    ``zorptastic``. BOTH docs are ``status=active`` — the exact coexistence the
+    #58 read-scoping fix must disambiguate. Returns ``(active_doc_id, old_doc_id)``.
+    """
+    import uuid
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add_all(
+        [
+            IndexVersion(
+                index_version="v-old",
+                status=IndexStatus.previous_good,
+                source_version_hash="sha256:v-old",
+                created_at=now - timedelta(hours=1),
+                promoted_at=now - timedelta(hours=1),
+            ),
+            IndexVersion(
+                index_version="v-active",
+                status=IndexStatus.active,
+                source_version_hash="sha256:v-active",
+                created_at=now,
+                promoted_at=now,
+            ),
+        ]
+    )
+    await session.flush()
+
+    doc_ids: dict[str, uuid.UUID] = {}
+    for version in ("v-old", "v-active"):
+        doc = Document(
+            document_id=uuid.uuid4(),
+            index_version=version,
+            source_name="codex",
+            product_area="codex",
+            source_url=f"https://docs.example.com/{version}",
+            title=f"Codex {version}",
+            content_checksum=f"sha256:{version}",
+            last_fetched_at=now,
+            last_indexed_at=now,
+            status=DocumentStatus.active,  # BOTH active — the coexistence bug
+        )
+        session.add(doc)
+        await session.flush()
+        session.add(
+            Chunk(
+                chunk_id=uuid.uuid4(),
+                document_id=doc.document_id,
+                product_area="codex",
+                section_path="/x",
+                heading="H",
+                parent_heading=None,
+                chunk_text=f"The codex zorptastic behaviour in {version}.",
+                context_summary="zorptastic",
+                exact_terms=[],
+                chunk_order=0,
+                content_checksum=f"sha256:{version}-chunk",
+            )
+        )
+        await session.flush()
+        doc_ids[version] = doc.document_id
+    await session.commit()
+    return doc_ids["v-active"], doc_ids["v-old"]
+
+
+async def test_hybrid_scopes_to_active_index_version(session) -> None:
+    # Regression: fails before the fix (both docs returned), passes after.
+    active_doc, old_doc = await _seed_two_versions(session)
+    h = HybridRetriever(session, active_index_version="v-active")
+    hits = await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)
+    assert hits, "the active-version chunk must be found"
+    doc_ids = {h_.document_id for h_ in hits}
+    assert active_doc in doc_ids
+    assert old_doc not in doc_ids, "prior-version doc must never mix into ranking"
+
+
+async def test_hybrid_no_active_index_returns_status_active_docs(session) -> None:
+    # The no-active-index case (``active_index_version=None``) must NOT filter to
+    # nothing — it falls back to a status-only filter (pre-#58 behavior), so BOTH
+    # status=active docs come back rather than an empty result.
+    active_doc, old_doc = await _seed_two_versions(session)
+    h = HybridRetriever(session, active_index_version=None)
+    hits = await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)
+    doc_ids = {h_.document_id for h_ in hits}
+    assert active_doc in doc_ids and old_doc in doc_ids
+
+
 async def test_reranker_passthrough() -> None:
     from uuid import uuid4
 

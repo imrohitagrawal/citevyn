@@ -168,12 +168,27 @@ async def _retrieve_index_version_hash(
     return row.index_version, row.source_version_hash
 
 
-def _default_retriever(settings: Settings, session: AsyncSession) -> _RetrieverLike:
+def _default_retriever(
+    settings: Settings,
+    session: AsyncSession,
+    *,
+    active_index_version: str | None = None,
+) -> _RetrieverLike:
     """Build the default hybrid retriever.
 
     Injected as a free function so tests can pass their own
     :class:`_RetrieverLike` and the orchestrator never imports the
     pgvector or FTS machinery on its own.
+
+    ``active_index_version`` scopes every retrieval arm to the documents of the
+    currently-active index version (#58): once "re-ingest as a *new* index
+    version" is used, old- and new-vector-space ``Document`` rows both sit at
+    ``status=active``, so filtering on status alone would mix vector spaces into
+    ``<=>`` ranking and break the ADR-0003 failover invariant. ``None`` (the
+    no-active-index case) leaves the arms filtering on ``status`` only — exactly
+    the pre-#58 behavior — so a fresh / un-promoted database still answers rather
+    than filtering to nothing. This is orthogonal to the #57 provenance gate
+    (``embedder_identity``, "which embedder"); this is "which documents".
 
     The embedder comes from the process-wide singleton
     (:func:`app.embeddings.get_embedder`) so the vector arm is live: the query is
@@ -191,6 +206,7 @@ def _default_retriever(settings: Settings, session: AsyncSession) -> _RetrieverL
     """
     return HybridRetriever(
         session,
+        active_index_version=active_index_version,
         embedder=get_embedder(settings),
         embedder_identity=configured_embedder_identity(settings),
     )
@@ -217,7 +233,13 @@ class Orchestrator:
         self._settings = settings
         self._session = session
         self._llm = llm or get_llm_client(settings)
-        self._retriever = retriever or _default_retriever(settings, session)
+        # An explicitly-injected retriever always wins (tests). The DEFAULT is
+        # built lazily in ``ask`` — only after the active index version is
+        # resolved — so it can scope retrieval to that version (#58). Building it
+        # here in ``__init__`` (a sync method) could not see the async-resolved
+        # active index, which is why the default was previously stuck at
+        # ``active_index_version=None`` and mixed old-version documents in.
+        self._injected_retriever = retriever
         self._cache = cache or build_answer_cache_store(settings, session)
         self._generator = AnswerGenerator(
             self._llm,
@@ -262,10 +284,11 @@ class Orchestrator:
                 intent=Intent.unsupported,
             )
 
-        # Look up the active index so the cache key carries the
-        # current source version. A missing index returns an empty
-        # hash, which still produces a stable (and unique) key.
-        _active_index_version, source_version_hash = await _retrieve_index_version_hash(
+        # Look up the active index ONCE so the cache key carries the current
+        # source version AND the default retriever can scope to that index
+        # version (#58). A missing index returns empty strings, which still
+        # produce a stable (and unique) cache key.
+        active_index_version, source_version_hash = await _retrieve_index_version_hash(
             self._session
         )
 
@@ -308,7 +331,18 @@ class Orchestrator:
                 reason="no_answer",
             )
 
-        evidence = await self._retriever.retrieve(
+        # Build the default retriever scoped to the active index version. The
+        # ``or None`` converts the "" no-active-index sentinel to ``None`` so the
+        # arms fall back to a status-only filter instead of filtering on
+        # ``index_version == ""`` (which matches NOTHING and would turn every
+        # answer into no_answer on a fresh / un-promoted database). An injected
+        # retriever bypasses this and owns its own scoping.
+        retriever = self._injected_retriever or _default_retriever(
+            self._settings,
+            self._session,
+            active_index_version=active_index_version or None,
+        )
+        evidence = await retriever.retrieve(
             question,
             product_area=domain.value,
             intent=intent,
