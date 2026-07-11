@@ -38,7 +38,7 @@ from app.cache.answer_cache import (
 )
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
-from app.embeddings import get_embedder
+from app.embeddings import configured_embedder_identity, get_embedder
 from app.guardrails.domain import Domain, classify_domain, is_unsupported
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
@@ -148,10 +148,18 @@ async def _retrieve_index_version_hash(
     """
     from app.models import IndexStatus, IndexVersion
 
+    # The ``index_version`` secondary sort is a deterministic tiebreaker so this
+    # resolution stays consistent with the retrieval-layer provenance gate
+    # (``HybridRetriever._active_index_stamp``, which sorts identically) if two
+    # rows are ever simultaneously ``active`` with equal ``promoted_at`` (a
+    # single-active-row invariant tracked by #58, but cheap to harden here).
     stmt = (
         select(IndexVersion)
         .where(IndexVersion.status == IndexStatus.active)
-        .order_by(IndexVersion.promoted_at.desc().nulls_last())
+        .order_by(
+            IndexVersion.promoted_at.desc().nulls_last(),
+            IndexVersion.index_version.desc(),
+        )
         .limit(1)
     )
     row = (await session.execute(stmt)).scalar_one_or_none()
@@ -172,8 +180,20 @@ def _default_retriever(settings: Settings, session: AsyncSession) -> _RetrieverL
     embedded with the same provider that built the index. On SQLite the vector
     retriever still short-circuits to ``[]`` (no pgvector), so wiring a stub
     embedder here is harmless for hermetic tests.
+
+    ``embedder_identity`` carries that same provider/model/dim so the retriever
+    can enforce it against the active index's provenance stamp and degrade the
+    vector arm on a mismatch (Tier 3 enforcement, #57). It MUST describe the same
+    embedder as ``embedder`` — both are derived from the one ``settings`` here,
+    and in production ``settings`` is the ``get_settings()`` singleton the
+    embedder singleton was also built from, so they cannot diverge. (Tests that
+    mutate settings must ``reset_embedder`` to keep the pair consistent.)
     """
-    return HybridRetriever(session, embedder=get_embedder(settings))
+    return HybridRetriever(
+        session,
+        embedder=get_embedder(settings),
+        embedder_identity=configured_embedder_identity(settings),
+    )
 
 
 class Orchestrator:

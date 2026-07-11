@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from typing import NamedTuple
 
 from app.core.config import Settings
 from app.embeddings.gemini import GeminiEmbedder
@@ -25,6 +26,39 @@ from app.embeddings.protocol import Embedder
 from app.embeddings.stub import StubEmbedder
 
 _logger = logging.getLogger("citevyn.embeddings")
+
+
+class EmbedderIdentity(NamedTuple):
+    """The provenance triple that identifies an embedding vector space.
+
+    The same shape describes both the *configured* query embedder
+    (:func:`configured_embedder_identity`, always fully populated) and the
+    *stamp* written onto an ``IndexVersion`` at ingest
+    (``embedding_provider/model/dim``, which may be ``None`` for legacy/stub
+    indexes). Two indexes are query-compatible only when their identities are
+    equal — cosine distance across different providers/models/dims is
+    meaningless. See ``docs/ADR/0003-embeddings-provider.md`` (Tier 3).
+    """
+
+    provider: str | None
+    model: str | None
+    dim: int | None
+
+
+def configured_embedder_identity(settings: Settings) -> EmbedderIdentity:
+    """The identity of the embedder that :func:`get_embedder` builds from ``settings``.
+
+    The process-wide embedder singleton is built from these same three
+    ``Settings`` values, so this triple *is* the query embedder's vector-space
+    identity. The read-path enforcement (Tier 3, #57) compares it against the
+    active ``IndexVersion``'s stamp and degrades the vector arm on a mismatch.
+    """
+    return EmbedderIdentity(
+        provider=settings.embedding_provider,
+        model=settings.embedding_model,
+        dim=settings.embedding_dim,
+    )
+
 
 # Production deploys MUST override the default ``CITEVYN_EMBEDDING_PROVIDER="stub"``
 # to a real provider so retrieval is semantic, not hash-bucketed.
@@ -153,8 +187,10 @@ def reset_embedder() -> None:
 
 __all__ = [
     "ALLOWED_EMBEDDING_PROVIDERS",
+    "EmbedderIdentity",
     "EmbeddingProviderNotConfigured",
     "build_embedder",
+    "configured_embedder_identity",
     "get_embedder",
     "reset_embedder",
     "shutdown_embedder",
