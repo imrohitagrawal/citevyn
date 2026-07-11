@@ -22,10 +22,12 @@ import asyncio
 import logging
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.middleware import get_current_request_id
-from app.embeddings import EmbedderUnavailable
+from app.embeddings import EmbedderIdentity, EmbedderUnavailable
+from app.models import IndexStatus, IndexVersion
 from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.keyword import KeywordRetriever
@@ -44,11 +46,17 @@ class HybridRetriever:
         *,
         active_index_version: str | None = None,
         embedder: Embedder | None = None,
+        embedder_identity: EmbedderIdentity | None = None,
         reranker: Reranker | None = None,
     ) -> None:
         self._session = session
         self._active_index_version = active_index_version
         self._embedder = embedder
+        # The provenance triple of the query embedder (provider/model/dim). When
+        # supplied, the vector arm is gated on it matching the active index's
+        # stamp (Tier 3 enforcement, #57); when ``None``, enforcement is off and
+        # the vector arm runs unconditionally (legacy callers / unit tests).
+        self._embedder_identity = embedder_identity
         self._reranker = reranker or Reranker()
 
     async def retrieve(
@@ -85,19 +93,21 @@ class HybridRetriever:
             # limit-independent (0 rows at top_k ⇒ 0 at ``limit``), so re-running
             # it in the gather below would be guaranteed-empty dead work — query
             # only keyword+vector and merge against the known-empty exact list.
+            vector_enabled = await self._vector_arm_enabled()
             keyword_hits, vector_hits = await asyncio.gather(
                 keyword.retrieve(question, product_area=product_area, limit=limit),
                 self._safe_vector_retrieve(
-                    vector, question, product_area=product_area, limit=limit
+                    vector, question, product_area=product_area, limit=limit, enabled=vector_enabled
                 ),
             )
             exact_hits = []
         else:
+            vector_enabled = await self._vector_arm_enabled()
             exact_hits, keyword_hits, vector_hits = await asyncio.gather(
                 exact.retrieve(question, product_area=product_area, limit=limit),
                 keyword.retrieve(question, product_area=product_area, limit=limit),
                 self._safe_vector_retrieve(
-                    vector, question, product_area=product_area, limit=limit
+                    vector, question, product_area=product_area, limit=limit, enabled=vector_enabled
                 ),
             )
 
@@ -117,17 +127,28 @@ class HybridRetriever:
         *,
         product_area: str,
         limit: int,
+        enabled: bool = True,
     ) -> list[RetrievedChunk]:
-        """Run the vector arm, degrading to ``[]`` if the embedder is unavailable.
+        """Run the vector arm, degrading to ``[]`` when it cannot be served safely.
 
         The vector arm is the only retriever that depends on an external embedding
-        provider. If that provider is transiently down (:class:`EmbedderUnavailable`),
-        the request should still be answerable from the exact-term and keyword
-        arms rather than 500-ing the whole query. We therefore degrade the vector
-        arm to no hits, but log a WARNING server-side so the degradation is
-        observable and never silent. Genuine database errors from the pgvector
-        query are NOT caught here — they propagate as real failures.
+        provider. Two conditions degrade it to no hits (the request stays
+        answerable from the exact-term and keyword arms rather than 500-ing or
+        serving corrupt rankings), each logged as a WARNING so the degradation is
+        observable and never silent:
+
+        * ``enabled is False`` — the active index was built by a *different*
+          embedder than the one configured to embed queries (Tier 3 mismatch,
+          #57). The caller (:meth:`_vector_arm_enabled`) has already logged the
+          mismatch; here we simply skip the arm without embedding or querying.
+        * :class:`EmbedderUnavailable` — the embedding provider is transiently
+          down (Tier 1).
+
+        Genuine database errors from the pgvector query are NOT caught here — they
+        propagate as real failures.
         """
+        if not enabled:
+            return []
         try:
             return await vector.retrieve(question, product_area=product_area, limit=limit)
         except EmbedderUnavailable:
@@ -136,6 +157,89 @@ class HybridRetriever:
                 extra={"request_id": get_current_request_id()},
             )
             return []
+
+    async def _vector_arm_enabled(self) -> bool:
+        """Whether the vector arm may run against the active index (Tier 3, #57).
+
+        The stored document vectors and the query vector must come from the same
+        embedding model, or cosine distance is meaningless and the LLM cites
+        wrongly-ranked sources — a *silent* correctness failure. The dimension
+        guard alone does not catch a same-dim provider/model swap without
+        re-ingest (e.g. ``stub`` → ``gemini``, both 1536).
+
+        Returns ``True`` (vector arm runs) when:
+
+        * enforcement is off — no ``embedder_identity`` was wired; or
+        * the active index carries no provenance stamp (legacy / stub-seeded
+          indexes: ``embedding_provider is None`` ⇒ "unknown provenance, allow",
+          which protects the seeded demo and pre-#51 indexes); or
+        * the stamp matches the configured embedder's ``(provider, model, dim)``.
+
+        Returns ``False`` (and logs a loud WARNING) when the stamp is present and
+        does *not* match — degrade rather than serve corrupted rankings. This is a
+        read-time correctness net, not failover (that is the deferred #59): the
+        request still answers from exact + keyword.
+
+        Deliberately awaited by :meth:`retrieve` *before* the ``asyncio.gather``
+        rather than from inside the vector arm: keeping this one small indexed
+        lookup (the single active-index row) off the shared ``AsyncSession`` while
+        the three retrieval arms run concurrently avoids a concurrent-use hazard,
+        at a cost that is negligible next to the embedding + LLM calls that follow.
+        """
+        if self._embedder_identity is None:
+            return True
+        stamp = await self._active_index_stamp()
+        if stamp is None or stamp.provider is None:
+            return True
+        if stamp == self._embedder_identity:
+            return True
+        _logger.warning(
+            "vector_retrieval_index_embedder_mismatch",
+            extra={
+                "request_id": get_current_request_id(),
+                "index_embedding_provider": stamp.provider,
+                "index_embedding_model": stamp.model,
+                "index_embedding_dim": stamp.dim,
+                "configured_embedding_provider": self._embedder_identity.provider,
+                "configured_embedding_model": self._embedder_identity.model,
+                "configured_embedding_dim": self._embedder_identity.dim,
+            },
+        )
+        return False
+
+    async def _active_index_stamp(self) -> EmbedderIdentity | None:
+        """The embedding provenance stamped on the active ``IndexVersion``.
+
+        Resolves the same active index the orchestrator uses for the cache key
+        (``status == active``, most-recently promoted). Returns its
+        ``(provider, model, dim)`` triple, or ``None`` when no index is active.
+        Scoping the read path to a single active version is the separate concern
+        of #58; this only reads the winning row's stamp.
+
+        The ``index_version`` secondary sort is a deterministic tiebreaker so
+        that, in the (today-impossible, #58-tracked) event of two simultaneously
+        active rows with equal ``promoted_at``, this query and the orchestrator's
+        cache-key resolution (``_retrieve_index_version_hash``, which sorts
+        identically) always pick the *same* winning row — the gate must reason
+        about the index the rest of the pipeline uses.
+        """
+        stmt = (
+            select(
+                IndexVersion.embedding_provider,
+                IndexVersion.embedding_model,
+                IndexVersion.embedding_dim,
+            )
+            .where(IndexVersion.status == IndexStatus.active)
+            .order_by(
+                IndexVersion.promoted_at.desc().nulls_last(),
+                IndexVersion.index_version.desc(),
+            )
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).first()
+        if row is None:
+            return None
+        return EmbedderIdentity(provider=row[0], model=row[1], dim=row[2])
 
 
 def _merge(

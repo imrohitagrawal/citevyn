@@ -7,8 +7,11 @@ fuses the scores and short-circuits the exact-lookup intent.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
+from app.embeddings import EmbedderIdentity
 from app.guardrails.domain import Domain
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.hybrid import HybridRetriever
@@ -223,6 +226,168 @@ async def test_hybrid_respects_domain_filter(seeded_session) -> None:
     assert all(h_.product_area == "codex" for h_ in hits)
     # The codex doc has no "rate" term, so this should be empty.
     assert hits == []
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 enforcement (#57): degrade the vector arm when the active index was
+# built by a different embedder than the one configured to embed queries.
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _capture_retrieval_logs():
+    """Attach a handler directly to the ``citevyn.retrieval`` logger.
+
+    Mirrors ``test_hybrid_degrades_when_embedder_unavailable``: caplog depends on
+    propagation/root state that a dependency's ``dictConfig`` can flip mid-suite,
+    so we capture on the concrete logger and force it enabled for determinism.
+    """
+    import logging
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("citevyn.retrieval")
+    handler = _Capture()
+    logger.addHandler(handler)
+    prev_level, logger.level = logger.level, logging.WARNING
+    prev_disabled, logger.disabled = logger.disabled, False
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.level = prev_level
+        logger.disabled = prev_disabled
+
+
+async def _stamp_active_index(session, *, provider, model, dim) -> None:
+    """Set the embedding provenance on the seeded active ``IndexVersion`` (``v1``)."""
+    from app.models import IndexVersion
+
+    row = await session.get(IndexVersion, "v1")
+    assert row is not None
+    row.embedding_provider = provider
+    row.embedding_model = model
+    row.embedding_dim = dim
+    await session.flush()
+
+
+_GEMINI = EmbedderIdentity(provider="gemini", model="gemini-embedding-001", dim=1536)
+
+
+async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:
+    await _stamp_active_index(
+        seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
+    )
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is True
+    assert not any("mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_degrades_on_stamp_mismatch(seeded_session) -> None:
+    # Same dim, different provider/model: the dimension guard does NOT fire, so
+    # without this enforcement the corrupted rankings would be served silently.
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is False
+    msgs = [r.getMessage() for r in records]
+    assert any("vector_retrieval_index_embedder_mismatch" in m for m in msgs)
+
+
+async def test_vector_arm_mismatch_warn_carries_identifiers(seeded_session) -> None:
+    # The WARN's operational value is its structured ``extra`` payload — assert it
+    # carries the stamped-vs-configured provider/model/dim (identifiers only).
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is False
+    rec = next(r for r in records if "vector_retrieval_index_embedder_mismatch" in r.getMessage())
+    assert rec.index_embedding_provider == "stub"
+    assert rec.configured_embedding_provider == "gemini"
+    assert rec.configured_embedding_model == "gemini-embedding-001"
+    assert rec.configured_embedding_dim == 1536
+
+
+async def test_vector_arm_degrades_on_dim_only_mismatch(seeded_session) -> None:
+    # Same provider AND model, only the dim differs. The boot guard pins the
+    # configured dim to the pgvector column width, but the index could have been
+    # stamped at a different dim; ``EmbedderIdentity`` compares all three fields,
+    # so this must still degrade — it is exactly the silent-corruption case.
+    await _stamp_active_index(
+        seeded_session, provider="gemini", model="gemini-embedding-001", dim=768
+    )
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is False
+    assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_degrades_on_partial_stamp(seeded_session) -> None:
+    # A half-written stamp (provider set, model/dim NULL) is not "unknown
+    # provenance" (only a NULL *provider* is), so it does not match a fully
+    # populated identity and must fail closed → degrade, not silently allow.
+    await _stamp_active_index(seeded_session, provider="gemini", model=None, dim=None)
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is False
+    assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_allowed_on_null_stamp(seeded_session) -> None:
+    # The seeded ``v1`` index carries no provenance stamp (legacy / stub-seeded
+    # demo). Unknown provenance must be ALLOWED, or the demo and every pre-#51
+    # index would break.
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is True
+    assert not any("mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_enforcement_off_without_identity(seeded_session) -> None:
+    # No identity wired ⇒ enforcement is off, even against a mismatching stamp.
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    assert await h._vector_arm_enabled() is True
+
+
+async def test_vector_arm_allowed_when_no_active_index(session) -> None:
+    # Empty catalog (no active IndexVersion) ⇒ nothing to enforce against ⇒ allow.
+    h = HybridRetriever(session, embedder_identity=_GEMINI)
+    assert await h._vector_arm_enabled() is True
+
+
+async def test_safe_vector_retrieve_skips_when_disabled(seeded_session) -> None:
+    # A disabled vector arm must not embed or query — it returns [] directly.
+    class _ExplodingVector:
+        async def retrieve(self, question, *, product_area, limit):
+            raise AssertionError("vector arm must not run when disabled")
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _ExplodingVector(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+        enabled=False,
+    )
+    assert result == []
+
+
+async def test_hybrid_retrieve_answers_from_keyword_on_mismatch(seeded_session) -> None:
+    # End-to-end: a provenance mismatch degrades the vector arm but the request
+    # still answers from exact/keyword — it does not raise or return [].
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        hits = await h.retrieve("rate", product_area=Domain.claude_api.value, intent=Intent.faq)
+    assert hits  # keyword still answers
+    assert all(hit.retrieval_type.value != "vector" for hit in hits)
+    assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
 
 
 async def test_reranker_passthrough() -> None:
