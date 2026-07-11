@@ -72,6 +72,38 @@ demonstrably reproducible.
 
 ---
 
+## 3. Universal Landing Page (UI Option 1 & 2)
+
+The Universal Landing Page is the new standard UI for CiteVyn, designed as a professional landing page that appeals to engineers, PMs, marketers, and general users. 
+
+**Status:** Design plan complete - See [UNIVERSAL_LANDING_PAGE_PLAN.md](UNIVERSAL_LANDING_PAGE_PLAN.md)
+
+### Two UI Alternatives
+
+1. **Browser-Core Modernism** (Prompt 1) - Technical DevTools aesthetic
+   - High-contrast technical elements
+   - Browser chrome frame, tabs, address bar
+   - Custom UI scrollbars, pattern grid background
+   - JetBrains Mono for technical labels
+
+2. **Bold Editorial Studio** (Prompt 2) - Creative typography-first design
+   - Black-and-white aesthetic with custom cursor
+   - Extreme weight/size contrasts (Inter typography)
+   - Asymmetrical rounded corners, smooth animations
+   - Mix-blend-mode difference cursor
+
+### Key Features
+- Instant demo (no signup)
+- How It Works section (3 steps)
+- Interactive citation trace
+- Light/dark theme toggle
+- Mobile bottom navigation
+- Pre-populated demo questions
+- Loading state messages
+- Hallucination challenge
+
+---
+
 ## 3. Quick start (local)
 
 ```bash

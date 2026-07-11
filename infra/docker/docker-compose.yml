@@ -62,7 +62,7 @@ services:
   # to the public network. The production security boundary is
   # Caddy on :443; Postgres is never reachable from the internet.
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg18
     container_name: citevyn-db
     restart: unless-stopped
     logging: *default-logging

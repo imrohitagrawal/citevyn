@@ -1,0 +1,365 @@
+/**
+ * Knowledge base data module for CiteVyn demo.
+ *
+ * In production this module is replaced by the real retrieval API
+ * (call /v1/sessions/{id}/messages with the user's question).
+ * The matchKB() function demonstrates keyword-based routing that
+ * will be swapped out for vector search.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface Source {
+  n: string;
+  title: string;
+  url: string;
+}
+
+export interface KBEntry {
+  q: string;
+  tag: string;
+  a: string;
+  sources: Source[];
+  refusal?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base entries
+// ---------------------------------------------------------------------------
+
+export const KB: Record<string, KBEntry> = {
+  "claude-code": {
+    q: "What is Claude Code?",
+    tag: "USAGE",
+    a: "Claude Code is Anthropic's agentic coding tool that runs in your terminal. It reads and edits files across your project, runs commands, and handles git workflows — working inside your existing dev environment instead of a separate IDE.",
+    sources: [
+      {
+        n: "1",
+        title: "Claude Code — Overview",
+        url: "docs.claude.com/en/docs/claude-code/overview",
+      },
+      {
+        n: "2",
+        title: "Quickstart",
+        url: "docs.claude.com/en/docs/claude-code/quickstart",
+      },
+    ],
+  },
+  "codex-flag": {
+    q: "What does the --model flag do in Codex?",
+    tag: "EXACT LOOKUP",
+    a: "The --model flag (short form -m) sets which model Codex uses for that run, overriding your configured default. Pass a model name after it, e.g. codex -m o4-mini. It applies only to the current invocation.",
+    sources: [
+      {
+        n: "1",
+        title: "Codex CLI — Command reference",
+        url: "developers.openai.com/codex/cli/reference",
+      },
+    ],
+  },
+  "gemini-stream": {
+    q: "How do I stream responses from the Gemini API?",
+    tag: "HOW-TO",
+    a: "Call the streaming variant of the generate-content method and iterate over the chunks as they arrive, rendering each partial response. In most SDKs this is generateContentStream, which returns an async stream of candidate deltas.",
+    sources: [
+      {
+        n: "1",
+        title: "Text generation — Streaming",
+        url: "ai.google.dev/gemini-api/docs/text-generation",
+      },
+    ],
+  },
+  "claude-code-cost": {
+    q: "Does Claude Code cost money?",
+    tag: "PRICING",
+    a: "Claude Code has no separate fee — usage is billed through your Anthropic account, either as API token usage or as part of an eligible Claude subscription plan. The docs recommend a subscription plan for regular day-to-day use.",
+    sources: [
+      {
+        n: "1",
+        title: "Claude Code — Manage costs",
+        url: "docs.claude.com/en/docs/claude-code/costs",
+      },
+    ],
+  },
+  "claude-models": {
+    q: "Which Claude models are available in the API?",
+    tag: "COMPARE",
+    a: "The Claude API offers three model families: Opus for the most complex work, Sonnet for a balance of intelligence and speed, and Haiku for near-instant responses. Each family is versioned, and the docs list current model IDs with their context windows.",
+    sources: [
+      {
+        n: "1",
+        title: "Models overview",
+        url: "docs.claude.com/en/docs/about-claude/models",
+      },
+    ],
+  },
+  "gemini-key": {
+    q: "How do I get a Gemini API key?",
+    tag: "SETUP",
+    a: "Create a free API key in Google AI Studio — sign in, open the API keys page, and click Create API key. Then pass it to the SDK or set it as the GEMINI_API_KEY environment variable.",
+    sources: [
+      {
+        n: "1",
+        title: "Gemini API — API keys",
+        url: "ai.google.dev/gemini-api/docs/api-key",
+      },
+    ],
+  },
+  "codex-install": {
+    q: "How do I install the Codex CLI?",
+    tag: "SETUP",
+    a: "Install it globally with npm: npm install -g @openai/codex, then run codex inside your project directory to start. On first run you sign in with your ChatGPT account or an API key.",
+    sources: [
+      {
+        n: "1",
+        title: "Codex CLI — Getting started",
+        url: "developers.openai.com/codex/cli",
+      },
+    ],
+  },
+  "laptop": {
+    q: "What's the best laptop for AI coding?",
+    tag: "OUT OF SCOPE",
+    refusal: true,
+    a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using indexed official documentation. I don't have credible source material in this assistant to answer that.",
+    sources: [],
+  },
+  // Canned answer for the "Get Pro" pricing CTA. Keyed like any other entry so
+  // it routes through the single `send` path (and its one dedup guard) instead
+  // of a bespoke handler.
+  "pro": {
+    q: "What do I get with CiteVyn Pro?",
+    tag: "PRICING",
+    a: "Pro isn't live yet — CiteVyn is an MVP demo, and everything here is free to try. Pro will add higher rate limits, exact lookups, saved history, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
+    sources: [],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Demo ordering and marquee data
+// ---------------------------------------------------------------------------
+
+/** Questions that cycle in the hero auto-play card */
+export const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"] as const;
+
+/** Questions in the question ticker (infinite marquee) */
+export const MARQUEE = [
+  "claude-code",
+  "gemini-key",
+  "codex-flag",
+  "claude-code-cost",
+  "gemini-stream",
+  "codex-install",
+  "claude-models",
+  "laptop",
+] as const;
+
+/** Questions in the interactive demo left rail */
+export const DEMO_ORDER = ["claude-code", "codex-flag", "gemini-stream", "laptop"] as const;
+
+/** Rotating placeholder text for the hero input */
+export const PLACEHOLDERS = [
+  "Ask about Claude, Codex, Gemini…",
+  "Does Claude Code cost money?",
+  "How do I get a Gemini API key?",
+  "What does --model do in Codex?",
+  "Which Claude models are available?",
+];
+
+/** Fallback answer when no KB entry matches */
+export const GENERIC_REFUSAL =
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using indexed official documentation. I don't have credible source material in this assistant to answer that.";
+
+// ---------------------------------------------------------------------------
+// Keyword matcher — routes free-typed questions to a KB entry
+// ---------------------------------------------------------------------------
+
+/**
+ * Match a free-text question against the canned KB.
+ *
+ * In production this is replaced by the real retrieval pipeline:
+ * 1. POST /v1/sessions  — create a session
+ * 2. POST /v1/sessions/{id}/messages  — send the question, get streaming answer
+ *
+ * @param text - User's free-text question
+ * @returns KB entry or generic refusal
+ */
+export function matchKB(text: string): KBEntry {
+  const t = text.toLowerCase();
+
+  // Hard out-of-scope keywords
+  if (/laptop|gpu|hardware|weather|stock|recipe/.test(t)) {
+    return {
+      q: text,
+      tag: "OUT OF SCOPE",
+      refusal: true,
+      a: GENERIC_REFUSAL,
+      sources: [],
+    };
+  }
+
+  // CiteVyn Pro pricing CTA. The "Get Pro" button routes its canned question
+  // here; any free-typed question mentioning "citevyn pro" resolves the same
+  // way (deliberate — the demo KB now knows about Pro).
+  if (t.includes("citevyn pro")) {
+    return KB["pro"];
+  }
+
+  // Gemini key / setup
+  if (t.includes("gemini") && (t.includes("key") || t.includes("get "))) {
+    return KB["gemini-key"];
+  }
+
+  // Any other Gemini question
+  if (t.includes("gemini")) {
+    return KB["gemini-stream"];
+  }
+
+  // Codex install
+  if (t.includes("install") && t.includes("codex")) {
+    return KB["codex-install"];
+  }
+
+  // Codex flags / --model
+  if (t.includes("codex") || t.includes("--") || t.includes("flag")) {
+    return KB["codex-flag"];
+  }
+
+  // Cost / pricing
+  if (
+    t.includes("cost") ||
+    t.includes("free") ||
+    t.includes("money") ||
+    t.includes("price")
+  ) {
+    return KB["claude-code-cost"];
+  }
+
+  // Claude models
+  if (t.includes("models") || t.includes("which claude")) {
+    return KB["claude-models"];
+  }
+
+  // Any other Claude question
+  if (t.includes("claude")) {
+    return KB["claude-code"];
+  }
+
+  // Generic refusal
+  return {
+    q: text,
+    tag: "OUT OF SCOPE",
+    refusal: true,
+    a: GENERIC_REFUSAL,
+    sources: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pricing tier data
+// ---------------------------------------------------------------------------
+
+export interface PricingTier {
+  name: string;
+  price: string;
+  unit: string;
+  desc: string;
+  cta: string;
+  featured: boolean;
+  features: string[];
+  // name === "Enterprise" → no-op; "Pro" → getPro flow; others → open chat
+  action: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// Persona data
+// ---------------------------------------------------------------------------
+
+export interface Persona {
+  tag: string;
+  title: string;
+  body: string;
+  qs: Array<{ q: string; select: () => void }>;
+}
+
+// ---------------------------------------------------------------------------
+// FAQ data
+// ---------------------------------------------------------------------------
+
+export interface FAQItem {
+  q: string;
+  a: string;
+}
+
+export const FAQ_DATA: FAQItem[] = [
+  {
+    q: "Which tools does CiteVyn cover?",
+    a: "The MVP covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini — using their official documentation only. ChatGPT and Cursor are on the roadmap, not in the MVP.",
+  },
+  {
+    q: "How do citations work?",
+    a: "Every factual answer is generated only from retrieved documentation chunks, and each is attached to the exact source page it came from. If a claim isn't supported by a source, it isn't made.",
+  },
+  {
+    q: "What happens when it can't find an answer?",
+    a: "CiteVyn refuses rather than guesses. If the docs don't support a reliable answer, or the question is outside the supported tools, it tells you so plainly instead of hallucinating.",
+  },
+  {
+    q: "Does CiteVyn hallucinate?",
+    a: "It's designed not to. Answers are grounded in indexed official docs and gated by an evaluation suite targeting 95%+ citation correctness and faithfulness before release.",
+  },
+  {
+    q: "Can it answer questions about my private docs?",
+    a: "Not in the MVP — it uses public official documentation only. Private-source ingestion, SSO, and tenant isolation are part of the Enterprise roadmap.",
+  },
+  {
+    q: "How fresh is the documentation?",
+    a: "CiteVyn serves from the last known-good index, so a failed re-index never corrupts what's live. Scheduled source refresh is an Enterprise feature.",
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Stat gates and feature cards
+// ---------------------------------------------------------------------------
+
+export interface StatGate {
+  label: string;
+  value: string;
+}
+
+export interface FeatureCard {
+  mark: string;
+  title: string;
+  body: string;
+}
+
+export const STAT_GATES: StatGate[] = [
+  { label: "Citation correctness", value: "≥95%" },
+  { label: "Guardrail on critical cases", value: "100%" },
+  { label: "Retrieval hit rate", value: "≥95%" },
+];
+
+export const FEATURE_CARDS: FeatureCard[] = [
+  {
+    mark: "⌗",
+    title: "Citation on every claim",
+    body: "No factual sentence without a source you can open and check.",
+  },
+  {
+    mark: "⏻",
+    title: "Refuses out-of-scope",
+    body: "Ask about anything but the four tools and it declines — cleanly.",
+  },
+  {
+    mark: "⏗",
+    title: "Exact lookup",
+    body: "Flags, commands, model names, config keys and errors, matched precisely.",
+  },
+  {
+    mark: "↰",
+    title: "Clean follow-ups",
+    body: "Switch tools mid-session without context bleeding across products.",
+  },
+];

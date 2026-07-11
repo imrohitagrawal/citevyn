@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install uv
         run: pip install --upgrade pip uv
       - name: Sync dependencies
@@ -88,7 +88,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - run: pip install --upgrade pip uv
       - name: Sync dependencies
         working-directory: backend
