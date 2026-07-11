@@ -499,3 +499,41 @@ async def test_orchestrator_creates_session_and_user_when_missing(
     user_row = await session.get(User, "demo_user")
     assert user_row is not None
     assert response["message_id"] is not None
+
+
+def _hit_with_type(rtype: RetrievalType) -> EvidenceHit:
+    """One evidence hit tagged with a specific retrieval_type."""
+    return _evidence(count=1)[0].model_copy(update={"retrieval_type": rtype})
+
+
+async def test_strategy_for_labels_from_evidence_not_intent() -> None:
+    """``_strategy_for`` reports the strategy actually used, not the intent.
+
+    Regression guard for the fix: an exact_lookup question whose exact index
+    missed falls through to hybrid retrieval, and the label must reflect that
+    (hybrid_reranked), not the intent (exact_lookup). Reverting the fix to
+    ``if intent is Intent.exact_lookup: return exact_lookup`` fails the
+    fell-through and mixed cases below.
+    """
+    from app.answer.orchestrator import Orchestrator, RetrievalStrategy
+
+    all_exact = [_hit_with_type(RetrievalType.exact)]
+    fell_through = [_hit_with_type(RetrievalType.keyword)]
+    mixed = [_hit_with_type(RetrievalType.exact), _hit_with_type(RetrievalType.vector)]
+
+    # exact_lookup intent + all-exact evidence → exact_lookup
+    assert Orchestrator._strategy_for(Intent.exact_lookup, all_exact) is (
+        RetrievalStrategy.exact_lookup
+    )
+    # exact_lookup intent that fell through (keyword/vector evidence) → hybrid
+    assert Orchestrator._strategy_for(Intent.exact_lookup, fell_through) is (
+        RetrievalStrategy.hybrid_reranked
+    )
+    # exact_lookup intent + mixed (not all exact) → hybrid
+    assert Orchestrator._strategy_for(Intent.exact_lookup, mixed) is (
+        RetrievalStrategy.hybrid_reranked
+    )
+    # no evidence → none
+    assert Orchestrator._strategy_for(Intent.exact_lookup, []) is RetrievalStrategy.none
+    # non-exact intent with evidence → hybrid
+    assert Orchestrator._strategy_for(Intent.faq, all_exact) is RetrievalStrategy.hybrid_reranked

@@ -17,11 +17,10 @@ class LLMProvider(enum.StrEnum):
 
     stub = "stub"
     anthropic = "anthropic"
-    # Gemini and the secondary multi-provider land in Slice 9b; the enum members are
-    # declared so :class:`LLMResult.provider` already accepts them
-    # before the corresponding client implementations are wired.
+    # Gemini (primary) and OpenRouter (``router``, the fallback) — implemented
+    # in app/llm/gemini.py and app/llm/openrouter.py.
     gemini = "gemini"
-    PROVIDER_ROUTER = "router"
+    router = "router"
 
 
 class LLMResult(BaseModel):

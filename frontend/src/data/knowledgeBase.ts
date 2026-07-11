@@ -257,6 +257,58 @@ export function matchKB(text: string): KBEntry {
   };
 }
 
+/**
+ * Match questions about CiteVyn *the product itself* (Pro/membership,
+ * coverage, trust, freshness).
+ *
+ * These are answered locally in BOTH demo and live mode. The live backend only
+ * indexes Claude/Claude Code/Codex/Gemini documentation and — correctly —
+ * refuses questions about CiteVyn as "unsupported", because CiteVyn is not one
+ * of the documented products. But "What do I get with CiteVyn Pro?" is a valid,
+ * expected question with a real answer, so the client short-circuits these
+ * app-level questions to built-in copy instead of showing the backend refusal.
+ *
+ * Returns ``null`` when the question is not about CiteVyn itself, so the caller
+ * falls through to the normal path (backend in live mode, ``matchKB`` in demo).
+ *
+ * The guard is deliberately narrow — it only fires when the text mentions
+ * "citevyn" — so genuine product questions ("does Claude Code cost money?")
+ * still reach the backend.
+ */
+export function matchCitevynMeta(text: string): KBEntry | null {
+  const t = text.toLowerCase();
+  if (!t.includes("citevyn")) return null;
+
+  const meta = (a: string, tag = "CITEVYN"): KBEntry => ({ q: text, tag, a, sources: [] });
+
+  // Pricing / Pro / membership / plans.
+  if (/\bpro\b|member|subscri|plan|pric|cost|money|\bfree\b|upgrade|worth|buy|billing|tier/.test(t)) {
+    return KB["pro"];
+  }
+  // Which tools / coverage.
+  if (/cover|support|which tool|what tool|\btools\b|products/.test(t)) {
+    return meta(
+      "CiteVyn covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini — using their official documentation only. ChatGPT and Cursor are on the roadmap, not in the MVP.",
+    );
+  }
+  // Trust / hallucination / accuracy.
+  if (/hallucin|guess|accura|trust|reliab|made up|wrong/.test(t)) {
+    return meta(
+      "CiteVyn is designed not to hallucinate: every answer is grounded in indexed official docs and links to the exact source page so you can verify it, and if the docs don't support an answer it refuses instead of guessing.",
+    );
+  }
+  // Freshness / index.
+  if (/fresh|updat|stale|\bold\b|current|index/.test(t)) {
+    return meta(
+      "CiteVyn serves from the last known-good index, so a failed re-index never corrupts what's live. Scheduled source refresh is an Enterprise feature.",
+    );
+  }
+  // Generic "what is CiteVyn".
+  return meta(
+    "CiteVyn gives you cited, checkable answers about AI dev tools (Claude, Claude Code, Codex, Gemini) straight from the makers' official docs — every claim links to the exact source page, and it says \"I don't know\" instead of guessing.",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Pricing tier data
 // ---------------------------------------------------------------------------

@@ -856,7 +856,14 @@ class Orchestrator:
     def _strategy_for(intent: Intent, evidence: list[EvidenceHit]) -> RetrievalStrategy:
         if not evidence:
             return RetrievalStrategy.none
-        if intent is Intent.exact_lookup:
+        # Label from the evidence actually retrieved, not from intent alone. An
+        # exact_lookup question whose exact index misses falls through to the
+        # full hybrid path (see app/retrieval/hybrid.py), so its evidence is
+        # keyword/vector — reporting "exact_lookup" then would misdescribe the
+        # retrieval in both the response and the audit trail.
+        if intent is Intent.exact_lookup and all(
+            hit.retrieval_type == RetrievalType.exact for hit in evidence
+        ):
             return RetrievalStrategy.exact_lookup
         return RetrievalStrategy.hybrid_reranked
 

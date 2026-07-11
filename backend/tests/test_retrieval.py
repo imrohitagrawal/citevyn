@@ -109,6 +109,25 @@ async def test_hybrid_short_circuits_on_exact_lookup(seeded_session) -> None:
     assert hits[0].retrieval_type.value == "exact"
 
 
+async def test_hybrid_exact_lookup_falls_back_when_no_exact_hit(seeded_session) -> None:
+    # PRD §3.2 answer-flow step 3: an exact_lookup question whose exact-term
+    # index misses must fall back to keyword/vector, not return [] (which the
+    # orchestrator turns into no_answer). ``ExactRetriever`` matches only when
+    # the whole normalized question equals a term_text, so a natural-language
+    # question never hits exact — but "rate" is a keyword in the seeded chunk.
+    # Regression guard: reverting the fall-through (returning only exact hits)
+    # would make this return [] and fail.
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    hits = await h.retrieve(
+        "explain the rate limit behaviour please",
+        product_area=Domain.claude_api.value,
+        intent=Intent.exact_lookup,
+    )
+    assert len(hits) >= 1
+    # It fell through to keyword/vector — no exact-typed hit.
+    assert all(hit.retrieval_type.value != "exact" for hit in hits)
+
+
 async def test_hybrid_merges_keyword_and_exact(seeded_session) -> None:
     h = HybridRetriever(seeded_session, active_index_version="v1")
     # Two questions; we run them separately and confirm the hybrid

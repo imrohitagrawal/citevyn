@@ -65,16 +65,32 @@ class HybridRetriever:
 
         if intent is Intent.exact_lookup:
             exact_hits = await exact.retrieve(question, product_area=product_area, limit=top_k)
-            evidence = [
-                _to_evidence(h, RetrievalType.exact, idx + 1) for idx, h in enumerate(exact_hits)
-            ]
-            return evidence[:top_k]
-
-        exact_hits, keyword_hits, vector_hits = await asyncio.gather(
-            exact.retrieve(question, product_area=product_area, limit=limit),
-            keyword.retrieve(question, product_area=product_area, limit=limit),
-            vector.retrieve(question, product_area=product_area, limit=limit),
-        )
+            if exact_hits:
+                evidence = [
+                    _to_evidence(h, RetrievalType.exact, idx + 1)
+                    for idx, h in enumerate(exact_hits)
+                ]
+                return evidence[:top_k]
+            # PRD §3.2 answer flow step 3: "Fall back to keyword search if
+            # needed." A natural-language exact-lookup question ("What does the
+            # --model flag do?") often doesn't resolve to an exact-term chunk
+            # even when the docs cover it, so an empty exact result must not
+            # short-circuit to no_answer. Fall through to the hybrid path.
+            # ``exact`` already returned nothing here, and an empty match is
+            # limit-independent (0 rows at top_k ⇒ 0 at ``limit``), so re-running
+            # it in the gather below would be guaranteed-empty dead work — query
+            # only keyword+vector and merge against the known-empty exact list.
+            keyword_hits, vector_hits = await asyncio.gather(
+                keyword.retrieve(question, product_area=product_area, limit=limit),
+                vector.retrieve(question, product_area=product_area, limit=limit),
+            )
+            exact_hits = []
+        else:
+            exact_hits, keyword_hits, vector_hits = await asyncio.gather(
+                exact.retrieve(question, product_area=product_area, limit=limit),
+                keyword.retrieve(question, product_area=product_area, limit=limit),
+                vector.retrieve(question, product_area=product_area, limit=limit),
+            )
 
         merged = _merge(question, exact_hits, keyword_hits, vector_hits)
         merged.sort(key=lambda h: h.score, reverse=True)
