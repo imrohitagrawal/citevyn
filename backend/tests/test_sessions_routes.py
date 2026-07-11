@@ -33,7 +33,9 @@ DEMO_BEARER = "Bearer local-demo-key"
 
 
 @pytest.fixture
-def in_memory_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[TestClient]:
+def in_memory_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> Generator[TestClient, None, None]:
     """A TestClient backed by a per-test SQLite file under tmp_path.
 
     ``:memory:`` SQLite gives every connection its own database, so the

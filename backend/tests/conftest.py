@@ -35,7 +35,7 @@ from app.models import (
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _default_database_url() -> Generator[None]:
+def _default_database_url() -> Generator[None, None, None]:
     """Point the test run at an in-memory SQLite database.
 
     The production default is a Postgres URL which is not available
@@ -50,14 +50,14 @@ def _default_database_url() -> Generator[None]:
 
 
 @pytest.fixture(autouse=True)
-def clear_settings_cache() -> Generator[None]:
+def clear_settings_cache() -> Generator[None, None, None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
 @pytest.fixture
-def client() -> Generator[TestClient]:
+def client() -> Generator[TestClient, None, None]:
     """Yield a :class:`TestClient` whose lifespan has fully started.
 
     The :func:`_lifespan` body runs :func:`validate_llm_provider`
