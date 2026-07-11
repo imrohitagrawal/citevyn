@@ -14,6 +14,7 @@ in the same change.
 | Issue | Title | Area | Priority | Origin |
 |---|---|---|---|---|
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
+| [#70](https://github.com/imrohitagrawal/citevyn/issues/70) | Cache: an answer degraded by a transient EmbedderUnavailable (Tier-1) is still cached to TTL | cache / observability | Low (bounded by TTL, self-heals; not predictable pre-retrieval) | #65 / PR #69, ADR-0003 |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
 | [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
 
