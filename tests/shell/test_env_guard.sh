@@ -99,6 +99,26 @@ assert_guard "prod password containing 'citevyn' is accepted" \
     "" \
     "POSTGRES_PASSWORD=citevynS3cret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
 
+# 1a''. QUOTED dev sentinels must be rejected. docker compose strips one
+# matched quote pair, so POSTGRES_PASSWORD="citevyn" would RUN with the weak
+# value; the anchored greps see the quotes and miss it, so the sourced-subshell
+# re-check must normalize (strip quotes/whitespace) and reject. Both single- and
+# double-quoted, for the password and the admin key.
+assert_guard 'double-quoted POSTGRES_PASSWORD="citevyn" is rejected' \
+    1 \
+    "dev-only stub secrets" \
+    "POSTGRES_PASSWORD=\"citevyn\""$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
+
+assert_guard "single-quoted POSTGRES_PASSWORD='dev-only-change-me' is rejected" \
+    1 \
+    "dev-only stub secrets" \
+    "POSTGRES_PASSWORD='dev-only-change-me'"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
+
+assert_guard 'double-quoted CITEVYN_ADMIN_API_KEY="dev-only-change-me" is rejected' \
+    1 \
+    "dev-only stub secrets" \
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=\"dev-only-change-me\""$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
+
 # 1b. Stub CITEVYN_ADMIN_API_KEY.
 assert_guard "stub CITEVYN_ADMIN_API_KEY is rejected" \
     1 \
