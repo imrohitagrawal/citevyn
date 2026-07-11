@@ -150,6 +150,19 @@ index version**, with queries always using the model that built the active index
 > keep working. This is a read-time *correctness net*, not failover (Tier 3 failover
 > below is still deferred). The manual re-ingest procedure (RUNBOOK §3.4a) remains the
 > way to *fix* a detected mismatch.
+>
+> ✅ **The answer cache now respects that degrade (#65).** The #57 degrade only runs
+> when retrieval runs, so a pre-existing cache-design property surfaced: the answer-cache
+> key omitted the embedder identity, so (1) a cache *hit* returned before retrieval and
+> silenced the mismatch WARN for the already-cached population, and (2) a degraded answer
+> cached during a mismatch persisted to TTL even after the operator fixed the config.
+> Fixed by encoding the configured embedder's `provider|model|dim` in `build_cache_key`
+> (a config-only swap now invalidates affected entries — no schema change; the stamp
+> triple only, never a secret) **and** skipping the cache *write* when the orchestrator
+> predicts the degrade (`is_index_embedder_mismatch`, resolved from the same active-index
+> row as the cache key), so a degraded answer is never frozen and every affected ask
+> re-runs retrieval and re-emits the WARN. Homes: `app/cache/answer_cache.py`,
+> `app/answer/orchestrator.py`, `app/embeddings/factory.py`.
 
 ## Deferred / Future Work
 

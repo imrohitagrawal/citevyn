@@ -219,7 +219,7 @@ class HybridRetriever:
         The ``index_version`` secondary sort is a deterministic tiebreaker so
         that, in the (today-impossible, #58-tracked) event of two simultaneously
         active rows with equal ``promoted_at``, this query and the orchestrator's
-        cache-key resolution (``_retrieve_index_version_hash``, which sorts
+        cache-key resolution (``_retrieve_active_index``, which sorts
         identically) always pick the *same* winning row — the gate must reason
         about the index the rest of the pipeline uses.
         """

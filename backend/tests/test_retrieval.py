@@ -348,6 +348,32 @@ async def test_vector_arm_allowed_on_null_stamp(seeded_session) -> None:
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
+async def test_predictor_agrees_with_gate_across_stamps(seeded_session) -> None:
+    """Parity contract (#65): the orchestrator's ``is_index_embedder_mismatch``
+    predictor must agree with the canonical read-time gate
+    ``HybridRetriever._vector_arm_enabled`` (#57) for EVERY stamp. If they drift,
+    the orchestrator would skip a cache write the retriever didn't degrade (or
+    cache one it did), silently regressing #65. This gives the "must stay in
+    agreement" docstring teeth without coupling the two implementations."""
+    from app.embeddings import is_index_embedder_mismatch
+
+    stamps = [
+        dict(provider="gemini", model="gemini-embedding-001", dim=1536),  # exact match
+        dict(provider="stub", model="stub", dim=1536),  # provider/model swap, same dim
+        dict(provider="gemini", model="gemini-embedding-001", dim=768),  # dim-only
+        dict(provider="gemini", model=None, dim=None),  # partial stamp (fail closed)
+        dict(provider=None, model=None, dim=None),  # NULL provider (unknown ⇒ allow)
+    ]
+    for stamp_cfg in stamps:
+        await _stamp_active_index(seeded_session, **stamp_cfg)
+        h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+        resolved = await h._active_index_stamp()
+        with _capture_retrieval_logs():
+            enabled = await h._vector_arm_enabled()
+        predicted_degrade = is_index_embedder_mismatch(_GEMINI, resolved)
+        assert predicted_degrade == (not enabled), f"gate/predictor disagree for {stamp_cfg}"
+
+
 async def test_vector_arm_enforcement_off_without_identity(seeded_session) -> None:
     # No identity wired ⇒ enforcement is off, even against a mismatching stamp.
     await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)

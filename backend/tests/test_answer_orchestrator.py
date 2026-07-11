@@ -22,6 +22,7 @@ the tests do not depend on the hybrid retriever's keyword matching.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock
@@ -689,3 +690,151 @@ async def test_ask_no_active_index_still_answers_status_only(session: Any) -> No
     # The doc was retrieved despite no active index — evidence trace is non-empty.
     versions = await _persisted_evidence_versions(session)
     assert versions == {"v1"}, "no-active-index must fall back to status-only, not blank out"
+
+
+# ---------------------------------------------------------------------------
+# #65: embedder identity in the cache key + skip-cache-on-degrade
+# ---------------------------------------------------------------------------
+
+
+async def _seed_stamped_index(
+    session: Any,
+    *,
+    provider: str | None,
+    model: str | None,
+    dim: int | None,
+    source_version_hash: str = "sha256:stamped",
+) -> None:
+    """Insert an active IndexVersion carrying an embedding provenance stamp."""
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="index_v1",
+            status=IndexStatus.active,
+            source_version_hash=source_version_hash,
+            embedding_provider=provider,
+            embedding_model=model,
+            embedding_dim=dim,
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    await session.flush()
+
+
+async def test_ask_skips_cache_write_on_embedder_mismatch(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#65 gap (2)/(1): config on ``stub`` but the active index was stamped by
+    ``gemini`` (a config-only swap that left source_version_hash unchanged). The
+    vector arm degrades (Tier 3, #57), so the resulting weaker exact+keyword-only
+    answer MUST NOT be cached — otherwise it freezes to TTL and silences the
+    mismatch WARN on subsequent hits. Fails before the fix (row was written)."""
+    settings = _settings(embedding_provider="stub")
+    await _seed_stamped_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        response = await orchestrator.ask(
+            question="How do I configure Claude Code permissions?",
+            request_id="req_mismatch",
+            session_id=uuid.uuid4(),
+        )
+
+    # The answer is still served and persisted...
+    assert response["no_answer"] is False
+    assert response["cache_hit"] is False
+    # ...but nothing is cached (the degrade is not frozen to TTL).
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert cache_rows == [], "a degraded (embedder-mismatch) answer must not be cached"
+
+    # The skip is observable — both in the audit trail and as a loud WARN — so it
+    # can never be confused with a silent drop.
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is False
+    assert "answer_cache_write_skipped_embedder_mismatch" in caplog.text
+
+
+async def test_ask_caches_when_embedder_matches(session: Any) -> None:
+    """Control for the mismatch test: when the configured embedder matches the
+    active index stamp, the vector arm is live and the answer caches normally."""
+    settings = _settings(embedding_provider="gemini")
+    await _seed_stamped_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    await orchestrator.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_match",
+        session_id=uuid.uuid4(),
+    )
+
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert len(cache_rows) == 1
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is True
+
+
+async def test_ask_caches_when_index_stamp_is_null(session: Any) -> None:
+    """The NULL-stamp trap: a legacy / stub-seeded index carries no provenance
+    (embedding_provider is None ⇒ "unknown, allow"). The vector arm is NOT
+    degraded, so the answer must cache normally — the write-gate must not blank
+    the cache or crash on a NULL stamp."""
+    settings = _settings(embedding_provider="stub")
+    await _seed_stamped_index(session, provider=None, model=None, dim=None)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    await orchestrator.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_nullstamp",
+        session_id=uuid.uuid4(),
+    )
+
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert len(cache_rows) == 1, "NULL-stamp (unknown provenance) must still cache"
+    # Assert the gate actively ALLOWED the write (not merely that a row exists,
+    # which also held before the fix) so this cannot pass with no gate at all.
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is True
+
+
+async def test_cache_key_partitions_by_configured_embedder(session: Any) -> None:
+    """#65 gap (2), option (a): the same question under two matching-but-distinct
+    embedder configs lands on two DIFFERENT cache keys, so a config swap does not
+    serve an answer built in the other vector space. Both writes succeed (each
+    config matches its own index stamp), yielding two distinct rows."""
+    question = "How do I configure Claude Code permissions?"
+
+    # First: configured stub, index stamped stub → match → caches under stub key.
+    await _seed_stamped_index(session, provider="stub", model="gemini-embedding-001", dim=1536)
+    await Orchestrator(
+        _settings(embedding_provider="stub"),
+        session,
+        retriever=_FakeRetriever(_evidence(count=2)),
+    ).ask(question=question, request_id="req_stub", session_id=uuid.uuid4())
+
+    # Flip the index stamp to gemini and the config to gemini → match again, but
+    # a DIFFERENT configured identity → different cache key → second distinct row.
+    stamp = await session.get(_index_version_model(), "index_v1")
+    stamp.embedding_provider = "gemini"
+    await session.flush()
+    await Orchestrator(
+        _settings(embedding_provider="gemini"),
+        session,
+        retriever=_FakeRetriever(_evidence(count=2)),
+    ).ask(question=question, request_id="req_gemini", session_id=uuid.uuid4())
+
+    keys = {row.cache_key for row in (await session.execute(select(AnswerCache))).scalars()}
+    assert len(keys) == 2, "distinct embedder configs must occupy distinct cache keys"
+
+
+def _index_version_model() -> Any:
+    from app.models import IndexVersion
+
+    return IndexVersion
