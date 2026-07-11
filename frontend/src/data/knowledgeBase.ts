@@ -294,7 +294,7 @@ export function matchCitevynMeta(text: string): KBEntry | null {
   // Trust / hallucination / accuracy.
   if (/hallucin|guess|accura|trust|reliab|made up|wrong/.test(t)) {
     return meta(
-      "CiteVyn is designed not to hallucinate: answers are grounded in indexed official docs and gated by an evaluation suite targeting 95%+ citation correctness before release. If the docs don't support an answer, it refuses instead of guessing.",
+      "CiteVyn is designed not to hallucinate: every answer is grounded in indexed official docs and links to the exact source page so you can verify it, and if the docs don't support an answer it refuses instead of guessing.",
     );
   }
   // Freshness / index.

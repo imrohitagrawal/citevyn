@@ -123,7 +123,9 @@ def _build_gemini_with_fallback(settings: Settings) -> LLMClient:
         _logger.warning("gemini_provider_no_key_using_stub")
         return StubLLMClient(model=f"stub-{settings.gemini_model}")
 
-    if not has_gemini and has_router:
+    if not has_gemini:
+        # The no-key case returned above, so reaching here without a Gemini key
+        # means the OpenRouter key is present — use it directly.
         return _build_openrouter(settings)
 
     gemini = GeminiLLMClient(

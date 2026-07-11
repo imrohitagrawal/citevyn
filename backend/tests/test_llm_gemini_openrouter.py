@@ -332,3 +332,134 @@ def test_factory_router_provider_requires_key(monkeypatch) -> None:
             build_llm_client(get_settings())
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Composed end-to-end: Gemini-empty → fallback → real OpenRouter answer
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_gemini_empty_falls_back_to_real_openrouter() -> None:
+    # The path the PR is built around, end to end (both clients real, faked
+    # transports): Gemini returns 200-with-no-text → LLMUnavailable → the
+    # FallbackLLMClient calls a real OpenRouterLLMClient which answers.
+    gemini = _gemini_client(
+        lambda _r: httpx.Response(200, json={"candidates": [{"content": {"parts": []}}]})
+    )
+    openrouter = _openrouter_client(
+        lambda _r: httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "Fallback answer [1]."}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            },
+        )
+    )
+    client = FallbackLLMClient(primary=gemini, secondary=openrouter)
+    try:
+        result = await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    finally:
+        await client.aclose()
+    assert result.provider == "router"
+    assert result.text == "Fallback answer [1]."
+
+
+# ---------------------------------------------------------------------------
+# FallbackLLMClient.aclose closes both children
+# ---------------------------------------------------------------------------
+
+
+class _AcloseRecorder:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
+        return _result("stub")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _NoAclose:
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
+        return _result("stub")
+
+
+async def test_fallback_aclose_closes_both_children() -> None:
+    primary, secondary = _AcloseRecorder(), _AcloseRecorder()
+    await FallbackLLMClient(primary=primary, secondary=secondary).aclose()
+    assert primary.closed and secondary.closed
+
+
+async def test_fallback_aclose_tolerates_child_without_aclose() -> None:
+    primary = _AcloseRecorder()
+    secondary = _NoAclose()  # no aclose attribute
+    await FallbackLLMClient(primary=primary, secondary=secondary).aclose()  # must not raise
+    assert primary.closed
+
+
+# ---------------------------------------------------------------------------
+# Malformed-response and OpenRouter error-symmetry coverage
+# ---------------------------------------------------------------------------
+
+
+async def test_gemini_non_json_body_raises_unavailable() -> None:
+    client = _gemini_client(lambda _r: httpx.Response(200, content=b"not json"))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_gemini_missing_candidates_raises_unavailable() -> None:
+    client = _gemini_client(lambda _r: httpx.Response(200, json={}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_gemini_transport_error_raises_unavailable() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = _gemini_client(handler)
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_non_json_body_raises_unavailable() -> None:
+    client = _openrouter_client(lambda _r: httpx.Response(200, content=b"not json"))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_missing_choices_raises_unavailable() -> None:
+    client = _openrouter_client(lambda _r: httpx.Response(200, json={}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_5xx_raises_unavailable() -> None:
+    client = _openrouter_client(lambda _r: httpx.Response(503, json={"error": "overloaded"}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_400_raises_unavailable() -> None:
+    client = _openrouter_client(lambda _r: httpx.Response(400, json={"error": "bad request"}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_timeout_raises_unavailable() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("simulated timeout")
+
+    client = _openrouter_client(handler)
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()

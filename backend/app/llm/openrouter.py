@@ -139,5 +139,5 @@ class OpenRouterLLMClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model=model,
-            provider=LLMProvider.PROVIDER_ROUTER.value,
+            provider=LLMProvider.router.value,
         )

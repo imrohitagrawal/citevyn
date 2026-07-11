@@ -74,6 +74,8 @@ class Settings(BaseSettings):
 
     # --- LLM (Slice 4+) ---
     llm_provider: str = "stub"  # "stub" | "anthropic" | "gemini" | "router"
+    # Model for the anthropic + stub providers only. gemini/router read their
+    # own gemini_model / openrouter_model below and ignore this field.
     llm_model: str = "claude-opus-4-8"
     llm_max_tokens: int = Field(default=1024, ge=1)
     llm_temperature: float = Field(default=0.2, ge=0.0, le=1.0)
@@ -90,7 +92,9 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com"
     gemini_model: str = "gemini-2.5-flash"
-    gemini_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    # 15s (not 30) so the sequential Gemini→OpenRouter fallback has a ~30s
+    # worst-case ceiling rather than 60s. Flash answers return in a few seconds.
+    gemini_timeout_seconds: float = Field(default=15.0, gt=0.0)
     # Gemini "thinking" budget. 0 disables thinking (right for gemini-2.5-flash
     # doc answers — spends the token budget on the answer, not reasoning). Set
     # -1 for dynamic, or a positive value for a model that requires thinking
@@ -99,7 +103,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "google/gemini-2.5-flash"
-    openrouter_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    openrouter_timeout_seconds: float = Field(default=15.0, gt=0.0)
 
     # --- Retrieval (Slice 4+) ---
     embedding_provider: str = "stub"

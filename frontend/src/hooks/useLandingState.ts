@@ -451,7 +451,8 @@ export function useLandingState() {
       // wrong UX for a valid "What is CiteVyn Pro?" ask.
       const meta = matchCitevynMeta(text);
       if (meta) {
-        streamBot(meta.a, { refusal: !!meta.refusal, finalSources: meta.sources || [] });
+        // Meta answers are always affirmative product copy — never refusals.
+        streamBot(meta.a, { refusal: false, finalSources: [] });
         return;
       }
       if (live) {
