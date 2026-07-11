@@ -90,6 +90,17 @@ def test_validate_rejects_unknown_provider() -> None:
         validate_embedder_provider(Settings(embedding_provider="voyage"))
 
 
+def test_validate_rejects_dim_mismatch_with_pgvector_column() -> None:
+    # 768 != the pgvector column dim (1536) → fail fast at boot.
+    with pytest.raises(RuntimeError, match="does not match the .*pgvector"):
+        validate_embedder_provider(Settings(embedding_dim=768))
+
+
+def test_validate_accepts_matching_dim() -> None:
+    # Default dim (1536) matches the column; no raise.
+    validate_embedder_provider(Settings())
+
+
 def test_validate_allows_stub_outside_production() -> None:
     validate_embedder_provider(Settings(environment="local", embedding_provider="stub"))
 

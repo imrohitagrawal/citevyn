@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
+from app.embeddings import validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
 from app.worker.embedder import build_embedder
 from app.worker.fetchers import build_fetcher
@@ -140,6 +141,11 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     stamp every :class:`Document` / :class:`Chunk` row it creates,
     and (c) satisfy the FK on ``documents``.
     """
+    # Fail fast on a bad embedding config (unknown provider, stub-in-prod, or a
+    # dimension that does not match the pgvector column) so a standalone worker
+    # cannot silently build a hash-only or wrong-dim index. Mirrors the API's
+    # startup guard in app.main.
+    validate_embedder_provider(settings)
     fetcher = build_fetcher(_pick_first_source())  # build default-root LocalFetcher
     embedder = build_embedder(settings)
     return IngestionRunner(

@@ -66,7 +66,15 @@ def _extract_values(embedding: Any, *, dim: int) -> list[float]:
     values = cast(dict[str, Any], embedding).get("values")
     if not isinstance(values, list) or not values:
         raise EmbedderUnavailable("Gemini embeddings response missing 'values' array")
-    vector = [float(v) for v in cast(list[Any], values)]
+    try:
+        vector = [float(v) for v in cast(list[Any], values)]
+    except (TypeError, ValueError) as exc:
+        # A non-numeric value in the body would otherwise raise a raw ValueError
+        # carrying provider-supplied content, which at ingest lands in
+        # IngestionJob.error_message (admin-visible). Keep it generic (issue #50).
+        raise EmbedderUnavailable(
+            "Gemini embeddings response contained a non-numeric value", cause=exc
+        ) from exc
     if len(vector) != dim:
         raise EmbedderUnavailable(f"Gemini embeddings returned dim {len(vector)}, expected {dim}")
     return vector
@@ -150,6 +158,10 @@ class GeminiEmbedder:
             raise EmbedderUnavailable(
                 "Gemini embeddings batch response count did not match the request"
             )
+        # Order dependency: batchEmbedContents returns embeddings in the same
+        # order as the requests (the API provides no per-item index to validate
+        # against), so we pair by position. The count check above is the only
+        # structural guard the response allows.
         return [_extract_values(item, dim=self._dim) for item in embeddings_list]
 
     # -- internals --------------------------------------------------------

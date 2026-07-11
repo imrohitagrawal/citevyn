@@ -30,6 +30,14 @@ _logger = logging.getLogger("citevyn.embeddings")
 # to a real provider so retrieval is semantic, not hash-bucketed.
 ALLOWED_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"stub", "gemini"})
 
+# The dimension of the pgvector ``chunks.embedding`` column created by migration
+# ``0004`` (``vector(1536)``). ``Settings.embedding_dim`` MUST equal this, because
+# the ORM emits a vector of ``settings.embedding_dim`` against a fixed-width
+# column; a mismatch fails cryptically at insert time on Postgres. The startup
+# guard below turns that into a clear boot-time error. Changing the dimension
+# means writing a new migration AND updating this constant in lock-step.
+PGVECTOR_COLUMN_DIM: int = 1536
+
 
 class EmbeddingProviderNotConfigured(RuntimeError):
     """Raised at startup when a production deploy uses the stub embedder."""
@@ -46,6 +54,16 @@ def validate_embedder_provider(settings: Settings) -> None:
         raise RuntimeError(
             f"CITEVYN_EMBEDDING_PROVIDER={settings.embedding_provider!r} is not supported. "
             f"Allowed values: {sorted(ALLOWED_EMBEDDING_PROVIDERS)}."
+        )
+    if settings.embedding_dim != PGVECTOR_COLUMN_DIM:
+        # The pgvector column is a fixed vector(PGVECTOR_COLUMN_DIM); a mismatched
+        # embedding_dim would fail cryptically at first insert on Postgres. Fail
+        # fast at boot instead, with a clear message.
+        raise RuntimeError(
+            f"CITEVYN_EMBEDDING_DIM={settings.embedding_dim} does not match the "
+            f"pgvector column dimension ({PGVECTOR_COLUMN_DIM}). Changing the "
+            "embedding dimension requires a new migration; see migration 0004 and "
+            "docs/ADR/0003-embeddings-provider.md."
         )
     if settings.environment == "production" and settings.embedding_provider == "stub":
         raise EmbeddingProviderNotConfigured(
@@ -83,9 +101,11 @@ _embedder: Embedder | None = None
 def get_embedder(settings: Settings | None = None) -> Embedder:
     """Return the process-wide :class:`Embedder`, building it lazily.
 
-    Subsequent calls return the same instance so a real client's
-    ``httpx.AsyncClient`` pool is reused. Use :func:`reset_embedder` in tests when
-    settings change.
+    ``settings`` is honored ONLY on the first call that builds the singleton;
+    subsequent calls return the cached instance and ignore any ``settings`` passed
+    (so a real client's ``httpx.AsyncClient`` pool is reused). To rebuild after a
+    settings change, call :func:`reset_embedder` (tests) or
+    :func:`shutdown_embedder` (production) first.
     """
     global _embedder
     if _embedder is None:

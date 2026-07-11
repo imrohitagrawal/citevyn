@@ -182,6 +182,28 @@ async def test_embed_wrong_dimension_body_raises() -> None:
         await client.aclose()
 
 
+async def test_embed_non_numeric_value_raises_generic_no_leak() -> None:
+    """A non-numeric value in the body → generic EmbedderUnavailable, no leak.
+
+    Guards issue #50 on the ingest path: a raw ValueError would carry the
+    provider-supplied token into IngestionJob.error_message (admin-visible).
+    """
+    secret_token = "NaN-SECRET-42"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embedding": {"values": [0.1, secret_token, 0.3, 0.4]}})
+
+    client = _client(handler, dim=4)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert secret_token not in str(info.value)
+    assert "non-numeric" in str(info.value)
+
+
 async def test_embed_documents_count_mismatch_raises() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         # Asked for 2, got 1 back.

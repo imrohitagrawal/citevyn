@@ -17,8 +17,11 @@ the write path and the read path call different methods. The stub ignores the
 distinction and returns the same deterministic vector either way, so hermetic tests
 stay simple.
 
-The contract is ``list[float]`` of length :attr:`dim`. Vectors are unit-normalised so
-cosine distance is well defined against the pgvector ``vector`` column.
+The contract is ``list[float]`` of length :attr:`dim`. Retrieval ranks by cosine
+distance (pgvector's ``<=>``), which is scale-invariant, so implementations need not
+return unit-length vectors — the :class:`~app.embeddings.stub.StubEmbedder`
+normalises for determinism, while a real provider (Gemini) returns provider-scaled
+values. Do not rely on unit norm downstream (e.g. raw inner product).
 """
 
 from __future__ import annotations
