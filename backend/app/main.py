@@ -46,6 +46,12 @@ from app.llm.factory import shutdown_llm_client, validate_llm_provider
 
 _logger = logging.getLogger("citevyn.request")
 
+# Client-facing reason for an LLM/answer-engine failure. Deliberately
+# generic: the underlying LLMUnavailable message can carry upstream
+# provider identity and raw error text, which must not reach the caller.
+# The full detail is logged server-side in _orchestrator_error_handler.
+_GENERIC_LLM_UNAVAILABLE_REASON = "The language model is temporarily unavailable."
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -115,16 +121,27 @@ def _resolve_request_id(request: Request) -> str:
 async def _orchestrator_error_handler(request: Request, exc: OrchestratorError) -> JSONResponse:
     """Map an orchestrator failure to a 500 with the standard envelope.
 
-    The cause string is preserved in ``error.details.reason`` so an
-    SRE can correlate the HTTP response with the underlying log
-    line without the client having to parse a stack trace.
+    The orchestrator wraps an :class:`LLMUnavailable` whose message can
+    carry upstream LLM-provider detail (provider identity, raw error
+    text). That must not reach the caller, so the client-facing
+    ``error.details.reason`` is a fixed generic string; the full cause
+    chain is logged SERVER-SIDE (keyed by ``request_id``) so an SRE can
+    still correlate the response with the failure.
     """
+    _logger.warning(
+        "orchestrator_error",
+        extra={
+            "request_id": _resolve_request_id(request),
+            "path": request.url.path,
+            "cause": str(exc),
+        },
+    )
     envelope = ErrorEnvelope(
         request_id=_resolve_request_id(request),
         error=ErrorDetail(
             code=APIErrorCode.internal_error,
             message=("The answer engine is currently unavailable. Please retry in a few seconds."),
-            details={"reason": str(exc)},
+            details={"reason": _GENERIC_LLM_UNAVAILABLE_REASON},
         ),
     )
     return JSONResponse(

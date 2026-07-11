@@ -15,14 +15,22 @@ transport failures and any 4xx surface as :class:`LLMUnavailable`.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, cast
 
 import httpx
 
+from app.core.middleware import get_current_request_id
 from app.llm.errors import LLMUnavailable
 from app.llm.types import LLMProvider, LLMResult
 
+_logger = logging.getLogger("citevyn.llm")
+
 _UNAVAILABLE_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+# Cap the upstream body we keep in the SERVER log. Enough to debug the
+# provider failure without hoarding an unbounded response.
+_ERROR_BODY_LOG_LIMIT = 500
 
 
 def _extract_text(choices: list[dict[str, Any]]) -> str:
@@ -109,9 +117,20 @@ class OpenRouterLLMClient:
             ) from exc
 
         if response.status_code in _UNAVAILABLE_STATUSES or response.status_code >= 400:
-            raise LLMUnavailable(
-                f"OpenRouter returned {response.status_code}: {response.text[:200]}"
+            # The upstream body can carry provider identity and raw error
+            # text, so it is logged SERVER-SIDE only (never the request
+            # headers, which hold the API key) and kept out of the exception
+            # message so it cannot leak to the caller through
+            # error.details.reason.
+            _logger.warning(
+                "openrouter_error_response",
+                extra={
+                    "request_id": get_current_request_id(),
+                    "status_code": response.status_code,
+                    "body": response.text[:_ERROR_BODY_LOG_LIMIT],
+                },
             )
+            raise LLMUnavailable(f"OpenRouter returned {response.status_code}")
 
         try:
             raw_data: Any = json.loads(response.content)

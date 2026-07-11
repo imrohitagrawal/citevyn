@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from app.core import db as db_module
 from app.core.config import get_settings
 from app.core.db import get_sessionmaker
-from app.main import create_app
+from app.main import _GENERIC_LLM_UNAVAILABLE_REASON, create_app
 from app.models import Base, IndexStatus, IndexVersion
 from tests.conftest import seed_catalog
 
@@ -284,12 +284,19 @@ def test_get_message_requires_bearer_token(seeded_app: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_orchestrator_error_maps_to_500_envelope(
-    in_memory_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the orchestrator raises :class:`OrchestratorError` the route
-    must return 500 with the standard envelope, not leak the Python
-    traceback to the client."""
+# The kind of message an LLM provider client can carry after a 5xx: the
+# upstream body (raw error text + provider identity) embedded in the
+# OrchestratorError. This is exactly what must NOT reach the client.
+_LEAKY_UPSTREAM_MESSAGE = (
+    'Anthropic returned 500: {"error":{"type":"api_error",'
+    '"message":"upstream model overloaded at datacenter us-east-1"}}'
+)
+
+
+def _boom_client(
+    in_memory_client: TestClient, monkeypatch: pytest.MonkeyPatch, *, message: str
+) -> TestClient:
+    """Wire the route to an orchestrator that raises OrchestratorError(message)."""
     from app.answer import orchestrator as orch_module
     from app.api.routes import messages as messages_module
 
@@ -298,23 +305,35 @@ def test_orchestrator_error_maps_to_500_envelope(
             del settings, session
 
         async def ask(self, **_kwargs: object) -> object:
-            raise orch_module.OrchestratorError("LLM provider timed out")
+            raise orch_module.OrchestratorError(message)
 
     monkeypatch.setattr(orch_module, "Orchestrator", _BoomOrchestrator)
     monkeypatch.setattr(messages_module, "Orchestrator", _BoomOrchestrator)
+    return in_memory_client
 
-    create = in_memory_client.post(
+
+def _post_boom_message(client: TestClient) -> object:
+    create = client.post(
         "/v1/sessions",
         json={"channel": "chat"},
         headers={"Authorization": DEMO_BEARER},
     )
     session_id = create.json()["session_id"]
-
-    response = in_memory_client.post(
+    return client.post(
         f"/v1/sessions/{session_id}/messages",
         json={"message": "How do I configure Claude Code permissions?"},
         headers={"Authorization": DEMO_BEARER},
     )
+
+
+def test_orchestrator_error_maps_to_500_envelope(
+    in_memory_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the orchestrator raises :class:`OrchestratorError` the route
+    must return 500 with the standard envelope, not leak the Python
+    traceback to the client."""
+    client = _boom_client(in_memory_client, monkeypatch, message="LLM provider timed out")
+    response = _post_boom_message(client)
 
     assert response.status_code == 500
     body = response.json()
@@ -323,5 +342,36 @@ def test_orchestrator_error_maps_to_500_envelope(
     # preserved.
     assert body["error"]["code"] == "internal_error"
     assert "unavailable" in body["error"]["message"].lower()
-    # The cause is preserved in the details for observability.
-    assert body["error"]["details"]["reason"] == "LLM provider timed out"
+    # The client-facing reason is a fixed generic string — never the raw
+    # cause — so provider/upstream detail cannot leak through the envelope.
+    assert body["error"]["details"]["reason"] == _GENERIC_LLM_UNAVAILABLE_REASON
+
+
+def test_orchestrator_error_does_not_leak_upstream_body_to_client(
+    in_memory_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Security regression (issue #50): a provider error body embedded in the
+    OrchestratorError must NOT reach the caller via ``error.details.reason``,
+    yet MUST still be logged server-side for operators."""
+    client = _boom_client(in_memory_client, monkeypatch, message=_LEAKY_UPSTREAM_MESSAGE)
+
+    with caplog.at_level("WARNING", logger="citevyn.request"):
+        response = _post_boom_message(client)
+
+    assert response.status_code == 500
+    reason = response.json()["error"]["details"]["reason"]
+    # Client sees ONLY the generic reason...
+    assert reason == _GENERIC_LLM_UNAVAILABLE_REASON
+    # ...with none of the upstream body, provider identity, or internal detail.
+    assert "Anthropic" not in reason
+    assert "upstream model overloaded" not in reason
+    assert "us-east-1" not in reason
+    assert "500" not in reason
+
+    # The full cause is preserved SERVER-SIDE so an SRE can still debug it.
+    logged = "\n".join(
+        rec.getMessage() + str(rec.__dict__.get("cause", "")) for rec in caplog.records
+    )
+    assert _LEAKY_UPSTREAM_MESSAGE in logged
