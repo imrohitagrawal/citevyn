@@ -38,6 +38,7 @@ from app.cache.answer_cache import (
 )
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
+from app.embeddings import get_embedder
 from app.guardrails.domain import Domain, classify_domain, is_unsupported
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
@@ -159,14 +160,20 @@ async def _retrieve_index_version_hash(
     return row.index_version, row.source_version_hash
 
 
-def _default_retriever(session: AsyncSession) -> _RetrieverLike:
+def _default_retriever(settings: Settings, session: AsyncSession) -> _RetrieverLike:
     """Build the default hybrid retriever.
 
     Injected as a free function so tests can pass their own
     :class:`_RetrieverLike` and the orchestrator never imports the
     pgvector or FTS machinery on its own.
+
+    The embedder comes from the process-wide singleton
+    (:func:`app.embeddings.get_embedder`) so the vector arm is live: the query is
+    embedded with the same provider that built the index. On SQLite the vector
+    retriever still short-circuits to ``[]`` (no pgvector), so wiring a stub
+    embedder here is harmless for hermetic tests.
     """
-    return HybridRetriever(session)
+    return HybridRetriever(session, embedder=get_embedder(settings))
 
 
 class Orchestrator:
@@ -190,7 +197,7 @@ class Orchestrator:
         self._settings = settings
         self._session = session
         self._llm = llm or get_llm_client(settings)
-        self._retriever = retriever or _default_retriever(session)
+        self._retriever = retriever or _default_retriever(settings, session)
         self._cache = cache or build_answer_cache_store(settings, session)
         self._generator = AnswerGenerator(
             self._llm,

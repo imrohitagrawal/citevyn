@@ -98,24 +98,48 @@ class IngestionRunner:
         embedder: Embedder,
         source_version_hash: str = "sha256:mvp-snapshot-1",
         index_version: str = "v-local",
+        embedding_provider: str | None = None,
+        embedding_model: str | None = None,
     ) -> None:
         """Create a runner with explicit collaborators.
 
         ``source_version_hash`` is the "what snapshot are we
         building against?" fingerprint. ``index_version`` is
-        the key the runner writes to. The CLI defaults are
-        good for the MVP; production swaps them for real
-        values from the operator-issued source feed.
+        the key the runner writes to. ``embedding_provider`` and
+        ``embedding_model`` are the provenance stamped onto the
+        :class:`IndexVersion` (Tier 3 guardrail, #51) so the read
+        path can be checked against the embedder that built the
+        index; ``None`` leaves the stamp unset (e.g. ad-hoc test
+        runs). The CLI defaults are good for the MVP; production
+        swaps them for real values from the operator-issued source
+        feed.
         """
         self._fetcher = fetcher
         self._embedder = embedder
         self._source_version_hash = source_version_hash
         self._index_version = index_version
+        self._embedding_provider = embedding_provider
+        self._embedding_model = embedding_model
 
     @property
     def source_version_hash(self) -> str:
         """Public read-only view of the snapshot hash (CLI / tests use this)."""
         return self._source_version_hash
+
+    @property
+    def embedding_provider(self) -> str | None:
+        """The embedding provider stamped onto the index (or ``None``)."""
+        return self._embedding_provider
+
+    @property
+    def embedding_model(self) -> str | None:
+        """The embedding model stamped onto the index (or ``None``)."""
+        return self._embedding_model
+
+    @property
+    def embedding_dim(self) -> int:
+        """The dimension of the vectors this runner's embedder produces."""
+        return self._embedder.dim
 
     async def run(
         self,
@@ -282,8 +306,14 @@ class IngestionRunner:
         attach chunks immediately).
         """
         document = await self._upsert_document(session, source=source)
+        # Embed the whole document's chunks in one batched call. Real providers
+        # (Gemini) charge and rate-limit per request, so a single
+        # ``embed_documents`` beats N per-chunk round-trips; the stub ignores the
+        # distinction. ``RETRIEVAL_DOCUMENT`` task type is applied inside the
+        # embedder (the read path uses ``RETRIEVAL_QUERY``).
+        vectors = await self._embedder.embed_documents([draft.text for draft in drafts])
         chunks: list[Chunk] = []
-        for draft in drafts:
+        for draft, vector in zip(drafts, vectors, strict=True):
             chunk = Chunk(
                 document_id=document.document_id,
                 product_area=source.product_area,
@@ -295,7 +325,7 @@ class IngestionRunner:
                 exact_terms=[],
                 chunk_order=draft.chunk_order,
                 content_checksum=_checksum(draft.text),
-                embedding=self._embedder.embed(draft.text),
+                embedding=vector,
             )
             session.add(chunk)
             chunks.append(chunk)
@@ -331,7 +361,9 @@ class IngestionRunner:
             index_version=self._index_version,
             source_name=source.name,
             product_area=source.product_area,
-            source_url=source.location,
+            # Prefer the official upstream URL so citations resolve to a real
+            # source; fall back to the local location for ad-hoc specs.
+            source_url=source.source_url or source.location,
             title=source.title,
             content_checksum=_checksum(source.name + source.title),
             last_fetched_at=datetime.now(UTC),
@@ -447,22 +479,37 @@ async def ensure_index_version(
     *,
     index_version: str,
     source_version_hash: str,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
 ) -> IndexVersion:
-    """Create the candidate :class:`IndexVersion` if missing.
+    """Create the candidate :class:`IndexVersion` if missing, and stamp provenance.
 
     The admin route is the only place that promotes a
     candidate to active; the worker just makes sure the
     candidate row exists for the snapshot it just built.
     Idempotent on ``index_version`` — re-running for the
     same version returns the existing row.
+
+    The embedding provenance (Tier 3 guardrail, #51) records which embedder built
+    this index. On a re-ingest it is refreshed on the existing row too, so an
+    index rebuilt under a new embedder does not keep a stale stamp.
     """
     existing = await session.get(IndexVersion, index_version)
     if existing is not None:
+        if embedding_provider is not None:
+            existing.embedding_provider = embedding_provider
+            existing.embedding_model = embedding_model
+            existing.embedding_dim = embedding_dim
+            await session.flush()
         return existing
     row = IndexVersion(
         index_version=index_version,
         status=IndexStatus.candidate,
         source_version_hash=source_version_hash,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
         created_at=datetime.now(UTC),
         promoted_at=None,
     )

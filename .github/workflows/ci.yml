@@ -54,7 +54,9 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     services:
       postgres:
-        image: postgres:16
+        # pgvector image (Postgres 16 + the ``vector`` extension) so migration
+        # 0004 can CREATE EXTENSION vector and the pgvector integration tests run.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: citevyn
           POSTGRES_PASSWORD: citevyn

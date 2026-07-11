@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import GUID, Base, StrEnumType
@@ -28,6 +28,14 @@ class IndexVersion(Base):
     index_version: Mapped[str] = mapped_column(String(64), primary_key=True)
     status: Mapped[IndexStatus] = mapped_column(StrEnumType(IndexStatus), nullable=False)
     source_version_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    # --- Embedding provenance (Tier 3 guardrail, #51) ---
+    # Records which embedder built this index so a future query-time embedder can
+    # be checked against it (a Gemini-built index must be queried with Gemini —
+    # cross-space cosine distance is meaningless). Nullable: pre-#51 indexes and
+    # the stub path leave them unset. See docs/ADR/0003-embeddings-provider.md.
+    embedding_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    embedding_dim: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     evaluation_run_id: Mapped[uuid.UUID | None] = mapped_column(

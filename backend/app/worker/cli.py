@@ -87,6 +87,9 @@ async def _drive(
             session,
             index_version=index_version,
             source_version_hash=runner.source_version_hash,
+            embedding_provider=runner.embedding_provider,
+            embedding_model=runner.embedding_model,
+            embedding_dim=runner.embedding_dim,
         )
         await session.commit()
 
@@ -138,12 +141,14 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     and (c) satisfy the FK on ``documents``.
     """
     fetcher = build_fetcher(_pick_first_source())  # build default-root LocalFetcher
-    embedder = build_embedder()
+    embedder = build_embedder(settings)
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
         source_version_hash=settings.source_version_hash,
         index_version=index_version,
+        embedding_provider=settings.embedding_provider,
+        embedding_model=settings.embedding_model,
     )
 
 

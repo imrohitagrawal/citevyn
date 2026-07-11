@@ -42,6 +42,7 @@ from app.core.errors import (
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIDMiddleware, get_current_request_id
 from app.core.redis_client import shutdown_redis_client
+from app.embeddings import shutdown_embedder, validate_embedder_provider
 from app.llm.factory import shutdown_llm_client, validate_llm_provider
 
 _logger = logging.getLogger("citevyn.request")
@@ -64,11 +65,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """
     settings = get_settings()
     validate_llm_provider(settings)
+    validate_embedder_provider(settings)
     _logger.info(
         "app_startup",
         extra={
             "environment": settings.environment,
             "llm_provider": settings.llm_provider,
+            "embedding_provider": settings.embedding_provider,
         },
     )
     try:
@@ -76,6 +79,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     finally:
         _logger.info("app_shutdown")
         await shutdown_llm_client()
+        await shutdown_embedder()
         await shutdown_redis_client()
 
 
