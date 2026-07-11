@@ -150,9 +150,11 @@ index version**, with queries always using the model that built the active index
 ## Deferred / Future Work
 
 Revisit these **only if Gemini proves insufficient** in practice — EXCEPT item 1, which
-is a correctness safety net worth doing whenever a second embedder becomes reachable:
+is a correctness safety net worth doing whenever a second embedder becomes reachable.
+Tracked as GitHub issues (see `docs/BACKLOG.md`): item 1 → **#57**, item 2 → **#58**,
+items 3–7 → **#59**.
 
-1. **Tier 3 enforcement (read the stamp) — TOP FOLLOW-UP.** At boot and/or per-query,
+1. **Tier 3 enforcement (read the stamp) — TOP FOLLOW-UP (#57).** At boot and/or per-query,
    compare the current embedder's `provider/model/dim` against the active
    `IndexVersion` stamp; on mismatch, **degrade the vector arm to `[]` with a loud
    log** (or refuse to serve) rather than returning silently-corrupted rankings.
