@@ -65,10 +65,18 @@ class HybridRetriever:
 
         if intent is Intent.exact_lookup:
             exact_hits = await exact.retrieve(question, product_area=product_area, limit=top_k)
-            evidence = [
-                _to_evidence(h, RetrievalType.exact, idx + 1) for idx, h in enumerate(exact_hits)
-            ]
-            return evidence[:top_k]
+            if exact_hits:
+                evidence = [
+                    _to_evidence(h, RetrievalType.exact, idx + 1)
+                    for idx, h in enumerate(exact_hits)
+                ]
+                return evidence[:top_k]
+            # PRD §3.2 answer flow step 3: "Fall back to keyword search if
+            # needed." A natural-language exact-lookup question ("What does the
+            # --model flag do?") often doesn't resolve to an exact-term chunk
+            # even when the docs cover it, so an empty exact result must not
+            # short-circuit to no_answer. Fall through to the full hybrid path
+            # (keyword + vector + rerank) below instead of returning [].
 
         exact_hits, keyword_hits, vector_hits = await asyncio.gather(
             exact.retrieve(question, product_area=product_area, limit=limit),

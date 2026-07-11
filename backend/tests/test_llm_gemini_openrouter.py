@@ -1,0 +1,334 @@
+"""Slice 9b LLM provider tests: Gemini + OpenRouter + fallback + factory.
+
+All HTTP is faked with ``httpx.MockTransport`` — no network. Covers:
+
+* :class:`GeminiLLMClient` / :class:`OpenRouterLLMClient` happy path
+  (text + token extraction + provider tag) and error surfacing (5xx, 429,
+  timeout, missing key).
+* :class:`FallbackLLMClient` uses the secondary only when the primary raises
+  :class:`LLMUnavailable`, and never when the primary succeeds.
+* :func:`build_llm_client` resolves ``gemini`` / ``router`` per which keys are
+  configured, including the Gemini→OpenRouter fallback wiring.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from app.core.config import Settings, get_settings
+from app.llm.errors import LLMUnavailable
+from app.llm.factory import build_llm_client
+from app.llm.fallback import FallbackLLMClient
+from app.llm.gemini import GeminiLLMClient
+from app.llm.openrouter import OpenRouterLLMClient
+from app.llm.protocol import LLMClient
+from app.llm.stub import StubLLMClient
+from app.llm.types import LLMResult
+
+# ---------------------------------------------------------------------------
+# Client builders with a faked transport
+# ---------------------------------------------------------------------------
+
+
+def _gemini_client(handler) -> GeminiLLMClient:
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    return GeminiLLMClient(
+        model="gemini-2.5-flash",
+        api_key="gm-test",
+        api_base="https://generativelanguage.googleapis.com",
+        timeout_seconds=5.0,
+        http_client=http_client,
+    )
+
+
+def _openrouter_client(handler) -> OpenRouterLLMClient:
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://openrouter.ai/api/v1",
+    )
+    return OpenRouterLLMClient(
+        model="google/gemini-2.5-flash",
+        api_key="or-test",
+        api_base="https://openrouter.ai/api/v1",
+        timeout_seconds=5.0,
+        http_client=http_client,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GeminiLLMClient
+# ---------------------------------------------------------------------------
+
+
+async def test_gemini_happy_path_extracts_text_and_tokens() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-goog-api-key"] == "gm-test"
+        assert "generateContent" in str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"role": "model", "parts": [{"text": "Use --model to pick [1]."}]}}
+                ],
+                "usageMetadata": {"promptTokenCount": 42, "candidatesTokenCount": 7},
+            },
+        )
+
+    client = _gemini_client(handler)
+    try:
+        result = await client.complete(system="sys", user="q", max_tokens=128, temperature=0.2)
+    finally:
+        await client.aclose()
+    assert result.text == "Use --model to pick [1]."
+    assert result.input_tokens == 42
+    assert result.output_tokens == 7
+    assert result.provider == "gemini"
+
+
+async def test_gemini_disables_thinking_in_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen.update(_json.loads(request.content))
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": "x [1]"}]}}]}
+        )
+
+    client = _gemini_client(handler)
+    try:
+        await client.complete(system="sys", user="q", max_tokens=64, temperature=0.0)
+    finally:
+        await client.aclose()
+    gen_cfg = seen["generationConfig"]
+    assert isinstance(gen_cfg, dict)
+    assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+async def test_gemini_empty_candidate_raises_unavailable() -> None:
+    # 200 OK but the candidate has no text part (e.g. finishReason SAFETY, or
+    # MAX_TOKENS with the budget consumed). Must raise so the fallback fires
+    # rather than returning a silent blank answer.
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"role": "model", "parts": []}}]}
+        )
+
+    client = _gemini_client(handler)
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_gemini_4xx_raises_unavailable() -> None:
+    # A 400 (e.g. an unsupported thinkingConfig on a model that requires
+    # thinking) must surface as LLMUnavailable so the OpenRouter fallback runs.
+    client = _gemini_client(lambda _r: httpx.Response(400, json={"error": "bad request"}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_gemini_5xx_raises_unavailable() -> None:
+    client = _gemini_client(lambda _r: httpx.Response(503, json={"error": "overloaded"}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_gemini_timeout_raises_unavailable() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("simulated timeout")
+
+    client = _gemini_client(handler)
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+def test_gemini_requires_api_key() -> None:
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        GeminiLLMClient(
+            model="gemini-2.5-flash",
+            api_key=None,
+            api_base="https://x",
+            timeout_seconds=5.0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# OpenRouterLLMClient
+# ---------------------------------------------------------------------------
+
+
+async def test_openrouter_happy_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer or-test"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "Answer [1]."}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+                "model": "google/gemini-2.5-flash",
+            },
+        )
+
+    client = _openrouter_client(handler)
+    try:
+        result = await client.complete(system="sys", user="q", max_tokens=128, temperature=0.2)
+    finally:
+        await client.aclose()
+    assert result.text == "Answer [1]."
+    assert result.input_tokens == 10
+    assert result.output_tokens == 3
+    assert result.provider == "router"
+
+
+async def test_openrouter_empty_content_raises_unavailable() -> None:
+    # 200 OK but the assistant message carries no content — raise so a blank
+    # answer is never returned.
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant"}}]})
+
+    client = _openrouter_client(handler)
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+async def test_openrouter_429_raises_unavailable() -> None:
+    client = _openrouter_client(lambda _r: httpx.Response(429, json={"error": "rate_limited"}))
+    with pytest.raises(LLMUnavailable):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    await client.aclose()
+
+
+def test_openrouter_requires_api_key() -> None:
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        OpenRouterLLMClient(
+            model="google/gemini-2.5-flash",
+            api_key=None,
+            api_base="https://x",
+            timeout_seconds=5.0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# FallbackLLMClient
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Minimal LLMClient double that records calls and returns a fixed result."""
+
+    def __init__(self, *, result: LLMResult | None = None, raises: Exception | None = None) -> None:
+        self._result = result
+        self._raises = raises
+        self.calls = 0
+
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        assert self._result is not None
+        return self._result
+
+
+def _result(provider: str) -> LLMResult:
+    return LLMResult(text="ok [1]", input_tokens=1, output_tokens=1, model="m", provider=provider)
+
+
+async def test_fallback_uses_secondary_when_primary_unavailable() -> None:
+    primary = _RecordingClient(raises=LLMUnavailable("gemini down"))
+    secondary = _RecordingClient(result=_result("router"))
+    client = FallbackLLMClient(primary=primary, secondary=secondary)
+    result = await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    assert result.provider == "router"
+    assert primary.calls == 1
+    assert secondary.calls == 1
+
+
+async def test_fallback_skips_secondary_when_primary_succeeds() -> None:
+    primary = _RecordingClient(result=_result("gemini"))
+    secondary = _RecordingClient(result=_result("router"))
+    client = FallbackLLMClient(primary=primary, secondary=secondary)
+    result = await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    assert result.provider == "gemini"
+    assert primary.calls == 1
+    assert secondary.calls == 0
+
+
+async def test_fallback_propagates_non_unavailable_error() -> None:
+    primary = _RecordingClient(raises=ValueError("bug"))
+    secondary = _RecordingClient(result=_result("router"))
+    client = FallbackLLMClient(primary=primary, secondary=secondary)
+    with pytest.raises(ValueError):
+        await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    assert secondary.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Factory resolution
+# ---------------------------------------------------------------------------
+
+
+def _settings(**over: object) -> Settings:
+    base: dict[str, object] = {"llm_provider": "gemini", "environment": "local"}
+    base.update(over)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+def test_factory_gemini_with_both_keys_builds_fallback() -> None:
+    client = build_llm_client(_settings(gemini_api_key="gm", openrouter_api_key="or"))
+    assert isinstance(client, FallbackLLMClient)
+    assert isinstance(client, LLMClient)
+
+
+def test_factory_gemini_key_only_builds_gemini() -> None:
+    client = build_llm_client(_settings(gemini_api_key="gm", openrouter_api_key=None))
+    assert isinstance(client, GeminiLLMClient)
+
+
+def test_factory_gemini_provider_router_key_only_builds_openrouter() -> None:
+    client = build_llm_client(_settings(gemini_api_key=None, openrouter_api_key="or"))
+    assert isinstance(client, OpenRouterLLMClient)
+
+
+def test_factory_gemini_no_keys_dev_falls_back_to_stub() -> None:
+    client = build_llm_client(_settings(gemini_api_key=None, openrouter_api_key=None))
+    assert isinstance(client, StubLLMClient)
+
+
+def test_factory_gemini_no_keys_production_raises() -> None:
+    # A production Settings requires a strong admin key (validator); supply one
+    # so the factory's own missing-LLM-key guard is what raises.
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        build_llm_client(
+            _settings(
+                environment="production",
+                admin_api_key="prod-strong-admin-secret",
+                gemini_api_key=None,
+                openrouter_api_key=None,
+            )
+        )
+
+
+def test_factory_router_provider_builds_openrouter() -> None:
+    client = build_llm_client(_settings(llm_provider="router", openrouter_api_key="or"))
+    assert isinstance(client, OpenRouterLLMClient)
+
+
+def test_factory_router_provider_requires_key(monkeypatch) -> None:
+    monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "router")
+    monkeypatch.delenv("CITEVYN_OPENROUTER_API_KEY", raising=False)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+            build_llm_client(get_settings())
+    finally:
+        get_settings.cache_clear()

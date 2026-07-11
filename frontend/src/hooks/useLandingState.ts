@@ -6,7 +6,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useReducer } from "react";
-import { matchKB, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
+import { matchKB, matchCitevynMeta, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
 import { askQuestion, createSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
 import { ApiClientError } from "../lib/types";
@@ -32,6 +32,11 @@ interface DemoState {
 }
 
 interface ChatMessage {
+  /** Stable, monotonically-increasing id assigned at creation. Streamed
+      updates target the message by this id (not by list position), so a
+      still-streaming answer can never write into a later bubble even when the
+      live path appends messages out of order after an awaited network call. */
+  id: number;
   role: "user" | "bot";
   text: string;
   streaming?: boolean;
@@ -62,8 +67,8 @@ type Action =
   | { type: "SET_HERO"; hero: Partial<HeroState> }
   | { type: "SET_DEMO"; demo: Partial<DemoState> }
   | { type: "ADD_MESSAGE"; message: ChatMessage }
-  | { type: "UPDATE_LAST_MESSAGE"; text: string }
-  | { type: "FINISH_LAST_MESSAGE"; sources: Source[]; refusal?: boolean }
+  | { type: "UPDATE_MESSAGE"; id: number; text: string }
+  | { type: "FINISH_MESSAGE"; id: number; sources: Source[]; refusal?: boolean }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
@@ -115,18 +120,18 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, demo: { ...state.demo, ...action.demo } };
     case "ADD_MESSAGE":
       return { ...state, messages: [...state.messages, action.message] };
-    case "UPDATE_LAST_MESSAGE":
+    case "UPDATE_MESSAGE":
       return {
         ...state,
-        messages: state.messages.map((m, i) =>
-          i === state.messages.length - 1 ? { ...m, text: action.text } : m
+        messages: state.messages.map((m) =>
+          m.id === action.id ? { ...m, text: action.text } : m
         ),
       };
-    case "FINISH_LAST_MESSAGE":
+    case "FINISH_MESSAGE":
       return {
         ...state,
-        messages: state.messages.map((m, i) =>
-          i === state.messages.length - 1
+        messages: state.messages.map((m) =>
+          m.id === action.id
             ? { ...m, streaming: false, sources: action.sources, refusal: action.refusal }
             : m
         ),
@@ -242,6 +247,9 @@ export function useLandingState() {
   // failure is not an answer — the user is told to retry, so a failed
   // question must be allowed back through.
   const failedQuestionsRef = useRef<Set<string>>(new Set());
+  // Monotonic source of stable ChatMessage ids (see ChatMessage.id).
+  const msgIdRef = useRef(0);
+  const nextMessageId = useCallback(() => (msgIdRef.current += 1), []);
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -437,6 +445,15 @@ export function useLandingState() {
   // by the first-ask and retry paths so both behave identically.
   const routeQuestion = useCallback(
     (text: string) => {
+      // Questions about CiteVyn itself (Pro/membership/coverage) are answered
+      // locally in both modes — the live backend only indexes the four product
+      // docs and refuses CiteVyn-meta questions as "unsupported", which is the
+      // wrong UX for a valid "What is CiteVyn Pro?" ask.
+      const meta = matchCitevynMeta(text);
+      if (meta) {
+        streamBot(meta.a, { refusal: !!meta.refusal, finalSources: meta.sources || [] });
+        return;
+      }
       if (live) {
         void sendLive(text);
         return;
@@ -473,38 +490,44 @@ export function useLandingState() {
 
       dispatch({
         type: "ADD_MESSAGE",
-        message: { role: "user", text },
+        message: { id: nextMessageId(), role: "user", text },
       });
 
       routeQuestion(text);
     },
-    [state.messages, routeQuestion],
+    [state.messages, routeQuestion, nextMessageId],
   );
 
   const streamBot = useCallback(
     (text: string, extra: { refusal?: boolean; finalSources: Source[] }) => {
+      // This answer's bubble gets its own stable id, and the stream targets that
+      // id — never "the last message". So concurrent answers (e.g. two live
+      // questions whose network calls resolve close together) each write only
+      // into their own bubble: no text bleed, and each finalizes its own cursor.
+      const id = nextMessageId();
+
       // Autoscroll is owned by ChatView's useEffect([messages]): every dispatch
       // below produces a new `messages` array, so the view re-pins to the bottom
-      // after each add / streamed chunk / finish. The hook no longer reaches into
-      // #chat-list directly.
+      // after each add / streamed chunk / finish.
       dispatch({
         type: "ADD_MESSAGE",
-        message: { role: "bot", text: "", streaming: true, sources: [], ...extra },
+        message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
       });
 
       timers.current.chatTimer = streamText(
         text,
-        (chunk) => dispatch({ type: "UPDATE_LAST_MESSAGE", text: chunk }),
+        (chunk) => dispatch({ type: "UPDATE_MESSAGE", id, text: chunk }),
         () => {
           dispatch({
-            type: "FINISH_LAST_MESSAGE",
+            type: "FINISH_MESSAGE",
+            id,
             sources: extra.finalSources,
             refusal: extra.refusal,
           });
         },
       );
     },
-    [],
+    [nextMessageId],
   );
 
   const flashExisting = useCallback(

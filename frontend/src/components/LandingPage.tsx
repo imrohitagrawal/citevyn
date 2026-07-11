@@ -138,7 +138,12 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
 
       {/* Chat View */}
       {screen === "chat" && (
-        <>
+        // Full-viewport flex column: the header takes its natural height (which
+        // varies — it wraps taller on narrow screens) and the chat pane fills
+        // the rest, so the message list (not the page body) is always the
+        // scroller regardless of header height. 100dvh tracks the mobile
+        // browser's dynamic viewport (URL bar / keyboard).
+        <div className="chat-screen">
           <Header
             themeLabel={dark ? "LIGHT" : "DARK"}
             themeGlyph={dark ? "☀" : "☾"}
@@ -157,7 +162,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onBackClick={backToLanding}
             live={live}
           />
-        </>
+        </div>
       )}
 
       <ToastHost toasts={toasts} onDismiss={removeToast} />
