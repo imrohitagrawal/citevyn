@@ -18,17 +18,25 @@ distinguish the two if needed.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, cast
 
 import httpx
 
+from app.core.middleware import get_current_request_id
 from app.llm.errors import LLMUnavailable
 from app.llm.types import LLMProvider, LLMResult
+
+_logger = logging.getLogger("citevyn.llm")
 
 # Status codes the orchestrator treats as "provider unavailable".
 # 4xx other than 408/429 are configuration errors (bad prompt, bad
 # key) — we still raise LLMUnavailable so the orchestrator can decide.
 _UNAVAILABLE_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+
+# Cap the upstream body we keep in the SERVER log. Enough to debug the
+# provider failure without hoarding an unbounded response.
+_ERROR_BODY_LOG_LIMIT = 500
 
 
 def _extract_text(content_blocks: list[dict[str, Any]]) -> str:
@@ -117,16 +125,23 @@ class AnthropicLLMClient:
                 cause=exc,
             ) from exc
 
-        if response.status_code in _UNAVAILABLE_STATUSES:
-            raise LLMUnavailable(
-                f"Anthropic returned {response.status_code}: {response.text[:200]}"
-            )
         if response.status_code >= 400:
-            # Other client errors (400/401/403) — still not retried by
-            # this client. Orchestrator decides.
-            raise LLMUnavailable(
-                f"Anthropic returned {response.status_code}: {response.text[:200]}"
+            # Covers both "provider unavailable" (5xx/408/429) and other
+            # client errors (400/401/403) — neither is retried by this
+            # client; the orchestrator decides. The upstream body can carry
+            # provider identity and raw error text, so it is logged
+            # SERVER-SIDE only (never the request headers, which hold the
+            # API key) and kept out of the exception message so it cannot
+            # leak to the caller through error.details.reason.
+            _logger.warning(
+                "anthropic_error_response",
+                extra={
+                    "request_id": get_current_request_id(),
+                    "status_code": response.status_code,
+                    "body": response.text[:_ERROR_BODY_LOG_LIMIT],
+                },
             )
+            raise LLMUnavailable(f"Anthropic returned {response.status_code}")
 
         try:
             raw_data: Any = json.loads(response.content)

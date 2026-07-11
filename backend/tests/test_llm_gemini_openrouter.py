@@ -219,6 +219,43 @@ def test_openrouter_requires_api_key() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Security regression (issue #50): upstream error body stays server-side
+# ---------------------------------------------------------------------------
+
+
+# 401 exercises the most sensitive upstream body (auth-failure detail); 429/503
+# cover the "unavailable" branch. Both clients funnel every status >= 400 through
+# one block, so parametrizing locks the leak closed for both providers.
+@pytest.mark.parametrize(
+    ("build_client", "provider"),
+    [(_gemini_client, "Gemini"), (_openrouter_client, "OpenRouter")],
+)
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_error_body_is_logged_not_in_exception(
+    build_client, provider: str, status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """All three provider clients behave identically (see the anthropic test):
+    the upstream error body is logged SERVER-SIDE but never embedded in the
+    LLMUnavailable message, so it cannot reach the client via
+    error.details.reason."""
+    secret_body = '{"error":"upstream secret detail us-east-1"}'
+    client = build_client(lambda _r: httpx.Response(status, text=secret_body))
+    try:
+        with (
+            caplog.at_level("WARNING", logger="citevyn.llm"),
+            pytest.raises(LLMUnavailable) as info,
+        ):
+            await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
+    finally:
+        await client.aclose()
+
+    assert secret_body not in str(info.value)
+    assert "upstream secret detail" not in str(info.value)
+    assert str(info.value) == f"{provider} returned {status}"
+    assert any(secret_body in str(rec.__dict__.get("body", "")) for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # FallbackLLMClient
 # ---------------------------------------------------------------------------
 
