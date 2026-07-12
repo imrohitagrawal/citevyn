@@ -12,11 +12,19 @@ Cache key composition (per ``docs/ARCHITECTURE.md`` §5.3):
     || "\x1f" || product_area
     || "\x1f" || source_version_hash
     || "\x1f" || answer_policy_version
+    || "\x1f" || embedder_identity
 
 The SHA-256 hex digest of the concatenation is the cache key. A
 ``source_version_hash`` change MUST change the key, so cached answers
 are invalidated when the underlying evidence corpus moves
 (``test_answer_cache.py`` pins that contract).
+
+``embedder_identity`` (the configured query embedder's ``provider|model|dim``,
+#65) is part of the key so a config-only embedder swap — which leaves
+``source_version_hash`` unchanged — still invalidates affected entries. Without
+it, an answer built in one vector space could be served after the operator
+switches the embedder. It defaults to ``""`` so legacy four-input callers keep a
+stable key; production always passes the real identity.
 """
 
 from __future__ import annotations
@@ -73,17 +81,25 @@ def build_cache_key(
     product_area: str,
     source_version_hash: str,
     answer_policy_version: str,
+    embedder_identity: str = "",
 ) -> str:
-    """Build a deterministic SHA-256 cache key from the four inputs.
+    """Build a deterministic SHA-256 cache key from the inputs.
 
     Concatenation order (separator ``\\x1f`` between fields):
 
         normalized_question || product_area || source_version_hash
-        || answer_policy_version
+        || answer_policy_version || embedder_identity
 
     Changing ``source_version_hash`` MUST change the key so the cache
     is invalidated when the underlying evidence corpus moves; the
     test suite pins that contract.
+
+    ``embedder_identity`` is the configured query embedder's stable
+    ``provider|model|dim`` string (``EmbedderIdentity.cache_key_component``,
+    #65). Changing it MUST change the key so a config-only embedder swap
+    invalidates affected entries. It is ``provider/model/dim`` only — never a
+    secret — so nothing sensitive enters the pre-image. It defaults to ``""``
+    so legacy four-input callers stay deterministic.
     """
     pre_image = _KEY_SEPARATOR.join(
         (
@@ -91,6 +107,7 @@ def build_cache_key(
             product_area,
             source_version_hash,
             answer_policy_version,
+            embedder_identity,
         )
     )
     return hashlib.sha256(pre_image.encode("utf-8")).hexdigest()

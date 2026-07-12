@@ -105,6 +105,34 @@ def test_build_cache_key_changes_with_policy_version() -> None:
     assert build_cache_key(**base) != build_cache_key(**{**base, "answer_policy_version": "v2"})
 
 
+def test_build_cache_key_changes_with_embedder_identity() -> None:
+    """#65: a config-only embedder swap leaves ``source_version_hash`` unchanged,
+    so the embedder identity MUST be part of the key or a stale answer built in a
+    different vector space would be served after the operator fixes the config."""
+    base = dict(
+        normalized_question="q",
+        product_area="claude_code",
+        source_version_hash="sha256:abc",
+        answer_policy_version="v1",
+        embedder_identity="stub|stub-embedding|1536",
+    )
+    swapped = {**base, "embedder_identity": "gemini|gemini-embedding-001|1536"}
+    assert build_cache_key(**base) != build_cache_key(**swapped)
+
+
+def test_build_cache_key_embedder_identity_defaults_stable() -> None:
+    """Legacy four-input callers omit ``embedder_identity``; the default ("")
+    must keep the key deterministic and equal to explicitly passing ""."""
+    four = dict(
+        normalized_question="q",
+        product_area="claude_code",
+        source_version_hash="sha256:abc",
+        answer_policy_version="v1",
+    )
+    assert build_cache_key(**four) == build_cache_key(**four)
+    assert build_cache_key(**four) == build_cache_key(**four, embedder_identity="")
+
+
 def test_build_cache_key_format_is_hex_sha256() -> None:
     """Sanity check: the digest is a 64-char hex string so it fits
     the ``AnswerCache.cache_key`` VARCHAR(256) column."""

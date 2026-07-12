@@ -30,6 +30,7 @@ from app.cache.answer_cache import (
 )
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
+from app.embeddings import configured_embedder_identity
 from app.llm.stub import StubLLMClient
 from app.models import (
     AnswerCache,
@@ -160,17 +161,23 @@ async def test_source_version_hash_bump_invalidates_cache(session: Any) -> None:
     rows = (await session.execute(select(AnswerCache))).scalars().all()
     keys = {row.cache_key for row in rows}
     assert len(keys) == 2
+    # The key now also carries the configured embedder identity (#65); the
+    # index seeded here has no provenance stamp so no arm degrades and both
+    # answers cache normally under their respective source-version keys.
+    embedder_identity = configured_embedder_identity(settings).cache_key_component()
     old_key = build_cache_key(
         normalized_question="how do i configure claude code permissions?",
         product_area="claude_code",
         source_version_hash="sha256:old",
         answer_policy_version=settings.answer_policy_version,
+        embedder_identity=embedder_identity,
     )
     new_key = build_cache_key(
         normalized_question="how do i configure claude code permissions?",
         product_area="claude_code",
         source_version_hash="sha256:new",
         answer_policy_version=settings.answer_policy_version,
+        embedder_identity=embedder_identity,
     )
     assert old_key in keys
     assert new_key in keys
