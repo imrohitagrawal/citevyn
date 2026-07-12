@@ -6,9 +6,10 @@ Covers the two endpoints defined in ``docs/API_SPEC.md`` §5:
 * ``GET /v1/sessions/{session_id}/messages/{message_id}`` — fetch one
   message for citation hydration.
 
-The happy-path test seeds the minimal catalog (an active index, four
-documents, one chunk per product area) through a one-shot async
-seed and asserts the full grounded-answer shape. The error-path tests
+The happy-path test seeds the minimal catalog (an active index, five
+documents — the four product areas plus the About-CiteVyn source — one
+chunk each) through a one-shot async seed and asserts the full
+grounded-answer shape. The error-path tests
 confirm the standard envelope and status mapping without seeding.
 """
 

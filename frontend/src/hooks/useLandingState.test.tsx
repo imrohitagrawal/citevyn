@@ -170,7 +170,9 @@ describe("useLandingState — live send path", () => {
     const bot = result.current.state.messages[1];
     expect(bot.role).toBe("bot");
     expect(bot.refusal).toBe(false);
-    expect(bot.text.toLowerCase()).toContain("pro");
+    // Assert on copy only matchCitevynMeta emits (not the word "pro", which is
+    // already in the question) so this proves the built-in CiteVyn copy was returned.
+    expect(bot.text.toLowerCase()).toContain("free to try");
   });
 
   it("de-dupes session creation for two concurrent asks", async () => {

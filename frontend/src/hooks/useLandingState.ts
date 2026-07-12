@@ -623,8 +623,9 @@ export function useLandingState() {
   // ---------------------------------------------------------------------------
 
   // "Get Pro" is just another question. Route it through `enterChat` → `send`
-  // so the single dedup guard + streaming path handle it (the canned answer
-  // lives in the KB as the "pro" entry, matched by `matchKB`).
+  // so the single dedup guard + streaming path handle it. In live mode it goes
+  // to the backend (the About-CiteVyn source, #49); in demo mode it is answered
+  // from built-in copy via `matchCitevynMeta` (which returns the KB "pro" entry).
   const getPro = useCallback(
     () => enterChat("What do I get with CiteVyn Pro?"),
     [enterChat],

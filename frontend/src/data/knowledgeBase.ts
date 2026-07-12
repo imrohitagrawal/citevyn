@@ -271,8 +271,9 @@ export function matchKB(text: string): KBEntry {
  * falls through to ``matchKB`` in demo mode.
  *
  * The guard is deliberately narrow — it only fires when the text mentions
- * "citevyn" — so genuine product questions ("does Claude Code cost money?")
- * still reach the backend.
+ * "citevyn" — so in demo mode genuine product questions ("does Claude Code
+ * cost money?") still fall through to ``matchKB``. (In live mode this matcher
+ * is never consulted; the caller routes every question to the backend.)
  */
 export function matchCitevynMeta(text: string): KBEntry | null {
   const t = text.toLowerCase();
