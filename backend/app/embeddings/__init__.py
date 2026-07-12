@@ -13,9 +13,12 @@ deferred Tier 3 cross-provider failover.
 from app.embeddings.errors import EmbedderUnavailable
 from app.embeddings.factory import (
     ALLOWED_EMBEDDING_PROVIDERS,
+    EmbedderIdentity,
     EmbeddingProviderNotConfigured,
     build_embedder,
+    configured_embedder_identity,
     get_embedder,
+    is_index_embedder_mismatch,
     reset_embedder,
     shutdown_embedder,
     validate_embedder_provider,
@@ -27,12 +30,15 @@ from app.embeddings.stub import StubEmbedder
 __all__ = [
     "ALLOWED_EMBEDDING_PROVIDERS",
     "Embedder",
+    "EmbedderIdentity",
     "EmbedderUnavailable",
     "EmbeddingProviderNotConfigured",
     "GeminiEmbedder",
     "StubEmbedder",
     "build_embedder",
+    "configured_embedder_identity",
     "get_embedder",
+    "is_index_embedder_mismatch",
     "reset_embedder",
     "shutdown_embedder",
     "validate_embedder_provider",

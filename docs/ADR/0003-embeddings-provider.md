@@ -135,36 +135,62 @@ index version**, with queries always using the model that built the active index
 | **Tier 1** | Same-provider retry on transient errors (429/503/timeout) — same model, same vector space, pure resilience | **Shipped** |
 | **Tier 2** | Provider *choice* via config (`CITEVYN_EMBEDDING_PROVIDER`); the chosen provider builds AND queries the index → always correct. No failover | **Shipped (Gemini wired; Voyage/OpenAI can be added behind the seam)** |
 | **Tier 3 groundwork** | *Write* `provider + model + dim` onto `IndexVersion` — provenance for debugging/observability and a future enforcement check | **Shipped (stamp is WRITTEN ONLY)** |
-| **Tier 3 enforcement** | *Read* the stamp and refuse/degrade a query whose embedder does not match the model that built the active index | **Deferred** |
+| **Tier 3 enforcement** | *Read* the stamp and degrade the vector arm for a query whose embedder does not match the model that built the active index | **Shipped (#57)** |
 | **Tier 3 failover** | Automatic re-ingest under a secondary provider + query-time model matching driven off the stamp | **Deferred** |
 
-> ⚠️ **The stamp is provenance, NOT a live guardrail (yet).** Nothing on the read
-> path reads `IndexVersion.embedding_provider/model/dim`. So there is **no runtime
-> protection** against querying an index with a different embedder than built it. The
-> **dimension** mismatch is caught (boot guard: `embedding_dim` must equal the
-> `vector(1536)` column). A **same-dimension provider/model swap without re-ingest**
-> (e.g. `stub → gemini`, both 1536) is **NOT** caught and silently corrupts rankings.
-> The only current mitigation is the **manual** "re-ingest on provider switch"
-> procedure (RUNBOOK §3.4a). Making this a real guardrail is the first deferred item.
+> ✅ **The stamp is now a live guardrail (#57).** At read time,
+> `HybridRetriever._vector_arm_enabled` compares the configured embedder's
+> `(provider, model, dim)` against the active `IndexVersion`'s stamp. On a mismatch it
+> **degrades the vector arm to `[]` with a loud WARN**
+> (`vector_retrieval_index_embedder_mismatch`) — exact + keyword still answer, the
+> request neither 500s nor serves corrupted rankings. A **same-dimension provider/model
+> swap without re-ingest** (e.g. `stub → gemini`, both 1536) is now caught, closing the
+> gap the **dimension** boot guard could not. A **NULL** stamp (legacy / stub-seeded
+> indexes) is treated as "unknown provenance → allow" so the demo and pre-#51 indexes
+> keep working. This is a read-time *correctness net*, not failover (Tier 3 failover
+> below is still deferred). The manual re-ingest procedure (RUNBOOK §3.4a) remains the
+> way to *fix* a detected mismatch.
+>
+> ✅ **The answer cache now respects that degrade (#65).** The #57 degrade only runs
+> when retrieval runs, so a pre-existing cache-design property surfaced: the answer-cache
+> key omitted the embedder identity, so (1) a cache *hit* returned before retrieval and
+> silenced the mismatch WARN for the already-cached population, and (2) a degraded answer
+> cached during a mismatch persisted to TTL even after the operator fixed the config.
+> Fixed by encoding the configured embedder's `provider|model|dim` in `build_cache_key`
+> (a config-only swap now invalidates affected entries — no schema change; the stamp
+> triple only, never a secret) **and** skipping the cache *write* when the orchestrator
+> predicts the degrade (`is_index_embedder_mismatch`, resolved from the same active-index
+> row as the cache key), so a degraded answer is never frozen and every affected ask
+> re-runs retrieval and re-emits the WARN. Homes: `app/cache/answer_cache.py`,
+> `app/answer/orchestrator.py`, `app/embeddings/factory.py`.
 
 ## Deferred / Future Work
 
 Revisit these **only if Gemini proves insufficient** in practice — EXCEPT item 1, which
-is a correctness safety net worth doing whenever a second embedder becomes reachable:
+is a correctness safety net worth doing whenever a second embedder becomes reachable.
+Tracked as GitHub issues (see `docs/BACKLOG.md`): item 1 → **#57**, item 2 → **#58**,
+items 3–7 → **#59**.
 
-1. **Tier 3 enforcement (read the stamp) — TOP FOLLOW-UP.** At boot and/or per-query,
-   compare the current embedder's `provider/model/dim` against the active
-   `IndexVersion` stamp; on mismatch, **degrade the vector arm to `[]` with a loud
-   log** (or refuse to serve) rather than returning silently-corrupted rankings.
-   Closes the gap called out above and by the review. Suggested homes:
-   `app/answer/orchestrator.py` (read path) / `app/embeddings/factory.py` (guard).
-2. **Scope the read path to the active index version.** `HybridRetriever` is built with
-   `active_index_version=None`, and `promote` flips `IndexVersion.status` without
-   demoting the prior version's `Document` rows — so two active index versions would be
-   queried together (benign today: single provider, re-ingest reuses the `v-local`
-   key). This must be closed before the "re-ingest as a *new* index version" failover
-   pattern is used, or old-vector-space chunks mix into ranking. (Pre-existing wiring
-   gap, not introduced by #51.)
+1. **Tier 3 enforcement (read the stamp) — SHIPPED (#57).** At read time,
+   `HybridRetriever._vector_arm_enabled` compares the configured embedder's
+   `provider/model/dim` (`app/embeddings/factory.configured_embedder_identity`) against
+   the active `IndexVersion` stamp; on mismatch it degrades the vector arm to `[]` with
+   a loud WARN rather than returning silently-corrupted rankings. Read-time degrade was
+   chosen over boot-fail because an index built by another model is a recoverable data
+   state, not a config error — failing boot would take the whole service down. NULL
+   stamp → allow (backward compat). Homes: `app/retrieval/hybrid.py` (enforcement, reuses
+   the `_safe_vector_retrieve` degrade seam) + `app/embeddings/factory.py` (identity
+   helper); wired in `app/answer/orchestrator.py::_default_retriever`.
+2. **Scope the read path to the active index version — SHIPPED (#58).** The orchestrator
+   now resolves the active index version once per `ask` and threads it into the default
+   `HybridRetriever` (`app/answer/orchestrator.py::_default_retriever`), which scopes all
+   three arms to `Document.index_version == active`. The no-active-index case passes
+   `None` (the `"" → None` conversion) so retrieval falls back to a status-only filter and
+   a fresh / un-promoted database still answers rather than filtering to nothing. `promote`
+   already keeps the `IndexVersion` active-singleton (demotes the prior active row to
+   `previous_good`), so no `Document`-row backfill was needed — read scoping is correct even
+   for pre-existing multi-version data. This closes the failover invariant required by
+   item 3. (Pre-existing wiring gap, not introduced by #51.)
 3. **Tier 3 cross-provider failover machinery** — build on 1 + 2: detect provider
    outage at ingest → build a fallback index version under Voyage/OpenAI; query-time
    selects the embedder matching the active index's stamp.

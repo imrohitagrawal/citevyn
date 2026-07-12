@@ -22,6 +22,7 @@ Pipeline (per ``docs/ARCHITECTURE.md`` §5.2):
 from __future__ import annotations
 
 import enum
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -38,7 +39,10 @@ from app.cache.answer_cache import (
 )
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
-from app.embeddings import get_embedder
+from app.embeddings import (
+    configured_embedder_identity,
+    get_embedder,
+)
 from app.guardrails.domain import Domain, classify_domain, is_unsupported
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
@@ -55,8 +59,15 @@ from app.models import (
 )
 from app.models.enums import RetrievalType
 from app.retrieval.hybrid import HybridRetriever
-from app.retrieval.types import EvidenceHit, chunk_to_citation
+from app.retrieval.types import (
+    EvidenceHit,
+    RetrievalResult,
+    VectorDegrade,
+    chunk_to_citation,
+)
 from app.routing.intent import Intent, classify_intent, should_skip_retrieval
+
+_logger = logging.getLogger("citevyn.answer")
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -123,7 +134,7 @@ class _RetrieverLike(Protocol):
         intent: Intent,
         limit: int,
         top_k: int,
-    ) -> list[EvidenceHit]: ...
+    ) -> RetrievalResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -135,45 +146,86 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-async def _retrieve_index_version_hash(
+async def _retrieve_active_index(
     session: AsyncSession,
 ) -> tuple[str, str]:
     """Return ``(active_index_version, source_version_hash)``.
 
-    Looks up the first ``IndexVersion`` row in ``active`` status. If
-    no active index exists, returns ``("", "")`` so the cache key
-    uses an empty source version — every subsequent run invalidates
-    the cache once the index is promoted, which is the desired
-    behavior before Slice 2 ingestion is wired.
+    Looks up the first ``IndexVersion`` row in ``active`` status and resolves what
+    the ``ask`` pipeline needs from it in ONE query (#58/#65): the version and
+    source hash feed the cache key and retriever scoping. If no active index
+    exists, returns ``("", "")`` so the cache key uses an empty source version —
+    every subsequent run invalidates the cache once the index is promoted, which
+    is the desired behavior before Slice 2 ingestion is wired.
+
+    The Tier-3 vector-arm degrade is no longer predicted here: the retriever
+    reports the *actual* runtime degrade reason back from ``retrieve()`` and the
+    write gate uses that (#70/#72), so this no longer resolves the embedder stamp.
     """
     from app.models import IndexStatus, IndexVersion
 
+    # The ``index_version`` secondary sort is a deterministic tiebreaker so this
+    # resolution stays consistent with the retrieval-layer provenance gate
+    # (``HybridRetriever._active_index_stamp``, which sorts identically) if two
+    # rows are ever simultaneously ``active`` with equal ``promoted_at`` (a
+    # single-active-row invariant tracked by #58, but cheap to harden here).
     stmt = (
-        select(IndexVersion)
+        select(IndexVersion.index_version, IndexVersion.source_version_hash)
         .where(IndexVersion.status == IndexStatus.active)
-        .order_by(IndexVersion.promoted_at.desc().nulls_last())
+        .order_by(
+            IndexVersion.promoted_at.desc().nulls_last(),
+            IndexVersion.index_version.desc(),
+        )
         .limit(1)
     )
-    row = (await session.execute(stmt)).scalar_one_or_none()
+    row = (await session.execute(stmt)).first()
     if row is None:
         return "", ""
-    return row.index_version, row.source_version_hash
+    return row[0], row[1]
 
 
-def _default_retriever(settings: Settings, session: AsyncSession) -> _RetrieverLike:
+def _default_retriever(
+    settings: Settings,
+    session: AsyncSession,
+    *,
+    active_index_version: str | None = None,
+) -> _RetrieverLike:
     """Build the default hybrid retriever.
 
     Injected as a free function so tests can pass their own
     :class:`_RetrieverLike` and the orchestrator never imports the
     pgvector or FTS machinery on its own.
 
+    ``active_index_version`` scopes every retrieval arm to the documents of the
+    currently-active index version (#58): once "re-ingest as a *new* index
+    version" is used, old- and new-vector-space ``Document`` rows both sit at
+    ``status=active``, so filtering on status alone would mix vector spaces into
+    ``<=>`` ranking and break the ADR-0003 failover invariant. ``None`` (the
+    no-active-index case) leaves the arms filtering on ``status`` only — exactly
+    the pre-#58 behavior — so a fresh / un-promoted database still answers rather
+    than filtering to nothing. This is orthogonal to the #57 provenance gate
+    (``embedder_identity``, "which embedder"); this is "which documents".
+
     The embedder comes from the process-wide singleton
     (:func:`app.embeddings.get_embedder`) so the vector arm is live: the query is
     embedded with the same provider that built the index. On SQLite the vector
     retriever still short-circuits to ``[]`` (no pgvector), so wiring a stub
     embedder here is harmless for hermetic tests.
+
+    ``embedder_identity`` carries that same provider/model/dim so the retriever
+    can enforce it against the active index's provenance stamp and degrade the
+    vector arm on a mismatch (Tier 3 enforcement, #57). It MUST describe the same
+    embedder as ``embedder`` — both are derived from the one ``settings`` here,
+    and in production ``settings`` is the ``get_settings()`` singleton the
+    embedder singleton was also built from, so they cannot diverge. (Tests that
+    mutate settings must ``reset_embedder`` to keep the pair consistent.)
     """
-    return HybridRetriever(session, embedder=get_embedder(settings))
+    return HybridRetriever(
+        session,
+        active_index_version=active_index_version,
+        embedder=get_embedder(settings),
+        embedder_identity=configured_embedder_identity(settings),
+    )
 
 
 class Orchestrator:
@@ -197,7 +249,13 @@ class Orchestrator:
         self._settings = settings
         self._session = session
         self._llm = llm or get_llm_client(settings)
-        self._retriever = retriever or _default_retriever(settings, session)
+        # An explicitly-injected retriever always wins (tests). The DEFAULT is
+        # built lazily in ``ask`` — only after the active index version is
+        # resolved — so it can scope retrieval to that version (#58). Building it
+        # here in ``__init__`` (a sync method) could not see the async-resolved
+        # active index, which is why the default was previously stuck at
+        # ``active_index_version=None`` and mixed old-version documents in.
+        self._injected_retriever = retriever
         self._cache = cache or build_answer_cache_store(settings, session)
         self._generator = AnswerGenerator(
             self._llm,
@@ -242,15 +300,23 @@ class Orchestrator:
                 intent=Intent.unsupported,
             )
 
-        # Look up the active index so the cache key carries the
-        # current source version. A missing index returns an empty
-        # hash, which still produces a stable (and unique) key.
-        _active_index_version, source_version_hash = await _retrieve_index_version_hash(
-            self._session
-        )
+        # Look up the active index ONCE so the cache key carries the current
+        # source version and the default retriever can scope to that index version
+        # (#58). A missing index returns empty strings, which still produce a
+        # stable (and unique) cache key. The Tier-3 vector-arm degrade is NOT
+        # predicted here anymore — the retriever reports the actual runtime reason
+        # back from ``retrieve()`` and the write gate uses that (#70/#72).
+        active_index_version, source_version_hash = await _retrieve_active_index(self._session)
+
+        # The configured query embedder's identity — encoded in the cache key (#65)
+        # so a config-only embedder swap (which leaves ``source_version_hash``
+        # unchanged) still invalidates affected entries, so a stale answer built in
+        # a different vector space is not re-served after the operator fixes the
+        # config. Only ``provider/model/dim`` — no secret — enters the pre-image.
+        configured_identity = configured_embedder_identity(self._settings)
 
         # Normalize the question for the cache key. The slice 5
-        # contract pins the four inputs verbatim; whitespace
+        # contract pins the inputs verbatim; whitespace
         # normalization is a soft enhancement that improves hit
         # rate on minor formatting differences.
         cache_normalized = normalized.lower()
@@ -259,6 +325,7 @@ class Orchestrator:
             product_area=domain.value,
             source_version_hash=source_version_hash,
             answer_policy_version=self._settings.answer_policy_version,
+            embedder_identity=configured_identity.cache_key_component(),
         )
         cached = await self._cache.get(cache_key=cache_key)
         if cached is not None:
@@ -288,13 +355,29 @@ class Orchestrator:
                 reason="no_answer",
             )
 
-        evidence = await self._retriever.retrieve(
+        # Build the default retriever scoped to the active index version. The
+        # ``or None`` converts the "" no-active-index sentinel to ``None`` so the
+        # arms fall back to a status-only filter instead of filtering on
+        # ``index_version == ""`` (which matches NOTHING and would turn every
+        # answer into no_answer on a fresh / un-promoted database). An injected
+        # retriever bypasses this and owns its own scoping.
+        retriever = self._injected_retriever or _default_retriever(
+            self._settings,
+            self._session,
+            active_index_version=active_index_version or None,
+        )
+        result = await retriever.retrieve(
             question,
             product_area=domain.value,
             intent=intent,
             limit=self._settings.retrieval_max_candidates,
             top_k=self._settings.retrieval_top_k,
         )
+        evidence = result.hits
+        # The ACTUAL runtime degrade of the vector arm (its reason: a transient
+        # outage, a Tier-3 mismatch that was truly consulted, or none) — this, not
+        # a config prediction, gates the cache write and labels its WARN (#70/#72).
+        vector_degrade = result.vector_degrade
 
         if not evidence:
             return await self._respond_no_answer(
@@ -382,6 +465,7 @@ class Orchestrator:
             cache_hit=False,
             cache_key=cache_key,
             cache_normalized=cache_normalized,
+            vector_degrade=vector_degrade,
         )
         return response
 
@@ -608,8 +692,20 @@ class Orchestrator:
         cache_hit: bool,
         cache_key: str,
         cache_normalized: str,
+        vector_degrade: VectorDegrade,
     ) -> AnswerResponse:
-        """Persist a grounded answer, write the cache, and return the response."""
+        """Persist a grounded answer, write the cache, and return the response.
+
+        The cache write is *intentionally skipped* when ``vector_degrade`` is not
+        :attr:`VectorDegrade.none` — the RUNTIME reason from the retriever that the
+        vector arm actually degraded to no hits (a transient Tier-1 outage, #70, or
+        a Tier-3 embedder mismatch that was truly consulted, #57). Caching an answer
+        built without the vector arm would freeze that weaker answer to TTL and
+        silence the degrade WARN on subsequent hits (#65). The skip is logged with a
+        reason-specific event so it is observable and never indistinguishable from a
+        silent drop; the answer itself is still served and persisted to the trace
+        exactly as normal.
+        """
         message_id = await self._persist_messages(
             session_id=session_id,
             question=question,
@@ -621,18 +717,27 @@ class Orchestrator:
             evidence=evidence,
             citations=citations,
         )
-        await self._cache.put(
-            cache_key=cache_key,
-            value=CachedAnswer(
-                answer=answer,
-                citations=[dict(c) for c in citations],
-                confidence=confidence,
-                source_version_hash=source_version_hash,
-                answer_policy_version=self._settings.answer_policy_version,
-                created_at=_utcnow(),
-                ttl_expires_at=_utcnow_from_seconds(self._settings.cache_ttl_seconds),
-            ),
-        )
+        cache_written = vector_degrade is VectorDegrade.none
+        if cache_written:
+            await self._cache.put(
+                cache_key=cache_key,
+                value=CachedAnswer(
+                    answer=answer,
+                    citations=[dict(c) for c in citations],
+                    confidence=confidence,
+                    source_version_hash=source_version_hash,
+                    answer_policy_version=self._settings.answer_policy_version,
+                    created_at=_utcnow(),
+                    ttl_expires_at=_utcnow_from_seconds(self._settings.cache_ttl_seconds),
+                ),
+            )
+        else:
+            skip_event = (
+                "answer_cache_write_skipped_embedder_mismatch"
+                if vector_degrade is VectorDegrade.mismatch
+                else "answer_cache_write_skipped_vector_unavailable"
+            )
+            _logger.warning(skip_event, extra={"request_id": request_id})
         await self._persist_audit(
             request_id=request_id,
             session_id=session_id,
@@ -644,16 +749,18 @@ class Orchestrator:
                 "retrieval_strategy": strategy.value,
                 "source_version_hash": source_version_hash,
                 "cache_hit": False,
+                "cache_written": cache_written,
             },
         )
-        # Also backfill the normalized_question / product_area
-        # fields the cache factory leaves blank so the row is
-        # queryable.
-        await self._backfill_cache_metadata(
-            cache_key=cache_key,
-            normalized_question=cache_normalized,
-            product_area=domain.value,
-        )
+        # Backfill the normalized_question / product_area fields the cache
+        # factory leaves blank so the row is queryable — only when a row was
+        # actually written (a degraded answer is not cached, #65).
+        if cache_written:
+            await self._backfill_cache_metadata(
+                cache_key=cache_key,
+                normalized_question=cache_normalized,
+                product_area=domain.value,
+            )
         await self._session.flush()
         return AnswerResponse(
             request_id=request_id,

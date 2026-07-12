@@ -189,16 +189,12 @@ async def shutdown_llm_client() -> None:
     global _client
     if _client is None:
         return
-    aclose = getattr(_client, "aclose", None)
-    if callable(aclose):
-        try:
-            result = aclose()
-            import inspect
-
-            if inspect.isawaitable(result):
-                await result
-        except Exception:  # pragma: no cover - defensive: shutdown must never raise
-            _logger.exception("llm_client_close_failed")
+    # ``aclose`` is part of the LLMClient contract, so a plain await suffices;
+    # the try/except keeps shutdown from ever raising if a client's cleanup does.
+    try:
+        await _client.aclose()
+    except Exception:  # pragma: no cover - defensive: shutdown must never raise
+        _logger.exception("llm_client_close_failed")
     _client = None
 
 

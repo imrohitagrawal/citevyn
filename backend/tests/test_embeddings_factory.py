@@ -18,12 +18,58 @@ import pytest
 from app.core.config import Settings
 from app.embeddings import factory as emb_factory
 from app.embeddings.factory import (
+    EmbedderIdentity,
     EmbeddingProviderNotConfigured,
     build_embedder,
+    is_index_embedder_mismatch,
     validate_embedder_provider,
 )
 from app.embeddings.gemini import GeminiEmbedder
 from app.embeddings.stub import StubEmbedder
+
+_STUB = EmbedderIdentity(provider="stub", model="stub-embedding", dim=1536)
+_GEMINI = EmbedderIdentity(provider="gemini", model="gemini-embedding-001", dim=1536)
+
+
+# -- EmbedderIdentity.cache_key_component (#65) -----------------------------
+
+
+def test_cache_key_component_encodes_triple() -> None:
+    assert _GEMINI.cache_key_component() == "gemini|gemini-embedding-001|1536"
+
+
+def test_cache_key_component_all_none_is_stable_nonempty() -> None:
+    """The NULL-stamp/unconfigured trap: an all-None identity must yield a
+    stable, non-empty component ("||"), never a value that blanks the key."""
+    empty = EmbedderIdentity(provider=None, model=None, dim=None)
+    assert empty.cache_key_component() == "||"
+
+
+def test_cache_key_component_distinguishes_providers() -> None:
+    assert _STUB.cache_key_component() != _GEMINI.cache_key_component()
+
+
+# -- is_index_embedder_mismatch (#65) ---------------------------------------
+
+
+def test_mismatch_false_when_no_active_stamp() -> None:
+    # No active index → not a mismatch (nothing to disagree with).
+    assert is_index_embedder_mismatch(_STUB, None) is False
+
+
+def test_mismatch_false_when_stamp_provider_none() -> None:
+    # Legacy / stub-seeded index carries no provider → "unknown provenance, allow".
+    legacy = EmbedderIdentity(provider=None, model=None, dim=None)
+    assert is_index_embedder_mismatch(_GEMINI, legacy) is False
+
+
+def test_mismatch_false_when_identities_equal() -> None:
+    assert is_index_embedder_mismatch(_GEMINI, _GEMINI) is False
+
+
+def test_mismatch_true_when_provider_bearing_stamp_differs() -> None:
+    # Config on stub, index built with gemini → mismatch (the #65 scenario).
+    assert is_index_embedder_mismatch(_STUB, _GEMINI) is True
 
 
 @pytest.fixture(autouse=True)

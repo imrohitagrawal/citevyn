@@ -15,7 +15,6 @@ orchestrator, which maps it to a 5xx.
 
 from __future__ import annotations
 
-import inspect
 import logging
 
 from app.llm.errors import LLMUnavailable
@@ -56,10 +55,9 @@ class FallbackLLMClient:
             )
 
     async def aclose(self) -> None:
-        """Close both underlying clients if they own resources."""
-        for client in (self._primary, self._secondary):
-            aclose = getattr(client, "aclose", None)
-            if callable(aclose):
-                result = aclose()
-                if inspect.isawaitable(result):
-                    await result
+        """Close both underlying clients.
+
+        ``aclose`` is part of the :class:`LLMClient` contract, so both children
+        are guaranteed to define it (a no-op when they own no resources)."""
+        await self._primary.aclose()
+        await self._secondary.aclose()
