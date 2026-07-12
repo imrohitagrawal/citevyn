@@ -6,9 +6,12 @@ root with ``uv run python -m db.seed.seed_catalog`` after
 
 The data shape mirrors ``backend/tests/conftest.py::seed_catalog`` so
 the stub LLM returns a deterministic grounded answer on a seeded
-question. The four product areas (``claude_api``, ``claude_code``,
-``codex``, ``gemini_api``) match the exact-term retriever's demo
-expectations and the Slice 7 test assertions.
+question. The five sources — the four product areas (``claude_api``,
+``claude_code``, ``codex``, ``gemini_api``) plus the ``citevyn``
+About-CiteVyn source (#49) — match the worker allowlist
+(``app.worker.allowlist.MVP_SOURCES``), the exact-term retriever's demo
+expectations, and the Slice 7 test assertions. Keep this list in
+lock-step with MVP_SOURCES and the conftest seed.
 """
 
 from __future__ import annotations
@@ -120,6 +123,21 @@ _DOC_DEFS: tuple[_DocDef, ...] = (
             "with stream=true to receive a stream of partial responses."
         ),
         context_summary="Gemini API streaming",
+    ),
+    _DocDef(
+        # About-CiteVyn source (#49): so CiteVyn-meta questions ("What is
+        # CiteVyn Pro?") resolve against this demo seed too, not only the
+        # worker-ingested index. Host-agnostic relative /about citation.
+        product_area="citevyn",
+        title="About CiteVyn",
+        source_url="/about",
+        heading="CiteVyn Pro and membership",
+        chunk_text=(
+            "CiteVyn Pro is not live yet. CiteVyn is an MVP demo and "
+            "everything is free to try. Pro is planned to add higher rate "
+            "limits, exact lookups, saved history, and shareable answers."
+        ),
+        context_summary="CiteVyn Pro and membership",
     ),
 )
 

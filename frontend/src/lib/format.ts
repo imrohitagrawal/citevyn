@@ -23,6 +23,7 @@ const DOMAIN_LABELS: Record<Domain, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
   gemini_api: "Gemini",
+  citevyn: "About CiteVyn",
   unsupported: "Outside scope",
 };
 

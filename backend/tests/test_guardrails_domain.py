@@ -49,9 +49,20 @@ def test_classify_domain_citevyn_wins_over_product_mention(question: str) -> Non
     assert classify_domain(question) is Domain.citevyn
 
 
-def test_citevyn_is_allowed_domain() -> None:
-    assert Domain.citevyn in ALLOWED_DOMAINS
-    assert not is_unsupported(Domain.citevyn)
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        # ``\bcitevyn\b`` is a whole-word match: it must NOT fire on the
+        # letters embedded in another token, and a product keyword in the
+        # same text should then win normally.
+        ("recitevynize the paragraph", Domain.unsupported),
+        ("mycitevynapp gemini api settings", Domain.gemini_api),
+    ],
+)
+def test_classify_domain_citevyn_requires_word_boundary(
+    question: str, expected: Domain
+) -> None:
+    assert classify_domain(question) is expected
 
 
 @pytest.mark.parametrize(
@@ -87,7 +98,9 @@ def test_allowed_domains_contains_all_supported() -> None:
     assert Domain.claude_code in ALLOWED_DOMAINS
     assert Domain.codex in ALLOWED_DOMAINS
     assert Domain.gemini_api in ALLOWED_DOMAINS
+    assert Domain.citevyn in ALLOWED_DOMAINS
     assert Domain.unsupported not in ALLOWED_DOMAINS
+    assert not is_unsupported(Domain.citevyn)
 
 
 def test_is_unsupported_helper() -> None:

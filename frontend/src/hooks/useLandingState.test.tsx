@@ -133,6 +133,46 @@ describe("useLandingState — live send path", () => {
     expect(result.current.state.messages[1].refusal).toBe(true);
   });
 
+  it("routes a live CiteVyn-meta question to the backend, not the client short-circuit (#49)", async () => {
+    // The whole point of #49's frontend change: in live mode a question about
+    // CiteVyn itself must reach the backend (which now indexes an About-CiteVyn
+    // source) instead of the local matchCitevynMeta copy. This guards against a
+    // regression that re-adds the short-circuit before the `if (live)` branch.
+    mockAskQuestion.mockResolvedValue(
+      askResponse({
+        answer: "CiteVyn Pro is not live yet.",
+        domain: "citevyn",
+        citations: [
+          { source_name: "About CiteVyn", title: "About CiteVyn", url: "/about", chunk_id: "cv1" },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("What do I get with CiteVyn Pro?"));
+    await settle();
+
+    expect(mockAskQuestion).toHaveBeenCalledWith("sess-1", "What do I get with CiteVyn Pro?");
+    const bot = result.current.state.messages[1];
+    expect(bot.text).toBe("CiteVyn Pro is not live yet.");
+    expect(bot.sources).toEqual([{ n: "1", title: "About CiteVyn", url: "/about" }]);
+  });
+
+  it("answers a CiteVyn-meta question from built-in copy in demo mode without hitting the backend", async () => {
+    // Demo/offline fallback: no backend, so matchCitevynMeta still answers.
+    mockIsLive.mockReturnValue(false);
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("What do I get with CiteVyn Pro?"));
+    await settle();
+
+    expect(mockAskQuestion).not.toHaveBeenCalled();
+    const bot = result.current.state.messages[1];
+    expect(bot.role).toBe("bot");
+    expect(bot.refusal).toBe(false);
+    expect(bot.text.toLowerCase()).toContain("pro");
+  });
+
   it("de-dupes session creation for two concurrent asks", async () => {
     const { result } = renderHook(() => useLandingState());
 

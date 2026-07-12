@@ -48,8 +48,13 @@ ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
 # ``citevyn`` is checked FIRST: any question that names CiteVyn is a
 # question about the product itself (Pro, coverage, "does CiteVyn support
 # Gemini?"), so it must win over a product keyword the same sentence
-# happens to mention. This mirrors the frontend matcher's narrow
-# "text includes 'citevyn'" guard (knowledgeBase.ts::matchCitevynMeta).
+# happens to mention. This is intentionally close to the frontend
+# matcher's narrow "mentions CiteVyn" guard
+# (knowledgeBase.ts::matchCitevynMeta), though the backend uses a word
+# boundary (\bcitevyn\b) where the frontend uses a looser substring
+# check — so "mycitevynapp" reaches a product/unsupported path here but
+# would trip the frontend guard. The whole-word match is the stricter,
+# more correct behavior for a live query.
 _PATTERNS: tuple[tuple[Domain, re.Pattern[str]], ...] = (
     (Domain.citevyn, re.compile(r"\bcitevyn\b", re.IGNORECASE)),
     (Domain.claude_code, re.compile(r"\bclaude[\s-]+code\b", re.IGNORECASE)),

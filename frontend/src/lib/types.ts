@@ -101,6 +101,7 @@ export type Domain =
   | "claude_code"
   | "codex"
   | "gemini_api"
+  | "citevyn"
   | "unsupported";
 
 /**

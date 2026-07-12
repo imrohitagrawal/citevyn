@@ -157,7 +157,7 @@ def test_post_message_answers_citevyn_meta_question(seeded_app: TestClient) -> N
     assert isinstance(body["answer"], str) and body["answer"]
     # Grounded in the About-CiteVyn chunk, cited to the host-agnostic /about.
     assert len(body["citations"]) >= 1
-    assert any("/about" in (c.get("source_url") or c.get("url") or "") for c in body["citations"])
+    assert any("/about" in (c.get("url") or "") for c in body["citations"])
 
 
 def test_post_message_returns_unsupported_shape(seeded_app: TestClient) -> None:
