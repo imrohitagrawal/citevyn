@@ -289,6 +289,30 @@ async def test_transient_error_is_retried_then_succeeds() -> None:
     assert calls["n"] == 2  # one retry
 
 
+async def test_fatal_status_is_not_retried_even_with_retries_available() -> None:
+    """A non-transient 4xx raises on the first attempt, even when retries remain.
+
+    Guards the transient-vs-fatal split at ``_post`` (``gemini.py:228`` transient →
+    retry vs ``:232`` other ``>=400`` → raise): a 400 must NOT consume the retry
+    budget. The retry-path test above uses a transient 503; this pins the fatal
+    branch's no-retry semantics with ``max_retries`` deliberately > 0.
+    """
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, text="bad request")
+
+    client = _client(handler, dim=4, max_retries=2)
+    try:
+        with pytest.raises(EmbedderUnavailable, match="returned 400"):
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert calls["n"] == 1  # raised immediately; retry budget untouched
+
+
 async def test_retry_applies_exponential_backoff(monkeypatch) -> None:
     """A transient failure sleeps with the configured backoff before retrying."""
     import app.embeddings.gemini as gem
