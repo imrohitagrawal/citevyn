@@ -261,15 +261,14 @@ export function matchKB(text: string): KBEntry {
  * Match questions about CiteVyn *the product itself* (Pro/membership,
  * coverage, trust, freshness).
  *
- * These are answered locally in BOTH demo and live mode. The live backend only
- * indexes Claude/Claude Code/Codex/Gemini documentation and — correctly —
- * refuses questions about CiteVyn as "unsupported", because CiteVyn is not one
- * of the documented products. But "What do I get with CiteVyn Pro?" is a valid,
- * expected question with a real answer, so the client short-circuits these
- * app-level questions to built-in copy instead of showing the backend refusal.
+ * OFFLINE/DEMO FALLBACK ONLY. In live mode the backend now indexes an "About
+ * CiteVyn" source (#49), so CiteVyn-meta questions flow through the normal
+ * retrieval + citation path and this matcher is NOT consulted. It remains as
+ * the demo-mode answer for these questions when there is no backend, so the
+ * static landing demo still responds to "What do I get with CiteVyn Pro?".
  *
  * Returns ``null`` when the question is not about CiteVyn itself, so the caller
- * falls through to the normal path (backend in live mode, ``matchKB`` in demo).
+ * falls through to ``matchKB`` in demo mode.
  *
  * The guard is deliberately narrow — it only fires when the text mentions
  * "citevyn" — so genuine product questions ("does Claude Code cost money?")

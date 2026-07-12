@@ -16,9 +16,9 @@ def test_mvp_sources_is_a_tuple() -> None:
     assert isinstance(MVP_SOURCES, tuple)
 
 
-def test_mvp_sources_has_four_entries() -> None:
-    """Four sources for the MVP: claude_api, claude_code, codex, gemini_api."""
-    assert len(MVP_SOURCES) == 4
+def test_mvp_sources_has_five_entries() -> None:
+    """Five sources for the MVP: the four product docs + About CiteVyn (#49)."""
+    assert len(MVP_SOURCES) == 5
 
 
 def test_mvp_source_names_match_demo_catalog() -> None:
@@ -28,7 +28,16 @@ def test_mvp_source_names_match_demo_catalog() -> None:
         "claude_code",
         "codex",
         "gemini_api",
+        "citevyn",
     }
+
+
+def test_citevyn_source_uses_host_agnostic_relative_url() -> None:
+    """The About-CiteVyn citation must not reference a domain we don't own —
+    it uses a relative /about path (see allowlist rationale)."""
+    spec = get_source("citevyn")
+    assert spec.product_area == "citevyn"
+    assert spec.source_url == "/about"
 
 
 def test_mvp_source_names_are_unique() -> None:

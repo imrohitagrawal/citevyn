@@ -132,6 +132,34 @@ def test_post_message_returns_200_with_full_shape(seeded_app: TestClient) -> Non
     assert isinstance(body["citations"], list)
 
 
+def test_post_message_answers_citevyn_meta_question(seeded_app: TestClient) -> None:
+    """#49: a question about CiteVyn itself ("What is CiteVyn Pro?") is answered
+    from the indexed About-CiteVyn source — classified in-domain and grounded —
+    NOT refused as unsupported the way it was before the source existed."""
+    create = seeded_app.post(
+        "/v1/sessions",
+        json={"channel": "chat"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    session_id = create.json()["session_id"]
+
+    response = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "What do I get with CiteVyn Pro?", "answer_style": "short"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["domain"] == "citevyn"
+    assert body["unsupported"] is False
+    assert body["no_answer"] is False
+    assert isinstance(body["answer"], str) and body["answer"]
+    # Grounded in the About-CiteVyn chunk, cited to the host-agnostic /about.
+    assert len(body["citations"]) >= 1
+    assert any("/about" in (c.get("source_url") or c.get("url") or "") for c in body["citations"])
+
+
 def test_post_message_returns_unsupported_shape(seeded_app: TestClient) -> None:
     """An off-domain question must come back with the unsupported flag,
     not a transport error (per spec §6)."""

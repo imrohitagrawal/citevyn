@@ -13,7 +13,7 @@ Design notes
 ------------
 * ``SourceSpec`` is a frozen dataclass — the allowlist is
   compile-time fixed, not runtime-mutable.
-* The four MVP sources match the demo catalog in
+* The five MVP sources match the demo catalog in
   :func:`tests.conftest.seed_catalog` so a freshly-built
   ``candidate`` index contains the same docs the demo runs
   against.
@@ -59,11 +59,13 @@ class SourceSpec:
 # ---------------------------------------------------------------------------
 #
 # Keep in lock-step with the demo catalog used by
-# :func:`tests.conftest.seed_catalog`. The four sources are
-# Claude API, Claude Code, Codex, and Gemini API — the four
-# products the MVP demo references. Adding a fifth source is
-# a deliberate operation; an SRE adds it here AND seeds the
-# test fixture so the demo catalog stays consistent.
+# :func:`tests.conftest.seed_catalog`. The five sources are the four
+# product docs (Claude API, Claude Code, Codex, Gemini API) plus the
+# "About CiteVyn" doc — so questions about CiteVyn itself
+# (Pro/membership/coverage/trust) flow through the normal
+# retrieval + citation path instead of being refused off-domain.
+# Adding a source is a deliberate operation; an SRE adds it here AND
+# seeds the test fixture so the demo catalog stays consistent.
 
 MVP_SOURCES: tuple[SourceSpec, ...] = (
     SourceSpec(
@@ -97,6 +99,19 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="tests/fixtures/sources/gemini_api.md",
         source_url="https://ai.google.dev/gemini-api/docs",
+    ),
+    SourceSpec(
+        name="citevyn",
+        product_area="citevyn",
+        title="About CiteVyn",
+        fetcher="local",
+        location="tests/fixtures/sources/citevyn.md",
+        # CiteVyn describes itself — there is no external upstream doc, so the
+        # citation points at CiteVyn's own about page. A RELATIVE path keeps it
+        # host-agnostic and never references a domain we don't own (a hard-coded
+        # citevyn.com/app could later be squatted). TODO(deploy): confirm the
+        # final /about route once CiteVyn is hosted.
+        source_url="/about",
     ),
 )
 

@@ -256,10 +256,10 @@ async def test_ensure_index_version_stamps_and_refreshes_embedding_provenance(
 
 
 @pytest.mark.asyncio
-async def test_run_all_four_mvp_sources(
+async def test_run_all_mvp_sources(
     session: AsyncSession,
 ) -> None:
-    """A full run over all MVP sources lands four documents."""
+    """A full run over all MVP sources lands one document per source."""
     runner = IngestionRunner(
         fetcher=LocalFetcher(),
         embedder=StubEmbedder(dim=16),
@@ -272,4 +272,4 @@ async def test_run_all_four_mvp_sources(
         )
     docs = (await session.execute(select(Document))).scalars().all()
     assert {d.source_name for d in docs} == {s.name for s in MVP_SOURCES}
-    assert len(docs) == 4
+    assert len(docs) == len(MVP_SOURCES)

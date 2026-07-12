@@ -24,10 +24,34 @@ from app.guardrails.domain import (
         ("Gemini API rate limits", Domain.gemini_api),
         ("gemini-api streaming", Domain.gemini_api),
         ("gemini usage", Domain.gemini_api),
+        # CiteVyn-meta questions (#49): about the product itself.
+        ("What do I get with CiteVyn Pro?", Domain.citevyn),
+        ("Which tools does CiteVyn cover?", Domain.citevyn),
+        ("Is CiteVyn accurate or does it hallucinate?", Domain.citevyn),
+        ("what is citevyn", Domain.citevyn),
     ],
 )
 def test_classify_domain_positive(question: str, expected: Domain) -> None:
     assert classify_domain(question) is expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Does CiteVyn support the Gemini API?",
+        "Can CiteVyn answer Claude Code questions?",
+        "Which is better in CiteVyn, Codex or Claude?",
+    ],
+)
+def test_classify_domain_citevyn_wins_over_product_mention(question: str) -> None:
+    """A question that names CiteVyn is about the product itself even when it
+    also mentions a product keyword — ``citevyn`` is checked first."""
+    assert classify_domain(question) is Domain.citevyn
+
+
+def test_citevyn_is_allowed_domain() -> None:
+    assert Domain.citevyn in ALLOWED_DOMAINS
+    assert not is_unsupported(Domain.citevyn)
 
 
 @pytest.mark.parametrize(

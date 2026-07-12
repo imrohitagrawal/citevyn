@@ -445,18 +445,20 @@ export function useLandingState() {
   // by the first-ask and retry paths so both behave identically.
   const routeQuestion = useCallback(
     (text: string) => {
-      // Questions about CiteVyn itself (Pro/membership/coverage) are answered
-      // locally in both modes — the live backend only indexes the four product
-      // docs and refuses CiteVyn-meta questions as "unsupported", which is the
-      // wrong UX for a valid "What is CiteVyn Pro?" ask.
+      if (live) {
+        // Live: the backend now indexes an "About CiteVyn" source (#49), so
+        // questions about CiteVyn itself (Pro/membership/coverage) flow through
+        // retrieval + citation like any other question — no client short-circuit.
+        void sendLive(text);
+        return;
+      }
+      // Demo/offline: there is no backend, so CiteVyn-meta questions are
+      // answered from the built-in copy (kept ONLY as the offline fallback),
+      // and everything else falls back to the canned KB.
       const meta = matchCitevynMeta(text);
       if (meta) {
         // Meta answers are always affirmative product copy — never refusals.
         streamBot(meta.a, { refusal: false, finalSources: [] });
-        return;
-      }
-      if (live) {
-        void sendLive(text);
         return;
       }
       const hit = matchKB(text);

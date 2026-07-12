@@ -149,7 +149,9 @@ class Settings(BaseSettings):
     # worker produces. The MVP default is a placeholder —
     # production replaces it with the SHA-256 of the source
     # feed the operator ingested.
-    source_version_hash: str = "sha256:mvp-snapshot-1"
+    # Bumped to -2 when the "About CiteVyn" source was added to the corpus
+    # (MVP_SOURCES) so a re-ingest produces a fresh IndexVersion.
+    source_version_hash: str = "sha256:mvp-snapshot-2"
 
     # --- Fixtures root (Slice 9a) ---
     # Path to the on-disk source corpus the ingestion worker reads.
