@@ -59,9 +59,7 @@ def test_classify_domain_citevyn_wins_over_product_mention(question: str) -> Non
         ("mycitevynapp gemini api settings", Domain.gemini_api),
     ],
 )
-def test_classify_domain_citevyn_requires_word_boundary(
-    question: str, expected: Domain
-) -> None:
+def test_classify_domain_citevyn_requires_word_boundary(question: str, expected: Domain) -> None:
     assert classify_domain(question) is expected
 
 
