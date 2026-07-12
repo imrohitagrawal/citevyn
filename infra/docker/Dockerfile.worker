@@ -24,7 +24,14 @@
 # ────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────── Stage 1: builder ──────────────────────────────
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
+
+# Force uv to build the venv against the image's SYSTEM interpreter
+# (/usr/local/bin/python3.14) rather than a uv-managed CPython under
+# /root/.local/share/uv, whose path does not exist in the
+# python:3.14-slim-bookworm runtime stage. See Dockerfile.api for the
+# full rationale; builder + runtime Python minor MUST move together.
+ENV UV_PYTHON_PREFERENCE=only-system
 
 ARG VERSION=dev
 ENV VERSION=${VERSION}
@@ -66,8 +73,14 @@ USER appuser
 # No HEALTHCHECK (the worker writes to ingestion_jobs; a missing
 # process is detected by the orchestrator, not by TCP probe).
 #
-# SIGTERM behaviour: citevyn-worker installs a signal handler that
+# SIGTERM behaviour: the worker CLI installs a signal handler that
 # drains the in-flight job before exiting, so docker stop's
 # default 10-second grace period is enough for clean shutdown.
-
-CMD ["citevyn-worker"]
+#
+# Invoked via ``python -m app.worker.cli`` rather than the
+# ``citevyn-worker`` console script: uv does not install this
+# project's [project.scripts] entry points into the venv ("project is
+# not packaged"), and any console-script shebang would point at the
+# builder-only venv path anyway. ``python`` resolves through
+# /app/.venv/bin to the runtime's /usr/local/bin interpreter.
+CMD ["python", "-m", "app.worker.cli"]

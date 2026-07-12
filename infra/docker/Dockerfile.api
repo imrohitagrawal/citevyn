@@ -30,7 +30,17 @@
 # ────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────── Stage 1: builder ──────────────────────────────
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
+
+# Force uv to build the venv against the image's SYSTEM interpreter
+# (/usr/local/bin/python3.14) instead of downloading a uv-managed
+# CPython into /root/.local/share/uv. The runtime stage
+# (python:3.14-slim-bookworm) only ships /usr/local/bin, so a managed
+# interpreter path would be a dangling symlink there and the copied
+# venv would fail to import anything. This keeps the venv interpreter
+# and its python3.14 site-packages tree aligned with the runtime base.
+# The builder + runtime Python minor version MUST move in lockstep.
+ENV UV_PYTHON_PREFERENCE=only-system
 
 # Build-time configuration. VERSION is stamped into the image for
 # `/health` and `/version` endpoints; default to "dev" so local
@@ -81,9 +91,13 @@ RUN groupadd --system --gid 1001 appuser \
 
 WORKDIR /app
 
-# Copy the venv built in stage 1. The .venv directory is fully
-# self-contained — its bin/ entries reference the absolute path
-# /app/.venv, so it works from the new WORKDIR.
+# Copy the venv built in stage 1. NOTE: uv writes console-script
+# shebangs (e.g. bin/uvicorn) pointing at the BUILDER venv path
+# (/build/backend/.venv/bin/python), which does not exist here, so
+# invoking those scripts directly would fail with "no such file or
+# directory". The venv's importable packages ARE relocatable, so the
+# CMD below invokes uvicorn via ``python -m`` (the python symlink
+# resolves to /usr/local/bin, which exists in both stages).
 COPY --from=builder --chown=appuser:appuser /build/backend/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /build/backend/app    /app/app
 COPY --from=builder --chown=appuser:appuser /build/backend/README.md /app/README.md
@@ -107,7 +121,11 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=5 \
 
 # Module path matches the package layout created by uv (app is at
 # /app/app, the venv is on PATH so uvicorn imports cleanly).
-CMD ["uvicorn", "app.main:app", \
+# Invoked via ``python -m`` rather than the ``uvicorn`` console
+# script because the script's shebang points at the builder-only
+# venv path (see the COPY note above); ``python`` resolves through
+# the /app/.venv/bin symlink to the runtime's /usr/local/bin.
+CMD ["python", "-m", "uvicorn", "app.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--proxy-headers", \
