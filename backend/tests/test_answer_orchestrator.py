@@ -963,9 +963,9 @@ async def test_ask_skips_cache_write_on_real_mismatch_non_exact(
 ) -> None:
     """#65 guard via the REAL hybrid (not a hand-set flag): a genuine Tier-3
     mismatch on a NON-short-circuit (faq) question degrades the vector arm at
-    runtime; the retriever reports ``vector_degraded=True``, so the answer (served
+    runtime; the retriever reports ``VectorDegrade.mismatch``, so the answer (served
     from keyword) MUST NOT be cached and the skip is labeled as an embedder
-    mismatch. Proves the runtime flag is computed for real, not just honored."""
+    mismatch. Proves the runtime reason is computed for real, not just honored."""
     await seed_catalog(session)
     await _restamp_active_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
     await session.commit()
@@ -983,7 +983,9 @@ async def test_ask_skips_cache_write_on_real_mismatch_non_exact(
     assert cache_rows == [], "a genuinely degraded (mismatch) answer must not be cached (#65)"
     audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
     assert audit.metadata_["cache_written"] is False
+    # Labeled a mismatch, NOT a transient outage (symmetric with the #70 tests).
     assert "answer_cache_write_skipped_embedder_mismatch" in caplog.text
+    assert "answer_cache_write_skipped_vector_unavailable" not in caplog.text
 
 
 async def test_ask_skips_cache_write_on_real_transient_outage(

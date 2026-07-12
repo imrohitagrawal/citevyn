@@ -180,7 +180,7 @@ async def test_hybrid_short_circuits_on_exact_lookup(seeded_session) -> None:
     assert hits[0].retrieval_type.value == "exact"
     # The exact-lookup short-circuit never consults the vector arm, so it is not
     # degraded — the orchestrator caches this embedder-independent answer (#72).
-    assert result.vector_degraded is False
+    assert result.vector_degrade is VectorDegrade.none
 
 
 async def test_hybrid_exact_lookup_falls_back_when_no_exact_hit(seeded_session) -> None:
@@ -468,8 +468,8 @@ async def test_hybrid_retrieve_answers_from_keyword_on_mismatch(seeded_session) 
     assert all(hit.retrieval_type.value != "vector" for hit in hits)
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
     # The vector arm was consulted and degraded on the mismatch — the runtime
-    # signal is True so the orchestrator skips caching this weaker answer (#65).
-    assert result.vector_degraded is True
+    # reason is ``mismatch`` so the orchestrator skips caching this weaker answer
+    # (#65) and labels the skip as an embedder mismatch.
     assert result.vector_degrade is VectorDegrade.mismatch
 
 

@@ -37,7 +37,7 @@ class EvidenceHit(RetrievedChunk):
     rank: int = 0
 
 
-class VectorDegrade(enum.Enum):
+class VectorDegrade(enum.StrEnum):
     """Why (if at all) the vector retrieval arm degraded to no hits at runtime.
 
     Reported at the degrade site so the answer-cache gate and its skip-WARN read
@@ -64,17 +64,13 @@ class VectorDegrade(enum.Enum):
 @dataclass(frozen=True, eq=False)
 class RetrievalResult:
     """What a retriever hands back to the orchestrator: the ranked ``hits`` plus
-    the runtime :class:`VectorDegrade` reason. The orchestrator gates the
-    answer-cache write on ``vector_degraded`` (any non-``none`` reason) and labels
-    the skip WARN from the reason itself (#70/#72), rather than predicting the
-    degrade from config, which mis-gates in both directions."""
+    the runtime :class:`VectorDegrade` reason. The orchestrator skips the
+    answer-cache write whenever ``vector_degrade`` is not :attr:`VectorDegrade.none`
+    and labels the skip WARN from the reason itself (#70/#72), rather than
+    predicting the degrade from config, which mis-gates in both directions."""
 
     hits: list[EvidenceHit]
     vector_degrade: VectorDegrade
-
-    @property
-    def vector_degraded(self) -> bool:
-        return self.vector_degrade is not VectorDegrade.none
 
 
 def chunk_to_citation(chunk: RetrievedChunk) -> dict[str, Any]:
