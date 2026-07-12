@@ -16,6 +16,7 @@ in the same change.
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
 | [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
+| [#78](https://github.com/imrohitagrawal/citevyn/issues/78) | Refactor: extend the shared LLM `post_json` helper to the embeddings Gemini client (4th copy) | backend / embeddings | Low (maintainability) | #48 / PR #77 |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 

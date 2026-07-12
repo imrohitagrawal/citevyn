@@ -29,3 +29,12 @@ class LLMClient(Protocol):
         max_tokens: int,
         temperature: float,
     ) -> LLMResult: ...
+
+    async def aclose(self) -> None:
+        """Release any owned resources (e.g. the httpx connection pool).
+
+        Cleanup is a typed part of the seam so callers can close a client
+        unconditionally. Implementations that own nothing return without
+        side effects.
+        """
+        ...
