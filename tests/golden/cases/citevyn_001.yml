@@ -1,0 +1,12 @@
+id: citevyn_001
+title: CiteVyn Pro / membership (about-the-product question)
+type: answer
+area: citevyn
+question: What do I get with CiteVyn Pro?
+answer_style: short
+# #49: CiteVyn-meta questions are answered by the backend from the indexed
+# "About CiteVyn" source (classified in-domain as `citevyn`), grounded and
+# cited to the host-agnostic /about path — not refused as unsupported.
+expect_domain: citevyn
+expect_citations_min: 1
+expect_citation_url_contains: /about

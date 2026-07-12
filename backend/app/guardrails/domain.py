@@ -2,8 +2,11 @@
 
 The guardrail classifies the incoming question into one of the four
 supported product areas (``claude_api``, ``claude_code``, ``codex``,
-``gemini_api``) or marks it ``unsupported``. It runs before any
-retrieval or LLM cost, so off-domain questions are refused cheaply.
+``gemini_api``), the ``citevyn`` about-the-product domain (questions
+about CiteVyn itself — Pro/membership/coverage/trust — answered from the
+indexed "About CiteVyn" source), or marks it ``unsupported``. It runs
+before any retrieval or LLM cost, so off-domain questions are refused
+cheaply.
 
 The classifier is a small, deterministic keyword + alias matcher. It
 exists so the answer pipeline always has a domain to pass to the
@@ -23,18 +26,37 @@ class Domain(enum.StrEnum):
     claude_code = "claude_code"
     codex = "codex"
     gemini_api = "gemini_api"
+    citevyn = "citevyn"
     unsupported = "unsupported"
 
 
 ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
-    {Domain.claude_api, Domain.claude_code, Domain.codex, Domain.gemini_api}
+    {
+        Domain.claude_api,
+        Domain.claude_code,
+        Domain.codex,
+        Domain.gemini_api,
+        Domain.citevyn,
+    }
 )
 
 
 # Patterns are ordered from most specific to least specific. The first
 # match wins. Word boundaries prevent ``claude`` matching ``claude_code``
 # twice and ``codex`` matching ``codex`` substrings inside other words.
+#
+# ``citevyn`` is checked FIRST: any question that names CiteVyn is a
+# question about the product itself (Pro, coverage, "does CiteVyn support
+# Gemini?"), so it must win over a product keyword the same sentence
+# happens to mention. This is intentionally close to the frontend
+# matcher's narrow "mentions CiteVyn" guard
+# (knowledgeBase.ts::matchCitevynMeta), though the backend uses a word
+# boundary (\bcitevyn\b) where the frontend uses a looser substring
+# check — so "mycitevynapp" reaches a product/unsupported path here but
+# would trip the frontend guard. The whole-word match is the stricter,
+# more correct behavior for a live query.
 _PATTERNS: tuple[tuple[Domain, re.Pattern[str]], ...] = (
+    (Domain.citevyn, re.compile(r"\bcitevyn\b", re.IGNORECASE)),
     (Domain.claude_code, re.compile(r"\bclaude[\s-]+code\b", re.IGNORECASE)),
     (Domain.claude_api, re.compile(r"\bclaude[\s-]+api\b", re.IGNORECASE)),
     (Domain.gemini_api, re.compile(r"\bgemini(?:[\s-]+api)?\b", re.IGNORECASE)),

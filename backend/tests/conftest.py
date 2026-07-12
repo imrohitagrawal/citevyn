@@ -160,6 +160,22 @@ async def seed_catalog(
                 "credentials file."
             ),
         },
+        {
+            # About-CiteVyn source (#49): keeps the demo catalog in lock-step
+            # with MVP_SOURCES so CiteVyn-meta questions ("What is CiteVyn
+            # Pro?") retrieve + cite instead of being refused off-domain.
+            # source_url is the host-agnostic relative /about (see allowlist).
+            "product_area": "citevyn",
+            "source_name": "citevyn",
+            "title": "About CiteVyn",
+            "source_url": "/about",
+            "chunk_heading": "CiteVyn Pro and membership",
+            "chunk_text": (
+                "CiteVyn Pro is not live yet. CiteVyn is an MVP demo and "
+                "everything is free to try. Pro is planned to add higher rate "
+                "limits, exact lookups, saved history, and shareable answers."
+            ),
+        },
     ]
 
     docs: list[Document] = []

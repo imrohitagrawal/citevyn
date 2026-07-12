@@ -96,7 +96,7 @@ class IngestionRunner:
         *,
         fetcher: Fetcher,
         embedder: Embedder,
-        source_version_hash: str = "sha256:mvp-snapshot-1",
+        source_version_hash: str = "sha256:mvp-snapshot-2",
         index_version: str = "v-local",
         embedding_provider: str | None = None,
         embedding_model: str | None = None,
