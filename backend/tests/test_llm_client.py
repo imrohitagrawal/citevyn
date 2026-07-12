@@ -145,6 +145,9 @@ def test_build_llm_client_honors_provider_setting(monkeypatch) -> None:
     try:
         client = build_llm_client(get_settings())
         assert isinstance(client, AnthropicLLMClient)
+        # aclose is now a required LLMClient member; confirm the real
+        # Anthropic client still satisfies the runtime_checkable protocol.
+        assert isinstance(client, LLMClient)
     finally:
         get_settings.cache_clear()
 

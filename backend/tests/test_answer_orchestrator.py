@@ -424,6 +424,9 @@ async def test_citation_validation_failure_returns_no_answer_with_audit(
                 provider="stub",
             )
 
+        async def aclose(self) -> None:
+            return None
+
     retriever = _FakeRetriever(_evidence(count=2))
     orchestrator = Orchestrator(settings, session, llm=_BadLLM(), retriever=retriever)
 
@@ -471,6 +474,9 @@ async def test_llm_unavailable_raises_orchestrator_error(session: Any) -> None:
     class _DownLLM:
         async def complete(self, **_kwargs: Any) -> Any:
             raise LLMUnavailable("provider is down")
+
+        async def aclose(self) -> None:
+            return None
 
     retriever = _FakeRetriever(_evidence(count=1))
     orchestrator = Orchestrator(settings, session, llm=_DownLLM(), retriever=retriever)

@@ -119,3 +119,7 @@ class StubLLMClient:
             model=self._model,
             provider=LLMProvider.stub.value,
         )
+
+    async def aclose(self) -> None:
+        """No-op: the stub owns no resources. Satisfies the LLMClient seam."""
+        return None
