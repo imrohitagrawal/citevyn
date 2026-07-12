@@ -17,6 +17,7 @@ from app.retrieval.exact import ExactRetriever
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.keyword import KeywordRetriever
 from app.retrieval.rerank import Reranker
+from app.retrieval.types import VectorDegrade
 from app.retrieval.vector import StubEmbedder
 from app.routing.intent import Intent
 
@@ -144,7 +145,9 @@ async def test_hybrid_degrades_when_embedder_unavailable(seeded_session) -> None
         logger.level = prev_level
         logger.disabled = prev_disabled
 
-    assert result == []
+    # _safe_vector_retrieve returns (chunks, degrade); a transient outage reports
+    # the Tier-1 ``unavailable`` reason.
+    assert result == ([], VectorDegrade.unavailable)
     assert any("vector_retrieval_degraded" in r.getMessage() for r in records)
 
 
@@ -167,13 +170,17 @@ async def test_hybrid_does_not_swallow_generic_errors(seeded_session) -> None:
 
 async def test_hybrid_short_circuits_on_exact_lookup(seeded_session) -> None:
     h = HybridRetriever(seeded_session, active_index_version="v1")
-    hits = await h.retrieve(
+    result = await h.retrieve(
         "CLAUDE_API_RATE_LIMIT",
         product_area=Domain.claude_api.value,
         intent=Intent.exact_lookup,
     )
+    hits = result.hits
     assert len(hits) >= 1
     assert hits[0].retrieval_type.value == "exact"
+    # The exact-lookup short-circuit never consults the vector arm, so it is not
+    # degraded — the orchestrator caches this embedder-independent answer (#72).
+    assert result.vector_degraded is False
 
 
 async def test_hybrid_exact_lookup_falls_back_when_no_exact_hit(seeded_session) -> None:
@@ -185,11 +192,13 @@ async def test_hybrid_exact_lookup_falls_back_when_no_exact_hit(seeded_session) 
     # Regression guard: reverting the fall-through (returning only exact hits)
     # would make this return [] and fail.
     h = HybridRetriever(seeded_session, active_index_version="v1")
-    hits = await h.retrieve(
-        "explain the rate limit behaviour please",
-        product_area=Domain.claude_api.value,
-        intent=Intent.exact_lookup,
-    )
+    hits = (
+        await h.retrieve(
+            "explain the rate limit behaviour please",
+            product_area=Domain.claude_api.value,
+            intent=Intent.exact_lookup,
+        )
+    ).hits
     assert len(hits) >= 1
     # It fell through to keyword/vector — no exact-typed hit.
     assert all(hit.retrieval_type.value != "exact" for hit in hits)
@@ -200,16 +209,20 @@ async def test_hybrid_merges_keyword_and_exact(seeded_session) -> None:
     # Two questions; we run them separately and confirm the hybrid
     # orchestrator returns the same chunk via either path, and that
     # a query with both an exact term and a keyword wins on score.
-    exact_hits = await h.retrieve(
-        "CLAUDE_API_RATE_LIMIT",
-        product_area=Domain.claude_api.value,
-        intent=Intent.faq,
-    )
-    keyword_hits = await h.retrieve(
-        "rate",
-        product_area=Domain.claude_api.value,
-        intent=Intent.faq,
-    )
+    exact_hits = (
+        await h.retrieve(
+            "CLAUDE_API_RATE_LIMIT",
+            product_area=Domain.claude_api.value,
+            intent=Intent.faq,
+        )
+    ).hits
+    keyword_hits = (
+        await h.retrieve(
+            "rate",
+            product_area=Domain.claude_api.value,
+            intent=Intent.faq,
+        )
+    ).hits
     assert exact_hits and keyword_hits
     # chunk found by both retrievers should outscore a single-retriever hit
     keyword_only_score = keyword_hits[0].score
@@ -218,11 +231,13 @@ async def test_hybrid_merges_keyword_and_exact(seeded_session) -> None:
 
 async def test_hybrid_respects_domain_filter(seeded_session) -> None:
     h = HybridRetriever(seeded_session, active_index_version="v1")
-    hits = await h.retrieve(
-        "rate",
-        product_area=Domain.codex.value,
-        intent=Intent.faq,
-    )
+    hits = (
+        await h.retrieve(
+            "rate",
+            product_area=Domain.codex.value,
+            intent=Intent.faq,
+        )
+    ).hits
     assert all(h_.product_area == "codex" for h_ in hits)
     # The codex doc has no "rate" term, so this should be empty.
     assert hits == []
@@ -416,7 +431,29 @@ async def test_safe_vector_retrieve_skips_when_disabled(seeded_session) -> None:
         limit=5,
         enabled=False,
     )
-    assert result == []
+    # A disabled arm degrades to no hits with the Tier-3 ``mismatch`` reason.
+    assert result == ([], VectorDegrade.mismatch)
+
+
+async def test_safe_vector_retrieve_reports_not_degraded_on_success(seeded_session) -> None:
+    # A live vector arm that actually runs reports degraded=False even when it
+    # legitimately finds no chunks — a genuine empty result must be distinguishable
+    # from a degrade so the orchestrator caches a normally-retrieved answer.
+    from app.retrieval.types import RetrievedChunk
+
+    class _EmptyVector:
+        async def retrieve(self, question, *, product_area, limit) -> list[RetrievedChunk]:
+            return []
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _EmptyVector(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+        enabled=True,
+    )
+    assert result == ([], VectorDegrade.none)
 
 
 async def test_hybrid_retrieve_answers_from_keyword_on_mismatch(seeded_session) -> None:
@@ -425,10 +462,40 @@ async def test_hybrid_retrieve_answers_from_keyword_on_mismatch(seeded_session) 
     await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        hits = await h.retrieve("rate", product_area=Domain.claude_api.value, intent=Intent.faq)
+        result = await h.retrieve("rate", product_area=Domain.claude_api.value, intent=Intent.faq)
+    hits = result.hits
     assert hits  # keyword still answers
     assert all(hit.retrieval_type.value != "vector" for hit in hits)
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
+    # The vector arm was consulted and degraded on the mismatch — the runtime
+    # signal is True so the orchestrator skips caching this weaker answer (#65).
+    assert result.vector_degraded is True
+    assert result.vector_degrade is VectorDegrade.mismatch
+
+
+async def test_exact_lookup_fallthrough_still_degrades_on_mismatch(seeded_session) -> None:
+    # Boundary of the #72 carve-out: the exact_lookup SHORT-CIRCUIT (exact hit
+    # present) is embedder-independent and reports ``none``, but an exact_lookup
+    # question whose exact arm MISSES falls THROUGH to the hybrid path and DOES
+    # consult the vector arm — so under a mismatch it must still degrade
+    # (``mismatch``), exactly like a non-exact query. Guards against the carve-out
+    # accidentally widening to all exact_lookup intents (which would freeze a
+    # degraded answer). "explain the rate limit" is exact_lookup-classified by the
+    # caller yet matches no exact term, and "rate" keyword-hits the seeded chunk.
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        result = await h.retrieve(
+            "explain the rate limit behaviour please",
+            product_area=Domain.claude_api.value,
+            intent=Intent.exact_lookup,
+        )
+    assert result.hits  # keyword still answers on the fall-through
+    assert all(hit.retrieval_type.value == "keyword" for hit in result.hits)
+    assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
+    # The fall-through consulted the vector arm and it degraded — NOT the #72
+    # short-circuit, so it must report a real degrade, not ``none``.
+    assert result.vector_degrade is VectorDegrade.mismatch
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +581,7 @@ async def test_hybrid_scopes_to_active_index_version(session) -> None:
     # Regression: fails before the fix (both docs returned), passes after.
     active_doc, old_doc = await _seed_two_versions(session)
     h = HybridRetriever(session, active_index_version="v-active")
-    hits = await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)
+    hits = (await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)).hits
     assert hits, "the active-version chunk must be found"
     doc_ids = {h_.document_id for h_ in hits}
     assert active_doc in doc_ids
@@ -527,7 +594,7 @@ async def test_hybrid_no_active_index_returns_status_active_docs(session) -> Non
     # status=active docs come back rather than an empty result.
     active_doc, old_doc = await _seed_two_versions(session)
     h = HybridRetriever(session, active_index_version=None)
-    hits = await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)
+    hits = (await h.retrieve("zorptastic", product_area=Domain.codex.value, intent=Intent.faq)).hits
     doc_ids = {h_.document_id for h_ in hits}
     assert active_doc in doc_ids and old_doc in doc_ids
 

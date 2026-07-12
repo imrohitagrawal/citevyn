@@ -38,7 +38,7 @@ from app.models import (
     IndexVersion,
     Message,
 )
-from app.retrieval.types import EvidenceHit
+from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
 
 pytestmark = pytest.mark.asyncio
@@ -108,8 +108,8 @@ class _FakeRetriever:
         intent: Intent,
         limit: int,
         top_k: int,
-    ) -> list[EvidenceHit]:
-        return list(self._evidence)
+    ) -> RetrievalResult:
+        return RetrievalResult(hits=list(self._evidence), vector_degrade=VectorDegrade.none)
 
 
 # ---------------------------------------------------------------------------

@@ -40,10 +40,8 @@ from app.cache.answer_cache import (
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
 from app.embeddings import (
-    EmbedderIdentity,
     configured_embedder_identity,
     get_embedder,
-    is_index_embedder_mismatch,
 )
 from app.guardrails.domain import Domain, classify_domain, is_unsupported
 from app.llm.errors import LLMUnavailable
@@ -61,7 +59,12 @@ from app.models import (
 )
 from app.models.enums import RetrievalType
 from app.retrieval.hybrid import HybridRetriever
-from app.retrieval.types import EvidenceHit, chunk_to_citation
+from app.retrieval.types import (
+    EvidenceHit,
+    RetrievalResult,
+    VectorDegrade,
+    chunk_to_citation,
+)
 from app.routing.intent import Intent, classify_intent, should_skip_retrieval
 
 _logger = logging.getLogger("citevyn.answer")
@@ -131,7 +134,7 @@ class _RetrieverLike(Protocol):
         intent: Intent,
         limit: int,
         top_k: int,
-    ) -> list[EvidenceHit]: ...
+    ) -> RetrievalResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -145,21 +148,19 @@ def _utcnow() -> datetime:
 
 async def _retrieve_active_index(
     session: AsyncSession,
-) -> tuple[str, str, EmbedderIdentity | None]:
-    """Return ``(active_index_version, source_version_hash, embedder_stamp)``.
+) -> tuple[str, str]:
+    """Return ``(active_index_version, source_version_hash)``.
 
-    Looks up the first ``IndexVersion`` row in ``active`` status and resolves
-    everything the ``ask`` pipeline needs from it in ONE query (#65): the
-    version and source hash feed the cache key and retriever scoping (#58), and
-    the ``(provider, model, dim)`` stamp lets the orchestrator predict the
-    Tier-3 vector-arm degrade (#57) before retrieval runs. If no active index
-    exists, returns ``("", "", None)`` so the cache key uses an empty source
-    version — every subsequent run invalidates the cache once the index is
-    promoted, which is the desired behavior before Slice 2 ingestion is wired.
+    Looks up the first ``IndexVersion`` row in ``active`` status and resolves what
+    the ``ask`` pipeline needs from it in ONE query (#58/#65): the version and
+    source hash feed the cache key and retriever scoping. If no active index
+    exists, returns ``("", "")`` so the cache key uses an empty source version —
+    every subsequent run invalidates the cache once the index is promoted, which
+    is the desired behavior before Slice 2 ingestion is wired.
 
-    Resolving the stamp here (not a second query) is why this reuses the same
-    single active-index read #58 already introduced: the cache key, the degrade
-    check, and retriever scoping must all reason about the *same* winning row.
+    The Tier-3 vector-arm degrade is no longer predicted here: the retriever
+    reports the *actual* runtime degrade reason back from ``retrieve()`` and the
+    write gate uses that (#70/#72), so this no longer resolves the embedder stamp.
     """
     from app.models import IndexStatus, IndexVersion
 
@@ -169,7 +170,7 @@ async def _retrieve_active_index(
     # rows are ever simultaneously ``active`` with equal ``promoted_at`` (a
     # single-active-row invariant tracked by #58, but cheap to harden here).
     stmt = (
-        select(IndexVersion)
+        select(IndexVersion.index_version, IndexVersion.source_version_hash)
         .where(IndexVersion.status == IndexStatus.active)
         .order_by(
             IndexVersion.promoted_at.desc().nulls_last(),
@@ -177,15 +178,10 @@ async def _retrieve_active_index(
         )
         .limit(1)
     )
-    row = (await session.execute(stmt)).scalar_one_or_none()
+    row = (await session.execute(stmt)).first()
     if row is None:
-        return "", "", None
-    stamp = EmbedderIdentity(
-        provider=row.embedding_provider,
-        model=row.embedding_model,
-        dim=row.embedding_dim,
-    )
-    return row.index_version, row.source_version_hash, stamp
+        return "", ""
+    return row[0], row[1]
 
 
 def _default_retriever(
@@ -305,30 +301,19 @@ class Orchestrator:
             )
 
         # Look up the active index ONCE so the cache key carries the current
-        # source version, the default retriever can scope to that index version
-        # (#58), and we can predict the Tier-3 vector-arm degrade before
-        # retrieval runs (#57/#65). A missing index returns empty strings + a
-        # ``None`` stamp, which still produce a stable (and unique) cache key.
-        active_index_version, source_version_hash, index_stamp = await _retrieve_active_index(
-            self._session
-        )
+        # source version and the default retriever can scope to that index version
+        # (#58). A missing index returns empty strings, which still produce a
+        # stable (and unique) cache key. The Tier-3 vector-arm degrade is NOT
+        # predicted here anymore — the retriever reports the actual runtime reason
+        # back from ``retrieve()`` and the write gate uses that (#70/#72).
+        active_index_version, source_version_hash = await _retrieve_active_index(self._session)
 
-        # The configured query embedder's identity — resolved once and reused
-        # for BOTH the cache key and the degrade check (#65). Encoding it in the
-        # key means a config-only embedder swap (which leaves
-        # ``source_version_hash`` unchanged) still invalidates affected entries,
-        # so a stale answer built in a different vector space is not re-served
-        # after the operator fixes the config. Only ``provider/model/dim`` — no
-        # secret — enters the pre-image.
+        # The configured query embedder's identity — encoded in the cache key (#65)
+        # so a config-only embedder swap (which leaves ``source_version_hash``
+        # unchanged) still invalidates affected entries, so a stale answer built in
+        # a different vector space is not re-served after the operator fixes the
+        # config. Only ``provider/model/dim`` — no secret — enters the pre-image.
         configured_identity = configured_embedder_identity(self._settings)
-
-        # Predict whether the vector arm will degrade (Tier-3 mismatch, #57): the
-        # active index was stamped by a different embedder than the one
-        # configured to embed queries. Used to skip caching the resulting weaker
-        # (exact+keyword-only) answer so a misconfiguration never freezes a
-        # degraded answer to TTL, and so every affected ask re-runs retrieval and
-        # re-emits the mismatch WARN instead of being silenced by a cache hit.
-        vector_degraded = is_index_embedder_mismatch(configured_identity, index_stamp)
 
         # Normalize the question for the cache key. The slice 5
         # contract pins the inputs verbatim; whitespace
@@ -381,13 +366,18 @@ class Orchestrator:
             self._session,
             active_index_version=active_index_version or None,
         )
-        evidence = await retriever.retrieve(
+        result = await retriever.retrieve(
             question,
             product_area=domain.value,
             intent=intent,
             limit=self._settings.retrieval_max_candidates,
             top_k=self._settings.retrieval_top_k,
         )
+        evidence = result.hits
+        # The ACTUAL runtime degrade of the vector arm (its reason: a transient
+        # outage, a Tier-3 mismatch that was truly consulted, or none) — this, not
+        # a config prediction, gates the cache write and labels its WARN (#70/#72).
+        vector_degrade = result.vector_degrade
 
         if not evidence:
             return await self._respond_no_answer(
@@ -475,7 +465,7 @@ class Orchestrator:
             cache_hit=False,
             cache_key=cache_key,
             cache_normalized=cache_normalized,
-            vector_degraded=vector_degraded,
+            vector_degrade=vector_degrade,
         )
         return response
 
@@ -702,17 +692,19 @@ class Orchestrator:
         cache_hit: bool,
         cache_key: str,
         cache_normalized: str,
-        vector_degraded: bool,
+        vector_degrade: VectorDegrade,
     ) -> AnswerResponse:
         """Persist a grounded answer, write the cache, and return the response.
 
-        The cache write is *intentionally skipped* when ``vector_degraded`` is
-        true (the vector arm was suppressed by a Tier-3 embedder mismatch, #57):
-        caching an answer built without the vector arm would freeze that weaker
-        answer to TTL and silence the mismatch WARN on subsequent hits (#65).
-        Skipping the write is logged so the skip is observable and never
-        indistinguishable from a silent drop; the answer itself is still served
-        and persisted to the trace exactly as normal.
+        The cache write is *intentionally skipped* when ``vector_degrade`` is not
+        :attr:`VectorDegrade.none` — the RUNTIME reason from the retriever that the
+        vector arm actually degraded to no hits (a transient Tier-1 outage, #70, or
+        a Tier-3 embedder mismatch that was truly consulted, #57). Caching an answer
+        built without the vector arm would freeze that weaker answer to TTL and
+        silence the degrade WARN on subsequent hits (#65). The skip is logged with a
+        reason-specific event so it is observable and never indistinguishable from a
+        silent drop; the answer itself is still served and persisted to the trace
+        exactly as normal.
         """
         message_id = await self._persist_messages(
             session_id=session_id,
@@ -725,7 +717,7 @@ class Orchestrator:
             evidence=evidence,
             citations=citations,
         )
-        cache_written = not vector_degraded
+        cache_written = vector_degrade is VectorDegrade.none
         if cache_written:
             await self._cache.put(
                 cache_key=cache_key,
@@ -740,10 +732,12 @@ class Orchestrator:
                 ),
             )
         else:
-            _logger.warning(
-                "answer_cache_write_skipped_embedder_mismatch",
-                extra={"request_id": request_id},
+            skip_event = (
+                "answer_cache_write_skipped_embedder_mismatch"
+                if vector_degrade is VectorDegrade.mismatch
+                else "answer_cache_write_skipped_vector_unavailable"
             )
+            _logger.warning(skip_event, extra={"request_id": request_id})
         await self._persist_audit(
             request_id=request_id,
             session_id=session_id,
