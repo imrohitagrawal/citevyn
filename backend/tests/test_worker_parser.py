@@ -48,7 +48,7 @@ def test_parse_no_h1_returns_empty_title() -> None:
 
 
 def test_parse_full_claude_api_fixture() -> None:
-    """The Claude API fixture parses to one H1 + three H2 blocks."""
+    """The Claude API fixture parses to one H1 + one block per H2 section."""
     from pathlib import Path
 
     # Resolve relative to *this* test file so the test works
@@ -58,11 +58,13 @@ def test_parse_full_claude_api_fixture() -> None:
     raw = fixture.read_text(encoding="utf-8")
     parsed = parse_markdown(raw)
     assert parsed.title == "Claude API Reference"
-    assert [b.heading for b in parsed.blocks] == [
-        "Rate limits",
-        "Authentication",
-        "Models",
-    ]
+    # One block per ## section, in document order. Assert the key sections the
+    # retrieval demo depends on are present rather than pinning the full list, so
+    # the corpus can grow without churning this test.
+    headings = [b.heading for b in parsed.blocks]
+    assert headings[0] == "Overview"
+    for expected in ("Authentication", "Rate limits", "Models"):
+        assert expected in headings
 
 
 def test_parse_skips_blank_lines() -> None:

@@ -28,6 +28,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from alembic.command import downgrade as alembic_downgrade
 from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, text
@@ -60,33 +61,51 @@ def _pg_url() -> str:
 
 
 def _pg_url_with_schema(schema: str) -> str:
-    """Build a Postgres URL whose default ``search_path`` is ``schema``.
+    """Build a Postgres URL whose ``search_path`` is ``<schema>,public``.
 
     Alembic opens its own connection from the URL we hand it; setting
     ``search_path`` on the fixture's connection does not propagate.
     libpq accepts ``options=-c search_path=<schema>`` as a connection
     parameter, which psycopg applies on every new connection. The
     schema name comes from ``pg_schema`` and is URL-safe (``[a-z0-9_]``).
+
+    ``public`` is appended (second, so the isolated schema still wins for
+    unqualified CREATEs) because the ``pgvector`` extension is installed
+    database-wide and its ``vector`` type / ``vector_cosine_ops`` opclass live in
+    whichever schema first created it. In CI, ``alembic upgrade head`` runs against
+    ``public`` before this per-schema test suite, so the type lives in ``public``;
+    without ``public`` on the path, ``ALTER TABLE ... vector(1536)`` fails with
+    ``type "vector" does not exist``. Production is unaffected (it runs in
+    ``public``, which is always on the default path).
     """
     base = _pg_url()
     separator = "&" if "?" in base else "?"
-    return f"{base}{separator}options=-c search_path={schema}"
+    return f"{base}{separator}options=-c search_path={schema},public"
 
 
-@pytest.fixture
-def alembic_pg_config() -> Iterator[AlembicConfig]:
-    """Yield an Alembic config pointed at the PG test database.
+def _alembic_config_for_schema(schema: str) -> AlembicConfig:
+    """Build an Alembic config isolated to ``schema``.
 
-    The connection itself is the per-test schema, applied below.
-    The tests that consume this fixture must call
-    ``cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(...))``
-    once they know the schema name so Alembic's connection inherits
-    ``search_path``.
+    Sets the connection ``search_path`` to ``<schema>,public`` (so the shared
+    pgvector ``vector`` type resolves) and pins alembic's ``version_table_schema``
+    to ``schema`` (so its ``alembic_version`` lookup does not resolve to a
+    ``public`` copy via the search_path). See ``db/env.py``.
     """
     cfg = AlembicConfig(str(ALEMBIC_INI))
     cfg.set_main_option("script_location", str(REPO_ROOT / "db"))
-    cfg.set_main_option("sqlalchemy.url", _pg_url())
-    yield cfg
+    cfg.set_main_option("sqlalchemy.url", _pg_url_with_schema(schema))
+    cfg.set_main_option("version_table_schema", schema)
+    return cfg
+
+
+@pytest.fixture
+def alembic_pg_config(pg_schema: str) -> Iterator[AlembicConfig]:
+    """Yield an Alembic config isolated to the per-test ``pg_schema``.
+
+    Both the ``search_path`` and alembic's ``version_table_schema`` are already
+    configured, so consuming tests just call ``alembic_upgrade(cfg, "head")``.
+    """
+    yield _alembic_config_for_schema(pg_schema)
 
 
 @pytest.fixture
@@ -122,7 +141,6 @@ def pg_schema() -> Iterator[str]:
 def test_alembic_upgrade_head_creates_all_tables(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -164,7 +182,6 @@ def test_uuid_columns_are_native_uuid_on_postgres(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
     """GUID columns must be real ``uuid`` on Postgres, not CHAR(36)."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     # Every GUID-typed column across the schema. Built from a tuple
@@ -205,7 +222,6 @@ def test_uuid_columns_are_native_uuid_on_postgres(
 
 def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str) -> None:
     """Smoke-test the application ORM against real Postgres."""
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -230,20 +246,16 @@ def test_round_trip_user_insert(alembic_pg_config: AlembicConfig, pg_schema: str
     assert row[1] == "admin"
 
 
-def test_chunks_embedding_is_bytea_on_postgres(
+def test_chunks_embedding_is_pgvector_on_postgres(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
-    """Slice 8 step 4: ``chunks.embedding`` lands as ``bytea`` on Postgres.
+    """After migration ``0004`` ``chunks.embedding`` is a pgvector ``vector``.
 
-       Migration ``0003`` declares the column as ``LargeBinary``, which
-       Postgres renders as ``bytea``. The future ``pgvector`` migration
-    will swap the column type to ``vector(<dim>)`` and this
-       assertion will need to be updated.
-
-       The test also confirms the column is nullable so existing rows
-       survive the upgrade.
+    Migration ``0003`` declared the column as ``bytea``; ``0004`` swaps it to
+    ``vector(1536)`` on Postgres. ``information_schema`` reports vector columns as
+    ``USER-DEFINED`` with ``udt_name = 'vector'``. The column stays nullable so
+    rows without an embedding survive.
     """
-    alembic_pg_config.set_main_option("sqlalchemy.url", _pg_url_with_schema(pg_schema))
     alembic_upgrade(alembic_pg_config, "head")
 
     engine = create_engine(_pg_url())
@@ -252,7 +264,7 @@ def test_chunks_embedding_is_bytea_on_postgres(
             conn.execute(text(f"SET search_path TO {pg_schema}"))
             row = conn.execute(
                 text(
-                    "SELECT data_type, is_nullable "
+                    "SELECT data_type, udt_name, is_nullable "
                     "FROM information_schema.columns "
                     "WHERE table_schema = :schema AND table_name = 'chunks' "
                     "AND column_name = 'embedding'"
@@ -263,6 +275,189 @@ def test_chunks_embedding_is_bytea_on_postgres(
         engine.dispose()
 
     assert row is not None, "chunks.embedding column not found after migration"
-    data_type, is_nullable = row
-    assert data_type == "bytea", f"expected bytea, got {data_type}"
+    data_type, udt_name, is_nullable = row
+    assert udt_name == "vector", f"expected pgvector 'vector', got udt_name={udt_name}"
+    assert data_type == "USER-DEFINED", f"expected USER-DEFINED, got {data_type}"
     assert is_nullable == "YES", "embedding should be nullable"
+
+
+def test_chunks_embedding_has_hnsw_index(alembic_pg_config: AlembicConfig, pg_schema: str) -> None:
+    """Migration ``0004`` creates the HNSW cosine index used by retrieval."""
+    alembic_upgrade(alembic_pg_config, "head")
+
+    engine = create_engine(_pg_url())
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {pg_schema}"))
+            row = conn.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname = :schema AND indexname = 'ix_chunks_embedding_hnsw'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+    finally:
+        engine.dispose()
+
+    assert row is not None, "HNSW index ix_chunks_embedding_hnsw not found"
+    assert "hnsw" in row[0].lower()
+    assert "vector_cosine_ops" in row[0].lower()
+
+
+def test_index_versions_has_embedding_stamp_columns(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """Migration ``0004`` adds the Tier 3 provenance stamp columns."""
+    alembic_upgrade(alembic_pg_config, "head")
+
+    engine = create_engine(_pg_url())
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {pg_schema}"))
+            rows = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'index_versions'"
+                ),
+                {"schema": pg_schema},
+            ).all()
+    finally:
+        engine.dispose()
+
+    columns = {r[0] for r in rows}
+    assert {"embedding_provider", "embedding_model", "embedding_dim"} <= columns
+
+
+def test_migration_0004_downgrade_restores_bytea(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """The 0004 rollback reverts the vector column to bytea and drops the stamp.
+
+    ``code_review.md`` blocks a migration without a working rollback, so this
+    exercises ``downgrade`` end-to-end: upgrade to head, downgrade to 0003, and
+    assert the schema shape returned to bytea + no stamp columns.
+    """
+    alembic_upgrade(alembic_pg_config, "head")
+    alembic_downgrade(alembic_pg_config, "0003")
+
+    engine = create_engine(_pg_url())
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {pg_schema}"))
+            emb = conn.execute(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'chunks' "
+                    "AND column_name = 'embedding'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+            stamp = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'index_versions' "
+                    "AND column_name = 'embedding_provider'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+    finally:
+        engine.dispose()
+
+    assert emb is not None and emb[0] == "bytea", "downgrade should restore bytea"
+    assert stamp is None, "downgrade should drop the embedding_provider stamp column"
+
+
+async def test_vector_retriever_returns_ranked_hits_on_postgres(pg_schema: str) -> None:
+    """The pgvector read path returns real, ranked hits on Postgres (not []).
+
+    This is #51's core "not []" proof, run WITHOUT a provider key: a deterministic
+    stub embedder writes 1536-dim vectors into the real ``vector(1536)`` column,
+    and :class:`VectorRetriever` runs a live ``<=>`` cosine query. The chunk whose
+    text matches the query embeds to the same point, so it ranks first.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.config import Settings
+    from app.embeddings import build_embedder
+    from app.models import Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
+    from app.retrieval.vector import VectorRetriever
+
+    # Build the schema via alembic on a sync engine, then work async in-schema.
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    settings = Settings()  # embedding_dim=1536, provider=stub
+    embedder = build_embedder(settings)
+    # The app URL scheme is already ``postgresql+psycopg`` (psycopg3), which has an
+    # async driver, so the same URL drives ``create_async_engine`` directly.
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    texts = [
+        "The --model flag selects the Claude model for a request.",
+        "Pass your API key in the x-api-key header.",
+        "Rate limits return HTTP 429 when exceeded.",
+    ]
+    query = texts[0]
+
+    try:
+        now = datetime.now(UTC)
+        async with maker() as session:
+            session.add(
+                IndexVersion(
+                    index_version="v-pgtest",
+                    status=IndexStatus.active,
+                    source_version_hash="sha256:pg-vec-test",
+                    embedding_provider=settings.embedding_provider,
+                    embedding_model=settings.embedding_model,
+                    embedding_dim=settings.embedding_dim,
+                    created_at=now,
+                    promoted_at=now,
+                )
+            )
+            await session.flush()
+            doc = Document(
+                index_version="v-pgtest",
+                source_name="claude_api",
+                product_area="claude_api",
+                source_url="https://docs.anthropic.com/en/api/overview",
+                title="Claude API Reference",
+                content_checksum="c" * 20,
+                last_fetched_at=now,
+                status=DocumentStatus.active,
+            )
+            session.add(doc)
+            await session.flush()
+
+            vectors = await embedder.embed_documents(texts)
+            for order, (t, v) in enumerate(zip(texts, vectors, strict=True)):
+                session.add(
+                    Chunk(
+                        document_id=doc.document_id,
+                        product_area="claude_api",
+                        section_path=f"s{order}",
+                        heading=f"h{order}",
+                        parent_heading=None,
+                        chunk_text=t,
+                        context_summary=t[:40],
+                        exact_terms=[],
+                        chunk_order=order,
+                        content_checksum=f"chk{order}",
+                        embedding=v,
+                    )
+                )
+            await session.commit()
+
+            retriever = VectorRetriever(session, active_index_version="v-pgtest", embedder=embedder)
+            hits = await retriever.retrieve(query, product_area="claude_api", limit=3)
+
+        # Proof it is NOT [] and that the pgvector ordering is real.
+        assert len(hits) == 3, "vector retrieval returned no hits on Postgres"
+        assert hits[0].chunk_text == query, "closest hit should be the matching chunk"
+        # Scores are descending (distance ascending); the exact match is ~1.0.
+        scores = [h.score for h in hits]
+        assert scores == sorted(scores, reverse=True)
+        assert scores[0] > scores[-1]
+    finally:
+        await engine.dispose()

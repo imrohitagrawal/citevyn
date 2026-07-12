@@ -25,8 +25,9 @@ def test_default_llm_provider_is_stub() -> None:
 def test_default_embedding_dim_matches_migration() -> None:
     settings = Settings()
     assert settings.embedding_provider == "stub"
-    assert settings.embedding_model == "voyage-3"
-    assert settings.embedding_dim == 1024
+    assert settings.embedding_model == "gemini-embedding-001"
+    # Must match the pgvector column dimension in migration 0004 (vector(1536)).
+    assert settings.embedding_dim == 1536
 
 
 def test_default_retrieval_and_cache_settings() -> None:

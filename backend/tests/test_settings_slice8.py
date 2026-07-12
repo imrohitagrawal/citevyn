@@ -111,3 +111,54 @@ def test_env_override_for_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)
     assert settings.rate_limit_demo_user_per_hour == 5
     assert settings.rate_limit_admin_per_hour == 20
+
+
+# ---------------------------------------------------------------------------
+# Embedding production guard + dimension coupling (#51)
+# ---------------------------------------------------------------------------
+
+
+def _prod_kwargs(**overrides: object) -> dict[str, object]:
+    """Baseline production Settings kwargs that satisfy the OTHER prod guards,
+    so a single embedding-specific guard can be exercised in isolation."""
+    base: dict[str, object] = {
+        "environment": "production",
+        "llm_provider": "gemini",  # allowed in prod; key checked at client build
+        "admin_api_key": "a-strong-admin-secret",  # not the rejected default
+        "_env_file": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_gemini_embeddings_in_production_requires_key() -> None:
+    """provider=gemini + no Gemini key in production fails at parse time."""
+    with pytest.raises(ValidationError, match="CITEVYN_GEMINI_API_KEY"):
+        Settings(**_prod_kwargs(embedding_provider="gemini", gemini_api_key=None))
+
+
+def test_gemini_embeddings_in_production_ok_with_key() -> None:
+    """provider=gemini + key present is accepted in production."""
+    settings = Settings(**_prod_kwargs(embedding_provider="gemini", gemini_api_key="gk-123"))
+    assert settings.embedding_provider == "gemini"
+
+
+def test_embedding_dim_is_locked_to_pgvector_column_and_migration() -> None:
+    """The three dimension sources agree: Settings default, the boot-guard
+    constant, and migration 0004's ``vector(<dim>)`` literal. This is the only
+    real drift gap across the immutable-migration boundary (arch review)."""
+    import importlib.util
+    from pathlib import Path
+
+    from app.embeddings.factory import PGVECTOR_COLUMN_DIM
+
+    assert Settings(_env_file=None).embedding_dim == PGVECTOR_COLUMN_DIM
+
+    migration_path = (
+        Path(__file__).resolve().parents[2] / "db" / "versions" / "0004_pgvector_embedding.py"
+    )
+    spec = importlib.util.spec_from_file_location("_mig0004", migration_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._EMBEDDING_DIM == PGVECTOR_COLUMN_DIM

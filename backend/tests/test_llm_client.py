@@ -145,6 +145,9 @@ def test_build_llm_client_honors_provider_setting(monkeypatch) -> None:
     try:
         client = build_llm_client(get_settings())
         assert isinstance(client, AnthropicLLMClient)
+        # aclose is now a required LLMClient member; confirm the real
+        # Anthropic client still satisfies the runtime_checkable protocol.
+        assert isinstance(client, LLMClient)
     finally:
         get_settings.cache_clear()
 
@@ -197,6 +200,39 @@ async def test_anthropic_client_surfaces_llm_unavailable_on_5xx() -> None:
             )
     finally:
         await client.aclose()
+
+
+# 401 exercises the most sensitive upstream body (auth-failure detail); 429/503
+# cover the "unavailable" branch. All flow through the unified `status_code >= 400`
+# block, so parametrizing locks the leak closed against a future re-split.
+@pytest.mark.parametrize("status", [401, 429, 503])
+async def test_anthropic_error_body_is_logged_not_in_exception(
+    status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Security regression (issue #50): the upstream error body must be logged
+    SERVER-SIDE but must NOT appear in the LLMUnavailable message (which flows
+    to the client-facing error.details.reason)."""
+    secret_body = '{"error":"upstream secret detail us-east-1"}'
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=secret_body)
+
+    client = _anthropic_client(handler)
+    try:
+        with (
+            caplog.at_level("WARNING", logger="citevyn.llm"),
+            pytest.raises(LLMUnavailable) as info,
+        ):
+            await client.complete(system="sys", user="hi", max_tokens=64, temperature=0.0)
+    finally:
+        await client.aclose()
+
+    # The exception message carries only the status, never the upstream body.
+    assert secret_body not in str(info.value)
+    assert "upstream secret detail" not in str(info.value)
+    assert str(info.value) == f"Anthropic returned {status}"
+    # The body IS preserved server-side for operators.
+    assert any(secret_body in str(rec.__dict__.get("body", "")) for rec in caplog.records)
 
 
 async def test_anthropic_client_surfaces_llm_unavailable_on_429() -> None:

@@ -17,18 +17,13 @@ distinguish the two if needed.
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 
 import httpx
 
+from app.llm._http import post_json
 from app.llm.errors import LLMUnavailable
 from app.llm.types import LLMProvider, LLMResult
-
-# Status codes the orchestrator treats as "provider unavailable".
-# 4xx other than 408/429 are configuration errors (bad prompt, bad
-# key) — we still raise LLMUnavailable so the orchestrator can decide.
-_UNAVAILABLE_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def _extract_text(content_blocks: list[dict[str, Any]]) -> str:
@@ -99,46 +94,15 @@ class AnthropicLLMClient:
             "anthropic-version": self._api_version,
             "content-type": "application/json",
         }
-        try:
-            response = await self._http_client.post(
-                url,
-                json=payload,
-                headers=headers,
-            )
-        except httpx.TimeoutException as exc:
-            raise LLMUnavailable(
-                f"Anthropic request timed out after {self._timeout_seconds}s",
-                cause=exc,
-            ) from exc
-        except httpx.HTTPError as exc:
-            # Covers connection errors, protocol errors, etc.
-            raise LLMUnavailable(
-                f"Anthropic transport error: {exc.__class__.__name__}",
-                cause=exc,
-            ) from exc
-
-        if response.status_code in _UNAVAILABLE_STATUSES:
-            raise LLMUnavailable(
-                f"Anthropic returned {response.status_code}: {response.text[:200]}"
-            )
-        if response.status_code >= 400:
-            # Other client errors (400/401/403) — still not retried by
-            # this client. Orchestrator decides.
-            raise LLMUnavailable(
-                f"Anthropic returned {response.status_code}: {response.text[:200]}"
-            )
-
-        try:
-            raw_data: Any = json.loads(response.content)
-        except json.JSONDecodeError as exc:
-            raise LLMUnavailable(
-                "Anthropic returned non-JSON body",
-                cause=exc,
-            ) from exc
-        # The Messages API JSON shape is well documented but the wire
-        # is not type-narrowed; cast to a dict and validate fields
-        # defensively as we read them.
-        data = cast(dict[str, Any], raw_data)
+        data = await post_json(
+            client=self._http_client,
+            url=url,
+            payload=payload,
+            headers=headers,
+            timeout_seconds=self._timeout_seconds,
+            provider="Anthropic",
+            error_event="anthropic_error_response",
+        )
 
         content = data.get("content")
         if not isinstance(content, list):

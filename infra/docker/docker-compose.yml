@@ -62,13 +62,29 @@ services:
   # to the public network. The production security boundary is
   # Caddy on :443; Postgres is never reachable from the internet.
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg18
     container_name: citevyn-db
     restart: unless-stopped
     logging: *default-logging
     environment:
       POSTGRES_DB: citevyn
       POSTGRES_USER: citevyn
+      # pgvector/pgvector:pg18 (Postgres 18) refuses to initdb when the
+      # data volume is mounted directly at /var/lib/postgresql/data (the
+      # pre-18 convention this file uses). Point PGDATA at a subdirectory
+      # of that mount so initdb runs below the mount root, which
+      # sidesteps the pg18 layout check.
+      #
+      # CAUTION: this changes where Postgres looks for the cluster. On a
+      # fresh volume initdb creates it under .../data/pgdata — correct.
+      # But if a volume ALREADY holds a cluster at the mount root
+      # (.../data/PG_VERSION, i.e. the old no-PGDATA layout), the
+      # entrypoint won't find it at the subdir and will initdb a NEW
+      # EMPTY cluster there, silently orphaning the old data. Only
+      # introduce PGDATA on greenfield volumes; before deploying against
+      # any existing volume, confirm it has no root-layout cluster (or
+      # migrate it into the subdir first).
+      PGDATA: /var/lib/postgresql/data/pgdata
     env_file:
       - .env
     volumes:
@@ -86,7 +102,7 @@ services:
       start_period: 30s
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: citevyn-redis
     restart: unless-stopped
     logging: *default-logging
@@ -174,17 +190,24 @@ services:
     logging: *default-logging
     env_file:
       # ACME email + CA override (staging for smoke, prod for
-      # real). The real-secret check lives in
-      # infra/docker/scripts/_env_guard.sh.
+      # real). Real-secret check lives in
+      # infra/docker/scripts/_env_guard.sh, which refuses to
+      # run any prod entry point while the dev stubs from
+      # ``make db-up`` are still in place.
       - .env
     environment:
       # ACME email is required for Let's Encrypt to notify the
       # operator about expiring certs. The dev-time default
-      # below keeps `make demo` working on a fresh clone with no
-      # .env file (Caddy is behind the prod profile and isn't
-      # started by `make demo` anyway, but compose still parses
-      # the full file during interpolation). The real-secret
-      # check lives in infra/docker/scripts/_env_guard.sh.
+      # below keeps ``docker compose config`` parsing happy on
+      # a fresh clone: ``make db-up`` writes a bootstrapped
+      # .env from prod.env.example (see the Makefile), but the
+      # caddy service is behind the ``prod`` profile and won't
+      # start from ``make demo`` anyway. The dev default and a
+      # missing value are both refused by
+      # infra/docker/scripts/_env_guard.sh (POSTGRES_PASSWORD,
+      # CITEVYN_ADMIN_API_KEY, CITEVYN_ACME_EMAIL), so a raw
+      # ``docker compose --profile prod up -d`` is the only
+      # remaining way to start Caddy with a placeholder email.
       CITEVYN_ACME_EMAIL: ${CITEVYN_ACME_EMAIL:-dev@local.invalid}
       CITEVYN_ACME_CA: ${CITEVYN_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
     ports:
@@ -204,7 +227,7 @@ services:
   # ──────────────── One-shot backup (backup profile) ────────────────
   backup:
     profiles: ["backup"]
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: citevyn-backup
     logging: *default-logging
     restart: "no"
