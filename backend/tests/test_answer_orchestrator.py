@@ -43,6 +43,7 @@ from app.models import (
     AuditAction,
     AuditEvent,
     Confidence,
+    ExactTerm,
     Message,
     MessageRole,
     RetrievalType,
@@ -51,8 +52,9 @@ from app.models import (
 from app.models.enums import (
     RetrievalType as ModelRetrievalType,
 )
-from app.retrieval.types import EvidenceHit
+from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
+from tests.conftest import seed_catalog
 
 pytestmark = pytest.mark.asyncio
 
@@ -114,10 +116,22 @@ def _evidence(*, count: int, score: float = 1.0) -> list[EvidenceHit]:
 
 
 class _FakeRetriever:
-    """In-memory retriever that returns a pre-built evidence list."""
+    """In-memory retriever that returns a pre-built evidence list.
 
-    def __init__(self, evidence: list[EvidenceHit]) -> None:
+    ``vector_degrade`` lets a test simulate what the real hybrid retriever reports
+    when the vector arm degraded at runtime (a Tier-3 mismatch or a transient
+    Tier-1 outage) so the orchestrator's cache-write gate can be exercised without
+    the full hybrid wiring (#70/#72).
+    """
+
+    def __init__(
+        self,
+        evidence: list[EvidenceHit],
+        *,
+        vector_degrade: VectorDegrade = VectorDegrade.none,
+    ) -> None:
         self._evidence = evidence
+        self._vector_degrade = vector_degrade
         self.calls: list[dict[str, Any]] = []
 
     async def retrieve(
@@ -128,7 +142,7 @@ class _FakeRetriever:
         intent: Intent,
         limit: int,
         top_k: int,
-    ) -> list[EvidenceHit]:
+    ) -> RetrievalResult:
         self.calls.append(
             {
                 "question": question,
@@ -138,7 +152,7 @@ class _FakeRetriever:
                 "top_k": top_k,
             }
         )
-        return list(self._evidence)
+        return RetrievalResult(hits=list(self._evidence), vector_degrade=self._vector_degrade)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +750,9 @@ async def test_ask_skips_cache_write_on_embedder_mismatch(
     mismatch WARN on subsequent hits. Fails before the fix (row was written)."""
     settings = _settings(embedding_provider="stub")
     await _seed_stamped_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
-    retriever = _FakeRetriever(_evidence(count=2))
+    # The real hybrid retriever degrades the vector arm on this mismatch and reports
+    # it back; the injected double mirrors that so the runtime-gated write is skipped.
+    retriever = _FakeRetriever(_evidence(count=2), vector_degrade=VectorDegrade.mismatch)
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
@@ -838,3 +854,172 @@ def _index_version_model() -> Any:
     from app.models import IndexVersion
 
     return IndexVersion
+
+
+# ---------------------------------------------------------------------------
+# #70 + #72: gate the cache write on the vector arm's ACTUAL runtime degrade
+# (reported back from ``retrieve()``), not a config-only prediction.
+# ---------------------------------------------------------------------------
+
+
+async def _restamp_active_index(
+    session: Any, *, provider: str | None, model: str | None, dim: int | None
+) -> None:
+    """Mutate the catalog's active ``v1`` IndexVersion to carry a given stamp."""
+    row = await session.get(_index_version_model(), "v1")
+    row.embedding_provider = provider
+    row.embedding_model = model
+    row.embedding_dim = dim
+    await session.flush()
+
+
+async def test_ask_skips_cache_write_on_transient_embedder_unavailable(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#70: the vector arm degraded on a *transient* ``EmbedderUnavailable`` (a
+    Tier-1 outage the retriever reports as ``VectorDegrade.unavailable``). The
+    weaker exact+keyword answer MUST NOT be cached, or it freezes to TTL until the
+    provider recovers, and the skip is labeled ``vector_unavailable`` (NOT an
+    embedder mismatch). Fails before the fix (config-only gate saw no mismatch →
+    wrote the row)."""
+    settings = _settings(embedding_provider="stub")
+    await _seed_stamped_index(session, provider="stub", model="stub", dim=1536)
+    retriever = _FakeRetriever(_evidence(count=2), vector_degrade=VectorDegrade.unavailable)
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    question = "How do I configure Claude Code permissions?"
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        first = await orchestrator.ask(
+            question=question, request_id="req_transient_1", session_id=uuid.uuid4()
+        )
+    # Answer still served, but nothing cached.
+    assert first["no_answer"] is False
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert cache_rows == [], "a transiently-degraded answer must not be cached (#70)"
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is False
+    # Labeled as a transient outage, NOT an embedder mismatch (no Tier-3 predicted).
+    assert "answer_cache_write_skipped_vector_unavailable" in caplog.text
+    assert "answer_cache_write_skipped_embedder_mismatch" not in caplog.text
+
+    # A second identical ask re-runs retrieval (cache miss), so once the provider
+    # recovers the fresh answer is served — the weak answer was never frozen.
+    second = await orchestrator.ask(
+        question=question, request_id="req_transient_2", session_id=uuid.uuid4()
+    )
+    assert second["cache_hit"] is False
+    assert len(retriever.calls) == 2, "retrieval must re-run; nothing was cached"
+
+
+async def test_exact_lookup_short_circuit_caches_under_mismatch(session: Any) -> None:
+    """#72: an ``exact_lookup`` question whose exact arm hits short-circuits the
+    REAL hybrid retriever BEFORE the vector arm is consulted, so the answer is
+    embedder-independent and NOT degraded — it must be cached even though the
+    active index carries a mismatched (Tier-3) stamp. Fails before the fix
+    (config-only gate predicted a degrade and skipped the write)."""
+    from app.models import TermType
+
+    seeded = await seed_catalog(session)
+    # Add an exact term that also carries a supported-domain keyword so the whole
+    # normalized question ("claude api --model") both classifies as claude_api +
+    # exact_lookup AND matches the term verbatim (ExactRetriever compares the full
+    # normalized question to term_text).
+    claude_chunk = next(c for c in seeded["chunks"] if c.product_area == "claude_api")  # type: ignore[attr-defined]
+    session.add(
+        ExactTerm(
+            term_id=uuid.uuid4(),
+            term_text="claude api --model",
+            term_type=TermType.flag,
+            product_area="claude_api",
+            document_id=claude_chunk.document_id,
+            chunk_id=claude_chunk.chunk_id,
+        )
+    )
+    # Config on stub, index stamped gemini → a genuine Tier-3 mismatch is present.
+    await _restamp_active_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
+    await session.commit()
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    question = "claude api --model"
+
+    first = await orchestrator.ask(
+        question=question, request_id="req_exact_1", session_id=uuid.uuid4()
+    )
+    assert first["cache_hit"] is False
+    assert first["intent"] == Intent.exact_lookup.value
+    assert first["retrieval_strategy"] == RetrievalStrategy.exact_lookup.value
+    # The embedder-independent exact-lookup answer IS cached despite the mismatch.
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert len(cache_rows) == 1, "an exact-lookup short-circuit answer must be cached (#72)"
+
+    second = await orchestrator.ask(
+        question=question, request_id="req_exact_2", session_id=uuid.uuid4()
+    )
+    assert second["cache_hit"] is True, "the second identical ask must hit the cache"
+
+
+async def test_ask_skips_cache_write_on_real_mismatch_non_exact(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#65 guard via the REAL hybrid (not a hand-set flag): a genuine Tier-3
+    mismatch on a NON-short-circuit (faq) question degrades the vector arm at
+    runtime; the retriever reports ``VectorDegrade.mismatch``, so the answer (served
+    from keyword) MUST NOT be cached and the skip is labeled as an embedder
+    mismatch. Proves the runtime reason is computed for real, not just honored."""
+    await seed_catalog(session)
+    await _restamp_active_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
+    await session.commit()
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    question = "the rate limit for the claude api"
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        response = await orchestrator.ask(
+            question=question, request_id="req_real_mismatch", session_id=uuid.uuid4()
+        )
+
+    assert response["no_answer"] is False, "keyword arm still answers under the mismatch"
+    assert response["intent"] == Intent.faq.value
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert cache_rows == [], "a genuinely degraded (mismatch) answer must not be cached (#65)"
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is False
+    # Labeled a mismatch, NOT a transient outage (symmetric with the #70 tests).
+    assert "answer_cache_write_skipped_embedder_mismatch" in caplog.text
+    assert "answer_cache_write_skipped_vector_unavailable" not in caplog.text
+
+
+async def test_ask_skips_cache_write_on_real_transient_outage(
+    session: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#70 via the REAL hybrid end-to-end: with a matching (NULL) stamp the vector
+    arm is ENABLED, so it is actually consulted — and a transient
+    ``EmbedderUnavailable`` makes it degrade at runtime. The retriever reports
+    ``VectorDegrade.unavailable``; the answer (served from keyword) MUST NOT be
+    cached and the skip is labeled ``vector_unavailable`` (NOT a mismatch). Proves
+    the transient reason is computed + labeled for real, not just honored."""
+    from app.embeddings import EmbedderUnavailable
+    from app.retrieval.vector import VectorRetriever
+
+    async def _raise(self: Any, question: str, *, product_area: str | None = None, limit: int = 10):
+        raise EmbedderUnavailable("Gemini embeddings returned 503")
+
+    # Catalog seeds a NULL-stamp active index ⇒ the arm is enabled (unknown
+    # provenance ⇒ allow), so it is consulted and the transient outage bites.
+    await seed_catalog(session)
+    await session.commit()
+    monkeypatch.setattr(VectorRetriever, "retrieve", _raise)
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    question = "the rate limit for the claude api"
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        response = await orchestrator.ask(
+            question=question, request_id="req_real_transient", session_id=uuid.uuid4()
+        )
+
+    assert response["no_answer"] is False, "keyword arm still answers under the outage"
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert cache_rows == [], "a transiently-degraded answer must not be cached (#70)"
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is False
+    assert "answer_cache_write_skipped_vector_unavailable" in caplog.text
+    assert "answer_cache_write_skipped_embedder_mismatch" not in caplog.text

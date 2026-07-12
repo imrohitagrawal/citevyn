@@ -32,7 +32,7 @@ from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.keyword import KeywordRetriever
 from app.retrieval.rerank import Reranker
-from app.retrieval.types import EvidenceHit, RetrievedChunk
+from app.retrieval.types import EvidenceHit, RetrievalResult, RetrievedChunk, VectorDegrade
 from app.retrieval.vector import Embedder, VectorRetriever
 from app.routing.intent import Intent
 
@@ -67,7 +67,7 @@ class HybridRetriever:
         intent: Intent,
         limit: int = 20,
         top_k: int = 6,
-    ) -> list[EvidenceHit]:
+    ) -> RetrievalResult:
         exact = ExactRetriever(self._session, active_index_version=self._active_index_version)
         keyword = KeywordRetriever(self._session, active_index_version=self._active_index_version)
         vector = VectorRetriever(
@@ -83,7 +83,11 @@ class HybridRetriever:
                     _to_evidence(h, RetrievalType.exact, idx + 1)
                     for idx, h in enumerate(exact_hits)
                 ]
-                return evidence[:top_k]
+                # The vector arm was never consulted on this short-circuit, so the
+                # answer is embedder-independent and NOT degraded even under a
+                # Tier-3 mismatch — report ``VectorDegrade.none`` so the
+                # orchestrator caches it (#72).
+                return RetrievalResult(hits=evidence[:top_k], vector_degrade=VectorDegrade.none)
             # PRD §3.2 answer flow step 3: "Fall back to keyword search if
             # needed." A natural-language exact-lookup question ("What does the
             # --model flag do?") often doesn't resolve to an exact-term chunk
@@ -94,7 +98,7 @@ class HybridRetriever:
             # it in the gather below would be guaranteed-empty dead work — query
             # only keyword+vector and merge against the known-empty exact list.
             vector_enabled = await self._vector_arm_enabled()
-            keyword_hits, vector_hits = await asyncio.gather(
+            keyword_hits, (vector_hits, vector_degrade) = await asyncio.gather(
                 keyword.retrieve(question, product_area=product_area, limit=limit),
                 self._safe_vector_retrieve(
                     vector, question, product_area=product_area, limit=limit, enabled=vector_enabled
@@ -103,7 +107,7 @@ class HybridRetriever:
             exact_hits = []
         else:
             vector_enabled = await self._vector_arm_enabled()
-            exact_hits, keyword_hits, vector_hits = await asyncio.gather(
+            exact_hits, keyword_hits, (vector_hits, vector_degrade) = await asyncio.gather(
                 exact.retrieve(question, product_area=product_area, limit=limit),
                 keyword.retrieve(question, product_area=product_area, limit=limit),
                 self._safe_vector_retrieve(
@@ -118,7 +122,7 @@ class HybridRetriever:
         reranked = await self._reranker.rerank(question, merged, top_k=top_k)
         for idx, hit in enumerate(reranked, start=1):
             hit.rank = idx
-        return reranked
+        return RetrievalResult(hits=reranked, vector_degrade=vector_degrade)
 
     async def _safe_vector_retrieve(
         self,
@@ -128,8 +132,15 @@ class HybridRetriever:
         product_area: str,
         limit: int,
         enabled: bool = True,
-    ) -> list[RetrievedChunk]:
+    ) -> tuple[list[RetrievedChunk], VectorDegrade]:
         """Run the vector arm, degrading to ``[]`` when it cannot be served safely.
+
+        Returns ``(chunks, degrade)`` where ``degrade`` names *why* the arm fell
+        back to no hits, or :attr:`VectorDegrade.none` when it actually ran (even
+        to a legitimately empty result). The orchestrator gates the answer-cache
+        write on that runtime reason and labels its skip-WARN from it (#70/#72), so
+        the two "degraded to []" cases must be distinguishable from a genuine empty
+        vector result — and from each other.
 
         The vector arm is the only retriever that depends on an external embedding
         provider. Two conditions degrade it to no hits (the request stays
@@ -139,24 +150,26 @@ class HybridRetriever:
 
         * ``enabled is False`` — the active index was built by a *different*
           embedder than the one configured to embed queries (Tier 3 mismatch,
-          #57). The caller (:meth:`_vector_arm_enabled`) has already logged the
-          mismatch; here we simply skip the arm without embedding or querying.
+          #57 ⇒ :attr:`VectorDegrade.mismatch`). The caller
+          (:meth:`_vector_arm_enabled`) has already logged the mismatch; here we
+          simply skip the arm without embedding or querying.
         * :class:`EmbedderUnavailable` — the embedding provider is transiently
-          down (Tier 1).
+          down (Tier 1 ⇒ :attr:`VectorDegrade.unavailable`).
 
         Genuine database errors from the pgvector query are NOT caught here — they
         propagate as real failures.
         """
         if not enabled:
-            return []
+            return [], VectorDegrade.mismatch
         try:
-            return await vector.retrieve(question, product_area=product_area, limit=limit)
+            hits = await vector.retrieve(question, product_area=product_area, limit=limit)
+            return hits, VectorDegrade.none
         except EmbedderUnavailable:
             _logger.warning(
                 "vector_retrieval_degraded_embedder_unavailable",
                 extra={"request_id": get_current_request_id()},
             )
-            return []
+            return [], VectorDegrade.unavailable
 
     async def _vector_arm_enabled(self) -> bool:
         """Whether the vector arm may run against the active index (Tier 3, #57).
