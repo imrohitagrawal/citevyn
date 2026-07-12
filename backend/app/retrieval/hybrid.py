@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.middleware import get_current_request_id
-from app.embeddings import EmbedderIdentity, EmbedderUnavailable
+from app.embeddings import EmbedderIdentity, EmbedderUnavailable, is_index_embedder_mismatch
 from app.models import IndexStatus, IndexVersion
 from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
@@ -180,6 +180,14 @@ class HybridRetriever:
         read-time correctness net, not failover (that is the deferred #59): the
         request still answers from exact + keyword.
 
+        The allow/degrade comparison is delegated to the pure
+        :func:`app.embeddings.is_index_embedder_mismatch` predicate so there is a
+        single source of truth (#71): the orchestrator uses the same predicate to
+        predict this degrade before retrieval runs and skip caching a degraded
+        answer (#65). The ``embedder_identity is None`` enforcement-off
+        short-circuit stays here — the predicate takes a non-optional configured
+        identity and reasons only about the stamp.
+
         Deliberately awaited by :meth:`retrieve` *before* the ``asyncio.gather``
         rather than from inside the vector arm: keeping this one small indexed
         lookup (the single active-index row) off the shared ``AsyncSession`` while
@@ -189,10 +197,12 @@ class HybridRetriever:
         if self._embedder_identity is None:
             return True
         stamp = await self._active_index_stamp()
-        if stamp is None or stamp.provider is None:
+        if not is_index_embedder_mismatch(self._embedder_identity, stamp):
             return True
-        if stamp == self._embedder_identity:
-            return True
+        # A True mismatch guarantees a provider-bearing stamp (the predicate
+        # returns False for a ``None`` / provider-less stamp), so the identifiers
+        # logged below are always populated.
+        assert stamp is not None
         _logger.warning(
             "vector_retrieval_index_embedder_mismatch",
             extra={

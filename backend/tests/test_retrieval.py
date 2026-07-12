@@ -348,13 +348,17 @@ async def test_vector_arm_allowed_on_null_stamp(seeded_session) -> None:
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
-async def test_predictor_agrees_with_gate_across_stamps(seeded_session) -> None:
-    """Parity contract (#65): the orchestrator's ``is_index_embedder_mismatch``
-    predictor must agree with the canonical read-time gate
-    ``HybridRetriever._vector_arm_enabled`` (#57) for EVERY stamp. If they drift,
-    the orchestrator would skip a cache write the retriever didn't degrade (or
-    cache one it did), silently regressing #65. This gives the "must stay in
-    agreement" docstring teeth without coupling the two implementations."""
+async def test_gate_delegates_to_shared_predicate(seeded_session, monkeypatch) -> None:
+    """Single-source-of-truth guard (#71): the canonical read-time gate
+    ``HybridRetriever._vector_arm_enabled`` (#57) must DELEGATE its allow/degrade
+    comparison to the shared ``is_index_embedder_mismatch`` predicate (#65), not
+    carry an inline copy. Post-#71, agreement with the orchestrator's predictor is
+    guaranteed by construction; this asserts the delegation directly so a future
+    edit that reintroduces an inline copy — and could drift from the predictor —
+    is caught. We spy on the predicate: for every stamp the gate calls it exactly
+    once with ``(configured_identity, resolved_stamp)`` and returns ``enabled ==
+    (not mismatch)`` (with the enforcement-off short-circuit still gate-side)."""
+    import app.retrieval.hybrid as hybrid_mod
     from app.embeddings import is_index_embedder_mismatch
 
     stamps = [
@@ -368,10 +372,21 @@ async def test_predictor_agrees_with_gate_across_stamps(seeded_session) -> None:
         await _stamp_active_index(seeded_session, **stamp_cfg)
         h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
         resolved = await h._active_index_stamp()
+
+        calls: list[tuple] = []
+
+        def _spy(configured, index_stamp, *, _calls=calls):
+            _calls.append((configured, index_stamp))
+            return is_index_embedder_mismatch(configured, index_stamp)
+
+        monkeypatch.setattr(hybrid_mod, "is_index_embedder_mismatch", _spy)
         with _capture_retrieval_logs():
             enabled = await h._vector_arm_enabled()
-        predicted_degrade = is_index_embedder_mismatch(_GEMINI, resolved)
-        assert predicted_degrade == (not enabled), f"gate/predictor disagree for {stamp_cfg}"
+
+        # The gate routed its decision through the shared predicate, exactly once,
+        # with the configured identity and the resolved active-index stamp.
+        assert calls == [(_GEMINI, resolved)], f"gate did not delegate for {stamp_cfg}"
+        assert enabled == (not is_index_embedder_mismatch(_GEMINI, resolved)), stamp_cfg
 
 
 async def test_vector_arm_enforcement_off_without_identity(seeded_session) -> None:
