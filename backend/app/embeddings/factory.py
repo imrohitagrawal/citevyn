@@ -44,6 +44,52 @@ class EmbedderIdentity(NamedTuple):
     model: str | None
     dim: int | None
 
+    def cache_key_component(self) -> str:
+        """A stable string encoding of the identity for the answer-cache key (#65).
+
+        The answer cache keys on the *configured* query embedder so a
+        config-only embedder swap (which leaves ``source_version_hash``
+        unchanged) invalidates affected entries instead of serving an answer
+        built in a different vector space. Only the ``provider/model/dim``
+        triple is encoded — never an API key or any secret — so the key
+        pre-image carries no sensitive material.
+
+        ``None`` fields (a legacy / unstamped identity) collapse to empty
+        strings, so an all-``None`` identity yields the stable, non-empty
+        ``"||"`` rather than a value that could blank or destabilize the key.
+        """
+        return "|".join(
+            (
+                self.provider or "",
+                self.model or "",
+                "" if self.dim is None else str(self.dim),
+            )
+        )
+
+
+def is_index_embedder_mismatch(
+    configured: EmbedderIdentity, index_stamp: EmbedderIdentity | None
+) -> bool:
+    """Whether the configured query embedder disagrees with the active index stamp.
+
+    Mirrors the allow-semantics of the read-time Tier-3 gate
+    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`, the
+    canonical enforcement point, #57) so the orchestrator can predict the vector
+    arm degrade *before* retrieval runs and skip caching a degraded answer (#65)
+    without changing the retriever's return shape. The two must stay in agreement
+    — both resolve the same active-index stamp and compare it to
+    ``configured_embedder_identity``.
+
+    Returns ``False`` (no mismatch — the vector arm runs) when there is no active
+    index stamp, when the stamp carries no provider (legacy / stub-seeded,
+    "unknown provenance ⇒ allow"), or when the stamp equals ``configured``.
+    Returns ``True`` only when a provider-bearing stamp differs from the
+    configured identity.
+    """
+    if index_stamp is None or index_stamp.provider is None:
+        return False
+    return index_stamp != configured
+
 
 def configured_embedder_identity(settings: Settings) -> EmbedderIdentity:
     """The identity of the embedder that :func:`get_embedder` builds from ``settings``.
@@ -192,6 +238,7 @@ __all__ = [
     "build_embedder",
     "configured_embedder_identity",
     "get_embedder",
+    "is_index_embedder_mismatch",
     "reset_embedder",
     "shutdown_embedder",
     "validate_embedder_provider",

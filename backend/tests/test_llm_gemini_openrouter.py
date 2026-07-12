@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from app.core.config import Settings, get_settings
+from app.llm._http import post_json
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import build_llm_client
 from app.llm.fallback import FallbackLLMClient
@@ -275,6 +276,9 @@ class _RecordingClient:
         assert self._result is not None
         return self._result
 
+    async def aclose(self) -> None:
+        return None
+
 
 def _result(provider: str) -> LLMResult:
     return LLMResult(text="ok [1]", input_tokens=1, output_tokens=1, model="m", provider=provider)
@@ -417,22 +421,10 @@ class _AcloseRecorder:
         self.closed = True
 
 
-class _NoAclose:
-    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
-        return _result("stub")
-
-
 async def test_fallback_aclose_closes_both_children() -> None:
     primary, secondary = _AcloseRecorder(), _AcloseRecorder()
     await FallbackLLMClient(primary=primary, secondary=secondary).aclose()
     assert primary.closed and secondary.closed
-
-
-async def test_fallback_aclose_tolerates_child_without_aclose() -> None:
-    primary = _AcloseRecorder()
-    secondary = _NoAclose()  # no aclose attribute
-    await FallbackLLMClient(primary=primary, secondary=secondary).aclose()  # must not raise
-    assert primary.closed
 
 
 # ---------------------------------------------------------------------------
@@ -500,3 +492,102 @@ async def test_openrouter_timeout_raises_unavailable() -> None:
     with pytest.raises(LLMUnavailable):
         await client.complete(system="s", user="u", max_tokens=64, temperature=0.0)
     await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Shared transport helper (app.llm._http.post_json) — the surface all three
+# clients now delegate to. The per-client tests above exercise it through the
+# real wire shapes; these hit it directly for the taxonomy edges.
+# ---------------------------------------------------------------------------
+
+
+def _http_client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://provider.test",
+    )
+
+
+async def _post(handler, *, timeout_seconds: float = 5.0):
+    client = _http_client(handler)
+    try:
+        return await post_json(
+            client=client,
+            url="https://provider.test/v1/call",
+            payload={"q": "x"},
+            headers={"authorization": "Bearer secret-key"},
+            timeout_seconds=timeout_seconds,
+            provider="Provider",
+            error_event="provider_error_response",
+        )
+    finally:
+        await client.aclose()
+
+
+async def test_post_json_happy_path_returns_dict() -> None:
+    data = await _post(lambda _r: httpx.Response(200, json={"ok": True, "n": 1}))
+    assert data == {"ok": True, "n": 1}
+
+
+async def test_post_json_timeout_raises_unavailable() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("boom")
+
+    with pytest.raises(LLMUnavailable) as info:
+        await _post(handler, timeout_seconds=3.0)
+    assert str(info.value) == "Provider request timed out after 3.0s"
+    assert info.value.cause is not None
+
+
+async def test_post_json_transport_error_raises_unavailable() -> None:
+    def handler(_r: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(LLMUnavailable) as info:
+        await _post(handler)
+    assert str(info.value) == "Provider transport error: ConnectError"
+    assert info.value.cause is not None
+
+
+async def test_post_json_status_error_logs_body_server_side_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #50 invariant, at the helper: the upstream body is logged server-side but
+    # never embedded in the LLMUnavailable message (which reaches the client via
+    # error.details.reason). The request headers (API key) are never logged.
+    secret_body = '{"error":"upstream secret detail us-east-1"}'
+    with (
+        caplog.at_level("WARNING", logger="citevyn.llm"),
+        pytest.raises(LLMUnavailable) as info,
+    ):
+        await _post(lambda _r: httpx.Response(503, text=secret_body))
+
+    assert str(info.value) == "Provider returned 503"
+    assert secret_body not in str(info.value)
+    records = [r for r in caplog.records if r.msg == "provider_error_response"]
+    assert records, "expected the per-provider error event to be logged"
+    assert any(secret_body in str(r.__dict__.get("body", "")) for r in records)
+    # The API key must never reach the log record.
+    assert not any("secret-key" in str(r.__dict__) for r in records)
+
+
+async def test_post_json_non_json_body_raises_unavailable() -> None:
+    with pytest.raises(LLMUnavailable) as info:
+        await _post(lambda _r: httpx.Response(200, content=b"not json"))
+    assert str(info.value) == "Provider returned non-JSON body"
+    assert info.value.cause is not None
+
+
+# ---------------------------------------------------------------------------
+# Protocol conformance: aclose is now a required LLMClient member, so every
+# implementer must still satisfy isinstance(_, LLMClient) at runtime.
+# ---------------------------------------------------------------------------
+
+
+def test_all_clients_satisfy_llmclient_protocol() -> None:
+    gemini = _gemini_client(lambda _r: httpx.Response(200, json={}))
+    openrouter = _openrouter_client(lambda _r: httpx.Response(200, json={}))
+    assert isinstance(StubLLMClient(), LLMClient)
+    assert isinstance(gemini, LLMClient)
+    assert isinstance(openrouter, LLMClient)
+    assert isinstance(FallbackLLMClient(primary=gemini, secondary=openrouter), LLMClient)
