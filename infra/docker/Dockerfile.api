@@ -109,7 +109,7 @@ COPY --from=builder --chown=appuser:appuser /build/backend/README.md /app/README
 COPY --from=builder --chown=appuser:appuser /build/db /db
 
 # No curl: use python's urllib for the healthcheck (the
-# python:3.12-slim-bookworm base ships urllib + ssl).
+# python:3.14-slim-bookworm base ships urllib + ssl).
 USER appuser
 
 EXPOSE 8000

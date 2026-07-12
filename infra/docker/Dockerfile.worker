@@ -73,9 +73,11 @@ USER appuser
 # No HEALTHCHECK (the worker writes to ingestion_jobs; a missing
 # process is detected by the orchestrator, not by TCP probe).
 #
-# SIGTERM behaviour: the worker CLI installs a signal handler that
-# drains the in-flight job before exiting, so docker stop's
-# default 10-second grace period is enough for clean shutdown.
+# Shutdown: the worker CLI (app/worker/cli.py) is a one-shot batch —
+# it ingests the configured sources and exits on its own. It installs
+# no signal handler and runs no resident poll loop, so docker stop
+# terminates it within the default grace period. (A resident poller /
+# graceful-drain model is out of MVP scope; tracked as a follow-up.)
 #
 # Invoked via ``python -m app.worker.cli`` rather than the
 # ``citevyn-worker`` console script: uv does not install this
