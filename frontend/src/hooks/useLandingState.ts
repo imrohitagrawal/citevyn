@@ -55,6 +55,9 @@ interface AppState {
   demo: DemoState;
   messages: ChatMessage[];
   screen: "landing" | "chat";
+  /** True between submitting a question and the first bot chunk landing.
+      Drives the "thinking…" loader in ChatView. */
+  pending: boolean;
 }
 
 type Action =
@@ -69,7 +72,8 @@ type Action =
   | { type: "ADD_MESSAGE"; message: ChatMessage }
   | { type: "UPDATE_MESSAGE"; id: number; text: string }
   | { type: "FINISH_MESSAGE"; id: number; sources: Source[]; refusal?: boolean }
-  | { type: "SET_SCREEN"; screen: "landing" | "chat" };
+  | { type: "SET_SCREEN"; screen: "landing" | "chat" }
+  | { type: "SET_PENDING"; value: boolean };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
 
@@ -95,6 +99,7 @@ const initialState: AppState = {
   },
   messages: [],
   screen: "landing",
+  pending: false,
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -138,6 +143,8 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case "SET_SCREEN":
       return { ...state, screen: action.screen };
+    case "SET_PENDING":
+      return { ...state, pending: action.value };
     default:
       return state;
   }
@@ -175,7 +182,7 @@ function streamText(
   full: string,
   onChunk: (chunk: string) => void,
   onDone?: () => void,
-  delay = 26,
+  delay = 60,
 ): Timer {
   // Split on whitespace (capturing group preserves whitespace tokens)
   const words = full.split(/(\s+)/);
@@ -417,6 +424,11 @@ export function useLandingState() {
   const sendLive = useCallback(
     async (text: string) => {
       const norm = text.trim().toLowerCase();
+      // Flip the loading indicator while we wait for the answer. We clear it
+      // inside ``streamBot``'s first onChunk (see sendLive/setPending wiring)
+      // — but to be safe against a backend that fails before the first chunk,
+      // also clear it in the catch.
+      dispatch({ type: "SET_PENDING", value: true });
       try {
         const sessionId = await ensureSession();
         const resp = await askQuestion(sessionId, text);
@@ -436,6 +448,7 @@ export function useLandingState() {
         // Remember the failure so the dedup guard lets the user retry it.
         failedQuestionsRef.current.add(norm);
         handleApiError(err);
+        dispatch({ type: "SET_PENDING", value: false });
       }
     },
     [ensureSession, handleApiError],
@@ -519,7 +532,12 @@ export function useLandingState() {
 
       timers.current.chatTimer = streamText(
         text,
-        (chunk) => dispatch({ type: "UPDATE_MESSAGE", id, text: chunk }),
+        (chunk) => {
+          // First chunk arrived → drop the loading indicator so the typing
+          // cursor takes over visually.
+          dispatch({ type: "SET_PENDING", value: false });
+          dispatch({ type: "UPDATE_MESSAGE", id, text: chunk });
+        },
         () => {
           dispatch({
             type: "FINISH_MESSAGE",
@@ -535,8 +553,14 @@ export function useLandingState() {
 
   const flashExisting = useCallback(
     (index: number) => {
+      // The duplicate is a user message at `index`; the bot answer that
+      // follows it sits at `index + 1`. We highlight BOTH so the user can
+      // see both their original question AND the answer it produced, and
+      // scroll the user bubble into view (the question is the anchor the
+      // user typed).
       // Reset highlight first to restart animation
       dispatch({ type: "SET_HIGHLIGHT", index: -1 });
+      const answerIndex = index + 1;
       setTimeout(() => {
         dispatch({ type: "SET_HIGHLIGHT", index });
         setTimeout(() => {
@@ -550,12 +574,18 @@ export function useLandingState() {
               12;
             list.scrollTo({ top, behavior: "smooth" });
           }
+          // Briefly extend the highlight to the answer too so the eye sees
+          // both bubbles pulse together.
+          setTimeout(
+            () => dispatch({ type: "SET_HIGHLIGHT", index: answerIndex }),
+            80,
+          );
         }, 40);
       }, 10);
 
       timers.current.highlightTimeout = timeout(
         () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
-        2100,
+        2400,
       );
     },
     [],

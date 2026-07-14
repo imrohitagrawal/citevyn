@@ -2086,6 +2086,63 @@ footer {
    19. REDUCED MOTION
    ========================================================================= */
 
+/* Loading indicator — three pulsing dots + a label while the backend
+   thinks. Sits inside its own bot-style bubble so it lines up with the
+   surrounding bot messages. */
+.pending-msg {
+  opacity: 1 !important;
+}
+
+.pending-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 16px;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--bg);
+  color: var(--faint);
+  border: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.pending-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  display: inline-block;
+  animation: cv-pending 1.05s ease-in-out infinite;
+}
+.pending-dot:nth-child(2) { animation-delay: 0.16s; }
+.pending-dot:nth-child(3) { animation-delay: 0.32s; }
+
+.pending-label {
+  margin-left: 4px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+@keyframes cv-pending {
+  0%, 60%, 100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* Bot-bubble highlight (the duplicate-question jump-to-existing feature
+   pulses the bot bubble next to the user question). User bubbles already
+   get the pulse via the ``userStyle`` object; bot bubbles need a class. */
+.message.bot.highlighted {
+  animation: cv-pulse .55s ease-in-out 3;
+  border-radius: 16px;
+  box-shadow: 0 0 0 3px var(--hl);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ticker-track {
     animation: none !important;
