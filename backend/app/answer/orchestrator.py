@@ -604,15 +604,23 @@ class Orchestrator:
         Not a refusal and not a no-answer: ``unsupported`` and ``no_answer``
         are both ``False`` and the intent is :attr:`Intent.greeting`. No
         retrieval ran, so there are no citations and the retrieval strategy
-        is ``none``. The classified ``domain`` is preserved for the trace
-        (a lone "hi" carries ``unsupported``; "hi CiteVyn" carries
-        ``citevyn``) — the greeting flags, not the domain, are the signal.
+        is ``none``. A lone greeting ("hi", "good morning") classifies as
+        ``unsupported`` domain; that would break the
+        ``domain == unsupported`` ⟺ ``unsupported == true`` invariant on a
+        non-refusal reply, so it is stamped with the neutral
+        :attr:`Domain.general` instead (#89). A ``citevyn``-addressed
+        greeting ("hi CiteVyn") already classifies as ``citevyn`` and keeps
+        it — the greeting flags, not the domain, are the signal. The neutral
+        domain is used for the persisted row, the audit trace, and the wire
+        response alike, so the stored value replayed by ``GET /messages``
+        agrees with the response.
         """
+        response_domain = Domain.general if is_unsupported(domain) else domain
         message_id = await self._persist_messages(
             session_id=session_id,
             question=question,
             normalized=normalized,
-            domain=domain,
+            domain=response_domain,
             intent=Intent.greeting,
             answer=GREETING_RESPONSE,
             confidence=Confidence.none,
@@ -623,7 +631,7 @@ class Orchestrator:
             request_id=request_id,
             session_id=session_id,
             message_id=message_id,
-            domain=domain,
+            domain=response_domain,
             intent=Intent.greeting,
             outcome="greeting",
             metadata={
@@ -636,7 +644,7 @@ class Orchestrator:
             message_id=str(message_id),
             answer=GREETING_RESPONSE,
             citations=[],
-            domain=domain.value,
+            domain=response_domain.value,
             intent=Intent.greeting.value,
             confidence=Confidence.none.value,
             cache_hit=False,

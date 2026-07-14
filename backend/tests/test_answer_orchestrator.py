@@ -1110,6 +1110,15 @@ async def test_greeting_returns_friendly_reply_without_retrieval_or_llm(
     assert response["cache_hit"] is False
     assert response["retrieval_strategy"] == RetrievalStrategy.none.value
     assert response["citations"] == []
+    # A bare greeting classifies as the unsupported domain, but a greeting is
+    # not a refusal — echoing "unsupported" here would break the
+    # domain == "unsupported" ⟺ unsupported == true invariant (#89). The
+    # response carries the neutral "general" domain instead, and the persisted
+    # message row (replayed verbatim by GET /messages) agrees.
+    assert response["domain"] == "general"
+    assert response["domain"] != "unsupported"
+    stored = list((await session.execute(select(Message))).scalars().all())
+    assert {m.domain for m in stored} == {"general"}
 
     # No retrieval, no LLM, no cache.
     assert retriever.calls == []

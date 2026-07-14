@@ -103,6 +103,7 @@ export type Domain =
   | "codex"
   | "gemini_api"
   | "citevyn"
+  | "general"
   | "unsupported";
 
 /**

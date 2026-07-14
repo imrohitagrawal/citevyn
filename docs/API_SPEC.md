@@ -162,13 +162,18 @@ reply with `intent: "greeting"`, `unsupported: false`, and `no_answer: false`.
 A real question that merely opens with a greeting ("hello, how do I get the
 Gemini API key?") is not short-circuited and flows through the normal pipeline.
 
+A greeting never carries `domain: "unsupported"` — that would break the
+`domain == "unsupported"` ⟺ `unsupported == true` invariant. A bare greeting
+carries the neutral `domain: "general"`; a `CiteVyn`-addressed greeting
+("hi CiteVyn") keeps `domain: "citevyn"`.
+
 ```json
 {
   "request_id": "req_005",
   "message_id": "msg_003",
   "answer": "Hi! I'm CiteVyn. I answer questions about Claude API, Claude Code, Codex, and Gemini API using cited official documentation. What would you like to know?",
   "citations": [],
-  "domain": "unsupported",
+  "domain": "general",
   "intent": "greeting",
   "confidence": "none",
   "cache_hit": false,

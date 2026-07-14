@@ -104,3 +104,17 @@ def test_allowed_domains_contains_all_supported() -> None:
 def test_is_unsupported_helper() -> None:
     assert is_unsupported(Domain.unsupported) is True
     assert is_unsupported(Domain.claude_api) is False
+
+
+def test_general_is_response_only_neutral_domain() -> None:
+    """``Domain.general`` (#89) is stamped on greeting replies by the
+    orchestrator; the guardrail never produces it and it is not a refusal.
+    It must stay out of ``ALLOWED_DOMAINS`` (not a retrievable product area)
+    and out of ``classify_domain``'s outputs so the classify/refuse logic is
+    untouched."""
+    assert is_unsupported(Domain.general) is False
+    assert Domain.general not in ALLOWED_DOMAINS
+    # The classifier maps a bare greeting to ``unsupported`` (not ``general``);
+    # the neutral relabel happens later, in the orchestrator's greeting path.
+    for question in ("hello", "hi there", "good morning", "", "Who won the World Cup?"):
+        assert classify_domain(question) is not Domain.general
