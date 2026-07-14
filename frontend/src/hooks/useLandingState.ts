@@ -55,6 +55,9 @@ interface AppState {
   demo: DemoState;
   messages: ChatMessage[];
   screen: "landing" | "chat";
+  /** True between submitting a question and the first bot chunk landing.
+      Drives the "thinking…" loader in ChatView. */
+  pending: boolean;
 }
 
 type Action =
@@ -69,7 +72,8 @@ type Action =
   | { type: "ADD_MESSAGE"; message: ChatMessage }
   | { type: "UPDATE_MESSAGE"; id: number; text: string }
   | { type: "FINISH_MESSAGE"; id: number; sources: Source[]; refusal?: boolean }
-  | { type: "SET_SCREEN"; screen: "landing" | "chat" };
+  | { type: "SET_SCREEN"; screen: "landing" | "chat" }
+  | { type: "SET_PENDING"; value: boolean };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
 
@@ -95,6 +99,7 @@ const initialState: AppState = {
   },
   messages: [],
   screen: "landing",
+  pending: false,
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -138,6 +143,8 @@ function reducer(state: AppState, action: Action): AppState {
       };
     case "SET_SCREEN":
       return { ...state, screen: action.screen };
+    case "SET_PENDING":
+      return { ...state, pending: action.value };
     default:
       return state;
   }
@@ -167,30 +174,63 @@ function interval(fn: () => void, ms: number): Timer {
 }
 
 /**
- * Word-by-word streaming into `onChunk`; calls `onDone` once the full string
- * has been emitted. Returns a {@link Timer} that closes over its own
- * `clearInterval` so the caller can stop it without knowing it's an interval.
+ * Smooth character-by-character streaming into `onChunk`; calls `onDone` once
+ * the full string has been emitted. Returns a {@link Timer} that closes over
+ * its own `clearInterval` so the caller can stop it without knowing it's an
+ * interval.
+ *
+ * Implementation note: the previous word-by-word implementation burst whole
+ * whitespace-separated tokens into a single frame, so a 14-char "**Features**"
+ * marker, a 30-char paragraph, or a sequence of "  the  codex" whitespace
+ * tokens all rendered in one ~16ms paint, then paused for ``delay`` ms — the
+ * eye read this as a stuttery typewriter, not a smooth stream. Emitting a
+ * few characters per tick (sized by ``delay`` so the wall-clock character
+ * rate is steady) eliminates the burst-and-pause and keeps the rate even
+ * across the whole text. ``delay=24`` + ``charsPerTick=2`` yields ~83 chars/sec,
+ * which is the natural reading pace the eye accepts as "smooth".
  */
 function streamText(
   full: string,
   onChunk: (chunk: string) => void,
   onDone?: () => void,
-  delay = 26,
+  delay = 24,
 ): Timer {
-  // Split on whitespace (capturing group preserves whitespace tokens)
-  const words = full.split(/(\s+)/);
+  const charsPerTick = Math.max(1, Math.round(delay / 12));
   let i = 0;
+  let stopped = false;
   const id = setInterval(() => {
-    i++;
-    if (i >= words.length) {
+    // Defensive: an exception inside ``onChunk`` (e.g. a reducer invariant
+    // violation) is swallowed by the browser's setInterval host and
+    // bypasses our ``clearInterval`` below — the interval would keep
+    // running forever, the pending indicator never clears, and the bot
+    // bubble stays stuck with no text and no closing cursor. Wrap each
+    // callback in try/catch so the interval is always cleared and the
+    // failure is surfaced (console.error) instead of being silent.
+    if (stopped) return;
+    try {
+      i = Math.min(full.length, i + charsPerTick);
+      onChunk(full.slice(0, i));
+      if (i >= full.length) {
+        stopped = true;
+        clearInterval(id);
+        try {
+          onDone?.();
+        } catch (e) {
+          console.error("[streamText] onDone threw:", e);
+        }
+      }
+    } catch (e) {
+      console.error("[streamText] onChunk threw; stopping stream:", e);
+      stopped = true;
       clearInterval(id);
-      onChunk(full);
-      onDone?.();
-      return;
+      try {
+        onDone?.();
+      } catch (e2) {
+        console.error("[streamText] onDone threw after error:", e2);
+      }
     }
-    onChunk(words.slice(0, i).join(""));
   }, delay);
-  return { stop: () => clearInterval(id) };
+  return { stop: () => { stopped = true; clearInterval(id); } };
 }
 
 /** Smooth-scroll the section with `id` into view below the ~72px fixed header. */
@@ -208,7 +248,6 @@ function scrollToId(id: string) {
 interface TimerRefs {
   heroLoop: Timer | null;
   demoTimer: Timer | null;
-  chatTimer: Timer | null;
   placeholderTimer: Timer | null;
   heroPause: Timer | null;
   nudgeTimeout: Timer | null;
@@ -220,12 +259,18 @@ export function useLandingState() {
   const timers = useRef<TimerRefs>({
     heroLoop: null,
     demoTimer: null,
-    chatTimer: null,
     placeholderTimer: null,
     heroPause: null,
     nudgeTimeout: null,
     highlightTimeout: null,
   });
+
+  // Chat answers stream concurrently: two live questions asked back-to-back
+  // resolve close together and each drives its own bubble. A single timer
+  // slot would let the second stream cancel the first (leaving the first
+  // bubble empty with a stuck cursor), so every in-flight chat stream is held
+  // here and self-removed on completion. Cleared en masse on unmount.
+  const chatStreams = useRef<Set<Timer>>(new Set());
 
   const heroRef = useRef<HTMLInputElement>(null);
 
@@ -280,6 +325,8 @@ export function useLandingState() {
     return () => {
       // Clean up all timers — each knows how to stop itself.
       Object.values(timers.current).forEach((timer) => timer?.stop());
+      chatStreams.current.forEach((t) => t.stop());
+      chatStreams.current.clear();
       window.removeEventListener("keydown", onKeyDown);
     };
   }, []);
@@ -417,6 +464,11 @@ export function useLandingState() {
   const sendLive = useCallback(
     async (text: string) => {
       const norm = text.trim().toLowerCase();
+      // Flip the loading indicator while we wait for the answer. We clear it
+      // inside ``streamBot``'s first onChunk (see sendLive/setPending wiring)
+      // — but to be safe against a backend that fails before the first chunk,
+      // also clear it in the catch.
+      dispatch({ type: "SET_PENDING", value: true });
       try {
         const sessionId = await ensureSession();
         const resp = await askQuestion(sessionId, text);
@@ -436,6 +488,7 @@ export function useLandingState() {
         // Remember the failure so the dedup guard lets the user retry it.
         failedQuestionsRef.current.add(norm);
         handleApiError(err);
+        dispatch({ type: "SET_PENDING", value: false });
       }
     },
     [ensureSession, handleApiError],
@@ -517,9 +570,19 @@ export function useLandingState() {
         message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
       });
 
-      timers.current.chatTimer = streamText(
+      // Each stream targets its own bubble by stable id, so concurrent
+      // streams don't interfere and the previous one is NOT stopped — killing
+      // it would leave its bubble empty with a stuck cursor. Track the handle
+      // so unmount can stop any still-running stream; it self-removes on done.
+      let handle: Timer;
+      handle = streamText(
         text,
-        (chunk) => dispatch({ type: "UPDATE_MESSAGE", id, text: chunk }),
+        (chunk) => {
+          // First chunk arrived → drop the loading indicator so the typing
+          // cursor takes over visually.
+          dispatch({ type: "SET_PENDING", value: false });
+          dispatch({ type: "UPDATE_MESSAGE", id, text: chunk });
+        },
         () => {
           dispatch({
             type: "FINISH_MESSAGE",
@@ -527,35 +590,67 @@ export function useLandingState() {
             sources: extra.finalSources,
             refusal: extra.refusal,
           });
+          chatStreams.current.delete(handle);
         },
       );
+      chatStreams.current.add(handle);
     },
     [nextMessageId],
   );
 
   const flashExisting = useCallback(
     (index: number) => {
-      // Reset highlight first to restart animation
+      // The duplicate is a user question at `index`. That is the anchor the
+      // user wants re-confirmed, so:
+      //   1. Scroll the user question into view (top of the chat list, with
+      //      a small top inset for breathing room).
+      //   2. Pulse ONLY the user bubble — the user said "I asked this
+      //      before", they want to see THE QUESTION, not relive the
+      //      answer. The answer below it is visible automatically once we
+      //      scroll into view.
+      //
+      // The scroll math: the previous implementation used
+      // ``(el.getBoundingClientRect().top - list.getBoundingClientRect().top)
+      //   + list.scrollTop`` — that produces the element's top RELATIVE TO
+      // the list's *unscrolled* coordinate system, which is the correct
+      // ``scrollTop`` value to pin it at the list's visible top. But this
+      // returns a NEGATIVE number if the element is ABOVE the list's
+      // current viewport (i.e. the user has scrolled past it), which would
+      // push ``scrollTop`` negative and silently fail to scroll. Clamp to
+      // ``0`` so a question buried earlier in the chat rises to the top.
       dispatch({ type: "SET_HIGHLIGHT", index: -1 });
       setTimeout(() => {
         dispatch({ type: "SET_HIGHLIGHT", index });
-        setTimeout(() => {
+        // Run the scroll on the next frame so the element exists in the
+        // DOM (it always does, since it was rendered when the user first
+        // asked) and so any layout from the highlight class is settled.
+        // If the chat-list is missing (component unmounted) or has 0 height
+        // (mid-re-mount), fall back to ``scrollIntoView`` on the bubble
+        // itself — at minimum the user's browser will bring the bubble
+        // into view, even if we can't pin it to the top of our list.
+        requestAnimationFrame(() => {
           const el = document.getElementById(`cv-msg-${index}`);
+          if (!el) return;
           const list = document.getElementById("chat-list");
-          if (el && list) {
-            const top =
-              el.getBoundingClientRect().top -
-              list.getBoundingClientRect().top +
-              list.scrollTop -
-              12;
-            list.scrollTo({ top, behavior: "smooth" });
+          if (!list || list.clientHeight === 0) {
+            el.scrollIntoView({ block: "start", behavior: "smooth" });
+            return;
           }
-        }, 40);
+          const desiredTop =
+            el.getBoundingClientRect().top -
+            list.getBoundingClientRect().top +
+            list.scrollTop -
+            12;
+          list.scrollTo({
+            top: Math.max(0, desiredTop),
+            behavior: "smooth",
+          });
+        });
       }, 10);
 
       timers.current.highlightTimeout = timeout(
         () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
-        2100,
+        2000,
       );
     },
     [],
@@ -574,6 +669,12 @@ export function useLandingState() {
 
   const backToLanding = useCallback(() => {
     dispatch({ type: "SET_SCREEN", screen: "landing" });
+    // A stale pending=true from a still-in-flight sendLive would survive
+    // across the screen swap and re-appear as a phantom "Searching…"
+    // bubble the next time the user enters chat. Clear it here so the
+    // landing view (which doesn't render the bubble) doesn't leak state
+    // into the next chat session.
+    dispatch({ type: "SET_PENDING", value: false });
     window.scrollTo({ top: 0 });
   }, []);
 

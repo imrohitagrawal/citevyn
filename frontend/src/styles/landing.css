@@ -2086,6 +2086,63 @@ footer {
    19. REDUCED MOTION
    ========================================================================= */
 
+/* Loading indicator — three pulsing dots + a label while the backend
+   thinks. Sits inside its own bot-style bubble so it lines up with the
+   surrounding bot messages. No opacity override here: the bubble
+   starts visible. */
+.pending-msg {
+}
+
+.pending-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 16px;
+  border-radius: 16px 16px 16px 4px;
+  background: var(--bg);
+  color: var(--faint);
+  border: 1px solid var(--border-2);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.pending-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  display: inline-block;
+  animation: cv-pending 1.05s ease-in-out infinite;
+}
+.pending-dot:nth-child(2) { animation-delay: 0.16s; }
+.pending-dot:nth-child(3) { animation-delay: 0.32s; }
+
+.pending-label {
+  margin-left: 4px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+@keyframes cv-pending {
+  0%, 60%, 100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* No ``.message.bot.highlighted`` rule. The duplicate-question
+   "jump-to-existing" feature pulses the ORIGINAL USER bubble, not the
+   bot answer underneath it — see the comment at useLandingState.ts
+   flashExisting: the user said "I asked this before", so the
+   highlight targets the question they typed. User bubbles get the
+   pulse automatically via their inline ``userStyle`` (border +
+   box-shadow that turn on/off with the highlighted class), so no
+   dedicated selector is needed here. */
+
 @media (prefers-reduced-motion: reduce) {
   .ticker-track {
     animation: none !important;
@@ -2100,6 +2157,19 @@ footer {
   .cv-shake,
   .cv-fadeup {
     animation-duration: 0ms !important;
+  }
+
+  /* Reduced-motion users should not see three dots bouncing forever while
+     a question is in flight. We still want a visible pending state, so
+     we keep the bubble layout but freeze the pulse and let the dots sit
+     at full opacity instead of looping. */
+  .pending-dot {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .message.bot.highlighted {
+    animation: none !important;
   }
 }
 

@@ -24,6 +24,12 @@ interface ChatViewProps {
   onBackClick: () => void;
   /** When true the chat is wired to the real backend, not canned answers. */
   live?: boolean;
+  /** True while waiting for the backend's first chunk. Renders a "thinking…"
+      loader so the user knows the request is in flight. */
+  pending?: boolean;
+  /** Index of the message bubble currently highlighted (e.g. by the
+      duplicate-question "jump-to-existing" feature). */
+  highlightedIndex?: number;
 }
 
 export function ChatView({
@@ -36,13 +42,40 @@ export function ChatView({
   onSendClick,
   onBackClick,
   live = false,
+  pending = false,
+  highlightedIndex = -1,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
+  // Remember whether the user was at (or near) the bottom BEFORE the last
+  // update. Only auto-scroll on streaming updates when they were — so a user
+  // who has scrolled up to read older content keeps their position while a
+  // new chunk streams in.
+  const wasAtBottomRef = useRef(true);
+
+  // Track whether the user is at the bottom whenever the list scrolls. We use
+  // this on the next ``[messages]`` tick to decide whether to keep pinning to
+  // the bottom or leave the user's scroll position alone.
+  useEffect(() => {
+    const list = chatListRef.current;
+    if (!list) return;
+    const onScroll = () => {
+      // 48px slack so a near-bottom user (last visible line is just off
+      // screen) still counts as "at bottom" and gets pinned.
+      const slack = 48;
+      const atBottom =
+        list.scrollHeight - list.scrollTop - list.clientHeight <= slack;
+      wasAtBottomRef.current = atBottom;
+    };
+    list.addEventListener("scroll", onScroll, { passive: true });
+    return () => list.removeEventListener("scroll", onScroll);
+  }, []);
 
   // Auto-scroll to bottom when new messages are added (or a chunk streams in):
   // this view owns autoscroll — the hook no longer touches #chat-list.
+  // Only pin when the user was already at the bottom; leave them alone if
+  // they've scrolled up to read.
   useEffect(() => {
-    if (chatListRef.current) {
+    if (chatListRef.current && wasAtBottomRef.current) {
       chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
     }
   }, [messages]);
@@ -76,11 +109,15 @@ export function ChatView({
         ) : (
           // Messages
           <>
-            {messages.map((m) => (
+            {messages.map((m, i) => (
               <div
                 key={m.domId}
                 id={m.domId}
-                className={m.isUser ? "message user user-msg" : "message bot bot-msg"}
+                className={
+                  m.isUser
+                    ? `message user user-msg${highlightedIndex === i ? " highlighted" : ""}`
+                    : `message bot bot-msg${highlightedIndex === i ? " highlighted" : ""}`
+                }
                 style={m.isUser ? m.userStyle : undefined}
               >
                 {!m.isUser && (
@@ -114,6 +151,21 @@ export function ChatView({
                 </div>
               </div>
             ))}
+            {/* Loading indicator while the backend is thinking. Renders as
+                its own bot bubble so it scrolls naturally with the rest. */}
+            {pending && (
+              <div className="message bot bot-msg pending-msg" aria-live="polite">
+                <div className="avatar bot-avatar">CV</div>
+                <div className="content">
+                  <div className="pending-bubble" role="status">
+                    <span className="pending-dot" />
+                    <span className="pending-dot" />
+                    <span className="pending-dot" />
+                    <span className="pending-label">Searching the docs…</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

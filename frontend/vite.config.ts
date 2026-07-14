@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { liveStubPlugin } from "./vite.liveStub";
 
 // Vite config for the CiteVyn web UI.
 //
@@ -15,8 +16,16 @@ import react from "@vitejs/plugin-react";
 // the dev experience is "single origin" — no CORS preflight in
 // the browser, and the production bundle just points at the
 // real API host via ``VITE_API_BASE_URL``.
+//
+// LIVE-STUB MODE: when ``VITE_LIVE_STUB=1`` is set (used by
+// ``playwright.live.config.ts``), the in-process stub plugin
+// handles ``/v1/...`` and ``/health`` directly, so the dev
+// server doesn't need a backend running. Set the proxy to
+// ``undefined`` in that mode so it doesn't try to forward to a
+// port nothing is listening on (which would surface as an
+// ECONNREFUSED in the browser and a confusing test failure).
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), liveStubPlugin()],
   server: {
     port: 3000,
     strictPort: true,
@@ -34,16 +43,19 @@ export default defineConfig({
         "**/.playwright-artifacts-*/**",
       ],
     },
-    proxy: {
-      "/v1": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-      },
-      "/health": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-      },
-    },
+    proxy:
+      process.env.VITE_LIVE_STUB === "1"
+        ? undefined
+        : {
+            "/v1": {
+              target: "http://127.0.0.1:8000",
+              changeOrigin: true,
+            },
+            "/health": {
+              target: "http://127.0.0.1:8000",
+              changeOrigin: true,
+            },
+          },
   },
   preview: {
     port: 4173,

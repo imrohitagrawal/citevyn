@@ -9,8 +9,9 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # ---------------------------------------------------------------------------
 
 DEFAULT_NO_ANSWER_FALLBACK: str = (
-    "I do not have credible source material in this assistant to answer that. "
-    "Try rephrasing or asking about a related topic covered by the indexed docs."
+    "I couldn't find a grounded answer for that question. "
+    "Try rephrasing with more specific terms, or ask about "
+    "Claude, Claude Code, Codex, or the Gemini API."
 )
 
 DEFAULT_UNSUPPORTED_REFUSAL: str = (
