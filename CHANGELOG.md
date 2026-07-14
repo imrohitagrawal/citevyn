@@ -57,6 +57,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stub secrets; and `infra/docker/scripts/_env_guard.sh` is sourced
   by `deploy.sh`/`refresh.sh`/`backup.sh`/`make restore` to refuse
   any prod entry point while the stubs are still in place.
+- Frontend live-mode e2e test was permanently skipped under the demo
+  Playwright config because `state.pending` only goes true on the
+  `sendLive` path. Added `frontend/vite.liveStub.ts` (in-process
+  Vite plugin that stubs `/v1/sessions` and `/v1/sessions/*/messages`
+  when `VITE_LIVE_STUB=1`), `frontend/playwright.live.config.ts`
+  (companion config with `grep: /live only/i` plus `VITE_API_LIVE=true`
+  so the previously-skipped loading-indicator test now runs and
+  asserts), and `.github/workflows/frontend-live-e2e.yml` to wire it
+  into CI on PRs that touch `frontend/**`. The demo config still
+  skips the test (intended — the demo path is instant by design) and
+  continues to gate merges via the 57-case demo suite.
 
 ## [0.9.1] — 2026-05-12
 

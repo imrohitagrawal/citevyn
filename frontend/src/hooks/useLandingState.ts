@@ -197,15 +197,40 @@ function streamText(
 ): Timer {
   const charsPerTick = Math.max(1, Math.round(delay / 12));
   let i = 0;
+  let stopped = false;
   const id = setInterval(() => {
-    i = Math.min(full.length, i + charsPerTick);
-    onChunk(full.slice(0, i));
-    if (i >= full.length) {
+    // Defensive: an exception inside ``onChunk`` (e.g. a reducer invariant
+    // violation) is swallowed by the browser's setInterval host and
+    // bypasses our ``clearInterval`` below — the interval would keep
+    // running forever, the pending indicator never clears, and the bot
+    // bubble stays stuck with no text and no closing cursor. Wrap each
+    // callback in try/catch so the interval is always cleared and the
+    // failure is surfaced (console.error) instead of being silent.
+    if (stopped) return;
+    try {
+      i = Math.min(full.length, i + charsPerTick);
+      onChunk(full.slice(0, i));
+      if (i >= full.length) {
+        stopped = true;
+        clearInterval(id);
+        try {
+          onDone?.();
+        } catch (e) {
+          console.error("[streamText] onDone threw:", e);
+        }
+      }
+    } catch (e) {
+      console.error("[streamText] onChunk threw; stopping stream:", e);
+      stopped = true;
       clearInterval(id);
-      onDone?.();
+      try {
+        onDone?.();
+      } catch (e2) {
+        console.error("[streamText] onDone threw after error:", e2);
+      }
     }
   }, delay);
-  return { stop: () => clearInterval(id) };
+  return { stop: () => { stopped = true; clearInterval(id); } };
 }
 
 /** Smooth-scroll the section with `id` into view below the ~72px fixed header. */
@@ -538,6 +563,11 @@ export function useLandingState() {
         message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
       });
 
+      // Stop the previous chatTimer before installing a new one. Without
+      // this the prior interval keeps dispatching UPDATE_MESSAGE for a
+      // message that no longer matches the user's mental model — ghost
+      // state mutation on a bot bubble they may not even see.
+      timers.current.chatTimer?.stop();
       timers.current.chatTimer = streamText(
         text,
         (chunk) => {
@@ -578,18 +608,25 @@ export function useLandingState() {
       // returns a NEGATIVE number if the element is ABOVE the list's
       // current viewport (i.e. the user has scrolled past it), which would
       // push ``scrollTop`` negative and silently fail to scroll. Clamp to
-      // ``0`` and use ``block: "start"`` as a fallback so a question buried
-      // earlier in the chat still rises to the top.
+      // ``0`` so a question buried earlier in the chat rises to the top.
       dispatch({ type: "SET_HIGHLIGHT", index: -1 });
       setTimeout(() => {
         dispatch({ type: "SET_HIGHLIGHT", index });
         // Run the scroll on the next frame so the element exists in the
         // DOM (it always does, since it was rendered when the user first
         // asked) and so any layout from the highlight class is settled.
+        // If the chat-list is missing (component unmounted) or has 0 height
+        // (mid-re-mount), fall back to ``scrollIntoView`` on the bubble
+        // itself — at minimum the user's browser will bring the bubble
+        // into view, even if we can't pin it to the top of our list.
         requestAnimationFrame(() => {
           const el = document.getElementById(`cv-msg-${index}`);
+          if (!el) return;
           const list = document.getElementById("chat-list");
-          if (!el || !list) return;
+          if (!list || list.clientHeight === 0) {
+            el.scrollIntoView({ block: "start", behavior: "smooth" });
+            return;
+          }
           const desiredTop =
             el.getBoundingClientRect().top -
             list.getBoundingClientRect().top +
@@ -623,6 +660,12 @@ export function useLandingState() {
 
   const backToLanding = useCallback(() => {
     dispatch({ type: "SET_SCREEN", screen: "landing" });
+    // A stale pending=true from a still-in-flight sendLive would survive
+    // across the screen swap and re-appear as a phantom "Searching…"
+    // bubble the next time the user enters chat. Clear it here so the
+    // landing view (which doesn't render the bubble) doesn't leak state
+    // into the next chat session.
+    dispatch({ type: "SET_PENDING", value: false });
     window.scrollTo({ top: 0 });
   }, []);
 

@@ -330,15 +330,19 @@ test.describe("Chat", () => {
       await page.keyboard.press("Enter");
       await waitStreamDone(page);
     }
-    // Sanity: the first user question is now ABOVE the chat list viewport
-    // (proves the next assertion actually exercises the scroll-up path).
+    // Sanity: the first user question is now FULLY OFF the top of the
+    // chat list viewport (bottom edge above the list's top edge). This
+    // guarantees the next assertion actually exercises the scroll-up
+    // path — checking only ``top < listTop`` would allow a partially-
+    // visible original to pass the post-condition without any scroll
+    // having fired.
     const original = page.locator("#cv-msg-0");
     const beforeRect = await original.evaluate((el) => {
       const r = el.getBoundingClientRect();
       const list = document.getElementById("chat-list")!.getBoundingClientRect();
-      return { top: r.top, listTop: list.top };
+      return { top: r.top, bottom: r.bottom, listTop: list.top };
     });
-    expect(beforeRect.top).toBeLessThan(beforeRect.listTop);
+    expect(beforeRect.bottom).toBeLessThan(beforeRect.listTop);
     const beforeCount = await page.locator(".message.user-msg").count();
     // Re-ask the very first question
     await input.fill("What is Claude Code?");
@@ -353,17 +357,31 @@ test.describe("Chat", () => {
         { timeout: 1500 },
       )
       .toBe("cv-pulse");
-    // And it has been scrolled UP into view at the top of the chat list,
-    // not just pushed into a position that's still above the list.
+    // And it has been scrolled UP to the TOP of the chat list, not just
+    // pushed somewhere inside the viewport. We assert the original's top
+    // edge is within 20px of the list's top edge — that matches the
+    // requested "scrolls to TOP of list" behavior. A weaker "inside
+    // viewport" assertion would let a regression that scrolls to the
+    // bottom of the list pass.
     await expect
       .poll(
         async () => {
           const rect = await original.evaluate((el) => {
             const r = el.getBoundingClientRect();
             const list = document.getElementById("chat-list")!.getBoundingClientRect();
-            return { top: r.top, bottom: r.bottom, listTop: list.top, listBottom: list.bottom };
+            return {
+              top: r.top,
+              bottom: r.bottom,
+              listTop: list.top,
+              listBottom: list.bottom,
+              distanceFromTop: Math.abs(r.top - list.top),
+            };
           });
-          return rect.top >= rect.listTop - 2 && rect.bottom <= rect.listBottom + 2;
+          return (
+            rect.top >= rect.listTop - 20 &&
+            rect.bottom <= rect.listBottom + 20 &&
+            rect.distanceFromTop < 20
+          );
         },
         { timeout: 2000 },
       )
@@ -431,19 +449,41 @@ test.describe("Chat", () => {
     // indicator never appears. We assert the DOM by intercepting the
     // /v1/sessions/messages response with an artificial delay so the
     // indicator is observable.
+    //
+    // This test runs under ``playwright.live.config.ts`` (set via
+    // ``VITE_LIVE_STUB=1`` to enable the in-process stub backend in
+    // ``vite.liveStub.ts``, plus ``VITE_API_LIVE=true``). The
+    // ``grep: /live only/i`` filter on that config restricts the run
+    // to this test only. Under the demo config (``playwright.config.ts``)
+    // the test self-skips via the ``!isLive`` guard below — that's the
+    // intended behavior: the demo path is instant by design and
+    // there's nothing to assert there.
     await enterChat(page);
     const isLive = await page.evaluate(
       () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
     );
     if (!isLive) {
-      test.skip(true, "Loading indicator is a live-path feature; demo is instant.");
+      test.skip(true, "Loading indicator is a live-path feature; demo is instant. Run via: VITE_LIVE_STUB=1 npx playwright test --config=playwright.live.config.ts");
       return;
     }
     // Throttle the API so we have a window to observe the pending bubble.
-    await page.route("**/v1/sessions/*/messages", async (route) => {
-      await new Promise((r) => setTimeout(r, 800));
-      await route.continue();
-    });
+    // Two modes:
+    //   - stub mode (VITE_LIVE_STUB=1): the dev server's vite.liveStub
+    //     plugin serves /v1/sessions/*/messages in-process with a
+    //     canned 800ms delay, so page.route() never matches (the
+    //     request is answered by the dev server, not the network).
+    //   - real-backend mode (VITE_API_LIVE=true without the stub):
+    //     we delay the response at the browser level so the bubble
+    //     becomes observable.
+    //   In demo mode the test skips above, so this block only runs in
+    //   live-ish configurations; if the stub isn't active, the route
+    //   delay acts as the throttle.
+    if (process.env.VITE_LIVE_STUB !== "1") {
+      await page.route("**/v1/sessions/*/messages", async (route) => {
+        await new Promise((r) => setTimeout(r, 800));
+        await route.continue();
+      });
+    }
     await page.locator(".chat-input").fill("What is Claude Code?");
     await page.keyboard.press("Enter");
     await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
