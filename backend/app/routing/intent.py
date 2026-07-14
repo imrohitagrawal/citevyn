@@ -20,6 +20,10 @@ from app.guardrails.domain import Domain
 #
 # ``no_answer`` is set by the orchestrator when retrieval yields zero
 # evidence; the router never produces it from text alone.
+#
+# ``greeting`` is likewise orchestrator-set: a bare social greeting
+# ("hi", "hello CiteVyn") short-circuits to a friendly static reply
+# before retrieval. The router never emits it from text alone.
 
 _HOW_TO_RE = re.compile(
     r"\b(?:how(?:\s+(?:do|can|should|to))?|configure|set\s+up|setup|install|enable|disable)\b",
@@ -48,6 +52,7 @@ class Intent(enum.StrEnum):
     how_to = "how_to"
     clarify = "clarify"
     no_answer = "no_answer"
+    greeting = "greeting"
     unsupported = "unsupported"
 
 
