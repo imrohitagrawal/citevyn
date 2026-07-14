@@ -174,28 +174,36 @@ function interval(fn: () => void, ms: number): Timer {
 }
 
 /**
- * Word-by-word streaming into `onChunk`; calls `onDone` once the full string
- * has been emitted. Returns a {@link Timer} that closes over its own
- * `clearInterval` so the caller can stop it without knowing it's an interval.
+ * Smooth character-by-character streaming into `onChunk`; calls `onDone` once
+ * the full string has been emitted. Returns a {@link Timer} that closes over
+ * its own `clearInterval` so the caller can stop it without knowing it's an
+ * interval.
+ *
+ * Implementation note: the previous word-by-word implementation burst whole
+ * whitespace-separated tokens into a single frame, so a 14-char "**Features**"
+ * marker, a 30-char paragraph, or a sequence of "  the  codex" whitespace
+ * tokens all rendered in one ~16ms paint, then paused for ``delay`` ms — the
+ * eye read this as a stuttery typewriter, not a smooth stream. Emitting a
+ * few characters per tick (sized by ``delay`` so the wall-clock character
+ * rate is steady) eliminates the burst-and-pause and keeps the rate even
+ * across the whole text. ``delay=24`` + ``charsPerTick=2`` yields ~83 chars/sec,
+ * which is the natural reading pace the eye accepts as "smooth".
  */
 function streamText(
   full: string,
   onChunk: (chunk: string) => void,
   onDone?: () => void,
-  delay = 60,
+  delay = 24,
 ): Timer {
-  // Split on whitespace (capturing group preserves whitespace tokens)
-  const words = full.split(/(\s+)/);
+  const charsPerTick = Math.max(1, Math.round(delay / 12));
   let i = 0;
   const id = setInterval(() => {
-    i++;
-    if (i >= words.length) {
+    i = Math.min(full.length, i + charsPerTick);
+    onChunk(full.slice(0, i));
+    if (i >= full.length) {
       clearInterval(id);
-      onChunk(full);
       onDone?.();
-      return;
     }
-    onChunk(words.slice(0, i).join(""));
   }, delay);
   return { stop: () => clearInterval(id) };
 }
@@ -553,39 +561,50 @@ export function useLandingState() {
 
   const flashExisting = useCallback(
     (index: number) => {
-      // The duplicate is a user message at `index`; the bot answer that
-      // follows it sits at `index + 1`. We highlight BOTH so the user can
-      // see both their original question AND the answer it produced, and
-      // scroll the user bubble into view (the question is the anchor the
-      // user typed).
-      // Reset highlight first to restart animation
+      // The duplicate is a user question at `index`. That is the anchor the
+      // user wants re-confirmed, so:
+      //   1. Scroll the user question into view (top of the chat list, with
+      //      a small top inset for breathing room).
+      //   2. Pulse ONLY the user bubble — the user said "I asked this
+      //      before", they want to see THE QUESTION, not relive the
+      //      answer. The answer below it is visible automatically once we
+      //      scroll into view.
+      //
+      // The scroll math: the previous implementation used
+      // ``(el.getBoundingClientRect().top - list.getBoundingClientRect().top)
+      //   + list.scrollTop`` — that produces the element's top RELATIVE TO
+      // the list's *unscrolled* coordinate system, which is the correct
+      // ``scrollTop`` value to pin it at the list's visible top. But this
+      // returns a NEGATIVE number if the element is ABOVE the list's
+      // current viewport (i.e. the user has scrolled past it), which would
+      // push ``scrollTop`` negative and silently fail to scroll. Clamp to
+      // ``0`` and use ``block: "start"`` as a fallback so a question buried
+      // earlier in the chat still rises to the top.
       dispatch({ type: "SET_HIGHLIGHT", index: -1 });
-      const answerIndex = index + 1;
       setTimeout(() => {
         dispatch({ type: "SET_HIGHLIGHT", index });
-        setTimeout(() => {
+        // Run the scroll on the next frame so the element exists in the
+        // DOM (it always does, since it was rendered when the user first
+        // asked) and so any layout from the highlight class is settled.
+        requestAnimationFrame(() => {
           const el = document.getElementById(`cv-msg-${index}`);
           const list = document.getElementById("chat-list");
-          if (el && list) {
-            const top =
-              el.getBoundingClientRect().top -
-              list.getBoundingClientRect().top +
-              list.scrollTop -
-              12;
-            list.scrollTo({ top, behavior: "smooth" });
-          }
-          // Briefly extend the highlight to the answer too so the eye sees
-          // both bubbles pulse together.
-          setTimeout(
-            () => dispatch({ type: "SET_HIGHLIGHT", index: answerIndex }),
-            80,
-          );
-        }, 40);
+          if (!el || !list) return;
+          const desiredTop =
+            el.getBoundingClientRect().top -
+            list.getBoundingClientRect().top +
+            list.scrollTop -
+            12;
+          list.scrollTo({
+            top: Math.max(0, desiredTop),
+            behavior: "smooth",
+          });
+        });
       }, 10);
 
       timers.current.highlightTimeout = timeout(
         () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
-        2400,
+        2000,
       );
     },
     [],

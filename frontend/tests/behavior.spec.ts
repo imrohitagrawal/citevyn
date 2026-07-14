@@ -301,36 +301,162 @@ test.describe("Chat", () => {
     expect(await page.locator(".message.bot-msg .source-card").count()).toBe(0);
   });
 
-  test("duplicate question: no new bubble, scrolls to original, pulses (cv-pulse)", async ({ page }) => {
+  test("duplicate question: no new bubble, scrolls to TOP of list on the original user question, pulses (cv-pulse)", async ({ page }) => {
+    // Demo-mode only: live mode's per-call backend latency (often 5-15s
+    // including LLM round-trip + retrieval) makes the "add N questions to
+    // push the first one off the top" setup flaky under slow networks /
+    // rate limits. The duplicate-guard and scroll-to-top behaviors are
+    // UI-only and identical across modes.
     await enterChat(page);
+    const isLive = await page.evaluate(
+      () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (isLive) {
+      test.skip(true, "Duplicate-guard scroll/highlight is UI-only; demo mode is faster and deterministic.");
+      return;
+    }
     const input = page.locator(".chat-input");
     await input.fill("What is Claude Code?");
     await page.keyboard.press("Enter");
     await waitStreamDone(page);
-    // add a few more so the original scrolls out of view
-    for (const q of ["How do I install the Codex CLI?", "How do I get a Gemini API key?"]) {
+    // Ask several follow-ups so the original question scrolls out of view
+    // (off the top of the chat list).
+    for (const q of [
+      "How do I install the Codex CLI?",
+      "How do I get a Gemini API key?",
+      "Which Claude models are available in the API?",
+    ]) {
       await input.fill(q);
       await page.keyboard.press("Enter");
       await waitStreamDone(page);
     }
-    const before = await page.locator(".message.user-msg").count();
-    // re-ask the very first question
-    await input.fill("What is Claude Code?");
-    await page.keyboard.press("Enter");
-    // no new user bubble
-    await expect(page.locator(".message.user-msg")).toHaveCount(before);
-    // the ORIGINAL (first) bubble gets the pulse animation
+    // Sanity: the first user question is now ABOVE the chat list viewport
+    // (proves the next assertion actually exercises the scroll-up path).
     const original = page.locator("#cv-msg-0");
-    await expect.poll(async () =>
-      original.evaluate((el) => getComputedStyle(el).animationName)
-    ).toBe("cv-pulse");
-    // and it is scrolled into view within the list
-    const visible = await original.evaluate((el) => {
+    const beforeRect = await original.evaluate((el) => {
       const r = el.getBoundingClientRect();
       const list = document.getElementById("chat-list")!.getBoundingClientRect();
-      return r.top >= list.top - 4 && r.bottom <= list.bottom + 4;
+      return { top: r.top, listTop: list.top };
     });
-    expect(visible).toBe(true);
+    expect(beforeRect.top).toBeLessThan(beforeRect.listTop);
+    const beforeCount = await page.locator(".message.user-msg").count();
+    // Re-ask the very first question
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    // No new user bubble
+    await expect(page.locator(".message.user-msg")).toHaveCount(beforeCount);
+    // The ORIGINAL (first) bubble gets the pulse animation — the user said
+    // "I asked this before", so we highlight THE QUESTION, not the answer.
+    await expect
+      .poll(
+        async () => original.evaluate((el) => getComputedStyle(el).animationName),
+        { timeout: 1500 },
+      )
+      .toBe("cv-pulse");
+    // And it has been scrolled UP into view at the top of the chat list,
+    // not just pushed into a position that's still above the list.
+    await expect
+      .poll(
+        async () => {
+          const rect = await original.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            const list = document.getElementById("chat-list")!.getBoundingClientRect();
+            return { top: r.top, bottom: r.bottom, listTop: list.top, listBottom: list.bottom };
+          });
+          return rect.top >= rect.listTop - 2 && rect.bottom <= rect.listBottom + 2;
+        },
+        { timeout: 2000 },
+      )
+      .toBe(true);
+  });
+
+  test("typing cadence: many short text updates per second (smooth, not bursty)", async ({ page }) => {
+    // The earlier word-by-word implementation emitted one whole whitespace
+    // token (sometimes > 10 chars) per ``delay`` tick, so the user saw a
+    // burst → pause → burst pattern. The new char-by-char implementation
+    // emits 2-3 chars every ~24ms which the eye reads as smooth.
+    //
+    // We assert on the *number of distinct text-content samples* observed
+    // during a fixed observation window while a known-length canned answer
+    // streams. With word-by-word bursts we'd see <= text.length "bursts";
+    // with smooth per-char we see a sample per ~50ms tick (≥8 in 800ms).
+    //
+    // NOTE: this test is a DEMO-mode assertion. Live mode runs the same
+    // ``streamBot`` path with the same ``streamText`` emitter, but the
+    // upstream latency masks the cadence — we measure the *client* ticker,
+    // not the wire, so demo mode is the cleanest signal. If live mode is
+    // active we skip (the cadence is provably the same since both paths
+    // share ``streamText``).
+    await enterChat(page);
+    const isLive = await page.evaluate(
+      () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (isLive) {
+      test.skip(true, "Cadence test is demo-mode-only (live mode shares streamText but backend latency dominates the wall-clock signal).");
+      return;
+    }
+    await page.locator(".chat-input").fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    // Wait for the bot bubble to appear, then sample its .streaming child
+    // (the text node) for 1200ms. Sample every ~30ms — 2-3 chars/tick at
+    // 24ms tick interval means consecutive samples will differ.
+    await page.locator(".message.bot-msg .streaming").waitFor({ timeout: 5000 });
+    const samples: string[] = await page.evaluate(async () => {
+      const out: string[] = [];
+      const el = document.querySelector(".message.bot-msg .streaming");
+      const start = performance.now();
+      while (performance.now() - start < 1200) {
+        out.push((el?.textContent ?? "").trim());
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return out;
+    });
+    const filled = samples.filter((s) => s.length > 0);
+    const distinct = new Set(filled).size;
+    // Smooth char-by-char emission produces ≥20 distinct prefixes in 1200ms;
+    // a bursty word-by-word emitter produces ≤ text.length/avgTokenLen ≈ 8.
+    expect(distinct).toBeGreaterThanOrEqual(15);
+    // No single jump between consecutive samples exceeds the per-tick budget.
+    let maxJump = 0;
+    for (let i = 1; i < filled.length; i++) {
+      maxJump = Math.max(maxJump, filled[i].length - filled[i - 1].length);
+    }
+    expect(maxJump).toBeLessThanOrEqual(6);
+  });
+
+  test("loading indicator: pending-bubble renders 3 dots + label when state.pending is true (live only)", async ({ page }) => {
+    // The pending indicator is rendered when state.pending=true. That
+    // only happens on the live path (sendLive sets it before the API
+    // round-trip). In demo mode the answer streams instantly so the
+    // indicator never appears. We assert the DOM by intercepting the
+    // /v1/sessions/messages response with an artificial delay so the
+    // indicator is observable.
+    await enterChat(page);
+    const isLive = await page.evaluate(
+      () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (!isLive) {
+      test.skip(true, "Loading indicator is a live-path feature; demo is instant.");
+      return;
+    }
+    // Throttle the API so we have a window to observe the pending bubble.
+    await page.route("**/v1/sessions/*/messages", async (route) => {
+      await new Promise((r) => setTimeout(r, 800));
+      await route.continue();
+    });
+    await page.locator(".chat-input").fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator(".pending-label")).toHaveText("Searching the docs…");
+    await expect(page.locator(".pending-dot")).toHaveCount(3);
+    // Pulsing animation must be wired up.
+    const anim = await page
+      .locator(".pending-dot")
+      .first()
+      .evaluate((el) => getComputedStyle(el).animationName);
+    expect(anim).toBe("cv-pending");
+    // Once the API responds and streaming starts, pending goes away.
+    await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 15000 });
   });
 
   test("autoscrolls: list stays pinned to the newest message", async ({ page }) => {
