@@ -248,7 +248,6 @@ function scrollToId(id: string) {
 interface TimerRefs {
   heroLoop: Timer | null;
   demoTimer: Timer | null;
-  chatTimer: Timer | null;
   placeholderTimer: Timer | null;
   heroPause: Timer | null;
   nudgeTimeout: Timer | null;
@@ -260,12 +259,18 @@ export function useLandingState() {
   const timers = useRef<TimerRefs>({
     heroLoop: null,
     demoTimer: null,
-    chatTimer: null,
     placeholderTimer: null,
     heroPause: null,
     nudgeTimeout: null,
     highlightTimeout: null,
   });
+
+  // Chat answers stream concurrently: two live questions asked back-to-back
+  // resolve close together and each drives its own bubble. A single timer
+  // slot would let the second stream cancel the first (leaving the first
+  // bubble empty with a stuck cursor), so every in-flight chat stream is held
+  // here and self-removed on completion. Cleared en masse on unmount.
+  const chatStreams = useRef<Set<Timer>>(new Set());
 
   const heroRef = useRef<HTMLInputElement>(null);
 
@@ -320,6 +325,8 @@ export function useLandingState() {
     return () => {
       // Clean up all timers — each knows how to stop itself.
       Object.values(timers.current).forEach((timer) => timer?.stop());
+      chatStreams.current.forEach((t) => t.stop());
+      chatStreams.current.clear();
       window.removeEventListener("keydown", onKeyDown);
     };
   }, []);
@@ -563,12 +570,12 @@ export function useLandingState() {
         message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
       });
 
-      // Stop the previous chatTimer before installing a new one. Without
-      // this the prior interval keeps dispatching UPDATE_MESSAGE for a
-      // message that no longer matches the user's mental model — ghost
-      // state mutation on a bot bubble they may not even see.
-      timers.current.chatTimer?.stop();
-      timers.current.chatTimer = streamText(
+      // Each stream targets its own bubble by stable id, so concurrent
+      // streams don't interfere and the previous one is NOT stopped — killing
+      // it would leave its bubble empty with a stuck cursor. Track the handle
+      // so unmount can stop any still-running stream; it self-removes on done.
+      let handle: Timer;
+      handle = streamText(
         text,
         (chunk) => {
           // First chunk arrived → drop the loading indicator so the typing
@@ -583,8 +590,10 @@ export function useLandingState() {
             sources: extra.finalSources,
             refusal: extra.refusal,
           });
+          chatStreams.current.delete(handle);
         },
       );
+      chatStreams.current.add(handle);
     },
     [nextMessageId],
   );
