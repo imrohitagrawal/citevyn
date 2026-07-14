@@ -1029,3 +1029,156 @@ async def test_ask_skips_cache_write_on_real_transient_outage(
     assert audit.metadata_["cache_written"] is False
     assert "answer_cache_write_skipped_vector_unavailable" in caplog.text
     assert "answer_cache_write_skipped_embedder_mismatch" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 12. Greeting short-circuit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello",
+        "hi",
+        "hey",
+        "hello CiteVyn",
+        "hi sitevyn",
+        "good morning",
+        "Hello, CiteVyn",
+        "hello?",  # a greeting terminated with a question mark still counts
+        "hi?",
+        "howdy",  # common openers beyond the core set
+        "sup",
+        "hiya",
+        "morning",  # bare time-of-day greeting (no "good")
+        "good evening!",
+        "hey there",
+    ],
+)
+async def test_is_greeting_true_for_bare_greetings(text: str) -> None:
+    """A bare social greeting (optionally addressed) is a greeting."""
+    from app.answer.orchestrator import is_greeting
+
+    assert is_greeting(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello, how do I get the Gemini API key?",  # real question wins
+        "what is Claude Code?",  # not a greeting at all
+        "hey, why does the codex CLI fail to install",  # substantive tail
+        "hello there my friend how are you doing today",  # tail past the addressee
+        "history of the claude api",  # 'hi' is only a substring, not the opener
+        "hey do embeddings work",  # yes/no ask riding a greeting token
+        "yo bitcoin price today",  # off-domain tail must not be swallowed
+        "hi list all the claude code flags",  # imperative ask riding a greeting
+        "",  # empty
+    ],
+)
+async def test_is_greeting_false_for_real_queries(text: str) -> None:
+    """A real question that opens with (or merely contains) a greeting is not
+    short-circuited."""
+    from app.answer.orchestrator import is_greeting
+
+    assert is_greeting(text) is False
+
+
+async def test_greeting_returns_friendly_reply_without_retrieval_or_llm(
+    session: Any,
+) -> None:
+    """A bare "hello" short-circuits to the greeting reply: not a refusal, not
+    a no-answer, no retrieval, no LLM, nothing cached."""
+    from app.answer.orchestrator import GREETING_RESPONSE
+
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="hello",
+        request_id="req_greeting",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["answer"] == GREETING_RESPONSE
+    assert response["intent"] == "greeting"
+    assert response["unsupported"] is False
+    assert response["no_answer"] is False
+    assert response["cache_hit"] is False
+    assert response["retrieval_strategy"] == RetrievalStrategy.none.value
+    assert response["citations"] == []
+
+    # No retrieval, no LLM, no cache.
+    assert retriever.calls == []
+    assert llm_spy.complete.await_count == 0
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+
+    # Audit event records the greeting outcome.
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].metadata_["outcome"] == "greeting"
+
+
+async def test_greeting_addressed_to_citevyn_preserves_domain(session: Any) -> None:
+    """ "hello CiteVyn" is still a greeting; the classified citevyn domain rides
+    the trace but the greeting flags (not the domain) are the signal."""
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="hello CiteVyn",
+        request_id="req_greeting_citevyn",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["intent"] == "greeting"
+    assert response["no_answer"] is False
+    assert response["unsupported"] is False
+    assert response["domain"] == "citevyn"
+    assert retriever.calls == []
+
+
+async def test_greeting_prefixed_real_question_still_answers(session: Any) -> None:
+    """ "hello, how do I ...?" is NOT a greeting — the real question flows through
+    the normal retrieval + generation pipeline."""
+    settings = _settings()
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="hello, how do I configure Claude Code permissions?",
+        request_id="req_greeting_prefix",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["intent"] != "greeting"
+    assert response["intent"] == "how_to"
+    assert len(retriever.calls) == 1
+
+
+async def test_offdomain_query_opening_with_greeting_still_refused(session: Any) -> None:
+    """An off-domain query that merely opens with a greeting token
+    ("yo bitcoin price today") must NOT be welcomed as a greeting — the
+    substantive tail keeps it out of the short-circuit so it still reaches
+    the unsupported refusal (greeting runs before the unsupported branch, so
+    a leaky detector would otherwise swallow the refusal)."""
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="yo bitcoin price today",
+        request_id="req_offdomain_greeting",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["intent"] == "unsupported"
+    assert response["unsupported"] is True
+    assert response["no_answer"] is True
+    assert response["answer"] == settings.unsupported_refusal
+    assert retriever.calls == []

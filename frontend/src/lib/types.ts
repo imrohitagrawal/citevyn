@@ -93,6 +93,7 @@ export type Intent =
   | "troubleshooting"
   | "lookup"
   | "smalltalk"
+  | "greeting"
   | "unsupported";
 
 /** Domain label, mirroring :class:`app.guardrails.domain.Domain`. */

@@ -153,6 +153,31 @@ step_by_step
 }
 ```
 
+### Greeting Response
+
+A bare social greeting (`hi`, `hello`, `hello CiteVyn`, `good morning`) is
+neither a grounded answer nor a refusal. The orchestrator short-circuits it —
+before retrieval and before the unsupported guardrail — to a friendly static
+reply with `intent: "greeting"`, `unsupported: false`, and `no_answer: false`.
+A real question that merely opens with a greeting ("hello, how do I get the
+Gemini API key?") is not short-circuited and flows through the normal pipeline.
+
+```json
+{
+  "request_id": "req_005",
+  "message_id": "msg_003",
+  "answer": "Hi! I'm CiteVyn. I answer questions about Claude API, Claude Code, Codex, and Gemini API using cited official documentation. What would you like to know?",
+  "citations": [],
+  "domain": "unsupported",
+  "intent": "greeting",
+  "confidence": "none",
+  "cache_hit": false,
+  "retrieval_strategy": "none",
+  "unsupported": false,
+  "no_answer": false
+}
+```
+
 ## 7. Exact Lookup
 
 ```http

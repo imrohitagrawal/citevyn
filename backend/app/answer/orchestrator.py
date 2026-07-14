@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -68,6 +69,64 @@ from app.retrieval.types import (
 from app.routing.intent import Intent, classify_intent, should_skip_retrieval
 
 _logger = logging.getLogger("citevyn.answer")
+
+# ---------------------------------------------------------------------------
+# Greeting short-circuit
+# ---------------------------------------------------------------------------
+
+# A bare social greeting ("hi", "hello CiteVyn") is neither an off-domain
+# refusal nor a no-answer — it is a non-informational query that should get a
+# friendly static reply without burning a retrieval + LLM round-trip. The
+# detector runs BEFORE the unsupported refusal because "hello" classifies as
+# an unsupported domain (no product keyword), and before retrieval so no
+# evidence is ever fetched for it.
+#
+# The pattern matches the WHOLE message, not just a prefix: a greeting opener,
+# an optional short addressee ("CiteVyn", "there", "team"…), and only trailing
+# punctuation to the end of the string. Anchoring the end is what keeps a real
+# question that merely opens with a greeting ("hey do embeddings work", "yo
+# bitcoin price today") from being swallowed — the substantive tail fails the
+# ``$`` anchor, so those fall through to the normal pipeline (and an off-domain
+# tail still reaches the unsupported refusal). A prefix match plus negative
+# keyword guards leaked exactly those cases.
+_GREETING_RE = re.compile(
+    r"""
+    ^\s*
+    (?:                                   # opener
+        hi|hello|hey|heya|hiya|howdy|yo|sup|greetings
+        | (?:good\s+)?(?:morning|afternoon|evening)   # "good morning" or bare "morning"
+    )
+    (?:                                   # zero or more short addressees
+        [\s,]+
+        (?:there|citevyn|sitevyn|team|folks|everyone|all|bot|assistant|user)
+    )*
+    [\s,.!?]*$                            # only trailing space/punctuation (incl. "?")
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Friendly static reply for a bare greeting. No citations, not a refusal.
+GREETING_RESPONSE = (
+    "Hi! I'm CiteVyn. I answer questions about Claude API, Claude Code, "
+    "Codex, and Gemini API using cited official documentation. What would "
+    "you like to know?"
+)
+
+
+def is_greeting(question: str) -> bool:
+    """Return ``True`` when ``question`` is a bare social greeting.
+
+    A greeting is an opener (``hi``, ``hello``, ``howdy``, ``sup``, ``good
+    morning``…) optionally trailed by a short addressee (``hello CiteVyn``,
+    ``hi there``) and only trailing punctuation — a bare ``hello?`` still
+    counts. The pattern is anchored at both ends, so any message carrying
+    substantive content past the greeting — a real question ("hello, how do I
+    get the Gemini API key?"), a bare ask riding a greeting token ("hey do
+    embeddings work"), or off-domain text ("yo bitcoin price today") — does
+    not match and flows to the normal pipeline instead.
+    """
+    return _GREETING_RE.match(question) is not None
+
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -289,6 +348,20 @@ class Orchestrator:
         # so a stale intent cannot leak through.
         if is_unsupported(domain):
             intent = Intent.unsupported
+
+        # A bare social greeting short-circuits to a friendly static reply
+        # before the unsupported refusal (a lone "hello" classifies as an
+        # unsupported domain) and before retrieval, so we never burn an LLM
+        # call on "hi". A real question that merely opens with a greeting
+        # falls through to the normal pipeline (see :func:`is_greeting`).
+        if is_greeting(question):
+            return await self._respond_greeting(
+                request_id=request_id,
+                session_id=session_id,
+                question=question,
+                normalized=normalized,
+                domain=domain,
+            )
 
         if intent is Intent.unsupported:
             return await self._respond_unsupported(
@@ -515,6 +588,63 @@ class Orchestrator:
             reason="unsupported",
             copy=self._settings.unsupported_refusal,
             message_id=str(message_id),
+        )
+
+    async def _respond_greeting(
+        self,
+        *,
+        request_id: str,
+        session_id: uuid.UUID,
+        question: str,
+        normalized: str,
+        domain: Domain,
+    ) -> AnswerResponse:
+        """Persist and return a friendly greeting response.
+
+        Not a refusal and not a no-answer: ``unsupported`` and ``no_answer``
+        are both ``False`` and the intent is :attr:`Intent.greeting`. No
+        retrieval ran, so there are no citations and the retrieval strategy
+        is ``none``. The classified ``domain`` is preserved for the trace
+        (a lone "hi" carries ``unsupported``; "hi CiteVyn" carries
+        ``citevyn``) — the greeting flags, not the domain, are the signal.
+        """
+        message_id = await self._persist_messages(
+            session_id=session_id,
+            question=question,
+            normalized=normalized,
+            domain=domain,
+            intent=Intent.greeting,
+            answer=GREETING_RESPONSE,
+            confidence=Confidence.none,
+            evidence=[],
+            citations=[],
+        )
+        await self._persist_audit(
+            request_id=request_id,
+            session_id=session_id,
+            message_id=message_id,
+            domain=domain,
+            intent=Intent.greeting,
+            outcome="greeting",
+            metadata={
+                "retrieval_strategy": RetrievalStrategy.none.value,
+            },
+        )
+        await self._session.flush()
+        return AnswerResponse(
+            request_id=request_id,
+            message_id=str(message_id),
+            answer=GREETING_RESPONSE,
+            citations=[],
+            domain=domain.value,
+            intent=Intent.greeting.value,
+            confidence=Confidence.none.value,
+            cache_hit=False,
+            retrieval_strategy=RetrievalStrategy.none.value,
+            unsupported=False,
+            no_answer=False,
+            source_version_hash="",
+            answer_policy_version="",
         )
 
     async def _respond_cache_hit(
@@ -1007,7 +1137,9 @@ def _utcnow_from_seconds(seconds: int) -> datetime:
 __all__ = [
     "AnswerResponse",
     "Citation",
+    "GREETING_RESPONSE",
     "Orchestrator",
     "OrchestratorError",
     "RetrievalStrategy",
+    "is_greeting",
 ]

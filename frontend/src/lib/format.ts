@@ -37,6 +37,7 @@ const INTENT_LABELS: Record<Intent, string> = {
   troubleshooting: "Troubleshooting",
   lookup: "Lookup",
   smalltalk: "Small talk",
+  greeting: "Greeting",
   unsupported: "Unsupported",
 };
 
