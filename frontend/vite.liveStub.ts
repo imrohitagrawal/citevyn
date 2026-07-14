@@ -20,7 +20,8 @@
  * scroll/pulse). Anything else would be testing real backend
  * behaviour, which belongs in ``backend/tests`` not here.
  */
-import type { Plugin, Connect } from "vite";
+import type { Plugin } from "vite";
+import type { ServerResponse } from "node:http";
 
 const STUB_DELAY_MS = 800;
 
@@ -39,7 +40,7 @@ const CANNED_CITATIONS = [
   },
 ];
 
-function send(res: Connect.ServerResponse, status: number, body: unknown): void {
+function send(res: ServerResponse, status: number, body: unknown): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(body));
@@ -53,14 +54,19 @@ export function liveStubPlugin(): Plugin {
       server.middlewares.use(async (req, res, next) => {
         if (!req.url) return next();
         if (req.method !== "POST") return next();
+        // Strip any query string before matching — vite passes the raw
+        // URL (including ?foo=bar) to middleware, so an anchored
+        // pattern would silently miss and fall through to the SPA
+        // fallback instead of returning a 200.
+        const path = req.url.split("?", 1)[0];
 
-        if (req.url === "/v1/sessions") {
+        if (path === "/v1/sessions") {
           await new Promise((r) => setTimeout(r, 50));
           send(res, 200, { session_id: "stub-session" });
           return;
         }
 
-        const msgMatch = /^\/v1\/sessions\/([^/]+)\/messages\/?$/.exec(req.url);
+        const msgMatch = /^\/v1\/sessions\/([^/]+)\/messages\/?$/.exec(path);
         if (msgMatch) {
           // Per-test override: ``X-Stub-Delay-Ms`` lets the test nudge the
           // delay without restarting the dev server.

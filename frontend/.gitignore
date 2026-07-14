@@ -5,8 +5,12 @@ test-results/
 # Compiled config artifacts (the .ts files are the sources)
 playwright.config.js
 playwright.config.d.ts
+playwright.live.config.js
+playwright.live.config.d.ts
 vite.config.js
 vite.config.d.ts
+vite.liveStub.js
+vite.liveStub.d.ts
 
 # The app's knowledge base lives in src/data/. The repo-root `.gitignore`
 # has a bare `data/` rule (meant for local Docker data) that would otherwise
