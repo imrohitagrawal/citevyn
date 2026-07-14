@@ -20,7 +20,6 @@ in the same change.
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
-| [#89](https://github.com/imrohitagrawal/citevyn/issues/89) | Greeting response leaks `domain="unsupported"` with `unsupported=false`, breaking the `domain⟺unsupported` invariant; give greetings a neutral domain (needs a new `Domain` enum value) | backend / frontend | Low (latent; no live consumer) | greeting-intent review |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 

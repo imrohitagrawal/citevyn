@@ -120,7 +120,7 @@ Stores user and assistant messages.
 | role | text | user or assistant |
 | content | text | Message text |
 | normalized_query | text | Normalized form |
-| domain | text | Product/domain classification |
+| domain | text | Product/domain classification (or `unsupported`, or neutral `general` on a greeting) |
 | intent | text | faq, exact_lookup, how_to, etc. |
 | created_at | timestamp | Created time |
 

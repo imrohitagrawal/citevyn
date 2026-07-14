@@ -28,6 +28,13 @@ class Domain(enum.StrEnum):
     gemini_api = "gemini_api"
     citevyn = "citevyn"
     unsupported = "unsupported"
+    # A neutral, response-only domain. ``classify_domain`` never returns it;
+    # the orchestrator stamps it on a bare-greeting reply so the greeting no
+    # longer borrows ``unsupported`` (which would break the
+    # ``domain == unsupported`` ⟺ ``unsupported == true`` invariant — #89).
+    # Not a retrievable product area, so it is absent from ``ALLOWED_DOMAINS``
+    # and ``is_unsupported`` returns ``False`` for it.
+    general = "general"
 
 
 ALLOWED_DOMAINS: frozenset[Domain] = frozenset(

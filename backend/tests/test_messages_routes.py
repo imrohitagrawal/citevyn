@@ -187,6 +187,42 @@ def test_post_message_returns_unsupported_shape(seeded_app: TestClient) -> None:
     assert body["citations"] == []
 
 
+def test_post_message_greeting_carries_neutral_general_domain(seeded_app: TestClient) -> None:
+    """A bare greeting is a friendly reply, not a refusal: over the wire it
+    carries the neutral ``general`` domain with ``unsupported``/``no_answer``
+    both false, and the stored ``domain`` replayed by GET agrees (#89). A
+    greeting must never surface ``domain: "unsupported"`` — that would break
+    the ``domain == "unsupported"`` ⟺ ``unsupported == true`` invariant."""
+    create = seeded_app.post(
+        "/v1/sessions",
+        json={"channel": "chat"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    session_id = create.json()["session_id"]
+
+    response = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "good morning"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent"] == "greeting"
+    assert body["domain"] == "general"
+    assert body["unsupported"] is False
+    assert body["no_answer"] is False
+    assert body["citations"] == []
+
+    # The stored domain replayed by GET matches the wire response.
+    replay = seeded_app.get(
+        f"/v1/sessions/{session_id}/messages/{body['message_id']}",
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert replay.status_code == 200
+    assert replay.json()["domain"] == "general"
+
+
 def test_post_message_rejects_bad_answer_style(seeded_app: TestClient) -> None:
     create = seeded_app.post(
         "/v1/sessions",
