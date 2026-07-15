@@ -363,6 +363,49 @@ async def test_empty_evidence_returns_no_answer_without_caching(
     assert audits[0].metadata_["retrieval_strategy"] == RetrievalStrategy.hybrid_reranked.value
 
 
+async def test_llm_refusal_with_evidence_records_runtime_strategy(
+    session: Any,
+) -> None:
+    """LLM emits the no-answer refusal despite non-empty evidence.
+
+    The LLM-refusal branch passes the ACTUAL runtime strategy to the audit,
+    not a hardcoded ``none`` — the other half of the Issue #81 / F3
+    observability change (the weak-evidence branch is covered above). Without
+    this test, reverting ``strategy=strategy`` to the default on that branch
+    would break nothing.
+    """
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    refusing_llm = AsyncMock()
+    refusing_llm.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL,
+        input_tokens=1,
+        output_tokens=1,
+        model="stub-deterministic-v1",
+        provider="stub",
+    )
+    orchestrator = Orchestrator(settings, session, llm=refusing_llm, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_llm_refusal",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].metadata_["outcome"] == "no_answer"
+    assert audits[0].metadata_["reason"] == "no_answer"
+    # Non-empty evidence WAS retrieved and reranked, so the audit records
+    # hybrid_reranked — not the default none.
+    assert audits[0].metadata_["retrieval_strategy"] == RetrievalStrategy.hybrid_reranked.value
+
+
 # ---------------------------------------------------------------------------
 # 4. Unsupported path
 # ---------------------------------------------------------------------------

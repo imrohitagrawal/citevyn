@@ -7,12 +7,15 @@
 # database volume (e.g. after a clean-up).
 #
 # What it does:
-#   1. Builds the API + worker images.
-#   2. Starts Postgres + Redis.
-#   3. Waits for both to be healthy.
-#   4. Runs the full alembic migration chain.
-#   5. Seeds the initial admin user (if not already present).
-#   6. Brings up the api, worker, caddy stack.
+#   1. Starts Postgres + Redis (uses pre-built images; run `docker compose
+#      --profile prod build api worker` first if they are missing).
+#   2. Waits for Postgres to accept connections.
+#   3. Runs the full alembic migration chain.
+#   4. Seeds the initial admin user + the demo knowledge catalog (idempotent).
+#   5. Brings up the api + caddy stack. The worker is a one-shot ingest job
+#      (restart: no), NOT started here — run it on demand with
+#      `docker compose --profile prod run --rm worker`.
+#   6. Waits until the api is healthy and caddy is running.
 #
 # Usage:
 #   VERSION=v1.2.3 ./scripts/deploy.sh
