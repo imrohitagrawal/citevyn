@@ -153,7 +153,47 @@ don't diverge; keep merges serial.
 
 **Phase 0 — Measurement & specs (first)**
 - PR0.1 Eval harness: golden set + hit-rate + LLM-judge, local + CI (extends #84). Baseline now.
+  **✅ DONE** (issue #96) — see §8a for the harness + measured baseline.
 - PR0.2 ADRs for embeddings-population, tsvector, ingestion.
+
+## 8a. Phase 0 status + measured baseline (issue #96)
+
+**Harness** (`make eval` / `python -m tests.eval.runner`; CI gate =
+`backend/tests/test_eval_harness.py`, hermetic, in the standard `pytest + lint` job):
+
+- Golden set: `tests/eval/golden.jsonl` — 20 cases, all 5 product areas × {literal,
+  paraphrase} + 5 out-of-corpus refusals. Anchored to the **conftest** seed corpus.
+- Metric 1 — **retrieval hit-rate**: does any top-k hit come from the expected source?
+  Measured on the live routing + `HybridRetriever` path (fully hermetic).
+- Metric 2 — **LLM-as-judge** (1–5 vs expected gist): opt-in; uses the configured LLM
+  (Gemini free). Under the stub it reports "unavailable" — never a faked score.
+- Gate thresholds (`tests/eval/thresholds.py`): literal hit-rate == 1.0, overall answerable
+  ≥ 0.60, refusal leaks == 0. Fail on **regression**, not on the known-dead state.
+
+**Retrieval baseline (measured 2026-07-16, conftest seed corpus, SQLite / vector arm dead):**
+
+| Metric | Value |
+|---|---|
+| Overall answerable hit-rate | **10/15 = 0.667** |
+| — literal | **1.000** (10/10) |
+| — paraphrase | **0.000** (0/5) |
+| Refusal leaks | **0/5** (all correctly retrieve nothing) |
+
+The paraphrase 0.000 is the point: the vector arm is dead (all embeddings NULL, #97). The
+five paraphrases split into two buckets that pre-attribute later-phase deltas:
+
+- **Phase-1-sensitive** (route to the correct domain but keyword-miss; embeddings alone
+  should fix): `claude_api_par_throttle`, `codex_par_engine`, `gemini_api_par_auth`.
+- **Phase-2-sensitive** (route to `unsupported` under hard domain scoping; also need soft
+  scoping): `claude_code_par_toolgate`, `citevyn_par_membership`.
+
+**Judge baseline: NOT YET MEASURED.** The configured Gemini model (`gemini-2.5-flash`)
+returns **404** from this environment's key and the free tier then **429**s, so no real
+answer/judge scores could be produced. The harness handled this correctly — it recorded
+loud per-case errors and reported "no scores" rather than fabricating one (no-silent-stub
+principle). This is a **pre-existing LLM-provider config issue** (stale model/endpoint),
+orthogonal to the harness; tracked as a follow-up. Re-run `CITEVYN_LLM_PROVIDER=gemini
+CITEVYN_GEMINI_API_KEY=… make eval` once the model id is fixed to fill in the judge row.
 
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
