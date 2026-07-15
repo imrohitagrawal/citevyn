@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- RAG eval harness (Phase 0 of `docs/RAG_QUALITY_PLAN.md`, #96): a JSONL
+  golden set at `tests/eval/golden.jsonl` (20 cases across all 5 product
+  areas × {literal, paraphrase} plus out-of-corpus refusals) scored by
+  two outcome metrics — retrieval hit-rate (hermetic, via the live
+  `HybridRetriever` path) and an opt-in LLM-as-judge (1–5 vs an expected
+  gist; reports "unavailable" under the stub, never a fabricated score).
+  The CI gate (`backend/tests/test_eval_harness.py`) runs in the existing
+  hermetic `pytest + lint` job and fails on retrieval regression, refusal
+  leaks, degenerate golden sets, or a total/partial judge outage. Exposed
+  via `make eval`. Baseline recorded in `RAG_QUALITY_PLAN` §8a (literal
+  hit-rate 1.0, paraphrase 0.0 — the dead vector arm, #97).
 - 50-case golden evaluation suite under `tests/golden/cases/` plus a
   runner module that boots the FastAPI app against the in-memory
   SQLite seed and exercises the full public surface. Exposed via
@@ -33,14 +44,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as a workflow artifact.
 
 ### Changed
-- `Makefile` now lists `golden` and `golden-smoke` in the developer
-  workflow header. The `make demo` target resolves `demo-frontend` so
-  the chat UI comes up alongside the API.
+- `Makefile` now lists `golden`, `golden-smoke`, and `eval` (the RAG eval
+  harness) in the developer workflow header. The `make demo` target
+  resolves `demo-frontend` so the chat UI comes up alongside the API.
 - `README.md` §13 ("Demo Build Status") flips from amber to green once
   the golden suite is green on the cut commit. The badge link now
   points at the latest nightly run.
 
 ### Fixed
+- LLM model retirement (#99): the configured chat model `gemini-2.5-flash`
+  is retired for new Google API projects (404 "no longer available to new
+  users"), which broke — or silently forced onto the paid fallback —
+  grounded-answer generation. The primary default is now
+  `gemini-flash-latest` (free tier; alias auto-tracks the current Flash GA)
+  and the OpenRouter fallback is `openai/gpt-4o-mini` — a *different*
+  provider family, so one Google-side retirement can no longer take out
+  both arms at once. Ordering is cost-driven (free primary, paid backstop).
+  Live-verified end-to-end. Surfaced by the Phase 0 eval baseline run.
 - `runner.py` (golden): the in-memory cache and the rate limiter were
   leaking state between cases. The runner now builds a fresh
   `TestClient` per case (configurable via

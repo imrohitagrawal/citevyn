@@ -22,9 +22,17 @@ in the same change.
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#92](https://github.com/imrohitagrawal/citevyn/issues/92) | Worker: prod ingestion needs a real fetcher + shipped sources (default LocalFetcher reads unshipped `tests/fixtures/*.md`, so `run` fails in the prod image) | worker / deploy | Medium (worker model fixed in #81, but ingestion can't succeed until this lands) | #81 verification |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
-| [#96](https://github.com/imrohitagrawal/citevyn/issues/96) | RAG eval harness: golden set + retrieval hit-rate + LLM-as-judge, CI-gated (Phase 0 of RAG_QUALITY_PLAN; supersedes #84 golden-in-CI) | eval / ci | High (measurement foundation for all RAG work) — **PR #98 open, awaiting merge**; baseline in RAG_QUALITY_PLAN §8a | RAG_QUALITY_PLAN |
 | [#97](https://github.com/imrohitagrawal/citevyn/issues/97) | Populate chunk embeddings + index provenance — revive the dead vector arm (all chunk embeddings NULL) (Phase 1) | backend / retrieval | High (dominant cause of poor answers) | RAG_QUALITY_PLAN |
-| [#99](https://github.com/imrohitagrawal/citevyn/issues/99) | LLM: configured Gemini model `gemini-2.5-flash` retired (404) — broke/silently-paid-forced generation. **Fix in PR (open, awaiting merge):** primary → `gemini-flash-latest` (free), fallback → `openai/gpt-4o-mini` (paid, different provider family); live-verified. Judge-baseline refill is a Phase-1 eval-run follow-up. | llm / config | Medium | #96 / PR #98 baseline run |
+
+## Recently closed
+
+- **[#96](https://github.com/imrohitagrawal/citevyn/issues/96)** — RAG eval harness (Phase 0)
+  landed via PR #98 (main `43972a3`). Golden set + retrieval hit-rate + LLM-judge, CI-gated;
+  baseline in `docs/RAG_QUALITY_PLAN.md` §8a.
+- **[#99](https://github.com/imrohitagrawal/citevyn/issues/99)** — retired `gemini-2.5-flash`
+  replaced via PR #100 (main `cc72b01`): primary `gemini-flash-latest` (free) + `openai/gpt-4o-mini`
+  fallback (paid, different provider family). Live-verified. Follow-up: refill the judge baseline
+  (§8a) via `make eval` during Phase 1.
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
