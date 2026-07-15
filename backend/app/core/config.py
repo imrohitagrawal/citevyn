@@ -85,25 +85,40 @@ class Settings(BaseSettings):
     anthropic_api_version: str = "2023-06-01"
     anthropic_timeout_seconds: float = Field(default=30.0, gt=0.0)
 
-    # --- LLM: Gemini + OpenRouter (Slice 9b) ---
+    # --- LLM: Gemini + OpenRouter (Slice 9b; models refreshed #99) ---
     # Primary provider is Gemini (CITEVYN_LLM_PROVIDER=gemini); the factory
     # transparently falls back to OpenRouter when the Gemini call fails or no
     # Gemini key is set but an OpenRouter key is. Set CITEVYN_LLM_PROVIDER=router
     # to route straight to OpenRouter. Keys come from the environment only.
+    #
+    # Model choice is cost-driven (#99): the Gemini primary runs on the Google AI
+    # Studio FREE tier (rate-limited, ~$0), so it is priority-1; GPT-4o-mini on
+    # OpenRouter is the PAID backstop (priority-2), used only when Gemini errors.
+    # Even on Gemini's paid tier, Flash ($0.15/$0.60 per 1M) undercuts GPT-4o-mini,
+    # so the free-primary / paid-fallback ordering is the cheaper arrangement.
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com"
-    gemini_model: str = "gemini-2.5-flash"
+    # ``gemini-flash-latest`` auto-tracks the current Flash GA model. The previous
+    # pin ``gemini-2.5-flash`` was retired for new API projects (404 "no longer
+    # available to new users", #99); ``gemini-2.0-flash`` is being shut down. The
+    # alias avoids re-pinning a soon-to-retire snapshot.
+    gemini_model: str = "gemini-flash-latest"
     # 15s (not 30) so the sequential Gemini→OpenRouter fallback has a ~30s
     # worst-case ceiling rather than 60s. Flash answers return in a few seconds.
     gemini_timeout_seconds: float = Field(default=15.0, gt=0.0)
-    # Gemini "thinking" budget. 0 disables thinking (right for gemini-2.5-flash
-    # doc answers — spends the token budget on the answer, not reasoning). Set
-    # -1 for dynamic, or a positive value for a model that requires thinking
-    # (e.g. gemini-2.5-pro's minimum) if you switch gemini_model.
+    # Gemini "thinking" budget. 0 disables thinking (right for Flash doc answers —
+    # spends the token budget on the answer, not reasoning). Set -1 for dynamic,
+    # or a positive value for a model that requires thinking (e.g. a Pro tier, or
+    # a future Flash that mandates it) if you switch gemini_model.
     gemini_thinking_budget: int = Field(default=0, ge=-1)
     openrouter_api_key: str | None = None
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "google/gemini-2.5-flash"
+    # Paid fallback (priority-2). GPT-4o-mini is the resilience backstop when the
+    # free Gemini primary is unavailable; it was chosen over pinning another
+    # Gemini snapshot on OpenRouter so a single Google-side retirement cannot take
+    # out both arms at once (the prior ``google/gemini-2.5-flash`` shared the #99
+    # retirement with the primary).
+    openrouter_model: str = "openai/gpt-4o-mini"
     openrouter_timeout_seconds: float = Field(default=15.0, gt=0.0)
 
     # --- Retrieval / embeddings (Slice 4+ / #51) ---

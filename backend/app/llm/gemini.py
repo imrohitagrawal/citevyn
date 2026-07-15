@@ -6,7 +6,7 @@ callers may inject a pre-built ``AsyncClient`` for testing (e.g. via
 :class:`httpx.MockTransport`).
 
 Thinking is disabled (``thinkingConfig.thinkingBudget = 0``) so a
-``gemini-2.5-flash`` call spends its ``maxOutputTokens`` budget on the visible
+``gemini-flash-latest`` call spends its ``maxOutputTokens`` budget on the visible
 answer rather than internal reasoning — CiteVyn answers are short, extractive,
 and grounded in the evidence block, so chain-of-thought adds latency and can
 starve the answer of tokens.

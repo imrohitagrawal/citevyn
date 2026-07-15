@@ -2,7 +2,7 @@
 
 Speaks to ``{openrouter_api_base}/chat/completions`` with the API key in an
 ``Authorization: Bearer`` header. OpenRouter is a multi-model gateway; the
-configured ``model`` (e.g. ``google/gemini-2.5-flash``) selects the upstream.
+configured ``model`` (e.g. ``openai/gpt-4o-mini``) selects the upstream.
 It serves as the secondary provider behind the primary Gemini client (see
 :mod:`app.llm.factory`) and can also be selected directly with
 ``CITEVYN_LLM_PROVIDER=router``.
