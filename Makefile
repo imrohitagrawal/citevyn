@@ -6,6 +6,7 @@
 #   make typecheck   — pyright on backend/app (strict)
 #   make test        — pytest (excludes the ``postgres`` marker)
 #   make golden      — run the 50-case golden evaluation suite
+#   make eval        — run the RAG eval harness (retrieval hit-rate + LLM judge)
 #   make smoke       — end-to-end curl against uvicorn on SQLite
 #   make clean       — drop caches
 #
@@ -37,7 +38,7 @@ export VERSION
 export PROFILE
 
 .PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
-        build push deploy refresh logs backup restore golden golden-smoke e2e
+        build push deploy refresh logs backup restore golden golden-smoke eval e2e
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -64,6 +65,10 @@ golden: ## Run the golden-case test suite (see tests/golden/README.md)
 golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 	cd backend && uv sync --group dev
 	cd backend && uv run python -m tests.golden.runner --ids claude_api_001,claude_api_004,cross_005 --report artifacts/golden_report_smoke.json
+
+eval: ## Run the RAG eval harness (retrieval hit-rate + LLM judge if a key is set; see tests/eval/README.md)
+	cd backend && uv sync --group dev
+	cd backend && env -u CITEVYN_DATABASE_URL uv run python -m tests.eval.runner --report artifacts/eval_report.json
 
 # ─────────────────────────── Local development ───────────────────────────
 

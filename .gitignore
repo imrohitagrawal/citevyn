@@ -54,3 +54,6 @@ infra/docker/citevyn_pgdata/
 
 # Playwright live-mode report dir
 playwright-report-live/
+
+# Generated eval / golden run reports (make eval / make golden write here)
+artifacts/
