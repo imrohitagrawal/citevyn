@@ -212,7 +212,48 @@ eval-set bias (grow to 50–100 + adversarial cases).
 
 ---
 
-## 11. Tracking
+## 11a. LLM & embedding provider strategy (testing tiers)
+
+Keys present in `.env`: **Gemini ✓, OpenRouter ✓** (OpenRouter wired as *fallback* only).
+
+- **Embeddings:** Gemini `gemini-embedding-001`@1536 (`CITEVYN_EMBEDDING_PROVIDER=gemini`).
+  Free tier is **rate-limit-bound for bulk corpus embedding** (embedding a full docs set = thousands
+  of calls). Mitigate: **bounded corpus in dev** (hundreds of chunks, not 13k), batching, throttling,
+  and caching embeddings; scale the corpus only once the pipeline is proven. The golden set is tiny (20).
+- **Generation — dev / eval loop:** **Gemini (free).** `CITEVYN_LLM_PROVIDER=gemini` (current). OpenRouter
+  stays fallback-only, so dev spend ≈ 0.
+- **Generation — final exact testing:** **OpenRouter (paid, on demand).** Switch via
+  `CITEVYN_LLM_PROVIDER=openrouter` and pin the model with `CITEVYN_OPENROUTER_MODEL`
+  (knob exists; default `google/gemini-2.5-flash`). Use only for the final gated eval run; specify the
+  exact model at that point. Do **not** leave the provider on OpenRouter during iterative testing.
+- **Cost control:** the free Gemini path carries all iterative work; OpenRouter is reserved for the final
+  quality run (and as resilience fallback). If zero OpenRouter spend is required during dev, keep provider
+  = gemini (fallback won't fire unless Gemini errors).
+
+## 11b. Budget (5x-token plan) & ultracode
+
+The 5x-token plan makes **fan-out affordable**: run reviews, research, design panels, and test-authoring
+as parallel ultracode workflows. Keep the build **critical path sequential** and **merges serial**
+regardless of budget. Bound each ultracode run and prefer `pipeline()` streaming over big barriers.
+
+## 11c. Estimate & first-demo milestone
+
+**First meaningful live demo = end of Phase 0 + Phase 1** — a real, embedded corpus with working
+semantic search, eval-proven (not cherry-picked). Effort estimate (me implementing, ultracode fan-out
+for review/exploration, gated by the review-until-clean loop and your merge cadence):
+
+| Milestone | Effort | Notes |
+|---|---|---|
+| Phase 0 — eval harness + golden set + baseline | ~1 session | mostly independent; parallelizable |
+| Phase 1 — embeddings + bounded real ingestion + promote | ~1–2 sessions | **embedding rate limits are the main variable** |
+| **→ First live demo (semantic answers on real corpus)** | **~2–3 sessions total** | the walking-skeleton milestone |
+| Phase 2 — retrieval quality (BM25/RRF/scoping) | ~1–2 sessions | |
+| Phase 3 + 4 — advanced + UX/ops | ~2–3 sessions | |
+| **Full plan** | **~6–9 focused sessions** | wall-clock depends on review iteration, merge cadence, embedding limits |
+
+These are **effort** estimates, not calendar promises; each PR runs the fan-out-review-until-clean loop.
+
+## 12. Tracking
 
 - New: **RAG eval harness** (Phase 0), **Populate chunk embeddings + provenance** (Phase 1).
 - Existing folded in: **#92** (real ingestion), **#84** (golden-in-CI overlap), **#87**
