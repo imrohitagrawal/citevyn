@@ -46,5 +46,29 @@
   + unique index_version + refuse in production + residue assertion.
 - **PR1.2 = #92** real HTTP fetcher + shipped sources (next).
 
-### How to test live in the morning
-- TBD once Phase 1 lands. (Will document the exact db→migrate→ingest→promote→eval→uvicorn chain.)
+### Phase 1 PR1.1 — code COMPLETE + committed (branch feat/rag-phase1-embeddings, `d743cbc`)
+- **All gates passed while Docker was up:** 607 hermetic pytest + 8 postgres + ruff format/check
+  + pyright(app) 0 errors. PG eval PROVEN + captured (`/tmp/cv_eval_pg.json`):
+  paraphrase 0/5→3/5, overall 13/15 (0.867), literal 1.0, refusal leaks 0/5, **zero residue**.
+  Semantic-discrimination proof: real 5/5 vs stub ≤2/5.
+- **Fan-out PR review running** (8 dimensions × adversarial per-finding verify).
+- Judge baseline deferred (Gemini generation also rate-limited; long paid-fallback txn was cut
+  by the Docker crash — orthogonal to the retrieval gate).
+- **⚠️ Docker Desktop CRASHED mid-run** ("unable to start"). Does NOT block PR/CI (CI runs its
+  own Postgres; hermetic gates need no Docker; PG proof already captured). Restart attempted.
+  Only affects local re-runs + the morning live demo (restart Docker first).
+
+### How to test live in the morning (after Phase 1 merges)
+1. Ensure Docker Desktop is running (it crashed during the autonomous run — reopen it).
+2. `make db-up` then migrate with the real password:
+   `export PGPW=$(grep '^POSTGRES_PASSWORD=' infra/docker/.env|cut -d= -f2-)`
+   `export DB_URL="postgresql+psycopg://citevyn:$PGPW@localhost:5432/citevyn"` ; `make migrate`
+3. Seed WITH real embeddings (revives the vector arm on the demo index):
+   `CITEVYN_DATABASE_URL=$DB_URL CITEVYN_EMBEDDING_PROVIDER=openrouter
+    CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small
+    uv run --project backend python -m db.seed.seed_users`  (then seed_catalog)
+4. Prove the eval jump on real pgvector:
+   `cd backend && CITEVYN_DATABASE_URL=$DB_URL CITEVYN_EMBEDDING_PROVIDER=openrouter
+    CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small
+    uv run python -m tests.eval.runner --postgres --no-judge`  → overall 0.867, paraphrase 0.6.
+   (Requires an EMPTY catalog; truncate first if you seeded in step 3.)
