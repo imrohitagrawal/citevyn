@@ -1,9 +1,9 @@
 # ────────────────────────────────────────────────────────────────────────────
 # CiteVyn production Caddy configuration.
 #
-# Caddy v2 auto-provisions a Let's Encrypt certificate the first time
-# it sees traffic on :443. The ACME HTTP-01 challenge is served on
-# :80 (see the second listener below).
+# Caddy v2 provisions a managed Let's Encrypt certificate for the
+# named site ($CITEVYN_PUBLIC_HOST) eagerly at startup. The ACME
+# HTTP-01 challenge is served on :80 (see the second listener below).
 #
 # Reverse proxy:
 #   :443  →  http://api:8000  (the FastAPI app inside the docker network)
@@ -55,24 +55,32 @@
 # Listener for the ACME HTTP-01 challenge and explicit health probes.
 :80 {
     # ACME HTTP-01 challenge paths (.well-known/acme-challenge/*) are
-    # served automatically by Caddy's on-demand TLS. Every other
-    # request is redirected to the HTTPS listener.
+    # served automatically by Caddy while it provisions the managed
+    # certificate for the named site below. Every other request is
+    # redirected to the HTTPS listener.
     @notacme {
         not path /.well-known/acme-challenge/*
     }
     redir @notacme https://{host}{uri} permanent
 }
 
-# Main HTTPS listener.
-:443 {
-    # On-demand TLS pulls a Let's Encrypt certificate the first time
-    # this host is requested. If the challenge fails (DNS / port
-    # 80 unreachable), the request is rejected with 522 — so the
-    # operator can detect the misconfiguration from a 4xx response
-    # rather than a silent 200.
+# Main HTTPS listener, scoped to the deployment's public host.
+#
+# Caddy provisions a single managed Let's Encrypt certificate for
+# ``$CITEVYN_PUBLIC_HOST`` via the HTTP-01 challenge on :80 (served by
+# the listener above). The host is known from the environment at
+# deploy time, so we name the site explicitly rather than using a
+# wildcard ``:443`` site with on-demand TLS.
+#
+# The previous ``:443`` + ``tls { on_demand }`` form no longer boots:
+# current Caddy (>= 2.5) refuses on-demand TLS unless an
+# ``on_demand_tls { ask <endpoint> }`` permission module is configured
+# to prevent cert-issuance abuse ("on-demand TLS cannot be enabled
+# without a permission module"). Because there is exactly one known
+# host, on-demand was never necessary.
+{$CITEVYN_PUBLIC_HOST} {
     tls {
         protocols tls1.2 tls1.3
-        on_demand
     }
 
     # Strict security headers on every response.
@@ -94,12 +102,14 @@
         -Server
     }
 
-    # Compress JSON responses; the 1KB threshold keeps tiny 200s
-    # uncompressed to avoid the CPU overhead. ``zstd`` is not
-    # available in the standard ``caddy:2-alpine`` image (it
-    # requires a custom build with the ``caddy-zstd`` module);
-    # we use gzip only.
-    encode gzip 1
+    # Compress responses with gzip. ``zstd`` is not available in the
+    # standard ``caddy:2-alpine`` image (it requires a custom build
+    # with the ``caddy-zstd`` module), so we use gzip only. The bare
+    # ``encode gzip`` directive is correct: a trailing token (e.g.
+    # ``encode gzip 1``) is parsed by Caddy as a second *encoder
+    # module name* — ``http.encoders.1`` — which is not registered,
+    # so the Caddyfile fails to adapt and the container crash-loops.
+    encode gzip
 
     # Liveness / readiness pass-through. The API's /health endpoint
     # is a pure DB-free probe and is safe to hit at high frequency.

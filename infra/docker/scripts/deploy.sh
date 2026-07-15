@@ -58,15 +58,28 @@ docker compose \
     --rm \
     --no-deps \
     api \
-    alembic \
+    python -m alembic \
         --config /db/alembic.ini \
-        --sqlalchemy-url "${CITEVYN_DATABASE_URL:?CITEVYN_DATABASE_URL must be set in .env}" \
     upgrade head
+# NB: invoke via ``python -m alembic`` — the ``alembic`` console script
+# in the runtime image carries a builder-stage shebang
+# (``#!/build/backend/.venv/bin/python``) that does not exist at runtime,
+# so a bare ``alembic`` exec fails with "no such file or directory".
+# No ``--sqlalchemy-url`` is passed (it is also not a valid alembic
+# 1.18 CLI option): ``db/env.py`` reads ``CITEVYN_DATABASE_URL`` from
+# the container env (compose ``env_file``) whenever ``alembic.ini``
+# still holds its ``sqlite:///placeholder.db`` default. If that var is
+# unset, env.py falls back to the ``config.py`` localhost default
+# (``postgres@localhost``, unreachable from the api container) and
+# fails opaquely — so ``_env_guard.sh`` fails fast on a missing
+# ``CITEVYN_DATABASE_URL`` before we get here.
 
 echo "==> seeding the initial admin user (idempotent)"
 # The seed module lives at ``db/seed/seed_users.py`` (not under
-# ``app/``); the api image has ``db/`` mounted at ``/db`` and
-# ``PYTHONPATH=/db`` so ``python -m db.seed.seed_users`` resolves.
+# ``app/``). The api image copies ``db/`` to ``/db`` and sets
+# ``PYTHONPATH=/db``, so ``/db`` itself is the package root on
+# ``sys.path`` — the module resolves as ``seed.seed_users`` (NOT
+# ``db.seed.seed_users``, which would need ``/`` on the path).
 # ``seed_users.seed()`` is idempotent: existing rows are left
 # untouched, so re-running this script on a populated database
 # is a no-op.
@@ -76,7 +89,7 @@ docker compose \
     --rm \
     --no-deps \
     api \
-    python -m db.seed.seed_users
+    python -m seed.seed_users
 
 echo "==> seeding the demo knowledge catalog (idempotent)"
 # Without this step the production DB has zero chunks on cold start and
@@ -85,13 +98,15 @@ echo "==> seeding the demo knowledge catalog (idempotent)"
 # idempotent — existing ``v1`` rows are left untouched — so re-running
 # on a populated database is a no-op. Operators ingest richer content
 # via the worker (``refresh.sh`` + admin promote) once the stack is up.
+# Resolves as ``seed.seed_catalog`` for the same reason as the admin
+# seed above (``/db`` is the package root on ``PYTHONPATH``).
 docker compose \
     --profile prod \
     run \
     --rm \
     --no-deps \
     api \
-    python -m db.seed.seed_catalog
+    python -m seed.seed_catalog
 
 echo "==> verifying the admin row landed"
 # Sanity-check that the seed actually wrote a row (the script
@@ -104,20 +119,43 @@ if [[ "${ADMIN_COUNT}" != "1" ]]; then
     exit 1
 fi
 
-echo "==> bringing up api + worker + caddy"
-docker compose --profile prod up -d
+echo "==> bringing up the long-running services (api + caddy)"
+# The worker is intentionally NOT started here. It is a one-shot ingest
+# job (compose ``worker`` service: CMD ``... run``, ``restart: "no"``),
+# not a resident service — so it never needs a health probe and cannot
+# crash-loop. Ingestion is an explicit operator step run once the
+# worker's source fetcher is configured for this deployment:
+#
+#     docker compose --profile prod run --rm worker
+#
+# It writes a *candidate* IndexVersion that an admin then promotes; the
+# live demo answers from the seeded ``v1`` active index until then, so
+# the deploy does not depend on ingestion. (The default CLI fetcher
+# reads local test fixtures that are not shipped in the runtime image —
+# a prod HTTP fetcher + source config is tracked as a follow-up.)
+docker compose --profile prod up -d api caddy
 
-echo "==> waiting for /health (max 60s)"
+echo "==> waiting for the api to become healthy (max 60s)"
+# Poll the api container's OWN health status (its compose healthcheck
+# hits http://localhost:8000/health *inside* the container), NOT
+# http://localhost/health: the :80 Caddy site 301-redirects every
+# non-ACME path to HTTPS, and ``curl --fail`` (no ``-L``) treats a 3xx
+# as success — so a crash-looping api would be reported healthy
+# (the pre-existing false-green gate this replaces).
 for _ in $(seq 1 30); do
-    if curl --silent --fail http://localhost/health >/dev/null; then
-        echo "==> healthy"
-        echo "==> ACME cert will be issued lazily on the first :443 request"
+    _api_health="$(docker inspect --format '{{.State.Health.Status}}' citevyn-api 2>/dev/null || true)"
+    if [[ "${_api_health}" == "healthy" ]]; then
+        echo "==> api healthy"
+        echo "==> Caddy provisions the TLS certificate for the configured"
+        echo "    CITEVYN_PUBLIC_HOST eagerly at startup via the ACME HTTP-01"
+        echo "    challenge on :80; tail the caddy logs to confirm issuance"
+        echo "    once DNS for that host resolves here and :80/:443 are open."
         echo "==> tail logs with: docker compose --profile prod logs -f"
         exit 0
     fi
     sleep 2
 done
 
-echo "warning: /health did not return 200 within 60s" >&2
-echo "         inspect with: docker compose --profile prod logs api" >&2
+echo "error: api did not become healthy within 60s" >&2
+echo "       inspect with: docker compose --profile prod logs api" >&2
 exit 1
