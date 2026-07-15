@@ -22,6 +22,8 @@ in the same change.
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#92](https://github.com/imrohitagrawal/citevyn/issues/92) | Worker: prod ingestion needs a real fetcher + shipped sources (default LocalFetcher reads unshipped `tests/fixtures/*.md`, so `run` fails in the prod image) | worker / deploy | Medium (worker model fixed in #81, but ingestion can't succeed until this lands) | #81 verification |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
+| [#96](https://github.com/imrohitagrawal/citevyn/issues/96) | RAG eval harness: golden set + retrieval hit-rate + LLM-as-judge, CI-gated (Phase 0 of RAG_QUALITY_PLAN; supersedes #84 golden-in-CI) | eval / ci | High (measurement foundation for all RAG work) | RAG_QUALITY_PLAN |
+| [#97](https://github.com/imrohitagrawal/citevyn/issues/97) | Populate chunk embeddings + index provenance — revive the dead vector arm (all chunk embeddings NULL) (Phase 1) | backend / retrieval | High (dominant cause of poor answers) | RAG_QUALITY_PLAN |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
