@@ -187,10 +187,13 @@ five paraphrases split into two buckets that pre-attribute later-phase deltas:
 - **Phase-2-sensitive** (route to `unsupported` under hard domain scoping; also need soft
   scoping): `claude_code_par_toolgate`, `citevyn_par_membership`.
 
-**Judge baseline: NOT YET MEASURED.** The configured Gemini model (`gemini-2.5-flash`)
-returns **404** from this environment's key and the free tier then **429**s, so no real
-answer/judge scores could be produced. The harness handled this correctly — it recorded
-loud per-case errors and reported "no scores" rather than fabricating one (no-silent-stub
+**Judge baseline: NOT YET MEASURED** at Phase-0 authoring time. The then-configured Gemini
+model (`gemini-2.5-flash`) returned **404** (retired for new projects) and the free tier then
+**429**s, so no real answer/judge scores could be produced. **Resolved by #99:** the primary
+is now `gemini-flash-latest` (free) with an `openai/gpt-4o-mini` paid fallback, both
+live-verified — re-run `CITEVYN_LLM_PROVIDER=gemini … make eval` to fill this row. The harness
+handled the outage correctly — it recorded loud per-case errors and reported "no scores"
+rather than fabricating one (no-silent-stub
 principle). This is a **pre-existing LLM-provider config issue** (stale model/endpoint),
 orthogonal to the harness; tracked as a follow-up. Re-run `CITEVYN_LLM_PROVIDER=gemini
 CITEVYN_GEMINI_API_KEY=… make eval` once the model id is fixed to fill in the judge row.
@@ -263,9 +266,9 @@ Keys present in `.env`: **Gemini ✓, OpenRouter ✓** (OpenRouter wired as *fal
 - **Generation — dev / eval loop:** **Gemini (free).** `CITEVYN_LLM_PROVIDER=gemini` (current). OpenRouter
   stays fallback-only, so dev spend ≈ 0.
 - **Generation — final exact testing:** **OpenRouter (paid, on demand).** Switch via
-  `CITEVYN_LLM_PROVIDER=openrouter` and pin the model with `CITEVYN_OPENROUTER_MODEL`
-  (knob exists; default `google/gemini-2.5-flash`). Use only for the final gated eval run; specify the
-  exact model at that point. Do **not** leave the provider on OpenRouter during iterative testing.
+  `CITEVYN_LLM_PROVIDER=router` and pin the model with `CITEVYN_OPENROUTER_MODEL`
+  (knob exists; default `openai/gpt-4o-mini` since #99). Use only for the final gated eval run;
+  specify the exact model at that point. Do **not** leave the provider on OpenRouter during iterative testing.
 - **Cost control:** the free Gemini path carries all iterative work; OpenRouter is reserved for the final
   quality run (and as resilience fallback). If zero OpenRouter spend is required during dev, keep provider
   = gemini (fallback won't fire unless Gemini errors).

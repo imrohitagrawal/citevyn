@@ -24,7 +24,7 @@ in the same change.
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
 | [#96](https://github.com/imrohitagrawal/citevyn/issues/96) | RAG eval harness: golden set + retrieval hit-rate + LLM-as-judge, CI-gated (Phase 0 of RAG_QUALITY_PLAN; supersedes #84 golden-in-CI) | eval / ci | High (measurement foundation for all RAG work) — **PR #98 open, awaiting merge**; baseline in RAG_QUALITY_PLAN §8a | RAG_QUALITY_PLAN |
 | [#97](https://github.com/imrohitagrawal/citevyn/issues/97) | Populate chunk embeddings + index provenance — revive the dead vector arm (all chunk embeddings NULL) (Phase 1) | backend / retrieval | High (dominant cause of poor answers) | RAG_QUALITY_PLAN |
-| [#99](https://github.com/imrohitagrawal/citevyn/issues/99) | LLM: configured Gemini model `gemini-2.5-flash` returns 404 (generation + eval judge cannot run); confirm model id / API version, fix default + infra/docker/.env, fill judge baseline | llm / config | Medium (blocks the eval judge baseline; likely breaks live-demo generation too) | #96 / PR #98 baseline run |
+| [#99](https://github.com/imrohitagrawal/citevyn/issues/99) | LLM: configured Gemini model `gemini-2.5-flash` retired (404) — broke/silently-paid-forced generation. **Fix in PR (open, awaiting merge):** primary → `gemini-flash-latest` (free), fallback → `openai/gpt-4o-mini` (paid, different provider family); live-verified. Judge-baseline refill is a Phase-1 eval-run follow-up. | llm / config | Medium | #96 / PR #98 baseline run |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 

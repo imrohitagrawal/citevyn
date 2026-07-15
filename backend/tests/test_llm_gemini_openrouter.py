@@ -324,7 +324,31 @@ def _settings(**over: object) -> Settings:
     return Settings(**base)  # type: ignore[arg-type]
 
 
+def test_default_llm_models_encode_cost_priority() -> None:
+    """#99: Gemini Flash (free tier) is the priority-1 primary; GPT-4o-mini on
+    OpenRouter is the paid priority-2 fallback.
+
+    Locked as a regression guard so a refactor cannot silently repin the retired
+    ``gemini-2.5-flash`` (404 "no longer available to new users") on either arm,
+    and so the fallback stays a *different* provider family — otherwise a single
+    Google-side retirement takes out both the primary and the backstop at once,
+    which is exactly the #99 failure.
+    """
+    # Assert the CLASS defaults (not Settings(), which would absorb a
+    # CITEVYN_GEMINI_MODEL / .env override and could mask a reverted default).
+    gemini_default = Settings.model_fields["gemini_model"].default
+    openrouter_default = Settings.model_fields["openrouter_model"].default
+    assert gemini_default == "gemini-flash-latest"
+    assert openrouter_default == "openai/gpt-4o-mini"
+    assert not openrouter_default.startswith("google/"), (
+        "fallback must be a different provider family than the Gemini primary"
+    )
+
+
 def test_factory_gemini_with_both_keys_builds_fallback() -> None:
+    # Cost-priority wiring (#99): both keys present ⇒ Gemini primary (free) with
+    # the OpenRouter GPT-4o-mini paid backstop. The factory threads
+    # settings.gemini_model / settings.openrouter_model into the two arms.
     client = build_llm_client(_settings(gemini_api_key="gm", openrouter_api_key="or"))
     assert isinstance(client, FallbackLLMClient)
     assert isinstance(client, LLMClient)
