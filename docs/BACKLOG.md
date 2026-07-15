@@ -20,6 +20,8 @@ in the same change.
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
+| [#96](https://github.com/imrohitagrawal/citevyn/issues/96) | RAG eval harness: golden set + retrieval hit-rate + LLM-as-judge, CI-gated (Phase 0 of RAG_QUALITY_PLAN; supersedes #84 golden-in-CI) | eval / ci | High (measurement foundation for all RAG work) | RAG_QUALITY_PLAN |
+| [#97](https://github.com/imrohitagrawal/citevyn/issues/97) | Populate chunk embeddings + index provenance — revive the dead vector arm (all chunk embeddings NULL) (Phase 1) | backend / retrieval | High (dominant cause of poor answers) | RAG_QUALITY_PLAN |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
