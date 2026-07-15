@@ -45,12 +45,14 @@ class SourceSpec:
     title: str
     fetcher: str
     location: str
-    # Official upstream URL this fixture paraphrases. Stamped onto
+    # Official upstream URL this source paraphrases. Stamped onto
     # :class:`Document.source_url` so citations resolve to a real source. The
-    # fixtures under ``tests/fixtures/sources`` are original, license-clean
+    # source docs under ``app/worker/sources`` are original, license-clean
     # summaries — not verbatim copies — of the page at this URL (see
-    # docs/ADR/0003-embeddings-provider.md). Defaults to "" so ad-hoc
-    # ``SourceSpec`` constructions (tests) need not supply it.
+    # docs/ADR/0003-embeddings-provider.md). They live under ``app/`` (not
+    # ``tests/``) so they ship inside the prod worker image and ``run`` can
+    # ingest them (#92). Defaults to "" so ad-hoc ``SourceSpec`` constructions
+    # (tests) need not supply it.
     source_url: str = ""
 
 
@@ -73,7 +75,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         product_area="claude_api",
         title="Claude API Reference",
         fetcher="local",
-        location="tests/fixtures/sources/claude_api.md",
+        location="app/worker/sources/claude_api.md",
         source_url="https://docs.anthropic.com/en/api/overview",
     ),
     SourceSpec(
@@ -81,7 +83,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         product_area="claude_code",
         title="Claude Code Reference",
         fetcher="local",
-        location="tests/fixtures/sources/claude_code.md",
+        location="app/worker/sources/claude_code.md",
         source_url="https://docs.anthropic.com/en/docs/claude-code/overview",
     ),
     SourceSpec(
@@ -89,7 +91,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         product_area="codex",
         title="Codex CLI Reference",
         fetcher="local",
-        location="tests/fixtures/sources/codex.md",
+        location="app/worker/sources/codex.md",
         source_url="https://developers.openai.com/codex/cli/",
     ),
     SourceSpec(
@@ -97,7 +99,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         product_area="gemini_api",
         title="Gemini API Reference",
         fetcher="local",
-        location="tests/fixtures/sources/gemini_api.md",
+        location="app/worker/sources/gemini_api.md",
         source_url="https://ai.google.dev/gemini-api/docs",
     ),
     SourceSpec(
@@ -105,7 +107,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         product_area="citevyn",
         title="About CiteVyn",
         fetcher="local",
-        location="tests/fixtures/sources/citevyn.md",
+        location="app/worker/sources/citevyn.md",
         # CiteVyn describes itself — there is no external upstream doc, so the
         # citation points at CiteVyn's own about page. A RELATIVE path keeps it
         # host-agnostic and never references a domain we don't own (a hard-coded

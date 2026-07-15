@@ -172,7 +172,7 @@ async def test_run_marks_job_failed_on_fetch_error(
         product_area="missing",
         title="Missing Source",
         fetcher="local",
-        location="tests/fixtures/sources/does-not-exist.md",
+        location="app/worker/sources/does-not-exist.md",
     )
     runner = IngestionRunner(
         fetcher=LocalFetcher(),

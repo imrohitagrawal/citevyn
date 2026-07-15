@@ -13,7 +13,7 @@ def _spec() -> SourceSpec:
         product_area="claude_api",
         title="Claude API Reference",
         fetcher="local",
-        location="tests/fixtures/sources/claude_api.md",
+        location="app/worker/sources/claude_api.md",
     )
 
 

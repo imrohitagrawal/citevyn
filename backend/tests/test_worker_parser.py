@@ -51,10 +51,10 @@ def test_parse_full_claude_api_fixture() -> None:
     """The Claude API fixture parses to one H1 + one block per H2 section."""
     from pathlib import Path
 
-    # Resolve relative to *this* test file so the test works
-    # regardless of pytest's CWD (CI uses ``backend``, local
-    # ``make`` invocations use the repo root).
-    fixture = Path(__file__).resolve().parent / "fixtures" / "sources" / "claude_api.md"
+    # The source docs ship as package data under ``app/worker/sources`` (#92) so
+    # the prod worker image contains them. Resolve relative to *this* test file
+    # (parents[1] == the backend dir) so the test works regardless of pytest CWD.
+    fixture = Path(__file__).resolve().parents[1] / "app" / "worker" / "sources" / "claude_api.md"
     raw = fixture.read_text(encoding="utf-8")
     parsed = parse_markdown(raw)
     assert parsed.title == "Claude API Reference"

@@ -49,6 +49,13 @@ docs/
 diagrams/
 *.md
 !backend/README.md
+# The worker's source corpus ships as package data (#92) — these .md files ARE
+# app data the prod worker ingests, not documentation. Docker's ``*.md`` above
+# does NOT match nested paths (unlike .gitignore), so they already ship today;
+# this explicit re-include documents the intent and future-proofs against a
+# broader rule (e.g. ``**/*.md``) that WOULD strip them and break
+# ``citevyn-worker run`` in the image.
+!backend/app/worker/sources/*.md
 
 # Repo-root files we don't ship inside the image
 .claude/

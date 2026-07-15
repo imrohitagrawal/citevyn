@@ -173,12 +173,11 @@ class Settings(BaseSettings):
     # (MVP_SOURCES) so a re-ingest produces a fresh IndexVersion.
     source_version_hash: str = "sha256:mvp-snapshot-2"
 
-    # --- Fixtures root (Slice 9a) ---
-    # Path to the on-disk source corpus the ingestion worker reads.
-    # Local dev defaults to the test fixtures shipped with the repo;
-    # production deploys override to a bind-mounted directory managed
-    # by ``scripts/refresh_sources.sh`` (lands in Slice 9c).
-    fixtures_root: str = "backend/fixtures/sources"
+    # (The former ``fixtures_root`` setting was removed in #92: it was dead config
+    # — nothing read it, and it pointed at a non-existent ``backend/fixtures/sources``.
+    # The worker's ``LocalFetcher`` resolves ``SourceSpec.location`` against the
+    # package root, and the source docs now ship under ``app/worker/sources`` so a
+    # prod ``run`` can read them without a bind mount.)
 
     # --- Redis key prefix (Slice 9a) ---
     # All keys created by the rate limiter are namespaced with this
