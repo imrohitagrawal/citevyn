@@ -78,6 +78,21 @@ docker compose \
     api \
     python -m db.seed.seed_users
 
+echo "==> seeding the demo knowledge catalog (idempotent)"
+# Without this step the production DB has zero chunks on cold start and
+# every retrieval arm returns [], so the orchestrator serves no_answer
+# for every question (Issue 2 / F0). ``seed_catalog.seed()`` is
+# idempotent — existing ``v1`` rows are left untouched — so re-running
+# on a populated database is a no-op. Operators ingest richer content
+# via the worker (``refresh.sh`` + admin promote) once the stack is up.
+docker compose \
+    --profile prod \
+    run \
+    --rm \
+    --no-deps \
+    api \
+    python -m db.seed.seed_catalog
+
 echo "==> verifying the admin row landed"
 # Sanity-check that the seed actually wrote a row (the script
 # exits non-zero if the seed module's commit failed silently).

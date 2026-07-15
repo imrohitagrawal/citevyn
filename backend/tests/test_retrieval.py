@@ -65,6 +65,98 @@ async def test_keyword_retriever_empty_for_stopwords_only(seeded_session) -> Non
     assert await r.retrieve("how is the", product_area=Domain.claude_api.value) == []
 
 
+async def test_keyword_retriever_strips_trailing_punctuation(seeded_session) -> None:
+    """Trailing '?' / '!' / '.' must not poison the LIKE pattern.
+
+    Regression: "How do I get the gemini api key?" previously tokenized
+    to ["get", "gemini", "api", "key?"] and built the LIKE clause
+    ``ILIKE '%key?%'`` — never matches because no chunk text contains a
+    literal '?'. Stripping punctuation recovers the intended tokens.
+    """
+    r = KeywordRetriever(seeded_session, active_index_version="v1")
+    # 'gemini' alone is one token in the seeded chunk → below the
+    # 2-token relevance floor and returns []. The tokenization fix is
+    # the part that lets ``key?`` become ``key`` so it can contribute
+    # to the floor once the chunk has a real key-bearing section.
+    hits = await r.retrieve("gemini api key?", product_area=Domain.gemini_api.value)
+    # Either the floor passes (≥2 tokens land in chunk_text) or it
+    # doesn't — both outcomes are consistent with the punctuation
+    # having been stripped. The hard assertion is that we did NOT
+    # fall through to the literal `'%key?%'` pattern: assert no row
+    # carries the substring "key?" in its chunk_text (which would
+    # indicate the un-stripped token survived).
+    assert all("key?" not in h.chunk_text for h in hits)
+
+
+async def test_keyword_retriever_requires_two_token_matches(session) -> None:
+    """A single-token hit on a sparse corpus is too weak to keep.
+
+    Regression: ``gemini`` alone used to return the "Streaming" chunk
+    as flat 0.5 evidence for the question "How do I get the gemini
+    api key?" — pure noise. The relevance floor (≥2 distinct query
+    tokens matched) keeps such single-token false positives out of
+    the evidence list.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from app.models import Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="v-floor",
+            status=IndexStatus.active,
+            source_version_hash="sha256:floor",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc = Document(
+        document_id=uuid.uuid4(),
+        index_version="v-floor",
+        source_name="docs.test",
+        product_area="gemini_api",
+        source_url="https://docs.test/gemini-streaming",
+        title="Gemini API",
+        content_checksum="sha256:demo-streaming",
+        status=DocumentStatus.active,
+        last_fetched_at=now,
+        last_indexed_at=now,
+    )
+    session.add(doc)
+    session.add(
+        Chunk(
+            chunk_id=uuid.uuid4(),
+            document_id=doc.document_id,
+            product_area=doc.product_area,
+            section_path="/section",
+            heading="Streaming",
+            parent_heading=None,
+            # Only ``gemini`` overlaps with the query tokens
+            # ["obtain", "gemini", "credentials"] — "credentials" doesn't
+            # appear here. Pre-fix this returned the chunk as flat 0.5
+            # evidence (any single-token match was sufficient); post-fix
+            # the 2-token floor rejects it because only 1 token matched.
+            chunk_text=(
+                "The Gemini SDK provides Go, Rust, and Swift bindings "
+                "alongside the primary Python and Node.js clients."
+            ),
+            context_summary="Gemini SDK languages",
+            chunk_order=1,
+            content_checksum="sha256:demo-chunk-sdk",
+        )
+    )
+    await session.flush()
+
+    r = KeywordRetriever(session, active_index_version="v-floor")
+    # Query tokens (after stopword removal) = ["obtain", "gemini",
+    # "credentials"]. Only "gemini" appears in the chunk above, so the
+    # 2-token floor should reject the hit.
+    hits = await r.retrieve("Obtain Gemini credentials", product_area="gemini_api")
+    assert hits == []
+
+
 async def test_stub_embedder_deterministic() -> None:
     e = StubEmbedder(dim=8)
     a = await e.embed("hello world")

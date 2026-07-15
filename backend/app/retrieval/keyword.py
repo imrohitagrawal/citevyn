@@ -41,7 +41,7 @@ class KeywordRetriever:
         limit: int = 10,
     ) -> list[RetrievedChunk]:
         tokens = [
-            tok
+            tok.rstrip("?!.,;:")
             for tok in question.lower().split()
             if tok and tok not in _STOPWORDS and any(c.isalnum() for c in tok)
         ]
@@ -62,6 +62,22 @@ class KeywordRetriever:
         stmt = stmt.order_by(Chunk.chunk_order.asc()).limit(limit)
 
         rows = (await self._session.execute(stmt)).all()
+        if not rows:
+            return []
+
+        # Require the relevant number of distinct query tokens to match:
+        # single-token queries ("model", "gemini") must match at least
+        # 1 token; multi-token queries need at least 2. This prevents
+        # a single noisy token (e.g., "gemini") from dominating a
+        # 4-token question about API keys, while keeping single-token
+        # search useful.
+        required_matches = max(1, min(2, len(tokens)))
+        matched_token_count = sum(
+            1 for tok in tokens if any(tok in (chunk.chunk_text or "").lower() for chunk, _ in rows)
+        )
+        if matched_token_count < required_matches:
+            return []
+
         return [
             RetrievedChunk(
                 chunk_id=chunk.chunk_id,

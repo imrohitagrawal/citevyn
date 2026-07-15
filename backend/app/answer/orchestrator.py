@@ -28,7 +28,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import AnswerGenerator
@@ -221,13 +221,35 @@ async def _retrieve_active_index(
     reports the *actual* runtime degrade reason back from ``retrieve()`` and the
     write gate uses that (#70/#72), so this no longer resolves the embedder stamp.
     """
+    from app.core.middleware import get_current_request_id
     from app.models import IndexStatus, IndexVersion
+
+    # Enforce the single-active-row invariant (#58) loudly rather than silently
+    # picking a deterministic-but-arbitrary winner. Two ``active`` rows means
+    # the previous promote did not demote the prior active, or two operators
+    # raced. Returning ``("", "")`` falls through to the status-only filter
+    # (the caller's ``or None``) so retrieval still runs rather than 500-ing
+    # the request; the WARNING is the operator-visible signal that this DB
+    # is in an inconsistent state and needs ``promote_version`` to converge.
+    count_stmt = select(func.count(IndexVersion.index_version)).where(
+        IndexVersion.status == IndexStatus.active
+    )
+    active_count = (await session.execute(count_stmt)).scalar_one()
+    if active_count > 1:
+        _logger.warning(
+            "orchestrator_multiple_active_indexes",
+            extra={
+                "request_id": get_current_request_id(),
+                "active_count": int(active_count),
+            },
+        )
+        return "", ""
 
     # The ``index_version`` secondary sort is a deterministic tiebreaker so this
     # resolution stays consistent with the retrieval-layer provenance gate
     # (``HybridRetriever._active_index_stamp``, which sorts identically) if two
     # rows are ever simultaneously ``active`` with equal ``promoted_at`` (a
-    # single-active-row invariant tracked by #58, but cheap to harden here).
+    # single-active-row invariant tracked by #58, now enforced above).
     stmt = (
         select(IndexVersion.index_version, IndexVersion.source_version_hash)
         .where(IndexVersion.status == IndexStatus.active)
@@ -462,6 +484,7 @@ class Orchestrator:
                 intent=intent,
                 source_version_hash=source_version_hash,
                 reason="weak_evidence",
+                strategy=RetrievalStrategy.hybrid_reranked,
             )
 
         # Record retrieval strategy on the response. The hybrid
@@ -508,6 +531,7 @@ class Orchestrator:
                 source_version_hash=source_version_hash,
                 reason="no_answer",
                 evidence=evidence,
+                strategy=strategy,
             )
 
         citations: list[Citation] = [Citation(chunk_to_citation(hit)) for hit in evidence]
@@ -720,6 +744,7 @@ class Orchestrator:
         source_version_hash: str,
         reason: str,
         evidence: list[EvidenceHit] | None = None,
+        strategy: RetrievalStrategy = RetrievalStrategy.none,
     ) -> AnswerResponse:
         """Persist and return a no-answer response (weak evidence, etc.)."""
         message_id = await self._persist_messages(
@@ -742,7 +767,7 @@ class Orchestrator:
             outcome="no_answer",
             metadata={
                 "reason": reason,
-                "retrieval_strategy": RetrievalStrategy.none.value,
+                "retrieval_strategy": strategy.value,
                 "source_version_hash": source_version_hash,
             },
         )
