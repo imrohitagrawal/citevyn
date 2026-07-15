@@ -22,9 +22,15 @@ in the same change.
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#92](https://github.com/imrohitagrawal/citevyn/issues/92) | Worker: prod ingestion needs a real fetcher + shipped sources (default LocalFetcher reads unshipped `tests/fixtures/*.md`, so `run` fails in the prod image) | worker / deploy | Medium (worker model fixed in #81, but ingestion can't succeed until this lands) | #81 verification |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
-| [#97](https://github.com/imrohitagrawal/citevyn/issues/97) | Populate chunk embeddings + index provenance — revive the dead vector arm (all chunk embeddings NULL) (Phase 1) | backend / retrieval | High (dominant cause of poor answers) | RAG_QUALITY_PLAN |
 
 ## Recently closed
+
+- **[#97](https://github.com/imrohitagrawal/citevyn/issues/97)** — Populate chunk embeddings +
+  index provenance (revive the dead vector arm), Phase 1 PR1.1. MERGED via PR #103 (main
+  `d3795f6`). OpenRouter/OpenAI `text-embedding-3-small` embedder behind the seam + embedding-aware
+  seeders + db/seed backfill + opt-in Postgres eval mode. Proven on real pgvector: paraphrase
+  0/5→3/5, overall 13/15 (0.867), zero residue; semantic-discrimination proof real 5/5 vs stub.
+  See RAG_QUALITY_PLAN §8a-1. Phase-1 remainder: **#92** (real prod ingestion) still open.
 
 - **[#96](https://github.com/imrohitagrawal/citevyn/issues/96)** — RAG eval harness (Phase 0)
   landed via PR #98 (main `43972a3`). Golden set + retrieval hit-rate + LLM-judge, CI-gated;

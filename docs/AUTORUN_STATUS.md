@@ -5,7 +5,12 @@
 
 ## STATUS (live) — 2026-07-16
 
-**Overall:** Phase 1 in progress (setup/mapping). Nothing merged yet.
+**Overall:** **Phase 1 PR1.1 MERGED** (PR #103, main `d3795f6`, #97 closed — all 6 required CI
+checks green, auto-squash-merged, no admin bypass). The walking-skeleton milestone is done:
+semantic search works on real pgvector, eval-proven (paraphrase 0→3/5, overall 13/15). Proceeding
+to **Phase 2** (retrieval quality — where the eval number moves next) as the higher-value step;
+**#92** (real prod-ingestion plumbing — no eval delta, uses the conftest corpus) is the tracked
+Phase-1 remainder to pick up if time permits.
 
 ### Environment decisions (locked)
 - **Embedding provider for this run = OpenRouter `openai/text-embedding-3-small` @ 1536 dims.**
