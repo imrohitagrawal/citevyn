@@ -25,18 +25,34 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import uuid
 from collections.abc import AsyncGenerator, Sequence
+from datetime import UTC, datetime
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings, get_settings
+from app.embeddings.factory import build_embedder, configured_embedder_identity
+from app.embeddings.protocol import Embedder
 from app.guardrails.domain import classify_domain
-from app.models import Base
+from app.models import Base, Chunk, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.types import VectorDegrade
 from app.routing.intent import classify_intent
 from tests.conftest import seed_catalog
 
 from .cases import EvalCase
+
+
+class PostgresEvalError(RuntimeError):
+    """Raised when the opt-in Postgres eval mode is misconfigured or unsafe to run.
+
+    Never a silent skip: the whole point of the Postgres mode is to produce a REAL
+    semantic number, so a stub embedder, a missing key, a production target, or a
+    non-empty catalog must fail loudly rather than quietly emit a hermetic-looking
+    (fabricated) result.
+    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -129,31 +145,160 @@ async def seeded_session() -> AsyncGenerator[AsyncSession, None]:
             await engine.dispose()
 
 
+@contextlib.asynccontextmanager
+async def _sqlite_session_and_embedder() -> AsyncGenerator[
+    tuple[AsyncSession, Embedder | None], None
+]:
+    """Adapt the hermetic :func:`seeded_session` to the ``(session, embedder)`` shape.
+
+    The embedder is always ``None`` on SQLite — the vector arm short-circuits to
+    ``[]`` there (no pgvector), which is the Phase-0 baseline this path measures.
+    """
+    async with seeded_session() as session:
+        yield session, None
+
+
+async def _seed_eval_users(session: AsyncSession) -> None:
+    """Seed the ``demo_user``/``admin`` rows the judge's orchestrator needs.
+
+    The judge drives the full orchestrator, which writes a ``sessions`` row FK'd to
+    ``users``. On the hermetic SQLite path SQLite does not enforce foreign keys so
+    this is a no-op there, but Postgres DOES — without these rows the first judged
+    case raises a ForeignKeyViolation. Seeded into the same rolled-back transaction
+    as the catalog, so it leaves no residue.
+    """
+    now = datetime.now(UTC)
+    for user_id, role in (("demo_user", UserRole.demo_user), ("admin", UserRole.admin)):
+        session.add(User(user_id=user_id, role=role, created_at=now))
+    await session.flush()
+
+
+@contextlib.asynccontextmanager
+async def postgres_session(
+    settings: Settings,
+) -> AsyncGenerator[tuple[AsyncSession, Embedder], None]:
+    """Yield ``(session, embedder)`` over a REAL Postgres+pgvector catalog (opt-in).
+
+    Unlike :func:`seeded_session` (hermetic SQLite, dead vector arm), this seeds the
+    conftest corpus WITH a real embedder into the configured Postgres database so
+    the pgvector cosine arm actually runs — the only way to measure semantic recall.
+
+    Safety (see the PR-plan review):
+
+    * Refuses to run against ``environment == "production"`` or a stub embedder or a
+      non-Postgres URL — a stub would silently emit a fabricated "semantic" number.
+    * Refuses a database whose catalog is non-empty (a pre-existing active index or
+      chunks), so it can never collide with or mutate a demo/prod index.
+    * Seeds with ``commit=False`` under a UNIQUE per-run ``index_version`` and rolls
+      back on EVERY exit path (normal, exception, cancellation) → **zero residue**.
+    * Stamps the index provenance from ``configured_embedder_identity(settings)`` —
+      the exact identity the read path compares against — so the Tier-3 gate treats
+      the index as query-compatible (asserted ``VectorDegrade.none`` per case).
+
+    The embedder is built via :func:`build_embedder` (NOT the process-wide
+    ``get_embedder`` singleton) so a leaked stub from earlier in the process can
+    never be reused with an openrouter-stamped index (a same-process space mismatch).
+    """
+    if settings.environment == "production":
+        raise PostgresEvalError("the Postgres eval mode must not run against production")
+    if not settings.database_url.startswith(("postgresql", "postgres")):
+        raise PostgresEvalError(
+            f"CITEVYN_DATABASE_URL must be a Postgres URL for --postgres eval; "
+            f"got {settings.database_url.split(':', 1)[0]!r}"
+        )
+    embedder = build_embedder(settings)
+    from app.embeddings.stub import StubEmbedder
+
+    if isinstance(embedder, StubEmbedder):
+        raise PostgresEvalError(
+            "the Postgres eval mode requires a REAL embedder — set "
+            "CITEVYN_EMBEDDING_PROVIDER=openrouter (+ CITEVYN_EMBEDDING_MODEL and key). "
+            "Refusing to emit a fabricated semantic number under the stub embedder."
+        )
+    identity = configured_embedder_identity(settings)
+    engine = create_async_engine(settings.database_url)
+    try:
+        factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+        async with factory() as session:
+            existing = await session.scalar(select(func.count()).select_from(Chunk))
+            if existing:
+                raise PostgresEvalError(
+                    f"the target Postgres catalog is not empty ({existing} chunk(s)). "
+                    "Run --postgres eval against a migrated-but-empty/dedicated DB so it "
+                    "never mutates a demo/prod index (seed rolls back, but a pre-existing "
+                    "active index would collide or double-activate)."
+                )
+            try:
+                await seed_catalog(
+                    session,
+                    index_version=f"eval-pg-{uuid.uuid4().hex[:8]}",
+                    embedder=embedder,
+                    embedder_identity=identity,
+                    commit=False,
+                )
+                await _seed_eval_users(session)
+                yield session, embedder
+            finally:
+                # Undo the uncommitted seed on every path (normal, error, cancel).
+                await session.rollback()
+    finally:
+        aclose = getattr(embedder, "aclose", None)
+        if callable(aclose):
+            await aclose()
+        await engine.dispose()
+
+
 async def _retrieve_sources(
-    session: AsyncSession, case: EvalCase, *, settings: Settings
-) -> tuple[str, ...]:
-    """Run the live retrieval path for one case; return the top-k source names."""
+    session: AsyncSession,
+    case: EvalCase,
+    *,
+    settings: Settings,
+    embedder: Embedder | None = None,
+) -> tuple[tuple[str, ...], VectorDegrade]:
+    """Run the live retrieval path for one case.
+
+    Returns ``(top-k source names, vector_degrade)``. ``embedder`` is ``None`` on
+    the hermetic SQLite path (vector arm dead by design) and the real embedder on
+    the Postgres path, where its identity also gates the Tier-3 mismatch check.
+    """
     domain = classify_domain(case.question)
     intent = classify_intent(case.question, domain)
-    result = await HybridRetriever(session, embedder=None).retrieve(
+    identity = configured_embedder_identity(settings) if embedder is not None else None
+    result = await HybridRetriever(session, embedder=embedder, embedder_identity=identity).retrieve(
         case.question,
         product_area=domain.value,
         intent=intent,
         limit=settings.retrieval_max_candidates,
         top_k=settings.retrieval_top_k,
     )
-    return tuple(hit.source_name for hit in result.hits)
+    return tuple(hit.source_name for hit in result.hits), result.vector_degrade
 
 
 async def evaluate_retrieval(
-    cases: Sequence[EvalCase], *, settings: Settings | None = None
+    cases: Sequence[EvalCase], *, settings: Settings | None = None, postgres: bool = False
 ) -> RetrievalReport:
-    """Compute the retrieval hit-rate report over ``cases`` (hermetic)."""
+    """Compute the retrieval hit-rate report over ``cases``.
+
+    ``postgres=False`` (default): hermetic SQLite, vector arm dead — the Phase-0
+    baseline path. ``postgres=True``: opt-in real Postgres+pgvector with a real
+    embedder (see :func:`postgres_session`); the only mode that measures semantic
+    recall. In Postgres mode an answerable case whose vector arm degraded to a
+    Tier-3 ``mismatch`` raises loudly (the index/query embedder identities diverged)
+    rather than silently lowering the number.
+    """
     settings = settings or get_settings()
     outcomes: list[RetrievalOutcome] = []
-    async with seeded_session() as session:
+    session_cm = postgres_session(settings) if postgres else _sqlite_session_and_embedder()
+    async with session_cm as (session, embedder):
         for case in cases:
-            sources = await _retrieve_sources(session, case, settings=settings)
+            sources, degrade = await _retrieve_sources(
+                session, case, settings=settings, embedder=embedder
+            )
+            if postgres and case.kind != "refusal" and degrade is VectorDegrade.mismatch:
+                raise PostgresEvalError(
+                    f"vector arm degraded to Tier-3 mismatch on case {case.id!r}: the "
+                    "seeded index provenance and configured query embedder disagree."
+                )
             domain = classify_domain(case.question)
             if case.is_refusal:
                 leaked = len(sources) > 0

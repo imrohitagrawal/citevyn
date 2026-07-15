@@ -214,3 +214,39 @@ items 3–7 → **#59**.
 - **Operational**: to get real cited answers end-to-end, set `CITEVYN_EMBEDDING_PROVIDER=gemini`
   and `CITEVYN_GEMINI_API_KEY`, then re-ingest (embeddings are model-specific — an index
   built under the stub must be rebuilt under Gemini). See `docs/RUNBOOK.md`.
+
+## Addendum (2026-07-16): OpenRouter / OpenAI `text-embedding-3-small` as a second provider
+
+**Status:** Accepted, additive. Added for the RAG-quality Phase-1 run (#97); overlaps
+the "additional providers behind the seam" future work (#59). The `gemini` provider and
+this ADR's decisions are unchanged — `openrouter` is added *alongside* `gemini`, not in
+place of it.
+
+**Why.** Gemini's free tier caps embedding requests at **1000/day**
+(`embed_content_free_tier_requests`), which was already exhausted during Phase-1 work and
+is too tight to embed even a bounded dev corpus while iterating on the eval. To unblock the
+walking-skeleton milestone without spending on a paid Gemini tier, we added a second real
+embedder — **OpenAI `text-embedding-3-small` via OpenRouter's OpenAI-compatible
+`/embeddings` endpoint** (user-authorized during the run; the OpenRouter key is already
+present as the LLM fallback).
+
+**Why it's a clean fit, not a new architecture.**
+- **Native 1536 dims** → matches the `vector(1536)` column exactly; **no migration**.
+- Slots behind the existing `Embedder` seam (`app/embeddings/openrouter.py`), mirroring
+  `GeminiEmbedder`'s resilience/leak discipline. `build_embedder` gains an `openrouter`
+  branch; `ALLOWED_EMBEDDING_PROVIDERS` gains `openrouter`.
+- **Same vector-space rule as this ADR.** The cross-provider *query-time* fallback rejected
+  above is still rejected — corpus and query are embedded by the SAME model. `openrouter` is
+  a whole-index provider choice (the blessed Tier-2 "swap the provider behind the seam"),
+  not a per-call mix.
+
+**Guards added** (fail fast, mirroring the gemini path): production requires
+`CITEVYN_OPENROUTER_API_KEY` when the provider is `openrouter`; a coherence validator rejects
+the Gemini-shaped default `embedding_model` under `openrouter` (set
+`CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small`). OpenAI embeddings have **no**
+`RETRIEVAL_QUERY`/`RETRIEVAL_DOCUMENT` task type, so `embed`/`embed_documents` are symmetric
+(same model, `dimensions` sent explicitly); response items are realigned by their `index`.
+
+**Cost.** `text-embedding-3-small` is ~$0.02/1M tokens; the bounded dev corpus + eval
+queries cost well under a cent. Gemini stays the ADR-preferred provider when its quota
+suffices; `openrouter` is the unblock for bulk/iterative embedding.

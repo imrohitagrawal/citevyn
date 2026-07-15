@@ -25,6 +25,7 @@ from app.embeddings.factory import (
     validate_embedder_provider,
 )
 from app.embeddings.gemini import GeminiEmbedder
+from app.embeddings.openrouter import OpenRouterEmbedder
 from app.embeddings.stub import StubEmbedder
 
 _STUB = EmbedderIdentity(provider="stub", model="stub-embedding", dim=1536)
@@ -101,6 +102,29 @@ def test_build_embedder_gemini_builds_real_client() -> None:
 def test_build_embedder_gemini_missing_key_raises() -> None:
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         build_embedder(Settings(embedding_provider="gemini", gemini_api_key=None))
+
+
+def test_build_embedder_openrouter_builds_real_client() -> None:
+    embedder = build_embedder(
+        Settings(
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            openrouter_api_key="or-123",
+        )
+    )
+    assert isinstance(embedder, OpenRouterEmbedder)
+    assert embedder.dim == Settings().embedding_dim
+
+
+def test_build_embedder_openrouter_missing_key_raises() -> None:
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        build_embedder(
+            Settings(
+                embedding_provider="openrouter",
+                embedding_model="openai/text-embedding-3-small",
+                openrouter_api_key=None,
+            )
+        )
 
 
 # -- singleton --------------------------------------------------------------

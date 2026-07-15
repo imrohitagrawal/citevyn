@@ -143,6 +143,43 @@ def test_gemini_embeddings_in_production_ok_with_key() -> None:
     assert settings.embedding_provider == "gemini"
 
 
+def test_openrouter_embeddings_in_production_requires_key() -> None:
+    """provider=openrouter + no OpenRouter key in production fails at parse time."""
+    with pytest.raises(ValidationError, match="CITEVYN_OPENROUTER_API_KEY"):
+        Settings(
+            **_prod_kwargs(
+                embedding_provider="openrouter",
+                embedding_model="openai/text-embedding-3-small",
+                openrouter_api_key=None,
+            )
+        )
+
+
+def test_openrouter_embeddings_in_production_ok_with_key() -> None:
+    settings = Settings(
+        **_prod_kwargs(
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            openrouter_api_key="or-123",
+        )
+    )
+    assert settings.embedding_provider == "openrouter"
+
+
+def test_openrouter_provider_rejects_gemini_shaped_model() -> None:
+    """The provider/model coherence guard: openrouter + the Gemini default model
+    (the easy misconfig) is rejected at parse time with an actionable message,
+    in any environment."""
+    with pytest.raises(ValidationError, match="openai/text-embedding-3-small"):
+        Settings(
+            environment="local",
+            embedding_provider="openrouter",
+            embedding_model="gemini-embedding-001",
+            openrouter_api_key="or-123",
+            _env_file=None,
+        )
+
+
 def test_embedding_dim_is_locked_to_pgvector_column_and_migration() -> None:
     """The three dimension sources agree: Settings default, the boot-guard
     constant, and migration 0004's ``vector(<dim>)`` literal. This is the only

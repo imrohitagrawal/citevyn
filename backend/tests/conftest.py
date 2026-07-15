@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import db as db_module
 from app.core.config import get_settings
+from app.embeddings.factory import EmbedderIdentity
+from app.embeddings.protocol import Embedder
 from app.main import create_app
 from app.models import (
     Base,
@@ -99,6 +101,9 @@ async def seed_catalog(
     session: AsyncSession,
     *,
     index_version: str = "v1",
+    embedder: Embedder | None = None,
+    embedder_identity: EmbedderIdentity | None = None,
+    commit: bool = True,
 ) -> dict[str, list[object]]:
     """Insert the demo catalog into ``session`` and return the inserted rows.
 
@@ -110,6 +115,24 @@ async def seed_catalog(
     Returns a dict with ``docs``, ``chunks``, and ``exact_terms`` so
     callers can grab a row by attribute (e.g. ``catalog['docs'][0]``)
     without re-querying.
+
+    ``embedder`` (optional): when provided, every chunk is embedded (one batched
+    :meth:`Embedder.embed_documents` call) and the vector is stored on
+    ``Chunk.embedding`` — reviving the semantic arm on a pgvector backend (#97).
+    Default ``None`` leaves ``embedding`` NULL, preserving the hermetic SQLite
+    behaviour (no network, no key) every existing caller relies on. A mid-batch
+    embed failure propagates and, because the rows are only flushed (see
+    ``commit``), leaves no partial/NULL-vector residue.
+
+    ``embedder_identity`` (optional): the ``(provider, model, dim)`` provenance
+    stamped onto the active :class:`IndexVersion`. It MUST equal the read path's
+    ``configured_embedder_identity(settings)`` so the Tier-3 gate treats the index
+    as query-compatible; leaving it ``None`` stamps nothing (the gate then reads
+    "unknown provenance ⇒ allow").
+
+    ``commit`` (default ``True``): when ``False`` the rows are flushed but not
+    committed, so the caller owns the transaction (the Postgres eval seeds with
+    ``commit=False`` and rolls back for zero residue).
     """
     now = datetime.now(UTC)
     doc_specs: list[dict[str, str]] = [
@@ -191,6 +214,9 @@ async def seed_catalog(
         index_version=index_version,
         status=IndexStatus.active,
         source_version_hash=f"sha256:{index_version}",
+        embedding_provider=embedder_identity.provider if embedder_identity else None,
+        embedding_model=embedder_identity.model if embedder_identity else None,
+        embedding_dim=embedder_identity.dim if embedder_identity else None,
         created_at=now,
         promoted_at=now,
     )
@@ -230,6 +256,17 @@ async def seed_catalog(
         docs.append(doc)
         chunks.append(chunk)
 
+    # Embed every chunk in one batched call when a real embedder is supplied, so
+    # the vector arm has something to retrieve (#97). Done AFTER all chunks exist so
+    # a single ``embed_documents`` covers the whole corpus; the vectors are paired
+    # back by position (``strict=True`` catches any count drift). A failure here
+    # propagates before any commit, so no chunk is left with a partial vector.
+    if embedder is not None:
+        vectors = await embedder.embed_documents([c.chunk_text for c in chunks])
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            chunk.embedding = vector
+        await session.flush()
+
     # Two exact terms: one env var, one CLI flag. The product_areas
     # are matched to the docs above so retrieval tests can find them.
     for chunk in chunks:
@@ -257,7 +294,8 @@ async def seed_catalog(
             )
 
     await session.flush()
-    await session.commit()
+    if commit:
+        await session.commit()
     return {"docs": docs, "chunks": chunks, "exact_terms": exact_terms}
 
 

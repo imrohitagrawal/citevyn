@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import json
 import pathlib
@@ -38,7 +39,7 @@ from app.llm.stub import StubLLMClient
 from .cases import EvalCase, filter_cases, load_cases
 from .judge import JudgeParseError, score_answer_async
 from .paths import DEFAULT_REPORT_PATH, GOLDEN_PATH
-from .retrieval import evaluate_retrieval, seeded_session
+from .retrieval import evaluate_retrieval, postgres_session, seeded_session
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
     MIN_JUDGE_COVERAGE,
@@ -64,7 +65,25 @@ class JudgedCase:
         return dataclasses.asdict(self)
 
 
-async def _judge_cases(cases: list[EvalCase], *, settings: Settings) -> list[JudgedCase]:
+@contextlib.asynccontextmanager
+async def _judge_session(settings: Settings, *, postgres: bool):
+    """Yield the DB session the judge drives the orchestrator against.
+
+    Hermetic SQLite by default; the real Postgres+pgvector catalog (with a real
+    embedder, rolled back for zero residue) when ``postgres=True`` so the judged
+    answers reflect the live semantic retrieval path.
+    """
+    if postgres:
+        async with postgres_session(settings) as (session, _embedder):
+            yield session
+    else:
+        async with seeded_session() as session:
+            yield session
+
+
+async def _judge_cases(
+    cases: list[EvalCase], *, settings: Settings, postgres: bool = False
+) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
     Returns one :class:`JudgedCase` per input case. A per-case failure (LLM
@@ -75,7 +94,7 @@ async def _judge_cases(cases: list[EvalCase], *, settings: Settings) -> list[Jud
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
     judged: list[JudgedCase] = []
-    async with seeded_session() as session:
+    async with _judge_session(settings, postgres=postgres) as session:
         for case in cases:
             # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
             # OrchestratorError; ``LLMUnavailable`` can also escape the generate
@@ -200,16 +219,33 @@ async def run_eval_async(
     ids: list[str] | None = None,
     with_judge: bool = True,
     settings: Settings | None = None,
+    postgres: bool = False,
 ) -> dict[str, Any]:
-    """Run the full eval and return a JSON-friendly summary."""
+    """Run the full eval and return a JSON-friendly summary.
+
+    ``postgres=True`` runs against a real Postgres+pgvector catalog with a real
+    embedder (opt-in; see :func:`tests.eval.retrieval.postgres_session`) so the
+    semantic/vector arm is actually exercised. Default is the hermetic SQLite path.
+    """
     settings = settings or get_settings()
     cases = filter_cases(load_cases(golden_path), ids=ids)
     if not cases:
         raise SystemExit(f"no eval cases found in {golden_path}")
-    retrieval_report = await evaluate_retrieval(cases, settings=settings)
+    retrieval_report = await evaluate_retrieval(cases, settings=settings, postgres=postgres)
     judge_available = with_judge and not isinstance(get_llm_client(settings), StubLLMClient)
-    judged = await _judge_cases(cases, settings=settings) if judge_available else []
-    return _summarize(cases, retrieval_report.as_dict(), judged, judge_available=judge_available)
+    judged = (
+        await _judge_cases(cases, settings=settings, postgres=postgres) if judge_available else []
+    )
+    summary = _summarize(cases, retrieval_report.as_dict(), judged, judge_available=judge_available)
+    # Record the embedder identity (provider/model/dim — never a key) so a report
+    # can be read as "real semantic run" vs "hermetic/stub" without guessing.
+    summary["embedder"] = {
+        "mode": "postgres" if postgres else "sqlite-hermetic",
+        "provider": settings.embedding_provider,
+        "model": settings.embedding_model,
+        "dim": settings.embedding_dim,
+    }
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,11 +263,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the LLM-judge metric even when a provider key is set.",
     )
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--postgres",
+        action="store_true",
+        help=(
+            "Run retrieval (and judge) against the real Postgres+pgvector catalog "
+            "in CITEVYN_DATABASE_URL with a real embedder (requires "
+            "CITEVYN_EMBEDDING_PROVIDER!=stub + key; refuses a non-empty catalog). "
+            "The only mode that measures semantic/vector recall."
+        ),
+    )
     args = parser.parse_args(argv)
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     summary = asyncio.run(
-        run_eval_async(golden_path=args.golden, ids=ids, with_judge=args.with_judge)
+        run_eval_async(
+            golden_path=args.golden, ids=ids, with_judge=args.with_judge, postgres=args.postgres
+        )
     )
 
     if args.report is not None:

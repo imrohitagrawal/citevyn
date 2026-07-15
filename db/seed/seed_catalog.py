@@ -34,6 +34,10 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 
 from app.core.config import get_settings  # noqa: E402
+from app.embeddings.factory import (  # noqa: E402
+    build_embedder,
+    configured_embedder_identity,
+)
 from app.models import (  # noqa: E402
     Chunk,
     Document,
@@ -156,7 +160,13 @@ async def seed(database_url: str) -> dict[str, int]:
         "documents": 0,
         "chunks": 0,
         "exact_terms": 0,
+        "embedded": 0,
     }
+    # Every chunk resolved this run (freshly inserted OR pre-existing), so the
+    # embedding backfill below can populate any that are still NULL — a re-seed
+    # after switching from the stub to a real provider must revive the vector arm,
+    # not skip the already-present rows (#97 review).
+    seeded_chunks: list[Chunk] = []
     async with sessionmaker() as session:
         # --- index version ---------------------------------------------
         existing_version = await session.scalar(
@@ -224,6 +234,7 @@ async def seed(database_url: str) -> dict[str, int]:
                 tally["chunks"] += 1
             else:
                 chunk = existing_chunk
+            seeded_chunks.append(chunk)
 
             # --- exact term (optional) ----------------------------------
             if definition.exact_term_text is not None and definition.exact_term_type is not None:
@@ -247,6 +258,40 @@ async def seed(database_url: str) -> dict[str, int]:
                     )
                     tally["exact_terms"] += 1
 
+        # --- embedding backfill (#97) --------------------------------
+        # When a real embedder is configured, populate every still-NULL chunk
+        # vector and re-stamp the active index's provenance, so `make seed` (or a
+        # re-seed after switching provider) produces a semantic, query-compatible
+        # index. Under the default stub provider this is skipped entirely (no key,
+        # no network, no cost) — the vectors stay NULL exactly as before. A real
+        # embedder's constructor raises eagerly on a missing key, and an embed
+        # failure propagates BEFORE the single commit below, so a partial/NULL
+        # backfill is never persisted (fail-loud).
+        settings = get_settings()
+        if settings.embedding_provider != "stub":
+            embedder = build_embedder(settings)
+            try:
+                to_embed = [c for c in seeded_chunks if c.embedding is None]
+                if to_embed:
+                    vectors = await embedder.embed_documents([c.chunk_text for c in to_embed])
+                    for chunk, vector in zip(to_embed, vectors, strict=True):
+                        chunk.embedding = vector
+                    tally["embedded"] = len(to_embed)
+            finally:
+                aclose = getattr(embedder, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+            # Re-stamp provenance so the read-path Tier-3 gate treats the index as
+            # query-compatible with the configured embedder (never a stale stamp).
+            identity = configured_embedder_identity(settings)
+            active = await session.scalar(
+                select(IndexVersion).where(IndexVersion.index_version == INDEX_VERSION)
+            )
+            if active is not None:
+                active.embedding_provider = identity.provider
+                active.embedding_model = identity.model
+                active.embedding_dim = identity.dim
+
         await session.commit()
     await engine.dispose()
     return tally
@@ -261,7 +306,8 @@ def main() -> None:
         f"index_versions=+{tally['index_versions']} "
         f"documents=+{tally['documents']} "
         f"chunks=+{tally['chunks']} "
-        f"exact_terms=+{tally['exact_terms']}"
+        f"exact_terms=+{tally['exact_terms']} "
+        f"embedded={tally['embedded']}"
     )
 
 
