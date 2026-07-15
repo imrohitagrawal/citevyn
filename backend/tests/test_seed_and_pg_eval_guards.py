@@ -61,6 +61,19 @@ class _BoomEmbedder(_FakeEmbedder):
         raise RuntimeError("embedding provider exploded")
 
 
+class _MarkerEmbedder(_FakeEmbedder):
+    """Emits a constant, provider-distinguishing vector so a test can assert WHICH
+    provider's space a stored vector came from (marker never collides with
+    ``_FakeEmbedder``'s length-derived first coordinate of 1..7)."""
+
+    def __init__(self, marker: float, dim: int = 1536) -> None:
+        super().__init__(dim)
+        self._marker = marker
+
+    def _vec(self, text: str) -> list[float]:
+        return [self._marker] + [0.0] * (self._dim - 1)
+
+
 async def _sqlite_factory():
     # The temp file must outlive this function (the caller runs the test against it
     # and closes it in a finally), so a with-block would close it too early.
@@ -300,5 +313,52 @@ async def test_db_seed_backfill_reseed_populates_preexisting_null_chunks(monkeyp
             async with factory() as session:
                 chunks = (await session.execute(select(Chunk))).scalars().all()
             assert all(c.embedding is not None for c in chunks)
+        finally:
+            await engine.dispose()
+
+
+async def test_db_seed_provider_switch_reembeds_all_and_never_stamps_stale(monkeypatch) -> None:
+    """Review finding (silent-failure/data-safety): switching providers on an already
+    embedded DB must RE-EMBED every chunk under the new provider before re-stamping —
+    never leave provider-A vectors stamped as provider-B (a same-dim cross-space
+    corruption the Tier-3 gate would miss)."""
+    import db.seed.seed_catalog as seedmod
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = f"sqlite+aiosqlite:///{fh.name}"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await engine.dispose()
+
+        # Seed under provider A = gemini (marker 1.0 in every vector; stamp gemini).
+        settings_a = Settings(embedding_provider="gemini", gemini_api_key="gk", _env_file=None)
+        monkeypatch.setattr(seedmod, "get_settings", lambda: settings_a)
+        monkeypatch.setattr(seedmod, "build_embedder", lambda _s: _MarkerEmbedder(1.0))
+        await seedmod.seed(url)
+
+        # Switch to provider B = openrouter (marker 2.0; identity differs).
+        settings_b = Settings(
+            embedding_provider="openrouter",
+            embedding_model="openai/text-embedding-3-small",
+            openrouter_api_key="or-k",
+            _env_file=None,
+        )
+        monkeypatch.setattr(seedmod, "get_settings", lambda: settings_b)
+        monkeypatch.setattr(seedmod, "build_embedder", lambda _s: _MarkerEmbedder(2.0))
+        tally = await seedmod.seed(url)
+
+        # ALL chunks re-embedded (not skipped as "already non-NULL").
+        assert tally["embedded"] == 5
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                chunks = (await session.execute(select(Chunk))).scalars().all()
+                iv = (await session.execute(select(IndexVersion))).scalars().one()
+            # Vectors are now in B's space (marker 2.0), never left in A's (1.0)...
+            assert all(c.embedding[0] == 2.0 for c in chunks)
+            # ...and the stamp matches the vectors (B), never a stale/mismatched stamp.
+            assert iv.embedding_provider == "openrouter"
         finally:
             await engine.dispose()

@@ -270,8 +270,29 @@ async def seed(database_url: str) -> dict[str, int]:
         settings = get_settings()
         if settings.embedding_provider != "stub":
             embedder = build_embedder(settings)
+            identity = configured_embedder_identity(settings)
+            active = await session.scalar(
+                select(IndexVersion).where(IndexVersion.index_version == INDEX_VERSION)
+            )
+            # A provider/model/dim SWITCH invalidates every stored vector: they live in
+            # the old provider's space. Re-stamping alone (leaving old vectors) would
+            # mark A-space vectors as B and — same dim — silently pass the Tier-3 gate,
+            # so the read path would cosine-compare B-space queries against A-space docs
+            # (cross-space garbage, no error). So when the active stamp names a DIFFERENT
+            # provider-bearing identity, re-embed ALL chunks, not just the NULL ones, so
+            # the vectors and the stamp we write below are always in the same space.
+            current = (
+                (active.embedding_provider, active.embedding_model, active.embedding_dim)
+                if active is not None
+                else (None, None, None)
+            )
+            provider_switch = current[0] is not None and current != tuple(identity)
             try:
-                to_embed = [c for c in seeded_chunks if c.embedding is None]
+                to_embed = (
+                    seeded_chunks
+                    if provider_switch
+                    else [c for c in seeded_chunks if c.embedding is None]
+                )
                 if to_embed:
                     vectors = await embedder.embed_documents([c.chunk_text for c in to_embed])
                     for chunk, vector in zip(to_embed, vectors, strict=True):
@@ -281,12 +302,8 @@ async def seed(database_url: str) -> dict[str, int]:
                 aclose = getattr(embedder, "aclose", None)
                 if callable(aclose):
                     await aclose()
-            # Re-stamp provenance so the read-path Tier-3 gate treats the index as
-            # query-compatible with the configured embedder (never a stale stamp).
-            identity = configured_embedder_identity(settings)
-            active = await session.scalar(
-                select(IndexVersion).where(IndexVersion.index_version == INDEX_VERSION)
-            )
+            # Safe to (re-)stamp now: any vectors that were in a different space have
+            # just been re-embedded under the configured identity above.
             if active is not None:
                 active.embedding_provider = identity.provider
                 active.embedding_model = identity.model
