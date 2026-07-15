@@ -135,17 +135,24 @@ echo "==> bringing up the long-running services (api + caddy)"
 # a prod HTTP fetcher + source config is tracked as a follow-up.)
 docker compose --profile prod up -d api caddy
 
-echo "==> waiting for the api to become healthy (max 60s)"
+echo "==> waiting for the api to become healthy + caddy to be running (max 60s)"
 # Poll the api container's OWN health status (its compose healthcheck
 # hits http://localhost:8000/health *inside* the container), NOT
 # http://localhost/health: the :80 Caddy site 301-redirects every
 # non-ACME path to HTTPS, and ``curl --fail`` (no ``-L``) treats a 3xx
 # as success — so a crash-looping api would be reported healthy
 # (the pre-existing false-green gate this replaces).
+#
+# Also require caddy to be RUNNING (not ``restarting``/``exited``). Caddy
+# has no healthcheck and the api's own probe bypasses it, so without this
+# a Caddyfile that fails to adapt at runtime (bad CITEVYN_PUBLIC_HOST,
+# ACME/permission issue, a future Caddyfile edit) would crash-loop while
+# the deploy still reported green and :80/:443 served nothing.
 for _ in $(seq 1 30); do
     _api_health="$(docker inspect --format '{{.State.Health.Status}}' citevyn-api 2>/dev/null || true)"
-    if [[ "${_api_health}" == "healthy" ]]; then
-        echo "==> api healthy"
+    _caddy_state="$(docker inspect --format '{{.State.Status}}' citevyn-caddy 2>/dev/null || true)"
+    if [[ "${_api_health}" == "healthy" && "${_caddy_state}" == "running" ]]; then
+        echo "==> api healthy, caddy running"
         echo "==> Caddy provisions the TLS certificate for the configured"
         echo "    CITEVYN_PUBLIC_HOST eagerly at startup via the ACME HTTP-01"
         echo "    challenge on :80; tail the caddy logs to confirm issuance"
@@ -156,6 +163,7 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 
-echo "error: api did not become healthy within 60s" >&2
-echo "       inspect with: docker compose --profile prod logs api" >&2
+echo "error: stack did not come up within 60s" >&2
+echo "       api health=${_api_health:-unknown}, caddy state=${_caddy_state:-unknown}" >&2
+echo "       inspect with: docker compose --profile prod logs api caddy" >&2
 exit 1

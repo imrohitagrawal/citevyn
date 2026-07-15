@@ -66,26 +66,22 @@ async def test_keyword_retriever_empty_for_stopwords_only(seeded_session) -> Non
 
 
 async def test_keyword_retriever_strips_trailing_punctuation(seeded_session) -> None:
-    """Trailing '?' / '!' / '.' must not poison the LIKE pattern.
+    """A *matching* token carrying trailing '?' still matches after stripping.
 
-    Regression: "How do I get the gemini api key?" previously tokenized
-    to ["get", "gemini", "api", "key?"] and built the LIKE clause
-    ``ILIKE '%key?%'`` — never matches because no chunk text contains a
-    literal '?'. Stripping punctuation recovers the intended tokens.
+    Regression: without ``rstrip("?!.,;:")`` the query "gemini header?"
+    tokenizes "header?" and builds ``ILIKE '%header?%'`` — which matches
+    nothing, leaving only "gemini" (one distinct token, below the >=2
+    relevance floor), so the seeded gemini chunk (whose text mentions the
+    ``x-goog-api-key header``) would be dropped and ``retrieve()`` would
+    return ``[]``. Stripping restores "header" so both tokens match and the
+    chunk is returned. Asserting the chunk IS returned makes this test fail
+    if the stripping is ever reverted (the prior assertion "no hit contains
+    'key?'" was vacuously true either way).
     """
     r = KeywordRetriever(seeded_session, active_index_version="v1")
-    # 'gemini' alone is one token in the seeded chunk → below the
-    # 2-token relevance floor and returns []. The tokenization fix is
-    # the part that lets ``key?`` become ``key`` so it can contribute
-    # to the floor once the chunk has a real key-bearing section.
-    hits = await r.retrieve("gemini api key?", product_area=Domain.gemini_api.value)
-    # Either the floor passes (≥2 tokens land in chunk_text) or it
-    # doesn't — both outcomes are consistent with the punctuation
-    # having been stripped. The hard assertion is that we did NOT
-    # fall through to the literal `'%key?%'` pattern: assert no row
-    # carries the substring "key?" in its chunk_text (which would
-    # indicate the un-stripped token survived).
-    assert all("key?" not in h.chunk_text for h in hits)
+    hits = await r.retrieve("gemini header?", product_area=Domain.gemini_api.value)
+    assert hits, "punctuation-stripped 'header?' should match the seeded gemini chunk"
+    assert any("header" in h.chunk_text.lower() for h in hits)
 
 
 async def test_keyword_retriever_requires_two_token_matches(session) -> None:
@@ -383,6 +379,38 @@ async def _stamp_active_index(session, *, provider, model, dim) -> None:
 
 
 _GEMINI = EmbedderIdentity(provider="gemini", model="gemini-embedding-001", dim=1536)
+
+
+async def test_active_index_stamp_none_on_dual_active(seeded_session) -> None:
+    """Two simultaneously-active index rows -> stamp returns None + WARN.
+
+    Mirrors the orchestrator's dual-active guard (#58): the vector arm must
+    gate on provenance=unknown rather than silently read the wrong embedder
+    stamp when more than one ``IndexVersion`` is active. The orchestrator
+    twin is covered by test_admin_services; this exercises the retrieval-side
+    guard added to ``HybridRetriever._active_index_stamp``.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    # ``v1`` is already active (seeded); add a second active row.
+    seeded_session.add(
+        IndexVersion(
+            index_version="v2",
+            status=IndexStatus.active,
+            source_version_hash="sha256:second-active",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    await seeded_session.flush()
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        stamp = await h._active_index_stamp()
+    assert stamp is None
+    assert any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
 
 
 async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:

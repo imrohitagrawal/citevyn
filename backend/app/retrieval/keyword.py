@@ -40,10 +40,15 @@ class KeywordRetriever:
         product_area: str | None = None,
         limit: int = 10,
     ) -> list[RetrievedChunk]:
+        # Normalize (strip trailing punctuation) BEFORE the stopword/alnum
+        # filter — otherwise a punctuated stopword ("what?") escapes the
+        # stopword set, then strips back to a bare stopword ("what"), which
+        # would inject a broad ``ILIKE '%what%'`` clause and count toward the
+        # relevance floor below.
         tokens = [
-            tok.rstrip("?!.,;:")
-            for tok in question.lower().split()
-            if tok and tok not in _STOPWORDS and any(c.isalnum() for c in tok)
+            stripped
+            for stripped in (tok.rstrip("?!.,;:") for tok in question.lower().split())
+            if stripped and stripped not in _STOPWORDS and any(c.isalnum() for c in stripped)
         ]
         if not tokens:
             return []
@@ -65,15 +70,19 @@ class KeywordRetriever:
         if not rows:
             return []
 
-        # Require the relevant number of distinct query tokens to match:
+        # Require the relevant number of *distinct* query tokens to match:
         # single-token queries ("model", "gemini") must match at least
-        # 1 token; multi-token queries need at least 2. This prevents
-        # a single noisy token (e.g., "gemini") from dominating a
-        # 4-token question about API keys, while keeping single-token
-        # search useful.
-        required_matches = max(1, min(2, len(tokens)))
+        # 1 token; multi-token queries need at least 2. Dedupe first so a
+        # repeated content word ("api api") cannot satisfy the >=2 floor on
+        # a single distinct token. This prevents a single noisy token (e.g.,
+        # "gemini") from dominating a 4-token question about API keys, while
+        # keeping single-token search useful.
+        distinct_tokens = set(tokens)
+        required_matches = max(1, min(2, len(distinct_tokens)))
         matched_token_count = sum(
-            1 for tok in tokens if any(tok in (chunk.chunk_text or "").lower() for chunk, _ in rows)
+            1
+            for tok in distinct_tokens
+            if any(tok in (chunk.chunk_text or "").lower() for chunk, _ in rows)
         )
         if matched_token_count < required_matches:
             return []

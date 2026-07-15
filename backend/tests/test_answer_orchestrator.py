@@ -357,6 +357,10 @@ async def test_empty_evidence_returns_no_answer_without_caching(
     assert len(audits) == 1
     assert audits[0].metadata_["outcome"] == "no_answer"
     assert audits[0].metadata_["reason"] == "weak_evidence"
+    # The audit records the ACTUAL retrieval strategy (hybrid ran but
+    # produced no evidence), not a hardcoded "none" — the observability
+    # the no_answer-strategy change (Issue #81 / F3) exists to provide.
+    assert audits[0].metadata_["retrieval_strategy"] == RetrievalStrategy.hybrid_reranked.value
 
 
 # ---------------------------------------------------------------------------
