@@ -20,7 +20,12 @@ venv/
 .vscode/
 
 # Claude Code agent state (per-machine; not part of the project)
-.claude/
+# Local Claude Code config stays out of git (settings, local skills) —
+# EXCEPT the shared, committed `rag-eval` project skill.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/rag-eval/
 
 # Logs
 *.log
