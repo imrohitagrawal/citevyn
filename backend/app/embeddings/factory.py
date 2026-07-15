@@ -22,6 +22,7 @@ from typing import NamedTuple
 
 from app.core.config import Settings
 from app.embeddings.gemini import GeminiEmbedder
+from app.embeddings.openrouter import OpenRouterEmbedder
 from app.embeddings.protocol import Embedder
 from app.embeddings.stub import StubEmbedder
 
@@ -108,7 +109,7 @@ def configured_embedder_identity(settings: Settings) -> EmbedderIdentity:
 
 # Production deploys MUST override the default ``CITEVYN_EMBEDDING_PROVIDER="stub"``
 # to a real provider so retrieval is semantic, not hash-bucketed.
-ALLOWED_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"stub", "gemini"})
+ALLOWED_EMBEDDING_PROVIDERS: frozenset[str] = frozenset({"stub", "gemini", "openrouter"})
 
 # The dimension of the pgvector ``chunks.embedding`` column created by migration
 # ``0004`` (``vector(1536)``). ``Settings.embedding_dim`` MUST equal this, because
@@ -164,6 +165,15 @@ def build_embedder(settings: Settings) -> Embedder:
             model=settings.embedding_model,
             api_key=settings.gemini_api_key,
             api_base=settings.gemini_api_base,
+            dim=settings.embedding_dim,
+            timeout_seconds=settings.embedding_timeout_seconds,
+            max_retries=settings.embedding_max_retries,
+        )
+    if settings.embedding_provider == "openrouter":
+        return OpenRouterEmbedder(
+            model=settings.embedding_model,
+            api_key=settings.openrouter_api_key,
+            api_base=settings.openrouter_api_base,
             dim=settings.embedding_dim,
             timeout_seconds=settings.embedding_timeout_seconds,
             max_retries=settings.embedding_max_retries,

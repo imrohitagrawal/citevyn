@@ -126,7 +126,11 @@ class Settings(BaseSettings):
     # keyless offline default (hermetic tests, local dev); "gemini" uses
     # gemini-embedding-001 via CITEVYN_GEMINI_API_KEY (the same key as the LLM).
     # See docs/ADR/0003-embeddings-provider.md for the provider decision.
-    embedding_provider: str = "stub"  # "stub" | "gemini"
+    # "stub" | "gemini" | "openrouter". The "openrouter" provider reaches OpenAI's
+    # text-embedding-3-* models (native 1536-dim, fits the pgvector column) via the
+    # OpenAI-compatible endpoint; set CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small
+    # with it (the default below is Gemini-shaped). See ADR-0003 (OpenRouter addendum).
+    embedding_provider: str = "stub"  # "stub" | "gemini" | "openrouter"
     embedding_model: str = "gemini-embedding-001"
     # 1536 is the largest recommended Gemini Matryoshka output size that fits
     # under pgvector's 2000-dim index limit. The pgvector column is
@@ -263,6 +267,39 @@ class Settings(BaseSettings):
                 "CITEVYN_GEMINI_API_KEY must be set when "
                 "CITEVYN_EMBEDDING_PROVIDER='gemini' and "
                 "CITEVYN_ENVIRONMENT='production'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_openrouter_key_for_embeddings_in_production(self) -> "Settings":
+        # The OpenRouter embedder reads ``openrouter_api_key``. Mirror the gemini
+        # guard so a production deploy with the openrouter embedding provider and no
+        # key fails at boot, not on the first ingest/query.
+        if (
+            self.environment == "production"
+            and self.embedding_provider == "openrouter"
+            and not self.openrouter_api_key
+        ):
+            raise ValueError(
+                "CITEVYN_OPENROUTER_API_KEY must be set when "
+                "CITEVYN_EMBEDDING_PROVIDER='openrouter' and "
+                "CITEVYN_ENVIRONMENT='production'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_gemini_model_under_openrouter_embeddings(self) -> "Settings":
+        # ``embedding_model`` defaults to the Gemini model name. Selecting the
+        # openrouter provider without also setting an OpenAI-shaped model would POST
+        # ``gemini-embedding-001`` to OpenRouter's /embeddings endpoint (a 400/404
+        # with a confusing upstream error). Catch the provider/model incoherence at
+        # parse time with an actionable message instead.
+        if self.embedding_provider == "openrouter" and self.embedding_model.startswith("gemini"):
+            raise ValueError(
+                f"CITEVYN_EMBEDDING_MODEL={self.embedding_model!r} is a Gemini model but "
+                "CITEVYN_EMBEDDING_PROVIDER='openrouter'. Set "
+                "CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small (or another "
+                "OpenAI-compatible embedding model served by OpenRouter)."
             )
         return self
 

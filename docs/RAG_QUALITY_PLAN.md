@@ -198,6 +198,49 @@ principle). This is a **pre-existing LLM-provider config issue** (stale model/en
 orthogonal to the harness; tracked as a follow-up. Re-run `CITEVYN_LLM_PROVIDER=gemini
 CITEVYN_GEMINI_API_KEY=… make eval` once the model id is fixed to fill in the judge row.
 
+## 8a-1. Phase 1 measured results (PR1.1, #97 — vector arm revived)
+
+**Provider deviation (see ADR-0003 addendum):** Gemini free-tier embeddings hit their
+**1000/day** cap during this run, so the embedder for Phase 1 is **OpenRouter
+`openai/text-embedding-3-small` @ 1536** (native dim = the pgvector column; no migration),
+used for BOTH corpus and query (one vector space). Added behind the seam alongside `gemini`.
+
+**Retrieval (measured on REAL Postgres+pgvector, `python -m tests.eval.runner --postgres`):**
+
+| Metric | Phase-0 baseline (SQLite, arm dead) | Phase-1 (Postgres, arm live) |
+|---|---|---|
+| Overall answerable hit-rate | 10/15 = **0.667** | 13/15 = **0.867** |
+| — literal | 1.000 | **1.000** |
+| — paraphrase | 0.000 | **0.600 (3/5)** |
+| Refusal leaks | 0/5 | **0/5** |
+
+The **+3 paraphrases** are exactly the Phase-1-sensitive ones (`claude_api_par_throttle`,
+`codex_par_engine`, `gemini_api_par_auth`) that route to their correct domain. The two
+remaining (`claude_code_par_toolgate`, `citevyn_par_membership`) route to `unsupported`
+under hard domain scoping — **Phase 2** (soft scoping) territory, out of PR1.1 scope.
+
+**Semantic-quality proof (not the golden number).** With one chunk per area under hard
+scoping, the golden paraphrase metric proves the vector *plumbing* is alive on Postgres —
+a *stub* embedder yields the same 3/5. What proves the embeddings are **semantic** is the
+opt-in `test_eval_semantic_discrimination` control: on the SAME corpus + golden paraphrases,
+GLOBALLY (no scoping), the real embedder routes **5/5** to the correct area while the
+hash-bucket stub scores at chance (≤2/5). Both numbers together = "semantic search works."
+
+**Isolation/safety of the Postgres eval:** opt-in `--postgres`; refuses a stub embedder, a
+production target, a non-Postgres URL, or a non-empty catalog; seeds with `commit=False`
+under a unique per-run index_version and rolls back on every exit path → **verified zero
+residue** (chunks/documents/index_versions all 0 after a run). The hermetic SQLite gate
+(`test_paraphrase_baseline_is_dead`) is unchanged and still guards the SQLite path.
+
+**Judge baseline (Phase 1): deferred.** The LLM-judge drives the full orchestrator (real
+generation per case). During this run Gemini free-tier **generation** was ALSO rate-limited
+(`llm_primary_unavailable_falling_back` → paid `openai/gpt-4o-mini` fallback), and the long
+judged transaction was interrupted when the local Docker Desktop restarted. The retrieval
+gate above is fully proven and is the hard eval gate for PR1.1; the judge row is orthogonal
+(answer wording, not retrieval) and is refilled by re-running, once Gemini generation quota
+resets, `CITEVYN_EMBEDDING_PROVIDER=openrouter CITEVYN_LLM_PROVIDER=gemini python -m
+tests.eval.runner --postgres` against a migrated-but-empty Postgres. Tracked as a follow-up.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
