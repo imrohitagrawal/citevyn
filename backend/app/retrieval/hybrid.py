@@ -22,7 +22,7 @@ import asyncio
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.middleware import get_current_request_id
@@ -246,6 +246,24 @@ class HybridRetriever:
         identically) always pick the *same* winning row — the gate must reason
         about the index the rest of the pipeline uses.
         """
+        # Enforce single-active-row invariant (#58) — see
+        # ``orchestrator._retrieve_active_index`` for the rationale. When
+        # the guard fires there it returns ``("", "")``; here we mirror
+        # the WARNING + ``None`` so the vector arm gates itself on
+        # provenance=None / unknown, not on the wrong embedder stamp.
+        count_stmt = select(func.count(IndexVersion.index_version)).where(
+            IndexVersion.status == IndexStatus.active
+        )
+        active_count = (await self._session.execute(count_stmt)).scalar_one()
+        if active_count > 1:
+            _logger.warning(
+                "retrieval_multiple_active_indexes",
+                extra={
+                    "request_id": get_current_request_id(),
+                    "active_count": int(active_count),
+                },
+            )
+            return None
         stmt = (
             select(
                 IndexVersion.embedding_provider,

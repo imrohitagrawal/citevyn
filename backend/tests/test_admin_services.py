@@ -312,6 +312,77 @@ async def test_promote_version_raises_when_target_missing(
 
 
 # ---------------------------------------------------------------------------
+# orchestrator._retrieve_active_index — dual-active guard (#58, Issue 2 / F1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_active_index_returns_empty_on_dual_active(
+    session: AsyncSession,
+) -> None:
+    """Two ``active`` rows must NOT let the orchestrator silently pick one.
+
+    Regression: ``_retrieve_active_index`` used to ``LIMIT 1`` and return
+    the winner of an arbitrary deterministic sort. With a real database
+    carrying two ``active`` rows (the demo ``v1`` seed + a worker-ingested
+    ``v-local``), this hides a richer index and degrades every retrieval
+    arm. The guard now returns ``("", "")`` and logs a WARNING so
+    operators see the inconsistency and converge it via
+    ``promote_version``.
+    """
+    from app.answer.orchestrator import _retrieve_active_index
+
+    await seed_catalog(session)
+    # ``seed_catalog`` already has ``v1`` active; force a second active
+    # row to reproduce the dual-active index bug.
+    await _make_candidate(session, index_version="v2")
+    second = await index_version_service.get_version(session, index_version="v2")
+    assert second is not None
+    second.status = IndexStatus.active
+    await session.flush()
+
+    version, source_hash = await _retrieve_active_index(session)
+    # Empty sentinel → caller converts to active_index_version=None and
+    # retrieval falls back to a status-only filter rather than 500-ing.
+    assert (version, source_hash) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_active_index_emits_warning_on_dual_active(
+    session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The dual-active guard must log the ``orchestrator_multiple_active_indexes``
+    WARNING so this regression is observable in production logs."""
+    from app.answer.orchestrator import _retrieve_active_index
+
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    second = await index_version_service.get_version(session, index_version="v2")
+    second.status = IndexStatus.active
+    await session.flush()
+
+    with caplog.at_level("WARNING", logger="citevyn.answer"):
+        await _retrieve_active_index(session)
+
+    assert any(
+        "orchestrator_multiple_active_indexes" in record.message for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_active_index_returns_row_on_single_active(
+    session: AsyncSession,
+) -> None:
+    """Single-active is the happy path and must return the (version, hash)."""
+    from app.answer.orchestrator import _retrieve_active_index
+
+    await seed_catalog(session)
+    version, source_hash = await _retrieve_active_index(session)
+    assert version == "v1"
+    assert source_hash == "sha256:v1"
+
+
+# ---------------------------------------------------------------------------
 # evaluations service
 # ---------------------------------------------------------------------------
 

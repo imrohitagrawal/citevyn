@@ -161,6 +161,10 @@ services:
     image: citevyn/worker:${VERSION:-dev}
     container_name: citevyn-worker
     <<: *app-defaults
+    # One-shot ingest job: override the shared ``unless-stopped`` so the
+    # worker is not restarted after it ingests the MVP sources and exits
+    # 0 (see Dockerfile.worker CMD ``... run``). #81 item 7.
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
@@ -170,17 +174,12 @@ services:
       <<: *app-env
       CITEVYN_LLM_PROVIDER: ${CITEVYN_LLM_PROVIDER:-stub}
       CITEVYN_LLM_MODEL: ${CITEVYN_LLM_MODEL:-}
-    healthcheck:
-      # The worker is headless (no TCP port). The orchestrator
-      # signals liveness via the ingestion_jobs table; from the
-      # container's POV, "alive" means the citevyn-worker
-      # process is running. pgrep returns 0 when a match is
-      # found, 1 when not.
-      test: ["CMD-SHELL", "pgrep -f citevyn-worker || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+    # No healthcheck: the worker is a one-shot batch that exits 0 when
+    # ingestion completes, so a process-liveness probe is meaningless.
+    # The previous ``pgrep -f citevyn-worker`` check could never pass —
+    # procps is not installed in the slim image, and the process cmdline
+    # is ``python -m app.worker.cli run``, which would not match the
+    # pattern anyway. #81 item 8.
 
   caddy:
     profiles: ["prod"]

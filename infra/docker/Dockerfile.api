@@ -104,8 +104,10 @@ COPY --from=builder --chown=appuser:appuser /build/backend/README.md /app/README
 
 # Alembic tree + seed modules. The api process never reads /db at
 # request time — these are only consulted by the deploy/refresh
-# scripts via ``docker compose run api alembic ...`` and ``python
-# -m app.db.seed.seed_users``.
+# scripts via ``docker compose run api python -m alembic ...`` and
+# ``python -m seed.seed_users`` (``/db`` is the package root on
+# PYTHONPATH, and the ``alembic`` console script's builder shebang is
+# absent at runtime — see infra/docker/scripts/deploy.sh).
 COPY --from=builder --chown=appuser:appuser /build/db /db
 
 # No curl: use python's urllib for the healthcheck (the

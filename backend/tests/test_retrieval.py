@@ -65,6 +65,94 @@ async def test_keyword_retriever_empty_for_stopwords_only(seeded_session) -> Non
     assert await r.retrieve("how is the", product_area=Domain.claude_api.value) == []
 
 
+async def test_keyword_retriever_strips_trailing_punctuation(seeded_session) -> None:
+    """A *matching* token carrying trailing '?' still matches after stripping.
+
+    Regression: without ``rstrip("?!.,;:")`` the query "gemini header?"
+    tokenizes "header?" and builds ``ILIKE '%header?%'`` — which matches
+    nothing, leaving only "gemini" (one distinct token, below the >=2
+    relevance floor), so the seeded gemini chunk (whose text mentions the
+    ``x-goog-api-key header``) would be dropped and ``retrieve()`` would
+    return ``[]``. Stripping restores "header" so both tokens match and the
+    chunk is returned. Asserting the chunk IS returned makes this test fail
+    if the stripping is ever reverted (the prior assertion "no hit contains
+    'key?'" was vacuously true either way).
+    """
+    r = KeywordRetriever(seeded_session, active_index_version="v1")
+    hits = await r.retrieve("gemini header?", product_area=Domain.gemini_api.value)
+    assert hits, "punctuation-stripped 'header?' should match the seeded gemini chunk"
+    assert any("header" in h.chunk_text.lower() for h in hits)
+
+
+async def test_keyword_retriever_requires_two_token_matches(session) -> None:
+    """A single-token hit on a sparse corpus is too weak to keep.
+
+    Regression: ``gemini`` alone used to return the "Streaming" chunk
+    as flat 0.5 evidence for the question "How do I get the gemini
+    api key?" — pure noise. The relevance floor (≥2 distinct query
+    tokens matched) keeps such single-token false positives out of
+    the evidence list.
+    """
+    import uuid
+    from datetime import UTC, datetime
+
+    from app.models import Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="v-floor",
+            status=IndexStatus.active,
+            source_version_hash="sha256:floor",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc = Document(
+        document_id=uuid.uuid4(),
+        index_version="v-floor",
+        source_name="docs.test",
+        product_area="gemini_api",
+        source_url="https://docs.test/gemini-streaming",
+        title="Gemini API",
+        content_checksum="sha256:demo-streaming",
+        status=DocumentStatus.active,
+        last_fetched_at=now,
+        last_indexed_at=now,
+    )
+    session.add(doc)
+    session.add(
+        Chunk(
+            chunk_id=uuid.uuid4(),
+            document_id=doc.document_id,
+            product_area=doc.product_area,
+            section_path="/section",
+            heading="Streaming",
+            parent_heading=None,
+            # Only ``gemini`` overlaps with the query tokens
+            # ["obtain", "gemini", "credentials"] — "credentials" doesn't
+            # appear here. Pre-fix this returned the chunk as flat 0.5
+            # evidence (any single-token match was sufficient); post-fix
+            # the 2-token floor rejects it because only 1 token matched.
+            chunk_text=(
+                "The Gemini SDK provides Go, Rust, and Swift bindings "
+                "alongside the primary Python and Node.js clients."
+            ),
+            context_summary="Gemini SDK languages",
+            chunk_order=1,
+            content_checksum="sha256:demo-chunk-sdk",
+        )
+    )
+    await session.flush()
+
+    r = KeywordRetriever(session, active_index_version="v-floor")
+    # Query tokens (after stopword removal) = ["obtain", "gemini",
+    # "credentials"]. Only "gemini" appears in the chunk above, so the
+    # 2-token floor should reject the hit.
+    hits = await r.retrieve("Obtain Gemini credentials", product_area="gemini_api")
+    assert hits == []
+
+
 async def test_stub_embedder_deterministic() -> None:
     e = StubEmbedder(dim=8)
     a = await e.embed("hello world")
@@ -291,6 +379,38 @@ async def _stamp_active_index(session, *, provider, model, dim) -> None:
 
 
 _GEMINI = EmbedderIdentity(provider="gemini", model="gemini-embedding-001", dim=1536)
+
+
+async def test_active_index_stamp_none_on_dual_active(seeded_session) -> None:
+    """Two simultaneously-active index rows -> stamp returns None + WARN.
+
+    Mirrors the orchestrator's dual-active guard (#58): the vector arm must
+    gate on provenance=unknown rather than silently read the wrong embedder
+    stamp when more than one ``IndexVersion`` is active. The orchestrator
+    twin is covered by test_admin_services; this exercises the retrieval-side
+    guard added to ``HybridRetriever._active_index_stamp``.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    # ``v1`` is already active (seeded); add a second active row.
+    seeded_session.add(
+        IndexVersion(
+            index_version="v2",
+            status=IndexStatus.active,
+            source_version_hash="sha256:second-active",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    await seeded_session.flush()
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        stamp = await h._active_index_stamp()
+    assert stamp is None
+    assert any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
 
 
 async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:

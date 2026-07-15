@@ -176,6 +176,50 @@ if ! (
         echo "       in .env before running a prod entry point." >&2
         exit 1
     fi
+    # CITEVYN_PUBLIC_HOST backs the named Caddy site
+    # ``{$CITEVYN_PUBLIC_HOST}`` (infra/docker/Caddyfile). An unset or
+    # empty value makes Caddy adapt a site block with an empty address
+    # ("site address cannot be empty"), so the caddy container exits
+    # non-zero and restart-loops and :443 never serves. Require it
+    # before any prod entry point starts caddy.
+    _public_host="$(_strip "${CITEVYN_PUBLIC_HOST:-}")"
+    if [[ -z "${_public_host}" ]]; then
+        echo "error: CITEVYN_PUBLIC_HOST is not set in .env." >&2
+        echo "       It is the public DNS name Caddy provisions a TLS" >&2
+        echo "       certificate for and matches the :443 site against;" >&2
+        echo "       an empty value crash-loops the caddy container." >&2
+        exit 1
+    fi
+    # CITEVYN_DATABASE_URL is read from the container env by alembic
+    # (db/env.py) and the app. deploy.sh / refresh.sh no longer pass it
+    # on the CLI, so an unset value silently resolves to the config.py
+    # localhost default (postgresql+psycopg://citevyn:citevyn@localhost)
+    # and dies with an opaque "connection refused" inside the api
+    # container (Postgres is at hostname ``db``, not localhost). Fail
+    # fast with an actionable message instead.
+    _database_url="$(_strip "${CITEVYN_DATABASE_URL:-}")"
+    if [[ -z "${_database_url}" ]]; then
+        echo "error: CITEVYN_DATABASE_URL is not set in .env." >&2
+        echo "       Migrations and the app read it from the container" >&2
+        echo "       env; without it alembic connects to the localhost" >&2
+        echo "       default (no Postgres there) and fails opaquely." >&2
+        exit 1
+    fi
+    # stub-LLM-in-production: compose pins CITEVYN_ENVIRONMENT=production
+    # and defaults ``CITEVYN_LLM_PROVIDER=stub``; the settings guard
+    # rejects the stub provider in production, so an api/worker started
+    # with the default crash-loops and /health never passes. Require a
+    # real provider so the failure is a clear pre-flight message rather
+    # than a 60s health-timeout.
+    _llm_provider="$(_strip "${CITEVYN_LLM_PROVIDER:-}")"
+    if [[ -z "${_llm_provider}" || "${_llm_provider}" == "stub" ]]; then
+        echo "error: CITEVYN_LLM_PROVIDER must be a real provider in prod" >&2
+        echo "       (got '${_llm_provider:-<unset>}'). The compose stack" >&2
+        echo "       pins CITEVYN_ENVIRONMENT=production, where the stub" >&2
+        echo "       provider is rejected and the api crash-loops." >&2
+        echo "       Set CITEVYN_LLM_PROVIDER=gemini (or anthropic)." >&2
+        exit 1
+    fi
 ); then
     return 1 2>/dev/null || exit 1
 fi

@@ -85,4 +85,11 @@ USER appuser
 # not packaged"), and any console-script shebang would point at the
 # builder-only venv path anyway. ``python`` resolves through
 # /app/.venv/bin to the runtime's /usr/local/bin interpreter.
-CMD ["python", "-m", "app.worker.cli"]
+#
+# The ``run`` subcommand is required: ``python -m app.worker.cli`` with
+# no subcommand prints usage and exits 1 (argparse), which would
+# crash-loop under any restart policy. ``run`` ingests the MVP sources
+# once into a candidate IndexVersion and exits 0. The compose service
+# pins ``restart: "no"`` so this one-shot is not restarted after it
+# completes.
+CMD ["python", "-m", "app.worker.cli", "run"]

@@ -70,18 +70,24 @@ docker compose \
     --rm \
     --no-deps \
     api \
-    alembic \
+    python -m alembic \
         --config /db/alembic.ini \
-        --sqlalchemy-url "${CITEVYN_DATABASE_URL:?CITEVYN_DATABASE_URL must be set in .env}" \
     upgrade head
+# See deploy.sh: invoke via ``python -m alembic`` (the console script's
+# builder-stage shebang is absent at runtime) and pass no
+# ``--sqlalchemy-url`` (``db/env.py`` reads ``CITEVYN_DATABASE_URL`` from
+# the container env; the flag is also invalid in alembic 1.18.x).
 
-echo "==> rolling the api + worker containers"
+echo "==> rolling the long-running containers (api + caddy)"
+# The worker is a one-shot ingest job, not a long-running service, so it
+# is excluded from this ``up`` (see deploy.sh). Re-ingest explicitly when
+# needed:  docker compose --profile prod run --rm worker
 docker compose \
     --profile prod \
     up \
     -d \
     --no-deps \
-    api worker caddy
+    api caddy
 
 # Caddy auto-reloads its config on SIGHUP; explicit ``caddy reload``
 # is only needed if we change the Caddyfile.
@@ -91,15 +97,23 @@ docker compose \
     caddy \
     caddy reload --config /etc/caddy/Caddyfile
 
-echo "==> waiting for /health (max 60s)"
+echo "==> waiting for the api to become healthy + caddy to be running (max 60s)"
+# Poll the api container's OWN health status, NOT http://localhost/health:
+# the :80 Caddy site 301-redirects to HTTPS and ``curl --fail`` (no
+# ``-L``) treats the 3xx as success, falsely reporting a crash-looping
+# api as healthy. Also require caddy to be RUNNING (not crash-looping) so
+# a bad Caddyfile reload does not report a green refresh. See deploy.sh.
 for _ in $(seq 1 30); do
-    if curl --silent --fail http://localhost/health >/dev/null; then
-        echo "==> healthy"
+    _api_health="$(docker inspect --format '{{.State.Health.Status}}' citevyn-api 2>/dev/null || true)"
+    _caddy_state="$(docker inspect --format '{{.State.Status}}' citevyn-caddy 2>/dev/null || true)"
+    if [[ "${_api_health}" == "healthy" && "${_caddy_state}" == "running" ]]; then
+        echo "==> api healthy, caddy running"
         exit 0
     fi
     sleep 2
 done
 
-echo "warning: /health did not return 200 within 60s" >&2
-echo "         inspect with: docker compose --profile prod logs api" >&2
+echo "error: stack did not come up within 60s" >&2
+echo "       api health=${_api_health:-unknown}, caddy state=${_caddy_state:-unknown}" >&2
+echo "       inspect with: docker compose --profile prod logs api caddy" >&2
 exit 1
