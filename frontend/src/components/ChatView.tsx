@@ -18,6 +18,9 @@ interface ChatViewProps {
     text: string;
     streaming?: boolean;
     refusal?: boolean;
+    /** A transport failure (rate limit / server / network) — distinct from a content
+     *  refusal, so it shows a rate-limit / connection notice, not "NO SOURCE — REFUSED" (#120). */
+    errorKind?: "rate_limit" | "error";
     hasSources?: boolean;
     sources?: Array<{ n: string; title: string; url: string }>;
     /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
@@ -54,37 +57,27 @@ export function ChatView({
   highlightedIndex = -1,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
-  // Remember whether the user was at (or near) the bottom BEFORE the last
-  // update. Only auto-scroll on streaming updates when they were — so a user
-  // who has scrolled up to read older content keeps their position while a
-  // new chunk streams in.
-  const wasAtBottomRef = useRef(true);
 
-  // Track whether the user is at the bottom whenever the list scrolls. We use
-  // this on the next ``[messages]`` tick to decide whether to keep pinning to
-  // the bottom or leave the user's scroll position alone.
+  // Auto-scroll to bottom when new messages are added (or a chunk streams in),
+  // but ONLY when the user is already at (or near) the bottom — a user who has
+  // scrolled up to read older content keeps their position.
+  //
+  // The at-bottom check is done SYNCHRONOUSLY here, reading the live
+  // ``scrollTop``/``scrollHeight`` when the effect runs, rather than trusting a
+  // ref updated by a passive scroll listener. That listener fires asynchronously,
+  // so during word-by-word streaming (many updates/sec) it could lag this effect,
+  // which then read a stale "at bottom = true" and yanked the view back down while
+  // the user was scrolling up — the jitter (#122). Reading synchronously removes
+  // the race: after new content is appended, ``distanceFromBottom`` equals just the
+  // added height for an at-bottom user (≤ slack → pin) but is large for a
+  // scrolled-up user (> slack → left alone).
   useEffect(() => {
     const list = chatListRef.current;
     if (!list) return;
-    const onScroll = () => {
-      // 48px slack so a near-bottom user (last visible line is just off
-      // screen) still counts as "at bottom" and gets pinned.
-      const slack = 48;
-      const atBottom =
-        list.scrollHeight - list.scrollTop - list.clientHeight <= slack;
-      wasAtBottomRef.current = atBottom;
-    };
-    list.addEventListener("scroll", onScroll, { passive: true });
-    return () => list.removeEventListener("scroll", onScroll);
-  }, []);
-
-  // Auto-scroll to bottom when new messages are added (or a chunk streams in):
-  // this view owns autoscroll — the hook no longer touches #chat-list.
-  // Only pin when the user was already at the bottom; leave them alone if
-  // they've scrolled up to read.
-  useEffect(() => {
-    if (chatListRef.current && wasAtBottomRef.current) {
-      chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
+    const slack = 120; // a few streamed lines of tolerance
+    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (distanceFromBottom <= slack) {
+      list.scrollTop = list.scrollHeight;
     }
   }, [messages]);
 
@@ -134,7 +127,16 @@ export function ChatView({
                   </div>
                 )}
                 <div className="content">
-                  {m.refusal && (
+                  {/* A transport failure (429 / server / network) gets its own notice —
+                      NOT the content-refusal badge, which means "the corpus had no
+                      answer" and must stay reserved for a genuine no_answer (#120). */}
+                  {m.errorKind === "rate_limit" && (
+                    <div className="notice-badge notice-rate-limit">⏳ RATE LIMIT REACHED</div>
+                  )}
+                  {m.errorKind === "error" && (
+                    <div className="notice-badge notice-error">⚠ CONNECTION ERROR</div>
+                  )}
+                  {!m.errorKind && m.refusal && (
                     <div className="refusal-badge">
                       ⚠ NO SOURCE — REFUSED
                     </div>

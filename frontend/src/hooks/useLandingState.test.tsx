@@ -245,7 +245,7 @@ describe("useLandingState — live send path", () => {
 });
 
 describe("useLandingState — live error path", () => {
-  it("surfaces a rate-limit as a toast plus an inline refusal message", async () => {
+  it("surfaces a rate-limit as a toast plus a rate-limit notice (NOT a content refusal)", async () => {
     mockAskQuestion.mockRejectedValue(
       new ApiClientError("Slow down.", 429, {
         request_id: "r",
@@ -260,8 +260,11 @@ describe("useLandingState — live error path", () => {
 
     const bot = result.current.state.messages[1];
     expect(bot.role).toBe("bot");
-    expect(bot.refusal).toBe(true);
-    expect(bot.text).toContain("Slow down.");
+    // A 429 is a TRANSPORT failure, NOT a "NO SOURCE — REFUSED" content refusal (#120):
+    // it carries the rate-limit errorKind and is not tagged as a refusal.
+    expect(bot.errorKind).toBe("rate_limit");
+    expect(bot.refusal).toBe(false);
+    expect(bot.text.toLowerCase()).toContain("rate limit");
 
     expect(result.current.toasts).toHaveLength(1);
     // A rate limit gets a DISTINCT, less-alarming visual: the amber "warning"
@@ -308,6 +311,12 @@ describe("useLandingState — live error path", () => {
     // the duplicate-question guard.
     expect(mockAskQuestion).toHaveBeenCalledTimes(2);
     expect(result.current.state.messages.at(-1)?.text).toBe("Recovered answer.");
+    // #121: the retry re-shows the user's question — there are TWO user bubbles for
+    // it, so the recovered answer is not an orphaned bot bubble with no question above.
+    const userAsks = result.current.state.messages.filter(
+      (m) => m.role === "user" && m.text === "How do permissions work?",
+    );
+    expect(userAsks).toHaveLength(2);
   });
 
   it("re-creates the session after a 404 so an expired session recovers", async () => {
@@ -362,7 +371,9 @@ describe("useLandingState — live error path", () => {
     await settle();
 
     expect(result.current.toasts[0]).toMatchObject({ kind: "error", title: "Something went wrong" });
-    expect(result.current.state.messages[1].refusal).toBe(true);
+    // A network/timeout failure is a transport error, NOT a content refusal (#120).
+    expect(result.current.state.messages[1].errorKind).toBe("error");
+    expect(result.current.state.messages[1].refusal).toBe(false);
   });
 
   it("retries session creation after it fails once, then succeeds", async () => {

@@ -22,8 +22,15 @@ in the same change.
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
 | [#112](https://github.com/imrohitagrawal/citevyn/issues/112) | Conversation memory: entity-aware rewrite for off-corpus topic-pivot follow-ups (honest relevance miss when a pivot is semantically adjacent to the prior topic) | backend / RAG | Low (LLM net refuses clear pivots; bounded phrasing class) | Phase 3b fan-out review |
+| [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 
 ## Recently closed
+
+- **[#120](https://github.com/imrohitagrawal/citevyn/issues/120)** / **[#121](https://github.com/imrohitagrawal/citevyn/issues/121)** / **[#122](https://github.com/imrohitagrawal/citevyn/issues/122)** — chat UX fixes
+  (surfaced by live testing): transport errors (429/5xx/network) no longer wear the "NO SOURCE —
+  REFUSED" content badge (distinct rate-limit/connection notice, #120); re-asking a failed question
+  re-shows the user bubble (#121); autoscroll no longer yanks the view down when scrolling up during
+  streaming (#122). Fixed via `feat/chat-ux-fixes`, frontend-only, live-verified.
 
 - **[#92](https://github.com/imrohitagrawal/citevyn/issues/92)** — Worker prod ingestion: source
   docs now ship as package data under `backend/app/worker/sources/` (were unshipped test

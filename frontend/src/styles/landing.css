@@ -1455,6 +1455,34 @@ body {
   border-radius: 999px;
 }
 
+/* Transport-failure notice (rate limit / server / network) — distinct from the
+   content-refusal badge so a 429 doesn't read as "the corpus had no answer" (#120).
+   Rate-limit = amber (matches the 429 warning toast); error = red. */
+.notice-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.notice-rate-limit {
+  color: rgba(180, 83, 9, 1);
+  background: rgba(217, 119, 6, 0.1);
+  border: 1px solid rgba(217, 119, 6, 0.45);
+}
+
+.notice-error {
+  color: rgba(185, 28, 28, 1);
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+}
+
 .continue-btn {
   margin-top: 22px;
   height: 40px;
