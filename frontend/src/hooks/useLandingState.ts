@@ -440,7 +440,13 @@ export function useLandingState() {
       const apiErr = err instanceof ApiClientError ? err : null;
       let title = "Something went wrong";
       let message = "The request failed. Please try again in a moment.";
+      // A rate limit is a transient, user-recoverable condition, not a failure of
+      // the service — so it gets a DISTINCT, less-alarming visual: the amber
+      // "warning" toast (role="status", polite) rather than the red "error" alert
+      // used for server/transport failures (Phase 4b: distinct 429 UI).
+      let kind: "warning" | "error" = "error";
       if (apiErr?.isRateLimited()) {
+        kind = "warning";
         title = "Rate limit reached";
         message =
           apiErr.message ||
@@ -451,7 +457,7 @@ export function useLandingState() {
       } else if (apiErr) {
         message = apiErr.message || message;
       }
-      addToast({ kind: "error", title, message });
+      addToast({ kind, title, message });
       streamBot(message, { refusal: true, finalSources: [] });
     },
     // streamBot is a stable useCallback([]) declared below; intentionally
