@@ -448,6 +448,31 @@ async def test_unsupported_offcorpus_refuses_after_global_retrieval(
     assert audits[0].metadata_["reason"] == "unsupported_domain"
 
 
+async def test_answer_when_grounded_flag_off_restores_refuse_early(
+    session: Any,
+) -> None:
+    """The documented kill-switch: with ``answer_when_grounded=False`` an
+    unsupported-routed question refuses BEFORE any retrieval (the pre-Phase-2
+    behavior) — no retrieval, no LLM, no cache. Guards the rollback path."""
+    settings = _settings(answer_when_grounded=False)
+    retriever = _FakeRetriever(_evidence(count=2))  # would answer if consulted
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="What is the recipe for chocolate cake?",
+        request_id="req_flag_off",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["unsupported"] is True
+    assert response["answer"] == settings.unsupported_refusal
+    # Refused early: the retriever and LLM were never consulted, nothing cached.
+    assert retriever.calls == []
+    assert llm_spy.complete.await_count == 0
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+
+
 async def test_unsupported_but_grounded_question_answers_globally(
     session: Any,
 ) -> None:
