@@ -91,6 +91,27 @@ def test_retrieval_hit_rate_gate() -> None:
     )
 
 
+def test_followup_misses_single_turn() -> None:
+    """Gap control (Phase 3b prerequisite): the anaphoric follow-up questions must
+    MISS when retrieved single-turn (no conversation memory yet).
+
+    Each ``followup`` case's final question ("How can I raise it?") names no product,
+    so it routes to ``unsupported`` → the global confidence-gated arm finds nothing on
+    the hermetic path. A 0.0 followup hit-rate here is what makes the eventual hit
+    attributable to conversation memory (Phase 3b) rather than the case being
+    trivially answerable. It is the follow-up analogue of
+    ``test_paraphrase_baseline_is_dead`` and is EXPECTED to flip once the feature
+    wires memory into the retrieval path (update the story in §8b then).
+    """
+    cases = load_cases(GOLDEN_PATH)
+    assert any(c.kind == "followup" for c in cases), "golden set must carry followup cases"
+    report = asyncio.run(evaluate_retrieval(cases))
+    assert report.followup_hit_rate == 0.0, (
+        "a follow-up hit single-turn without memory — the gap is not real: "
+        f"{[o.case_id for o in report.outcomes if o.kind == 'followup' and o.hit]}"
+    )
+
+
 def test_paraphrase_baseline_is_dead() -> None:
     """Guardrail on the baseline story itself.
 
@@ -271,6 +292,130 @@ def test_multihop_validation_rejects_bad_rows(payload: dict[str, object], match:
 
     with pytest.raises(ValueError, match=match):
         EvalCase.from_dict(payload, origin="test")
+
+
+def test_followup_case_parses_with_history() -> None:
+    from tests.eval.cases import EvalCase
+
+    case = EvalCase.from_dict(
+        {
+            "id": "fu",
+            "area": "claude_api",
+            "kind": "followup",
+            "history": ["What is the rate limit for the Claude API?"],
+            "question": "How can I raise it?",
+            "expected_source": "claude_api",
+            "expected_gist": "raise the rate limit via the env var",
+        },
+        origin="test",
+    )
+    assert case.history == ("What is the rate limit for the Claude API?",)
+    assert case.expected_source == "claude_api"
+    assert case.expected_sources is None
+
+
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        (
+            {  # followup needs a non-empty history
+                "id": "fu1",
+                "area": "claude_api",
+                "kind": "followup",
+                "question": "How can I raise it?",
+                "expected_source": "claude_api",
+                "expected_gist": "g",
+            },
+            "must set a non-empty history",
+        ),
+        (
+            {  # followup needs an expected_source
+                "id": "fu2",
+                "area": "claude_api",
+                "kind": "followup",
+                "history": ["prior"],
+                "question": "q",
+                "expected_gist": "g",
+            },
+            "must set a non-empty expected_source",
+        ),
+        (
+            {  # followup must not use expected_sources (the plural is multihop's)
+                "id": "fu3",
+                "area": "claude_api",
+                "kind": "followup",
+                "history": ["prior"],
+                "question": "q",
+                "expected_source": "claude_api",
+                "expected_sources": ["claude_api", "gemini_api"],
+                "expected_gist": "g",
+            },
+            "sets expected_sources",
+        ),
+        (
+            {  # history belongs only to a followup case
+                "id": "fu4",
+                "area": "claude_api",
+                "kind": "literal",
+                "history": ["prior"],
+                "question": "q",
+                "expected_source": "claude_api",
+                "expected_gist": "g",
+            },
+            "only kind='followup'",
+        ),
+        (
+            {  # a stringly-typed history must be rejected, not char-split
+                "id": "fu5",
+                "area": "claude_api",
+                "kind": "followup",
+                "history": "prior turn",
+                "question": "q",
+                "expected_source": "claude_api",
+                "expected_gist": "g",
+            },
+            "history must be a list",
+        ),
+    ],
+)
+def test_followup_validation_rejects_bad_rows(payload: dict[str, object], match: str) -> None:
+    from tests.eval.cases import EvalCase
+
+    with pytest.raises(ValueError, match=match):
+        EvalCase.from_dict(payload, origin="test")
+
+
+def test_followup_excluded_from_core_overall_hit_rate() -> None:
+    """A followup case must never enter the gated core overall hit-rate — even when it
+    misses (single-turn, pre-memory), it must not drag the literal+paraphrase gate."""
+    from tests.eval.retrieval import RetrievalOutcome, RetrievalReport
+
+    def _outcome(kind: str, hit: bool) -> RetrievalOutcome:
+        return RetrievalOutcome(
+            case_id=f"{kind}-x",
+            area="a",
+            kind=kind,
+            domain="claude_api",
+            expected_source="claude_api",
+            retrieved_sources=("claude_api",) if hit else (),
+            hit=hit,
+            leaked=False,
+        )
+
+    report = RetrievalReport(
+        outcomes=(
+            _outcome("literal", True),
+            _outcome("paraphrase", True),
+            _outcome("followup", False),  # misses (single-turn) — must not count
+        )
+    )
+    # Core overall = literal + paraphrase only (both hit) → 1.0, unaffected by the miss.
+    assert report.overall_hit_rate == 1.0
+    d = report.as_dict()
+    assert d["answerable_total"] == 2, "followup must be excluded from the gated denominator"
+    assert d["followup_total"] == 1
+    assert d["followup_hits"] == 0
+    assert d["followup_hit_rate"] == 0.0
 
 
 # ---------------------------------------------------------------------------
