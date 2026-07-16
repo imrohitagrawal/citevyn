@@ -15,4 +15,8 @@ import pathlib
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 EVAL_DIR = REPO_ROOT / "tests" / "eval"
 GOLDEN_PATH = EVAL_DIR / "golden.jsonl"
+# Distractor corpus golden (#125, PR B): multi-relevant + single-relevant cases evaluated
+# ONLY by the opt-in Postgres distractor eval. Kept in its own file so it never enters the
+# locked hermetic/judged run's case list nor the main-golden coverage assertions.
+DISTRACTOR_GOLDEN_PATH = EVAL_DIR / "golden_distractors.jsonl"
 DEFAULT_REPORT_PATH = pathlib.Path("artifacts/eval_report.json")
