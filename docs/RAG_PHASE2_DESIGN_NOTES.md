@@ -75,8 +75,16 @@ run (LLM in the loop). During this run **Gemini free-tier *generation* was rate-
 local Docker Desktop crash. So even the corrected design can't be eval-proven for refusal safety
 right now without either a generation-quota reset or the paid OpenRouter LLM for the judge.
 
-## Product decision for you (the reason a human should sign off)
-**Should CiteVyn answer in-corpus questions that don't name the product (changing "unsupported →
-immediate refusal" to "retrieve globally, answer if grounded, else decline")?** This trades a
-crisp, cheap, always-safe refusal for broader recall at the cost of a per-query embedding+LLM
-spend and a softer refusal contract. That's a product/UX call, not purely an engineering one.
+## Product decision — RESOLVED 2026-07-16: **"Answer when grounded"**
+The owner delegated this call ("take the decision on my behalf as an expert"). **Decision: yes —
+CiteVyn should answer in-corpus questions that don't name the product** (change "unsupported →
+immediate refusal" to "retrieve globally, answer if grounded, else decline"). Rationale: a docs
+Q&A assistant refusing a real, answerable question just because the user said "coding assistant"
+instead of "Claude Code" is bad UX; the per-query embed/LLM cost is bounded by rate limits + a
+cheap pre-filter, and the existing LLM grounding-refusal keeps genuinely off-corpus queries safe.
+
+**Implementation must use the SOUND design above**, NOT the rejected absolute floor. The load-bearing
+prerequisite is the **eval refusal-metric redesign**: because global retrieval means refusal queries
+retrieve nearest chunks, the current hermetic `MAX_REFUSAL_LEAKS==0` (retrieval-only) gate conflicts
+and must become "the orchestrator declined" (judged / LLM-in-loop), validated on the real #92 corpus.
+Decomposition + status: `docs/AUTORUN_STATUS.md` (Phase 2 plan).
