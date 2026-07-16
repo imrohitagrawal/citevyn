@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embeddings import Embedder, StubEmbedder, build_embedder
 from app.models import Chunk, Document, DocumentStatus
+from app.retrieval.confidence import is_confident_global_result
 from app.retrieval.types import RetrievedChunk
 
 __all__ = ["Embedder", "StubEmbedder", "VectorRetriever", "build_embedder"]
@@ -29,10 +30,17 @@ class VectorRetriever:
         *,
         active_index_version: str | None = None,
         embedder: Embedder | None = None,
+        global_confidence: tuple[float, float] | None = None,
     ) -> None:
         self._session = session
         self._active_index_version = active_index_version
         self._embedder = embedder
+        # ``(min_top_score, min_margin)`` for the GLOBAL confidence gate (Phase 2).
+        # Applied only when ``product_area is None`` (a global "answer when grounded"
+        # search): an off-corpus query's nearest chunks are dropped so the arm
+        # contributes nothing rather than a spurious hit. ``None`` = no gate (the
+        # in-domain path and legacy callers are unaffected).
+        self._global_confidence = global_confidence
 
     async def retrieve(
         self,
@@ -70,6 +78,20 @@ class VectorRetriever:
             stmt = stmt.where(Chunk.product_area == product_area)
 
         rows = (await self._session.execute(stmt)).all()
+
+        # Global "answer when grounded" confidence gate (Phase 2): on an unscoped
+        # search (``product_area is None``), trust the vector result only when its
+        # best hit clearly stands out — otherwise an off-corpus question would
+        # surface a spurious nearest chunk. Rows are ordered by distance, so the
+        # scores are already descending. Skipped entirely for in-domain retrieval.
+        if product_area is None and self._global_confidence is not None:
+            scores = [max(0.0, 1.0 - float(dist)) for _c, _d, dist in rows]
+            min_top_score, min_margin = self._global_confidence
+            if not is_confident_global_result(
+                scores, min_top_score=min_top_score, min_margin=min_margin
+            ):
+                return []
+
         results: list[RetrievedChunk] = []
         for chunk, doc, dist in rows:
             # Cosine distance is in [0, 2]; convert to a [0, 1]-ish similarity.

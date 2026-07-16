@@ -261,11 +261,60 @@ def test_gate_flags_a_regressed_summary() -> None:
             "hit_rate_by_kind": {"literal": 0.80, "paraphrase": 0.0},
             "refusal_leaks": 1,
         },
-        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 2.0},
+        # Judge ran, so the judged refusal metric (orchestrator answered a refusal)
+        # is the authoritative refusal gate, not the retrieval count.
+        "judge": {
+            "available": True,
+            "judged": 15,
+            "scored": 15,
+            "mean_score": 2.0,
+            "refusal_leaks_judged": 1,
+        },
     }
     failures = gate_failures(regressed)
-    # literal < 1.0, overall < 0.60, a refusal leak, and mean judge < 3.0 → 4 reasons
+    # literal < 1.0, overall < 0.60, a judged refusal leak, and mean judge < 3.0 → 4 reasons
     assert len(failures) == 4, failures
+
+
+def test_refusal_gate_uses_judged_metric_when_llm_ran() -> None:
+    """Under "answer when grounded", a retrieval "leak" the LLM correctly declines
+    must NOT fail the gate when the judge ran — the orchestrator's decision governs."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 1,  # a chunk WAS retrieved for a refusal...
+        },
+        # ...but the LLM declined it, so 0 judged leaks → gate passes.
+        "judge": {
+            "available": True,
+            "judged": 15,
+            "scored": 15,
+            "mean_score": 4.0,
+            "refusal_leaks_judged": 0,
+        },
+    }
+    assert gate_failures(summary) == []
+
+
+def test_refusal_gate_uses_retrieval_metric_when_no_llm() -> None:
+    """With no LLM (hermetic SQLite), the retrieval refusal count is exact (dead
+    vector arm → refusals retrieve nothing) and remains the gate."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 0.667,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 0.0},
+            "refusal_leaks": 1,
+        },
+        "judge": {"available": False, "judged": 0, "scored": 0, "mean_score": None},
+    }
+    assert any("retrieval" in f and "refusal" in f for f in gate_failures(summary))
 
 
 def test_gate_passes_a_healthy_baseline_summary() -> None:

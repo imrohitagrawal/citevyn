@@ -35,11 +35,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
-from app.guardrails.domain import classify_domain
+from app.guardrails.domain import classify_domain, is_unsupported
 from app.models import Base, Chunk, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.types import VectorDegrade
-from app.routing.intent import classify_intent
+from app.routing.intent import Intent, classify_intent
 from tests.conftest import seed_catalog
 
 from .cases import EvalCase
@@ -263,10 +263,25 @@ async def _retrieve_sources(
     """
     domain = classify_domain(case.question)
     intent = classify_intent(case.question, domain)
+    if is_unsupported(domain):
+        intent = Intent.unsupported
     identity = configured_embedder_identity(settings) if embedder is not None else None
-    result = await HybridRetriever(session, embedder=embedder, embedder_identity=identity).retrieve(
+    # Mirror the orchestrator's "answer when grounded" routing (Phase 2): an
+    # unsupported-routed question retrieves GLOBALLY (product_area=None) through the
+    # confidence-gated vector arm, so the eval measures the same path the product
+    # serves rather than the old hard-scoped one.
+    answer_globally = settings.answer_when_grounded and intent is Intent.unsupported
+    result = await HybridRetriever(
+        session,
+        embedder=embedder,
+        embedder_identity=identity,
+        global_confidence=(
+            settings.retrieval_global_min_top_score,
+            settings.retrieval_global_min_margin,
+        ),
+    ).retrieve(
         case.question,
-        product_area=domain.value,
+        product_area=None if answer_globally else domain.value,
         intent=intent,
         limit=settings.retrieval_max_candidates,
         top_k=settings.retrieval_top_k,

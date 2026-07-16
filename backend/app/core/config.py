@@ -142,6 +142,22 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=6, ge=1)
     retrieval_max_candidates: int = Field(default=20, ge=1)
 
+    # --- "Answer when grounded" — global retrieval for unsupported-routed
+    #     questions (Phase 2). A question that doesn't NAME a product routes to
+    #     ``unsupported``; instead of an immediate refusal we retrieve GLOBALLY
+    #     (across all product areas) and answer when the evidence is confident.
+    #     Refusal safety = the confidence gate below (drops off-corpus queries at
+    #     retrieval) + the existing LLM grounding-refusal (the final net). Set
+    #     ``False`` to restore the old refuse-before-retrieval behavior.
+    answer_when_grounded: bool = True
+    # Confidence gate for the GLOBAL vector result (see app/retrieval/confidence.py).
+    # An off-corpus query's nearest chunk is either barely related (below the floor)
+    # or one of a muddle of ~equal weak matches (below the margin); an in-corpus
+    # query has one clearly-best chunk. Tuned on the ingested corpus (answerable
+    # margins >= 0.070, refusal margins <= 0.027); the eval harness validates changes.
+    retrieval_global_min_top_score: float = Field(default=0.30, ge=0.0, le=1.0)
+    retrieval_global_min_margin: float = Field(default=0.04, ge=0.0, le=1.0)
+
     # --- Answer cache (Slice 5+) ---
     answer_policy_version: str = "v1"
     cache_enabled: bool = True
