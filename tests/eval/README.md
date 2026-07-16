@@ -77,6 +77,21 @@ labels on a separate distractor index) — a distinct, careful PR that must not 
 locked hermetic baseline. Growing the golden set toward 50–100 and a human-labeled judge
 calibration subset ride along there.
 
+## CI enforcement of answer quality
+
+The hermetic retrieval gate runs in the standard `pytest + lint` CI job (no key, no
+network). The **judged answer-quality gate** (`MIN_MEAN_JUDGE` + per-case groundedness +
+prompt-injection resistance) runs in a dedicated `answer-quality-eval` CI job that spins up
+a pgvector service and drives the orchestrator per golden case with a real LLM + embedder.
+
+It requires the OpenRouter key as a **repo Actions secret** (`CITEVYN_OPENROUTER_API_KEY`),
+which only the repo **owner** can add. Until it is present the job **skips** every
+meaningful step (a loud `::notice::`) and stays green — the key is never hardcoded or
+faked. **To enable the gate:** add `CITEVYN_OPENROUTER_API_KEY` under *Settings → Secrets
+and variables → Actions*; the next run flips it on. Cost is bounded via
+`CITEVYN_EVAL_JUDGE_PANEL=1` (1 rubric framing + the adversarial veto = 2 judge
+calls/case) on a small model over the ~31-case golden set.
+
 ## Kinds
 
 - **`literal`** — shares vocabulary with the seed corpus; the keyword/exact arm can hit.

@@ -177,3 +177,86 @@ jobs:
       - name: Tear down + destroy the fresh volume (always)
         if: always()
         run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
+
+  answer-quality-eval:
+    name: judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)
+    runs-on: ubuntu-latest
+    needs: test
+    # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
+    # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
+    timeout-minutes: 20
+    # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
+    # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
+    # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
+    # resistance. It requires the OpenRouter key as a repo Actions SECRET, which only
+    # the repo OWNER can add. Until it is present, every meaningful step is SKIPPED (a
+    # loud ``::notice::``) so the job is green and the branch protection is unblocked —
+    # never hardcoded, never faked. Adding the secret flips the gate on with no further
+    # change. Forks never receive secrets, so this job is scoped to same-repo events.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    services:
+      postgres:
+        # pgvector so the vector arm actually runs (the only mode that measures
+        # semantic recall + drives the judged answer path).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: citevyn
+          POSTGRES_PASSWORD: citevyn
+          POSTGRES_DB: citevyn_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U citevyn -d citevyn_eval"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The secret is owner-only; when unset this is empty and the guard skips.
+      CITEVYN_OPENROUTER_API_KEY: ${{ secrets.CITEVYN_OPENROUTER_API_KEY }}
+      CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_eval
+      CITEVYN_EMBEDDING_PROVIDER: openrouter
+      CITEVYN_EMBEDDING_MODEL: openai/text-embedding-3-small
+      CITEVYN_LLM_PROVIDER: router
+      # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
+      # calls/case over the ~31-case golden set on a small model.
+      CITEVYN_EVAL_JUDGE_PANEL: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Guard — skip when the answer-quality secret is absent (owner-only)
+        id: guard
+        run: |
+          if [ -z "${CITEVYN_OPENROUTER_API_KEY}" ]; then
+            echo "::notice title=answer-quality eval skipped::CITEVYN_OPENROUTER_API_KEY is not configured. Add it as a repo Actions secret (Settings → Secrets and variables → Actions) to enable the judged answer-quality gate. Skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install uv
+        if: steps.guard.outputs.run == 'true'
+        run: pip install --upgrade pip uv
+      - name: Sync dependencies
+        if: steps.guard.outputs.run == 'true'
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Migrate the eval database
+        if: steps.guard.outputs.run == 'true'
+        working-directory: backend
+        # ``-c ../db/alembic.ini`` resolves the repo-root db/ tree from backend/ where
+        # the venv lives (same convention as the postgres-migrations job).
+        run: uv run alembic -c ../db/alembic.ini upgrade head
+      - name: Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)
+        if: steps.guard.outputs.run == 'true'
+        working-directory: backend
+        # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
+        # and rolls back (zero residue). Non-zero exit on any gate regression.
+        run: uv run python -m tests.eval.runner --postgres --report ../artifacts/eval_report.json
+      - name: Upload the eval report
+        if: steps.guard.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: answer-quality-eval-report
+          path: artifacts/eval_report.json
+          if-no-files-found: ignore
