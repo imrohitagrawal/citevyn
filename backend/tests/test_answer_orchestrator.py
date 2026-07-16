@@ -702,6 +702,84 @@ async def test_anaphoric_pivot_followup_still_declines_when_llm_refuses(session:
     assert refusing_llm.complete.await_count == 2
 
 
+async def test_no_answer_with_evidence_surfaces_nearest_doc_suggestions(session: Any) -> None:
+    """Graceful fallback (Phase 4a): when evidence was retrieved but the LLM declined,
+    the no_answer response offers the nearest docs as suggestions instead of a bare
+    refusal — deduped by source, projecting title/url/product_area."""
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    refusing_llm = AsyncMock()
+    refusing_llm.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    orch = Orchestrator(settings, session, llm=refusing_llm, retriever=retriever)
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_sugg",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    suggestions = response["suggestions"]
+    assert len(suggestions) >= 1
+    assert set(suggestions[0]) == {"title", "url", "product_area"}
+    # The two _evidence hits share source "docs.test" → deduped to one suggestion.
+    assert len(suggestions) == 1
+    assert suggestions[0]["title"] == "Doc 1"
+
+
+async def test_unsupported_refusal_has_no_suggestions(session: Any) -> None:
+    """A truly off-corpus refusal (no evidence retrieved) stays a CLEAN refusal — no
+    suggestions to avoid implying coverage we don't have."""
+    settings = _settings()
+    retriever = _FakeRetriever([])  # gate drops the off-corpus query → no evidence
+    orch = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orch.ask(
+        question="What is the recipe for chocolate cake?",
+        request_id="req_unsupp_sugg",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["unsupported"] is True
+    assert response["suggestions"] == []
+
+
+async def test_offcorpus_declined_with_evidence_has_no_suggestions(session: Any) -> None:
+    """Review finding 1: an OFF-CORPUS question routes to ``unsupported`` but the global
+    "answer when grounded" arm may surface a nearest (cross-domain) chunk that the LLM
+    then declines. Suggesting THAT doc would imply coverage we don't have — so a
+    ``unsupported``-intent no_answer must have NO suggestions even when evidence exists."""
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    settings = _settings()
+    # The global arm surfaced a nearest chunk (evidence non-empty)...
+    retriever = _FakeRetriever(_evidence(count=2))
+    # ...but the grounding-refusal net declines the off-corpus question.
+    refusing_llm = AsyncMock()
+    refusing_llm.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    orch = Orchestrator(settings, session, llm=refusing_llm, retriever=retriever)
+
+    response = await orch.ask(
+        question="How do I call the OpenAI GPT-4 API?",
+        request_id="req_offcorpus_sugg",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    assert response["domain"] == "unsupported"
+    assert response["suggestions"] == []  # cross-domain doc NOT offered as helpful
+
+
 async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> None:
     """The kill-switch: with ``conversation_memory=False`` a follow-up is NOT rewritten
     — it stays unsupported (global arm), the pre-Phase-3b behavior."""

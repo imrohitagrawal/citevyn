@@ -358,7 +358,11 @@ scope. Kill-switch: `conversation_memory=False` restores the pre-3b behavior.
   not needed — recent `Message` rows are the reliable per-turn signal).
 
 **Phase 4 — UX & ops**
-- PR4.1 Graceful fallback UX (nearest-doc suggestions).
+- PR4.1 Graceful fallback UX (nearest-doc suggestions). **✅ DONE** — when evidence was
+  retrieved but no answer could be grounded (LLM declined / citation-failed), the
+  no_answer response carries deduped nearest-doc `suggestions` (title/url/product_area);
+  the chat renders "You might find these helpful:" instead of a dead-end refusal. A clean
+  off-corpus refusal (no evidence) stays suggestion-free.
 - PR4.2 Rate-limit segmentation + distinct 429 UI. **Distinct 429 UI ✅ DONE** — a rate
   limit renders as the amber `warning` toast (transient/recoverable), visually distinct
   from the red `error` alert used for server/transport failures. Rate-limit *segmentation*

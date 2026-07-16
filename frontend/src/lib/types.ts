@@ -71,6 +71,18 @@ export interface Citation {
 }
 
 /**
+ * One nearest-doc suggestion offered on a graceful fallback (Phase 4a). When the
+ * backend retrieved evidence but could not ground an answer, it returns these
+ * doc-level pointers so the UI can offer "you might find these helpful" instead of a
+ * bare refusal. Empty for a clean off-corpus refusal (no evidence retrieved).
+ */
+export interface Suggestion {
+  title: string;
+  url: string;
+  product_area: string;
+}
+
+/**
  * Confidence of the answer. The backend's :class:`Confidence` enum
  * is a string enum; the values are the only legal ones.
  */
@@ -131,6 +143,11 @@ export interface AskResponse {
   source_version_hash: string;
   /** Answer-policy version that produced the response. */
   answer_policy_version: string;
+  /**
+   * Nearest-doc suggestions for a graceful fallback (Phase 4a). Present (possibly
+   * empty) on a no_answer/unsupported response; absent/ignored on a grounded answer.
+   */
+  suggestions?: Suggestion[];
 }
 
 // ---------------------------------------------------------------------------
