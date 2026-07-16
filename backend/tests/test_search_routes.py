@@ -356,6 +356,35 @@ def test_health_index_ready_when_active_present(app_with_seeded_session, session
         assert body["previous_good_index"] is None
 
 
+def test_health_index_pre_index_has_null_vector_arm(app_with_seeded_session) -> None:
+    """Phase 4c: with no active index there is nothing to embed → vector_arm is null."""
+    with TestClient(app_with_seeded_session) as client:
+        body = client.get("/health/index").json()
+        assert body["status"] == "pre_index"
+        assert body["vector_arm"] is None
+
+
+def test_health_index_reports_dead_vector_arm(app_with_seeded_session, session) -> None:
+    """Phase 4c: the seeded catalog's chunks are unembedded (embedder=None), so the
+    vector_arm block reports ``dead`` — the exact #97 failure an operator must SEE,
+    while the top-level ``status`` stays ``ready`` (additive; does not drain the pod)."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+
+    with TestClient(app_with_seeded_session) as client:
+        body = client.get("/health/index").json()
+        assert body["status"] == "ready"  # unchanged, additive signal
+        va = body["vector_arm"]
+        assert va["status"] == "dead"
+        assert va["healthy"] is False
+        assert va["chunks_total"] > 0
+        assert va["chunks_embedded"] == 0
+        assert va["embedded_ratio"] == 0.0
+        # The configured query embedder identity is surfaced (provider/model/dim only).
+        assert set(va["configured_query_embedder"]) == {"provider", "model", "dim"}
+
+
 def test_search_exact_422_redacts_user_input(app_with_seeded_session) -> None:
     """The 422 envelope must not echo back user-provided input.
 
