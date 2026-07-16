@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     retrieval_global_min_top_score: float = Field(default=0.30, ge=0.0, le=1.0)
     retrieval_global_min_margin: float = Field(default=0.04, ge=0.0, le=1.0)
 
+    # --- Conversation memory (Phase 3b) — resolve an anaphoric follow-up ("How can
+    #     I raise it?") against recent turns so retrieval + the answer see the topic.
+    #     Only a follow-up that names NO product AND is genuinely anaphoric/elliptical
+    #     is rewritten (a self-contained off-domain sentence still reaches the refusal;
+    #     see app/answer/memory.py). ``memory_recent_turns`` bounds how far back we
+    #     look for the antecedent. Set ``conversation_memory=False`` to disable.
+    conversation_memory: bool = True
+    memory_recent_turns: int = Field(default=6, ge=1)
+
     # --- Answer cache (Slice 5+) ---
     answer_policy_version: str = "v1"
     cache_enabled: bool = True

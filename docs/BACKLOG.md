@@ -21,6 +21,7 @@ in the same change.
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
+| [#112](https://github.com/imrohitagrawal/citevyn/issues/112) | Conversation memory: entity-aware rewrite for off-corpus topic-pivot follow-ups (honest relevance miss when a pivot is semantically adjacent to the prior topic) | backend / RAG | Low (LLM net refuses clear pivots; bounded phrasing class) | Phase 3b fan-out review |
 
 ## Recently closed
 

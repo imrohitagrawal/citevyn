@@ -35,3 +35,9 @@ MIN_JUDGE_COVERAGE = 0.9
 # only with the live vector arm, so it is gated ONLY on the --postgres run (excluded
 # from the hermetic overall gate). Every multi-hop case must hit there.
 MIN_MULTIHOP_HIT_RATE = 1.0
+# Conversation memory (Phase 3b): an anaphoric follow-up must resolve against its
+# prior turns and retrieve its expected area. Unlike multihop, the memory rewrite
+# resolves DETERMINISTICALLY (domain routing + keyword), so this is gated on the
+# HERMETIC run too (a strong, non-flaky gate — a broken rewrite fails CI). Every
+# followup case must hit.
+MIN_FOLLOWUP_HIT_RATE = 1.0

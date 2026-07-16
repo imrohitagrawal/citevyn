@@ -42,6 +42,7 @@ from .paths import DEFAULT_REPORT_PATH, GOLDEN_PATH
 from .retrieval import evaluate_retrieval, postgres_session, seeded_session
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
+    MIN_FOLLOWUP_HIT_RATE,
     MIN_JUDGE_COVERAGE,
     MIN_LITERAL_HIT_RATE,
     MIN_MEAN_JUDGE,
@@ -97,23 +98,28 @@ async def _judge_cases(
     judged: list[JudgedCase] = []
     async with _judge_session(settings, postgres=postgres) as session:
         for case in cases:
-            # A ``followup`` case is a MULTI-TURN conversation: judging it single-turn
-            # would drive only the anaphoric final turn (no topic), which correctly
-            # declines and would drag the judge mean on a metric it does not belong to.
-            # The multi-turn replay (drive ``history`` then the final turn in one
-            # session) lands with the conversation-memory feature (Phase 3b); until
-            # then this bucket is retrieval-only and skipped here.
-            if case.kind == "followup":
-                continue
             # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
             # OrchestratorError; ``LLMUnavailable`` can also escape the generate
             # path in some arms. Either way the case records a loud error and the
             # batch keeps going — one flaky call must not abort the whole run.
+            #
+            # A ``followup`` case is MULTI-TURN: replay its ``history`` through the
+            # orchestrator on ONE session first, so the orchestrator's DB-backed
+            # conversation memory (Phase 3b) resolves the anaphoric final turn exactly
+            # as it would in production. Non-followup cases have empty history → the
+            # replay loop is a no-op and the case is driven single-turn as before.
+            session_id = uuid.uuid4()
             try:
+                for prior in case.history:
+                    await Orchestrator(settings, session).ask(
+                        question=prior,
+                        request_id=f"eval-{case.id}-history",
+                        session_id=session_id,
+                    )
                 response = await Orchestrator(settings, session).ask(
                     question=case.question,
                     request_id=f"eval-{case.id}",
-                    session_id=uuid.uuid4(),
+                    session_id=session_id,
                 )
             except (OrchestratorError, LLMUnavailable) as exc:
                 judged.append(
@@ -235,6 +241,12 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
             failures.append(
                 f"multihop hit-rate {r['multihop_hit_rate']:.3f} < {MIN_MULTIHOP_HIT_RATE}"
             )
+    # Conversation memory (Phase 3b): the followup rewrite resolves deterministically
+    # (domain routing + keyword), so gate it on EVERY run — hermetic included. A broken
+    # rewrite (or memory disabled) drops the hit-rate and fails CI.
+    fu_total = r.get("followup_total", 0)
+    if fu_total and r.get("followup_hit_rate", 0.0) < MIN_FOLLOWUP_HIT_RATE:
+        failures.append(f"followup hit-rate {r['followup_hit_rate']:.3f} < {MIN_FOLLOWUP_HIT_RATE}")
     if j["available"]:
         judged = j.get("judged", 0)
         scored = j.get("scored", 0)

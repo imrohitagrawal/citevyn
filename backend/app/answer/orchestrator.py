@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import AnswerGenerator
+from app.answer.memory import build_contextual_query, recent_user_questions
 from app.answer.no_answer import build_no_answer_response
 from app.cache.answer_cache import (
     AnswerCacheStore,
@@ -377,37 +378,60 @@ class Orchestrator:
         committing the session once it has serialized the response.
         """
         normalized = question.strip()
-        domain = classify_domain(question)
-        intent = classify_intent(question, domain)
-        # The router emits ``Intent.unsupported`` when the guardrail
-        # refused, but the orchestrator re-derives it from the domain
-        # so a stale intent cannot leak through.
-        if is_unsupported(domain):
-            intent = Intent.unsupported
 
-        # Multi-hop (Phase 3): a cross-product question names >=2 products
-        # ("compare the Claude API and Gemini rate limits"). ``classify_domain``
-        # returns only the first, so the single-domain path answers only half.
-        # When >=2 product areas are named we retrieve each and merge below.
-        # (A multi-hop question always resolves to a product domain — not
-        # ``unsupported`` — so it never collides with the answer-when-grounded /
-        # refuse-early branches; CiteVyn-meta short-circuits to ``[citevyn]``.)
-        multi_domains = classify_domains(question)
-        multi_hop = len(multi_domains) >= 2
-
-        # A bare social greeting short-circuits to a friendly static reply
-        # before the unsupported refusal (a lone "hello" classifies as an
-        # unsupported domain) and before retrieval, so we never burn an LLM
-        # call on "hi". A real question that merely opens with a greeting
-        # falls through to the normal pipeline (see :func:`is_greeting`).
+        # A bare social greeting short-circuits to a friendly static reply before the
+        # unsupported refusal (a lone "hello" classifies as an unsupported domain) and
+        # before retrieval, so we never burn an LLM call on "hi". It runs on the
+        # ORIGINAL utterance, BEFORE conversation memory, so a bare "hi" mid-session
+        # stays a greeting instead of borrowing the prior topic. A real question that
+        # merely opens with a greeting falls through to the normal pipeline (see
+        # :func:`is_greeting`).
         if is_greeting(question):
             return await self._respond_greeting(
                 request_id=request_id,
                 session_id=session_id,
                 question=question,
                 normalized=normalized,
-                domain=domain,
+                domain=classify_domain(question),
             )
+
+        # Conversation memory (Phase 3b): an anaphoric follow-up ("How can I raise
+        # it?") names no product on its own, so single-turn it would route to
+        # ``unsupported`` and be refused. Resolve it against the session's recent turns
+        # so retrieval AND the answer see the topic. ``build_contextual_query`` only
+        # rewrites a genuine anaphoric/elliptical follow-up (a self-contained off-domain
+        # sentence is left alone → still refused); with no prior turns it is a no-op, so
+        # every single-turn path is byte-for-byte unchanged. Everything downstream
+        # classifies + retrieves + answers from ``retrieval_query`` (the resolved
+        # topic), while the ORIGINAL ``question`` stays the persisted user utterance.
+        retrieval_query = question
+        if self._settings.conversation_memory:
+            prior_questions = await recent_user_questions(
+                self._session, session_id, limit=self._settings.memory_recent_turns
+            )
+            retrieval_query = build_contextual_query(question, prior_questions)
+
+        domain = classify_domain(retrieval_query)
+        intent = classify_intent(retrieval_query, domain)
+        # The router emits ``Intent.unsupported`` when the guardrail refused, but the
+        # orchestrator re-derives it from the domain so a stale intent cannot leak
+        # through.
+        if is_unsupported(domain):
+            intent = Intent.unsupported
+
+        # Multi-hop (Phase 3): a cross-product question names >=2 products ("compare the
+        # Claude API and Gemini rate limits"). ``classify_domain`` returns only the
+        # first, so the single-domain path answers only half. When >=2 product areas
+        # are named we retrieve each and merge below. (A multi-hop question always
+        # resolves to a product domain — not ``unsupported`` — so it never collides with
+        # the answer-when-grounded / refuse-early branches; CiteVyn-meta short-circuits
+        # to ``[citevyn]``.) Classified from ``retrieval_query`` so that IF a memory
+        # rewrite prepended a prior turn that itself named a second product, the fan-out
+        # still fires. (A follow-up that names a product on its own is self-contained —
+        # ``build_contextual_query`` leaves it unchanged — so it does NOT inherit the
+        # prior topic; resolving cross-product follow-ups by pronoun is out of scope.)
+        multi_domains = classify_domains(retrieval_query)
+        multi_hop = len(multi_domains) >= 2
 
         # "Answer when grounded" (Phase 2): a question that names no product routes
         # to ``unsupported``, but the docs may still cover it ("restrict which tools
@@ -441,11 +465,14 @@ class Orchestrator:
         # config. Only ``provider/model/dim`` — no secret — enters the pre-image.
         configured_identity = configured_embedder_identity(self._settings)
 
-        # Normalize the question for the cache key. The slice 5
-        # contract pins the inputs verbatim; whitespace
-        # normalization is a soft enhancement that improves hit
-        # rate on minor formatting differences.
-        cache_normalized = normalized.lower()
+        # Normalize the question for the cache key. The slice 5 contract pins the
+        # inputs verbatim; whitespace normalization is a soft enhancement that improves
+        # hit rate on minor formatting differences. Built from ``retrieval_query`` (not
+        # the raw ``question``) so two sessions asking the SAME anaphoric follow-up
+        # ("how can I raise it?") under DIFFERENT prior topics get DISTINCT cache keys
+        # (the resolved query + resolved ``product_area`` both differ) and never
+        # cross-serve a wrong cached answer (adversarial review R3/#6).
+        cache_normalized = retrieval_query.strip().lower()
         # A multi-hop answer is built from several product areas, so its cache key
         # encodes the sorted joined set (e.g. "claude_api+gemini_api") — self-
         # describing and impossible to collide with a single-domain row. The read
@@ -507,7 +534,7 @@ class Orchestrator:
         # arms as before.
         if multi_hop:
             result = await retriever.retrieve_multi(
-                question,
+                retrieval_query,
                 product_areas=[d.value for d in multi_domains],
                 intent=intent,
                 limit=self._settings.retrieval_max_candidates,
@@ -515,7 +542,7 @@ class Orchestrator:
             )
         else:
             result = await retriever.retrieve(
-                question,
+                retrieval_query,
                 product_area=None if answer_globally else domain.value,
                 intent=intent,
                 limit=self._settings.retrieval_max_candidates,
@@ -560,7 +587,15 @@ class Orchestrator:
         strategy = self._strategy_for(intent, evidence)
 
         try:
-            llm_result = await self._generator.generate(question, evidence)
+            # Answer the RESOLVED query so the LLM can resolve the follow-up's pronoun
+            # from the prepended topic ("What is the Claude API rate limit? How can I
+            # raise it?") — handing it only the bare "How can I raise it?" makes the LLM
+            # refuse a genuine anaphora it cannot disambiguate (measured). An off-corpus
+            # PIVOT that opens with an anaphor ("and how do I do that on Kubernetes?") is
+            # still declined: the routed chunk carries no support for the new topic, so
+            # the LLM grounding-refusal net refuses (the multi-turn refusal golden cases
+            # gate this). Single-turn ``retrieval_query == question`` so this is a no-op.
+            llm_result = await self._generator.generate(retrieval_query, evidence)
         except LLMUnavailable as exc:
             # Slice 7 maps this to ``cost_limit_reached`` (503) when
             # the cause is 429, otherwise to ``internal_error`` (500).

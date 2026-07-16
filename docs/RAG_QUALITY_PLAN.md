@@ -294,6 +294,52 @@ only on the `--postgres` run). The eval's `_retrieve_sources` mirrors the orches
 routing so a passing eval implies a working product. Follow-up: **conversation memory** (Phase 3's
 other half) needs multi-turn eval infrastructure — a separate PR.
 
+## 8a-4. Phase 3b measured results (conversation memory)
+
+An anaphoric follow-up ("How can I raise it?") after a product turn named no product on
+its own, so it routed to `unsupported` and — finding nothing confident in the global arm
+— was refused. Conversation memory now reads the session's recent USER turns
+(`recent_user_questions`) and, when the follow-up is genuinely anaphoric/elliptical AND
+names no product, prepends the most-recent prior product turn
+(`build_contextual_query`). The resolved query drives domain routing, retrieval, the
+generated answer, AND the cache key (so two sessions asking the same follow-up under
+different topics never cross-serve). A self-contained off-domain sentence ("what's the
+weather?") carries no anaphora, so it is left unchanged and still reaches the refusal
+(adversarial R1). Single-turn (no prior) is a byte-for-byte no-op.
+
+**Measured (real Postgres+pgvector; openrouter embeddings + LLM; `--postgres` judged run):**
+
+| Metric | Phase-3a | Phase-3b |
+|---|---|---|
+| Follow-up hit-rate (memory ON) | — | **3/3 = 1.000** |
+| Follow-up hit-rate (memory OFF, raw control) | — | **0/3 = 0.000** |
+| Core overall (literal + paraphrase) | 15/15 | 15/15 (unchanged) |
+| Multi-hop | 3/3 | 3/3 (unchanged) |
+| Refusal leaks — judged | 0/5 | **0/5** (off-topic follow-up still declines) |
+| Judge mean (now over 26 cases incl. 3 judged followups) | 4.91 | **4.88**, 0 errors |
+
+**Refusal safety.** The rewrite only fires on a genuine anaphoric/elliptical follow-up
+that names no product (`is_anaphoric_followup`), so a self-contained off-domain sentence
+("what's the weather?") is left unchanged and still refused. An off-corpus PIVOT that
+opens with an anaphor ("and how do I do that on Kubernetes?") IS contextualized, but the
+LLM grounding-refusal net (Phase 2) is the authoritative gate: a clear pivot finds no
+support in the routed chunk and is declined (`refusal_leaks_judged` 0/5; verified in the
+judged eval + a hermetic test that memory routing HONORS the LLM refusal). The residual —
+a pivot semantically adjacent to the prior topic answered-with-disclaimer — is an honest
+relevance miss (not a fabrication) tracked as **#112** (entity-aware rewrite); handing
+generation only the bare follow-up regresses genuine anaphora, so it is not the fix.
+
+Zero residue (chunks/documents/index_versions/messages/sessions all 0 after rollback).
+Unlike `multihop`, the followup rewrite resolves DETERMINISTICALLY (domain routing +
+keyword), so the followup bucket is gated on the **hermetic** run too (a broken rewrite
+fails CI) — the eval's retrieval metric persists the history as real `Message` rows and
+reads them back through the SAME `recent_user_questions` helper the orchestrator uses, so
+a passing eval implies a working product (adversarial finding #2). The permanent
+memory-OFF raw-miss control (`test_followup_raw_misses_without_memory`) keeps the hit
+attributable to memory. Design limitation (documented): the antecedent is the
+most-recent prior product turn — deep coreference past an intervening topic is out of
+scope. Kill-switch: `conversation_memory=False` restores the pre-3b behavior.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
@@ -306,8 +352,10 @@ other half) needs multi-turn eval infrastructure — a separate PR.
 - PR2.4 (optional) cross-encoder reranker.
 
 **Phase 3 — Advanced**
-- PR3.1 Query rewriting/decomposition (multi-hop).
-- PR3.2 Conversation memory (prior turns → retrieval + prompt; use `sessions.summary`).
+- PR3.1 Query rewriting/decomposition (multi-hop). **✅ DONE** (#109) — see §8a-3.
+- PR3.2 Conversation memory (prior turns → retrieval + prompt). **✅ DONE** (Phase 3b) — see
+  §8a-4. Recent USER turns rewrite an anaphoric follow-up (deterministic; `sessions.summary`
+  not needed — recent `Message` rows are the reliable per-turn signal).
 
 **Phase 4 — UX & ops**
 - PR4.1 Graceful fallback UX (nearest-doc suggestions).
