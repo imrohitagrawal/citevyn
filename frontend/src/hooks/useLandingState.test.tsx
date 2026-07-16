@@ -116,6 +116,33 @@ describe("useLandingState — live send path", () => {
     const bot = result.current.state.messages[1];
     expect(bot.refusal).toBe(true);
     expect(bot.sources).toEqual([]);
+    expect(bot.suggestions ?? []).toEqual([]);
+  });
+
+  it("threads graceful-fallback nearest-doc suggestions onto a no_answer message", async () => {
+    // A no_answer that retrieved evidence carries suggestions the UI should surface
+    // instead of a bare refusal (Phase 4a).
+    mockAskQuestion.mockResolvedValue(
+      askResponse({
+        answer: "No grounded answer.",
+        unsupported: false,
+        no_answer: true,
+        citations: [],
+        suggestions: [
+          { title: "Claude Code Reference", url: "/claude-code", product_area: "claude_code" },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("something the docs almost cover"));
+    await settle();
+
+    const bot = result.current.state.messages[1];
+    expect(bot.refusal).toBe(true);
+    expect(bot.suggestions).toEqual([
+      { title: "Claude Code Reference", url: "/claude-code", product_area: "claude_code" },
+    ]);
   });
 
   it("marks a grounded no-answer (no_answer only, unsupported false) as a refusal", async () => {

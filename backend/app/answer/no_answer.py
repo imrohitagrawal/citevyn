@@ -19,13 +19,53 @@ database so it stays cheap to call on the hot path.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.routing.intent import Intent
+
+if TYPE_CHECKING:
+    from app.retrieval.types import EvidenceHit
 
 # Map from orchestrator exit-reason to the public ``no_answer`` flag.
 # Every reason maps to True so clients see one consistent flag.
 _NO_ANSWER_REASONS: frozenset[str] = frozenset(
     {"unsupported", "weak_evidence", "no_answer", "citation_validation_failed"}
 )
+
+# How many nearest-doc suggestions to surface on a graceful fallback. A short list
+# (distinct sources) — enough to redirect the user without burying the refusal.
+_MAX_SUGGESTIONS = 3
+
+
+def build_suggestions(evidence: list[EvidenceHit]) -> list[dict[str, str]]:
+    """Project retrieved evidence into deduped nearest-doc suggestions (Phase 4a).
+
+    When the orchestrator retrieved evidence but could not ground an answer (the LLM
+    declined, or citation validation failed), the retrieved chunks are still the
+    *nearest in-corpus docs*. Surfacing them as suggestions turns a bare refusal into a
+    graceful fallback ("I couldn't answer that, but you might find these helpful").
+
+    Dedupes by ``source_name`` (one entry per doc, first/highest-ranked wins) and caps at
+    :data:`_MAX_SUGGESTIONS`. Returns ``[]`` for empty evidence — a truly off-corpus
+    refusal (no evidence) stays a clean refusal with no suggestions. Each entry carries
+    only ``title``/``url``/``product_area`` (no chunk text, no secret).
+    """
+    suggestions: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for hit in evidence:
+        if hit.source_name in seen:
+            continue
+        seen.add(hit.source_name)
+        suggestions.append(
+            {
+                "title": hit.document_title,
+                "url": hit.source_url,
+                "product_area": hit.product_area,
+            }
+        )
+        if len(suggestions) >= _MAX_SUGGESTIONS:
+            break
+    return suggestions
 
 
 def build_no_answer_response(
@@ -37,6 +77,7 @@ def build_no_answer_response(
     copy: str,
     message_id: str | None = None,
     retrieval_strategy: str = "none",
+    suggestions: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     """Build the canonical no-answer response shape.
 
@@ -47,6 +88,11 @@ def build_no_answer_response(
     defaults to ``"none"``; the citation-validation-failed path
     passes the strategy the retriever actually attempted so the
     observability layer can see the attempt.
+
+    ``suggestions`` (Phase 4a) are the nearest in-corpus docs to offer as a graceful
+    fallback when evidence was retrieved but no answer could be grounded; ``None`` / empty
+    yields ``"suggestions": []`` so a clean off-corpus refusal is unchanged. The field is
+    additive — existing clients that ignore it see the same no-answer shape.
 
     The function is pure and does not touch the database;
     persistence happens in the orchestrator.
@@ -73,7 +119,8 @@ def build_no_answer_response(
         "no_answer": True,
         "source_version_hash": "",
         "answer_policy_version": "",
+        "suggestions": suggestions or [],
     }
 
 
-__all__ = ["build_no_answer_response"]
+__all__ = ["build_no_answer_response", "build_suggestions"]

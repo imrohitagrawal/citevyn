@@ -4,6 +4,12 @@
 
 import { useEffect, useRef } from "react";
 
+/** A doc URL is a safe link only when it is http(s) or a site-relative path; anything
+ *  else (e.g. a ``javascript:`` scheme) renders as inert text, not a clickable link. */
+function isSafeHref(url: string): boolean {
+  return /^https?:\/\//i.test(url) || url.startsWith("/");
+}
+
 interface ChatViewProps {
   messages: Array<{
     isUser: boolean;
@@ -14,6 +20,8 @@ interface ChatViewProps {
     refusal?: boolean;
     hasSources?: boolean;
     sources?: Array<{ n: string; title: string; url: string }>;
+    /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
+    docSuggestions?: Array<{ title: string; url: string; product_area: string }>;
   }>;
   chatEmpty: boolean;
   chatSuggestions: Array<{ q: string; select: () => void }>;
@@ -146,6 +154,35 @@ export function ChatView({
                           </div>
                         </div>
                       ))}
+                    </div>
+                  )}
+                  {/* Graceful fallback (Phase 4a): when the answer was declined but the
+                      backend found nearby docs, offer them instead of a dead-end refusal.
+                      A doc URL is only made clickable when it is a safe http(s)/relative
+                      link — a defensive guard so a bad ``javascript:`` URL (were one ever
+                      ingested) renders as inert text, not an executable link. */}
+                  {m.docSuggestions && m.docSuggestions.length > 0 && (
+                    <div className="suggestions" role="group" aria-label="Related documentation">
+                      <div className="suggestions-label">You might find these helpful:</div>
+                      {m.docSuggestions.map((s) =>
+                        isSafeHref(s.url) ? (
+                          <a
+                            key={s.url + s.title}
+                            className="suggestion-card"
+                            href={s.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <span className="suggestion-title">{s.title}</span>
+                            <span className="suggestion-url">{s.url}</span>
+                          </a>
+                        ) : (
+                          <div key={s.url + s.title} className="suggestion-card">
+                            <span className="suggestion-title">{s.title}</span>
+                            <span className="suggestion-url">{s.url}</span>
+                          </div>
+                        ),
+                      )}
                     </div>
                   )}
                 </div>

@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useRef, useReducer } from "react";
 import { matchKB, matchCitevynMeta, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
 import { askQuestion, createSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
-import { ApiClientError } from "../lib/types";
+import { ApiClientError, type Suggestion } from "../lib/types";
 import { useToast } from "./useToast";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,8 @@ interface ChatMessage {
   streaming?: boolean;
   sources?: Source[];
   refusal?: boolean;
+  /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
+  suggestions?: Suggestion[];
 }
 
 interface AppState {
@@ -71,7 +73,13 @@ type Action =
   | { type: "SET_DEMO"; demo: Partial<DemoState> }
   | { type: "ADD_MESSAGE"; message: ChatMessage }
   | { type: "UPDATE_MESSAGE"; id: number; text: string }
-  | { type: "FINISH_MESSAGE"; id: number; sources: Source[]; refusal?: boolean }
+  | {
+      type: "FINISH_MESSAGE";
+      id: number;
+      sources: Source[];
+      refusal?: boolean;
+      suggestions?: Suggestion[];
+    }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" }
   | { type: "SET_PENDING"; value: boolean };
 
@@ -137,7 +145,13 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         messages: state.messages.map((m) =>
           m.id === action.id
-            ? { ...m, streaming: false, sources: action.sources, refusal: action.refusal }
+            ? {
+                ...m,
+                streaming: false,
+                sources: action.sources,
+                refusal: action.refusal,
+                suggestions: action.suggestions,
+              }
             : m
         ),
       };
@@ -482,6 +496,9 @@ export function useLandingState() {
         streamBot(resp.answer, {
           refusal: resp.unsupported || resp.no_answer,
           finalSources: citationsToSources(resp.citations ?? []),
+          // Graceful fallback (Phase 4a): surface nearest-doc suggestions the backend
+          // offers on a no_answer/unsupported so the refusal isn't a dead end.
+          finalSuggestions: resp.suggestions ?? [],
         });
       } catch (err) {
         // A 404 means the backend session expired or was evicted; drop the
@@ -561,7 +578,10 @@ export function useLandingState() {
   );
 
   const streamBot = useCallback(
-    (text: string, extra: { refusal?: boolean; finalSources: Source[] }) => {
+    (
+      text: string,
+      extra: { refusal?: boolean; finalSources: Source[]; finalSuggestions?: Suggestion[] },
+    ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
       // id — never "the last message". So concurrent answers (e.g. two live
       // questions whose network calls resolve close together) each write only
@@ -595,6 +615,7 @@ export function useLandingState() {
             id,
             sources: extra.finalSources,
             refusal: extra.refusal,
+            suggestions: extra.finalSuggestions,
           });
           chatStreams.current.delete(handle);
         },
@@ -854,6 +875,9 @@ export function useLandingState() {
     refusal: !!m.refusal,
     hasSources: !m.streaming && (m.sources?.length ?? 0) > 0,
     sources: m.sources || [],
+    // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
+    // bubble has finished streaming and only when the backend offered any.
+    docSuggestions: !m.streaming ? m.suggestions || [] : [],
   }));
 
   const chatSuggestions = ["claude-code", "codex-flag", "gemini-stream", "laptop"].map(

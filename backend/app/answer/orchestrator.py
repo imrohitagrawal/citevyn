@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import AnswerGenerator
 from app.answer.memory import build_contextual_query, recent_user_questions
-from app.answer.no_answer import build_no_answer_response
+from app.answer.no_answer import build_no_answer_response, build_suggestions
 from app.cache.answer_cache import (
     AnswerCacheStore,
     CachedAnswer,
@@ -881,6 +881,16 @@ class Orchestrator:
             reason=reason,
             copy=self._settings.no_answer_fallback,
             message_id=str(message_id),
+            # Graceful fallback (Phase 4a): when evidence WAS retrieved for an IN-DOMAIN
+            # question but the LLM declined to ground an answer, offer those nearest docs
+            # instead of a bare refusal. Suppressed when the question routed to
+            # ``unsupported`` (an off-corpus question that only surfaced a nearest chunk
+            # via the global "answer when grounded" arm) — suggesting that cross-domain
+            # doc would imply coverage we don't have and partly undo the refusal (review
+            # finding 1). An empty-evidence no_answer yields [] regardless.
+            suggestions=(
+                build_suggestions(evidence or []) if intent is not Intent.unsupported else []
+            ),
         )
 
     async def _respond_validation_failed(
@@ -937,6 +947,11 @@ class Orchestrator:
             copy=self._settings.no_answer_fallback,
             message_id=str(message_id),
             retrieval_strategy=strategy.value,
+            # The retrieved docs are the nearest in-corpus content — offer them even
+            # though the model's citation markers didn't validate (Phase 4a). Suppressed
+            # for an off-corpus (``unsupported``) question so a cross-domain doc is not
+            # offered as helpful (review finding 1).
+            suggestions=(build_suggestions(evidence) if intent is not Intent.unsupported else []),
         )
 
     async def _persist_and_respond(

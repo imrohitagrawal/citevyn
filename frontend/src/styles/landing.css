@@ -509,6 +509,59 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Graceful-fallback nearest-doc suggestions (Phase 4a). Shown under a refusal so a
+   declined answer offers somewhere to go instead of a dead end. */
+.suggestions {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  animation: cv-fadeup 0.4s ease both;
+}
+
+.suggestions-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.suggestion-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: var(--surface);
+  text-decoration: none;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.suggestion-card:hover {
+  border-color: var(--hl);
+  background: var(--bg);
+}
+
+.suggestion-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggestion-url {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .progress-container {
   display: flex;
   align-items: center;
