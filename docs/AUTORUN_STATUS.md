@@ -4,22 +4,28 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
-# STATUS — 2026-07-16 (Phases 1 + 2 COMPLETE & MERGED; eval MAXED 15/15)
+# STATUS — 2026-07-16 (Phases 1, 2, 3a MERGED; core eval 15/15 + multihop 3/3)
 # ============================================================================
 
-**One line:** **Phases 1 and 2 are COMPLETE, eval-proven, and MERGED.** The RAG system went from
-overall **10/15 → 15/15 (100%)**, paraphrase **0/5 → 5/5**, with real semantic retrieval, refusal
-safety (judged leaks 0/5), and answer quality (judge mean 5.00) — all on real Postgres+pgvector.
-Phases 3–4 remain (feature work: query rewrite/decomposition + conversation memory; UX/ops) and will
-need NEW golden cases to be eval-gated (the current 15-case set is maxed).
+**One line:** **Phases 1, 2, and Phase-3 query decomposition are COMPLETE, eval-proven, and MERGED.**
+The RAG system now answers single-product, unnamed-but-in-corpus, AND cross-product questions well:
+core overall **10/15 → 15/15**, paraphrase **0/5 → 5/5**, multi-hop **3/3**, judged refusal leaks
+**0/5**, judge mean **~4.9** — all on real Postgres+pgvector. Remaining: **Phase 3b conversation
+memory** (needs multi-turn eval infra — the harness is single-turn) and **Phase 4** UX/ops.
 
 ## What merged
 | PR | What | Result | State |
 |---|---|---|---|
 | **#103** (`d3795f6`) | **Phase 1.1** — revive the vector arm (#97): OpenRouter/OpenAI embedder + embedding-aware seeders + db/seed backfill + opt-in Postgres eval mode | paraphrase **0→3/5**, overall **10/15→13/15**, leaks 0, zero residue; discrimination real 5/5 vs stub | **MERGED** |
-| **#105** (`f199a2f`) | **Phase 1.2** — ship source docs as package data (#92): worker corpus → `app/worker/sources/` | verified inside a built worker image; ingested a real 33-chunk corpus | **MERGED** |
-| **#107** (`b654ddd`) | **Phase 2** — answer when grounded: global confidence-gated retrieval + LLM grounding-refusal net + judged eval refusal metric | paraphrase **3/5→5/5**, overall **13/15→15/15**, judged refusal leaks **0/5**, judge mean **5.00** | **MERGED** |
-| #104/#106 | docs closeouts | — | MERGED |
+| **#105** (`f199a2f`) | **Phase 1.2** — ship source docs as package data (#92) | verified inside a built worker image; ingested a real 33-chunk corpus | **MERGED** |
+| **#107** (`b654ddd`) | **Phase 2** — answer when grounded: global confidence-gated retrieval + LLM grounding-refusal net + judged eval refusal metric | paraphrase **3/5→5/5**, overall **→15/15**, judged refusal leaks **0/5**, judge 5.00 | **MERGED** |
+| **#109** (`2f4f8a4`) | **Phase 3a** — multi-hop query decomposition: `classify_domains` + `retrieve_multi` + orchestrator routing + eval `multihop` bucket | **multihop 3/3** (each cross-product Q retrieves both areas), judge 4.91, core 15/15, zero residue | **MERGED** |
+| #104/#106/#108 | docs closeouts | — | MERGED |
+
+**Remaining (fresh-scope feature work):** Phase 3b conversation memory (`sessions.summary` → retrieval
++ prompt; needs a multi-turn eval harness); Phase 4 UX/ops (fallback UX, distinct 429 UI #61/#62,
+VectorDegrade health signal). Neither moves the current single-turn golden set — both need new eval
+cases/infra first.
 
 _Every merge: full loop (design → adversarial plan/PR review → TDD → gates → real-Postgres eval proof →
 release-readiness SHIP → 6/6 CI green → auto-squash-merge). No `--admin`, no bypass._
