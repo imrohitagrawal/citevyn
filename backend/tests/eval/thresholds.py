@@ -31,6 +31,17 @@ MIN_OVERALL_HIT_RATE = 0.60
 MAX_REFUSAL_LEAKS = 0
 MIN_MEAN_JUDGE = 3.0
 MIN_JUDGE_COVERAGE = 0.9
+# Judge-robustness panel (Item 1). The judged metric is now the mean over per-case
+# ``min(standard_median, adversarial)`` scores (see ``judge.py``); ``MIN_MEAN_JUDGE``
+# gates that mean. ``CONTESTED_SPREAD`` is the standard-member max-min at or above
+# which a case is flagged ``contested`` (same-rubric disagreement worth review) —
+# informational, not a gate.
+CONTESTED_SPREAD = 2
+# Deterministic groundedness (Item 1c): fraction of a case's declared ``expected_facts``
+# that must appear (word-boundary matched) in the produced answer, averaged over the
+# cases that declare facts. Below 1.0 so a single legitimate paraphrase miss does not
+# red the whole judged run, while a wrong/absent hard fact still drags it under.
+MIN_GROUNDED_FACT_RATE = 0.8
 # Multi-hop (Phase 3): a cross-product case must retrieve EVERY named area. Provable
 # only with the live vector arm, so it is gated ONLY on the --postgres run (excluded
 # from the hermetic overall gate). Every multi-hop case must hit there.

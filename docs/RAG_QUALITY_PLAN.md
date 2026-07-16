@@ -340,6 +340,46 @@ attributable to memory. Design limitation (documented): the antecedent is the
 most-recent prior product turn — deep coreference past an intervening topic is out of
 scope. Kill-switch: `conversation_memory=False` restores the pre-3b behavior.
 
+## 8a-5. Eval-hardening — trustworthy answer-quality signal (Item 1)
+
+The judged metric was a SINGLE LLM-judge call — noisy, and able to over-score a
+*plausible-but-wrong* answer. It is now three complementary signals (see
+`tests/eval/judge.py`, `tests/eval/groundedness.py`):
+
+- **Prompt-ensemble panel** — N distinct rubric *framings* (not temperature samples)
+  at temp 0.0; the **median** smooths one framing's interpretation bias while staying
+  reproducible (no run-to-run flake). `CITEVYN_EVAL_JUDGE_PANEL` sets N (odd; default 3).
+- **Adversarial veto** — one skeptical fact-checker pass; the gated score is
+  `min(standard_median, adversarial)`. The skeptic is a *floor*, never averaged into the
+  median (a lone low vote can't move a median — it would be discarded on exactly the
+  plausible-but-wrong case it targets; plan-review blocker).
+- **Deterministic groundedness** — judge-*independent*: declared `expected_facts` (env
+  vars, headers, CLI commands, or a number *with* its unit; `|`-alternatives any-of)
+  must appear in the answer, **word-boundary matched** so `"50 requests per minute"` is
+  NOT credited by `"150 requests per minute"` (plan-review blocker). Gate
+  `MIN_GROUNDED_FACT_RATE=0.8`; a golden-integrity test asserts each fact is groundable
+  in the seed corpus (any-of).
+
+**Measured (real Postgres+pgvector; openrouter embeddings + LLM; `--postgres` judged run):**
+
+| Metric | Single-call (before) | **Panel + veto + groundedness (now)** |
+|---|---|---|
+| Core overall (literal + paraphrase) | 15/15 | **15/15** (unchanged) |
+| Multi-hop / Follow-up | 3/3 / 3/3 | **3/3 / 3/3** (unchanged) |
+| Refusal leaks — judged | 0/5 | **0/5** (unchanged) |
+| Judge mean | 4.88 (single call) | **4.73** (panel min-vetoed — fresh metric, NOT the 4.88 baseline; the veto conservatively lowers over-scores) |
+| Contested (standard-framing disagreement) | — | **0/26** |
+| **Groundedness fact-rate** | — | **1.000** over 11 fact-bearing cases (0 under-grounded) |
+| DB residue | zero | **zero** |
+
+The panel mean (4.73) is a *new* metric — the min-veto makes it a strictly more
+conservative number than the single-call 4.88, so the two are not directly comparable;
+`MIN_MEAN_JUDGE=3.0` still passes with wide headroom. Robustness is proven by hermetic
+tests (median smooths a noisy outlier; the adversarial vetoes a fooled panel `[5,5]+2→2`;
+`"150 requests per minute"` scores 0 for a `"50…"` fact) plus opt-in real-key tests
+(`CITEVYN_EVAL_LLM=1`: a deliberately-wrong answer scores ≤2 and fails groundedness; the
+same answer is stable across repeated runs). The hermetic CI gate is unchanged.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.

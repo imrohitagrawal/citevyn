@@ -37,12 +37,14 @@ from app.llm.factory import get_llm_client
 from app.llm.stub import StubLLMClient
 
 from .cases import EvalCase, filter_cases, load_cases
-from .judge import JudgeParseError, score_answer_async
+from .groundedness import fact_coverage, missing_facts
+from .judge import JudgeParseError, score_answer_panel_async
 from .paths import DEFAULT_REPORT_PATH, GOLDEN_PATH
 from .retrieval import evaluate_retrieval, postgres_session, seeded_session
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
     MIN_FOLLOWUP_HIT_RATE,
+    MIN_GROUNDED_FACT_RATE,
     MIN_JUDGE_COVERAGE,
     MIN_LITERAL_HIT_RATE,
     MIN_MEAN_JUDGE,
@@ -53,7 +55,13 @@ from .thresholds import (
 
 @dataclasses.dataclass
 class JudgedCase:
-    """One case driven end-to-end and (optionally) judged."""
+    """One case driven end-to-end and (optionally) judged.
+
+    ``score`` is the ROBUST panel score — ``min(standard_median, adversarial)`` — so
+    a skeptic that catches a plausible-but-wrong answer vetoes an over-scored median.
+    ``fact_coverage`` is the judge-independent deterministic groundedness signal
+    (``None`` when the case declares no ``expected_facts``).
+    """
 
     case_id: str
     kind: str
@@ -62,6 +70,13 @@ class JudgedCase:
     score: int | None = None
     rationale: str = ""
     error: str | None = None
+    standard_scores: tuple[int, ...] = ()
+    standard_median: int | None = None
+    adversarial_score: int | None = None
+    spread: int | None = None
+    contested: bool = False
+    fact_coverage: float | None = None
+    missing_facts: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -135,11 +150,19 @@ async def _judge_cases(
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
             entry = JudgedCase(case_id=case.id, kind=case.kind, answer=answer, no_answer=no_answer)
-            # Step 2: judge it. An unparseable verdict or a provider outage on the
-            # judge call is recorded per-case (never a fabricated score, never a
-            # crash) so the run still emits a report and the retrieval gate holds.
+            # Deterministic groundedness (Item 1c) — judge-independent. Computed for
+            # every case that declares hard facts, whether or not the LLM judge runs,
+            # so a plausible-but-wrong answer that fumbles a fact fails regardless of
+            # the judge's opinion.
+            if case.expected_facts:
+                entry.fact_coverage = fact_coverage(answer, case.expected_facts)
+                entry.missing_facts = tuple(missing_facts(answer, case.expected_facts))
+            # Step 2: judge it with the robust panel (N framings + adversarial veto).
+            # An unparseable verdict or a provider outage on any judge call is recorded
+            # per-case (never a fabricated score, never a crash) so the run still emits
+            # a report and the retrieval gate holds.
             try:
-                verdict = await score_answer_async(
+                verdict = await score_answer_panel_async(
                     question=case.question,
                     answer=answer,
                     expected_gist=case.expected_gist,
@@ -153,6 +176,11 @@ async def _judge_cases(
                 if verdict is not None:
                     entry.score = verdict.score
                     entry.rationale = verdict.rationale
+                    entry.standard_scores = verdict.standard_scores
+                    entry.standard_median = verdict.standard_median
+                    entry.adversarial_score = verdict.adversarial_score
+                    entry.spread = verdict.spread
+                    entry.contested = verdict.contested
                 else:
                     # ``None`` only if the provider went stub mid-run (guarded
                     # against above). Record it as an error rather than letting
@@ -178,6 +206,14 @@ def _summarize(
     # the orchestrator's decision is the authoritative measure when the LLM ran.
     refusal_judged = [j for j in judged if j.kind == "refusal"]
     refusal_leaks_judged = sum(1 for j in refusal_judged if not j.no_answer)
+    # Deterministic groundedness (Item 1c): aggregate ONLY over cases that declared
+    # facts (fact_coverage is not None). Independent of the judge — reported even
+    # when the panel could not run — so a wrong hard fact is caught on its own axis.
+    grounded = [j for j in judged if j.fact_coverage is not None]
+    grounded_rate = (
+        (sum(j.fact_coverage or 0.0 for j in grounded) / len(grounded)) if grounded else None
+    )
+    contested = [j.case_id for j in judged if j.contested]
     return {
         "total_cases": len(cases),
         "retrieval": retrieval,
@@ -189,8 +225,23 @@ def _summarize(
             "min_mean_threshold": MIN_MEAN_JUDGE,
             "refusal_total": len(refusal_judged),
             "refusal_leaks_judged": refusal_leaks_judged,
+            "contested_cases": contested,
             "errors": [j.as_dict() for j in judged if j.error],
             "cases": [j.as_dict() for j in judged],
+        },
+        "groundedness": {
+            "cases_with_facts": len(grounded),
+            "grounded_fact_rate": grounded_rate,
+            "min_threshold": MIN_GROUNDED_FACT_RATE,
+            "under_grounded": [
+                {
+                    "case_id": j.case_id,
+                    "coverage": j.fact_coverage,
+                    "missing": list(j.missing_facts),
+                }
+                for j in grounded
+                if (j.fact_coverage or 0.0) < 1.0
+            ],
         },
     }
 
@@ -247,6 +298,18 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     fu_total = r.get("followup_total", 0)
     if fu_total and r.get("followup_hit_rate", 0.0) < MIN_FOLLOWUP_HIT_RATE:
         failures.append(f"followup hit-rate {r['followup_hit_rate']:.3f} < {MIN_FOLLOWUP_HIT_RATE}")
+    # Deterministic groundedness (Item 1c): a judge-independent floor. It only bites
+    # when the judged run actually produced answers to check (cases_with_facts > 0);
+    # a wrong/absent hard fact drags the rate under MIN_GROUNDED_FACT_RATE regardless
+    # of the LLM judge's score.
+    g = summary.get("groundedness", {})
+    g_rate = g.get("grounded_fact_rate")
+    if g.get("cases_with_facts", 0) > 0 and g_rate is not None and g_rate < MIN_GROUNDED_FACT_RATE:
+        under = [u["case_id"] for u in g.get("under_grounded", [])]
+        failures.append(
+            f"groundedness fact-rate {g_rate:.3f} < "
+            f"{MIN_GROUNDED_FACT_RATE} (under-grounded: {under})"
+        )
     if j["available"]:
         judged = j.get("judged", 0)
         scored = j.get("scored", 0)
@@ -360,12 +423,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"{j.get('refusal_leaks_judged', 0)}/{j.get('refusal_total', 0)}"
             )
             print(
-                f"Judge: mean {mean:.2f} over {j['scored']} scored ({len(j['errors'])} error(s))"
+                f"Judge (panel min-vetoed): mean {mean:.2f} over {j['scored']} scored "
+                f"({len(j['errors'])} error(s)); contested: {j.get('contested_cases', [])}"
                 if mean is not None
                 else "Judge: no scores"
             )
         else:
             print("Judge: unavailable (stub provider) — set CITEVYN_LLM_PROVIDER + key to run")
+        g = summary.get("groundedness", {})
+        if g.get("cases_with_facts", 0) > 0 and g.get("grounded_fact_rate") is not None:
+            print(
+                f"Groundedness: fact-rate {g['grounded_fact_rate']:.3f} over "
+                f"{g['cases_with_facts']} fact-bearing case(s); "
+                f"under-grounded: {[u['case_id'] for u in g.get('under_grounded', [])]}"
+            )
 
     failures = gate_failures(summary)
     if failures:

@@ -671,6 +671,61 @@ def test_gate_flags_total_and_partial_judge_outage() -> None:
     assert any("coverage" in f for f in failures), failures
 
 
+def test_gate_flags_under_grounded_run() -> None:
+    """A judged run whose grounded-fact-rate falls below the floor must FAIL — the
+    deterministic net catches a wrong hard fact independent of the judge score."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "groundedness": {
+            "cases_with_facts": 5,
+            "grounded_fact_rate": 0.4,  # below MIN_GROUNDED_FACT_RATE
+            "under_grounded": [{"case_id": "claude_api_lit_ratelimit"}],
+        },
+    }
+    failures = gate_failures(summary)
+    assert any("groundedness" in f for f in failures), failures
+
+
+def test_gate_passes_when_grounded_rate_meets_floor() -> None:
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "groundedness": {"cases_with_facts": 5, "grounded_fact_rate": 1.0, "under_grounded": []},
+    }
+    assert gate_failures(summary) == []
+
+
+def test_gate_tolerates_missing_groundedness_block() -> None:
+    """Hand-built summaries without a groundedness block (older callers) must not crash."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 0.667,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 0.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": False, "judged": 0, "scored": 0, "mean_score": None},
+    }
+    assert gate_failures(summary) == []
+
+
 @pytest.mark.skipif(
     os.getenv("CITEVYN_EVAL_LLM") != "1",
     reason="LLM judge requires a real provider key; set CITEVYN_EVAL_LLM=1 to run",
