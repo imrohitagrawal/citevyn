@@ -31,7 +31,7 @@ from typing import Any, cast
 # zero literal token overlap so they isolate the semantic/vector arm
 # (expected ~0 hit-rate until #97 revives it); ``refusal`` questions are
 # out-of-corpus / off-domain and MUST retrieve nothing and be refused.
-KINDS = frozenset({"literal", "paraphrase", "refusal"})
+KINDS = frozenset({"literal", "paraphrase", "refusal", "multihop"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +51,11 @@ class EvalCase:
     expected_gist: str
     expect_no_answer: bool
     raw: dict[str, Any]
+    # Multi-hop (Phase 3): a cross-product question is a HIT only when EVERY listed
+    # source area is retrieved. ``None`` for single-source cases (they use
+    # ``expected_source``). Appended last with a default so the frozen dataclass
+    # stays valid and every existing case parses unchanged.
+    expected_sources: tuple[str, ...] | None = None
 
     @property
     def is_refusal(self) -> bool:
@@ -72,22 +77,42 @@ class EvalCase:
         if kind not in KINDS:
             raise ValueError(f"{origin}: unknown kind {kind!r}; expected one of {sorted(KINDS)}")
         expected_source = d.get("expected_source")
+        raw_sources = d.get("expected_sources")
+        expected_sources = tuple(raw_sources) if raw_sources else None
         expect_no_answer = bool(d.get("expect_no_answer", False))
-        # A refusal case must have no expected source and must expect a
-        # no-answer; a non-refusal answerable case must name a source. This
-        # keeps the golden data internally consistent so the hit-rate and
-        # judge metrics can trust a case's shape without re-deriving it.
+        # A refusal case has no source and expects a no-answer; a multihop case names
+        # >=2 expected_sources (and no single expected_source); every other answerable
+        # case names exactly one expected_source. This keeps the golden data
+        # internally consistent so the metrics can trust a case's shape.
         if kind == "refusal":
-            if expected_source is not None:
-                raise ValueError(f"{origin}: refusal case {d['id']!r} must not set expected_source")
+            if expected_source is not None or expected_sources is not None:
+                raise ValueError(
+                    f"{origin}: refusal case {d['id']!r} must not set expected_source(s)"
+                )
             if not expect_no_answer:
                 raise ValueError(
                     f"{origin}: refusal case {d['id']!r} must set expect_no_answer=true"
                 )
+        elif kind == "multihop":
+            if expected_source is not None:
+                raise ValueError(
+                    f"{origin}: multihop case {d['id']!r} uses expected_sources (a list), "
+                    "not expected_source"
+                )
+            if not expected_sources or len(expected_sources) < 2:
+                raise ValueError(
+                    f"{origin}: multihop case {d['id']!r} must set expected_sources with >=2 areas"
+                )
+            if expect_no_answer:
+                raise ValueError(f"{origin}: multihop case {d['id']!r} must not expect_no_answer")
         else:
             if not expected_source:
                 raise ValueError(
                     f"{origin}: answerable case {d['id']!r} must set a non-empty expected_source"
+                )
+            if expected_sources is not None:
+                raise ValueError(
+                    f"{origin}: case {d['id']!r} sets expected_sources; use kind='multihop'"
                 )
             if expect_no_answer:
                 raise ValueError(
@@ -102,6 +127,7 @@ class EvalCase:
             expected_gist=d["expected_gist"],
             expect_no_answer=expect_no_answer,
             raw=d,
+            expected_sources=expected_sources,
         )
 
 

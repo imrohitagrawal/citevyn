@@ -31,3 +31,7 @@ MIN_OVERALL_HIT_RATE = 0.60
 MAX_REFUSAL_LEAKS = 0
 MIN_MEAN_JUDGE = 3.0
 MIN_JUDGE_COVERAGE = 0.9
+# Multi-hop (Phase 3): a cross-product case must retrieve EVERY named area. Provable
+# only with the live vector arm, so it is gated ONLY on the --postgres run (excluded
+# from the hermetic overall gate). Every multi-hop case must hit there.
+MIN_MULTIHOP_HIT_RATE = 1.0

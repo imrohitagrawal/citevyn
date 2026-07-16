@@ -38,6 +38,39 @@ from app.routing.intent import Intent
 
 _logger = logging.getLogger("citevyn.retrieval")
 
+# Cap on how many product areas a single multi-hop question fans out to. The
+# per-area searches are sequential (shared session) and each embeds the query, so
+# this bounds cost/latency; a realistic cross-product question names 2–3 products.
+_MAX_MULTIHOP_DOMAINS = 3
+
+
+def _combine_degrades(degrades: list[VectorDegrade]) -> VectorDegrade:
+    """Merge per-area vector-degrade signals for the cache-write gate (#70/#72).
+
+    ``none`` only when EVERY area retrieved cleanly, so a multi-hop answer built
+    while one area's vector arm was degraded is never cached as if fully grounded.
+    Precedence mirrors the single-path reasons: ``mismatch`` over ``unavailable``
+    over ``none``.
+    """
+    if any(d is VectorDegrade.mismatch for d in degrades):
+        return VectorDegrade.mismatch
+    if any(d is VectorDegrade.unavailable for d in degrades):
+        return VectorDegrade.unavailable
+    return VectorDegrade.none
+
+
+def _round_robin_merge(per_area_hits: list[list[EvidenceHit]]) -> list[EvidenceHit]:
+    """Interleave per-area hit lists by rank, deduping by chunk, so each product
+    area is represented rather than one high-scoring area crowding out the others."""
+    seen: set[uuid.UUID] = set()
+    merged: list[EvidenceHit] = []
+    for rank in range(max((len(h) for h in per_area_hits), default=0)):
+        for hits in per_area_hits:
+            if rank < len(hits) and hits[rank].chunk_id not in seen:
+                seen.add(hits[rank].chunk_id)
+                merged.append(hits[rank])
+    return merged
+
 
 class HybridRetriever:
     def __init__(
@@ -138,6 +171,45 @@ class HybridRetriever:
         for idx, hit in enumerate(reranked, start=1):
             hit.rank = idx
         return RetrievalResult(hits=reranked, vector_degrade=vector_degrade)
+
+    async def retrieve_multi(
+        self,
+        question: str,
+        *,
+        product_areas: list[str],
+        intent: Intent,
+        limit: int = 20,
+        top_k: int = 6,
+    ) -> RetrievalResult:
+        """Retrieve for a cross-product (multi-hop) question — Phase 3.
+
+        Runs the scoped hybrid retrieval once PER product area and merges, so a
+        question spanning several products ("compare the Claude API and Gemini rate
+        limits") can be answered from all of them rather than the single first-match
+        domain. Evidence is merged **round-robin by rank** so every product is
+        represented (a higher-scoring area cannot crowd the other out), deduped by
+        chunk, then reranked to ``top_k``.
+
+        Cost/latency note (PR-review): the per-area searches run **sequentially**
+        (they share one ``AsyncSession``) and each embeds the query, so cost scales
+        with the number of areas — hence the ``_MAX_MULTIHOP_DOMAINS`` cap. Multi-hop
+        is a minority path (most questions name one product). The combined
+        ``vector_degrade`` is ``none`` only when EVERY area's retrieval was clean, so
+        the orchestrator's cache-write gate never freezes a partially-degraded answer.
+        """
+        areas = product_areas[:_MAX_MULTIHOP_DOMAINS]
+        per_area = [
+            await self.retrieve(question, product_area=a, intent=intent, limit=limit, top_k=top_k)
+            for a in areas
+        ]
+        merged = _round_robin_merge([r.hits for r in per_area])
+        reranked = await self._reranker.rerank(question, merged, top_k=top_k)
+        for idx, hit in enumerate(reranked, start=1):
+            hit.rank = idx
+        return RetrievalResult(
+            hits=reranked,
+            vector_degrade=_combine_degrades([r.vector_degrade for r in per_area]),
+        )
 
     async def _retrieve_global(self, question: str, *, limit: int, top_k: int) -> RetrievalResult:
         """Global "answer when grounded" retrieval: the confidence-gated vector arm.
