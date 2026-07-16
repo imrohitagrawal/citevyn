@@ -360,7 +360,10 @@ scope. Kill-switch: `conversation_memory=False` restores the pre-3b behavior.
 **Phase 4 — UX & ops**
 - PR4.1 Graceful fallback UX (nearest-doc suggestions).
 - PR4.2 Rate-limit segmentation + distinct 429 UI.
-- PR4.3 VectorDegrade / dead-embedding health signal.
+- PR4.3 VectorDegrade / dead-embedding health signal. **✅ DONE** — `GET /health/index`
+  carries an additive `vector_arm` block (empty/dead/mismatch/partial/healthy) so an
+  operator can SEE the #97 failure (NULL embeddings) or a Tier-3 mismatch; live-verified
+  on Postgres (dead 0/5 → healthy 5/5).
 
 ---
 

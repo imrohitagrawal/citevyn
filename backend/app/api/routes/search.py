@@ -33,6 +33,7 @@ from app.services.exact_lookup import (
     ExactLookupHit,
     exact_lookup,
 )
+from app.services.index_health import active_index_vector_health
 
 router = APIRouter(tags=["search"])
 
@@ -146,14 +147,24 @@ async def search_exact(
 async def health_index(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> dict[str, Any]:
-    """Report the active and previous-good index versions.
+    """Report the active and previous-good index versions + vector-arm health.
 
     Reads the :class:`IndexVersion` table; returns a 200 with
     ``status="pre_index"`` and ``active_index=None`` when no
     index has been promoted yet. The shape matches the
     Slice 1 placeholder so the load balancer / dashboard
     doesn't need a code change.
+
+    The active index also carries a ``vector_arm`` block (Phase 4c): whether its chunks
+    are actually embedded and query-compatible, so an operator can SEE a dead/mismatched
+    vector arm (the #97 failure) instead of inferring it from a flat eval score. This is
+    an ADDITIVE field — the top-level ``status`` keeps its existing "is there an active
+    index" meaning (``ready``/``degraded``/``pre_index``) so a dead-embedding index does
+    NOT flip the health probe to a draining state (that would risk pulling a serving pod
+    over a signal the operator, not the load balancer, should act on). Read
+    ``vector_arm.status`` for the vector-arm verdict.
     """
     request_id = _request_id(request)
 
@@ -174,14 +185,19 @@ async def health_index(
             "status": "pre_index",
             "active_index": None,
             "previous_good_index": None,
+            "vector_arm": None,
             "message": "No active index exists yet.",
         }
 
+    vector_arm = (
+        await active_index_vector_health(db, active, settings) if active is not None else None
+    )
     return {
         "request_id": request_id,
         "status": "ready" if active is not None else "degraded",
         "active_index": _index_payload(active) if active else None,
         "previous_good_index": _index_payload(previous) if previous else None,
+        "vector_arm": vector_arm,
         "message": None,
     }
 
