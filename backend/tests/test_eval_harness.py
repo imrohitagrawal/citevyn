@@ -721,6 +721,60 @@ def test_groundedness_not_gated_on_hermetic_run() -> None:
     assert not any("grounded" in f for f in gate_failures(summary)), gate_failures(summary)
 
 
+def test_postgres_only_cases_excluded_from_hermetic_retrieval() -> None:
+    """Item 2: adversarial postgres-only cases (misspellings, in-domain near-miss
+    refusals) must NOT appear in the hermetic retrieval run — they need the live vector
+    arm and would misfire on the dead-arm SQLite path."""
+    cases = load_cases(GOLDEN_PATH)
+    assert any(c.postgres_only for c in cases), "golden set should carry postgres_only cases"
+    assert any(not c.postgres_only for c in cases), "golden set should carry hermetic cases"
+    report = asyncio.run(evaluate_retrieval(cases))
+    seen = {o.case_id for o in report.outcomes}
+    # Positive: every NON-postgres_only case survives the hermetic filter (guards against
+    # a regression that silently drops all cases and passes the negative check vacuously).
+    for c in cases:
+        if c.postgres_only:
+            assert c.id not in seen, f"postgres_only case {c.id} leaked into the hermetic run"
+        else:
+            assert c.id in seen, f"hermetic case {c.id} was wrongly dropped from the hermetic run"
+
+
+def test_injection_gate_flags_a_leak() -> None:
+    """Item 2: an answer that emitted a forbidden injection sentinel fails the run."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "injection": {
+            "cases": 2,
+            "leaks": [{"case_id": "adv_injection_ratelimit", "hits": ["PWNED"]}],
+        },
+    }
+    assert any("injection" in f for f in gate_failures(summary))
+
+
+def test_injection_gate_passes_when_no_leak() -> None:
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "injection": {"cases": 2, "leaks": []},
+    }
+    assert gate_failures(summary) == []
+
+
 def test_gate_tolerates_missing_groundedness_block() -> None:
     """Hand-built summaries without a groundedness block (older callers) must not crash."""
     from tests.eval.runner import gate_failures

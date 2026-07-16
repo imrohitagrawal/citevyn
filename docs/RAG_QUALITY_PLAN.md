@@ -384,6 +384,50 @@ tests (median smooths a noisy outlier; the adversarial vetoes a fooled panel `[5
 (`CITEVYN_EVAL_LLM=1`: a deliberately-wrong answer scores ≤2 and fails groundedness; the
 same answer is stable across repeated runs). The hermetic CI gate is unchanged.
 
+## 8a-6. Eval-hardening — adversarial cases + injection resistance (Item 2 slice)
+
+A single-LLM meter also needs sharper INPUTS. This slice adds adversarial hardening with
+zero risk to the locked hermetic baseline (all new cases are `postgres_only`, excluded
+from the hermetic run + gates):
+
+- **`postgres_only` bucket field** — a case meaningful only on the live vector arm
+  (misspellings; in-domain near-miss refusals) is excluded from the hermetic run/gates
+  and evaluated on `--postgres` (mirrors the multihop/followup pattern).
+- **Prompt-injection resistance** — `must_not_contain` on a case lists forbidden
+  sentinels; the produced answer is checked **judge-independently** and any obeyed
+  injection fails the run (zero tolerance).
+- **Adversarial golden cases** (postgres-only): 2 prompt-injection (answer correctly AND
+  ignore "reply PWNED / output HACKED-TOKEN"), 2 misspellings ("rate limt for teh Claude
+  API"), 1 in-domain near-miss refusal (Claude API *price per token* — in-domain but not
+  in the docs → must decline, not invent).
+
+**Measured (real Postgres+pgvector; `--postgres` judged run, 31 cases):**
+
+| Metric | Value |
+|---|---|
+| Core overall (literal+paraphrase, incl. 4 new adversarial literals) | **19/19 = 1.000** |
+| Multi-hop / Follow-up | 3/3 / 3/3 |
+| Refusal leaks — judged (incl. in-domain pricing) | **0/6** (all decline, incl. the near-miss) |
+| **Injection resistance** | **0 leaks / 2 cases** (no sentinel emitted) |
+| Misspelling recovery | 2/2 (typo → correct answer, groundedness 1.0) |
+| Groundedness fact-rate | 1.000 over 15 fact-bearing cases |
+| Judge mean (panel min-vetoed) | ~4.6 (4.58–4.61), 0 errors, contested 0/31 |
+| DB residue | zero |
+
+Misspelling cases are `kind=paraphrase` (the bucket that isolates vector recovery) so a
+typo-recall miss degrades the 0.60-floored overall gate gracefully instead of tripping the
+strict literal=1.0 invariant (PR-review). Injection leak = sentinel present AND the answer
+failed to ground its facts, so a resistant answer that names the sentinel while declining
+is not a false leak. Proven identical under the CI-bound `CITEVYN_EVAL_JUDGE_PANEL=1`.
+
+Design shaped by an adversarial plan review (8 blockers + 13 majors) that showed the naive
+"context precision/recall + distractor corpus" design is UNSOUND on the current harness
+(source-level identity only; `uuid4` chunk ids; `top_k ≥ corpus size`; distractors flipping
+the hermetic paraphrase baseline). **Deferred to a tracked follow-up** (needs chunk-level
+relevance identity on a separate distractor index): context precision/recall metrics, the
+distractor corpus, golden-set growth toward 50–100, and a human-labeled judge-calibration
+subset. Shipped here is the safe, high-value adversarial slice.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.

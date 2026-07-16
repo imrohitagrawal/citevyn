@@ -64,9 +64,18 @@ async def _corpus_by_area(embedder: Embedder) -> dict[str, list[float]]:
             factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
             async with factory() as session:
                 catalog = await seed_catalog(session, embedder=embedder)
+            chunks = catalog["chunks"]
+            # Invariant guard (Item 2): this metric keys the corpus by product_area, so
+            # it silently OVERWRITES a gold embedding if an area ever gains a 2nd chunk
+            # (e.g. a distractor). Assert one-chunk-per-area so such a change fails loudly
+            # here instead of masquerading as an embedding-quality regression.
+            areas = [str(c.product_area) for c in chunks]  # type: ignore[attr-defined]
+            assert len(areas) == len(set(areas)), (
+                f"semantic-discrimination corpus must have one chunk per area; got {areas}"
+            )
             return {
                 str(c.product_area): list(c.embedding)  # type: ignore[attr-defined]
-                for c in catalog["chunks"]
+                for c in chunks
             }
         finally:
             await engine.dispose()
