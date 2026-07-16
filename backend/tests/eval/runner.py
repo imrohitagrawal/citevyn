@@ -97,6 +97,14 @@ async def _judge_cases(
     judged: list[JudgedCase] = []
     async with _judge_session(settings, postgres=postgres) as session:
         for case in cases:
+            # A ``followup`` case is a MULTI-TURN conversation: judging it single-turn
+            # would drive only the anaphoric final turn (no topic), which correctly
+            # declines and would drag the judge mean on a metric it does not belong to.
+            # The multi-turn replay (drive ``history`` then the final turn in one
+            # session) lands with the conversation-memory feature (Phase 3b); until
+            # then this bucket is retrieval-only and skipped here.
+            if case.kind == "followup":
+                continue
             # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
             # OrchestratorError; ``LLMUnavailable`` can also escape the generate
             # path in some arms. Either way the case records a loud error and the

@@ -26,12 +26,21 @@ import pathlib
 from collections.abc import Iterable
 from typing import Any, cast
 
-# The three case kinds. ``literal`` questions share vocabulary with the
-# seed corpus (keyword/exact arms can hit); ``paraphrase`` questions carry
-# zero literal token overlap so they isolate the semantic/vector arm
-# (expected ~0 hit-rate until #97 revives it); ``refusal`` questions are
-# out-of-corpus / off-domain and MUST retrieve nothing and be refused.
-KINDS = frozenset({"literal", "paraphrase", "refusal", "multihop"})
+# The case kinds. ``literal`` questions share vocabulary with the seed corpus
+# (keyword/exact arms can hit); ``paraphrase`` questions carry zero literal token
+# overlap so they isolate the semantic/vector arm (expected ~0 hit-rate until #97
+# revives it); ``refusal`` questions are out-of-corpus / off-domain and MUST
+# retrieve nothing and be refused; ``multihop`` questions name >=2 products and hit
+# only when EVERY named area is retrieved (Phase 3a); ``followup`` questions are the
+# final turn of a multi-turn conversation whose ``history`` establishes the topic —
+# the anaphoric final question ("How can I raise it?") names no product on its own
+# and only resolves once conversation memory (Phase 3b) rewrites it against the prior
+# turn. Unlike ``multihop`` (which needs the live vector arm), the ``followup``
+# rewrite resolves DETERMINISTICALLY (domain re-routing + keyword), so it hits on
+# hermetic SQLite too and is gated on the hermetic run once the feature lands; it
+# lives in its own bucket only because a multi-turn conversation is a distinct
+# concern from the single-turn literal+paraphrase overall gate.
+KINDS = frozenset({"literal", "paraphrase", "refusal", "multihop", "followup"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -56,6 +65,12 @@ class EvalCase:
     # ``expected_source``). Appended last with a default so the frozen dataclass
     # stays valid and every existing case parses unchanged.
     expected_sources: tuple[str, ...] | None = None
+    # Conversation memory (Phase 3b): the prior USER turns (most-recent turn LAST,
+    # in chronological order) that precede this ``question`` in one session. A
+    # ``followup`` case carries a non-empty ``history``; every other kind leaves it
+    # empty. The runner replays these turns before the asserted final turn so the
+    # orchestrator's memory can resolve the anaphora.
+    history: tuple[str, ...] = ()
 
     @property
     def is_refusal(self) -> bool:
@@ -80,8 +95,20 @@ class EvalCase:
         raw_sources = d.get("expected_sources")
         expected_sources = tuple(raw_sources) if raw_sources else None
         expect_no_answer = bool(d.get("expect_no_answer", False))
+        raw_history = d.get("history")
+        # Guard against a stringly-typed history ("prior turn") silently
+        # char-splitting into a tuple of letters — it must be a JSON array of turns.
+        if raw_history is not None and not isinstance(raw_history, list):
+            raise ValueError(f"{origin}: case {d['id']!r} history must be a list of strings")
+        history = tuple(raw_history) if raw_history else ()
+        # ``history`` belongs only to a ``followup`` case (it drives the multi-turn
+        # replay). Rejecting it elsewhere keeps a stray key from silently doing
+        # nothing on a single-turn case.
+        if history and kind != "followup":
+            raise ValueError(f"{origin}: case {d['id']!r} sets history; only kind='followup' may")
         # A refusal case has no source and expects a no-answer; a multihop case names
-        # >=2 expected_sources (and no single expected_source); every other answerable
+        # >=2 expected_sources (and no single expected_source); a followup case names
+        # exactly one expected_source AND a non-empty history; every other answerable
         # case names exactly one expected_source. This keeps the golden data
         # internally consistent so the metrics can trust a case's shape.
         if kind == "refusal":
@@ -105,6 +132,23 @@ class EvalCase:
                 )
             if expect_no_answer:
                 raise ValueError(f"{origin}: multihop case {d['id']!r} must not expect_no_answer")
+        elif kind == "followup":
+            if not expected_source:
+                raise ValueError(
+                    f"{origin}: followup case {d['id']!r} must set a non-empty expected_source"
+                )
+            if expected_sources is not None:
+                raise ValueError(
+                    f"{origin}: followup case {d['id']!r} sets expected_sources; use one "
+                    "expected_source (the final turn resolves to one area)"
+                )
+            if not history:
+                raise ValueError(
+                    f"{origin}: followup case {d['id']!r} must set a non-empty history "
+                    "(the prior turns that establish the topic)"
+                )
+            if expect_no_answer:
+                raise ValueError(f"{origin}: followup case {d['id']!r} must not expect_no_answer")
         else:
             if not expected_source:
                 raise ValueError(
@@ -128,6 +172,7 @@ class EvalCase:
             expect_no_answer=expect_no_answer,
             raw=d,
             expected_sources=expected_sources,
+            history=history,
         )
 
 

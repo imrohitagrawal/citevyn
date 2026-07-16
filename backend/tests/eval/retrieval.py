@@ -79,11 +79,13 @@ class RetrievalReport:
 
     outcomes: tuple[RetrievalOutcome, ...]
 
-    # The "core" answerable kinds that make up the gated overall hit-rate. ``multihop``
-    # is deliberately EXCLUDED (reported as its own bucket): a multi-hop case needs the
-    # live vector arm to hit both areas, so it is Postgres-only-provable and would drag
-    # the hermetic overall gate down (the review's blocker). It is gated separately on
-    # the --postgres run.
+    # The "core" answerable kinds that make up the gated overall hit-rate.
+    # ``multihop`` AND ``followup`` are deliberately EXCLUDED (each reported as its own
+    # bucket). ``multihop`` needs the live vector arm to hit both areas, so it is
+    # Postgres-only-provable and gated only on --postgres. ``followup`` resolves
+    # deterministically once memory rewrites it (domain routing + keyword), so it hits
+    # on hermetic SQLite too and is gated on the hermetic run — but it is a distinct
+    # multi-turn concern, so it stays out of the single-turn literal+paraphrase overall.
     _CORE_KINDS = frozenset({"literal", "paraphrase"})
 
     def _answerable(self) -> list[RetrievalOutcome]:
@@ -116,6 +118,10 @@ class RetrievalReport:
         return self.hit_rate("multihop")
 
     @property
+    def followup_hit_rate(self) -> float:
+        return self.hit_rate("followup")
+
+    @property
     def refusal_leaks(self) -> int:
         return sum(o.leaked for o in self.outcomes if o.kind == "refusal")
 
@@ -125,6 +131,7 @@ class RetrievalReport:
         kinds = sorted({o.kind for o in answerable})
         refusals = [o for o in self.outcomes if o.kind == "refusal"]
         multihop = [o for o in self.outcomes if o.kind == "multihop"]
+        followup = [o for o in self.outcomes if o.kind == "followup"]
         return {
             "answerable_total": len(core),  # gated denominator = core kinds
             "answerable_hits": sum(o.hit for o in core),
@@ -133,6 +140,9 @@ class RetrievalReport:
             "multihop_total": len(multihop),
             "multihop_hits": sum(o.hit for o in multihop),
             "multihop_hit_rate": self.multihop_hit_rate,
+            "followup_total": len(followup),
+            "followup_hits": sum(o.hit for o in followup),
+            "followup_hit_rate": self.followup_hit_rate,
             "refusal_total": len(refusals),
             "refusal_leaks": self.refusal_leaks,
             "outcomes": [o.as_dict() for o in self.outcomes],
