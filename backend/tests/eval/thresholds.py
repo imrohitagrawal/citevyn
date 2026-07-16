@@ -56,3 +56,29 @@ MIN_MULTIHOP_HIT_RATE = 1.0
 # HERMETIC run too (a strong, non-flaky gate — a broken rewrite fails CI). Every
 # followup case must hit.
 MIN_FOLLOWUP_HIT_RATE = 1.0
+# Chunk-level rank-sensitive metric (#125). MRR + precision@1 over single-relevant answerable
+# cases (exactly one gold chunk): the 15 core literal+paraphrase + 3 followup = 18 cases (the
+# adversarial injection/misspelling cases opt OUT — rank-precision on a malformed query is a
+# category error). Gated ONLY on the --postgres run: hermetically the vector arm is dead, so
+# paraphrase cases structurally score 0 and a literal-only MRR would just restate the literal
+# hit-rate.
+#
+# What actually MOVES the number: 16 of the 18 route SCOPED (retrieve(product_area=area) → the
+# gold is the only candidate in its one-chunk area → structurally rank-1, a keyword-arm
+# tautology on today's corpus). Only 2 route GLOBAL — claude_code_par_toolgate,
+# citevyn_par_membership (product_area=None → the unscoped vector arm ranks the gold against
+# ALL other areas' chunks) — so precision@1 there is a strictly stronger signal than hit-rate,
+# and a fully-dead vector arm drops it below 1.0 (the globals return []). PR B's within-area
+# distractors make the scoped cases informative too.
+#
+# Baseline MEASURED 2026-07-17 on real Postgres + openai/text-embedding-3-small, verified
+# STABLE across 5 consecutive runs (byte-identical rank order every run): MRR 1.000,
+# precision@1 1.000 over n=18 (recorded in docs/RAG_QUALITY_PLAN.md §8a-7). precision@1 is
+# pinned EXACT (1.0): embeddings are effectively deterministic run-to-run here, so a wrong-area
+# chunk outranking a gold on either global case is a real regression, not jitter. MRR keeps a
+# small margin as a tolerant companion. The 1.0 is an ASSERTION about retrieval quality ("a
+# good retriever keeps every gold #1"), NOT an immovable floor: when PR B adds a deliberately-
+# hard within-area distractor that legitimately outranks a gold, lowering precision@1 to the
+# new measured baseline WITH justification is the correct move.
+MIN_MRR = 0.95
+MIN_PRECISION_AT_1 = 1.0

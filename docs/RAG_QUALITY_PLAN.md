@@ -428,6 +428,65 @@ relevance identity on a separate distractor index): context precision/recall met
 distractor corpus, golden-set growth toward 50–100, and a human-labeled judge-calibration
 subset. Shipped here is the safe, high-value adversarial slice.
 
+## 8a-7. Chunk-level retrieval identity + rank metric — PR A of #125
+
+The first slice of the deferred #125 work: **chunk-level identity plumbing** + a
+**rank-sensitive metric** (MRR + precision@1), additive and reporting-only — the locked
+hermetic and judged baselines are byte-for-byte unchanged (proven below). No `seed_catalog`
+default-output change, no `app/` change, no schema/migration.
+
+- **Stable chunk key** = the composite `"{source_name}#{chunk_order}"` (e.g. `claude_api#0`),
+  derived in the eval layer by joining `Chunk→Document`. Chosen over `chunk_id` (uuid4,
+  regenerated every seed → unlabelable) AND over `content_checksum` (a content HASH that
+  *collides* for byte-identical chunks → would silently mis-map identity; adversarial plan
+  review). Golden cases label `gold_chunks` by this key; a hermetic guard asserts every
+  labelled key names a real seeded chunk so a typo can't silently zero a case's rank.
+- **Chunk-level retrieval identity** — the eval maps each ordered retrieval hit's
+  `chunk_id` → its stable key (raising loudly, never silently skipping, on an unmapped id).
+- **Rank-sensitive metric** — for single-relevant cases (exactly one gold chunk), MRR and
+  precision@1 (rank of the gold chunk), NOT precision@k (rank-insensitive with one gold) or
+  recall (trivial while `top_k ≥ corpus`). Gated **`--postgres`-only** (the hermetic vector
+  arm is dead → paraphrases structurally score 0), mirroring the multihop/groundedness gates.
+- **Pool = well-formed answerable queries only** (15 core literal+paraphrase + 3 followup =
+  **n=18**). Adversarial injection/misspelling cases opt OUT — holding a deliberately-malformed
+  query to a strict rank-1 pin is a category error (they are scored on injection-resistance /
+  typo hit-rate / groundedness instead; a fan-out PR review flagged the misspelled global
+  `adv_misspell_authheader` as the one drift-prone case, so it is excluded).
+- **What actually moves the number:** 16 of 18 route SCOPED (`retrieve(product_area=area)` →
+  the gold is the only candidate in its one-chunk area → structurally rank-1, a keyword-arm
+  tautology today). Only **2** route GLOBAL (`claude_code_par_toolgate`, `citevyn_par_membership`
+  → `product_area=None`, the unscoped vector arm) — there the gold is ranked against ALL other
+  areas' chunks, so precision@1 is strictly stronger than hit-rate and a fully-dead vector arm
+  drops it below 1.0. Verified in the report: `claude_code#0` outranks `codex#0`/`gemini_api#0`;
+  `citevyn#0` outranks `claude_api#0`/`gemini_api#0`. PR B broadens ranking to scoped areas via
+  a distractor seed.
+
+**Measured baseline (2026-07-17, real Postgres+pgvector, `openai/text-embedding-3-small`,
+`--postgres` judged run, panel=1; rank metric verified STABLE across 5 consecutive runs —
+byte-identical rank order every run):**
+
+| Metric | Value |
+|---|---|
+| **Chunk rank — MRR** (n=18 single-relevant) | **1.000** |
+| **Chunk rank — precision@1** (n=18) | **1.000** |
+| Core overall (literal+paraphrase) | 19/19 = 1.000 |
+| Multi-hop / Follow-up | 3/3 / 3/3 |
+| Refusal leaks — judged | 0/6 |
+| Injection resistance | 0 leaks / 2 |
+| Groundedness fact-rate | 1.000 / 15 |
+| Judge mean (panel min-vetoed) | 4.55, 0 errors |
+| DB residue | zero |
+
+Gates (`thresholds.py`): `MIN_PRECISION_AT_1 = 1.0` (pinned exact — embeddings are effectively
+deterministic run-to-run here, so a wrong-area chunk outranking a gold on a global case is a
+real regression, not jitter; only the 2 global cases can move it), `MIN_MRR = 0.95` (tolerant
+companion margin). Both `--postgres`-only + non-empty-pool-guarded. The 1.0 pin is an
+assertion about retrieval quality, not an immovable floor — a deliberately-hard PR-B distractor
+that legitimately outranks a gold lowers it to the new measured baseline with justification.
+Design hardened by three fan-out plan skeptics (ranking-triviality, chunk-key stability,
+baseline non-regression) + three fan-out PR reviewers (correctness, adversarial-metric,
+test-coverage).
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
