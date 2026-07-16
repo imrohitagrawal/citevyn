@@ -55,6 +55,12 @@ in the same change.
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
+- **Enable the CI answer-quality gate (owner-only):** add `CITEVYN_OPENROUTER_API_KEY` as a
+  repo Actions secret (*Settings → Secrets and variables → Actions*). The `answer-quality-eval`
+  CI job (PR #127) skips until it is present; adding it flips the judged MIN_MEAN_JUDGE +
+  groundedness + injection gate on. Config proven locally (`--postgres`,
+  `openai/text-embedding-3-small`, `router`, `CITEVYN_EVAL_JUDGE_PANEL=1`). Recommend one
+  trial PR run before making it a *required* check. See `docs/AUTORUN_STATUS.md` (top block).
 - **Live semantic e2e for #51:** set `CITEVYN_EMBEDDING_PROVIDER=gemini` + `CITEVYN_GEMINI_API_KEY`,
   re-ingest, and confirm a landing-page question returns a substantive, correctly-cited
   answer. The plumbing is verified end-to-end; only real-key semantic quality remains.

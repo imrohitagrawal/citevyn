@@ -4,6 +4,54 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
+# STATUS — 2026-07-16 · EVAL HARDENING + ENFORCEMENT (autonomous run)
+# ============================================================================
+
+**One line:** The RAG eval's answer-quality signal is now **trustworthy** (panel + adversarial
+veto + deterministic groundedness + injection resistance) and the gate is **enforced** both in
+CI (owner must add one secret) and locally (pre-commit hook). Four items, each through the full
+loop (adversarial plan review → TDD → gates → real-Postgres judged eval proof → fan-out PR review
+w/ per-finding verification → release-readiness → green CI → squash-merge). No `--admin`, no bypass.
+
+## What merged this run
+| PR | Item | What | Result |
+|---|---|---|---|
+| **#124** | 1 — Judge robustness | Prompt-ensemble panel (N rubric framings, temp-0, median) + adversarial **veto** (`min(median, adversarial)`, a floor not a member) + deterministic **groundedness** (word-boundary hard-fact match, per-case on `--postgres`) | judge 4.88 → panel min-vetoed ~4.7; groundedness 1.000/11; core 15/15; zero residue |
+| **#126** | 2 (slice) — Adversarial hardening | `postgres_only` bucket + **prompt-injection resistance** (`must_not_contain`, leak = sentinel present AND facts ungrounded) + adversarial golden cases (2 injection, 2 misspelling, 1 in-domain near-miss refusal) + one-chunk-per-area guard | injection 0 leaks/2; misspell recovery 2/2; in-domain refusal declines; core 19/19; zero residue |
+| **#127** | 3 — CI enforcement | `answer-quality-eval` CI job: pgvector service → migrate → judged `--postgres` eval enforcing MIN_MEAN_JUDGE + groundedness + injection. **Guarded to skip when the secret is absent** (green, no merge block); `panel=1` bounds cost | reviewed SOUND (no secret leak); skips cleanly today |
+| **#128** | 4 — Local enforcement | git **pre-commit hook** (ruff format+check on staged backend py) + `make install-hooks` + CONTRIBUTING docs | blocks bad format/lint, skips docs-only — verified |
+
+## Judge robustness: before → after
+- **Before:** a SINGLE LLM-judge call (temp 0), able to over-score a plausible-but-wrong answer; no groundedness or injection axis.
+- **After:** median over N reproducible rubric framings (noise) + adversarial veto (over-scoring) + judge-INDEPENDENT groundedness (a wrong hard fact fails regardless of the judge; `"50 requests per minute"` not credited by `"150…"`/`"0.50…"`) + injection resistance. Robustness proven by hermetic tests (median smooths a noisy outlier; adversarial vetoes a fooled `[5,5]→2`; numeric superstrings score 0) + opt-in real-key tests. Design shaped by adversarial plan reviews (Item 1: 2 blockers; Item 2: 8 blockers + 13 majors) + fan-out PR reviews (all confirmed findings fixed).
+
+## Enforcement: live vs pending
+- **CI answer-quality gate — WIRED, PENDING one owner action.** The `answer-quality-eval` job runs the judged eval + gates, but the judged run needs the OpenRouter key as a repo Actions secret. **ACTION REQUIRED (owner only):** add `CITEVYN_OPENROUTER_API_KEY` under *Settings → Secrets and variables → Actions*. Until then the job skips (green). The exact job config (`--postgres`, `openai/text-embedding-3-small`, `router`, `CITEVYN_EVAL_JUDGE_PANEL=1`) was proven locally this run, so it flips on cleanly. Recommend running it once on a PR before making it a *required* check (LLM-judged gate is non-deterministic; MIN_MEAN_JUDGE=3.0 has wide headroom).
+- **Local pre-commit — LIVE.** `make install-hooks` installs the ruff format+check gate.
+
+## Deferred (tracked)
+- **#125** — context precision/recall + distractor corpus + golden-set growth to 50–100 + human judge-calibration. The naive design is unsound on the current harness (source-level identity; `uuid4` chunk ids; `top_k ≥ corpus size`); needs chunk-level relevance identity on a separate distractor index. Precise spec in the issue.
+
+## How to run it
+```bash
+# Hermetic gate (no key/Docker): 748 pass
+cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
+# Judged proof (Docker + key in infra/docker/.env):
+export PGPW=$(grep '^POSTGRES_PASSWORD=' infra/docker/.env|cut -d= -f2-)
+export DB_URL="postgresql+psycopg://citevyn:$PGPW@localhost:5432/citevyn"
+export OR_KEY=$(grep '^CITEVYN_OPENROUTER_API_KEY=' infra/docker/.env|cut -d= -f2-)
+make db-up && CITEVYN_DATABASE_URL=$DB_URL uv run --project backend alembic -c db/alembic.ini upgrade head
+docker exec -e PGPASSWORD="$PGPW" citevyn-db psql -U citevyn -d citevyn -c \
+  "TRUNCATE exact_terms, chunks, documents, index_versions CASCADE;"
+cd backend && CITEVYN_DATABASE_URL=$DB_URL CITEVYN_EMBEDDING_PROVIDER=openrouter \
+  CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small CITEVYN_LLM_PROVIDER=router \
+  CITEVYN_OPENROUTER_API_KEY=$OR_KEY uv run python -m tests.eval.runner --postgres
+#  → core 19/19, multihop 3/3, followup 3/3, refusal leaks judged 0/6, injection 0/2,
+#    groundedness 1.000/15, judge ~4.6, gate PASSED, zero residue
+make install-hooks   # local pre-commit gate
+```
+
+# ============================================================================
 # FINAL STATUS — 2026-07-16 · RAG_QUALITY_PLAN COMPLETE (all phases 0→4 MERGED)
 # ============================================================================
 
