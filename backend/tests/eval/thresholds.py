@@ -82,3 +82,21 @@ MIN_FOLLOWUP_HIT_RATE = 1.0
 # new measured baseline WITH justification is the correct move.
 MIN_MRR = 0.95
 MIN_PRECISION_AT_1 = 1.0
+# Distractor-corpus context precision/recall (#125, PR B). Measured by the OPT-IN, Postgres-
+# only distractor eval (tests.eval.distractors) over 18 competing chunks (2 gold + 16
+# distractors, incl. 2 LEXICAL HARD NEGATIVES that share the gold vocabulary) with VECTOR-ONLY
+# scoped retrieval — never by the locked hermetic/judged run. ``RECALL_AT_K`` = every gold
+# chunk is in the top-k; ``PRECISION_AT_GOLD`` = the top-|gold| retrieved keys are all gold
+# (precision@2 for the 2-gold case) — the rank-strict axis a distractor breaking into the top
+# would fail. (At the 1.0 pin precision@|gold| subsumes recall@k per case; recall is kept as a
+# cheap independent safety net that bites if the precision floor is ever lowered.)
+#
+# Pinned 1.0/1.0 is EARNED, not a knife-edge: measured 2026-07-17 on real Postgres +
+# openai/text-embedding-3-small, STABLE across 5 runs, the true gold outranks even the lexical
+# hard negatives (panel_library, silences) by a min cosine margin of 0.092 (0.092–0.158;
+# recorded per-case in the report's ``gold_margin`` so a shrinking margin warns before a flip).
+# A regression that let a hard negative outrank a gold would have to erode ~0.09 of margin — a
+# real ranking regression, not provider jitter. Lower ONLY with a re-measured justification
+# (e.g. a future confuser that legitimately outranks a gold). See RAG_QUALITY_PLAN §8a-8.
+MIN_DISTRACTOR_RECALL_AT_K = 1.0
+MIN_DISTRACTOR_PRECISION_AT_GOLD = 1.0

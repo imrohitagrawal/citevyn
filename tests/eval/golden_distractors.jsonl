@@ -1,0 +1,14 @@
+# RAG eval — DISTRACTOR corpus golden (#125, PR B). One JSON object per line.
+# Evaluated ONLY by the opt-in Postgres distractor eval (tests.eval.distractors), NEVER by
+# the locked hermetic/judged run. Anchored to tests.eval.distractors.seed_eval_distractors:
+# a throwaway product area "eval_grafana" holding a 2-chunk GOLD source (eval_grafana#0 =
+# dashboards, eval_grafana#1 = alerting) + ~14 within-area distractor sources, so top_k must
+# select among ~16 candidates. gold_chunks are the stable "{source_name}#{chunk_order}" keys
+# (PR A). Retrieval is VECTOR-ONLY + scoped to the eval_grafana area (no keyword confound, no
+# global margin gate). Blank + #-comment lines are skipped.
+#
+# --- multi-relevant: both gold chunks are relevant (context recall@k + precision@2) --------
+{"id": "distractor_multi_dash_alert", "area": "eval_grafana", "kind": "paraphrase", "postgres_only": true, "question": "In Grafana, how do I put together a board of panels to visualize my data and also get notified when a metric crosses a limit?", "expected_source": "eval_grafana", "expected_gist": "Covers BOTH building a Grafana dashboard of panels AND creating an alerting rule that notifies on a threshold breach.", "gold_chunks": ["eval_grafana#0", "eval_grafana#1"]}
+# --- single-relevant: one gold chunk must outrank the sibling gold + every distractor -------
+{"id": "distractor_single_dashboards", "area": "eval_grafana", "kind": "paraphrase", "postgres_only": true, "question": "How do I lay out and arrange panels on a board so my team can open the same view?", "expected_source": "eval_grafana", "expected_gist": "Building/arranging Grafana dashboard panels (eval_grafana#0), not alerting or any adjacent topic.", "gold_chunks": ["eval_grafana#0"]}
+{"id": "distractor_single_alerting", "area": "eval_grafana", "kind": "paraphrase", "postgres_only": true, "question": "How do I get a notification sent to my team when a metric goes over a threshold on a schedule?", "expected_source": "eval_grafana", "expected_gist": "Creating a Grafana alerting rule that fires notifications on a threshold breach (eval_grafana#1).", "gold_chunks": ["eval_grafana#1"]}

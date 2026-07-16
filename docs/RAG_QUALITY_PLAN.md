@@ -487,6 +487,57 @@ Design hardened by three fan-out plan skeptics (ranking-triviality, chunk-key st
 baseline non-regression) + three fan-out PR reviewers (correctness, adversarial-metric,
 test-coverage).
 
+## 8a-8. Distractor corpus + context precision/recall — PR B of #125
+
+PR A's rank metric only bit on the 2 global paraphrases because the clean corpus has ONE
+chunk per area — retrieval never has to *choose*. PR B adds a dedicated, eval-only
+**distractor corpus** so `top_k` is forced to select among many candidates, making context
+recall/precision a real signal. **Fully isolated** — a SEPARATE seed function + SEPARATE
+golden + SEPARATE opt-in runner; the locked hermetic and judged runs are untouched (762
+hermetic tests pass; no `seed_catalog`/`_retrieve_sources`/`RetrievalReport`/main-golden
+change).
+
+- **`seed_eval_distractors`** (`tests/eval/distractors.py`) seeds a throwaway area
+  `eval_grafana` = one 2-chunk GOLD source (`eval_grafana#0` dashboards, `eval_grafana#1`
+  alerting) + 16 within-area distractor sources (18 chunks total), embedded, under exactly
+  ONE active `IndexVersion` (asserted). NEVER `conftest.seed_catalog`. The last 2 distractors
+  are **lexical HARD NEGATIVES** (`panel_library` shares "panels/dashboards"; `silences`
+  shares "alert notifications") — without them every distractor is a disjoint subtopic and any
+  non-broken embedder passes, so the metric could only detect a dead arm (which hit-rate
+  already catches). The near-misses give precision@|gold| the teeth to catch a SUBTLE ranking
+  regression (adversarial PR review).
+- **`postgres_distractor_session`** carries the full `postgres_session` rails (no-prod,
+  Postgres-URL, non-stub embedder via `build_embedder` not `get_embedder`, empty-catalog
+  refusal, rollback → zero residue). Run SERIALLY vs the judged pass (same DB).
+- **VECTOR-ONLY retrieval** (`VectorRetriever` scoped to the area) — NOT the hybrid path,
+  whose flat-0.5 keyword ILIKE arm would confound the ranking into a keyword tautology, and
+  NOT `classify_domain` routing (a fictional-product query would hit the margin-gated global
+  arm). Measures the cosine ranking the metric claims.
+- **Metric = recall@k + precision@|gold|** (MAP deferred as brittle for a 2-relevant case).
+  precision@|gold| is rank-strict: a distractor breaking into the top-|gold| fails it even
+  when recall@k stays 1.0.
+
+**Measured baseline (2026-07-17, real Postgres + `openai/text-embedding-3-small`,
+`python -m tests.eval.distractors`, verified STABLE across 5 runs — byte-identical margins):**
+
+| Case | recall@k | precision@\|gold\| | gold margin (cosine) |
+|---|---|---|---|
+| `distractor_multi_dash_alert` (2 gold) | 1.000 | 1.000 (both gold ranked #1–#2 over 16 distractors) | 0.150 |
+| `distractor_single_dashboards` | 1.000 | 1.000 (gold #1 over the `panel_library` hard negative) | **0.092** |
+| `distractor_single_alerting` | 1.000 | 1.000 (alerting #1 over the `silences` hard negative + dashboards sibling) | 0.158 |
+
+`gold_margin` = min retrieved-gold cosine − max retrieved-distractor cosine (recorded per case
+in the report so a shrinking margin warns before a flip). The min, 0.092, is the true gold vs
+its LEXICAL hard negative — comfortable, stable headroom, not a knife-edge.
+
+Gates: `MIN_DISTRACTOR_RECALL_AT_K = 1.0`, `MIN_DISTRACTOR_PRECISION_AT_GOLD = 1.0`
+(distractor-mode-only). 1.0 is EARNED against the hard negatives with a 0.092 margin, so a
+regression that let a near-miss outrank a gold is a real ranking regression, not jitter —
+lower only with a re-measured justification. Design hardened by two fan-out plan skeptics
+(metric-confounding → vector-only; seed-isolation → the 5 guardrails) + two fan-out PR
+reviewers (correctness/isolation → CLEAN; adversarial-metric → added the hard negatives + the
+gold-margin instrument so the metric detects a subtle regression, not just a dead arm).
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
