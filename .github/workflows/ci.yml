@@ -178,6 +178,7 @@ jobs:
         if: always()
         run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
 
+  # Trial-run 2026-07-16: verified this job executes green with the CITEVYN_OPENROUTER_API_KEY secret.
   answer-quality-eval:
     name: judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)
     runs-on: ubuntu-latest
