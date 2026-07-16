@@ -271,6 +271,29 @@ overall 0.667, paraphrase 0.0, 0 leaks); the Phase-2 gain is Postgres-only and
 larger real corpus (#59); the retrieval gate needs a real LLM as the net — a stub-LLM deploy
 under `answer_when_grounded` leans entirely on the loose gate (production requires a real LLM).
 
+## 8a-3. Phase 3 measured results (multi-hop query decomposition)
+
+Cross-product questions ("compare the Claude API and Gemini rate limits") named ≥2 products but
+`classify_domain` returned only the first, so retrieval scoped to one area and the other product
+was never retrieved — the answer half-covered it or declined. `classify_domains` now returns every
+named product area (non-overlapping matches; CiteVyn short-circuits to preserve #49), and the
+orchestrator retrieves each and round-robin-merges (`retrieve_multi`), so the answer covers all.
+
+**Measured (real Postgres+pgvector; openrouter embeddings + LLM; `--postgres` judged run):**
+
+| Metric | Value |
+|---|---|
+| Multi-hop hit-rate (EVERY named area retrieved) | **3/3 = 1.000** |
+| Core overall (literal + paraphrase) | 15/15 = 1.000 (unchanged) |
+| Refusal leaks — judged | 0/5 (unchanged) |
+| Judge mean (now over 23 cases incl. multihop) | **4.91**, 0 errors |
+
+Zero residue. **Hermetic CI gate unchanged** (multihop is its own bucket, EXCLUDED from the gated
+overall — it needs the live vector arm to hit both areas, so it is Postgres-only-provable and gated
+only on the `--postgres` run). The eval's `_retrieve_sources` mirrors the orchestrator's multi-hop
+routing so a passing eval implies a working product. Follow-up: **conversation memory** (Phase 3's
+other half) needs multi-turn eval infrastructure — a separate PR.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.

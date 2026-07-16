@@ -352,6 +352,43 @@ def test_refusal_gate_uses_judged_metric_when_llm_ran() -> None:
     assert gate_failures(summary) == []
 
 
+def _multihop_summary(*, mode: str, multihop_hit_rate: float) -> dict[str, Any]:
+    return {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0, "multihop": multihop_hit_rate},
+            "refusal_leaks": 0,
+            "multihop_total": 3,
+            "multihop_hit_rate": multihop_hit_rate,
+        },
+        "judge": {"available": False, "judged": 0, "scored": 0, "mean_score": None},
+        "embedder": {"mode": mode},
+    }
+
+
+def test_multihop_gate_fails_on_postgres_when_below_threshold() -> None:
+    from tests.eval.runner import gate_failures
+
+    failures = gate_failures(_multihop_summary(mode="postgres", multihop_hit_rate=0.66))
+    assert any("multihop" in f for f in failures), failures
+
+
+def test_multihop_gate_passes_on_postgres_when_all_hit() -> None:
+    from tests.eval.runner import gate_failures
+
+    assert gate_failures(_multihop_summary(mode="postgres", multihop_hit_rate=1.0)) == []
+
+
+def test_multihop_not_gated_on_hermetic_sqlite() -> None:
+    """A low multihop rate on the hermetic (non-postgres) run must NOT fail the gate
+    — multihop is Postgres-only-provable and excluded from the standard CI gate."""
+    from tests.eval.runner import gate_failures
+
+    failures = gate_failures(_multihop_summary(mode="sqlite-hermetic", multihop_hit_rate=0.0))
+    assert not any("multihop" in f for f in failures), failures
+
+
 def test_refusal_gate_uses_retrieval_metric_when_no_llm() -> None:
     """With no LLM (hermetic SQLite), the retrieval refusal count is exact (dead
     vector arm → refusals retrieve nothing) and remains the gate."""
