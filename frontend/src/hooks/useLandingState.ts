@@ -44,6 +44,10 @@ interface ChatMessage {
   refusal?: boolean;
   /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
   suggestions?: Suggestion[];
+  /** A TRANSPORT failure (rate limit / server / network) — distinct from a content
+   *  refusal (#120). Drives a rate-limit / error notice badge instead of the
+   *  "NO SOURCE — REFUSED" badge, which must stay reserved for a genuine corpus miss. */
+  errorKind?: "rate_limit" | "error";
 }
 
 interface AppState {
@@ -459,20 +463,27 @@ export function useLandingState() {
       // "warning" toast (role="status", polite) rather than the red "error" alert
       // used for server/transport failures (Phase 4b: distinct 429 UI).
       let kind: "warning" | "error" = "error";
+      // The inline bubble's badge: a TRANSPORT failure (rate limit / server / network)
+      // must NOT wear the "NO SOURCE — REFUSED" content-refusal badge — that badge means
+      // "the corpus had no answer", which is wrong here (#120). ``errorKind`` drives a
+      // distinct rate-limit / connection-error notice instead.
+      let errorKind: "rate_limit" | "error" = "error";
       if (apiErr?.isRateLimited()) {
         kind = "warning";
+        errorKind = "rate_limit";
         title = "Rate limit reached";
-        message =
-          apiErr.message ||
-          "You've hit the demo rate limit — wait a minute and try again.";
+        // Prefer the friendly copy over the raw "Request failed with status 429."
+        message = "You've hit the demo rate limit — please wait a minute and try again.";
       } else if (apiErr?.isServerError()) {
         title = "Backend unavailable";
-        message = apiErr.message || "The answer service is temporarily unavailable.";
+        message = "The answer service is temporarily unavailable. Please try again in a moment.";
       } else if (apiErr) {
         message = apiErr.message || message;
       }
       addToast({ kind, title, message });
-      streamBot(message, { refusal: true, finalSources: [] });
+      // ``refusal: false`` — this is a transport error, not a content refusal; the
+      // ``errorKind`` badge is what the bubble shows.
+      streamBot(message, { refusal: false, finalSources: [], errorKind });
     },
     // streamBot is a stable useCallback([]) declared below; intentionally
     // omitted to avoid a forward-reference in the dependency array.
@@ -560,6 +571,12 @@ export function useLandingState() {
         // question that was actually answered.
         if (failedQuestionsRef.current.has(norm)) {
           failedQuestionsRef.current.delete(norm);
+          // Re-show the user's question so the retry's response is not an orphaned
+          // bot bubble with no visible question above it (#121).
+          dispatch({
+            type: "ADD_MESSAGE",
+            message: { id: nextMessageId(), role: "user", text },
+          });
           routeQuestion(text);
           return;
         }
@@ -580,7 +597,12 @@ export function useLandingState() {
   const streamBot = useCallback(
     (
       text: string,
-      extra: { refusal?: boolean; finalSources: Source[]; finalSuggestions?: Suggestion[] },
+      extra: {
+        refusal?: boolean;
+        finalSources: Source[];
+        finalSuggestions?: Suggestion[];
+        errorKind?: "rate_limit" | "error";
+      },
     ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
       // id — never "the last message". So concurrent answers (e.g. two live
@@ -873,6 +895,7 @@ export function useLandingState() {
     text: m.text,
     streaming: !!m.streaming,
     refusal: !!m.refusal,
+    errorKind: m.errorKind,
     hasSources: !m.streaming && (m.sources?.length ?? 0) > 0,
     sources: m.sources || [],
     // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
