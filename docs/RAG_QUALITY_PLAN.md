@@ -241,6 +241,36 @@ gate above is fully proven and is the hard eval gate for PR1.1; the judge row is
 resets, `CITEVYN_EMBEDDING_PROVIDER=openrouter CITEVYN_LLM_PROVIDER=gemini python -m
 tests.eval.runner --postgres` against a migrated-but-empty Postgres. Tracked as a follow-up.
 
+## 8a-2. Phase 2 measured results (answer when grounded)
+
+Questions that don't NAME a product routed to `unsupported` and were refused before any
+retrieval. Phase 2 retrieves GLOBALLY for those and answers when grounded, with a confidence
+gate (loose floor + relative margin — a cheap cost pre-filter) and the **LLM grounding-refusal
+as the authoritative net**. Why the LLM, not the gate: empirically **no fixed retrieval
+threshold separates refusals from valid answers across corpus densities** (conftest 5-chunk
+needs margin ~0.15 — `refusal_openai` floor 0.373 > valid `citevyn_par` 0.341; the 33-chunk
+worker corpus needs ~0.04). So the eval's refusal metric was redesigned: when the LLM ran, a
+refusal "leaks" only if the **orchestrator answered it**, not if retrieval merely surfaced a
+chunk the LLM then declines.
+
+**Measured (real Postgres+pgvector; openrouter embeddings + LLM; `--postgres` judged run):**
+
+| Metric | Phase-1 (13/15) | Phase-2 |
+|---|---|---|
+| Overall answerable hit-rate | 0.867 | **15/15 = 1.000** |
+| — paraphrase | 0.600 (3/5) | **1.000 (5/5)** |
+| — literal | 1.000 | 1.000 |
+| Refusal leaks — retrieval (informational) | 0/5 | 1/5 (`refusal_openai` retrieves a chunk) |
+| **Refusal leaks — judged (orchestrator declined)** | — | **0/5** (all decline, incl. openai) |
+| **Judge mean (answer quality, 1–5)** | _(deferred)_ | **5.00** over 20 scored, 0 errors |
+
+Zero DB residue (rollback verified). **Hermetic CI gate unchanged** (SQLite vector arm dead →
+overall 0.667, paraphrase 0.0, 0 leaks); the Phase-2 gain is Postgres-only and
+`test_paraphrase_baseline_is_dead` stays valid. The judged run also fills the §8a Phase-1
+**judge baseline** row (mean 5.00). Follow-ups: grow the golden set + validate the gate on a
+larger real corpus (#59); the retrieval gate needs a real LLM as the net — a stub-LLM deploy
+under `answer_when_grounded` leans entirely on the loose gate (production requires a real LLM).
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
