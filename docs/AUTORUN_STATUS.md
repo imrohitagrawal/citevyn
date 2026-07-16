@@ -4,21 +4,25 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
-# STATUS — 2026-07-16 (Phase 1 COMPLETE; Phase 2 decision locked)
+# STATUS — 2026-07-16 (Phases 1 + 2 COMPLETE & MERGED; eval MAXED 15/15)
 # ============================================================================
 
-**One line:** **Phase 1 is COMPLETE end-to-end and MERGED** (#97 PR #103 + #92 PR #105) —
-semantic search works on a real embedded corpus, eval-proven, and the worker ships + ingests its
-source corpus in the prod image. **Phase 2 decision is locked** (you delegated it: *"answer when
-grounded"*), and it's the next work — but a fresh-context-sized one because it requires redesigning
-the eval's refusal metric (see the Phase-2 plan below). Phases 3–4 sit behind Phase 2.
+**One line:** **Phases 1 and 2 are COMPLETE, eval-proven, and MERGED.** The RAG system went from
+overall **10/15 → 15/15 (100%)**, paraphrase **0/5 → 5/5**, with real semantic retrieval, refusal
+safety (judged leaks 0/5), and answer quality (judge mean 5.00) — all on real Postgres+pgvector.
+Phases 3–4 remain (feature work: query rewrite/decomposition + conversation memory; UX/ops) and will
+need NEW golden cases to be eval-gated (the current 15-case set is maxed).
 
 ## What merged
 | PR | What | Result | State |
 |---|---|---|---|
-| **#103** (`d3795f6`) | **Phase 1 PR1.1** — revive the vector arm (#97): OpenRouter/OpenAI `text-embedding-3-small` embedder + embedding-aware seeders + db/seed backfill + opt-in Postgres eval mode | paraphrase **0/5 → 3/5**, overall **10/15 → 13/15 (0.867)**, leaks 0/5, zero residue; discrimination real **5/5** vs stub ≤2/5 | **MERGED**, 6/6 CI green |
-| **#105** (`f199a2f`) | **Phase 1 PR1.2** — ship source docs as package data (#92): worker corpus moved to `app/worker/sources/`, dead `fixtures_root` removed | verified inside the built worker image; worker ingested a real **33-chunk** corpus on Postgres | **MERGED**, 6/6 CI green |
-| #104 (`a101ff2`) | docs closeout + Phase-2 design notes | — | MERGED |
+| **#103** (`d3795f6`) | **Phase 1.1** — revive the vector arm (#97): OpenRouter/OpenAI embedder + embedding-aware seeders + db/seed backfill + opt-in Postgres eval mode | paraphrase **0→3/5**, overall **10/15→13/15**, leaks 0, zero residue; discrimination real 5/5 vs stub | **MERGED** |
+| **#105** (`f199a2f`) | **Phase 1.2** — ship source docs as package data (#92): worker corpus → `app/worker/sources/` | verified inside a built worker image; ingested a real 33-chunk corpus | **MERGED** |
+| **#107** (`b654ddd`) | **Phase 2** — answer when grounded: global confidence-gated retrieval + LLM grounding-refusal net + judged eval refusal metric | paraphrase **3/5→5/5**, overall **13/15→15/15**, judged refusal leaks **0/5**, judge mean **5.00** | **MERGED** |
+| #104/#106 | docs closeouts | — | MERGED |
+
+_Every merge: full loop (design → adversarial plan/PR review → TDD → gates → real-Postgres eval proof →
+release-readiness SHIP → 6/6 CI green → auto-squash-merge). No `--admin`, no bypass._
 
 ## Phase 2 plan (decision LOCKED = "answer when grounded")
 The next eval win needs the refusal-contract change. The design review proved an absolute floor is
