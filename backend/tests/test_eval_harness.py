@@ -29,6 +29,7 @@ from tests.eval.paths import GOLDEN_PATH
 from tests.eval.retrieval import evaluate_retrieval
 from tests.eval.thresholds import (
     MAX_REFUSAL_LEAKS,
+    MIN_FOLLOWUP_HIT_RATE,
     MIN_LITERAL_HIT_RATE,
     MIN_OVERALL_HIT_RATE,
 )
@@ -89,26 +90,42 @@ def test_retrieval_hit_rate_gate() -> None:
         f"{report.refusal_leaks} out-of-corpus case(s) leaked a chunk: "
         f"{[o.case_id for o in report.outcomes if o.leaked]}"
     )
+    # Phase 3b: conversation memory resolves anaphoric follow-ups deterministically, so
+    # the followup bucket is gated on the hermetic run too (a broken rewrite fails CI).
+    assert report.followup_hit_rate >= MIN_FOLLOWUP_HIT_RATE, (
+        f"followup hit-rate regressed to {report.followup_hit_rate:.3f}; "
+        f"misses: {[o.case_id for o in report.outcomes if o.kind == 'followup' and not o.hit]}"
+    )
 
 
-def test_followup_misses_single_turn() -> None:
-    """Gap control (Phase 3b prerequisite): the anaphoric follow-up questions must
-    MISS when retrieved single-turn (no conversation memory yet).
+def test_followup_raw_misses_without_memory() -> None:
+    """Permanent raw-miss control (adversarial finding #5): with conversation memory
+    OFF, each anaphoric follow-up ("How can I raise it?") names no product, routes to
+    ``unsupported``, and the global arm finds nothing on the hermetic path → MISS.
 
-    Each ``followup`` case's final question ("How can I raise it?") names no product,
-    so it routes to ``unsupported`` → the global confidence-gated arm finds nothing on
-    the hermetic path. A 0.0 followup hit-rate here is what makes the eventual hit
-    attributable to conversation memory (Phase 3b) rather than the case being
-    trivially answerable. It is the follow-up analogue of
-    ``test_paraphrase_baseline_is_dead`` and is EXPECTED to flip once the feature
-    wires memory into the retrieval path (update the story in §8b then).
+    This is what makes the memory-ON hit attributable to memory rather than the case
+    being trivially answerable — the follow-up analogue of
+    ``test_paraphrase_baseline_is_dead``. If a future embedder ever made the raw
+    follow-up hit, this trips and the gap (and the feature's value) must be revisited.
     """
     cases = load_cases(GOLDEN_PATH)
     assert any(c.kind == "followup" for c in cases), "golden set must carry followup cases"
-    report = asyncio.run(evaluate_retrieval(cases))
+    report = asyncio.run(evaluate_retrieval(cases, use_memory=False))
     assert report.followup_hit_rate == 0.0, (
-        "a follow-up hit single-turn without memory — the gap is not real: "
+        "a follow-up hit WITHOUT memory — the gap is not real: "
         f"{[o.case_id for o in report.outcomes if o.kind == 'followup' and o.hit]}"
+    )
+
+
+def test_followup_hits_with_memory() -> None:
+    """Conversation memory (Phase 3b) resolves each follow-up against its history and
+    retrieves the expected area — hermetically (the rewrite routes to the product
+    domain + the keyword arm hits, no vector arm needed). This is the hermetic gate."""
+    cases = load_cases(GOLDEN_PATH)
+    report = asyncio.run(evaluate_retrieval(cases))
+    assert report.followup_hit_rate >= MIN_FOLLOWUP_HIT_RATE, (
+        f"followup hit-rate {report.followup_hit_rate:.3f} < {MIN_FOLLOWUP_HIT_RATE}; "
+        f"misses: {[o.case_id for o in report.outcomes if o.kind == 'followup' and not o.hit]}"
     )
 
 
@@ -535,6 +552,38 @@ def test_multihop_gate_passes_on_postgres_when_all_hit() -> None:
     from tests.eval.runner import gate_failures
 
     assert gate_failures(_multihop_summary(mode="postgres", multihop_hit_rate=1.0)) == []
+
+
+def _followup_summary(*, mode: str, followup_hit_rate: float) -> dict[str, Any]:
+    return {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0, "followup": followup_hit_rate},
+            "refusal_leaks": 0,
+            "followup_total": 3,
+            "followup_hit_rate": followup_hit_rate,
+        },
+        "judge": {"available": False, "judged": 0, "scored": 0, "mean_score": None},
+        "embedder": {"mode": mode},
+    }
+
+
+def test_followup_gate_fails_below_threshold_on_both_modes() -> None:
+    """Unlike multihop, the followup gate is enforced on the HERMETIC run too — the
+    rewrite resolves deterministically, so a broken rewrite must fail CI."""
+    from tests.eval.runner import gate_failures
+
+    for mode in ("sqlite-hermetic", "postgres"):
+        failures = gate_failures(_followup_summary(mode=mode, followup_hit_rate=0.66))
+        assert any("followup" in f for f in failures), (mode, failures)
+
+
+def test_followup_gate_passes_when_all_hit() -> None:
+    from tests.eval.runner import gate_failures
+
+    for mode in ("sqlite-hermetic", "postgres"):
+        assert gate_failures(_followup_summary(mode=mode, followup_hit_rate=1.0)) == []
 
 
 def test_multihop_not_gated_on_hermetic_sqlite() -> None:

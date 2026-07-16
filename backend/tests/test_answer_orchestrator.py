@@ -554,6 +554,176 @@ async def test_unsupported_but_grounded_question_answers_globally(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Conversation memory (Phase 3b)
+# ---------------------------------------------------------------------------
+
+
+async def test_followup_resolves_against_prior_turn(session: Any) -> None:
+    """An anaphoric follow-up ("How can I raise it?") after a Claude-API turn is
+    contextualized: retrieval sees the resolved query and scopes to claude_api (a
+    product), NOT the global unsupported arm it would hit single-turn."""
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, retriever=retriever)
+
+    # Turn 1 — a self-contained product question (establishes the topic).
+    await orch.ask(
+        question="What is the rate limit for the Claude API?",
+        request_id="req_t1",
+        session_id=sid,
+    )
+    # Turn 2 — the anaphoric follow-up on the SAME session.
+    response = await orch.ask(question="How can I raise it?", request_id="req_t2", session_id=sid)
+
+    assert response["no_answer"] is False
+    assert response["unsupported"] is False
+    # The follow-up was routed to the product topic, not the global unsupported arm.
+    followup_call = retriever.calls[-1]
+    assert followup_call["product_area"] == "claude_api"
+    assert "Claude API" in followup_call["question"]  # prior turn was prepended
+    assert followup_call["question"].endswith("How can I raise it?")
+    # The persisted user message keeps the ORIGINAL utterance, not the rewrite.
+    user_msgs = (
+        (await session.execute(select(Message).where(Message.role == MessageRole.user)))
+        .scalars()
+        .all()
+    )
+    assert any(m.content == "How can I raise it?" for m in user_msgs)
+
+
+async def test_offtopic_followup_is_not_hijacked_into_prior_product(session: Any) -> None:
+    """Adversarial R1: a full off-topic sentence mid-session must NOT borrow the prior
+    product topic — it carries no anaphora, so it stays unsupported (global arm) and,
+    finding nothing, refuses. It must never be scoped to claude_api."""
+    await _seed_index_version(session)
+    settings = _settings()
+    # Empty retriever → the global arm finds nothing confident → refusal.
+    retriever = _FakeRetriever([])
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
+
+    # Turn 1 — a product question (would be the hijack antecedent).
+    scoped_retriever = _FakeRetriever(_evidence(count=2))
+    orch_t1 = Orchestrator(settings, session, retriever=scoped_retriever)
+    await orch_t1.ask(
+        question="What is the rate limit for the Claude API?",
+        request_id="req_t1",
+        session_id=sid,
+    )
+    # Turn 2 — a self-contained off-topic sentence.
+    response = await orch.ask(
+        question="What's the weather in Paris tomorrow?",
+        request_id="req_t2",
+        session_id=sid,
+    )
+
+    assert response["unsupported"] is True
+    assert response["domain"] == "unsupported"
+    # Retrieval, if attempted, went to the GLOBAL arm — never scoped to claude_api.
+    assert all(c["product_area"] is None for c in retriever.calls)
+    assert llm_spy.complete.await_count == 0
+
+
+async def test_followup_cache_key_differs_by_prior_topic(session: Any) -> None:
+    """Adversarial R3/#6: the SAME anaphoric follow-up text under DIFFERENT prior
+    topics must get DISTINCT cache keys — session B must not be served session A's
+    cached answer."""
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid_a, sid_b = uuid.uuid4(), uuid.uuid4()
+    orch = Orchestrator(settings, session, retriever=retriever)
+
+    # Session A: Claude prior, then the follow-up → caches under the resolved key.
+    await orch.ask(
+        question="What is the rate limit for the Claude API?",
+        request_id="a1",
+        session_id=sid_a,
+    )
+    await orch.ask(question="How can I raise it?", request_id="a2", session_id=sid_a)
+
+    # Session B: Gemini prior, then the SAME follow-up text.
+    await orch.ask(
+        question="Which header carries the Gemini API key?",
+        request_id="b1",
+        session_id=sid_b,
+    )
+    resp_b = await orch.ask(question="How can I raise it?", request_id="b2", session_id=sid_b)
+
+    # B's follow-up is NOT a cache hit — its resolved query (Gemini) keys differently.
+    assert resp_b["cache_hit"] is False
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    normalized_qs = {r.normalized_question for r in cache_rows}
+    # Two DISTINCT resolved follow-up queries were cached, not one shared key.
+    assert any("claude api" in q and "raise it" in q for q in normalized_qs)
+    assert any("gemini" in q and "raise it" in q for q in normalized_qs)
+
+
+async def test_anaphoric_pivot_followup_still_declines_when_llm_refuses(session: Any) -> None:
+    """Adversarial R1 / refusal-safety: a follow-up that opens with an anaphor/ellipsis
+    but PIVOTS to an off-corpus topic ("and how do I do that on Kubernetes?") IS
+    contextualized (routed to the prior product, retrieves that chunk) — memory must not
+    bypass the refusal. The LLM grounding-refusal net is the authoritative gate: when it
+    declines (the routed chunk has no support for the new topic), the orchestrator
+    returns no_answer, exactly as it would single-turn. Proven against the real LLM in
+    the judged eval (the k8s pivot refuses); here we lock that memory routing HONORS the
+    LLM's refusal rather than forcing a grounded answer out of the prepended antecedent.
+    """
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    settings = _settings()
+    # The rewrite routes the pivot to claude_api and retrieves the prior chunk...
+    retriever = _FakeRetriever(_evidence(count=2))
+    # ...but the grounding-refusal net declines it (no support for the new topic).
+    refusing_llm = AsyncMock()
+    refusing_llm.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=refusing_llm, retriever=retriever)
+
+    await orch.ask(
+        question="What is the rate limit for the Claude API?", request_id="t1", session_id=sid
+    )
+    response = await orch.ask(
+        question="and how do I do that on Kubernetes?", request_id="t2", session_id=sid
+    )
+
+    # Memory routed it (retrieval ran, scoped to the product) but the LLM refusal wins.
+    assert response["no_answer"] is True
+    assert retriever.calls[-1]["product_area"] == "claude_api"  # was contextualized
+    # The pivot turn was NOT short-circuited to a refusal — it retrieved + consulted the
+    # LLM (turn 1 + the pivot = 2 calls), and the LLM's decline is what produced no_answer.
+    assert refusing_llm.complete.await_count == 2
+
+
+async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> None:
+    """The kill-switch: with ``conversation_memory=False`` a follow-up is NOT rewritten
+    — it stays unsupported (global arm), the pre-Phase-3b behavior."""
+    await _seed_index_version(session)
+    settings = _settings(conversation_memory=False)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, retriever=retriever)
+
+    await orch.ask(
+        question="What is the rate limit for the Claude API?",
+        request_id="t1",
+        session_id=sid,
+    )
+    await orch.ask(question="How can I raise it?", request_id="t2", session_id=sid)
+
+    # Flag off → the follow-up was NOT scoped to claude_api; it hit the global arm.
+    assert retriever.calls[-1]["product_area"] is None
+    assert retriever.calls[-1]["question"] == "How can I raise it?"
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 

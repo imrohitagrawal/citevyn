@@ -27,16 +27,17 @@ import contextlib
 import dataclasses
 import uuid
 from collections.abc import AsyncGenerator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.answer.memory import build_contextual_query, recent_user_questions
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
 from app.guardrails.domain import classify_domain, classify_domains, is_unsupported
-from app.models import Base, Chunk, User, UserRole
+from app.models import Base, Chunk, Message, MessageRole, Session, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.types import VectorDegrade
 from app.routing.intent import Intent, classify_intent
@@ -278,21 +279,80 @@ async def postgres_session(
         await engine.dispose()
 
 
+async def _seed_followup_history(session: AsyncSession, case: EvalCase) -> uuid.UUID:
+    """Persist a followup case's ``history`` as prior USER Message rows in a fresh
+    session, returning the ``session_id``.
+
+    This makes the eval exercise the REAL conversation-memory DB path
+    (:func:`recent_user_questions`) — the role filter, session scoping, and ordering —
+    rather than passing ``case.history`` straight to the pure rewrite function
+    (adversarial finding #2: the DB fetch must be measured, not bypassed). A
+    ``demo_user`` + ``Session`` row satisfy Postgres FKs (SQLite does not enforce
+    them); everything is flushed into the caller's transaction, which rolls back.
+    """
+    now = datetime.now(UTC)
+    if await session.get(User, "demo_user") is None:
+        session.add(User(user_id="demo_user", role=UserRole.demo_user, created_at=now))
+        await session.flush()
+    session_id = uuid.uuid4()
+    session.add(
+        Session(
+            session_id=session_id,
+            user_id="demo_user",
+            channel="chat",
+            created_at=now,
+            expires_at=now,
+        )
+    )
+    await session.flush()
+    # ``history`` is chronological (oldest first); stamp increasing timestamps so
+    # ``recent_user_questions`` (created_at DESC) reproduces the true recency order.
+    for offset, turn in enumerate(case.history):
+        session.add(
+            Message(
+                session_id=session_id,
+                role=MessageRole.user,
+                content=turn,
+                normalized_query=turn,
+                domain=None,
+                intent=None,
+                created_at=now + timedelta(seconds=offset),
+            )
+        )
+    await session.flush()
+    return session_id
+
+
 async def _retrieve_sources(
     session: AsyncSession,
     case: EvalCase,
     *,
     settings: Settings,
     embedder: Embedder | None = None,
-) -> tuple[tuple[str, ...], VectorDegrade]:
+    use_memory: bool = True,
+) -> tuple[tuple[str, ...], VectorDegrade, str]:
     """Run the live retrieval path for one case.
 
-    Returns ``(top-k source names, vector_degrade)``. ``embedder`` is ``None`` on
-    the hermetic SQLite path (vector arm dead by design) and the real embedder on
-    the Postgres path, where its identity also gates the Tier-3 mismatch check.
+    Returns ``(top-k source names, vector_degrade, routed_domain)``. ``embedder`` is
+    ``None`` on the hermetic SQLite path (vector arm dead by design) and the real
+    embedder on the Postgres path, where its identity also gates the Tier-3 mismatch
+    check.
+
+    For a ``followup`` case, conversation memory (Phase 3b) resolves the anaphoric
+    final question against its ``history`` via the SAME product path the orchestrator
+    uses — persist the history, read it back with :func:`recent_user_questions`, and
+    rewrite with :func:`build_contextual_query`. ``use_memory=False`` forces the raw
+    single-turn query (the permanent raw-miss control).
     """
-    domain = classify_domain(case.question)
-    intent = classify_intent(case.question, domain)
+    query = case.question
+    if use_memory and case.history and settings.conversation_memory:
+        session_id = await _seed_followup_history(session, case)
+        priors = await recent_user_questions(
+            session, session_id, limit=settings.memory_recent_turns
+        )
+        query = build_contextual_query(case.question, priors)
+    domain = classify_domain(query)
+    intent = classify_intent(query, domain)
     if is_unsupported(domain):
         intent = Intent.unsupported
     identity = configured_embedder_identity(settings) if embedder is not None else None
@@ -309,10 +369,10 @@ async def _retrieve_sources(
     # serves: multi-hop (>=2 named products) → retrieve each and merge (Phase 3);
     # else "answer when grounded" (Phase 2) sends an unsupported-routed question
     # through the global confidence-gated arm (product_area=None); else scoped.
-    multi_domains = classify_domains(case.question)
+    multi_domains = classify_domains(query)
     if len(multi_domains) >= 2:
         result = await retriever.retrieve_multi(
-            case.question,
+            query,
             product_areas=[d.value for d in multi_domains],
             intent=intent,
             limit=settings.retrieval_max_candidates,
@@ -321,17 +381,21 @@ async def _retrieve_sources(
     else:
         answer_globally = settings.answer_when_grounded and intent is Intent.unsupported
         result = await retriever.retrieve(
-            case.question,
+            query,
             product_area=None if answer_globally else domain.value,
             intent=intent,
             limit=settings.retrieval_max_candidates,
             top_k=settings.retrieval_top_k,
         )
-    return tuple(hit.source_name for hit in result.hits), result.vector_degrade
+    return tuple(hit.source_name for hit in result.hits), result.vector_degrade, domain.value
 
 
 async def evaluate_retrieval(
-    cases: Sequence[EvalCase], *, settings: Settings | None = None, postgres: bool = False
+    cases: Sequence[EvalCase],
+    *,
+    settings: Settings | None = None,
+    postgres: bool = False,
+    use_memory: bool = True,
 ) -> RetrievalReport:
     """Compute the retrieval hit-rate report over ``cases``.
 
@@ -341,21 +405,26 @@ async def evaluate_retrieval(
     recall. In Postgres mode an answerable case whose vector arm degraded to a
     Tier-3 ``mismatch`` raises loudly (the index/query embedder identities diverged)
     rather than silently lowering the number.
+
+    ``use_memory=False`` disables the Phase-3b conversation-memory rewrite for
+    ``followup`` cases — the raw single-turn control that proves the memory-on hit is
+    attributable to memory (adversarial finding #5).
     """
     settings = settings or get_settings()
     outcomes: list[RetrievalOutcome] = []
     session_cm = postgres_session(settings) if postgres else _sqlite_session_and_embedder()
     async with session_cm as (session, embedder):
         for case in cases:
-            sources, degrade = await _retrieve_sources(
-                session, case, settings=settings, embedder=embedder
+            sources, degrade, routed_domain = await _retrieve_sources(
+                session, case, settings=settings, embedder=embedder, use_memory=use_memory
             )
             if postgres and case.kind != "refusal" and degrade is VectorDegrade.mismatch:
                 raise PostgresEvalError(
                     f"vector arm degraded to Tier-3 mismatch on case {case.id!r}: the "
                     "seeded index provenance and configured query embedder disagree."
                 )
-            domain = classify_domain(case.question)
+            # The domain actually routed to (from the memory-resolved query for a
+            # followup) — not a second classification of the raw question (finding #7).
             if case.is_refusal:
                 leaked = len(sources) > 0
                 hit = False
@@ -371,7 +440,7 @@ async def evaluate_retrieval(
                     case_id=case.id,
                     area=case.area,
                     kind=case.kind,
-                    domain=domain.value,
+                    domain=routed_domain,
                     expected_source=case.expected_source,
                     retrieved_sources=sources,
                     hit=hit,
