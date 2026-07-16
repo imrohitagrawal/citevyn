@@ -4,6 +4,70 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
+# STATUS — 2026-07-17 · CI FLAKE #85 + EVAL PRECISION/RECALL #125 (autonomous run)
+# ============================================================================
+
+**One line:** Fixed the intermittent CI merge-gate flake (#85) and landed the bulk of the
+deferred eval-hardening #125 — chunk-level retrieval identity + a rank metric, a distractor
+corpus with context precision/recall, and golden growth 31→50 — as four small PRs, each
+through the FULL loop (fan-out adversarial plan review → TDD → gates → real-Postgres eval
+proof → fan-out PR review w/ per-finding verification → release-readiness → green CI →
+squash-merge). No `--admin`, no bypass. Only human-labeled judge-calibration remains on #125.
+
+## What merged this run
+| PR | Item | What | Result |
+|---|---|---|---|
+| **#131** | 0 — CI flake #85 | `make db-verify` retries both `psql` calls (10×2s) through the pgvector:pg18 first-boot restart race; cap still hard-fails a genuinely broken boot (no false green) | Verified fresh-volume `make ci-smoke` ×3 self-heals; #85 CLOSED |
+| **#132** | 1 (PR A) — chunk identity + rank metric | Stable chunk key `"{source_name}#{chunk_order}"` (over uuid4 / collision-prone content_checksum); eval-layer chunk_id→key map (raise-on-miss); `EvalCase.gold_chunks`; **MRR + precision@1** for single-relevant cases, `--postgres`-gated | Baseline (stable ×5 runs): MRR 1.000, precision@1 1.000 (n=18); locked judged run unchanged |
+| **#133** | 1 (PR B) — distractor corpus | Dedicated `seed_eval_distractors` (own throwaway area, own active index, full postgres_session rails, zero residue) + **context recall@k + precision@\|gold\|** via VECTOR-ONLY retrieval; 2 lexical HARD NEGATIVES so the metric detects a subtle regression, not just a dead arm; per-case `gold_margin` instrument | All cases recall/precision 1.000, gold beats hard negatives by min 0.092 cosine (stable ×5); fully isolated from locked runs |
+| **#134** | 1 (PR C) — golden growth | Main golden **31→50**: +10 refusal robustness (6 off-domain + 4 in-domain near-miss `postgres_only`), +4 verified paraphrases, +2 multihop — every one proven on the judged run | core 23/23, multihop 5/5, refusal leaks judged 0/19, groundedness 1.000/18, gate PASSED |
+
+## Measured baselines + margin gates (real Postgres, openai/text-embedding-3-small, 2026-07-17)
+- **Rank metric (#132):** `MIN_PRECISION_AT_1 = 1.0` (pinned — the 2 GLOBAL-routed paraphrases
+  rank their gold over all other areas, precision@1 strictly stronger than hit-rate there;
+  deterministic run-to-run, verified stable ×5), `MIN_MRR = 0.95` (tolerant companion). n=18.
+- **Distractor context (#133):** `MIN_DISTRACTOR_RECALL_AT_K = 1.0`,
+  `MIN_DISTRACTOR_PRECISION_AT_GOLD = 1.0` — EARNED against lexical hard negatives with a
+  measured 0.092 min cosine margin (0.092–0.158), recorded per-case as `gold_margin` for
+  early warning. Distractor-mode-only (opt-in `python -m tests.eval.distractors`; NOT wired
+  into CI to avoid same-DB concurrency with the judged pass — run serially).
+- **Golden (#134):** 50 cases; all locked RATES preserved (counts grew: core 19→23, multihop
+  3→5, refusal leaks 0/6→0/19 judged, all still perfect).
+- Distractor corpus size: **18 chunks** (2 gold + 16 within-area distractors incl. 2 hard neg).
+- Golden set final count: **50** main + **3** distractor-golden cases.
+
+## Design shaped by fan-out adversarial review (honored, not overridden)
+- PR A: 3 plan skeptics (ranking-triviality → the metric already bites on the 2 global
+  paraphrases, not pure plumbing; chunk-key stability → composite key, raise-on-miss; baseline
+  non-regression → `()` defaults + `.get()`-guarded postgres-only gate) + 3 PR reviewers.
+- PR B: 2 plan skeptics (keyword-ILIKE confound → VECTOR-ONLY retrieval; seed isolation → 5
+  guardrails incl. build_embedder-not-get_embedder, empty-catalog refusal, exactly-1-active-
+  index) + 2 PR reviewers (adversarial-metric → the metric was too easy, so added lexical hard
+  negatives + the gold-margin instrument).
+- PR C: judged-run verification is the gate — a 5th paraphrase (`citevyn_par_cost`) was DROPPED
+  rather than lower a gate when the global confidence gate suppressed it.
+
+## Remaining on #125 (the ONLY open piece — DEFERRED by design this run)
+- **Human-labeled judge-calibration subset** (Item 2d): measure judge-vs-human agreement on a
+  small hand-scored slice. Needs a human in the loop (out of scope for an unattended run).
+  #125 stays OPEN scoped to this alone; BACKLOG row updated.
+
+## How to run the new pieces
+```bash
+# Distractor context precision/recall (opt-in, Postgres-only; run serially vs the judged pass):
+export PGPW=$(grep '^POSTGRES_PASSWORD=' infra/docker/.env|cut -d= -f2-)
+export DB_URL="postgresql+psycopg://citevyn:$PGPW@localhost:5432/citevyn"
+export OR_KEY=$(grep '^CITEVYN_OPENROUTER_API_KEY=' infra/docker/.env|cut -d= -f2-)
+make db-up && CITEVYN_DATABASE_URL=$DB_URL uv run --project backend alembic -c db/alembic.ini upgrade head
+docker exec -e PGPASSWORD="$PGPW" citevyn-db psql -U citevyn -d citevyn -c \
+  "TRUNCATE exact_terms, chunks, documents, index_versions CASCADE;"
+cd backend && CITEVYN_DATABASE_URL=$DB_URL CITEVYN_EMBEDDING_PROVIDER=openrouter \
+  CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small CITEVYN_OPENROUTER_API_KEY=$OR_KEY \
+  uv run python -m tests.eval.distractors           # → recall/precision 1.000, min margin 0.092
+# The rank metric + golden 50 ride the existing judged run: uv run python -m tests.eval.runner --postgres
+```
+
+# ============================================================================
 # STATUS — 2026-07-16 · EVAL HARDENING + ENFORCEMENT (autonomous run)
 # ============================================================================
 
