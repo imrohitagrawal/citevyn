@@ -538,6 +538,37 @@ lower only with a re-measured justification. Design hardened by two fan-out plan
 reviewers (correctness/isolation → CLEAN; adversarial-metric → added the hard negatives + the
 gold-margin instrument so the metric detects a subtle regression, not just a dead arm).
 
+## 8a-9. Golden-set growth — PR C of #125
+
+Grew the main golden **31 → 50** cases, every addition VERIFIED on the real-Postgres judged
+run (a case retrieval can't handle is not added — it would regress the gate, not measure
+quality). All locked RATES are preserved; the counts grow:
+
+- **+10 refusal robustness** — 6 diverse off-domain topics (Docker, AWS, React, git, SQL,
+  Terraform, JS, MongoDB, Linux/cron) that route `unsupported` → decline (hermetic-safe), and
+  **4 in-domain near-miss refusals** (`postgres_only`): a real product is named but the fact
+  (uptime SLA, supported languages, per-token price, keyboard shortcuts) is NOT in the docs,
+  so the orchestrator must DECLINE rather than invent. Measured: judged refusal leaks **0/19**
+  (all decline, incl. every near-miss — the grounding-refusal net holds).
+- **+4 paraphrases** (`postgres_only`, so they never drag the hermetic 0.60 overall floor):
+  additional zero-overlap phrasings for claude_api / claude_code / codex / gemini_api, each
+  verified to retrieve its area and rank the gold #1. (A 5th, `citevyn_par_cost`, was DROPPED:
+  too generic → the global confidence gate suppressed it; not added rather than lower a gate.)
+- **+2 multihop** — Claude-API-vs-Codex and Gemini-auth-vs-Claude-Code-permissions; both hit
+  BOTH areas (multihop **5/5**).
+
+Measured (2026-07-17, real Postgres, 50 cases): core overall **23/23**, multihop **5/5**,
+followup 3/3, refusal leaks judged **0/19**, injection 0/2, groundedness 1.000/18, chunk rank
+MRR/precision@1 1.000 (n=22), judge 4.76, gate PASSED, zero residue.
+
+**Corpus cap (honest):** the main golden is anchored to the locked 5-chunk `seed_catalog`
+(one chunk per area, deliberately unchanged). Each chunk covers ~2 facts, so beyond ~50 cases
+new literal/paraphrase additions become near-duplicates without discriminating power. Pushing
+toward the 100 end of the range would require EXPANDING the seed corpus (new curated content),
+which is out of scope here (it changes the locked corpus + the one-chunk-per-area guard). The
+distractor corpus (§8a-8) is the seam for adding ranking-discriminating cases without touching
+the locked seed.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.
