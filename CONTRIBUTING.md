@@ -31,8 +31,23 @@ git clone https://github.com/imrohitagrawal/citevyn.git
 cd citevyn
 make demo                      # brings up db + redis, runs migrations, seeds
 cd backend && uv sync          # resolves the python environment
+make install-hooks             # installs the pre-commit gate (recommended, see below)
 make verify                    # runs lint + typecheck + test
 ```
+
+### 2a. Pre-commit hook (recommended)
+
+`make install-hooks` installs a git **pre-commit hook** that blocks a commit unless
+`ruff format --check` + `ruff check` pass on the staged `backend/` Python — so a
+lint/format regression is stopped locally before it ever reaches CI. It is fast
+(~sub-second, no network) and only runs when `backend/*.py` is staged. Set
+`CITEVYN_PRECOMMIT_TESTS=1` to also run a fast eval-harness test slice. Bypass a single
+commit with `git commit --no-verify`. The hook source lives in
+[`scripts/git-hooks/pre-commit`](scripts/git-hooks/pre-commit).
+
+The hook checks the whole `backend/` tree (mirroring CI's `ruff check .` scope), so an
+unrelated dirty file can block an otherwise-clean commit — clean the tree, or use
+`--no-verify`. It honors `core.hooksPath` and works from a git worktree.
 
 ### 3. Pre-merge gate
 

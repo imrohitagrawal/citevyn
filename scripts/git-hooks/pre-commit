@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# CiteVyn pre-commit hook — blocks a commit unless the fast static gates pass, so a
+# lint/format regression is stopped LOCALLY before it ever reaches CI (the exact class
+# of miss red-flagged on PR #109). Install with ``make install-hooks``.
+#
+# ALWAYS (fast, no network, ~sub-second): ruff format --check + ruff check on backend/.
+# OPTIONAL (off by default so the hook stays fast): set CITEVYN_PRECOMMIT_TESTS=1 to also
+# run a fast hermetic eval-harness test slice before the commit lands.
+#
+# Escape hatch: ``git commit --no-verify`` skips the hook (use sparingly, e.g. a WIP
+# checkpoint on a private branch).
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Only run when Python files under backend/ are staged — a docs-only or frontend-only
+# commit shouldn't pay the cost or fail on unrelated pre-existing issues. Capture the
+# staged list FIRST, then match via a here-string: piping ``git diff | grep -q`` can hand
+# grep an early SIGPIPE on a large list and (under ``pipefail``) false-skip the gate.
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+if ! grep -qE '^backend/.*\.py$' <<<"$staged"; then
+  echo "pre-commit: no staged backend/*.py — skipping ruff."
+  exit 0
+fi
+
+cd "$repo_root/backend"
+echo "pre-commit: ruff format --check + ruff check (backend)…"
+if ! uv run ruff format --check .; then
+  echo "pre-commit BLOCKED: formatting. Run 'cd backend && uv run ruff format .' then re-commit." >&2
+  exit 1
+fi
+if ! uv run ruff check .; then
+  echo "pre-commit BLOCKED: lint. Fix the findings above (or 'uv run ruff check --fix .') then re-commit." >&2
+  exit 1
+fi
+
+if [ "${CITEVYN_PRECOMMIT_TESTS:-0}" = "1" ]; then
+  echo "pre-commit: fast eval-harness test slice…"
+  if ! env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q \
+      tests/test_eval_harness.py tests/test_eval_judge_robustness.py; then
+    echo "pre-commit BLOCKED: eval-harness tests failed." >&2
+    exit 1
+  fi
+fi
+
+echo "pre-commit: OK"
