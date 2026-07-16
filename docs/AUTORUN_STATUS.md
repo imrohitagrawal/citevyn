@@ -4,6 +4,81 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
+# FINAL STATUS — 2026-07-16 · RAG_QUALITY_PLAN COMPLETE (all phases 0→4 MERGED)
+# ============================================================================
+
+**One line:** **Every phase of `docs/RAG_QUALITY_PLAN.md` is now implemented, eval-proven,
+reviewed, and MERGED to `main` (`968de50`).** This run completed the two remaining phases —
+**3B conversation memory** and **4 UX & ops** — through the full loop (adversarial plan +
+fan-out PR review → TDD → gates → real-Postgres eval proof → release-readiness SHIP → green
+CI → auto-squash-merge; no `--admin`, no bypass).
+
+## What merged THIS run
+| PR | Phase | What | Result |
+|---|---|---|---|
+| **#111** (`c20a1b6`) | 3B.1 | Multi-turn eval infra: `followup` case kind + `history` + gap control (prerequisite) | followup **0/3** (gap demonstrated), baselines unchanged |
+| **#113** (`e75395f`) | 3B.2 | Conversation memory: `build_contextual_query` + `recent_user_questions` → orchestrator rewrites an anaphoric follow-up against recent turns (routing + retrieval + generation + cache key); kill-switch | follow-up **0/3 → 3/3**, core 15/15, multihop 3/3, refusal leaks judged 0/5, judge 4.85, zero residue |
+| **#115** (`75624ee`) | 4c | `GET /health/index` `vector_arm` block (dead/mismatch/partial/healthy) — operator sees the #97 failure | live-verified PG: dead 0/5 → healthy 5/5 |
+| **#116** (`d9d8334`) | 4b | Distinct 429 UI — amber `warning` toast (transient) vs red `error` alert | 35 frontend tests + tsc |
+| **#117** (`968de50`) | 4a | Graceful fallback — nearest-doc `suggestions` on an in-domain no_answer; off-corpus stays suggestion-free | 714 backend + 35 frontend |
+| #114 | docs | 3B closeout | — |
+
+## Eval numbers per phase (before → after, real Postgres+pgvector, judged `--postgres`)
+| Metric | Phase-3a (start of run) | **Phase-3B/4 (now)** |
+|---|---|---|
+| Core overall (literal + paraphrase) | 15/15 | **15/15** |
+| Multi-hop | 3/3 | **3/3** |
+| **Follow-up (conversation memory)** | — (no infra) | **3/3** (memory ON) · 0/3 (memory OFF control) |
+| Refusal leaks — judged | 0/5 | **0/5** |
+| Judge mean | 4.91 (23 cases) | **4.85–4.88** (26 cases incl. 3 judged followups) |
+| DB residue | zero | **zero** |
+
+## What's left (tracked follow-ups — none block the plan)
+- **#112** (filed this run) — conversation memory: entity-aware rewrite for off-corpus
+  topic-pivot follow-ups (an adjacent pivot gets a disclaimed prior-topic answer — honest
+  relevance miss; the LLM net refuses clear pivots). Low priority.
+- Pre-existing backlog unchanged: #59 (embedding providers/scale), #61 (SSE streaming),
+  #62 (composer gating), #82/#85 (CI), #84 (CiteVyn-meta), #87 (legit no_answer), #93 (seed
+  log redaction). Rate-limit *segmentation* (the other half of PR4.2) remains a small ops
+  follow-up. See `docs/BACKLOG.md`.
+
+## How to test it all live
+Prereqs: Docker running; the OpenRouter key is already in `infra/docker/.env`.
+```bash
+cd ~/Projects/citevyn && git checkout main && git pull        # 968de50 or later
+export PGPW=$(grep '^POSTGRES_PASSWORD=' infra/docker/.env | cut -d= -f2-)
+export DB_URL="postgresql+psycopg://citevyn:$PGPW@localhost:5432/citevyn"
+export OR_KEY=$(grep '^CITEVYN_OPENROUTER_API_KEY=' infra/docker/.env | cut -d= -f2-)
+make db-up
+CITEVYN_DATABASE_URL=$DB_URL uv run --project backend alembic -c db/alembic.ini upgrade head
+
+# 1) Full eval proof (truncate first → the runner seeds+rolls back, zero residue):
+docker exec -e PGPASSWORD="$PGPW" citevyn-db psql -U citevyn -d citevyn \
+  -c "TRUNCATE exact_terms, chunks, documents, index_versions CASCADE;"
+cd backend && CITEVYN_DATABASE_URL=$DB_URL \
+  CITEVYN_EMBEDDING_PROVIDER=openrouter CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small \
+  CITEVYN_LLM_PROVIDER=router CITEVYN_OPENROUTER_API_KEY=$OR_KEY \
+  uv run python -m tests.eval.runner --postgres
+#   → core 15/15, followup 1.000 (3/3), multihop 1.000, refusal leaks judged 0/5, judge ~4.85, gate PASSED
+
+# 2) Vector-arm health signal (4c): seed WITH embeddings, then GET /health/index
+#    → vector_arm.status "healthy" (5/5); seed with embedder=None → "dead" (0/5).
+#    (See scratchpad verify_health.py pattern from the run, or hit the live uvicorn.)
+
+# 3) Hermetic gates (no Docker/keys needed):
+cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q   # 714 passed
+cd ../frontend && npm run type-check && npx vitest run                          # 35 passed
+```
+For a live chat demo (conversation memory + fallback UX + 429 toast): seed a demo index WITH
+embeddings, promote, run uvicorn + the live frontend (`VITE_API_LIVE=true`), then ask a product
+question followed by an anaphoric follow-up ("How can I raise it?") — the follow-up now answers
+(memory). See the phase-one runbook for the seed→promote→serve chain.
+
+_All work this run went through: adversarial plan/PR review (fan-out) → TDD → full gates
+(ruff format+check, pyright, 714 hermetic + 8 postgres pytest, 35 vitest, stylelint) →
+real-Postgres judged eval proof → release-readiness SHIP → 6/6 CI green → auto-squash-merge._
+
+# ============================================================================
 # STATUS — 2026-07-16 (Phase 3B MERGED; conversation memory; followup 3/3)
 # ============================================================================
 
