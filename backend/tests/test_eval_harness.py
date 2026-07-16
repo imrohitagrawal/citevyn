@@ -55,6 +55,31 @@ def test_golden_covers_all_areas_and_kinds() -> None:
     assert "refusal" in kinds, "need out-of-corpus refusal cases"
 
 
+def test_golden_gold_chunks_reference_real_seeded_chunks() -> None:
+    """Every ``gold_chunks`` key in the golden file must name a chunk the conftest seed
+    actually produces (#125). A typo'd gold key would silently zero a case's reciprocal
+    rank (it can never match a retrieved key), quietly deflating MRR/precision@1 — so the
+    labels are validated against the seed's stable ``"{source_name}#{chunk_order}"`` keys.
+    Only a refusal may lack gold_chunks; multihop is multi-relevant and opts out.
+    """
+    import asyncio
+
+    from tests.eval.retrieval import _chunk_key_map, seeded_session
+
+    async def _seed_keys() -> set[str]:
+        async with seeded_session() as session:
+            return set((await _chunk_key_map(session)).values())
+
+    seeded = asyncio.run(_seed_keys())
+    assert seeded == {f"{a}#0" for a in EXPECTED_AREAS}, seeded
+    for case in load_cases(GOLDEN_PATH):
+        for key in case.gold_chunks:
+            assert key in seeded, (
+                f"case {case.id!r} labels gold chunk {key!r} which the seed does not produce; "
+                f"valid keys: {sorted(seeded)}"
+            )
+
+
 def test_every_area_has_a_paraphrase() -> None:
     """Each product area must carry at least one zero-overlap paraphrase.
 
@@ -237,6 +262,46 @@ def test_loader_rejects_invalid_json(tmp_path: object) -> None:
                 "expect_no_answer": True,
             },
             "must not set expect_no_answer",
+        ),
+        (
+            # a refusal has no correct chunk to rank → must not label a gold chunk (#125)
+            {
+                "id": "x",
+                "area": "o",
+                "kind": "refusal",
+                "question": "q",
+                "expected_gist": "g",
+                "expect_no_answer": True,
+                "gold_chunks": ["claude_api#0"],
+            },
+            "must not set gold_chunks",
+        ),
+        (
+            # gold_chunks must be a list of non-empty strings (#125)
+            {
+                "id": "x",
+                "area": "codex",
+                "kind": "literal",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_source": "codex",
+                "gold_chunks": ["codex#0", "  "],
+            },
+            "gold_chunks must be a list of non-empty strings",
+        ),
+        (
+            # multihop is multi-relevant (scored by expected_sources) → must not carry a
+            # single gold_chunks that would wrongly pull it into the rank pool (#125)
+            {
+                "id": "x",
+                "area": "cross",
+                "kind": "multihop",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_sources": ["claude_api", "gemini_api"],
+                "gold_chunks": ["claude_api#0"],
+            },
+            "multihop case .* must not set gold_chunks",
         ),
     ],
 )
@@ -433,6 +498,180 @@ def test_followup_excluded_from_core_overall_hit_rate() -> None:
     assert d["followup_total"] == 1
     assert d["followup_hits"] == 0
     assert d["followup_hit_rate"] == 0.0
+
+
+def _ranked_outcome(
+    case_id: str,
+    *,
+    gold: tuple[str, ...],
+    retrieved: tuple[str, ...],
+    kind: str = "paraphrase",
+):
+    """Build a RetrievalOutcome with chunk-key plumbing for the rank-metric tests."""
+    from tests.eval.retrieval import RetrievalOutcome
+
+    return RetrievalOutcome(
+        case_id=case_id,
+        area="a",
+        kind=kind,
+        domain="claude_api",
+        expected_source="claude_api",
+        retrieved_sources=tuple(k.split("#")[0] for k in retrieved),
+        hit=bool(retrieved),
+        leaked=False,
+        retrieved_chunk_keys=retrieved,
+        gold_chunks=gold,
+    )
+
+
+def test_reciprocal_rank_and_precision_at_1_are_rank_sensitive() -> None:
+    """The per-case rank metric must reward a gold chunk at rank 1 and decay with rank."""
+    # gold at rank 1
+    o1 = _ranked_outcome("a", gold=("claude_api#0",), retrieved=("claude_api#0", "codex#0"))
+    assert o1.reciprocal_rank() == 1.0
+    assert o1.precision_at_1() is True
+    # gold at rank 2 (a wrong-area chunk outranks it)
+    o2 = _ranked_outcome("b", gold=("claude_api#0",), retrieved=("codex#0", "claude_api#0"))
+    assert o2.reciprocal_rank() == 0.5
+    assert o2.precision_at_1() is False
+    # gold absent / nothing retrieved
+    o3 = _ranked_outcome("c", gold=("claude_api#0",), retrieved=())
+    assert o3.reciprocal_rank() == 0.0
+    assert o3.precision_at_1() is False
+
+
+def test_mrr_and_precision_pool_only_single_relevant_answerable() -> None:
+    """MRR/precision@1 average ONLY over answerable cases with exactly one gold chunk;
+    refusals, multi-gold cases, and unlabelled cases opt out. An empty pool → 1.0."""
+    from tests.eval.retrieval import RetrievalOutcome, RetrievalReport
+
+    report = RetrievalReport(
+        outcomes=(
+            _ranked_outcome("rank1", gold=("claude_api#0",), retrieved=("claude_api#0",)),
+            _ranked_outcome("rank2", gold=("gemini_api#0",), retrieved=("codex#0", "gemini_api#0")),
+            # multi-gold (multi-relevant) — excluded from the single-relevant rank metric
+            _ranked_outcome(
+                "multi", gold=("claude_api#0", "gemini_api#0"), retrieved=("claude_api#0",)
+            ),
+            # unlabelled answerable — opts out
+            _ranked_outcome("nogold", gold=(), retrieved=("codex#0",)),
+            # a refusal must never enter the pool even if mislabelled data slipped a key in
+            RetrievalOutcome(
+                case_id="refusal",
+                area="o",
+                kind="refusal",
+                domain="unsupported",
+                expected_source=None,
+                retrieved_sources=(),
+                hit=False,
+                leaked=False,
+            ),
+        )
+    )
+    d = report.as_dict()
+    assert d["ranked_total"] == 2, "only the two single-gold answerable cases count"
+    # MRR = mean(1.0, 0.5) = 0.75; precision@1 = mean(1, 0) = 0.5
+    assert d["mrr"] == 0.75
+    assert d["precision_at_1"] == 0.5
+
+    # An empty single-relevant pool is vacuously 1.0 (guarded by the non-empty gate).
+    empty = RetrievalReport(outcomes=(_ranked_outcome("nogold", gold=(), retrieved=("codex#0",)),))
+    assert empty.as_dict()["ranked_total"] == 0
+    assert empty.mrr == 1.0
+    assert empty.precision_at_1 == 1.0
+
+
+def test_live_retrieval_populates_rank_aligned_chunk_keys() -> None:
+    """End-to-end (hermetic, real HybridRetriever): a literal case must produce non-empty
+    retrieved_chunk_keys that are rank-aligned with retrieved_sources and carry the gold at
+    rank 1 — proving the live chunk_id→key wiring, not just the hand-built unit outcomes."""
+    report = asyncio.run(evaluate_retrieval(load_cases(GOLDEN_PATH)))
+    lit = next(o for o in report.outcomes if o.case_id == "claude_api_lit_ratelimit")
+    assert lit.retrieved_chunk_keys, "live retrieval produced no chunk keys"
+    # rank-aligned: key[i] and source[i] describe the SAME hit.
+    assert len(lit.retrieved_chunk_keys) == len(lit.retrieved_sources)
+    assert lit.retrieved_chunk_keys[0].split("#")[0] == lit.retrieved_sources[0]
+    # the labelled gold sits at rank 1 (keyword arm hits it deterministically on SQLite).
+    assert lit.gold_chunks == ("claude_api#0",)
+    assert lit.reciprocal_rank() == 1.0
+    assert lit.precision_at_1() is True
+
+
+def test_unmapped_chunk_id_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the retriever returns a chunk absent from the identity map, the harness must RAISE
+    (never silently drop the hit, which would shift ranks and corrupt MRR)."""
+    import tests.eval.retrieval as retrieval_mod
+
+    async def _empty_map(_session: Any) -> dict[str, str]:
+        return {}  # simulate a chunk_id that maps to nothing
+
+    monkeypatch.setattr(retrieval_mod, "_chunk_key_map", _empty_map)
+    # A literal case retrieves a real chunk hermetically → its chunk_id misses the empty map.
+    lit = [c for c in load_cases(GOLDEN_PATH) if c.id == "claude_api_lit_ratelimit"]
+    with pytest.raises(RuntimeError, match="absent from the chunk identity map"):
+        asyncio.run(evaluate_retrieval(lit))
+
+
+def test_gate_gates_mrr_and_precision_only_on_postgres() -> None:
+    """The rank metric is gated ONLY on the --postgres run, guarded on a non-empty pool,
+    and never KeyErrors on a summary that predates the keys (skeptic-3 fixes)."""
+    from tests.eval.runner import gate_failures
+
+    base: dict[str, Any] = {
+        "answerable_total": 15,
+        "overall_hit_rate": 1.0,
+        "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+        "refusal_leaks": 0,
+    }
+    judge = {"available": False, "judged": 0, "scored": 0, "mean_score": None}
+
+    # Regressed rank metric on the postgres run → FAILS on both axes.
+    regressed = {
+        "retrieval": {**base, "ranked_total": 18, "mrr": 0.80, "precision_at_1": 0.90},
+        "judge": judge,
+        "embedder": {"mode": "postgres"},
+    }
+    fails = gate_failures(regressed)
+    assert any("precision@1" in f for f in fails), fails
+    assert any("MRR" in f for f in fails), fails
+
+    # The two axes are independent: an MRR-only regression (precision@1 still 1.0) must
+    # flag ONLY MRR, and vice versa — so a bug collapsing one into the other is caught.
+    mrr_only = {
+        "retrieval": {**base, "ranked_total": 18, "mrr": 0.80, "precision_at_1": 1.0},
+        "judge": judge,
+        "embedder": {"mode": "postgres"},
+    }
+    mrr_fails = gate_failures(mrr_only)
+    assert any("MRR" in f for f in mrr_fails) and not any("precision@1" in f for f in mrr_fails)
+    prec_only = {
+        "retrieval": {**base, "ranked_total": 18, "mrr": 1.0, "precision_at_1": 0.90},
+        "judge": judge,
+        "embedder": {"mode": "postgres"},
+    }
+    prec_fails = gate_failures(prec_only)
+    assert any("precision@1" in f for f in prec_fails) and not any("MRR" in f for f in prec_fails)
+
+    # The SAME regressed numbers on the hermetic run are NOT gated (informational only).
+    hermetic = {**regressed, "embedder": {"mode": "sqlite-hermetic"}}
+    assert not any("precision@1" in f or "MRR" in f for f in gate_failures(hermetic))
+
+    # A summary with no rank keys at all (older run / no gold_chunks) must not KeyError
+    # nor fail vacuously.
+    legacy = {
+        "retrieval": base,
+        "judge": judge,
+        "embedder": {"mode": "postgres"},
+    }
+    assert not any("precision@1" in f or "MRR" in f for f in gate_failures(legacy))
+
+    # A healthy postgres run at baseline passes the rank gate.
+    healthy = {
+        "retrieval": {**base, "ranked_total": 15, "mrr": 1.0, "precision_at_1": 1.0},
+        "judge": judge,
+        "embedder": {"mode": "postgres"},
+    }
+    assert not any("precision@1" in f or "MRR" in f for f in gate_failures(healthy))
 
 
 # ---------------------------------------------------------------------------

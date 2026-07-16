@@ -47,8 +47,10 @@ from .thresholds import (
     MIN_JUDGE_COVERAGE,
     MIN_LITERAL_HIT_RATE,
     MIN_MEAN_JUDGE,
+    MIN_MRR,
     MIN_MULTIHOP_HIT_RATE,
     MIN_OVERALL_HIT_RATE,
+    MIN_PRECISION_AT_1,
 )
 
 
@@ -317,6 +319,20 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
             failures.append(
                 f"multihop hit-rate {r['multihop_hit_rate']:.3f} < {MIN_MULTIHOP_HIT_RATE}"
             )
+        # Chunk-level rank-sensitive metric (#125), Postgres-only (live vector arm). Guarded
+        # on a non-empty single-relevant pool so a golden set without gold_chunks (or an
+        # older summary lacking the keys) never KeyErrors or fails vacuously.
+        ranked_total = r.get("ranked_total", 0)
+        if ranked_total:
+            if r.get("precision_at_1", 0.0) < MIN_PRECISION_AT_1:
+                failures.append(
+                    f"precision@1 {r['precision_at_1']:.3f} < {MIN_PRECISION_AT_1} "
+                    f"(over {ranked_total} single-relevant case(s))"
+                )
+            if r.get("mrr", 0.0) < MIN_MRR:
+                failures.append(
+                    f"MRR {r['mrr']:.3f} < {MIN_MRR} (over {ranked_total} single-relevant case(s))"
+                )
     # Conversation memory (Phase 3b): the followup rewrite resolves deterministically
     # (domain routing + keyword), so gate it on EVERY run — hermetic included. A broken
     # rewrite (or memory disabled) drops the hit-rate and fails CI.
@@ -452,6 +468,16 @@ def main(argv: list[str] | None = None) -> int:
         # grounded" (a globally-retrieved chunk the LLM may still decline); the
         # judged count below is authoritative when the LLM ran.
         print(f"  refusal leaks (retrieval): {r['refusal_leaks']}/{r['refusal_total']}")
+        if r.get("ranked_total", 0):
+            print(
+                f"  chunk rank (single-relevant, n={r['ranked_total']}): "
+                f"MRR {r.get('mrr', 0.0):.3f}, precision@1 {r.get('precision_at_1', 0.0):.3f}"
+                + (
+                    "  [gated on --postgres]"
+                    if summary.get("embedder", {}).get("mode") == "postgres"
+                    else "  [hermetic — informational]"
+                )
+            )
         if j["available"]:
             mean = j["mean_score"]
             print(

@@ -37,7 +37,7 @@ from app.core.config import Settings, get_settings
 from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
 from app.guardrails.domain import classify_domain, classify_domains, is_unsupported
-from app.models import Base, Chunk, Message, MessageRole, Session, User, UserRole
+from app.models import Base, Chunk, Document, Message, MessageRole, Session, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.types import VectorDegrade
 from app.routing.intent import Intent, classify_intent
@@ -69,9 +69,34 @@ class RetrievalOutcome:
     # ``hit`` is meaningful for answerable cases; ``leaked`` for refusals.
     hit: bool
     leaked: bool
+    # Chunk-level identity (#125). ``retrieved_chunk_keys`` is the ordered (top-k, rank-1
+    # first) list of stable ``"{source_name}#{chunk_order}"`` keys the retriever returned;
+    # ``gold_chunks`` echoes the case's labelled gold for the report. Both default ``()`` so
+    # a case without gold labels (and every existing hand-built test outcome) stays valid.
+    retrieved_chunk_keys: tuple[str, ...] = ()
+    gold_chunks: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)
+
+    def reciprocal_rank(self) -> float:
+        """1/rank of the first retrieved key that is a gold chunk, else 0.0.
+
+        Rank-sensitive: a gold chunk at position 1 scores 1.0, at position 2 scores 0.5,
+        absent scores 0.0. Meaningful only for a single-relevant answerable case (exactly
+        one ``gold_chunks`` key); callers pool on that.
+        """
+        gold = set(self.gold_chunks)
+        for index, key in enumerate(self.retrieved_chunk_keys):
+            if key in gold:
+                return 1.0 / (index + 1)
+        return 0.0
+
+    def precision_at_1(self) -> bool:
+        """True when the rank-1 retrieved chunk is a gold chunk (nothing retrieved → False)."""
+        return bool(self.retrieved_chunk_keys) and self.retrieved_chunk_keys[0] in set(
+            self.gold_chunks
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -126,6 +151,28 @@ class RetrievalReport:
     def refusal_leaks(self) -> int:
         return sum(o.leaked for o in self.outcomes if o.kind == "refusal")
 
+    def _single_relevant(self) -> list[RetrievalOutcome]:
+        """Answerable cases labelled with EXACTLY one gold chunk.
+
+        These are the cases the rank-sensitive metric applies to: with one relevant chunk,
+        the rank of that chunk is the signal (precision@k would be rank-insensitive, and
+        recall is trivial when top_k >= corpus size — #125). A case that declares no
+        ``gold_chunks`` opts out.
+        """
+        return [o for o in self.outcomes if o.kind != "refusal" and len(o.gold_chunks) == 1]
+
+    @property
+    def mrr(self) -> float:
+        """Mean reciprocal rank of the gold chunk over single-relevant answerable cases."""
+        pool = self._single_relevant()
+        return (sum(o.reciprocal_rank() for o in pool) / len(pool)) if pool else 1.0
+
+    @property
+    def precision_at_1(self) -> float:
+        """Fraction of single-relevant answerable cases whose rank-1 chunk is the gold."""
+        pool = self._single_relevant()
+        return (sum(o.precision_at_1() for o in pool) / len(pool)) if pool else 1.0
+
     def as_dict(self) -> dict[str, object]:
         core = self._core()
         answerable = self._answerable()
@@ -146,6 +193,12 @@ class RetrievalReport:
             "followup_hit_rate": self.followup_hit_rate,
             "refusal_total": len(refusals),
             "refusal_leaks": self.refusal_leaks,
+            # Rank-sensitive chunk-level metric (#125). ``ranked_total`` is the
+            # single-relevant pool size; ``mrr``/``precision_at_1`` are gated only on the
+            # --postgres run (where the vector arm is live), mirroring the multihop gate.
+            "ranked_total": len(self._single_relevant()),
+            "mrr": self.mrr,
+            "precision_at_1": self.precision_at_1,
             "outcomes": [o.as_dict() for o in self.outcomes],
         }
 
@@ -323,20 +376,42 @@ async def _seed_followup_history(session: AsyncSession, case: EvalCase) -> uuid.
     return session_id
 
 
+async def _chunk_key_map(session: AsyncSession) -> dict[str, str]:
+    """Map every seeded chunk's ``chunk_id`` → its STABLE ``"{source_name}#{chunk_order}"`` key.
+
+    ``chunk_id`` is a ``uuid4`` regenerated on every seed, so it cannot be labelled in the
+    golden file; the composite ``(source_name, chunk_order)`` is stable across seeds and
+    human-writable (``source_name`` lives on ``Document``, joined here). Keyed by ``str`` so
+    the lookup is robust to the ``uuid.UUID``/``str`` round-trip differences between the
+    SQLite and Postgres backends. This is a read-only projection over the SAME session the
+    retriever used, so it sees exactly the rows the retriever could return (incl. the
+    Postgres path's uncommitted seed).
+    """
+    rows = await session.execute(
+        select(Chunk.chunk_id, Document.source_name, Chunk.chunk_order).join(
+            Document, Chunk.document_id == Document.document_id
+        )
+    )
+    return {
+        str(chunk_id): f"{source_name}#{chunk_order}" for chunk_id, source_name, chunk_order in rows
+    }
+
+
 async def _retrieve_sources(
     session: AsyncSession,
     case: EvalCase,
     *,
     settings: Settings,
+    key_map: dict[str, str],
     embedder: Embedder | None = None,
     use_memory: bool = True,
-) -> tuple[tuple[str, ...], VectorDegrade, str]:
+) -> tuple[tuple[str, ...], tuple[str, ...], VectorDegrade, str]:
     """Run the live retrieval path for one case.
 
-    Returns ``(top-k source names, vector_degrade, routed_domain)``. ``embedder`` is
-    ``None`` on the hermetic SQLite path (vector arm dead by design) and the real
-    embedder on the Postgres path, where its identity also gates the Tier-3 mismatch
-    check.
+    Returns ``(top-k source names, top-k chunk keys, vector_degrade, routed_domain)`` — the
+    two ordered tuples are rank-aligned (index 0 = rank-1 hit). ``embedder`` is ``None`` on
+    the hermetic SQLite path (vector arm dead by design) and the real embedder on the
+    Postgres path, where its identity also gates the Tier-3 mismatch check.
 
     For a ``followup`` case, conversation memory (Phase 3b) resolves the anaphoric
     final question against its ``history`` via the SAME product path the orchestrator
@@ -387,7 +462,24 @@ async def _retrieve_sources(
             limit=settings.retrieval_max_candidates,
             top_k=settings.retrieval_top_k,
         )
-    return tuple(hit.source_name for hit in result.hits), result.vector_degrade, domain.value
+    # Translate each ordered hit to its stable chunk key using the ONE identity map built
+    # for the whole run (the seeded chunk set is invariant across cases — followup seeding
+    # adds Session/Message rows, never chunks). A miss means the retriever returned a chunk
+    # absent from the seeded catalog's identity map — a real bug, so raise loudly rather than
+    # silently dropping the hit (which would shift ranks and corrupt MRR).
+    try:
+        chunk_keys = tuple(key_map[str(hit.chunk_id)] for hit in result.hits)
+    except KeyError as exc:
+        raise RuntimeError(
+            f"eval: retrieved chunk_id {exc.args[0]} on case {case.id!r} is absent from the "
+            "chunk identity map — the retriever returned a chunk not in the seeded catalog"
+        ) from exc
+    return (
+        tuple(hit.source_name for hit in result.hits),
+        chunk_keys,
+        result.vector_degrade,
+        domain.value,
+    )
 
 
 async def evaluate_retrieval(
@@ -418,9 +510,17 @@ async def evaluate_retrieval(
     outcomes: list[RetrievalOutcome] = []
     session_cm = postgres_session(settings) if postgres else _sqlite_session_and_embedder()
     async with session_cm as (session, embedder):
+        # The seeded chunk set is invariant across cases, so build the chunk-id→key identity
+        # map ONCE here rather than re-querying per case.
+        key_map = await _chunk_key_map(session)
         for case in cases:
-            sources, degrade, routed_domain = await _retrieve_sources(
-                session, case, settings=settings, embedder=embedder, use_memory=use_memory
+            sources, chunk_keys, degrade, routed_domain = await _retrieve_sources(
+                session,
+                case,
+                settings=settings,
+                key_map=key_map,
+                embedder=embedder,
+                use_memory=use_memory,
             )
             if postgres and case.kind != "refusal" and degrade is VectorDegrade.mismatch:
                 raise PostgresEvalError(
@@ -449,6 +549,8 @@ async def evaluate_retrieval(
                     retrieved_sources=sources,
                     hit=hit,
                     leaked=leaked,
+                    retrieved_chunk_keys=chunk_keys,
+                    gold_chunks=case.gold_chunks,
                 )
             )
     return RetrievalReport(outcomes=tuple(outcomes))

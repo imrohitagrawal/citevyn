@@ -87,6 +87,14 @@ class EvalCase:
     # MUST NOT contain; checked judge-independently on the judged run.
     postgres_only: bool = False
     must_not_contain: tuple[str, ...] = ()
+    # Chunk-level retrieval identity (#125). The gold chunk key(s) a correct retrieval must
+    # surface, each a STABLE composite ``"{source_name}#{chunk_order}"`` (NOT the uuid4
+    # ``chunk_id``, which is regenerated every seed, and NOT ``content_checksum``, which is a
+    # content HASH that collides for byte-identical chunks). Used by the rank-sensitive
+    # metric (MRR / precision@1) in :mod:`tests.eval.retrieval`: a case with exactly one gold
+    # key is single-relevant (rank of that one chunk is what matters). Answerable-only — a
+    # refusal has no correct chunk to rank. Default ``()`` → a case opts out of the metric.
+    gold_chunks: tuple[str, ...] = ()
 
     @property
     def is_refusal(self) -> bool:
@@ -145,6 +153,21 @@ class EvalCase:
                 f"{origin}: case {d['id']!r} must_not_contain must be a list of non-empty strings"
             )
         must_not_contain = tuple(raw_forbidden) if raw_forbidden else ()
+        raw_gold = d.get("gold_chunks")
+        if raw_gold is not None and (
+            not isinstance(raw_gold, list)
+            or not all(isinstance(g, str) and g.strip() for g in raw_gold)
+        ):
+            raise ValueError(
+                f"{origin}: case {d['id']!r} gold_chunks must be a list of non-empty strings"
+            )
+        gold_chunks = tuple(raw_gold) if raw_gold else ()
+        # A refusal has no correct chunk to retrieve, so it cannot declare a gold chunk. A
+        # multihop case is multi-relevant (it is scored by ``expected_sources`` hit-rate, not
+        # single-chunk rank) — labelling it with a single gold key would wrongly pull it into
+        # the single-relevant rank pool, so it opts out until PR B adds multi-relevant labels.
+        if gold_chunks and kind in ("refusal", "multihop"):
+            raise ValueError(f"{origin}: {kind} case {d['id']!r} must not set gold_chunks")
         # A refusal case has no source and expects a no-answer; a multihop case names
         # >=2 expected_sources (and no single expected_source); a followup case names
         # exactly one expected_source AND a non-empty history; every other answerable
@@ -215,6 +238,7 @@ class EvalCase:
             expected_facts=expected_facts,
             postgres_only=postgres_only,
             must_not_contain=must_not_contain,
+            gold_chunks=gold_chunks,
         )
 
 
