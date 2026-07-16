@@ -4,19 +4,36 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
-# FINAL STATUS — autonomous run ended 2026-07-16 (morning handoff)
+# STATUS — 2026-07-16 (Phase 1 COMPLETE; Phase 2 decision locked)
 # ============================================================================
 
-**One line:** Phase 1 is COMPLETE, adversarially reviewed, eval-proven, and **MERGED to main**.
-Phase 2 was investigated + design-reviewed and **deliberately stopped before implementation**
-because the adversarial design review found the proposed refusal-safety mechanism unsound and the
-sound redesign changes a user-facing refusal contract — a call that should be yours, not an
-unsupervised auto-merge. Phases 3–4 not started (they sit behind Phase 2 in the plan sequence).
+**One line:** **Phase 1 is COMPLETE end-to-end and MERGED** (#97 PR #103 + #92 PR #105) —
+semantic search works on a real embedded corpus, eval-proven, and the worker ships + ingests its
+source corpus in the prod image. **Phase 2 decision is locked** (you delegated it: *"answer when
+grounded"*), and it's the next work — but a fresh-context-sized one because it requires redesigning
+the eval's refusal metric (see the Phase-2 plan below). Phases 3–4 sit behind Phase 2.
 
 ## What merged
-| PR | What | Eval (before → after) | State |
+| PR | What | Result | State |
 |---|---|---|---|
-| **#103** (main `d3795f6`) | **Phase 1 PR1.1** — revive the vector arm (#97): OpenRouter/OpenAI `text-embedding-3-small` embedder behind the seam, embedding-aware seeders + db/seed backfill, opt-in Postgres eval mode | paraphrase **0/5 → 3/5**, overall **10/15 → 13/15 (0.867)**, literal 1.0, refusal leaks 0/5 (real pgvector, zero residue). Semantic-discrimination proof: real **5/5** vs stub ≤2/5 | **MERGED**, all 6 CI checks green, no `--admin` |
+| **#103** (`d3795f6`) | **Phase 1 PR1.1** — revive the vector arm (#97): OpenRouter/OpenAI `text-embedding-3-small` embedder + embedding-aware seeders + db/seed backfill + opt-in Postgres eval mode | paraphrase **0/5 → 3/5**, overall **10/15 → 13/15 (0.867)**, leaks 0/5, zero residue; discrimination real **5/5** vs stub ≤2/5 | **MERGED**, 6/6 CI green |
+| **#105** (`f199a2f`) | **Phase 1 PR1.2** — ship source docs as package data (#92): worker corpus moved to `app/worker/sources/`, dead `fixtures_root` removed | verified inside the built worker image; worker ingested a real **33-chunk** corpus on Postgres | **MERGED**, 6/6 CI green |
+| #104 (`a101ff2`) | docs closeout + Phase-2 design notes | — | MERGED |
+
+## Phase 2 plan (decision LOCKED = "answer when grounded")
+The next eval win needs the refusal-contract change. The design review proved an absolute floor is
+unsound; the sound design (in `docs/RAG_PHASE2_DESIGN_NOTES.md`) is: global vector recall + routed-area
+boost, the **existing LLM grounding-refusal as the real refusal net**, a **relative/margin** confidence
+gate (not absolute), and relax the orchestrator's `unsupported→refuse-early` gate. **Key coupling that
+makes this a fresh-context task:** under global retrieval, refusal queries WILL retrieve nearest chunks,
+so the hermetic `MAX_REFUSAL_LEAKS==0` retrieval metric fundamentally conflicts — the eval's refusal
+metric must be **redesigned to "the orchestrator declined" (judged/LLM-in-loop)**, and the golden set
+grown/realistic-ified against the #92 corpus. Suggested PR decomposition:
+1. **Eval refusal-metric redesign** (judged/orchestrator-decline) + a hermetic pure-function test for
+   the confidence gate — the prerequisite; no product-contract change yet.
+2. **Retriever**: global vector recall + routed-area boost + a loose cost-guard + a relative/margin gate.
+3. **Orchestrator**: relax `unsupported→refuse-early`; keep a cheap pre-filter + rate-limit; LLM
+   grounding-refusal is the net. Eval-prove on the real corpus via the judged `--postgres` run.
 
 Full loop honored on #103: adversarial plan-review → TDD → gates (608 hermetic + 8 postgres pytest,
 ruff, pyright) → **PG eval proof** → fan-out PR review (10 findings → 8 refuted → 2 confirmed majors

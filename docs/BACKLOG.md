@@ -20,11 +20,15 @@ in the same change.
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
-| [#92](https://github.com/imrohitagrawal/citevyn/issues/92) | Worker: prod ingestion needs a real fetcher + shipped sources (default LocalFetcher reads unshipped `tests/fixtures/*.md`, so `run` fails in the prod image) | worker / deploy | Medium (worker model fixed in #81, but ingestion can't succeed until this lands) | #81 verification |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
 
 ## Recently closed
 
+- **[#92](https://github.com/imrohitagrawal/citevyn/issues/92)** — Worker prod ingestion: source
+  docs now ship as package data under `backend/app/worker/sources/` (were unshipped test
+  fixtures). MERGED via PR #105 (main `f199a2f`). Verified inside a built worker image + the
+  worker ingested a real 33-chunk corpus on Postgres. `HttpFetcher` stays an unwired seam
+  (curated license-clean local docs are the intended source, per ADR-0003). Completes Phase 1.
 - **[#97](https://github.com/imrohitagrawal/citevyn/issues/97)** — Populate chunk embeddings +
   index provenance (revive the dead vector arm), Phase 1 PR1.1. MERGED via PR #103 (main
   `d3795f6`). OpenRouter/OpenAI `text-embedding-3-small` embedder behind the seam + embedding-aware
