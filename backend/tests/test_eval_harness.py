@@ -232,22 +232,34 @@ def test_multihop_case_parses_with_expected_sources() -> None:
     [
         (
             {  # multihop needs >=2 areas
-                "id": "mh1", "area": "x", "kind": "multihop", "question": "q",
-                "expected_gist": "g", "expected_sources": ["claude_api"],
+                "id": "mh1",
+                "area": "x",
+                "kind": "multihop",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_sources": ["claude_api"],
             },
             "must set expected_sources with >=2",
         ),
         (
             {  # multihop must not use the single expected_source
-                "id": "mh2", "area": "x", "kind": "multihop", "question": "q",
-                "expected_gist": "g", "expected_source": "claude_api",
+                "id": "mh2",
+                "area": "x",
+                "kind": "multihop",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_source": "claude_api",
             },
             "uses expected_sources",
         ),
         (
             {  # a non-multihop case must not set expected_sources
-                "id": "l1", "area": "x", "kind": "literal", "question": "q",
-                "expected_gist": "g", "expected_source": "claude_api",
+                "id": "l1",
+                "area": "x",
+                "kind": "literal",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_source": "claude_api",
                 "expected_sources": ["claude_api", "gemini_api"],
             },
             "use kind='multihop'",
