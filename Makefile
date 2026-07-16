@@ -138,10 +138,32 @@ db-verify: ## Assert the composed db truly SERVES (SELECT 1 + pgvector) — a co
 	# PGDATA layout, missing pgvector image) surfaces as a hard failure
 	# rather than a false green. ``-v ON_ERROR_STOP=1`` makes psql exit
 	# non-zero on any SQL error so ``make`` propagates it.
+	#
+	# Each psql call is wrapped in a BOUNDED retry loop (10 attempts ×
+	# 2s ≈ 20s). On a FRESH volume the pgvector/pgvector:pg18 entrypoint
+	# runs initdb, then RESTARTS Postgres to apply config; ``db-up``s
+	# ``pg_isready`` can report ready during that pre-restart window, so
+	# an immediate ``SELECT 1`` can hit the cluster mid-restart and get
+	# ``FATAL: the database system is shutting down`` / ``database
+	# "citevyn" does not exist`` (Issue #85). Retrying rides out that
+	# transient window. The retry does NOT weaken the check: a genuinely
+	# broken boot (no pgvector image, wrong PGDATA layout, auth mismatch)
+	# fails every attempt and hard-fails after the cap — so a false green
+	# is still impossible, we just tolerate the first-boot restart race.
 	@echo "Verifying the composed db serves a live query…"
-	docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "SELECT 1;"
+	@n=0; until docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "SELECT 1;"; do \
+	  n=$$((n + 1)); \
+	  if [ $$n -ge 10 ]; then echo "db-verify: 'SELECT 1' still failing after $$n attempts — the db is not serving" >&2; exit 1; fi; \
+	  echo "db-verify: db not serving yet (attempt $$n/10, likely first-boot restart) — retrying in 2s…" >&2; \
+	  sleep 2; \
+	done
 	@echo "Verifying the pgvector extension can be created…"
-	docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;"
+	@n=0; until docker exec citevyn-db psql -U citevyn -d citevyn -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;"; do \
+	  n=$$((n + 1)); \
+	  if [ $$n -ge 10 ]; then echo "db-verify: 'CREATE EXTENSION vector' still failing after $$n attempts — pgvector is unavailable" >&2; exit 1; fi; \
+	  echo "db-verify: pgvector not ready yet (attempt $$n/10) — retrying in 2s…" >&2; \
+	  sleep 2; \
+	done
 	@echo "db-verify: OK — the composed pg18 db is serving."
 
 ci-smoke: db-up db-verify migrate ## Fresh-volume DB-stack boot smoke used by .github/workflows/ci.yml (Closes #52)
