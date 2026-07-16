@@ -237,7 +237,27 @@ describe("useLandingState — live error path", () => {
     expect(bot.text).toContain("Slow down.");
 
     expect(result.current.toasts).toHaveLength(1);
-    expect(result.current.toasts[0]).toMatchObject({ kind: "error", title: "Rate limit reached" });
+    // A rate limit gets a DISTINCT, less-alarming visual: the amber "warning"
+    // toast, not the red "error" alert used for server/transport failures.
+    expect(result.current.toasts[0]).toMatchObject({
+      kind: "warning",
+      title: "Rate limit reached",
+    });
+  });
+
+  it("uses a distinct toast kind for a rate limit vs a server error", async () => {
+    // Rate limit → warning (transient, recoverable).
+    mockAskQuestion.mockRejectedValueOnce(new ApiClientError("Slow down.", 429, "Slow down."));
+    const { result } = renderHook(() => useLandingState());
+    act(() => result.current.send("throttled question"));
+    await settle();
+    expect(result.current.toasts[0].kind).toBe("warning");
+
+    // Server error → error (a genuine failure of the service).
+    mockAskQuestion.mockRejectedValueOnce(new ApiClientError("boom", 503, "boom"));
+    act(() => result.current.send("another question after 5xx"));
+    await settle();
+    expect(result.current.toasts[result.current.toasts.length - 1].kind).toBe("error");
   });
 
   it("allows re-asking the same question after a live error (retry is not dropped)", async () => {
