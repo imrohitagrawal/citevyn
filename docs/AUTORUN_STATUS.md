@@ -4,6 +4,32 @@
 > Purpose: survive context compaction so the run can resume.
 
 # ============================================================================
+# STATUS — 2026-07-16 (Phase 3B MERGED; conversation memory; followup 3/3)
+# ============================================================================
+
+**One line:** **Phase 3B (conversation memory) is COMPLETE, eval-proven, and MERGED.**
+Anaphoric follow-ups ("How can I raise it?") that previously refused now resolve against
+the session's recent turns: **follow-up hit-rate 0/3 → 3/3**, core **15/15**, multi-hop
+**3/3**, judged refusal leaks **0/5**, judge **4.85** over 26 (incl. 3 judged followups),
+zero residue — all on real Postgres+pgvector.
+
+| PR | What | Result | State |
+|---|---|---|---|
+| **#111** (`c20a1b6`) | **Phase 3b.1** — multi-turn eval infra: `followup` case kind + `history` + gap control (prerequisite) | followup 0/3 (gap demonstrated), baselines unchanged | **MERGED** |
+| **#113** (`e75395f`) | **Phase 3b.2** — conversation memory: `build_contextual_query` + `recent_user_questions` → orchestrator rewrites an anaphoric follow-up against recent turns (routing + retrieval + generation + cache key); kill-switch `conversation_memory` | **followup 3/3**, core 15/15, multihop 3/3, refusal leaks judged 0/5, judge 4.85, zero residue | **MERGED** |
+
+**Refusal safety (fan-out review):** an off-corpus PIVOT opening with an anaphor is
+contextualized, but the Phase-2 LLM grounding-refusal net declines clear pivots (k8s →
+no_answer, verified); generating against the bare follow-up regresses genuine anaphora
+(measured), so it is rejected. Residual (adjacent-pivot answered-with-disclaim, honest
+relevance miss) tracked as **#112**. See §8a-4.
+
+**Remaining:** **Phase 4** UX/ops — 4a graceful fallback UX (nearest-doc suggestions),
+4b distinct 429 rate-limit UI (#61/#62 adjacent), 4c VectorDegrade/dead-embedding health
+signal. Mostly frontend/ops (prove via verify/webapp-testing + hermetic backend tests
+where there's a runtime surface); not eval-measurable.
+
+# ============================================================================
 # STATUS — 2026-07-16 (Phases 1, 2, 3a MERGED; core eval 15/15 + multihop 3/3)
 # ============================================================================
 
