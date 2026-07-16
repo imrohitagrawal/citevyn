@@ -19,7 +19,16 @@ rather than re-implementing them.
 """
 
 from .cases import EvalCase, filter_cases, load_cases
-from .judge import JudgeParseError, JudgeVerdict, score_answer, score_answer_async
+from .groundedness import fact_coverage, fact_covered, missing_facts
+from .judge import (
+    JudgeParseError,
+    JudgeVerdict,
+    PanelVerdict,
+    aggregate_panel,
+    score_answer,
+    score_answer_async,
+    score_answer_panel_async,
+)
 from .retrieval import RetrievalOutcome, RetrievalReport, evaluate_retrieval
 
 # NOTE: :mod:`.runner` is deliberately NOT imported here. It is the CLI entry
@@ -31,11 +40,17 @@ __all__ = [
     "EvalCase",
     "JudgeParseError",
     "JudgeVerdict",
+    "PanelVerdict",
     "RetrievalOutcome",
     "RetrievalReport",
+    "aggregate_panel",
     "evaluate_retrieval",
+    "fact_coverage",
+    "fact_covered",
     "filter_cases",
     "load_cases",
+    "missing_facts",
     "score_answer",
     "score_answer_async",
+    "score_answer_panel_async",
 ]

@@ -671,6 +671,72 @@ def test_gate_flags_total_and_partial_judge_outage() -> None:
     assert any("coverage" in f for f in failures), failures
 
 
+def _grounded_summary(*, mode: str, under: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "groundedness": {
+            "cases_with_facts": 11,
+            "grounded_fact_rate": 1.0 - 0.0909 * len(under),
+            "under_grounded": under,
+        },
+        "embedder": {"mode": mode},
+    }
+
+
+def test_gate_flags_a_single_under_grounded_case_on_postgres() -> None:
+    """On the live-retrieval run a SINGLE wrong/absent hard fact must FAIL — the
+    deterministic net catches over-scored plausible-but-wrong answers regardless of the
+    judge (an aggregate mean over binary single-fact cases would leak one wrong fact)."""
+    from tests.eval.runner import gate_failures
+
+    summary = _grounded_summary(
+        mode="postgres",
+        under=[{"case_id": "claude_api_lit_ratelimit", "coverage": 0.0, "missing": ["50…"]}],
+    )
+    assert any("not fully grounded" in f.lower() or "grounded" in f for f in gate_failures(summary))
+
+
+def test_gate_passes_when_every_fact_case_is_grounded_on_postgres() -> None:
+    from tests.eval.runner import gate_failures
+
+    assert gate_failures(_grounded_summary(mode="postgres", under=[])) == []
+
+
+def test_groundedness_not_gated_on_hermetic_run() -> None:
+    """Fact-bearing paraphrase cases structurally can't retrieve on the dead-vector-arm
+    hermetic path, so groundedness is NOT gated there (mirrors the multihop guard) —
+    only the --postgres run bites."""
+    from tests.eval.runner import gate_failures
+
+    summary = _grounded_summary(
+        mode="sqlite-hermetic",
+        under=[{"case_id": "claude_api_par_throttle", "coverage": 0.0, "missing": ["50…"]}],
+    )
+    assert not any("grounded" in f for f in gate_failures(summary)), gate_failures(summary)
+
+
+def test_gate_tolerates_missing_groundedness_block() -> None:
+    """Hand-built summaries without a groundedness block (older callers) must not crash."""
+    from tests.eval.runner import gate_failures
+
+    summary: dict[str, Any] = {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 0.667,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 0.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": False, "judged": 0, "scored": 0, "mean_score": None},
+    }
+    assert gate_failures(summary) == []
+
+
 @pytest.mark.skipif(
     os.getenv("CITEVYN_EVAL_LLM") != "1",
     reason="LLM judge requires a real provider key; set CITEVYN_EVAL_LLM=1 to run",

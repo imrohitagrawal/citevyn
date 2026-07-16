@@ -24,8 +24,34 @@ Executor code lives in `backend/tests/eval/`; run it with `make eval` or
 | `expected_source` | str \| null | Seed `source_name` the correct chunk belongs to; `null` for refusals. |
 | `expected_gist` | str | Short summary of the correct answer, scored by the judge. |
 | `expect_no_answer` | bool | `true` for refusal/out-of-corpus cases. |
+| `expected_facts` | list[str] | *(optional, answerable-only)* Hard facts a correct grounded answer MUST state — see **Groundedness** below. |
 
 Blank lines and `#`-prefixed lines are skipped, so the file stays annotatable.
+
+## Answer-quality robustness (Item 1)
+
+A single LLM judge can be noisy or over-score a *plausible-but-wrong* answer. The
+judged run (`--postgres`) therefore combines three signals:
+
+1. **Prompt-ensemble panel** — each answer is scored by N distinct rubric *framings*
+   (not temperature samples) at temp 0.0; the **median** smooths one framing's
+   interpretation bias while staying reproducible. `CITEVYN_EVAL_JUDGE_PANEL` sets N
+   (odd; default 3).
+2. **Adversarial veto** — one skeptical fact-checker pass; the gated score is
+   `min(standard_median, adversarial)`, so a skeptic that catches an over-scored
+   answer pulls it down (it is a floor, never averaged away).
+3. **Deterministic groundedness** — judge-*independent*. Declare `expected_facts` on a
+   case (phrasing-stable tokens — env-var names, headers, CLI commands, or a number
+   *with* its unit; each entry may list `|`-separated alternatives, any-of). A fact is
+   matched at word boundaries, so `"50 requests per minute"` is **not** satisfied by
+   `"150 requests per minute"` or `"0.50 requests per minute"` — a wrong hard fact
+   fails regardless of the judge. **Gated per case on the `--postgres` run only** (the
+   mode where fact-bearing answerable cases can actually retrieve; the hermetic
+   dead-vector-arm path would structurally zero the paraphrase fact-cases, so it is
+   excluded — exactly like the multihop gate): every fact-bearing case must be **fully
+   grounded** there, so a single wrong fact fails (an aggregate mean over binary
+   single-fact cases would leak it). A golden-integrity test asserts each fact is
+   groundable (at least one alternative appears in the seed corpus).
 
 ## Kinds
 

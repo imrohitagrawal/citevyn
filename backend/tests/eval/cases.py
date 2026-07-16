@@ -71,6 +71,13 @@ class EvalCase:
     # empty. The runner replays these turns before the asserted final turn so the
     # orchestrator's memory can resolve the anaphora.
     history: tuple[str, ...] = ()
+    # Deterministic groundedness (Item 1c): hard facts a correct grounded answer MUST
+    # state — phrasing-stable tokens (env-var names, headers, CLI commands, or a
+    # number WITH its unit). Each entry may list ``|``-separated surface forms; ANY
+    # one present counts the fact covered (word-boundary matched, so "50 requests per
+    # minute" is NOT satisfied by "150 requests per minute"). Answerable-only; a
+    # refusal case must not declare facts (there is no correct answer to ground).
+    expected_facts: tuple[str, ...] = ()
 
     @property
     def is_refusal(self) -> bool:
@@ -98,7 +105,9 @@ class EvalCase:
         raw_history = d.get("history")
         # Guard against a stringly-typed history ("prior turn") silently
         # char-splitting into a tuple of letters — it must be a JSON array of turns.
-        if raw_history is not None and not isinstance(raw_history, list):
+        if raw_history is not None and (
+            not isinstance(raw_history, list) or not all(isinstance(t, str) for t in raw_history)
+        ):
             raise ValueError(f"{origin}: case {d['id']!r} history must be a list of strings")
         history = tuple(raw_history) if raw_history else ()
         # ``history`` belongs only to a ``followup`` case (it drives the multi-turn
@@ -106,6 +115,15 @@ class EvalCase:
         # nothing on a single-turn case.
         if history and kind != "followup":
             raise ValueError(f"{origin}: case {d['id']!r} sets history; only kind='followup' may")
+        raw_facts = d.get("expected_facts")
+        if raw_facts is not None and (
+            not isinstance(raw_facts, list) or not all(isinstance(f, str) for f in raw_facts)
+        ):
+            raise ValueError(f"{origin}: case {d['id']!r} expected_facts must be a list of strings")
+        expected_facts = tuple(raw_facts) if raw_facts else ()
+        # A refusal has no correct answer to ground, so it must not declare facts.
+        if expected_facts and kind == "refusal":
+            raise ValueError(f"{origin}: refusal case {d['id']!r} must not set expected_facts")
         # A refusal case has no source and expects a no-answer; a multihop case names
         # >=2 expected_sources (and no single expected_source); a followup case names
         # exactly one expected_source AND a non-empty history; every other answerable
@@ -173,6 +191,7 @@ class EvalCase:
             raw=d,
             expected_sources=expected_sources,
             history=history,
+            expected_facts=expected_facts,
         )
 
 
