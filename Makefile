@@ -38,7 +38,7 @@ export VERSION
 export PROFILE
 
 .PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
-        build push deploy refresh logs backup restore golden golden-smoke eval e2e
+        build push deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -50,6 +50,19 @@ lint: ## Run ruff over backend/app + tests (check only — fixes go in a separat
 
 typecheck: ## Run pyright strict on backend/app
 	cd backend && uv run pyright
+
+install-hooks: ## Install the git pre-commit hook (ruff format+check gate; see scripts/git-hooks/)
+	@root="$$(git rev-parse --show-toplevel)"; \
+	hooksdir="$$(git config core.hooksPath || git rev-parse --git-path hooks)"; \
+	hook="$$hooksdir/pre-commit"; \
+	if [ -e "$$hook" ] && ! grep -q "CiteVyn pre-commit hook" "$$hook" 2>/dev/null; then \
+		echo "A different pre-commit hook already exists at $$hook — back it up or merge manually; not overwriting."; \
+		exit 1; \
+	fi; \
+	mkdir -p "$$hooksdir"; \
+	ln -sf "$$root/scripts/git-hooks/pre-commit" "$$hook" 2>/dev/null && [ -e "$$hook" ] || cp "$$root/scripts/git-hooks/pre-commit" "$$hook"; \
+	chmod +x "$$hook"; \
+	echo "Installed pre-commit hook -> $$hook (bypass a single commit with 'git commit --no-verify')."
 
 test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLite)
 	cd backend && uv sync --group dev
