@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
-from app.guardrails.domain import classify_domain, is_unsupported
+from app.guardrails.domain import classify_domain, classify_domains, is_unsupported
 from app.models import Base, Chunk, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.types import VectorDegrade
@@ -79,14 +79,23 @@ class RetrievalReport:
 
     outcomes: tuple[RetrievalOutcome, ...]
 
+    # The "core" answerable kinds that make up the gated overall hit-rate. ``multihop``
+    # is deliberately EXCLUDED (reported as its own bucket): a multi-hop case needs the
+    # live vector arm to hit both areas, so it is Postgres-only-provable and would drag
+    # the hermetic overall gate down (the review's blocker). It is gated separately on
+    # the --postgres run.
+    _CORE_KINDS = frozenset({"literal", "paraphrase"})
+
     def _answerable(self) -> list[RetrievalOutcome]:
         return [o for o in self.outcomes if o.kind != "refusal"]
+
+    def _core(self) -> list[RetrievalOutcome]:
+        return [o for o in self.outcomes if o.kind in self._CORE_KINDS]
 
     @staticmethod
     def _rate(hits: int, total: int) -> float:
         # An empty pool returns 1.0 (0 hits / 0 cases is vacuously "no misses").
-        # This is safe ONLY because the callers guard non-emptiness elsewhere:
-        # the pytest gate asserts coverage (>=20 cases, every area + kind), and
+        # Callers guard non-emptiness: the pytest gate asserts coverage and
         # ``runner.gate_failures`` fails on ``answerable_total == 0`` / a missing
         # ``literal`` bucket. Do not lean on this rate alone as a gate.
         return (hits / total) if total else 1.0
@@ -98,21 +107,32 @@ class RetrievalReport:
 
     @property
     def overall_hit_rate(self) -> float:
-        return self.hit_rate()
+        """Gated overall = core kinds (literal + paraphrase) only; excludes multihop."""
+        core = self._core()
+        return self._rate(sum(o.hit for o in core), len(core))
+
+    @property
+    def multihop_hit_rate(self) -> float:
+        return self.hit_rate("multihop")
 
     @property
     def refusal_leaks(self) -> int:
         return sum(o.leaked for o in self.outcomes if o.kind == "refusal")
 
     def as_dict(self) -> dict[str, object]:
+        core = self._core()
         answerable = self._answerable()
         kinds = sorted({o.kind for o in answerable})
         refusals = [o for o in self.outcomes if o.kind == "refusal"]
+        multihop = [o for o in self.outcomes if o.kind == "multihop"]
         return {
-            "answerable_total": len(answerable),
-            "answerable_hits": sum(o.hit for o in answerable),
+            "answerable_total": len(core),  # gated denominator = core kinds
+            "answerable_hits": sum(o.hit for o in core),
             "overall_hit_rate": self.overall_hit_rate,
             "hit_rate_by_kind": {k: self.hit_rate(k) for k in kinds},
+            "multihop_total": len(multihop),
+            "multihop_hits": sum(o.hit for o in multihop),
+            "multihop_hit_rate": self.multihop_hit_rate,
             "refusal_total": len(refusals),
             "refusal_leaks": self.refusal_leaks,
             "outcomes": [o.as_dict() for o in self.outcomes],
@@ -266,12 +286,7 @@ async def _retrieve_sources(
     if is_unsupported(domain):
         intent = Intent.unsupported
     identity = configured_embedder_identity(settings) if embedder is not None else None
-    # Mirror the orchestrator's "answer when grounded" routing (Phase 2): an
-    # unsupported-routed question retrieves GLOBALLY (product_area=None) through the
-    # confidence-gated vector arm, so the eval measures the same path the product
-    # serves rather than the old hard-scoped one.
-    answer_globally = settings.answer_when_grounded and intent is Intent.unsupported
-    result = await HybridRetriever(
+    retriever = HybridRetriever(
         session,
         embedder=embedder,
         embedder_identity=identity,
@@ -279,13 +294,29 @@ async def _retrieve_sources(
             settings.retrieval_global_min_top_score,
             settings.retrieval_global_min_margin,
         ),
-    ).retrieve(
-        case.question,
-        product_area=None if answer_globally else domain.value,
-        intent=intent,
-        limit=settings.retrieval_max_candidates,
-        top_k=settings.retrieval_top_k,
     )
+    # Mirror the orchestrator's routing so the eval measures the SAME path the product
+    # serves: multi-hop (>=2 named products) → retrieve each and merge (Phase 3);
+    # else "answer when grounded" (Phase 2) sends an unsupported-routed question
+    # through the global confidence-gated arm (product_area=None); else scoped.
+    multi_domains = classify_domains(case.question)
+    if len(multi_domains) >= 2:
+        result = await retriever.retrieve_multi(
+            case.question,
+            product_areas=[d.value for d in multi_domains],
+            intent=intent,
+            limit=settings.retrieval_max_candidates,
+            top_k=settings.retrieval_top_k,
+        )
+    else:
+        answer_globally = settings.answer_when_grounded and intent is Intent.unsupported
+        result = await retriever.retrieve(
+            case.question,
+            product_area=None if answer_globally else domain.value,
+            intent=intent,
+            limit=settings.retrieval_max_candidates,
+            top_k=settings.retrieval_top_k,
+        )
     return tuple(hit.source_name for hit in result.hits), result.vector_degrade
 
 
@@ -318,6 +349,10 @@ async def evaluate_retrieval(
             if case.is_refusal:
                 leaked = len(sources) > 0
                 hit = False
+            elif case.expected_sources is not None:
+                # Multi-hop: a HIT requires EVERY named product area to be retrieved.
+                leaked = False
+                hit = all(s in sources for s in case.expected_sources)
             else:
                 leaked = False
                 hit = case.expected_source in sources

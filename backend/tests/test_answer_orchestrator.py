@@ -133,6 +133,7 @@ class _FakeRetriever:
         self._evidence = evidence
         self._vector_degrade = vector_degrade
         self.calls: list[dict[str, Any]] = []
+        self.multi_calls: list[dict[str, Any]] = []
 
     async def retrieve(
         self,
@@ -151,6 +152,22 @@ class _FakeRetriever:
                 "limit": limit,
                 "top_k": top_k,
             }
+        )
+        return RetrievalResult(hits=list(self._evidence), vector_degrade=self._vector_degrade)
+
+    async def retrieve_multi(
+        self,
+        question: str,
+        *,
+        product_areas: list[str],
+        intent: Intent,
+        limit: int,
+        top_k: int,
+    ) -> RetrievalResult:
+        # Records the multi-hop routing; the merge/degrade logic is exercised at the
+        # HybridRetriever level (test_retrieval_vector_gate / a dedicated retriever test).
+        self.multi_calls.append(
+            {"question": question, "product_areas": product_areas, "intent": intent}
         )
         return RetrievalResult(hits=list(self._evidence), vector_degrade=self._vector_degrade)
 
@@ -446,6 +463,45 @@ async def test_unsupported_offcorpus_refuses_after_global_retrieval(
     assert len(audits) == 1
     assert audits[0].metadata_["outcome"] == "unsupported"
     assert audits[0].metadata_["reason"] == "unsupported_domain"
+
+
+async def test_multihop_question_routes_to_retrieve_multi(session: Any) -> None:
+    """A cross-product question retrieves EACH named product area (retrieve_multi),
+    not the single first-match domain (Phase 3)."""
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="How do the rate limits compare between the Claude API and Gemini?",
+        request_id="req_multihop",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is False
+    assert response["unsupported"] is False
+    # retrieve_multi was used with BOTH areas; the single-domain retrieve was not.
+    assert len(retriever.multi_calls) == 1
+    assert retriever.multi_calls[0]["product_areas"] == ["claude_api", "gemini_api"]
+    assert retriever.calls == []
+
+
+async def test_single_product_question_still_routes_to_retrieve(session: Any) -> None:
+    """A single-product question uses the normal single-domain retrieve, not multi."""
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    await orchestrator.ask(
+        question="What is the rate limit for the Claude API?",
+        request_id="req_single",
+        session_id=uuid.uuid4(),
+    )
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0]["product_area"] == "claude_api"
+    assert retriever.multi_calls == []
 
 
 async def test_answer_when_grounded_flag_off_restores_refuse_early(

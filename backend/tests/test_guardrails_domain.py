@@ -8,8 +8,57 @@ from app.guardrails.domain import (
     ALLOWED_DOMAINS,
     Domain,
     classify_domain,
+    classify_domains,
     is_unsupported,
 )
+
+# ---------------------------------------------------------------------------
+# classify_domains — multi-hop detection (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        # Single product → single-element list (no multi-hop).
+        ("How do I configure Claude Code permissions?", [Domain.claude_code]),
+        ("What is the Claude API rate limit?", [Domain.claude_api]),
+        ("codex --model flag", [Domain.codex]),
+        # The generic bare-"claude" catch-all is NOT a multi-hop signal.
+        ("how do I use Claude?", []),
+        # Cross-product → both, in most-specific-first order (the Phase-3 gap).
+        (
+            "How do the rate limits compare between the Claude API and Gemini?",
+            [Domain.claude_api, Domain.gemini_api],
+        ),
+        (
+            "How does authentication differ between the Gemini API and the Claude API?",
+            [Domain.claude_api, Domain.gemini_api],
+        ),
+        # 'claude code' must NOT also pull claude_api from the \bclaude\b catch-all.
+        ("Claude Code permissions and Codex flags", [Domain.claude_code, Domain.codex]),
+        # Empty → [].
+        ("", []),
+        ("   ", []),
+    ],
+)
+def test_classify_domains_multi(question: str, expected: list[Domain]) -> None:
+    assert classify_domains(question) == expected
+
+
+def test_classify_domains_citevyn_short_circuits_over_products() -> None:
+    """#49 invariant preserved: a question naming CiteVyn is about CiteVyn itself,
+    even when it also names a product — it must NOT decompose into product multi-hop."""
+    assert classify_domains("Does CiteVyn cover the Gemini API?") == [Domain.citevyn]
+    assert classify_domains("Which is better in CiteVyn, Codex or Claude Code?") == [Domain.citevyn]
+
+
+def test_classify_domains_agrees_with_classify_domain_on_single_product() -> None:
+    """For a single-product question, the first multi-domain entry equals the
+    single classifier's result (they share the same patterns)."""
+    for q in ("Claude API rate limit", "codex help", "Gemini API auth", "Claude Code permissions"):
+        doms = classify_domains(q)
+        assert doms and doms[0] is classify_domain(q)
 
 
 @pytest.mark.parametrize(

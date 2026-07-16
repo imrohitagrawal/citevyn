@@ -44,7 +44,7 @@ from app.embeddings import (
     configured_embedder_identity,
     get_embedder,
 )
-from app.guardrails.domain import Domain, classify_domain, is_unsupported
+from app.guardrails.domain import Domain, classify_domain, classify_domains, is_unsupported
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
@@ -190,6 +190,16 @@ class _RetrieverLike(Protocol):
         question: str,
         *,
         product_area: str | None,
+        intent: Intent,
+        limit: int,
+        top_k: int,
+    ) -> RetrievalResult: ...
+
+    async def retrieve_multi(
+        self,
+        question: str,
+        *,
+        product_areas: list[str],
         intent: Intent,
         limit: int,
         top_k: int,
@@ -375,6 +385,16 @@ class Orchestrator:
         if is_unsupported(domain):
             intent = Intent.unsupported
 
+        # Multi-hop (Phase 3): a cross-product question names >=2 products
+        # ("compare the Claude API and Gemini rate limits"). ``classify_domain``
+        # returns only the first, so the single-domain path answers only half.
+        # When >=2 product areas are named we retrieve each and merge below.
+        # (A multi-hop question always resolves to a product domain — not
+        # ``unsupported`` — so it never collides with the answer-when-grounded /
+        # refuse-early branches; CiteVyn-meta short-circuits to ``[citevyn]``.)
+        multi_domains = classify_domains(question)
+        multi_hop = len(multi_domains) >= 2
+
         # A bare social greeting short-circuits to a friendly static reply
         # before the unsupported refusal (a lone "hello" classifies as an
         # unsupported domain) and before retrieval, so we never burn an LLM
@@ -426,9 +446,16 @@ class Orchestrator:
         # normalization is a soft enhancement that improves hit
         # rate on minor formatting differences.
         cache_normalized = normalized.lower()
+        # A multi-hop answer is built from several product areas, so its cache key
+        # encodes the sorted joined set (e.g. "claude_api+gemini_api") — self-
+        # describing and impossible to collide with a single-domain row. The read
+        # and write both use this same key (the question text determines the set).
+        cache_product_area = (
+            "+".join(sorted(d.value for d in multi_domains)) if multi_hop else domain.value
+        )
         cache_key = build_cache_key(
             normalized_question=cache_normalized,
-            product_area=domain.value,
+            product_area=cache_product_area,
             source_version_hash=source_version_hash,
             answer_policy_version=self._settings.answer_policy_version,
             embedder_identity=configured_identity.cache_key_component(),
@@ -474,16 +501,26 @@ class Orchestrator:
             self._session,
             active_index_version=active_index_version or None,
         )
-        # ``product_area=None`` triggers the global confidence-gated vector path for
-        # an unsupported-routed question (answer when grounded); a real domain scopes
-        # the arms as before.
-        result = await retriever.retrieve(
-            question,
-            product_area=None if answer_globally else domain.value,
-            intent=intent,
-            limit=self._settings.retrieval_max_candidates,
-            top_k=self._settings.retrieval_top_k,
-        )
+        # Multi-hop → retrieve each named product area and merge (Phase 3). Otherwise
+        # ``product_area=None`` triggers the global confidence-gated vector path for an
+        # unsupported-routed question (answer when grounded); a real domain scopes the
+        # arms as before.
+        if multi_hop:
+            result = await retriever.retrieve_multi(
+                question,
+                product_areas=[d.value for d in multi_domains],
+                intent=intent,
+                limit=self._settings.retrieval_max_candidates,
+                top_k=self._settings.retrieval_top_k,
+            )
+        else:
+            result = await retriever.retrieve(
+                question,
+                product_area=None if answer_globally else domain.value,
+                intent=intent,
+                limit=self._settings.retrieval_max_candidates,
+                top_k=self._settings.retrieval_top_k,
+            )
         evidence = result.hits
         # The ACTUAL runtime degrade of the vector arm (its reason: a transient
         # outage, a Tier-3 mismatch that was truly consulted, or none) — this, not

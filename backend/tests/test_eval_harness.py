@@ -209,6 +209,58 @@ def test_case_validation_rejects_inconsistent_rows(payload: dict[str, object], m
         EvalCase.from_dict(payload, origin="test")
 
 
+def test_multihop_case_parses_with_expected_sources() -> None:
+    from tests.eval.cases import EvalCase
+
+    case = EvalCase.from_dict(
+        {
+            "id": "mh",
+            "area": "cross_product",
+            "kind": "multihop",
+            "question": "compare claude api and gemini api",
+            "expected_gist": "both",
+            "expected_sources": ["claude_api", "gemini_api"],
+        },
+        origin="test",
+    )
+    assert case.expected_sources == ("claude_api", "gemini_api")
+    assert case.expected_source is None
+
+
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        (
+            {  # multihop needs >=2 areas
+                "id": "mh1", "area": "x", "kind": "multihop", "question": "q",
+                "expected_gist": "g", "expected_sources": ["claude_api"],
+            },
+            "must set expected_sources with >=2",
+        ),
+        (
+            {  # multihop must not use the single expected_source
+                "id": "mh2", "area": "x", "kind": "multihop", "question": "q",
+                "expected_gist": "g", "expected_source": "claude_api",
+            },
+            "uses expected_sources",
+        ),
+        (
+            {  # a non-multihop case must not set expected_sources
+                "id": "l1", "area": "x", "kind": "literal", "question": "q",
+                "expected_gist": "g", "expected_source": "claude_api",
+                "expected_sources": ["claude_api", "gemini_api"],
+            },
+            "use kind='multihop'",
+        ),
+    ],
+)
+def test_multihop_validation_rejects_bad_rows(payload: dict[str, object], match: str) -> None:
+    from tests.eval.cases import EvalCase
+
+    with pytest.raises(ValueError, match=match):
+        EvalCase.from_dict(payload, origin="test")
+
+
 # ---------------------------------------------------------------------------
 # Judge score parser (hermetic — no live LLM)
 # ---------------------------------------------------------------------------

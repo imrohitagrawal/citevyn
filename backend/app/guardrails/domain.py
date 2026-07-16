@@ -87,5 +87,59 @@ def classify_domain(question: str) -> Domain:
     return Domain.unsupported
 
 
+# Specific product patterns for multi-hop DETECTION only (:func:`classify_domains`).
+# Excludes the ``citevyn`` meta-domain (its own short-circuit) and the generic
+# ``\bclaude\b`` catch-all — the catch-all is a loose single-domain fallback, too
+# weak to be a confident SECOND-product signal (a real cross-product question names
+# its products specifically, e.g. "Claude API and Gemini"), and counting it would
+# over-collect on a sentence that repeats "claude" after "claude code".
+_MULTIHOP_PATTERNS: tuple[tuple[Domain, re.Pattern[str]], ...] = tuple(
+    (d, p) for d, p in _PATTERNS if d is not Domain.citevyn and p.pattern != r"\bclaude\b"
+)
+
+
+def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def classify_domains(question: str) -> list[Domain]:
+    """All DISTINCT product domains a question names — for multi-hop decomposition.
+
+    A cross-product question ("compare the rate limits of the Claude API and
+    Gemini") names two products; :func:`classify_domain` returns only the FIRST,
+    so the retriever scopes to one area and the other product's answer is missed.
+    This returns every named product area so the orchestrator can retrieve each.
+
+    Rules (mirroring :func:`classify_domain`'s precedence):
+
+    * **CiteVyn short-circuits** — a question that names CiteVyn is a question about
+      the product itself (#49: "does CiteVyn support Gemini?" is about CiteVyn's
+      coverage, not the Gemini API), so it returns ``[Domain.citevyn]`` regardless of
+      any product keywords in the same sentence, and never triggers multi-hop.
+    * Otherwise, collect distinct product domains from **non-overlapping** matches,
+      most-specific pattern first: "claude code permissions" yields ``[claude_code]``,
+      not ``[claude_code, claude_api]`` — the generic ``\\bclaude\\b`` catch-all is
+      skipped where its match overlaps the already-matched "claude code" span.
+
+    Deterministic, no I/O. Returns ``[]`` for empty/whitespace input.
+    """
+    if not question or not question.strip():
+        return []
+    for domain, pattern in _PATTERNS:
+        if domain is Domain.citevyn and pattern.search(question):
+            return [Domain.citevyn]
+    matched_spans: list[tuple[int, int]] = []
+    domains: list[Domain] = []
+    for domain, pattern in _MULTIHOP_PATTERNS:
+        for m in pattern.finditer(question):
+            span = m.span()
+            if any(_overlaps(span, s) for s in matched_spans):
+                continue
+            matched_spans.append(span)
+            if domain not in domains:
+                domains.append(domain)
+    return domains
+
+
 def is_unsupported(domain: Domain) -> bool:
     return domain is Domain.unsupported

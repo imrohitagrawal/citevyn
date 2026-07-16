@@ -45,6 +45,7 @@ from .thresholds import (
     MIN_JUDGE_COVERAGE,
     MIN_LITERAL_HIT_RATE,
     MIN_MEAN_JUDGE,
+    MIN_MULTIHOP_HIT_RATE,
     MIN_OVERALL_HIT_RATE,
 )
 
@@ -217,6 +218,15 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
             )
     elif r["refusal_leaks"] > MAX_REFUSAL_LEAKS:
         failures.append(f"{r['refusal_leaks']} refusal leak(s) (retrieval) > {MAX_REFUSAL_LEAKS}")
+    # Multi-hop is Postgres-only-provable (needs the live vector arm to hit both
+    # areas); gate it ONLY on the --postgres run. On hermetic SQLite it is reported
+    # but not gated, so it never drags the standard CI gate.
+    if summary.get("embedder", {}).get("mode") == "postgres":
+        mh_total = r.get("multihop_total", 0)
+        if mh_total and r.get("multihop_hit_rate", 0.0) < MIN_MULTIHOP_HIT_RATE:
+            failures.append(
+                f"multihop hit-rate {r['multihop_hit_rate']:.3f} < {MIN_MULTIHOP_HIT_RATE}"
+            )
     if j["available"]:
         judged = j.get("judged", 0)
         scored = j.get("scored", 0)
