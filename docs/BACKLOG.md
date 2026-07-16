@@ -19,13 +19,19 @@ in the same change.
 | [#81](https://github.com/imrohitagrawal/citevyn/issues/81) | Prod container stack not deployable: deploy.sh/refresh.sh alembic+`--sqlalchemy-url`+seed path, false-green health gate, stub-in-prod; worker CMD/service model + healthcheck | infra / deploy | **Reopened** — items 1–8 fixed in PR `fix/81-prod-deploy-path-v2` (was prematurely closed 2026-07-12 without fixing any item) | #34 review |
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
-| [#85](https://github.com/imrohitagrawal/citevyn/issues/85) | CI flaky: `compose-db-smoke` `db-verify` races the pg18 first-boot restart (`FATAL: shutting down`); retry the `SELECT 1` / `CREATE EXTENSION` | ci | Medium (flakes the merge gate) | #83 CI |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
 | [#112](https://github.com/imrohitagrawal/citevyn/issues/112) | Conversation memory: entity-aware rewrite for off-corpus topic-pivot follow-ups (honest relevance miss when a pivot is semantically adjacent to the prior topic) | backend / RAG | Low (LLM net refuses clear pivots; bounded phrasing class) | Phase 3b fan-out review |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: chunk-level context precision/recall + distractor corpus + golden-set growth toward 50–100 + human judge-calibration subset | eval / RAG | Medium (sharpens retrieval-ranking signal; needs chunk-level identity on a separate distractor index) | Item 2 eval-hardening plan review (deferred) |
 
 ## Recently closed
+
+- **[#85](https://github.com/imrohitagrawal/citevyn/issues/85)** — CI flake: `compose-db-smoke`
+  `db-verify` raced the pgvector:pg18 first-boot restart (`FATAL: shutting down` / `database
+  "citevyn" does not exist`). Both `docker exec psql` calls (`SELECT 1` + `CREATE EXTENSION
+  vector`) now retry in a bounded loop (10×2s) that rides out the transient window; the cap still
+  hard-fails a genuinely broken boot (no false green). Fixed via `fix/85-db-verify-retry`,
+  Makefile-only, verified with fresh-volume `make ci-smoke` ×3.
 
 - **[#120](https://github.com/imrohitagrawal/citevyn/issues/120)** / **[#121](https://github.com/imrohitagrawal/citevyn/issues/121)** / **[#122](https://github.com/imrohitagrawal/citevyn/issues/122)** — chat UX fixes
   (surfaced by live testing): transport errors (429/5xx/network) no longer wear the "NO SOURCE —
