@@ -44,7 +44,6 @@ from .retrieval import evaluate_retrieval, postgres_session, seeded_session
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
     MIN_FOLLOWUP_HIT_RATE,
-    MIN_GROUNDED_FACT_RATE,
     MIN_JUDGE_COVERAGE,
     MIN_LITERAL_HIT_RATE,
     MIN_MEAN_JUDGE,
@@ -232,7 +231,6 @@ def _summarize(
         "groundedness": {
             "cases_with_facts": len(grounded),
             "grounded_fact_rate": grounded_rate,
-            "min_threshold": MIN_GROUNDED_FACT_RATE,
             "under_grounded": [
                 {
                     "case_id": j.case_id,
@@ -298,17 +296,22 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     fu_total = r.get("followup_total", 0)
     if fu_total and r.get("followup_hit_rate", 0.0) < MIN_FOLLOWUP_HIT_RATE:
         failures.append(f"followup hit-rate {r['followup_hit_rate']:.3f} < {MIN_FOLLOWUP_HIT_RATE}")
-    # Deterministic groundedness (Item 1c): a judge-independent floor. It only bites
-    # when the judged run actually produced answers to check (cases_with_facts > 0);
-    # a wrong/absent hard fact drags the rate under MIN_GROUNDED_FACT_RATE regardless
-    # of the LLM judge's score.
+    # Deterministic groundedness (Item 1c): judge-independent, gated PER CASE on the
+    # --postgres run ONLY (the mode where fact-bearing answerable cases can actually
+    # retrieve; the hermetic dead-vector-arm path would structurally zero the paraphrase
+    # fact-cases, so it is excluded exactly like the multihop gate). Every fact-bearing
+    # case must be FULLY grounded there — a single wrong/absent hard fact (which an
+    # aggregate mean over binary single-fact cases would leak) fails the run.
     g = summary.get("groundedness", {})
-    g_rate = g.get("grounded_fact_rate")
-    if g.get("cases_with_facts", 0) > 0 and g_rate is not None and g_rate < MIN_GROUNDED_FACT_RATE:
-        under = [u["case_id"] for u in g.get("under_grounded", [])]
+    if (
+        summary.get("embedder", {}).get("mode") == "postgres"
+        and g.get("cases_with_facts", 0) > 0
+        and g.get("under_grounded")
+    ):
+        under = [f"{u['case_id']}(missing {u.get('missing', [])})" for u in g["under_grounded"]]
         failures.append(
-            f"groundedness fact-rate {g_rate:.3f} < "
-            f"{MIN_GROUNDED_FACT_RATE} (under-grounded: {under})"
+            f"{len(g['under_grounded'])} fact-bearing case(s) NOT fully grounded on the "
+            f"live-retrieval run: {under}"
         )
     if j["available"]:
         judged = j.get("judged", 0)

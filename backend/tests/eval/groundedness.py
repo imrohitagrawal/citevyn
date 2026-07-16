@@ -28,6 +28,18 @@ The metric is intentionally narrow and honest: it catches a MISSING or WRONG har
 fact, not arbitrary hallucination (that needs NLI, out of scope). Facts are best
 chosen as verbatim identifiers a correct answer cannot paraphrase — env-var names,
 header names, CLI commands — plus numeric facts guarded by the boundary rule.
+
+Two known blind spots (deliberate; the LLM judge + adversarial veto cover them):
+
+* **Negation** — ``"not 50 requests per minute"`` credits the ``"50 requests per
+  minute"`` fact (token presence, no sentiment). A negated hard fact is a rare,
+  contrived phrasing; the realistic wrong-value case (a *different* number) is caught
+  by the boundary guard.
+* **Non-digit numeric prefixes at the boundary** are guarded (``.``/``,`` included
+  below), but arbitrary reformatting of a number is not. Trade-off: an identifier fact
+  immediately preceded by ``,`` with no space (``--model,--help``) is rejected (a
+  strict-direction false-negative, never a false-positive) — a rare shape in answer
+  prose; add an alternative if a real answer ever hits it.
 """
 
 from __future__ import annotations
@@ -35,13 +47,17 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-# Characters that, if they flank a candidate match, mean it is part of a larger
+# Characters that, if they follow a candidate match, mean it is part of a larger
 # token and therefore NOT a real occurrence of the fact. Alphanumerics plus the
-# identifier joiners ``-``/``_`` so ``150`` cannot satisfy a ``50`` fact AND
-# ``x-goog-api-key-v2`` / ``CLAUDE_API_RATE_LIMIT_V2`` cannot satisfy the shorter
-# identifier, while symbol-bearing facts still match at their natural word edges
-# (``-`` is placed last in the class so it is a literal, not a range).
-_WORD_CHAR = "0-9a-z_-"
+# identifier joiners ``-``/``_`` so ``x-goog-api-key-v2`` / ``CLAUDE_API_RATE_LIMIT_V2``
+# cannot satisfy the shorter identifier, while symbol-bearing facts still match at
+# their natural word edges (``-`` is placed last so it is a literal, not a range).
+_TRAIL_CHAR = "0-9a-z_-"
+# The LEADING flank additionally rejects a numeric-prefix that is not a bare digit:
+# ``0.50`` / ``1,50`` must not satisfy a ``50`` fact (off by 100x), the same
+# wrong-number class as ``150``. ``.``/``,`` are added ONLY to the lookbehind so
+# trailing punctuation (``codex --help.``) still matches at the tail.
+_LEAD_CHAR = "0-9a-z_.,-"
 
 
 def normalize(text: str) -> str:
@@ -65,7 +81,7 @@ def _fact_present(normalized_answer: str, fact_alternative: str) -> bool:
     needle = normalize(fact_alternative)
     if not needle:
         return False
-    pattern = rf"(?<![{_WORD_CHAR}]){re.escape(needle)}(?![{_WORD_CHAR}])"
+    pattern = rf"(?<![{_LEAD_CHAR}]){re.escape(needle)}(?![{_TRAIL_CHAR}])"
     return re.search(pattern, normalized_answer) is not None
 
 

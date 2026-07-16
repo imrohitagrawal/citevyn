@@ -356,9 +356,13 @@ The judged metric was a SINGLE LLM-judge call — noisy, and able to over-score 
 - **Deterministic groundedness** — judge-*independent*: declared `expected_facts` (env
   vars, headers, CLI commands, or a number *with* its unit; `|`-alternatives any-of)
   must appear in the answer, **word-boundary matched** so `"50 requests per minute"` is
-  NOT credited by `"150 requests per minute"` (plan-review blocker). Gate
-  `MIN_GROUNDED_FACT_RATE=0.8`; a golden-integrity test asserts each fact is groundable
-  in the seed corpus (any-of).
+  NOT credited by `"150 requests per minute"` or `"0.50 requests per minute"`
+  (plan-review + PR-review). **Gated per case on the `--postgres` run only** (the mode
+  where fact-cases can retrieve; the hermetic dead-arm path would structurally zero the
+  paraphrase fact-cases — excluded like the multihop gate): every fact-bearing case must
+  be fully grounded there, so a single wrong fact fails (an aggregate mean over binary
+  single-fact cases would leak it). A golden-integrity test asserts each fact is
+  groundable in the seed corpus (any-of).
 
 **Measured (real Postgres+pgvector; openrouter embeddings + LLM; `--postgres` judged run):**
 
@@ -367,8 +371,8 @@ The judged metric was a SINGLE LLM-judge call — noisy, and able to over-score 
 | Core overall (literal + paraphrase) | 15/15 | **15/15** (unchanged) |
 | Multi-hop / Follow-up | 3/3 / 3/3 | **3/3 / 3/3** (unchanged) |
 | Refusal leaks — judged | 0/5 | **0/5** (unchanged) |
-| Judge mean | 4.88 (single call) | **4.73** (panel min-vetoed — fresh metric, NOT the 4.88 baseline; the veto conservatively lowers over-scores) |
-| Contested (standard-framing disagreement) | — | **0/26** |
+| Judge mean | 4.88 (single call) | **~4.7** (4.69–4.73 across runs; panel min-vetoed — fresh metric, NOT the 4.88 baseline; the veto conservatively lowers over-scores) |
+| Contested (standard-framing disagreement) | — | **0–1/26** (a multihop case occasionally flagged) |
 | **Groundedness fact-rate** | — | **1.000** over 11 fact-bearing cases (0 under-grounded) |
 | DB residue | zero | **zero** |
 

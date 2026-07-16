@@ -44,10 +44,14 @@ judged run (`--postgres`) therefore combines three signals:
    case (phrasing-stable tokens — env-var names, headers, CLI commands, or a number
    *with* its unit; each entry may list `|`-separated alternatives, any-of). A fact is
    matched at word boundaries, so `"50 requests per minute"` is **not** satisfied by
-   `"150 requests per minute"` — a wrong hard fact fails regardless of the judge. The
-   gate floor is `MIN_GROUNDED_FACT_RATE` (mean coverage over fact-bearing cases). A
-   golden-integrity test asserts each fact is groundable (at least one alternative
-   appears in the seed corpus).
+   `"150 requests per minute"` or `"0.50 requests per minute"` — a wrong hard fact
+   fails regardless of the judge. **Gated per case on the `--postgres` run only** (the
+   mode where fact-bearing answerable cases can actually retrieve; the hermetic
+   dead-vector-arm path would structurally zero the paraphrase fact-cases, so it is
+   excluded — exactly like the multihop gate): every fact-bearing case must be **fully
+   grounded** there, so a single wrong fact fails (an aggregate mean over binary
+   single-fact cases would leak it). A golden-integrity test asserts each fact is
+   groundable (at least one alternative appears in the seed corpus).
 
 ## Kinds
 

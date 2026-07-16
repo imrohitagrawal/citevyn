@@ -59,7 +59,19 @@ def test_any_of_alternatives() -> None:
     fact = "50 requests per minute|50 req/min"
     assert fact_covered("throttled at 50 req/min", fact)
     assert fact_covered("throttled at 50 requests per minute", fact)
-    assert not fact_covered("throttled at 100 req/min", fact)
+    # "150 req/min" contains "50 req/min" as a substring — the digit-prefix guard must
+    # reject it for the `req/min` alternative too (not merely because it is absent).
+    assert not fact_covered("throttled at 150 req/min", fact)
+
+
+def test_decimal_or_comma_numeric_prefix_does_not_credit_a_wrong_number() -> None:
+    """A decimal/thousands-separator prefix is a wrong value (off by 100x) and must not
+    satisfy the fact — the same class as the digit-prefix guard."""
+    fact = "50 requests per minute"
+    assert not fact_covered("the ratio is 0.50 requests per minute", fact)
+    assert not fact_covered("about 1,50 requests per minute", fact)
+    # trailing punctuation still matches (lookahead unchanged)
+    assert fact_covered("run codex --help.", "codex --help")
 
 
 def test_coverage_and_missing() -> None:
@@ -148,6 +160,24 @@ def test_expected_facts_must_be_a_list() -> None:
         )
 
 
+def test_expected_facts_elements_must_be_strings() -> None:
+    """A non-string element (e.g. a bare number) must be rejected at parse time, not
+    crash later with an AttributeError inside the matcher."""
+    with pytest.raises(ValueError, match="expected_facts must be a list of strings"):
+        EvalCase.from_dict(
+            {
+                "id": "x",
+                "area": "claude_api",
+                "kind": "literal",
+                "question": "q",
+                "expected_source": "claude_api",
+                "expected_gist": "g",
+                "expected_facts": [50],
+            },
+            origin="test",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Panel aggregation — median smooths noise, adversarial VETOES (not averaged)
 # ---------------------------------------------------------------------------
@@ -212,6 +242,37 @@ def test_panel_size_is_odd_and_clamped() -> None:
         assert panel_size() % 2 == 1
     finally:
         del os.environ["CITEVYN_EVAL_JUDGE_PANEL"]
+
+
+def test_summarize_aggregates_groundedness_over_fact_bearing_cases_only() -> None:
+    """_summarize must average coverage over ONLY cases that declare facts, build
+    under_grounded from the sub-1.0 ones, and keep groundedness judge-INDEPENDENT (a
+    case whose judge errored but whose fact_coverage was computed still counts)."""
+    from tests.eval.runner import JudgedCase, _summarize
+
+    judged = [
+        JudgedCase(
+            case_id="a", kind="literal", answer="x", no_answer=False, score=5, fact_coverage=1.0
+        ),
+        # judge errored (score None) but the deterministic coverage was still computed
+        JudgedCase(
+            case_id="b",
+            kind="literal",
+            answer="",
+            no_answer=True,
+            error="judge_unavailable: boom",
+            fact_coverage=0.0,
+            missing_facts=("50 requests per minute",),
+        ),
+        # no declared facts → excluded from the groundedness aggregate entirely
+        JudgedCase(case_id="c", kind="paraphrase", answer="y", no_answer=False, score=4),
+    ]
+    summary = _summarize([], {"stub": True}, judged, judge_available=True)
+    g = summary["groundedness"]
+    assert g["cases_with_facts"] == 2  # a + b, not c
+    assert g["grounded_fact_rate"] == 0.5  # (1.0 + 0.0) / 2
+    assert [u["case_id"] for u in g["under_grounded"]] == ["b"]
+    assert g["under_grounded"][0]["missing"] == ["50 requests per minute"]
 
 
 class _ScriptedLLM:

@@ -105,7 +105,9 @@ class EvalCase:
         raw_history = d.get("history")
         # Guard against a stringly-typed history ("prior turn") silently
         # char-splitting into a tuple of letters — it must be a JSON array of turns.
-        if raw_history is not None and not isinstance(raw_history, list):
+        if raw_history is not None and (
+            not isinstance(raw_history, list) or not all(isinstance(t, str) for t in raw_history)
+        ):
             raise ValueError(f"{origin}: case {d['id']!r} history must be a list of strings")
         history = tuple(raw_history) if raw_history else ()
         # ``history`` belongs only to a ``followup`` case (it drives the multi-turn
@@ -114,7 +116,9 @@ class EvalCase:
         if history and kind != "followup":
             raise ValueError(f"{origin}: case {d['id']!r} sets history; only kind='followup' may")
         raw_facts = d.get("expected_facts")
-        if raw_facts is not None and not isinstance(raw_facts, list):
+        if raw_facts is not None and (
+            not isinstance(raw_facts, list) or not all(isinstance(f, str) for f in raw_facts)
+        ):
             raise ValueError(f"{origin}: case {d['id']!r} expected_facts must be a list of strings")
         expected_facts = tuple(raw_facts) if raw_facts else ()
         # A refusal has no correct answer to ground, so it must not declare facts.

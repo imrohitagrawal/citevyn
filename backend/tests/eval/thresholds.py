@@ -37,11 +37,15 @@ MIN_JUDGE_COVERAGE = 0.9
 # which a case is flagged ``contested`` (same-rubric disagreement worth review) —
 # informational, not a gate.
 CONTESTED_SPREAD = 2
-# Deterministic groundedness (Item 1c): fraction of a case's declared ``expected_facts``
-# that must appear (word-boundary matched) in the produced answer, averaged over the
-# cases that declare facts. Below 1.0 so a single legitimate paraphrase miss does not
-# red the whole judged run, while a wrong/absent hard fact still drags it under.
-MIN_GROUNDED_FACT_RATE = 0.8
+# Deterministic groundedness (Item 1c) is gated PER CASE on the ``--postgres`` run only
+# (the mode where every fact-bearing answerable case can actually retrieve — the
+# hermetic dead-vector-arm path would structurally zero the paraphrase fact-cases and
+# is excluded, mirroring the multihop gate). On that run every fact-bearing case must be
+# FULLY grounded (coverage 1.0): a single wrong/absent hard fact fails, which an
+# aggregate mean over binary single-fact cases would leak. Facts are chosen phrasing-
+# stable (identifiers + number-with-alternatives) so a correct answer reaches 1.0
+# (empirically it does); a legitimate miss is fixed by adding an alternative, never by
+# weakening the gate. ``grounded_fact_rate`` is still reported for visibility.
 # Multi-hop (Phase 3): a cross-product case must retrieve EVERY named area. Provable
 # only with the live vector arm, so it is gated ONLY on the --postgres run (excluded
 # from the hermetic overall gate). Every multi-hop case must hit there.
