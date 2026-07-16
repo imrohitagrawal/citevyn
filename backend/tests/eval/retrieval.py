@@ -411,6 +411,10 @@ async def evaluate_retrieval(
     attributable to memory (adversarial finding #5).
     """
     settings = settings or get_settings()
+    # Postgres-only cases (misspellings the keyword arm can't recover, in-domain
+    # near-miss refusals) are meaningful only on the live vector arm — exclude them from
+    # the hermetic run so they never drag or leak into the hermetic gate (Item 2).
+    cases = [c for c in cases if postgres or not c.postgres_only]
     outcomes: list[RetrievalOutcome] = []
     session_cm = postgres_session(settings) if postgres else _sqlite_session_and_embedder()
     async with session_cm as (session, embedder):

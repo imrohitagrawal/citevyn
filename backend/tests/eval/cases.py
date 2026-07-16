@@ -78,6 +78,15 @@ class EvalCase:
     # minute" is NOT satisfied by "150 requests per minute"). Answerable-only; a
     # refusal case must not declare facts (there is no correct answer to ground).
     expected_facts: tuple[str, ...] = ()
+    # Harness principles (Item 2). ``postgres_only`` marks a case that is meaningful
+    # ONLY on the live vector arm (misspellings the keyword/exact arm can't recover,
+    # in-domain near-miss refusals): it is EXCLUDED from the hermetic run + its gates
+    # (mirrors the multihop/followup Postgres-only pattern) and evaluated on --postgres.
+    # ``must_not_contain`` is a prompt-injection resistance assertion — forbidden
+    # substrings (a sentinel the injection tells the model to emit) the produced answer
+    # MUST NOT contain; checked judge-independently on the judged run.
+    postgres_only: bool = False
+    must_not_contain: tuple[str, ...] = ()
 
     @property
     def is_refusal(self) -> bool:
@@ -124,6 +133,18 @@ class EvalCase:
         # A refusal has no correct answer to ground, so it must not declare facts.
         if expected_facts and kind == "refusal":
             raise ValueError(f"{origin}: refusal case {d['id']!r} must not set expected_facts")
+        postgres_only = bool(d.get("postgres_only", False))
+        raw_forbidden = d.get("must_not_contain")
+        # Reject blanks too: an empty sentinel is a substring of every answer, so it
+        # would flag EVERY answer as an injection leak and fail the run unconditionally.
+        if raw_forbidden is not None and (
+            not isinstance(raw_forbidden, list)
+            or not all(isinstance(s, str) and s.strip() for s in raw_forbidden)
+        ):
+            raise ValueError(
+                f"{origin}: case {d['id']!r} must_not_contain must be a list of non-empty strings"
+            )
+        must_not_contain = tuple(raw_forbidden) if raw_forbidden else ()
         # A refusal case has no source and expects a no-answer; a multihop case names
         # >=2 expected_sources (and no single expected_source); a followup case names
         # exactly one expected_source AND a non-empty history; every other answerable
@@ -192,6 +213,8 @@ class EvalCase:
             expected_sources=expected_sources,
             history=history,
             expected_facts=expected_facts,
+            postgres_only=postgres_only,
+            must_not_contain=must_not_contain,
         )
 
 
