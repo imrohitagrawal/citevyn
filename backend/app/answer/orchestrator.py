@@ -189,7 +189,7 @@ class _RetrieverLike(Protocol):
         self,
         question: str,
         *,
-        product_area: str,
+        product_area: str | None,
         intent: Intent,
         limit: int,
         top_k: int,
@@ -306,6 +306,10 @@ def _default_retriever(
         active_index_version=active_index_version,
         embedder=get_embedder(settings),
         embedder_identity=configured_embedder_identity(settings),
+        global_confidence=(
+            settings.retrieval_global_min_top_score,
+            settings.retrieval_global_min_margin,
+        ),
     )
 
 
@@ -385,7 +389,14 @@ class Orchestrator:
                 domain=domain,
             )
 
-        if intent is Intent.unsupported:
+        # "Answer when grounded" (Phase 2): a question that names no product routes
+        # to ``unsupported``, but the docs may still cover it ("restrict which tools
+        # the coding assistant may run" is a Claude Code question). Instead of an
+        # immediate refusal, retrieve GLOBALLY below (``product_area=None``) and let
+        # the confidence gate + the LLM grounding-refusal decline genuinely
+        # off-corpus questions. When the flag is off, keep the old refuse-early.
+        answer_globally = self._settings.answer_when_grounded and intent is Intent.unsupported
+        if intent is Intent.unsupported and not answer_globally:
             return await self._respond_unsupported(
                 request_id=request_id,
                 session_id=session_id,
@@ -437,8 +448,10 @@ class Orchestrator:
 
         # Empty / very short questions map to ``Intent.clarify`` in
         # the router. The orchestrator surfaces them as no-answer so
-        # we never burn an LLM call on "hi".
-        if should_skip_retrieval(intent):
+        # we never burn an LLM call on "hi". The global "answer when grounded"
+        # path deliberately overrides this for ``Intent.unsupported`` (it retrieves
+        # instead of refusing) — but ``clarify`` (empty/too-short) still short-circuits.
+        if should_skip_retrieval(intent) and not answer_globally:
             return await self._respond_no_answer(
                 request_id=request_id,
                 session_id=session_id,
@@ -461,9 +474,12 @@ class Orchestrator:
             self._session,
             active_index_version=active_index_version or None,
         )
+        # ``product_area=None`` triggers the global confidence-gated vector path for
+        # an unsupported-routed question (answer when grounded); a real domain scopes
+        # the arms as before.
         result = await retriever.retrieve(
             question,
-            product_area=domain.value,
+            product_area=None if answer_globally else domain.value,
             intent=intent,
             limit=self._settings.retrieval_max_candidates,
             top_k=self._settings.retrieval_top_k,
@@ -475,6 +491,20 @@ class Orchestrator:
         vector_degrade = result.vector_degrade
 
         if not evidence:
+            # A question that named no product (answer-when-grounded, global
+            # retrieval) and found no confident evidence is genuinely off-corpus —
+            # give it the SAME helpful "I can answer about Claude/Codex/Gemini…"
+            # refusal it got before, not the generic no-answer. Only unsupported
+            # questions that DID ground now answer; the rest keep the crisp refusal.
+            if answer_globally:
+                return await self._respond_unsupported(
+                    request_id=request_id,
+                    session_id=session_id,
+                    question=question,
+                    normalized=normalized,
+                    domain=domain,
+                    intent=Intent.unsupported,
+                )
             return await self._respond_no_answer(
                 request_id=request_id,
                 session_id=session_id,

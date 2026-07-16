@@ -156,6 +156,13 @@ def _summarize(
 ) -> dict[str, Any]:
     scores = [j.score for j in judged if j.score is not None]
     mean_score = (sum(scores) / len(scores)) if scores else None
+    # Judged refusal safety: a refusal "leaks" only when the ORCHESTRATOR actually
+    # answered it (``no_answer`` False). Under "answer when grounded" (Phase 2) a
+    # refusal may retrieve a nearest chunk globally that the LLM grounding-refusal
+    # then correctly declines — so the retrieval-only leak count over-counts, and
+    # the orchestrator's decision is the authoritative measure when the LLM ran.
+    refusal_judged = [j for j in judged if j.kind == "refusal"]
+    refusal_leaks_judged = sum(1 for j in refusal_judged if not j.no_answer)
     return {
         "total_cases": len(cases),
         "retrieval": retrieval,
@@ -165,6 +172,8 @@ def _summarize(
             "scored": len(scores),
             "mean_score": mean_score,
             "min_mean_threshold": MIN_MEAN_JUDGE,
+            "refusal_total": len(refusal_judged),
+            "refusal_leaks_judged": refusal_leaks_judged,
             "errors": [j.as_dict() for j in judged if j.error],
             "cases": [j.as_dict() for j in judged],
         },
@@ -192,9 +201,22 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
             failures.append(f"literal hit-rate {literal_rate:.3f} < {MIN_LITERAL_HIT_RATE}")
     if r["overall_hit_rate"] < MIN_OVERALL_HIT_RATE:
         failures.append(f"overall hit-rate {r['overall_hit_rate']:.3f} < {MIN_OVERALL_HIT_RATE}")
-    if r["refusal_leaks"] > MAX_REFUSAL_LEAKS:
-        failures.append(f"{r['refusal_leaks']} refusal leak(s) > {MAX_REFUSAL_LEAKS}")
     j = summary["judge"]
+    # Refusal-safety gate. When the LLM ran (judged), the authoritative measure is
+    # whether the orchestrator DECLINED — under "answer when grounded" a refusal can
+    # retrieve a nearest chunk (a retrieval "leak") that the LLM correctly refuses,
+    # so the retrieval-only count over-counts. Fall back to the retrieval metric only
+    # when no LLM ran: on hermetic SQLite the dead vector arm keeps refusals empty,
+    # so the retrieval count is exact there (and is the CI gate).
+    if j["available"] and j.get("judged", 0) > 0:
+        judged_leaks = j.get("refusal_leaks_judged", 0)
+        if judged_leaks > MAX_REFUSAL_LEAKS:
+            failures.append(
+                f"{judged_leaks} refusal leak(s) — orchestrator answered a refusal "
+                f"(judged) > {MAX_REFUSAL_LEAKS}"
+            )
+    elif r["refusal_leaks"] > MAX_REFUSAL_LEAKS:
+        failures.append(f"{r['refusal_leaks']} refusal leak(s) (retrieval) > {MAX_REFUSAL_LEAKS}")
     if j["available"]:
         judged = j.get("judged", 0)
         scored = j.get("scored", 0)
@@ -297,9 +319,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         for kind, rate in sorted(r["hit_rate_by_kind"].items()):
             print(f"  {kind:11s}: {rate:.3f}")
-        print(f"  refusal leaks: {r['refusal_leaks']}/{r['refusal_total']}")
+        # Retrieval-level refusal leaks are informational under "answer when
+        # grounded" (a globally-retrieved chunk the LLM may still decline); the
+        # judged count below is authoritative when the LLM ran.
+        print(f"  refusal leaks (retrieval): {r['refusal_leaks']}/{r['refusal_total']}")
         if j["available"]:
             mean = j["mean_score"]
+            print(
+                f"  refusal leaks (judged, orchestrator answered): "
+                f"{j.get('refusal_leaks_judged', 0)}/{j.get('refusal_total', 0)}"
+            )
             print(
                 f"Judge: mean {mean:.2f} over {j['scored']} scored ({len(j['errors'])} error(s))"
                 if mean is not None

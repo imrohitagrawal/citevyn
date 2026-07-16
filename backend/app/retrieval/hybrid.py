@@ -48,6 +48,7 @@ class HybridRetriever:
         embedder: Embedder | None = None,
         embedder_identity: EmbedderIdentity | None = None,
         reranker: Reranker | None = None,
+        global_confidence: tuple[float, float] | None = None,
     ) -> None:
         self._session = session
         self._active_index_version = active_index_version
@@ -58,16 +59,30 @@ class HybridRetriever:
         # the vector arm runs unconditionally (legacy callers / unit tests).
         self._embedder_identity = embedder_identity
         self._reranker = reranker or Reranker()
+        # ``(min_top_score, min_margin)`` for the global "answer when grounded"
+        # confidence gate (Phase 2). Used only on a ``product_area=None`` retrieval;
+        # ``None`` disables the gate (the vector arm returns whatever it finds).
+        self._global_confidence = global_confidence
 
     async def retrieve(
         self,
         question: str,
         *,
-        product_area: str,
+        product_area: str | None,
         intent: Intent,
         limit: int = 20,
         top_k: int = 6,
     ) -> RetrievalResult:
+        # "Answer when grounded" (Phase 2): a ``None`` product area means the
+        # question named no product (routed ``unsupported``) but we still try to
+        # answer it from the whole corpus. Exact + keyword have nothing to scope to
+        # and a global keyword ILIKE would surface spurious generic-token matches,
+        # so this path uses the confidence-gated global VECTOR arm alone — it
+        # answers real paraphrases and returns nothing for off-corpus questions
+        # (which then decline via weak_evidence / the LLM grounding-refusal).
+        if product_area is None:
+            return await self._retrieve_global(question, limit=limit, top_k=top_k)
+
         exact = ExactRetriever(self._session, active_index_version=self._active_index_version)
         keyword = KeywordRetriever(self._session, active_index_version=self._active_index_version)
         vector = VectorRetriever(
@@ -124,12 +139,37 @@ class HybridRetriever:
             hit.rank = idx
         return RetrievalResult(hits=reranked, vector_degrade=vector_degrade)
 
+    async def _retrieve_global(self, question: str, *, limit: int, top_k: int) -> RetrievalResult:
+        """Global "answer when grounded" retrieval: the confidence-gated vector arm.
+
+        Runs the vector arm unscoped (``product_area=None``) with the global
+        confidence gate applied inside :class:`VectorRetriever`. An off-corpus
+        question yields no hits (gated), so the orchestrator declines it via the
+        empty-evidence path; a real paraphrase yields its chunk(s). Exact + keyword
+        are intentionally not consulted (nothing to scope to; a global ILIKE leaks).
+        """
+        vector = VectorRetriever(
+            self._session,
+            active_index_version=self._active_index_version,
+            embedder=self._embedder,
+            global_confidence=self._global_confidence,
+        )
+        enabled = await self._vector_arm_enabled()
+        hits, degrade = await self._safe_vector_retrieve(
+            vector, question, product_area=None, limit=limit, enabled=enabled
+        )
+        evidence = [_to_evidence(h, RetrievalType.vector, i + 1) for i, h in enumerate(hits)]
+        reranked = await self._reranker.rerank(question, evidence, top_k=top_k)
+        for idx, hit in enumerate(reranked, start=1):
+            hit.rank = idx
+        return RetrievalResult(hits=reranked, vector_degrade=degrade)
+
     async def _safe_vector_retrieve(
         self,
         vector: VectorRetriever,
         question: str,
         *,
-        product_area: str,
+        product_area: str | None,
         limit: int,
         enabled: bool = True,
     ) -> tuple[list[RetrievedChunk], VectorDegrade]:

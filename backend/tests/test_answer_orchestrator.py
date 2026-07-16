@@ -138,7 +138,7 @@ class _FakeRetriever:
         self,
         question: str,
         *,
-        product_area: str,
+        product_area: str | None,
         intent: Intent,
         limit: int,
         top_k: int,
@@ -411,13 +411,15 @@ async def test_llm_refusal_with_evidence_records_runtime_strategy(
 # ---------------------------------------------------------------------------
 
 
-async def test_unsupported_question_returns_refusal_without_caching(
+async def test_unsupported_offcorpus_refuses_after_global_retrieval(
     session: Any,
 ) -> None:
-    """An off-domain question triggers the unsupported refusal with
-    no cache write and no LLM call."""
+    """ "Answer when grounded" (Phase 2): a genuinely off-corpus question now
+    retrieves GLOBALLY (product_area=None), and — finding nothing confident (the
+    confidence gate drops it, modeled here by an empty retriever) — falls back to
+    the SAME helpful unsupported refusal, with no cache write and no LLM call."""
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever([])  # gate drops the off-corpus query → no evidence
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
 
@@ -433,16 +435,66 @@ async def test_unsupported_question_returns_refusal_without_caching(
     assert response["intent"] == "unsupported"
     assert response["answer"] == settings.unsupported_refusal
 
-    # No retrieval, no LLM, no cache.
-    assert retriever.calls == []
+    # Retrieval WAS attempted globally (the new behavior), but no LLM, no cache.
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0]["product_area"] is None  # global "answer when grounded"
     assert llm_spy.complete.await_count == 0
     assert (await session.execute(select(AnswerCache))).scalars().all() == []
 
-    # Audit event records the unsupported outcome.
+    # Audit event still records the unsupported outcome.
     audits = (await session.execute(select(AuditEvent))).scalars().all()
     assert len(audits) == 1
     assert audits[0].metadata_["outcome"] == "unsupported"
     assert audits[0].metadata_["reason"] == "unsupported_domain"
+
+
+async def test_answer_when_grounded_flag_off_restores_refuse_early(
+    session: Any,
+) -> None:
+    """The documented kill-switch: with ``answer_when_grounded=False`` an
+    unsupported-routed question refuses BEFORE any retrieval (the pre-Phase-2
+    behavior) — no retrieval, no LLM, no cache. Guards the rollback path."""
+    settings = _settings(answer_when_grounded=False)
+    retriever = _FakeRetriever(_evidence(count=2))  # would answer if consulted
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="What is the recipe for chocolate cake?",
+        request_id="req_flag_off",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["unsupported"] is True
+    assert response["answer"] == settings.unsupported_refusal
+    # Refused early: the retriever and LLM were never consulted, nothing cached.
+    assert retriever.calls == []
+    assert llm_spy.complete.await_count == 0
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+
+
+async def test_unsupported_but_grounded_question_answers_globally(
+    session: Any,
+) -> None:
+    """The new capability: an unsupported-routed question that DOES find confident
+    global evidence is answered (not refused) — the whole point of "answer when
+    grounded". The retriever is called with product_area=None."""
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(_evidence(count=2))  # confident evidence survives the gate
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="How do I restrict which tools the coding assistant may run?",
+        request_id="req_grounded",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["unsupported"] is False
+    assert response["no_answer"] is False
+    assert response["domain"] == "unsupported"  # routed unsupported, but answered
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0]["product_area"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1222,9 +1274,11 @@ async def test_offdomain_query_opening_with_greeting_still_refused(session: Any)
     ("yo bitcoin price today") must NOT be welcomed as a greeting — the
     substantive tail keeps it out of the short-circuit so it still reaches
     the unsupported refusal (greeting runs before the unsupported branch, so
-    a leaky detector would otherwise swallow the refusal)."""
+    a leaky detector would otherwise swallow the refusal). Under "answer when
+    grounded" the off-corpus tail retrieves globally and finds nothing confident
+    (empty retriever models the gate), so it still lands on the refusal."""
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever([])  # off-corpus → confidence gate drops it → no evidence
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -1237,4 +1291,4 @@ async def test_offdomain_query_opening_with_greeting_still_refused(session: Any)
     assert response["unsupported"] is True
     assert response["no_answer"] is True
     assert response["answer"] == settings.unsupported_refusal
-    assert retriever.calls == []
+    assert retriever.calls[0]["product_area"] is None  # retrieved globally, found nothing
