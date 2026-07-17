@@ -16,12 +16,22 @@ in the same change.
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
 | [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
-| [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |
 
 ## Recently closed
+
+- **[#82](https://github.com/imrohitagrawal/citevyn/issues/82)** — No CI job built/booted the
+  api+worker images, so a container-runtime break (interpreter/CMD, which `docker build` does
+  NOT catch) shipped green (the class that let the 3.14 bump merge non-booting). Fixed via
+  `fix/82-ci-image-boot-smoke`: `infra/docker/scripts/image_smoke.sh` builds+BOOTS the images
+  (api boots under `CITEVYN_ENVIRONMENT=local` → GET /health=200; worker execs
+  `python -m app.worker.cli list-sources` exit 0), wired as `make image-smoke`, a CI PR-gate
+  job (`image-smoke`), and a release.yml load→boot→push gate so a non-booting image fails the
+  release BEFORE `:latest` publishes. dependabot groups the uv-builder + slim-runtime `FROM`
+  refs so a minor bump can't drift the interpreters apart. Verified locally: smoke passes on
+  the real images AND fails on a deliberately non-serving image (proven gate, not a rubber stamp).
 
 - **[#87](https://github.com/imrohitagrawal/citevyn/issues/87)** — Retrieval returned
   no_answer for legitimate source-named questions ("How do I install the Codex CLI?"). Root

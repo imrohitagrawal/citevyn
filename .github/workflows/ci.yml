@@ -260,3 +260,23 @@ jobs:
           name: answer-quality-eval-report
           path: artifacts/eval_report.json
           if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Image build + BOOT smoke (#82). `docker build` succeeds even when the
+  # runtime interpreter is misaligned or the console-script CMD is broken —
+  # those only fail at `exec` time. This job BUILDS AND RUNS both images
+  # (api /health=200, worker `python -m app.worker.cli list-sources` exits 0)
+  # so a container-runtime regression fails a PR instead of shipping green.
+  # The same script backs `make image-smoke` (local) and the release gate.
+  # ─────────────────────────────────────────────────────────────────────────
+  image-smoke:
+    name: image build+boot smoke (api /health + worker exec)
+    runs-on: ubuntu-latest
+    # Bound the job: the two image builds + boot polls are bounded by
+    # HEALTH_TIMEOUT inside the script, but a stuck BuildKit/pull could still
+    # hang — cap the whole job so it fails instead of burning a runner.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build + boot the api and worker images
+        run: ./infra/docker/scripts/image_smoke.sh

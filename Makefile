@@ -38,7 +38,7 @@ export VERSION
 export PROFILE
 
 .PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
-        build push deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
+        build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -224,6 +224,9 @@ build: ## Build the api + worker images (VERSION=tag to label)
 
 push: ## Push the api + worker images to the configured registry
 	$(COMPOSE) --profile $(PROFILE) push
+
+image-smoke: ## Build + BOOT the api/worker images (api /health=200, worker execs CMD) — #82
+	./infra/docker/scripts/image_smoke.sh
 
 # ─────────────────────────── Production deploy ───────────────────────────
 deploy: ## First-time / cold-start deploy (run from infra/docker/.env host)
