@@ -64,6 +64,11 @@ interface AppState {
   /** True between submitting a question and the first bot chunk landing.
       Drives the "thinking…" loader in ChatView. */
   pending: boolean;
+  /** Monotonic counter bumped every time the user submits a NEW question. ChatView
+      watches it to bring the just-asked question into view even when the reader had
+      scrolled up — an explicit send must always be followed, unlike a passive stream
+      append which respects the reader's scroll position. */
+  sendTick: number;
 }
 
 type Action =
@@ -85,7 +90,8 @@ type Action =
       suggestions?: Suggestion[];
     }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" }
-  | { type: "SET_PENDING"; value: boolean };
+  | { type: "SET_PENDING"; value: boolean }
+  | { type: "BUMP_SEND_TICK" };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
 
@@ -112,6 +118,7 @@ const initialState: AppState = {
   messages: [],
   screen: "landing",
   pending: false,
+  sendTick: 0,
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -163,6 +170,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, screen: action.screen };
     case "SET_PENDING":
       return { ...state, pending: action.value };
+    case "BUMP_SEND_TICK":
+      return { ...state, sendTick: state.sendTick + 1 };
     default:
       return state;
   }
@@ -577,6 +586,10 @@ export function useLandingState() {
             type: "ADD_MESSAGE",
             message: { id: nextMessageId(), role: "user", text },
           });
+          // An explicit (re)send must scroll to the new question even from a
+          // scrolled-up position (a duplicate ANSWERED question takes the
+          // flashExisting path below and keeps its own scroll behaviour).
+          dispatch({ type: "BUMP_SEND_TICK" });
           routeQuestion(text);
           return;
         }
@@ -588,6 +601,7 @@ export function useLandingState() {
         type: "ADD_MESSAGE",
         message: { id: nextMessageId(), role: "user", text },
       });
+      dispatch({ type: "BUMP_SEND_TICK" });
 
       routeQuestion(text);
     },
@@ -610,9 +624,10 @@ export function useLandingState() {
       // into their own bubble: no text bleed, and each finalizes its own cursor.
       const id = nextMessageId();
 
-      // Autoscroll is owned by ChatView's useEffect([messages]): every dispatch
-      // below produces a new `messages` array, so the view re-pins to the bottom
-      // after each add / streamed chunk / finish.
+      // Autoscroll is owned by ChatView: every dispatch below produces a new
+      // `messages` array, and ChatView re-pins to the bottom after each add /
+      // streamed chunk / finish ONLY while its stick-to-bottom latch is armed (a
+      // reader who scrolled up keeps their position). An explicit send re-arms it.
       dispatch({
         type: "ADD_MESSAGE",
         message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
@@ -724,6 +739,10 @@ export function useLandingState() {
     // landing view (which doesn't render the bubble) doesn't leak state
     // into the next chat session.
     dispatch({ type: "SET_PENDING", value: false });
+    // Clear the hero composer so returning to the landing page presents an empty
+    // box — the prior question was already dispatched into chat and should not
+    // linger for the user to delete before asking something new.
+    dispatch({ type: "SET_HERO_INPUT", value: "" });
     window.scrollTo({ top: 0 });
   }, []);
 
@@ -742,6 +761,10 @@ export function useLandingState() {
       );
       return;
     }
+    // Clear the hero box as the question is dispatched into chat (mirrors how
+    // submitChat clears the chat composer), so a later "Back to landing" never
+    // shows a stale question.
+    dispatch({ type: "SET_HERO_INPUT", value: "" });
     enterChat(q);
   }, [state.heroInput, enterChat]);
 

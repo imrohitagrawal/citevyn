@@ -163,6 +163,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             live={live}
             pending={state.pending}
             highlightedIndex={state.highlight}
+            sendTick={state.sendTick}
           />
         </div>
       )}

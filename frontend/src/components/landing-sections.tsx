@@ -43,16 +43,21 @@ export function QuestionTicker({
 export function SourcesStrip() {
   return (
     <section className="sources-strip">
-      <span className="mono-label">Grounded in official documentation from</span>
-      <div className="tools-row">
-        {["CL", "CC", "CX", "GM"].map((g, i) => (
-          <div key={g} className="tool-item">
-            <span className="tool-badge">{g}</span>
-            <span className="tool-name">
-              {["Claude", "Claude Code", "Codex", "Gemini"][i]}
-            </span>
-          </div>
-        ))}
+      {/* The inner wrapper carries the horizontal padding + centered max-width
+          (.sources-strip-inner in landing.css); without it the label jams against
+          the viewport's left edge and reads as cut off. */}
+      <div className="sources-strip-inner">
+        <span className="mono-label">Grounded in official documentation from</span>
+        <div className="tools-row">
+          {["CL", "CC", "CX", "GM"].map((g, i) => (
+            <div key={g} className="tool-item">
+              <span className="tool-badge">{g}</span>
+              <span className="tool-name">
+                {["Claude", "Claude Code", "Codex", "Gemini"][i]}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
