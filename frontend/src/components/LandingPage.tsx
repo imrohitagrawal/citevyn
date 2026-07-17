@@ -114,7 +114,13 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
         <InteractiveDemo
           demoQuestions={demoQuestions}
           demo={{
-            q: heroItem.q,
+            // The question shown ABOVE the answer must be the question the answer
+            // is for — i.e. the selected demo (state.demo.key), NOT the hero's
+            // auto-rotating placeholder (heroItem.q). Binding it to heroItem.q let
+            // the header cycle independently of the answer, so the panel showed a
+            // question that didn't match its answer (looks like it answered the
+            // wrong thing — the opposite of the "trustworthy" promise).
+            q: KB[state.demo.key]?.q ?? "",
             text: state.demo.text,
             streaming: state.demo.streaming,
             done: state.demo.done,

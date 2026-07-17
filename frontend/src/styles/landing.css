@@ -1399,7 +1399,9 @@ body {
 }
 
 .demo-q-btn .demo-q-tag {
-  display: inline-block;
+  /* Own line BELOW the question — as a sibling inline span it collided with the
+     question text ("Claude Code?USAGE"). Block + margin-top gives the intended gap. */
+  display: block;
   margin-top: 6px;
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
