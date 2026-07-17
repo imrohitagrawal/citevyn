@@ -97,6 +97,16 @@ updates:
     # ghcr.io/astral-sh/uv:python3.12-bookworm-slim). The
     # ``docker-compose`` ecosystem below separately covers
     # the ``image:`` refs in the compose file.
+    # Group ALL base-image bumps into ONE PR (#82): the uv builder
+    # (ghcr.io/astral-sh/uv:python3.X) and the slim runtime
+    # (python:3.X-slim-bookworm) MUST move in lockstep, or a minor bump
+    # drifts the builder/runtime interpreter apart and ships a
+    # non-booting image (the exact class #34 fixed). One grouped PR
+    # keeps the two ``FROM`` interpreters aligned.
+    groups:
+      docker-base-images:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "docker"
