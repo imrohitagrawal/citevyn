@@ -166,9 +166,19 @@ async def seed_catalog(
             "title": "Codex CLI Reference",
             "source_url": "https://docs.example.com/codex",
             "chunk_heading": "CLI flags",
+            # Mirrors the real shipped worker source (codex.md: Installation +
+            # Authentication + CLI flags) so a source-named question with a
+            # question word — "How do I install the Codex CLI?", "Does Codex
+            # need an API key?" — is answerable on the HERMETIC path (exact +
+            # keyword, vector arm off on SQLite), guarding #87 against regression.
             "chunk_text": (
                 "The --model flag selects the model Codex uses for code "
-                "generation. Run 'codex --help' for the full list of flags."
+                "generation. Run 'codex --help' for the full list of flags. "
+                "Install the Codex CLI globally with npm ('npm install -g "
+                "@openai/codex') or on macOS with Homebrew ('brew install codex'). "
+                "Codex reads its credentials from the OPENAI_API_KEY environment "
+                "variable, or a stored login created by signing in through the CLI, "
+                "so it does need an API key (or a ChatGPT sign-in)."
             ),
         },
         {
@@ -177,10 +187,22 @@ async def seed_catalog(
             "title": "Gemini API Reference",
             "source_url": "https://docs.example.com/gemini",
             "chunk_heading": "Authentication",
+            # Mirrors the real shipped worker source (gemini_api.md:
+            # Authentication + Streaming responses) so "google gemini streaming
+            # responses" is answerable on the HERMETIC path (keyword arm, vector
+            # off on SQLite) — guards #87 against regression.
+            # NOTE: keep this text free of low-value function words shared with
+            # the paraphrase eval cases (e.g. "to") — the keyword arm's ≥2-token
+            # floor would otherwise let a single content token ("gemini") + a
+            # stray function word spuriously satisfy a semantic paraphrase and
+            # trip ``test_paraphrase_baseline_is_dead`` (the false-literal guard).
             "chunk_text": (
                 "Pass your Gemini API key in the x-goog-api-key header on "
                 "every request. The Gemini CLI also accepts the key in a "
-                "credentials file."
+                "credentials file. The Gemini API also supports streaming "
+                "responses: the streaming generate-content variant "
+                "(streamGenerateContent) returns the answer as a sequence of "
+                "partial chunks rather than one whole response."
             ),
         },
         {

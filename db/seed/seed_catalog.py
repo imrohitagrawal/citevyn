@@ -117,9 +117,11 @@ _DOC_DEFS: tuple[_DocDef, ...] = (
         heading="Model flag",
         chunk_text=(
             "Use `codex --model gpt-4` to pick a model. The default is "
-            "`gpt-3.5`. Environment variable OPENAI_API_KEY is required."
+            "`gpt-3.5`. Environment variable OPENAI_API_KEY is required. "
+            "Install the Codex CLI with npm ('npm install -g @openai/codex') "
+            "or Homebrew ('brew install codex')."
         ),
-        context_summary="Codex model flag",
+        context_summary="Codex model flag and installation",
         exact_term_text="--model",
         exact_term_type=_TERM_TYPE_MAP["cli_flag"],
     ),
