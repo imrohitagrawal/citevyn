@@ -480,12 +480,20 @@ export function useLandingState() {
       if (apiErr?.isRateLimited()) {
         kind = "warning";
         errorKind = "rate_limit";
-        title = "Rate limit reached";
+        title = "Too many requests";
         // Prefer the friendly copy over the raw "Request failed with status 429."
-        message = "You've hit the demo rate limit — please wait a minute and try again.";
+        // This is CiteVyn's own request throttle (not a provider quota), so it
+        // clears on its own — "wait a moment" is the right, non-technical guidance.
+        message = "You're sending requests a little too quickly — please wait a moment and try again.";
       } else if (apiErr?.isServerError()) {
-        title = "Backend unavailable";
-        message = "The answer service is temporarily unavailable. Please try again in a moment.";
+        // A 5xx here covers a transient answer-service outage: the answer provider
+        // not responding, a timeout, or a provider usage limit. Keep the copy plain
+        // and customer-facing — never surface "limit exhausted" / provider internals.
+        // "Try again in a moment" fits a passing blip; "if it keeps happening,
+        // contact support" is the honest escalation when it's a persistent limit.
+        title = "We couldn't get an answer";
+        message =
+          "We're having trouble reaching the answer service right now. Please try again in a moment — if it keeps happening, contact support.";
       } else if (apiErr) {
         message = apiErr.message || message;
       }

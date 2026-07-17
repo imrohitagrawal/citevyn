@@ -586,6 +586,24 @@ class Orchestrator:
         vector_degrade = result.vector_degrade
 
         if not evidence:
+            # A transiently-unavailable embedding provider (OpenRouter not
+            # responding, a timeout, a provider-side rate/quota limit) degrades the
+            # vector arm to no hits (#70 ⇒ ``VectorDegrade.unavailable``). When that
+            # outage leaves us with NO evidence from any arm, "no source" is
+            # UNTRUSTWORTHY: the grounded answer may well exist — we simply could not
+            # retrieve it this time. Emitting a content refusal here mislabels a
+            # transient infrastructure outage as "the corpus has no answer" and, worse,
+            # the client records that 200-refusal as a *successful* answer, so a re-ask
+            # of the same question is deduped and never retried. Raise a transient error
+            # instead: the API maps it (main.py) to a 5xx with a generic, non-technical
+            # "temporarily unavailable, please retry" envelope — no provider detail
+            # leaks — and the client's failed-question set lets the user retry, which
+            # succeeds once the provider recovers (or correctly refuses if genuinely
+            # off-corpus). This mirrors how an LLM-generation outage already surfaces.
+            if vector_degrade is VectorDegrade.unavailable:
+                raise OrchestratorError(
+                    "retrieval degraded: embedding provider unavailable — no evidence retrieved"
+                )
             # A question that named no product (answer-when-grounded, global
             # retrieval) and found no confident evidence is genuinely off-corpus —
             # give it the SAME helpful "I can answer about Claude/Codex/Gemini…"
