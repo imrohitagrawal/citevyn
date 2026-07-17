@@ -4,7 +4,8 @@
 
 The Gemini API is Google's REST interface for generating text, structured output,
 and embeddings from Gemini models. Requests are JSON over HTTPS and are
-authenticated with an API key. This page is an original, paraphrased summary of the
+authenticated with an API key. Gemini is a family of large language models (LLMs),
+so the Gemini API is an LLM-based service. This page is an original, paraphrased summary of the
 official Gemini API documentation, written for use as a grounded demo corpus.
 
 ## Authentication

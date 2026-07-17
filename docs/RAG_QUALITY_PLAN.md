@@ -604,6 +604,25 @@ plan skeptics:
 refusal leaks judged **0/19**, injection 0/2, groundedness 1.000/19, MRR/precision@1 1.000,
 judge 4.69, gate PASSED, zero residue. **Closes #112.**
 
+## 8a-11. Concepts/glossary source — conceptual questions now answer (#112 follow-up)
+
+Live QA: "what is an LLM?", "is Codex an LLM?", "what are the different models?" all REFUSED —
+no source doc defined these general terms, so declining was correct but unhelpful for a broad
+(non-developer) audience. Fix: a new **`concepts` source** (`app/worker/sources/concepts.md`,
+registered in `MVP_SOURCES`) — an original plain-language glossary defining an LLM and stating
+that Claude/Claude Code/Codex/Gemini are LLM-based tools — plus a one-line "it is an LLM-based
+tool" mention added to each product doc (so the *scoped* "is Codex an LLM?" route answers too).
+Mirrored into `conftest.seed_catalog` (+ `EXPECTED_AREAS`) so the eval corpus covers it, with
+two `postgres_only` golden cases (`concepts_lit_llm`, `concepts_par_llm` — they route
+`unsupported` → the global vector arm, dead hermetically).
+
+**Verified live** (real Postgres + router LLM): all three previously-refused questions now
+answer with citations — "What is an LLM?" cites `concepts`; "Is Codex an LLM?" → "Yes, Codex is
+an LLM-based tool… [1]" cites `codex`; "What are the different models?" answers from
+`concepts`+product docs. **Judged eval:** both concepts cases answered (judge 4, groundedness
+1.0); overall answerable **25/25**, multihop 5/5, followup 3/3, refusal leaks judged 0/19,
+injection 0/2, groundedness 1.000/20, MRR/precision@1 1.000, gate PASSED, zero residue.
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.

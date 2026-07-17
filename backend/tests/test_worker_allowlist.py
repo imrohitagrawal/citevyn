@@ -16,9 +16,10 @@ def test_mvp_sources_is_a_tuple() -> None:
     assert isinstance(MVP_SOURCES, tuple)
 
 
-def test_mvp_sources_has_five_entries() -> None:
-    """Five sources for the MVP: the four product docs + About CiteVyn (#49)."""
-    assert len(MVP_SOURCES) == 5
+def test_mvp_sources_has_six_entries() -> None:
+    """Six sources: the four product docs + About CiteVyn (#49) + the AI concepts/glossary
+    (#112 follow-up, so conceptual questions like "what is an LLM?" answer instead of refuse)."""
+    assert len(MVP_SOURCES) == 6
 
 
 def test_mvp_source_names_match_demo_catalog() -> None:
@@ -29,6 +30,7 @@ def test_mvp_source_names_match_demo_catalog() -> None:
         "codex",
         "gemini_api",
         "citevyn",
+        "concepts",
     }
 
 
