@@ -120,6 +120,11 @@ jobs:
       # can be BOOT-tested before any tag — including :latest — is published.
       # ``docker build`` succeeds on a non-booting image (interpreter/CMD breaks
       # surface at exec time), which is how the 3.14 bump shipped green (#82).
+      # Build into the LOCAL daemon (load, not pushed) with the FINAL labels
+      # already applied, so the exact artifact that will be published is the one
+      # boot-tested below. ``docker build`` succeeds on a non-booting image
+      # (interpreter/CMD breaks surface at exec time) — which is why the 3.14
+      # bump shipped green (#82) — so a build alone is not enough.
       - name: Build (load, not pushed yet)
         uses: docker/build-push-action@v7
         with:
@@ -127,6 +132,7 @@ jobs:
           file: infra/docker/Dockerfile.${{ matrix.target }}
           load: true
           tags: citevyn-${{ matrix.target }}:boot-check
+          labels: ${{ steps.meta.outputs.labels }}
           pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -134,7 +140,7 @@ jobs:
             VERSION=${{ needs.validate.outputs.version }}
 
       # Post-build boot gate (#82): a non-booting image fails the release here,
-      # BEFORE the push step below publishes :latest. Same script as the PR
+      # BEFORE any tag (incl. :latest) is published. Same script as the PR
       # image-smoke job and ``make image-smoke`` (per-role: api /health=200,
       # worker execs ``python -m app.worker.cli list-sources``).
       - name: Boot smoke (gate before publishing)
@@ -142,21 +148,22 @@ jobs:
           BUILD: "0"  # boot the just-built local image; do not rebuild
         run: ./infra/docker/scripts/image_smoke.sh ${{ matrix.target }} citevyn-${{ matrix.target }}:boot-check
 
-      # Only now publish every tag (incl. :latest). Reuses the gha cache from the
-      # load build above, so this is a fast metadata push, not a rebuild.
+      # Publish the EXACT bytes that just booted: re-tag the local boot-check
+      # image to every metadata tag (incl. :latest) and ``docker push``. No
+      # second BuildKit run, so there is zero chance of publishing a different
+      # (untested) artifact if a floating base tag moved or the cache evicted
+      # between build and push — the pushed image IS the boot-tested image.
       - name: Push (after boot smoke passes)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: infra/docker/Dockerfile.${{ matrix.target }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          pull: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            VERSION=${{ needs.validate.outputs.version }}
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${TAGS}" | while IFS= read -r tag; do
+            [ -n "${tag}" ] || continue
+            echo "Pushing ${tag}"
+            docker tag "citevyn-${{ matrix.target }}:boot-check" "${tag}"
+            docker push "${tag}"
+          done
 
   # ──────────────── 3. Draft the GitHub release ────────────────
   release:

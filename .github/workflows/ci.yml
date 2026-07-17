@@ -272,6 +272,10 @@ jobs:
   image-smoke:
     name: image build+boot smoke (api /health + worker exec)
     runs-on: ubuntu-latest
+    # Bound the job: the two image builds + boot polls are bounded by
+    # HEALTH_TIMEOUT inside the script, but a stuck BuildKit/pull could still
+    # hang — cap the whole job so it fails instead of burning a runner.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Build + boot the api and worker images
