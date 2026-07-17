@@ -29,6 +29,18 @@ contents field and optional generation settings such as the maximum output token
 and temperature. The response returns the generated candidates plus usage metadata
 describing how many tokens the prompt and the answer consumed.
 
+## Streaming responses
+
+To receive an answer incrementally instead of waiting for the whole response, call
+the streaming variant of generate-content — streamGenerateContent over REST, exposed
+as generateContentStream in the client SDKs. It returns the response as a sequence of
+partial chunks (candidate deltas); iterate over the chunks as they arrive and append
+each piece to what you have already shown. Streaming does not change the final
+result — only when you receive it — so it is the right choice for chat-style
+interfaces where rendering text as it is produced improves the perceived response
+time. Each chunk carries the same candidate structure as a non-streamed response, and
+usage metadata arrives with the final chunk.
+
 ## Embeddings
 
 The Gemini API also produces embedding vectors through the embedContent and

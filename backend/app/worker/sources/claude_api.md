@@ -27,11 +27,19 @@ immediately.
 
 ## Models
 
-The --model flag (or the "model" field in the JSON body) selects which Claude
-model handles a request. Choose a larger model for harder reasoning and a smaller
-model for latency-sensitive, high-volume calls. Model identifiers are versioned,
-so pin an explicit version in production rather than relying on an alias that may
-move over time.
+The Claude API offers three model families, each aimed at a different balance of
+capability, speed, and cost. Opus is the most capable, suited to the hardest
+reasoning and long agentic tasks. Sonnet balances intelligence and speed and is the
+usual choice for everyday production workloads. Haiku is the fastest and most
+cost-effective, made for near-instant, high-volume calls. Every family is released
+as versioned, dated model identifiers, and the documentation lists the current IDs
+along with each model's context window.
+
+The --model flag (or the "model" field in the JSON body) selects which of these
+Claude models handles a request. Choose a larger model for harder reasoning and a
+smaller model for latency-sensitive, high-volume calls. Because identifiers are
+versioned, pin an explicit version in production rather than relying on an alias
+that may move over time.
 
 ## Messages
 
