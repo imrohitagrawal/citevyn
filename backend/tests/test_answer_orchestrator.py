@@ -465,6 +465,67 @@ async def test_unsupported_offcorpus_refuses_after_global_retrieval(
     assert audits[0].metadata_["reason"] == "unsupported_domain"
 
 
+class _RewritingLLM:
+    """A non-stub LLM whose ``complete`` returns a fixed text. Used to prove the #112 rewrite
+    is a PURE RECALL improver: even when it (adversarially) injects a product name into a
+    pivot, routing must NOT flip to the scoped path — the query stays global (gated)."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
+        from app.llm.types import LLMResult
+
+        return LLMResult(
+            text=self._reply, input_tokens=1, output_tokens=1, model="fake", provider="router"
+        )
+
+    async def aclose(self) -> None: ...
+
+
+async def test_content_noun_pivot_rewrite_never_hijacks_routing_to_scoped(session: Any) -> None:
+    """#112 anti-hijack: a pivot follow-up ("what's the weather?") after a product turn routes
+    ``unsupported`` and the LLM rewrite fires — but because routing is fixed from the ORIGINAL
+    query, even a rewrite that injects "Claude API" retrieves GLOBALLY (product_area=None,
+    confidence-gated), never the scoped un-gated path. Empty evidence → still refuses."""
+    from datetime import UTC, datetime
+
+    # A real provider (not stub) so the entity-aware rewrite is enabled; the injected LLM
+    # below is used directly, so no network call happens.
+    settings = _settings(llm_provider="router")
+    # A prior product turn so recent_user_questions is non-empty and the rewrite fires.
+    session_id = uuid.uuid4()
+    session.add(
+        Message(
+            session_id=session_id,
+            role=MessageRole.user,
+            content="What is the rate limit for the Claude API?",
+            normalized_query="what is the rate limit for the claude api?",
+            domain=None,
+            intent=None,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+    retriever = _FakeRetriever([])  # gate drops the off-corpus query → no evidence
+    # The rewrite adversarially injects a product token — the worst case for hijacking.
+    hijacking_llm = _RewritingLLM("What is the Claude API weather tomorrow?")
+    orchestrator = Orchestrator(settings, session, llm=hijacking_llm, retriever=retriever)
+
+    response = await orchestrator.ask(
+        question="What's the weather tomorrow?",
+        request_id="req_pivot",
+        session_id=session_id,
+    )
+
+    # Refused (empty evidence on the global gated path), exactly as today.
+    assert response["unsupported"] is True and response["no_answer"] is True
+    # The rewrite changed the retrieval TEXT but NOT the routing: still global, never scoped.
+    assert len(retriever.calls) == 1
+    assert retriever.calls[0]["product_area"] is None  # NOT "claude_api"
+    assert retriever.calls[0]["question"] == "What is the Claude API weather tomorrow?"
+
+
 async def test_multihop_question_routes_to_retrieve_multi(session: Any) -> None:
     """A cross-product question retrieves EACH named product area (retrieve_multi),
     not the single first-match domain (Phase 3)."""

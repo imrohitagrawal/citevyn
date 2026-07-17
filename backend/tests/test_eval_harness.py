@@ -303,6 +303,20 @@ def test_loader_rejects_invalid_json(tmp_path: object) -> None:
             },
             "multihop case .* must not set gold_chunks",
         ),
+        (
+            # judge_only (#112) is validated only on the orchestrator-driven judged run, which
+            # runs on --postgres → it must be postgres_only too.
+            {
+                "id": "x",
+                "area": "codex",
+                "kind": "literal",
+                "question": "q",
+                "expected_gist": "g",
+                "expected_source": "codex",
+                "judge_only": True,
+            },
+            "sets judge_only but not postgres_only",
+        ),
     ],
 )
 def test_case_validation_rejects_inconsistent_rows(payload: dict[str, object], match: str) -> None:
@@ -579,6 +593,36 @@ def test_mrr_and_precision_pool_only_single_relevant_answerable() -> None:
     assert empty.as_dict()["ranked_total"] == 0
     assert empty.mrr == 1.0
     assert empty.precision_at_1 == 1.0
+
+
+def test_judge_only_case_is_excluded_from_the_retrieval_report() -> None:
+    """A judge_only followup (#112) needs the orchestrator's LLM rewrite, which the hermetic
+    retrieval path never calls — so it must NOT appear in the retrieval report (else it would
+    spuriously miss and drag followup_hit_rate/overall below the locked floor)."""
+    from tests.eval.cases import EvalCase
+    from tests.eval.retrieval import evaluate_retrieval
+
+    judge_only = EvalCase.from_dict(
+        {
+            "id": "judge_only_followup",
+            "area": "gemini_api",
+            "kind": "followup",
+            "postgres_only": True,
+            "judge_only": True,
+            "history": ["How do I authenticate to the Gemini API?"],
+            "question": "Is there a credentials file option?",
+            "expected_source": "gemini_api",
+            "expected_gist": "g",
+        },
+        origin="test",
+    )
+    plain = next(c for c in load_cases(GOLDEN_PATH) if c.id == "gemini_api_lit_authheader")
+    # Even on the --postgres path (postgres=... would seed real vectors), judge_only is filtered
+    # BEFORE any DB work, so we can assert exclusion on the hermetic run without Postgres.
+    report = asyncio.run(evaluate_retrieval([plain, judge_only]))
+    ids = {o.case_id for o in report.outcomes}
+    assert "judge_only_followup" not in ids
+    assert "gemini_api_lit_authheader" in ids
 
 
 def test_live_retrieval_populates_rank_aligned_chunk_keys() -> None:

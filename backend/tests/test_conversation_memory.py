@@ -18,9 +18,11 @@ import pytest
 
 from app.answer.memory import (
     build_contextual_query,
+    condense_question_llm,
     is_anaphoric_followup,
     recent_user_questions,
 )
+from app.llm.types import LLMResult
 from app.models import Message, MessageRole
 
 # ---------------------------------------------------------------------------
@@ -102,6 +104,52 @@ def test_intervening_nonproduct_turn_is_skipped() -> None:
 )
 def test_is_anaphoric_followup(text: str, expected: bool) -> None:
     assert is_anaphoric_followup(text) is expected
+
+
+# ---------------------------------------------------------------------------
+# condense_question_llm — LLM entity-aware rewrite (#112)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLLM:
+    """Records prompts and returns a fixed reply — lets the pure rewrite logic be tested
+    without a network call (the real rewrite quality is proven on the --postgres judged run)."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+        self.calls: list[dict[str, str]] = []
+
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float):
+        self.calls.append({"system": system, "user": user})
+        return LLMResult(
+            text=self._reply, input_tokens=1, output_tokens=1, model="fake", provider="stub"
+        )
+
+    async def aclose(self) -> None: ...
+
+
+@pytest.mark.asyncio
+async def test_condense_empty_history_is_a_noop_without_calling_the_llm() -> None:
+    llm = _FakeLLM("SHOULD NOT BE USED")
+    assert await condense_question_llm("Is there a credentials file option?", [], llm) == (
+        "Is there a credentials file option?"
+    )
+    assert llm.calls == []  # no LLM round-trip on a first turn
+
+
+@pytest.mark.asyncio
+async def test_condense_returns_the_rewrite_stripped_of_quotes() -> None:
+    llm = _FakeLLM('  "Is there a credentials file option for the Gemini API?"  ')
+    out = await condense_question_llm("Is there a credentials file option?", [_GEMINI_PRIOR], llm)
+    assert out == "Is there a credentials file option for the Gemini API?"
+    # Prior turns are handed to the model oldest-first inside the user prompt.
+    assert _GEMINI_PRIOR in llm.calls[0]["user"]
+
+
+@pytest.mark.asyncio
+async def test_condense_falls_back_on_empty_or_overlong_output() -> None:
+    assert await condense_question_llm("q", [_GEMINI_PRIOR], _FakeLLM("   ")) == "q"
+    assert await condense_question_llm("q", [_GEMINI_PRIOR], _FakeLLM("x" * 400)) == "q"
 
 
 # ---------------------------------------------------------------------------

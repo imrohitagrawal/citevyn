@@ -20,11 +20,18 @@ in the same change.
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
-| [#112](https://github.com/imrohitagrawal/citevyn/issues/112) | Conversation memory: entity-aware rewrite for off-corpus topic-pivot follow-ups (honest relevance miss when a pivot is semantically adjacent to the prior topic) | backend / RAG | Low (LLM net refuses clear pivots; bounded phrasing class) | Phase 3b fan-out review |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |
 
 ## Recently closed
+
+- **[#112](https://github.com/imrohitagrawal/citevyn/issues/112)** — Conversation memory:
+  entity-aware CONTENT-NOUN follow-up rewrite. A follow-up naming no product + no bare anaphora
+  ("is there a credentials file option?") used to refuse; `condense_question_llm` now resolves
+  it via an LLM standalone-question rewrite, wired as a PURE recall-improver on the answer-when-
+  grounded path (can't hijack routing). Deterministic regex kept for the hermetic followup gate;
+  a new `judge_only` eval flag validates the case on the judged run only. Answered + gate green
+  (stable ×3), locked numbers unchanged. See RAG_QUALITY_PLAN §8a-10.
 
 - **[#85](https://github.com/imrohitagrawal/citevyn/issues/85)** — CI flake: `compose-db-smoke`
   `db-verify` raced the pgvector:pg18 first-boot restart (`FATAL: shutting down` / `database
