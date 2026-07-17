@@ -667,8 +667,11 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 28px 40px;
-  justify-content: space-between;
+  /* Keep the label and the tools together (a tidy "label: tool tool tool" row)
+     rather than pushed to opposite edges — ``space-between`` left a large gap on
+     wide screens. The row-gap keeps them spaced when they wrap on narrow screens. */
+  gap: 20px 32px;
+  justify-content: flex-start;
 }
 
 .mono-label {
@@ -677,7 +680,9 @@ body {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--faint);
-  max-width: 180px;
+  /* Stay on ONE straight line — the old ``max-width: 180px`` forced
+     "Grounded in official documentation from" to wrap onto 2–3 lines. */
+  white-space: nowrap;
   line-height: 1.5;
 }
 
