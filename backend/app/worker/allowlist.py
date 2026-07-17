@@ -89,10 +89,10 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
     SourceSpec(
         name="codex",
         product_area="codex",
-        title="Codex CLI Reference",
+        title="Codex Reference",
         fetcher="local",
         location="app/worker/sources/codex.md",
-        source_url="https://developers.openai.com/codex/cli/",
+        source_url="https://openai.com/codex/",
     ),
     SourceSpec(
         name="gemini_api",

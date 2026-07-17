@@ -2,11 +2,14 @@
 
 ## Overview
 
-Claude Code is Anthropic's agentic coding tool that runs in the terminal, reads
-and edits files in your project, runs commands, and answers questions about the
-codebase. It is powered by Claude, a large language model (LLM), so Claude Code is
-an LLM-based tool. This page is an original, paraphrased summary of the official Claude
-Code documentation, written for use as a grounded demo corpus.
+Claude Code is Anthropic's agentic coding tool for working on a codebase in plain
+language — it reads and edits files in your project, runs commands, and answers
+questions about the code. It is available in several forms that share the same
+agent: a command-line tool in your terminal, a desktop app, a web app, and
+extensions for popular IDEs such as VS Code and JetBrains. It is powered by
+Claude, a large language model (LLM), so Claude Code is an LLM-based tool. This
+page is an original, paraphrased summary of the official Claude Code
+documentation, written for use as a grounded demo corpus.
 
 ## Permissions
 

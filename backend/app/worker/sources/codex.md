@@ -2,11 +2,14 @@
 
 ## Overview
 
-Codex is OpenAI's command-line coding agent. It runs in the terminal, reads and
-edits files in your working directory, and can execute commands to implement and
-verify changes. It is powered by a large language model (LLM), so Codex is an
-LLM-based tool. This page is an original, paraphrased summary of the official
-Codex CLI documentation, written for use as a grounded demo corpus.
+Codex is OpenAI's agentic coding agent for software-engineering tasks such as
+writing code, fixing bugs, and running commands. It is not a single app but a
+family of surfaces that share the same underlying agent: a command-line tool that
+runs in your terminal (the Codex CLI), a desktop app, extensions for popular IDEs,
+and a cloud service, and it is also built into ChatGPT. It is powered by a large
+language model (LLM), so Codex is an LLM-based tool. This page is an original,
+paraphrased summary of the official Codex documentation; the details below focus
+on the Codex CLI, but the other surfaces share the same core behavior.
 
 ## Installation
 

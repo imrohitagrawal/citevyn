@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -150,11 +151,44 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
-        source_version_hash=settings.source_version_hash,
+        # Derive the snapshot hash from the ACTUAL corpus content, not the static
+        # ``settings.source_version_hash``. The answer-cache key includes this hash
+        # (see ``cache.build_cache_key``), so a constant value meant a doc edit +
+        # re-ingest left the cache serving the OLD answer until someone manually
+        # bumped the constant or the TTL expired. Hashing real content makes any
+        # edit change the hash → the cache key changes → stale answers invalidate
+        # on the next ingest, automatically.
+        source_version_hash=_content_version_hash(MVP_SOURCES),
         index_version=index_version,
         embedding_provider=settings.embedding_provider,
         embedding_model=settings.embedding_model,
     )
+
+
+def _content_version_hash(
+    sources: Sequence[SourceSpec],
+    *,
+    fetch: Callable[[SourceSpec], str] | None = None,
+) -> str:
+    """Return ``sha256:<hex>`` over the actual content of every source.
+
+    Hashes each source's fetched text (in a stable name-sorted order, with the
+    source name mixed in so a rename also changes the hash) so the result is a
+    deterministic fingerprint of the whole corpus. This is what makes the answer
+    cache self-invalidate when a source doc is edited — see the call site. Hashing
+    the full ``MVP_SOURCES`` (not just the ``--source`` subset) keeps the fingerprint
+    corpus-wide, so a single-source re-ingest still reflects the true snapshot.
+
+    ``fetch`` is injectable for testing; it defaults to the real per-source fetcher.
+    """
+    read = fetch if fetch is not None else (lambda spec: build_fetcher(spec).fetch(spec))
+    digest = hashlib.sha256()
+    for spec in sorted(sources, key=lambda s: s.name):
+        digest.update(spec.name.encode("utf-8"))
+        digest.update(b"\x1f")
+        digest.update(read(spec).encode("utf-8"))
+        digest.update(b"\x1e")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _pick_first_source() -> SourceSpec:
