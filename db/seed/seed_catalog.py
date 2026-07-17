@@ -48,6 +48,12 @@ from app.models import (  # noqa: E402
     TermType,
 )
 
+# Package-relative so it resolves under BOTH layouts: repo-root
+# ``python -m db.seed.seed_catalog`` (package ``db.seed``) and the deploy image's
+# ``python -m seed.seed_catalog`` with ``PYTHONPATH=/db`` (package ``seed``, no
+# top-level ``db``). An absolute ``from db.seed import ...`` breaks the latter.
+from . import redact_database_url  # noqa: E402
+
 INDEX_VERSION: str = "v1"
 SOURCE_VERSION_HASH: str = "sha256:demo-seed-v1"
 SOURCE_NAME: str = "docs.test"
@@ -237,7 +243,10 @@ async def seed(database_url: str) -> dict[str, int]:
             seeded_chunks.append(chunk)
 
             # --- exact term (optional) ----------------------------------
-            if definition.exact_term_text is not None and definition.exact_term_type is not None:
+            if (
+                definition.exact_term_text is not None
+                and definition.exact_term_type is not None
+            ):
                 existing_term = await session.scalar(
                     select(ExactTerm).where(
                         ExactTerm.term_text == definition.exact_term_text,
@@ -282,7 +291,11 @@ async def seed(database_url: str) -> dict[str, int]:
             # provider-bearing identity, re-embed ALL chunks, not just the NULL ones, so
             # the vectors and the stamp we write below are always in the same space.
             current = (
-                (active.embedding_provider, active.embedding_model, active.embedding_dim)
+                (
+                    active.embedding_provider,
+                    active.embedding_model,
+                    active.embedding_dim,
+                )
                 if active is not None
                 else (None, None, None)
             )
@@ -294,7 +307,9 @@ async def seed(database_url: str) -> dict[str, int]:
                     else [c for c in seeded_chunks if c.embedding is None]
                 )
                 if to_embed:
-                    vectors = await embedder.embed_documents([c.chunk_text for c in to_embed])
+                    vectors = await embedder.embed_documents(
+                        [c.chunk_text for c in to_embed]
+                    )
                     for chunk, vector in zip(to_embed, vectors, strict=True):
                         chunk.embedding = vector
                     tally["embedded"] = len(to_embed)
@@ -318,8 +333,9 @@ def main() -> None:
     """CLI entry point: seed and print a one-line summary."""
     settings = get_settings()
     tally = asyncio.run(seed(settings.database_url))
+    # Redact the password: this line lands in deploy.sh / CI logs (#93).
     print(
-        f"Seeded catalog into {settings.database_url}: "
+        f"Seeded catalog into {redact_database_url(settings.database_url)}: "
         f"index_versions=+{tally['index_versions']} "
         f"documents=+{tally['documents']} "
         f"chunks=+{tally['chunks']} "

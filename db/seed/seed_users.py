@@ -22,6 +22,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from app.core.config import get_settings  # noqa: E402
 from app.models import User, UserRole  # noqa: E402
 
+# Package-relative so it resolves under BOTH layouts: repo-root
+# ``python -m db.seed.seed_users`` (package ``db.seed``) and the deploy image's
+# ``python -m seed.seed_users`` with ``PYTHONPATH=/db`` (package ``seed``, no
+# top-level ``db``). An absolute ``from db.seed import ...`` breaks the latter.
+from . import redact_database_url  # noqa: E402
+
 DEFAULT_USERS: tuple[tuple[str, UserRole], ...] = (
     ("demo_user", UserRole.demo_user),
     ("admin", UserRole.admin),
@@ -34,9 +40,7 @@ async def seed(database_url: str) -> None:
     now = datetime.now(UTC)
     async with sessionmaker() as session:  # type: AsyncSession
         for user_id, role in DEFAULT_USERS:
-            existing = await session.scalar(
-                select(User).where(User.user_id == user_id)
-            )
+            existing = await session.scalar(select(User).where(User.user_id == user_id))
             if existing is not None:
                 continue
             session.add(User(user_id=user_id, role=role, created_at=now))
@@ -47,7 +51,10 @@ async def seed(database_url: str) -> None:
 def main() -> None:
     settings = get_settings()
     asyncio.run(seed(settings.database_url))
-    print(f"Seeded {len(DEFAULT_USERS)} users into {settings.database_url}.")
+    # Redact the password: this line lands in deploy.sh / CI logs (#93).
+    print(
+        f"Seeded {len(DEFAULT_USERS)} users into {redact_database_url(settings.database_url)}."
+    )
 
 
 if __name__ == "__main__":
