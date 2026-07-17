@@ -743,3 +743,42 @@ async def test_reranker_passthrough() -> None:
     r = Reranker()
     out = await r.rerank("q", hits, top_k=3)
     assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
+# #87 regression: a question that NAMES a source and carries a question word
+# ("install" / "how do I" / "need") must return non-empty evidence on the
+# hermetic path (exact + keyword; the vector arm is off on SQLite). The bug was
+# that the thin conftest codex/gemini fixtures lacked the content the real
+# shipped corpus has, so scoped keyword retrieval found nothing and the
+# orchestrator refused a legitimate, indexed question. The enriched fixtures now
+# mirror the real sources (codex.md install/auth; gemini_api.md streaming).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("question", "product_area", "expected_substr"),
+    [
+        # ``expected_substr`` must appear in some retrieved chunk — a stronger
+        # assertion than "non-empty", because the pre-fix thin fixture could still
+        # return the WRONG chunk via a noise token (e.g. ILIKE '%i%' matching
+        # "generation"). Requiring the ACTUAL answer content makes this fail on the
+        # un-enriched fixture, so it is a genuine #87 regression tripwire.
+        ("How do I install the Codex CLI?", Domain.codex.value, "npm install"),
+        ("Does Codex need an API key?", Domain.codex.value, "OPENAI_API_KEY"),
+        # Assert a unique identifier ("streamGenerateContent") rather than the bare
+        # word "streaming" so a future unrelated gemini chunk mentioning "streaming"
+        # can't satisfy this without the actual #87 streaming-response content.
+        ("google gemini streaming responses", Domain.gemini_api.value, "streamGenerateContent"),
+    ],
+)
+async def test_source_named_question_word_returns_evidence_hermetically(
+    seeded_session, question: str, product_area: str, expected_substr: str
+) -> None:
+    r = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await r.retrieve(question, product_area=product_area, intent=Intent.how_to)
+    assert result.hits, f"#87: no evidence for source-named question {question!r}"
+    # Evidence stays scoped to the named source (no cross-product contamination)...
+    assert all(h.product_area == product_area for h in result.hits)
+    # ...and the RIGHT content was retrieved, not just any chunk in the domain.
+    assert any(expected_substr in h.chunk_text for h in result.hits), (
+        f"#87: retrieved evidence for {question!r} lacks {expected_substr!r}"
+    )

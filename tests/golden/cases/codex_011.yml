@@ -1,0 +1,10 @@
+id: codex_011
+title: Codex install how-to (source-named question word, #87 acceptance repro)
+type: answer
+area: codex
+question: How do I install the Codex CLI?
+answer_style: short
+expect_citations_min: 1
+expect_domain: codex
+expect_citation_url_contains: docs.example.com/codex
+expect_answer_cites_index: true
