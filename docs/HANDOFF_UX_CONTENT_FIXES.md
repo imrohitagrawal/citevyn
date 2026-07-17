@@ -97,11 +97,13 @@ cd backend && CITEVYN_DATABASE_URL=$DB_URL CITEVYN_ENVIRONMENT=local CITEVYN_EMB
 CITEVYN_DATABASE_URL=$DB_URL CITEVYN_ENVIRONMENT=local CITEVYN_LLM_PROVIDER=router \
   CITEVYN_OPENROUTER_API_KEY=$OR_KEY CITEVYN_EMBEDDING_PROVIDER=openrouter \
   CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 &
-curl -s -X POST :8000/v1/admin/index_versions/v-local/promote -H "X-Admin-API-Key: local-admin-key"
+# promote v-local to active: POST /v1/admin/index_versions/v-local/promote with the admin key in
+#   the X-Admin-API-Key request header (dev default is the publicly-known local-admin-key).
 # frontend (proxies /v1 → :8000; VITE_API_LIVE=true already in frontend/.env.local):
 cd frontend && npm run dev                                 # http://localhost:3000
-# chat API: POST /v1/sessions {"user_id":"demo_user","channel":"chat"} (Bearer local-demo-key);
-#           POST /v1/sessions/{id}/messages {"message":"..."}   (field is "message", NOT "content")
+# chat API: POST /v1/sessions {"user_id":"demo_user","channel":"chat"} with a Bearer demo token
+#   (dev default local-demo-key); then POST /v1/sessions/{id}/messages {"message":"..."}   (the
+#   request field is "message", NOT "content").
 ```
 Gotchas: DB password comes from infra/docker/.env (NOT literal "citevyn"); `make demo`/`make seed`
 default DB_URL uses citevyn:citevyn — pass DB_URL explicitly. seed_users required. Session channel
