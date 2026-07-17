@@ -46,7 +46,7 @@ export function Hero({
         <div>
           <div className="status-badge">
             <span className="status-dot" />
-            Cited answers for AI dev tools
+            Cited answers for your AI tools
           </div>
 
           <h1 className="hero-title">

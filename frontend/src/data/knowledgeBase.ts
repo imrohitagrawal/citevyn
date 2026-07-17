@@ -123,7 +123,7 @@ export const KB: Record<string, KBEntry> = {
     q: "What's the best laptop for AI coding?",
     tag: "OUT OF SCOPE",
     refusal: true,
-    a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using indexed official documentation. I don't have credible source material in this assistant to answer that.",
+    a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.",
     sources: [],
   },
   // Canned answer for the "Get Pro" pricing CTA. Keyed like any other entry so
@@ -132,7 +132,7 @@ export const KB: Record<string, KBEntry> = {
   "pro": {
     q: "What do I get with CiteVyn Pro?",
     tag: "PRICING",
-    a: "Pro isn't live yet — CiteVyn is an MVP demo, and everything here is free to try. Pro will add higher rate limits, exact lookups, saved history, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
+    a: "Pro isn't live yet — CiteVyn is an early demo, and everything here is free to try. Pro will add higher rate limits, exact lookups, saved history, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
     sources: [],
   },
 };
@@ -170,7 +170,7 @@ export const PLACEHOLDERS = [
 
 /** Fallback answer when no KB entry matches */
 export const GENERIC_REFUSAL =
-  "I can answer questions about Claude, Claude Code, Codex, and Gemini using indexed official documentation. I don't have credible source material in this assistant to answer that.";
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Keyword matcher — routes free-typed questions to a KB entry
@@ -288,13 +288,13 @@ export function matchCitevynMeta(text: string): KBEntry | null {
   // Which tools / coverage.
   if (/cover|support|which tool|what tool|\btools\b|products/.test(t)) {
     return meta(
-      "CiteVyn covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini — using their official documentation only. ChatGPT and Cursor are on the roadmap, not in the MVP.",
+      "CiteVyn covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini today — using their official documentation only. ChatGPT and Cursor are planned, but not available yet.",
     );
   }
   // Trust / hallucination / accuracy.
   if (/hallucin|guess|accura|trust|reliab|made up|wrong/.test(t)) {
     return meta(
-      "CiteVyn is designed not to hallucinate: every answer is grounded in indexed official docs and links to the exact source page so you can verify it, and if the docs don't support an answer it refuses instead of guessing.",
+      "CiteVyn is designed not to hallucinate: every answer is grounded in the official docs and links to the exact source page so you can verify it, and if the docs don't support an answer it refuses instead of guessing.",
     );
   }
   // Freshness / index.
@@ -305,7 +305,7 @@ export function matchCitevynMeta(text: string): KBEntry | null {
   }
   // Generic "what is CiteVyn".
   return meta(
-    "CiteVyn gives you cited, checkable answers about AI dev tools (Claude, Claude Code, Codex, Gemini) straight from the makers' official docs — every claim links to the exact source page, and it says \"I don't know\" instead of guessing.",
+    "CiteVyn gives you cited, checkable answers about your AI tools (Claude, Claude Code, Codex, Gemini) straight from the makers' official docs — every claim links to the exact source page, and it says \"I don't know\" instead of guessing.",
   );
 }
 
@@ -348,11 +348,11 @@ export interface FAQItem {
 export const FAQ_DATA: FAQItem[] = [
   {
     q: "Which tools does CiteVyn cover?",
-    a: "The MVP covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini — using their official documentation only. ChatGPT and Cursor are on the roadmap, not in the MVP.",
+    a: "CiteVyn covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini today — using their official documentation only. ChatGPT and Cursor are planned, but not available yet.",
   },
   {
     q: "How do citations work?",
-    a: "Every factual answer is generated only from retrieved documentation chunks, and each is attached to the exact source page it came from. If a claim isn't supported by a source, it isn't made.",
+    a: "Every factual answer is built only from passages of the official docs, and each claim links to the exact source page it came from. If a claim isn't backed by a source, it isn't made.",
   },
   {
     q: "What happens when it can't find an answer?",
@@ -360,11 +360,11 @@ export const FAQ_DATA: FAQItem[] = [
   },
   {
     q: "Does CiteVyn hallucinate?",
-    a: "It's designed not to. Answers are grounded in indexed official docs and gated by an evaluation suite targeting 95%+ citation correctness and faithfulness before release.",
+    a: "It's designed not to. Answers are grounded in the official docs and checked by an automated quality suite — targeting 95%+ correct, faithful citations — before each release.",
   },
   {
     q: "Can it answer questions about my private docs?",
-    a: "Not in the MVP — it uses public official documentation only. Private-source ingestion, SSO, and tenant isolation are part of the Enterprise roadmap.",
+    a: "Not yet — today it uses public official documentation only. Connecting your own private docs, single sign-on, and per-team data isolation are planned for Enterprise.",
   },
   {
     q: "How fresh is the documentation?",
@@ -390,7 +390,7 @@ export interface FeatureCard {
 export const STAT_GATES: StatGate[] = [
   { label: "Citation correctness", value: "≥95%" },
   { label: "Guardrail on critical cases", value: "100%" },
-  { label: "Retrieval hit rate", value: "≥95%" },
+  { label: "Found the right source", value: "≥95%" },
 ];
 
 export const FEATURE_CARDS: FeatureCard[] = [

@@ -933,21 +933,6 @@ export function useLandingState() {
     }),
   );
 
-  const faqItems = [
-    { q: "Which tools does CiteVyn cover?", a: "The MVP covers Claude (API), Claude Code, OpenAI Codex, and Google Gemini — using their official documentation only. ChatGPT and Cursor are on the roadmap, not in the MVP." },
-    { q: "How do citations work?", a: "Every factual answer is generated only from retrieved documentation chunks, and each is attached to the exact source page it came from. If a claim isn't supported by a source, it isn't made." },
-    { q: "What happens when it can't find an answer?", a: "CiteVyn refuses rather than guesses. If the docs don't support a reliable answer, or the question is outside the supported tools, it tells you so plainly instead of hallucinating." },
-    { q: "Does CiteVyn hallucinate?", a: "It's designed not to. Answers are grounded in indexed official docs and gated by an evaluation suite targeting 95%+ citation correctness and faithfulness before release." },
-    { q: "Can it answer questions about my private docs?", a: "Not in the MVP — it uses public official documentation only. Private-source ingestion, SSO, and tenant isolation are part of the Enterprise roadmap." },
-    { q: "How fresh is the documentation?", a: "CiteVyn serves from the last known-good index, so a failed re-index never corrupts what's live. Scheduled source refresh is an Enterprise feature." },
-  ].map((f, i) => ({
-    q: f.q,
-    a: f.a,
-    open: state.openFaq === i,
-    sign: state.openFaq === i ? "−" : "+",
-    toggle: () => toggleFaq(i),
-  }));
-
   return {
     state,
     dispatch,
@@ -966,7 +951,6 @@ export function useLandingState() {
     heroChips,
     chatView,
     chatSuggestions,
-    faqItems,
     openFaq: state.openFaq,
     heroRef,
     onHeroInput,

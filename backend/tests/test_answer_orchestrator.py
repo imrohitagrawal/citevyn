@@ -73,7 +73,7 @@ def _settings(**overrides: Any) -> Settings:
         cache_ttl_seconds=3600,
         unsupported_refusal=(
             "I can answer questions about Claude, Claude Code, Codex, and "
-            "Gemini using indexed official documentation. I do not have "
+            "Gemini using their official documentation. I do not have "
             "credible source material in this assistant to answer that."
         ),
         no_answer_fallback=(

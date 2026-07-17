@@ -16,7 +16,7 @@ DEFAULT_NO_ANSWER_FALLBACK: str = (
 
 DEFAULT_UNSUPPORTED_REFUSAL: str = (
     "I can answer questions about Claude, Claude Code, Codex, and Gemini using "
-    "indexed official documentation. I do not have credible source material in "
+    "their official documentation. I do not have credible source material in "
     "this assistant to answer that."
 )
 

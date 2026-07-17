@@ -1,5 +1,6 @@
 /**
- * ChatView — Full-screen demo chat with canned responses.
+ * ChatView — Full-screen chat. Renders live answers from the official docs, or
+ * sample answers in demo mode.
  */
 
 import { useEffect, useRef } from "react";
@@ -113,7 +114,7 @@ export function ChatView({
           ← Back to landing
         </button>
         <span className="demo-badge">
-          {live ? "LIVE — backend answers" : "DEMO — canned responses"}
+          {live ? "LIVE — answering from the docs" : "DEMO — sample answers"}
         </span>
       </div>
 
@@ -251,8 +252,8 @@ export function ChatView({
           </button>
         </div>
         <p className="composer-hint">
-          CiteVyn answers from indexed official docs.{" "}
-          {live ? "Answers come from the live backend." : "This is a demo with canned responses."}
+          CiteVyn answers from the official docs.{" "}
+          {live ? "This answer was generated live, just now." : "This is a sample answer for the demo."}
         </p>
       </div>
     </main>
