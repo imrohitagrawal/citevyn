@@ -48,6 +48,8 @@ from app.models import (  # noqa: E402
     TermType,
 )
 
+from db.seed import redact_database_url  # noqa: E402
+
 INDEX_VERSION: str = "v1"
 SOURCE_VERSION_HASH: str = "sha256:demo-seed-v1"
 SOURCE_NAME: str = "docs.test"
@@ -318,8 +320,9 @@ def main() -> None:
     """CLI entry point: seed and print a one-line summary."""
     settings = get_settings()
     tally = asyncio.run(seed(settings.database_url))
+    # Redact the password: this line lands in deploy.sh / CI logs (#93).
     print(
-        f"Seeded catalog into {settings.database_url}: "
+        f"Seeded catalog into {redact_database_url(settings.database_url)}: "
         f"index_versions=+{tally['index_versions']} "
         f"documents=+{tally['documents']} "
         f"chunks=+{tally['chunks']} "

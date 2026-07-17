@@ -317,6 +317,79 @@ async def test_db_seed_backfill_reseed_populates_preexisting_null_chunks(monkeyp
             await engine.dispose()
 
 
+# ---------------------------------------------------------------------------
+# db/seed: never log the DB password to stdout (#93)
+# ---------------------------------------------------------------------------
+
+_SECRET_PW = "sup3r-s3cret-pw"  # noqa: S105 — test fixture, not a real credential
+_URL_WITH_PW = f"postgresql+psycopg://citevyn:{_SECRET_PW}@db:5432/citevyn"
+
+
+def test_redact_database_url_masks_password() -> None:
+    from db.seed import redact_database_url
+
+    redacted = redact_database_url(_URL_WITH_PW)
+    assert _SECRET_PW not in redacted
+    # Still useful for operators: driver, user, host, db survive.
+    assert "postgresql+psycopg" in redacted
+    assert "db:5432/citevyn" in redacted
+
+
+def test_redact_database_url_never_echoes_unparseable_value() -> None:
+    """A malformed URL must not be echoed verbatim — it could still hold a secret."""
+    from db.seed import redact_database_url
+
+    assert _SECRET_PW not in redact_database_url(f"::::not a url::::{_SECRET_PW}")
+
+
+def test_seed_users_main_does_not_print_password(monkeypatch, capsys) -> None:
+    """Regression (#93): ``seed_users`` success line must not leak the password.
+
+    Synchronous by design: ``main`` calls ``asyncio.run`` internally, which
+    cannot run inside a pytest-asyncio event loop.
+    """
+    import db.seed.seed_users as seedmod
+
+    real = Settings(database_url=_URL_WITH_PW, _env_file=None)
+    monkeypatch.setattr(seedmod, "get_settings", lambda: real)
+
+    # Stub the DB work so the test stays hermetic (no real Postgres connection).
+    async def _noop_seed(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(seedmod, "seed", _noop_seed)
+    seedmod.main()
+    out = capsys.readouterr().out
+    assert _SECRET_PW not in out
+    assert "db:5432/citevyn" in out
+
+
+def test_seed_catalog_main_does_not_print_password(monkeypatch, capsys) -> None:
+    """Regression (#93): ``seed_catalog`` success line must not leak the password.
+
+    Synchronous by design: ``main`` calls ``asyncio.run`` internally.
+    """
+    import db.seed.seed_catalog as seedmod
+
+    real = Settings(database_url=_URL_WITH_PW, _env_file=None)
+    monkeypatch.setattr(seedmod, "get_settings", lambda: real)
+
+    async def _fake_seed(_url: str) -> dict[str, int]:
+        return {
+            "index_versions": 0,
+            "documents": 0,
+            "chunks": 0,
+            "exact_terms": 0,
+            "embedded": 0,
+        }
+
+    monkeypatch.setattr(seedmod, "seed", _fake_seed)
+    seedmod.main()
+    out = capsys.readouterr().out
+    assert _SECRET_PW not in out
+    assert "db:5432/citevyn" in out
+
+
 async def test_db_seed_provider_switch_reembeds_all_and_never_stamps_stale(monkeypatch) -> None:
     """Review finding (silent-failure/data-safety): switching providers on an already
     embedded DB must RE-EMBED every chunk under the new provider before re-stamping —

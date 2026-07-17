@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from app.core.config import get_settings  # noqa: E402
 from app.models import User, UserRole  # noqa: E402
 
+from db.seed import redact_database_url  # noqa: E402
+
 DEFAULT_USERS: tuple[tuple[str, UserRole], ...] = (
     ("demo_user", UserRole.demo_user),
     ("admin", UserRole.admin),
@@ -47,7 +49,8 @@ async def seed(database_url: str) -> None:
 def main() -> None:
     settings = get_settings()
     asyncio.run(seed(settings.database_url))
-    print(f"Seeded {len(DEFAULT_USERS)} users into {settings.database_url}.")
+    # Redact the password: this line lands in deploy.sh / CI logs (#93).
+    print(f"Seeded {len(DEFAULT_USERS)} users into {redact_database_url(settings.database_url)}.")
 
 
 if __name__ == "__main__":
