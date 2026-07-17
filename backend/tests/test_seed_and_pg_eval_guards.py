@@ -10,6 +10,7 @@ and ``test_eval_semantic_discrimination`` (both make real API calls).
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -339,7 +340,81 @@ def test_redact_database_url_never_echoes_unparseable_value() -> None:
     """A malformed URL must not be echoed verbatim — it could still hold a secret."""
     from db.seed import redact_database_url
 
-    assert _SECRET_PW not in redact_database_url(f"::::not a url::::{_SECRET_PW}")
+    out = redact_database_url(f"::::not a url::::{_SECRET_PW}")
+    assert _SECRET_PW not in out
+    # Lock the exact placeholder so a future bug returning "" / None still fails.
+    assert out == "<unparseable database url>"
+
+
+def test_redact_database_url_empty_returns_placeholder() -> None:
+    """An empty URL yields the placeholder, never a bare/echoed value."""
+    from db.seed import redact_database_url
+
+    assert redact_database_url("") == "<unparseable database url>"
+
+
+def test_redact_database_url_percent_encoded_special_chars_masked() -> None:
+    """The SUPPORTED form (special chars percent-encoded) masks cleanly."""
+    from db.seed import redact_database_url
+
+    # p@ss/word → p%40ss%2Fword (correctly encoded), single raw '@'.
+    redacted = redact_database_url("postgresql+psycopg://u:p%40ss%2Fword@h:5432/d")
+    assert "p%40ss%2Fword" not in redacted
+    assert "p@ss/word" not in redacted
+    assert "***" in redacted
+    assert "h:5432/d" in redacted
+
+
+def test_redact_database_url_raw_at_in_password_bails_to_placeholder() -> None:
+    """A raw (unencoded) '@' in the password would make make_url mis-split and
+    leak a fragment into the host — the >1-'@' guard bails to the placeholder."""
+    from db.seed import redact_database_url
+
+    leaky = "postgresql+psycopg://u:pa@ssword@h:5432/d"
+    out = redact_database_url(leaky)
+    assert out == "<unparseable database url>"
+    assert "ssword" not in out
+
+
+def test_seed_scripts_import_under_deploy_layout(tmp_path) -> None:
+    """Regression (#93 review, F1): the deploy image runs ``python -m seed.seed_users``
+    with ``PYTHONPATH=/db`` (package ``seed``, no top-level ``db``). A package-relative
+    import must resolve there; an absolute ``from db.seed import`` raised
+    ``ModuleNotFoundError: No module named 'db'`` and broke the prod seed step whose
+    logs #93 set out to protect."""
+    import shutil
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    dst = tmp_path / "db"
+    shutil.copytree(repo_root / "db", dst, ignore=shutil.ignore_patterns("__pycache__"))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join([str(dst), str(repo_root / "backend")])
+    # Import both seed modules as the deploy image does (package ``seed``).
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import seed.seed_users, seed.seed_catalog; "
+            "from seed import redact_database_url; "
+            "print(redact_database_url('postgresql+psycopg://u:sekret@h:5432/d'))",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"deploy-layout import failed: {result.stderr}"
+    assert "sekret" not in result.stdout
+    assert "***" in result.stdout
+
+
+def test_seed_scripts_import_under_repo_root_layout() -> None:
+    """The repo-root / CI layout (``python -m db.seed.*``, package ``db.seed``)
+    must also resolve the relative import."""
+    import importlib
+
+    for mod in ("db.seed.seed_users", "db.seed.seed_catalog"):
+        assert importlib.import_module(mod) is not None
 
 
 def test_seed_users_main_does_not_print_password(monkeypatch, capsys) -> None:
