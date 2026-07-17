@@ -50,3 +50,15 @@ Settings are layered: user-level settings apply everywhere, and project-level
 settings override them for a specific repository. Prefer project settings for
 anything team-specific so the configuration travels with the code and every
 contributor gets the same behavior.
+
+## Cost and billing
+
+Claude Code has no separate license fee of its own — what you pay for is the Claude
+usage it consumes, billed through your Anthropic account. That works in one of two
+ways, chosen when you authenticate: pay-as-you-go API token usage billed through the
+Anthropic Console, or an eligible Claude subscription plan whose allowance covers
+Claude Code usage. The two are alternatives rather than a single combined bill — a
+subscription pauses when its allowance is reached rather than silently spilling over
+into metered API charges, and work that needs more than a plan provides can use API
+billing instead. Because cost tracks token usage either way, keeping the working
+context focused is part of what keeps spending down.

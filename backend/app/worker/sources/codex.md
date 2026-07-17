@@ -8,6 +8,15 @@ verify changes. It is powered by a large language model (LLM), so Codex is an
 LLM-based tool. This page is an original, paraphrased summary of the official
 Codex CLI documentation, written for use as a grounded demo corpus.
 
+## Installation
+
+Install the Codex CLI globally with npm — run 'npm install -g @openai/codex' — or, on
+macOS, with Homebrew via 'brew install codex'. Once it is installed, run 'codex'
+inside a project directory to start a session. On first launch you authenticate,
+either by signing in with your ChatGPT account or by supplying an OPENAI_API_KEY; the
+credentials are then stored and reused on later runs, so you sign in only once per
+machine.
+
 ## CLI flags
 
 The --model flag selects the model Codex uses for code generation. Run
