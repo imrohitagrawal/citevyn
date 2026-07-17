@@ -32,7 +32,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import AnswerGenerator
-from app.answer.memory import build_contextual_query, recent_user_questions
+from app.answer.memory import (
+    build_contextual_query,
+    condense_question_llm,
+    recent_user_questions,
+)
 from app.answer.no_answer import build_no_answer_response, build_suggestions
 from app.cache.answer_cache import (
     AnswerCacheStore,
@@ -405,6 +409,7 @@ class Orchestrator:
         # classifies + retrieves + answers from ``retrieval_query`` (the resolved
         # topic), while the ORIGINAL ``question`` stays the persisted user utterance.
         retrieval_query = question
+        prior_questions: list[str] = []
         if self._settings.conversation_memory:
             prior_questions = await recent_user_questions(
                 self._session, session_id, limit=self._settings.memory_recent_turns
@@ -440,6 +445,32 @@ class Orchestrator:
         # the confidence gate + the LLM grounding-refusal decline genuinely
         # off-corpus questions. When the flag is off, keep the old refuse-early.
         answer_globally = self._settings.answer_when_grounded and intent is Intent.unsupported
+
+        # Entity-aware follow-up rewrite (#112). A CONTENT-NOUN follow-up ("is there a
+        # credentials file option?", "what are the different models?") names no product and
+        # carries no bare anaphora, so ``build_contextual_query`` above left it unchanged and
+        # it routed ``unsupported``. Only HERE — on the answer-when-grounded path, with
+        # ``domain``/``intent``/``answer_globally`` ALREADY fixed from the un-rewritten query
+        # (so this can never flip a pivot onto the scoped, un-gated path) and only when there
+        # are prior turns the deterministic rewrite did NOT already resolve — ask the LLM to
+        # condense it into a standalone question. It is a PURE RECALL improver: it changes only
+        # the TEXT fed to the GLOBAL confidence-gated retrieval + generation below; the gate +
+        # the grounding-refusal net remain the sole authority on declining an off-corpus pivot.
+        # Skipped when no real LLM is configured (``llm_provider == "stub"``) — the stub's
+        # canned text is not a rewrite, and a test spy that wraps the stub must behave the
+        # same as the stub. Any error degrades to the un-rewritten query so a rewrite failure
+        # never turns an answer/refusal into a 500.
+        if (
+            answer_globally
+            and prior_questions
+            and retrieval_query == question
+            and self._settings.llm_provider != "stub"
+        ):
+            try:
+                retrieval_query = await condense_question_llm(question, prior_questions, self._llm)
+            except Exception:  # noqa: BLE001 — any LLM failure falls back to the raw query
+                retrieval_query = question
+
         if intent is Intent.unsupported and not answer_globally:
             return await self._respond_unsupported(
                 request_id=request_id,

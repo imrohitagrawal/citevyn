@@ -506,7 +506,10 @@ async def evaluate_retrieval(
     # Postgres-only cases (misspellings the keyword arm can't recover, in-domain
     # near-miss refusals) are meaningful only on the live vector arm — exclude them from
     # the hermetic run so they never drag or leak into the hermetic gate (Item 2).
-    cases = [c for c in cases if postgres or not c.postgres_only]
+    # judge_only cases (#112) are excluded from the retrieval report on EVERY run: their
+    # correct resolution needs the orchestrator's LLM rewrite, which this LLM-free retrieval
+    # path never calls, so they would spuriously miss and drag followup_hit_rate/overall.
+    cases = [c for c in cases if (postgres or not c.postgres_only) and not c.judge_only]
     outcomes: list[RetrievalOutcome] = []
     session_cm = postgres_session(settings) if postgres else _sqlite_session_and_embedder()
     async with session_cm as (session, embedder):

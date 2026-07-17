@@ -569,6 +569,41 @@ which is out of scope here (it changes the locked corpus + the one-chunk-per-are
 distractor corpus (§8a-8) is the seam for adding ranking-discriminating cases without touching
 the locked seed.
 
+## 8a-10. Conversation memory: entity-aware content-noun follow-up (#112)
+
+Live QA found a real gap: a CONTENT-NOUN follow-up ("is there a credentials file option?"
+after "how do I authenticate to the Gemini API?", or "what are the different models?" after
+"what is claude?") names no product and carries no BARE anaphora, so the deterministic regex
+`build_contextual_query` left it → it routed `unsupported` → **refused** a perfectly answerable
+question. The standalone form ("…Gemini credentials file?") answers fine.
+
+Fix (`condense_question_llm`, #112): an **LLM entity-aware "standalone question" rewrite**,
+layered on the deterministic regex (which stays for the 3 hermetic bare-anaphora cases, so the
+LOCKED hermetic followup gate is byte-for-byte unchanged). Design shaped by two adversarial
+plan skeptics:
+
+- **Pure recall-improver, never drives routing.** Wired in `Orchestrator.ask` INSIDE the
+  answer-when-grounded (global, confidence-gated) branch, AFTER `domain`/`intent`/`answer_globally`
+  are fixed from the un-rewritten query. So even a rewrite that (wrongly) injects a product token
+  can NOT flip a pivot onto the scoped, un-gated path — it only changes the TEXT fed to the
+  gated global retrieval + generation. The confidence gate + grounding-refusal net remain the
+  sole refusal authority. Guarded on history-present + regex-left-unchanged + a real provider
+  (`llm_provider != "stub"`); any LLM error falls back to the un-rewritten query (never a 500).
+  Proven by a hermetic anti-hijack test: a pivot whose rewrite injects "Claude API" still
+  retrieves `product_area=None` and refuses.
+- **Eval-safe via a new `judge_only` case flag.** `postgres_only` gates hermetic-vs-postgres,
+  not retrieval-vs-judge — a content-noun followup would still enter the `--postgres`
+  `followup_hit_rate` pool (resolved there by regex-only, no LLM) and fail the locked gate.
+  `judge_only` excludes a case from the retrieval report entirely (validated SOLELY by the
+  orchestrator-driven judged run).
+
+**Measured (2026-07-17, real Postgres, judged run, STABLE across 3 runs):** the new
+`followup_gemini_credfile_contentnoun` case (judge_only + postgres_only) is **answered** —
+"Yes, the Gemini CLI accepts the API key in a credentials file [1]", judge **5**, groundedness
+1.0 — every run. All LOCKED numbers hold: overall 23/23, multihop 5/5, followup (retrieval) 3/3,
+refusal leaks judged **0/19**, injection 0/2, groundedness 1.000/19, MRR/precision@1 1.000,
+judge 4.69, gate PASSED, zero residue. **Closes #112.**
+
 **Phase 1 — Foundation (walking skeleton)**
 - PR1.1 Populate embeddings at seed + ingest; stamp index provenance. (TDD + eval jump.)
 - PR1.2 Real ingestion (#92): prod HTTP fetcher → contextual chunker → embed → candidate → promote.

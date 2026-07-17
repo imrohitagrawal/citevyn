@@ -95,6 +95,14 @@ class EvalCase:
     # key is single-relevant (rank of that one chunk is what matters). Answerable-only — a
     # refusal has no correct chunk to rank. Default ``()`` → a case opts out of the metric.
     gold_chunks: tuple[str, ...] = ()
+    # Judge-only (#112). A case whose CORRECT resolution needs a step that lives ONLY in the
+    # Orchestrator (e.g. the LLM entity-aware follow-up rewrite), which the hermetic
+    # retrieval-hit-rate path (:func:`tests.eval.retrieval.evaluate_retrieval`) never calls.
+    # Such a case is EXCLUDED from the retrieval report entirely (it would otherwise miss in
+    # the LLM-free retrieval path and wrongly drag ``followup_hit_rate``/``overall``) and is
+    # validated SOLELY by the judged run, which drives the real orchestrator. Implies it must
+    # also be ``postgres_only`` (the orchestrator + real LLM run on the --postgres judged run).
+    judge_only: bool = False
 
     @property
     def is_refusal(self) -> bool:
@@ -142,6 +150,12 @@ class EvalCase:
         if expected_facts and kind == "refusal":
             raise ValueError(f"{origin}: refusal case {d['id']!r} must not set expected_facts")
         postgres_only = bool(d.get("postgres_only", False))
+        judge_only = bool(d.get("judge_only", False))
+        # A judge-only case is validated solely by the orchestrator-driven judged run, which
+        # runs on --postgres — so it must be postgres_only too (else the hermetic run would
+        # try, and fail, to validate it without the LLM rewrite it depends on).
+        if judge_only and not postgres_only:
+            raise ValueError(f"{origin}: case {d['id']!r} sets judge_only but not postgres_only")
         raw_forbidden = d.get("must_not_contain")
         # Reject blanks too: an empty sentinel is a substring of every answer, so it
         # would flag EVERY answer as an injection leak and fail the run unconditionally.
@@ -239,6 +253,7 @@ class EvalCase:
             postgres_only=postgres_only,
             must_not_contain=must_not_contain,
             gold_chunks=gold_chunks,
+            judge_only=judge_only,
         )
 
 

@@ -36,12 +36,17 @@ Design limitations (documented, not bugs):
   Kubernetes?") is contextualized like a genuine follow-up, so it retrieves the prior
   product's chunk. The LLM grounding-refusal net (Phase 2) is the authoritative gate
   there: a pivot to a clearly off-corpus topic finds no support in the routed chunk and
-  is declined (verified in the judged eval + a hermetic test). The residual is a pivot
-  SEMANTICALLY ADJACENT to the prior topic ("...Gemini key?" → "what about them for
-  OpenAI?"), where the LLM answers the prior topic and disclaims the new one — an honest
-  relevance miss, not a fabrication. Tightening this (entity-aware rewrite) is tracked
-  as a follow-up; it must not regress genuine anaphora resolution (handing generation
-  only the bare pronoun makes the LLM refuse a real follow-up — measured).
+  is declined (verified in the judged eval + a hermetic test).
+
+* CONTENT-NOUN follow-ups ("is there a credentials file option?", "what are the different
+  models?") name no product and carry no bare anaphora, so the regex above leaves them and
+  they would route ``unsupported`` and refuse. :func:`condense_question_llm` (#112) resolves
+  these via the LLM as an ENTITY-AWARE rewrite. It is wired ONLY on the orchestrator's
+  answer-when-grounded (global, confidence-gated) path — a PURE RECALL improver that changes
+  only the retrieval/generation TEXT, never the routing — so it can never hijack a pivot onto
+  the scoped, un-gated path; the confidence gate + grounding-refusal net stay the sole refusal
+  authority. Kept OUT of the pure regex path so the deterministic hermetic followup gate is
+  unchanged (proven on the judged run; see docs/RAG_QUALITY_PLAN.md §8a-10).
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.guardrails.domain import Domain, classify_domain
+from app.llm.protocol import LLMClient
 from app.models import Message, MessageRole
 
 # Anaphora markers: a bare pronoun / determiner that points at something named in a
@@ -120,6 +126,54 @@ def build_contextual_query(question: str, prior_user_questions: Sequence[str]) -
     return question
 
 
+_CONDENSE_SYSTEM = (
+    "You rewrite a user's latest question into a single self-contained question, using the "
+    "earlier turns of the conversation to resolve anything under-specified (a pronoun, or a "
+    "bare noun like 'the models' / 'a credentials file' that only makes sense in context). "
+    "TWO HARD RULES: (1) If the latest question already stands on its own, OR changes the "
+    "subject to something the earlier turns did not establish, return it UNCHANGED — never "
+    "invent a topic it doesn't ask about. (2) Reply with ONLY the rewritten question — no "
+    "preamble, quotes, or explanation."
+)
+
+# A rewrite longer than this is almost certainly the model ignoring the "only the question"
+# instruction (adding preamble/explanation) — fall back to the original rather than feed a
+# runaway string into retrieval.
+_MAX_REWRITE_CHARS = 300
+
+
+async def condense_question_llm(
+    question: str, prior_user_questions: Sequence[str], llm: LLMClient
+) -> str:
+    """Rewrite a context-dependent follow-up into a standalone question via the LLM.
+
+    This is the entity-aware companion to :func:`build_contextual_query` (#112): it resolves a
+    CONTENT-NOUN follow-up ("what are the different models?", "is there a credentials file
+    option?") that carries no bare anaphora and so the deterministic regex leaves unchanged.
+
+    It is a PURE RECALL IMPROVER and is called by the orchestrator ONLY inside the
+    "answer when grounded" (global, confidence-gated) path — after routing is already fixed
+    from the un-rewritten query — so it can NEVER flip a pivot onto the scoped, un-gated
+    retrieval path. The confidence gate + the LLM grounding-refusal net remain the sole
+    authority on whether an off-corpus pivot is declined; this only changes the TEXT fed to
+    the global retrieval + generation. Any empty history, empty/overlong output, or LLM error
+    falls back to the original ``question`` (the caller also wraps the call defensively).
+    """
+    if not prior_user_questions:
+        return question
+    # Oldest-first for the model to read as a conversation (the store hands them newest-first).
+    convo = "\n".join(f"- {q}" for q in reversed(list(prior_user_questions)))
+    user = (
+        f"Earlier questions in this conversation (oldest first):\n{convo}\n\n"
+        f"Latest question: {question}\n\nStandalone question:"
+    )
+    result = await llm.complete(system=_CONDENSE_SYSTEM, user=user, max_tokens=80, temperature=0.0)
+    rewritten = result.text.strip().strip('"').strip()
+    if not rewritten or len(rewritten) > _MAX_REWRITE_CHARS:
+        return question
+    return rewritten
+
+
 async def recent_user_questions(
     session: AsyncSession, session_id: uuid.UUID, *, limit: int
 ) -> list[str]:
@@ -144,4 +198,9 @@ async def recent_user_questions(
     return list(rows)
 
 
-__all__ = ["build_contextual_query", "is_anaphoric_followup", "recent_user_questions"]
+__all__ = [
+    "build_contextual_query",
+    "condense_question_llm",
+    "is_anaphoric_followup",
+    "recent_user_questions",
+]
