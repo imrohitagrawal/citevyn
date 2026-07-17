@@ -19,11 +19,20 @@ in the same change.
 | [#81](https://github.com/imrohitagrawal/citevyn/issues/81) | Prod container stack not deployable: deploy.sh/refresh.sh alembic+`--sqlalchemy-url`+seed path, false-green health gate, stub-in-prod; worker CMD/service model + healthcheck | infra / deploy | **Reopened** — items 1–8 fixed in PR `fix/81-prod-deploy-path-v2` (was prematurely closed 2026-07-12 without fixing any item) | #34 review |
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
-| [#93](https://github.com/imrohitagrawal/citevyn/issues/93) | Seed modules log the database URL including the password to stdout (`seed_users`/`seed_catalog`); redact before merge into deploy/CI logs | security / db | Medium (secret in deploy logs) | #81 verification |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |
 
 ## Recently closed
+
+- **[#93](https://github.com/imrohitagrawal/citevyn/issues/93)** — Seed modules logged the
+  full `CITEVYN_DATABASE_URL` (password included) to stdout; `deploy.sh`/CI ran them, so the
+  credential landed in deploy/CI logs. Fixed via `fix/93-redact-seed-db-password`: a shared
+  `db.seed.redact_database_url` helper (SQLAlchemy `hide_password=True`; bails to a placeholder
+  on an unparseable URL or a raw-`@`-in-password that `make_url` would mis-split) routes both
+  success prints. Package-relative import so it resolves under BOTH the deploy image layout
+  (`python -m seed.*`, `PYTHONPATH=/db`) and repo-root/CI (`python -m db.seed.*`). TDD + a
+  deploy-layout import regression test (the review caught the absolute import breaking prod).
+  Verified: live seed run prints `citevyn:***@…`, 20/20 unit tests green, lint+typecheck clean.
 
 - **[#112](https://github.com/imrohitagrawal/citevyn/issues/112)** — Conversation memory:
   entity-aware CONTENT-NOUN follow-up rewrite. A follow-up naming no product + no bare anaphora
