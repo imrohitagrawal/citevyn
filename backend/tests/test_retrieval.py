@@ -764,7 +764,10 @@ async def test_reranker_passthrough() -> None:
         # un-enriched fixture, so it is a genuine #87 regression tripwire.
         ("How do I install the Codex CLI?", Domain.codex.value, "npm install"),
         ("Does Codex need an API key?", Domain.codex.value, "OPENAI_API_KEY"),
-        ("google gemini streaming responses", Domain.gemini_api.value, "streaming"),
+        # Assert a unique identifier ("streamGenerateContent") rather than the bare
+        # word "streaming" so a future unrelated gemini chunk mentioning "streaming"
+        # can't satisfy this without the actual #87 streaming-response content.
+        ("google gemini streaming responses", Domain.gemini_api.value, "streamGenerateContent"),
     ],
 )
 async def test_source_named_question_word_returns_evidence_hermetically(

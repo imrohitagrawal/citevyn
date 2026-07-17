@@ -16,13 +16,26 @@ in the same change.
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
 | [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
-| [#81](https://github.com/imrohitagrawal/citevyn/issues/81) | Prod container stack not deployable: deploy.sh/refresh.sh alembic+`--sqlalchemy-url`+seed path, false-green health gate, stub-in-prod; worker CMD/service model + healthcheck | infra / deploy | **Reopened** — items 1–8 fixed in PR `fix/81-prod-deploy-path-v2` (was prematurely closed 2026-07-12 without fixing any item) | #34 review |
 | [#82](https://github.com/imrohitagrawal/citevyn/issues/82) | No CI job builds/boots the api+worker images (container-runtime breaks ship green); add build+boot smoke; group the two docker `FROM` refs in dependabot | ci | Medium (systemic gate gap) | #34 review |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |
 
 ## Recently closed
+
+- **[#87](https://github.com/imrohitagrawal/citevyn/issues/87)** — Retrieval returned
+  no_answer for legitimate source-named questions ("How do I install the Codex CLI?"). Root
+  cause was NOT domain misrouting (routing is correct: domain=codex): on the LIVE Postgres
+  path (real embeddings) the repro already returns evidence, but it survived HERMETICALLY
+  (SQLite, vector arm off) because the thin conftest codex/gemini fixtures lacked content the
+  real shipped corpus has, so scoped keyword retrieval found nothing. Fixed via
+  `fix/87-source-named-retrieval-regression`: enrich conftest.seed_catalog codex (install +
+  OPENAI_API_KEY) and gemini (streaming) chunks to mirror the real worker sources; mirror
+  install into db/seed; add regression guards — a hermetic retriever test (asserts the RIGHT
+  content is retrieved), golden case codex_011, and CI-gated `--postgres` eval case
+  codex_lit_install. golden 49/51→52/52; judged eval improved (overall 10/15→11/16, judge
+  4.16→4.29, groundedness 0.818→0.833, paraphrase held 0.0, refusal leaks 0). No orchestrator
+  code change.
 
 - **[#93](https://github.com/imrohitagrawal/citevyn/issues/93)** — Seed modules logged the
   full `CITEVYN_DATABASE_URL` (password included) to stdout; `deploy.sh`/CI ran them, so the
