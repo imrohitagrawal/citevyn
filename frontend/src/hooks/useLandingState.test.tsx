@@ -264,14 +264,16 @@ describe("useLandingState — live error path", () => {
     // it carries the rate-limit errorKind and is not tagged as a refusal.
     expect(bot.errorKind).toBe("rate_limit");
     expect(bot.refusal).toBe(false);
-    expect(bot.text.toLowerCase()).toContain("rate limit");
+    // The copy is deliberately non-technical (no "rate limit" jargon) — it tells the
+    // user to slow down and retry, which is the recoverable action for a 429.
+    expect(bot.text.toLowerCase()).toContain("too quickly");
 
     expect(result.current.toasts).toHaveLength(1);
     // A rate limit gets a DISTINCT, less-alarming visual: the amber "warning"
     // toast, not the red "error" alert used for server/transport failures.
     expect(result.current.toasts[0]).toMatchObject({
       kind: "warning",
-      title: "Rate limit reached",
+      title: "Too many requests",
     });
   });
 
@@ -343,7 +345,7 @@ describe("useLandingState — live error path", () => {
     expect(result.current.state.messages.at(-1)?.text).toBe("After re-create.");
   });
 
-  it("labels a 5xx as a backend-unavailable error", async () => {
+  it("labels a 5xx with a plain, customer-facing service-unavailable message", async () => {
     mockAskQuestion.mockRejectedValue(
       new ApiClientError("boom", 503, {
         request_id: "r",
@@ -356,7 +358,10 @@ describe("useLandingState — live error path", () => {
     act(() => result.current.send("Another question"));
     await settle();
 
-    expect(result.current.toasts[0]).toMatchObject({ kind: "error", title: "Backend unavailable" });
+    expect(result.current.toasts[0]).toMatchObject({ kind: "error", title: "We couldn't get an answer" });
+    // The copy must stay non-technical and offer the honest escalation for a
+    // persistent outage (e.g. a provider usage limit) rather than leaking internals.
+    expect(result.current.toasts[0].message.toLowerCase()).toContain("contact support");
   });
 
   it("shows a generic error for a status-0 network/timeout failure", async () => {

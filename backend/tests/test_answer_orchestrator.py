@@ -380,6 +380,66 @@ async def test_empty_evidence_returns_no_answer_without_caching(
     assert audits[0].metadata_["retrieval_strategy"] == RetrievalStrategy.hybrid_reranked.value
 
 
+async def test_embedder_outage_with_no_evidence_raises_transient_error_not_refusal(
+    session: Any,
+) -> None:
+    """A transient embedding-provider outage must surface as a transient error.
+
+    When the embedding provider is transiently unavailable (OpenRouter not
+    responding, a timeout, a provider usage limit), the hybrid retriever degrades
+    the vector arm to no hits and reports ``VectorDegrade.unavailable``. If the
+    remaining arms also found nothing, "no source" is UNTRUSTWORTHY — the grounded
+    answer may exist and we simply could not retrieve it. The orchestrator must
+    raise :class:`OrchestratorError` (→ a 5xx with a generic, non-technical
+    "temporarily unavailable" envelope, no provider detail leaked) rather than
+    return a content ``no_answer`` refusal. The content-refusal 200 was the bug:
+    it mislabels an infra outage as "the corpus has no answer" AND, because the
+    client records a 200-refusal as a *successful* answer, silently blocks
+    retry-on-re-ask.
+    """
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(evidence=[], vector_degrade=VectorDegrade.unavailable)
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
+
+    with pytest.raises(OrchestratorError):
+        await orchestrator.ask(
+            question="How do I configure Claude Code permissions?",
+            request_id="req_embedder_down",
+            session_id=uuid.uuid4(),
+        )
+
+    # A transient failure must not burn an LLM call, must not persist a refusal to
+    # the answer cache, and must not record a no_answer audit outcome — the request
+    # never produced a real answer, so there is nothing legitimate to cache/replay.
+    assert llm_spy.complete.await_count == 0
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+
+
+async def test_empty_evidence_without_outage_still_refuses(session: Any) -> None:
+    """The transient-error path is guarded on the outage flag, not empty evidence.
+
+    A genuinely empty retrieval whose vector arm ran cleanly
+    (``VectorDegrade.none``) is a real content no_answer — it must keep refusing,
+    not be misread as an outage. This pins the guard so a future refactor cannot
+    turn every empty result into a 5xx.
+    """
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(evidence=[], vector_degrade=VectorDegrade.none)
+    orchestrator = Orchestrator(
+        settings, session, llm=AsyncMock(wraps=StubLLMClient()), retriever=retriever
+    )
+
+    response = await orchestrator.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_clean_empty",
+        session_id=uuid.uuid4(),
+    )
+    assert response["no_answer"] is True
+
+
 async def test_llm_refusal_with_evidence_records_runtime_strategy(
     session: Any,
 ) -> None:
@@ -545,6 +605,33 @@ async def test_multihop_question_routes_to_retrieve_multi(session: Any) -> None:
     # retrieve_multi was used with BOTH areas; the single-domain retrieve was not.
     assert len(retriever.multi_calls) == 1
     assert retriever.multi_calls[0]["product_areas"] == ["claude_api", "gemini_api"]
+    assert retriever.calls == []
+
+
+async def test_multihop_embedder_outage_with_no_evidence_also_raises_transient_error(
+    session: Any,
+) -> None:
+    """The outage guard covers the multi-hop ``retrieve_multi`` path too.
+
+    A cross-product question routes to ``retrieve_multi``, which combines each
+    area's degrade reason. When that reports ``VectorDegrade.unavailable`` and no
+    evidence survived, the transient-error guard must fire exactly as it does on the
+    single-domain path — a transient outage is not a content refusal regardless of
+    how many areas were queried.
+    """
+    await _seed_index_version(session)
+    settings = _settings()
+    retriever = _FakeRetriever(evidence=[], vector_degrade=VectorDegrade.unavailable)
+    orchestrator = Orchestrator(settings, session, retriever=retriever)
+
+    with pytest.raises(OrchestratorError):
+        await orchestrator.ask(
+            question="How do the rate limits compare between the Claude API and Gemini?",
+            request_id="req_multihop_outage",
+            session_id=uuid.uuid4(),
+        )
+    # It really went through the multi-hop arm, not the single-domain one.
+    assert len(retriever.multi_calls) == 1
     assert retriever.calls == []
 
 

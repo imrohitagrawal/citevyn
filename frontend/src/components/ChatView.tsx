@@ -157,10 +157,10 @@ export function ChatView({
                       NOT the content-refusal badge, which means "the corpus had no
                       answer" and must stay reserved for a genuine no_answer (#120). */}
                   {m.errorKind === "rate_limit" && (
-                    <div className="notice-badge notice-rate-limit">⏳ RATE LIMIT REACHED</div>
+                    <div className="notice-badge notice-rate-limit">⏳ ONE MOMENT</div>
                   )}
                   {m.errorKind === "error" && (
-                    <div className="notice-badge notice-error">⚠ CONNECTION ERROR</div>
+                    <div className="notice-badge notice-error">⚠ TEMPORARILY UNAVAILABLE</div>
                   )}
                   {!m.errorKind && m.refusal && (
                     <div className="refusal-badge">
