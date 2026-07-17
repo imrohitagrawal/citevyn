@@ -514,6 +514,72 @@ test.describe("Chat", () => {
     expect(atBottom).toBe(true);
   });
 
+  // Regression: an explicit send must bring the new question into view even when the
+  // reader had scrolled up (previously there was NO scroll-on-send, so from a scrolled-up
+  // position the new question rendered off-screen and the user couldn't tell it was answered).
+  test("new question scrolls into view even when the reader has scrolled up", async ({ page }) => {
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    for (const q of [
+      "What is Claude Code?",
+      "How do I install the Codex CLI?",
+      "Which Claude models are available in the API?",
+    ]) {
+      await input.fill(q);
+      await page.keyboard.press("Enter");
+      await waitStreamDone(page);
+    }
+    // Scroll to the very top, then ask a NEW question.
+    await page.evaluate(() => {
+      document.getElementById("chat-list")!.scrollTop = 0;
+    });
+    await input.fill("What does the --model flag do in Codex?");
+    await page.keyboard.press("Enter");
+    // The list must jump to the new question (at/near the bottom), not stay at the top.
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(() => {
+            const l = document.getElementById("chat-list")!;
+            return l.scrollHeight - l.scrollTop - l.clientHeight;
+          }),
+        { timeout: 5000 },
+      )
+      .toBeLessThan(80);
+  });
+
+  // Regression (#122): scrolling UP during streaming must hold position — the stick-to-bottom
+  // latch disarms on the first upward gesture, so streamed chunks no longer snap the view back.
+  test("scrolling up during streaming holds position (no snap-back)", async ({ page }) => {
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    for (const q of ["What is Claude Code?", "How do I install the Codex CLI?"]) {
+      await input.fill(q);
+      await page.keyboard.press("Enter");
+      await waitStreamDone(page);
+    }
+    // Ask one more; while its answer is still streaming, scroll up a small amount (the exact
+    // band that the old 120px-slack autoscroll would have re-pinned on the next chunk).
+    await input.fill("Which Claude models are available in the API?");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".typing-cursor", { timeout: 5000 });
+    // Scroll up a SMALL amount — well inside the old 120px slack band — so the old
+    // slack-band autoscroll would reliably re-pin on the next chunk, while the new 8px
+    // latch reliably disarms and holds. (A larger scroll could clear the old band on its
+    // own and pass even on the buggy code.)
+    await page.evaluate(() => {
+      document.getElementById("chat-list")!.scrollBy(0, -40);
+    });
+    // Over the next ~700ms of streaming, the view must NOT be yanked back to the bottom
+    // (content grows below the held viewport, so the distance only ever increases).
+    await page.waitForTimeout(700);
+    const distanceFromBottom = await page.evaluate(() => {
+      const l = document.getElementById("chat-list")!;
+      return l.scrollHeight - l.scrollTop - l.clientHeight;
+    });
+    expect(distanceFromBottom).toBeGreaterThan(20);
+  });
+
   test("chat fits below the 64px header, max-width 820; back returns + scrolls top", async ({ page }) => {
     await enterChat(page);
     const main = page.locator('[data-screen-label="Chat"]');
@@ -862,5 +928,30 @@ test.describe("Timer cleanup / no post-unmount state updates", () => {
       await page.waitForTimeout(400); // let the orphaned timers fire
     }
     expect(errors, errors.join("\n")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Landing UX regressions (composer reset + sources strip layout)
+// ---------------------------------------------------------------------------
+test.describe("Landing UX regressions", () => {
+  test("hero composer clears after asking and returning to landing", async ({ page }) => {
+    const hero = page.locator("#hero-input");
+    await hero.fill("What is Claude Code?");
+    await page.locator(".ask-button").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await page.locator(".back-button").click();
+    // Back on the landing page, the hero box must be EMPTY — not still holding the
+    // question the user already asked (which they would otherwise have to delete).
+    await expect(page.locator("#hero-input")).toHaveValue("");
+  });
+
+  test("sources-strip label is padded, not flush against the left edge", async ({ page }) => {
+    const label = page.locator(".sources-strip .mono-label");
+    await label.scrollIntoViewIfNeeded();
+    const box = await label.boundingBox();
+    // With the .sources-strip-inner wrapper restored, the label sits inside 28px of
+    // horizontal padding rather than jammed at x≈0 (the cut-off symptom).
+    expect(box!.x).toBeGreaterThan(16);
   });
 });

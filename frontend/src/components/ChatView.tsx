@@ -41,6 +41,10 @@ interface ChatViewProps {
   /** Index of the message bubble currently highlighted (e.g. by the
       duplicate-question "jump-to-existing" feature). */
   highlightedIndex?: number;
+  /** Monotonic counter bumped by the hook on every NEW question submit. A change
+      here force-scrolls the just-asked question into view even if the reader had
+      scrolled up — an explicit send must always be followed. */
+  sendTick?: number;
 }
 
 export function ChatView({
@@ -55,31 +59,52 @@ export function ChatView({
   live = false,
   pending = false,
   highlightedIndex = -1,
+  sendTick = 0,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
+  // Stick-to-bottom LATCH. Armed (true) means "keep pinning to the bottom as new
+  // content streams in"; the first time the user scrolls UP it disarms, so streaming
+  // chunks stop yanking them back down. It re-arms only when they return to the true
+  // bottom. This replaces the old 120px "slack band": that band re-pinned on every
+  // streamed token whenever the user was within 120px of the bottom, so an upward
+  // scroll of a few px was instantly reversed by the next chunk — the jitter (#122).
+  const stickRef = useRef(true);
 
-  // Auto-scroll to bottom when new messages are added (or a chunk streams in),
-  // but ONLY when the user is already at (or near) the bottom — a user who has
-  // scrolled up to read older content keeps their position.
-  //
-  // The at-bottom check is done SYNCHRONOUSLY here, reading the live
-  // ``scrollTop``/``scrollHeight`` when the effect runs, rather than trusting a
-  // ref updated by a passive scroll listener. That listener fires asynchronously,
-  // so during word-by-word streaming (many updates/sec) it could lag this effect,
-  // which then read a stale "at bottom = true" and yanked the view back down while
-  // the user was scrolling up — the jitter (#122). Reading synchronously removes
-  // the race: after new content is appended, ``distanceFromBottom`` equals just the
-  // added height for an at-bottom user (≤ slack → pin) but is large for a
-  // scrolled-up user (> slack → left alone).
+  // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
+  // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
+  // programmatic ``scrollTop = scrollHeight`` lands at the bottom, so it keeps the
+  // latch armed (correct) rather than fighting itself.
   useEffect(() => {
     const list = chatListRef.current;
     if (!list) return;
-    const slack = 120; // a few streamed lines of tolerance
-    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
-    if (distanceFromBottom <= slack) {
+    const onScroll = () => {
+      const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+      stickRef.current = distanceFromBottom <= 8;
+    };
+    list.addEventListener("scroll", onScroll, { passive: true });
+    return () => list.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Passive updates (new message OR a streamed chunk) pin to the bottom ONLY while the
+  // latch is armed, so a reader who scrolled up keeps their position.
+  useEffect(() => {
+    const list = chatListRef.current;
+    if (!list) return;
+    if (stickRef.current) {
       list.scrollTop = list.scrollHeight;
     }
   }, [messages]);
+
+  // An EXPLICIT send always brings the new question into view, even from a scrolled-up
+  // position, and re-arms the latch so its streaming answer stays followed. Keyed on
+  // ``sendTick`` (bumped once per submit) so it never runs on a passive stream token.
+  useEffect(() => {
+    if (sendTick === 0) return; // initial mount, no send yet
+    const list = chatListRef.current;
+    if (!list) return;
+    stickRef.current = true;
+    list.scrollTop = list.scrollHeight;
+  }, [sendTick]);
 
   return (
     <main data-screen-label="Chat">
