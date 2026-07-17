@@ -34,7 +34,7 @@ from tests.eval.thresholds import (
     MIN_OVERALL_HIT_RATE,
 )
 
-EXPECTED_AREAS = {"claude_api", "claude_code", "codex", "gemini_api", "citevyn"}
+EXPECTED_AREAS = {"claude_api", "claude_code", "codex", "gemini_api", "citevyn", "concepts"}
 
 
 def test_golden_parses_and_ids_unique() -> None:

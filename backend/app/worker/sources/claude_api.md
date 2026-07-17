@@ -4,7 +4,8 @@
 
 The Claude API is a REST interface for sending messages to Claude models and
 receiving generated responses. Requests are JSON over HTTPS, and every request is
-authenticated and rate limited per organization. This page is an original,
+authenticated and rate limited per organization. Claude is a family of large
+language models (LLMs), so the Claude API is an LLM-based service. This page is an original,
 paraphrased summary of the official Anthropic API documentation, written for use
 as a grounded demo corpus.
 

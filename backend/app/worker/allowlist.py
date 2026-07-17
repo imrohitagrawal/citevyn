@@ -115,6 +115,19 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         # final /about route once CiteVyn is hosted.
         source_url="/about",
     ),
+    SourceSpec(
+        # Cross-cutting AI concepts/glossary (#112 follow-up): lets CiteVyn answer
+        # "what is an LLM?", "is Codex an LLM?", "what do the different models mean?" from a
+        # grounded, cited source instead of refusing. Original plain-language explainer; the
+        # citation points at CiteVyn's own /about (there is no single upstream doc for a
+        # general glossary, and it must never reference a domain CiteVyn does not own).
+        name="concepts",
+        product_area="concepts",
+        title="AI Concepts and Glossary",
+        fetcher="local",
+        location="app/worker/sources/concepts.md",
+        source_url="/about",
+    ),
 )
 
 

@@ -4,7 +4,8 @@
 
 Codex is OpenAI's command-line coding agent. It runs in the terminal, reads and
 edits files in your working directory, and can execute commands to implement and
-verify changes. This page is an original, paraphrased summary of the official
+verify changes. It is powered by a large language model (LLM), so Codex is an
+LLM-based tool. This page is an original, paraphrased summary of the official
 Codex CLI documentation, written for use as a grounded demo corpus.
 
 ## CLI flags

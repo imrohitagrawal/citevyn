@@ -199,6 +199,22 @@ async def seed_catalog(
                 "limits, exact lookups, saved history, and shareable answers."
             ),
         },
+        {
+            # AI concepts/glossary (#112 follow-up): keeps the demo catalog in
+            # lock-step with MVP_SOURCES so conceptual questions ("what is an LLM?",
+            # "is Codex an LLM?") retrieve + cite instead of being refused off-domain.
+            "product_area": "concepts",
+            "source_name": "concepts",
+            "title": "AI Concepts and Glossary",
+            "source_url": "/about",
+            "chunk_heading": "What a large language model (LLM) is",
+            "chunk_text": (
+                "A large language model, or LLM, is an AI system trained on a large "
+                "amount of text so it can understand a plain-language request and "
+                "generate a useful text response. Claude, Claude Code, Codex, and "
+                "Gemini are all LLM-based AI tools."
+            ),
+        },
     ]
 
     docs: list[Document] = []
