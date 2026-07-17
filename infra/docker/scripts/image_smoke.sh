@@ -96,7 +96,11 @@ smoke_worker() {
   echo "OK: worker list-sources exited 0"
 }
 
-[[ "${ROLE}" == "api" || "${ROLE}" == "both" ]] && smoke_api
-[[ "${ROLE}" == "worker" || "${ROLE}" == "both" ]] && smoke_worker
+if [[ "${ROLE}" == "api" || "${ROLE}" == "both" ]]; then
+  smoke_api
+fi
+if [[ "${ROLE}" == "worker" || "${ROLE}" == "both" ]]; then
+  smoke_worker
+fi
 
 log "image smoke passed (${ROLE})"
