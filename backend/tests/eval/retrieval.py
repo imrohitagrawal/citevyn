@@ -36,7 +36,12 @@ from app.answer.memory import build_contextual_query, recent_user_questions
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
-from app.guardrails.domain import classify_domain, classify_domains, is_unsupported
+from app.guardrails.domain import (
+    canonicalize_product_name,
+    classify_domain,
+    classify_domains,
+    is_unsupported,
+)
 from app.models import Base, Chunk, Document, Message, MessageRole, Session, User, UserRole
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.types import VectorDegrade
@@ -426,6 +431,12 @@ async def _retrieve_sources(
             session, session_id, limit=settings.memory_recent_turns
         )
         query = build_contextual_query(case.question, priors)
+    # Mirror the orchestrator's alias canonicalization (#84 item 1). This harness
+    # re-implements the query pipeline, so any step it omits makes the eval measure a
+    # DIFFERENT system than production: without this line the citevyn alias cases would
+    # score raw-alias retrieval, and a regression that dropped canonicalization from
+    # ``ask`` would leave the gate green. Keep this in step with ``Orchestrator.ask``.
+    query = canonicalize_product_name(query)
     domain = classify_domain(query)
     intent = classify_intent(query, domain)
     if is_unsupported(domain):

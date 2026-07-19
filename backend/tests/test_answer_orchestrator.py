@@ -1138,6 +1138,134 @@ async def test_self_contained_midsession_question_never_calls_the_condenser(
 
 
 # ---------------------------------------------------------------------------
+# 4d. CiteVyn alias canonicalization reaches retrieval (#84 item 1)
+# ---------------------------------------------------------------------------
+#
+# Routing the alias is only half the fix. "what is sitewin?" routes to ``citevyn``
+# from the guardrail alone, but its ONLY content word is the mangled token, which
+# appears nowhere in the corpus — so both retrieval arms come back empty and the
+# user still gets the refusal. ``canonicalize_product_name`` in ``ask`` is what
+# closes that, and these tests cover the WIRING: the unit tests in
+# test_guardrails_domain.py exercise the function in isolation and stay green even
+# if the orchestrator stops calling it.
+
+
+async def test_alias_is_canonicalized_before_retrieval(session: Any) -> None:
+    """The query handed to the retriever must carry the canonical name, not the
+    mangled one. Deleting the call site in ``ask`` must fail HERE."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="Is sitewin free to use right now?",
+        request_id="alias_1",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "Is CiteVyn free to use right now?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_alias_canonicalization_reaches_the_generator(session: Any) -> None:
+    """Generation sees the canonical name too — otherwise the LLM is asked about a
+    product whose name appears in none of the evidence it was handed."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
+
+    await orch.ask(question="what is sitewin?", request_id="alias_2", session_id=uuid.uuid4())
+
+    prompt = llm_spy.complete.await_args.kwargs["user"]
+    assert "CiteVyn" in prompt
+    assert "sitewin" not in prompt
+
+
+async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
+    session: Any,
+) -> None:
+    """The transcript must show what the user actually typed. Canonicalization rebinds
+    ``retrieval_query``; rebinding ``question`` instead would garble the persisted
+    message, the audit trail, and the prior turns conversation memory reads back."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="what is sitewin?", request_id="alias_3", session_id=uuid.uuid4())
+
+    user_msgs = (
+        (await session.execute(select(Message).where(Message.role == MessageRole.user)))
+        .scalars()
+        .all()
+    )
+    assert [m.content for m in user_msgs] == ["what is sitewin?"]
+
+
+async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
+    """Regression guard: canonicalization is a no-op for every question that contains
+    no alias, so no existing single-turn path changes."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="alias_4",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "How do I configure Claude Code permissions?"
+
+
+async def test_alias_canonicalization_does_not_trigger_the_condenser(session: Any) -> None:
+    """Merge-interaction guard (#169 x #84).
+
+    ``needs_condense`` keys off ``retrieval_query != question``, which was written to mean
+    "the deterministic MEMORY rewrite fired". Canonicalization now also mutates
+    ``retrieval_query``, so an aliased mid-session question makes the two differ for an
+    unrelated reason — firing the LLM condenser on a question that has nothing to resolve,
+    burning a round-trip and letting the condenser overwrite the canonical name.
+
+    Neither PR could catch this alone; it only exists once both are on the same branch.
+    """
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    # Turn 1 establishes history so ``prior_questions`` is non-empty.
+    await orch.ask(question="What is Codex CLI?", request_id="x1", session_id=sid)
+    # Turn 2 is a self-contained aliased question — nothing to condense.
+    await orch.ask(question="is sitewin free?", request_id="x2", session_id=sid)
+
+    assert llm.condense_prompts == [], "condenser fired on a question with nothing to resolve"
+    assert retriever.calls[-1]["question"] == "is CiteVyn free?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any) -> None:
+    """The costly failure: ordinary English containing an alias-like phrase must not be
+    silently rewritten and answered from the CiteVyn docs. "may the best site win!" is a
+    set phrase that an earlier version of the matcher turned into "may the best CiteVyn!"."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever([])
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(
+        question="may the best site win!",
+        request_id="alias_5",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["domain"] == "unsupported"
+    assert all(c["question"] == "may the best site win!" for c in retriever.calls)
+    assert all(c["product_area"] is None for c in retriever.calls)
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 

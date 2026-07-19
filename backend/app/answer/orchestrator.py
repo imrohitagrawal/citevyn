@@ -49,7 +49,13 @@ from app.embeddings import (
     configured_embedder_identity,
     get_embedder,
 )
-from app.guardrails.domain import Domain, classify_domain, classify_domains, is_unsupported
+from app.guardrails.domain import (
+    Domain,
+    canonicalize_product_name,
+    classify_domain,
+    classify_domains,
+    is_unsupported,
+)
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
@@ -416,6 +422,27 @@ class Orchestrator:
             )
             retrieval_query = build_contextual_query(question, prior_questions)
 
+        # Whether the deterministic MEMORY rewrite fired, captured HERE — before
+        # canonicalization also starts mutating ``retrieval_query``. The condense gate
+        # below keys off this, and it used to test ``retrieval_query != question``
+        # directly; once alias canonicalization landed, that comparison silently started
+        # meaning "memory rewrote it OR it contained an alias", firing the LLM condenser
+        # on self-contained aliased questions that have nothing to resolve.
+        memory_rewrote = retrieval_query != question
+
+        # Speech-to-text mangles the product name ("sitewin", "site win"), and the
+        # guardrail now recognizes those aliases — but recognition alone still refuses
+        # the commonest phrasing. "what is sitewin?" routes to ``citevyn`` correctly, yet
+        # its ONLY content word is the mangled token, which appears nowhere in the corpus,
+        # so both retrieval arms come back empty. Normalizing the alias to "CiteVyn" here
+        # is what lets the indexed About-CiteVyn chunks match (#84 item 1).
+        #
+        # A no-op for every question that contains no alias, and the guarded pattern means
+        # it can never rewrite text the classifier would not also have routed to
+        # ``citevyn`` — so "our site win rate" is left alone. The ORIGINAL ``question`` is
+        # still what gets persisted as the user's message.
+        retrieval_query = canonicalize_product_name(retrieval_query)
+
         domain = classify_domain(retrieval_query)
         intent = classify_intent(retrieval_query, domain)
         # The router emits ``Intent.unsupported`` when the guardrail refused, but the
@@ -483,8 +510,11 @@ class Orchestrator:
         # ALREADY stands on its own ("how do I install the Codex CLI?") routes to a product
         # domain AND was left unchanged by the deterministic rewrite — it has nothing to
         # resolve, so we skip the call rather than pay an LLM round-trip per turn for a
-        # rewrite the condenser is instructed to decline anyway.
-        needs_condense = answer_globally or retrieval_query != question
+        # rewrite the condenser is instructed to decline anyway. Keyed off
+        # ``memory_rewrote`` rather than ``retrieval_query != question`` so that alias
+        # canonicalization — which also rewrites ``retrieval_query`` — cannot drag a
+        # self-contained question ("is sitewin free?") into the condenser.
+        needs_condense = answer_globally or memory_rewrote
         if needs_condense and prior_questions and self._settings.llm_provider != "stub":
             # The fallback is whatever routing already resolved: the concatenation when the
             # deterministic rewrite fired, else the raw question. NEVER the bare fragment —
