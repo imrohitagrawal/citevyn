@@ -93,8 +93,24 @@ BASE_URL_REQUESTED="${BASE_URL:-}"
 # Read only the values we need, in a SUBSHELL, so the full prod secret set is
 # not exported into this shell and inherited by every child process
 # (_env_guard.sh sources in a subshell for the same reason).
-read_env() {  # read_env <KEY> -> value on stdout (empty if unset)
-    ( set -a; . "${COMPOSE_DIR}/.env" >/dev/null 2>&1; set +a; printf '%s' "${!1:-}" )
+read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
+    # Normalize the way docker compose's env-file parser does — bash `source`
+    # keeps quote characters literally, so a perfectly valid
+    #   CITEVYN_PUBLIC_HOST="citevyn.example.com"
+    # would otherwise yield https://"citevyn.example.com" and fail every probe
+    # (and a quoted/CRLF api key would put a stray quote in the bearer header).
+    # Same peeling as _env_guard.sh's _strip(): trailing whitespace/CR first,
+    # then one matched pair of surrounding quotes.
+    local v
+    v="$( set -a; . "${COMPOSE_DIR}/.env" >/dev/null 2>&1; set +a; printf '%s' "${!1:-}" )"
+    while [[ "${v}" =~ [[:space:]]$ ]]; do v="${v%%[[:space:]]}"; done
+    if [[ ${#v} -ge 2 ]]; then
+        local f="${v:0:1}" l="${v: -1}"
+        if [[ "${f}" == "'" && "${l}" == "'" ]] || [[ "${f}" == '"' && "${l}" == '"' ]]; then
+            v="${v:1:-1}"
+        fi
+    fi
+    printf '%s' "${v}"
 }
 DEMO_KEY="$(read_env CITEVYN_DEMO_API_KEY)"
 PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
@@ -115,6 +131,8 @@ else
     BASE_URL=""
 fi
 PRODUCT_AREA="${PRODUCT_AREA:-codex}"
+# Must be a seeded ExactTerm row for PRODUCT_AREA (see probe 7).
+EXACT_TERM="${EXACT_TERM:---model}"
 
 echo "    version under test : ${VERSION:-<unset>}"
 echo "    rollback target    : ${PREV_VERSION:-<none found>}"
@@ -180,8 +198,13 @@ api_post() {  # api_post <path> <json> -> body on stdout
 }
 
 new_session() {  # -> session id on stdout (empty on failure)
+    # The response key is `session_id`, NOT `id` (sessions.py returns
+    # {request_id, session_id, expires_at}). Matching `"id"` would require a
+    # quote immediately before `id`, which neither `"session_id"` nor
+    # `"request_id"` contains — so it would never match and every dependent
+    # probe would be skipped on a perfectly healthy stack.
     api_post /v1/sessions '{}' \
-        | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+        | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
 # ── The functional verify suite ────────────────────────────────────────────
@@ -210,6 +233,17 @@ verify_suite() {
         record FAIL "${phase}: /health/index status=ready" "got: ${body:0:140}"
     fi
 
+    # 3b. Vector arm. Top-level `status` only answers "is there an active
+    #     index" — it stays "ready" when the vector arm is DEAD (the #97 failure
+    #     mode: NULL embeddings / embedder mismatch). The lexical arm alone can
+    #     still satisfy the citation probe below, so without this assertion a
+    #     half-broken retrieval stack passes the whole gate.
+    if grep -q '"healthy"[[:space:]]*:[[:space:]]*true' <<<"${body}"; then
+        record PASS "${phase}: /health/index vector arm healthy"
+    else
+        record FAIL "${phase}: /health/index vector arm healthy" "got: ${body:0:180}"
+    fi
+
     # 4. Session creation.
     local session_id
     session_id="$(new_session)"
@@ -217,7 +251,10 @@ verify_suite() {
         record PASS "${phase}: POST /v1/sessions"
     else
         record FAIL "${phase}: POST /v1/sessions" "no session id returned"
-        record FAIL "${phase}: (dependent probes skipped — no session)" ""
+        # Plain echo, not `record`: the FAIL above already fires, and counting a
+        # non-probe would make this phase's pass/fail totals asymmetric with the
+        # other phases in the summary.
+        echo "    (probes 5-8 skipped for this phase — no session)" >&2
         return
     fi
 
@@ -255,8 +292,13 @@ verify_suite() {
 
     # 7. Exact lookup (§10 blocker 4). `product_area` is REQUIRED; the response
     #    envelope key is `hits` (not `results`).
+    #    The term MUST be a real `ExactTerm` row: exact_lookup matches on strict
+    #    equality against ExactTerm.term_text, not substring over chunk text. The
+    #    seed defines `--model` (codex) and `CLAUDE_API_RATE_LIMIT` (claude_api);
+    #    a term that only appears inside chunk prose returns zero hits on a
+    #    correctly-seeded stack.
     body="$(curl_demo -X POST -H 'content-type: application/json' \
-        --data "{\"term\":\"OPENAI_API_KEY\",\"product_area\":\"${PRODUCT_AREA}\"}" \
+        --data "{\"term\":\"${EXACT_TERM}\",\"product_area\":\"${PRODUCT_AREA}\"}" \
         "${BASE_URL}/v1/search/exact")"
     if grep -q '"hits"[[:space:]]*:[[:space:]]*\[[[:space:]]*{' <<<"${body}"; then
         record PASS "${phase}: exact lookup returns a hit"
