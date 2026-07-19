@@ -188,15 +188,13 @@ class Settings(BaseSettings):
     # "golden pass rate >= 95%" gate.
     index_promotion_min_pass_rate: float = Field(default=0.95, ge=0.0, le=1.0)
 
-    # --- Worker source snapshot (Slice 8 step 6) ---
-    # The ``source_version_hash`` is stamped on every
-    # :class:`IngestionJob` and :class:`IndexVersion` row this
-    # worker produces. The MVP default is a placeholder —
-    # production replaces it with the SHA-256 of the source
-    # feed the operator ingested.
-    # Bumped to -2 when the "About CiteVyn" source was added to the corpus
-    # (MVP_SOURCES) so a re-ingest produces a fresh IndexVersion.
-    source_version_hash: str = "sha256:mvp-snapshot-2"
+    # (The former ``source_version_hash`` setting was removed alongside the
+    # content-derived snapshot hash: it was a static placeholder that nothing
+    # could usefully change. The worker now derives the hash from the actual
+    # corpus bytes — see ``app.worker.cli._content_version_hash`` — so an
+    # operator "bumping the constant" had no effect and only invited confusion.
+    # ``model_config`` uses ``extra="ignore"``, so a leftover
+    # ``CITEVYN_SOURCE_VERSION_HASH`` in an existing ``.env`` is harmless.)
 
     # (The former ``fixtures_root`` setting was removed in #92: it was dead config
     # — nothing read it, and it pointed at a non-existent ``backend/fixtures/sources``.

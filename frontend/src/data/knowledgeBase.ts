@@ -33,7 +33,7 @@ export const KB: Record<string, KBEntry> = {
   "claude-code": {
     q: "What is Claude Code?",
     tag: "USAGE",
-    a: "Claude Code is Anthropic's agentic coding tool that runs in your terminal. It reads and edits files across your project, runs commands, and handles git workflows — working inside your existing dev environment instead of a separate IDE.",
+    a: "Claude Code is Anthropic's agentic coding tool. It reads and edits files across your project, runs commands, and handles git workflows — working inside your existing dev environment. You can use it as a terminal CLI, a desktop app, a web app, or an extension for editors like VS Code and JetBrains.",
     sources: [
       {
         n: "1",

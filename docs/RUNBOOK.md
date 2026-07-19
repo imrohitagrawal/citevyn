@@ -272,6 +272,48 @@ $EDITOR /etc/docker/daemon.json
 
 ---
 
+### 3.7 Editing a source doc (corpus correction)
+
+**Context:** The corpus under `backend/app/worker/sources/*.md` is the ground
+truth every answer is generated from. Correcting a doc is a normal operation —
+a definition is too narrow, a flag is wrong, a section is missing.
+
+**Procedure:** edit the `.md` file, re-run ingestion, then promote:
+
+```bash
+python -m app.worker.cli run          # rebuilds v-local from the edited corpus
+# then promote via POST /v1/admin/index_versions/{version}/promote
+```
+
+**What happens automatically (no manual cache flush needed):**
+
+- `IndexVersion.source_version_hash` is derived from the **bytes of the source
+  docs** (`app.worker.cli._content_version_hash`), so any edit changes it. The
+  answer-cache key includes that hash, so cached answers built from the old text
+  stop being reachable. There is no constant to bump.
+- A re-ingest **replaces** the source's chunks and exact terms rather than
+  appending, so the old wording does not linger in the corpus next to the new.
+- `Document.title` and `source_url` are refreshed from the allowlist, so an
+  allowlist correction reaches rendered citations.
+
+All three hold when re-ingesting **in place** (the default `--index-version
+v-local`, which is what the worker image's `CMD` runs). Before this was fixed,
+each of them silently required building a brand-new index version instead.
+
+**The new fingerprint is published only after a clean, whole-corpus run.** If
+any source fails, or you ingested a subset with `--source`, the hash stays where
+it was. That is deliberate: publishing a hash the corpus does not yet match
+would let a query be answered from the un-rebuilt chunks and then *cached under
+the new key*, and because a retry re-hashes the same files the hash never moves
+again — the stale answer would survive the correction until the TTL expires.
+So after a partial failure, **fix the cause and re-run the full ingest**; the
+correction is not live until a run completes cleanly.
+
+**Verify the edit actually shipped:** ask the corrected question and confirm the
+answer reflects the new text. If it still shows the old answer, check (a) that
+the run reported no failed sources, and (b) that the promote step ran — an
+un-promoted candidate is not served.
+
 ## 4. Backup & restore
 
 ### 4.1 Backups (operator)

@@ -20,14 +20,16 @@ to remember every detail. "LLM" and "large language model" mean the same thing.
 All four products CiteVyn covers are built on large language models:
 
 - Claude is a family of LLMs from Anthropic, used through the Claude API.
-- Claude Code is Anthropic's coding assistant; it is powered by Claude (an LLM) and works in
-  your terminal.
-- Codex is OpenAI's command-line coding tool; it is powered by an LLM to read and write code.
+- Claude Code is Anthropic's agentic coding assistant, powered by Claude (an LLM); you can use
+  it in your terminal and also as a desktop app, a web app, and IDE extensions.
+- Codex is OpenAI's agentic coding tool, powered by an LLM to read and write code; it runs in
+  the terminal (the Codex CLI) and also as a desktop app, an IDE extension, a cloud service,
+  and inside ChatGPT.
 - Gemini is Google's family of LLMs, used through the Gemini API.
 
 So yes — Claude, Claude Code, Codex, and Gemini are all LLM-based AI tools. The difference is
-mostly how you use each one (a raw API, a terminal coding agent, and so on), not whether it is
-a language model.
+mostly how you use each one (a raw API, or a coding agent you can run in the terminal and in
+several other places, and so on), not whether it is a language model.
 
 ## What "a model" means and why there are different ones
 

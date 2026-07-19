@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,10 +31,19 @@ from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
 from app.embeddings import build_embedder, validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
-from app.worker.fetchers import build_fetcher
-from app.worker.runner import IngestionRunner, RunResult, ensure_index_version
+from app.worker.fetchers import FetchError, build_fetcher
+from app.worker.runner import (
+    IngestionRunner,
+    RunResult,
+    advance_source_version_hash,
+    ensure_index_version,
+)
 
 logger = logging.getLogger(__name__)
+
+# Folded into the corpus fingerprint in place of a source that cannot be read,
+# so one unfetchable spec degrades the hash instead of aborting the whole run.
+_UNFETCHABLE_SENTINEL = "\x00<unfetchable>"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -82,7 +92,9 @@ async def _drive(
     async with sessionmaker() as session:
         # One IndexVersion row for the whole run. Idempotent
         # — a re-run for the same ``index_version`` returns
-        # the existing row.
+        # the existing row. On a re-ingest this deliberately
+        # leaves ``source_version_hash`` alone; see the
+        # ``advance_source_version_hash`` call below.
         await ensure_index_version(
             session,
             index_version=index_version,
@@ -99,6 +111,29 @@ async def _drive(
         _print_result(result)
         if result.status.value == "failed":
             failed += 1
+
+    # Publish the new corpus fingerprint only once the corpus actually matches
+    # it: every source ingested, and the whole corpus ingested. The fingerprint
+    # spans all of MVP_SOURCES, so a ``--source`` subset run cannot vouch for
+    # the sources it skipped — advancing there would claim the untouched docs
+    # were rebuilt too. Publishing early (or on a partial run) caches answers
+    # built from the OLD chunks under the NEW key, and a retry re-hashes the
+    # same files, so nothing would evict them until the TTL.
+    full_corpus = {s.name for s in sources} == {s.name for s in MVP_SOURCES}
+    if failed == 0 and full_corpus:
+        async with sessionmaker() as session:
+            await advance_source_version_hash(
+                session,
+                index_version=index_version,
+                source_version_hash=runner.source_version_hash,
+            )
+            await session.commit()
+    elif failed == 0:
+        logger.info(
+            "source_version_hash_not_advanced_partial_run",
+            extra={"index_version": index_version, "ingested": sorted(s.name for s in sources)},
+        )
+
     return 0 if failed == 0 else 2
 
 
@@ -150,11 +185,66 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
-        source_version_hash=settings.source_version_hash,
+        # Derive the snapshot hash from the ACTUAL corpus content, not the static
+        # ``settings.source_version_hash``. The answer-cache key includes this hash
+        # (see ``cache.build_cache_key``), so a constant value meant a doc edit +
+        # re-ingest left the cache serving the OLD answer until someone manually
+        # bumped the constant or the TTL expired. Hashing real content makes any
+        # edit change the hash → the cache key changes → stale answers invalidate
+        # on the next ingest, automatically.
+        source_version_hash=_content_version_hash(MVP_SOURCES),
         index_version=index_version,
         embedding_provider=settings.embedding_provider,
         embedding_model=settings.embedding_model,
     )
+
+
+def _content_version_hash(
+    sources: Sequence[SourceSpec],
+    *,
+    fetch: Callable[[SourceSpec], str] | None = None,
+) -> str:
+    """Return ``sha256:<hex>`` over the actual content of every source.
+
+    Hashes each source's fetched text (in a stable name-sorted order, with the
+    source name mixed in so a rename also changes the hash) so the result is a
+    deterministic fingerprint of the whole corpus. This is what makes the answer
+    cache self-invalidate when a source doc is edited — see the call site. Hashing
+    the full ``MVP_SOURCES`` (not just the ``--source`` subset) keeps the fingerprint
+    corpus-wide, so a single-source re-ingest still reflects the true snapshot.
+
+    A source that cannot be fetched contributes a stable sentinel instead of
+    aborting the run. Hashing spans the whole corpus, so without this a single
+    unreadable spec — a missing local fixture, or the first ``fetcher="http"``
+    source, which :class:`HttpFetcher` always rejects in the MVP — would raise
+    here at runner-build time and kill ``run`` before a single
+    :class:`IngestionJob` row existed, even for ``--source <a healthy one>``.
+    Degrading keeps the pre-existing behaviour: the bad source still fails, but
+    as its own job row with ``error_type="FetchError"``, and the other sources
+    still ingest.
+
+    ``fetch`` is injectable for testing; it defaults to the real per-source fetcher.
+    """
+
+    def _default_read(spec: SourceSpec) -> str:
+        return build_fetcher(spec).fetch(spec)
+
+    read: Callable[[SourceSpec], str] = fetch if fetch is not None else _default_read
+    digest = hashlib.sha256()
+    for spec in sorted(sources, key=lambda s: s.name):
+        try:
+            text = read(spec)
+        except FetchError as exc:
+            logger.warning(
+                "source_version_hash_source_unfetchable",
+                extra={"source": spec.name, "error": str(exc)},
+            )
+            text = _UNFETCHABLE_SENTINEL
+        digest.update(spec.name.encode("utf-8"))
+        digest.update(b"\x1f")
+        digest.update(text.encode("utf-8"))
+        digest.update(b"\x1e")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _pick_first_source() -> SourceSpec:
