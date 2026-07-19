@@ -11,6 +11,36 @@ Claude, a large language model (LLM), so Claude Code is an LLM-based tool. This
 page is an original, paraphrased summary of the official Claude Code
 documentation, written for use as a grounded demo corpus.
 
+## Installation
+
+The recommended way to install Claude Code is the native installer: on macOS, Linux
+or WSL run 'curl -fsSL https://claude.ai/install.sh | bash', and on Windows
+PowerShell run 'irm https://claude.ai/install.ps1 | iex'. Package managers also
+work — 'brew install --cask claude-code' on macOS and
+'winget install Anthropic.ClaudeCode' on Windows. It can also be installed from
+npm with 'npm install -g @anthropic-ai/claude-code', which requires Node.js v22 or
+later; do not install it with sudo. Supported platforms are macOS 13.0+, Windows 10
+1809+, Ubuntu 20.04+, Debian 10+ and Alpine 3.19+, on x64 or ARM64 with at least
+4 GB of RAM, and an internet connection is required.
+
+Confirm the install with 'claude --version', and run 'claude doctor' for read-only
+diagnostics of install health and settings. Native installs auto-update in the
+background by default and can also be updated on demand with 'claude update'; set
+DISABLE_AUTOUPDATER=1 to turn that off. Package-manager and npm installs do not
+auto-update — refresh them with 'brew upgrade claude-code',
+'winget upgrade Anthropic.ClaudeCode', or
+'npm install -g @anthropic-ai/claude-code@latest'.
+
+## First run and sign-in
+
+Run 'claude' to start it; the first launch opens a browser to sign in, and where no
+browser is available it shows a code you paste back into the terminal. Sign-in works
+with a Claude Pro or Max subscription, with Claude for Teams or Enterprise, or with a
+Claude Console account. The free Claude.ai plan does not include Claude Code. As an
+alternative to signing in, set the ANTHROPIC_API_KEY environment variable, or run
+'claude setup-token' to mint a long-lived token for CI and scripts. Use '/logout' to
+sign out.
+
 ## Permissions
 
 Claude Code permissions are configured in the project's settings file. Use the
