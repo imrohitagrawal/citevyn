@@ -34,7 +34,12 @@ _NO_ANSWER_REASONS: frozenset[str] = frozenset(
         "weak_evidence",
         "no_answer",
         "citation_validation_failed",
-        # #174. An unregistered reason silently coerces to "unsupported" below, which
+        # #174. AUDIT-ONLY, like "no_answer" — deliberately NOT in API_SPEC §15 or the
+        # APIErrorCode enum, because it is never emitted over the wire; it exists so an
+        # operator can tell a model that ignored its evidence from one that politely
+        # refused. Every other §15 entry mirrors the enum, so listing it there would be
+        # drift.
+        # An unregistered reason silently coerces to "unsupported" below, which
         # would label an IN-DOMAIN question "Outside scope" in the UI and emit
         # suggestions alongside unsupported=true — the combination #117 forbids. Any
         # new orchestrator exit reason must be added here.

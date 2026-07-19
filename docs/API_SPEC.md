@@ -350,7 +350,6 @@ GET /health/dependencies
 | unsupported_domain | Query outside supported scope |
 | weak_evidence | Not enough source evidence |
 | citation_validation_failed | Answer not supported by citations |
-| uncited_answer | Model produced a claim it did not attribute to any source (#174) |
 | rate_limited | User exceeded rate limit |
 | auth_required | Missing or invalid auth |
 | ingestion_failed | Ingestion job failed |
