@@ -164,11 +164,36 @@ class Settings(BaseSettings):
     #     is rewritten (a self-contained off-domain sentence still reaches the refusal;
     #     see app/answer/memory.py). ``memory_recent_turns`` bounds how far back we
     #     look for the antecedent. Set ``conversation_memory=False`` to disable.
+    # --- CiteVyn alias intent check (#84 follow-up) ---
+    #     Single-token manglings ("sitewin") are matched deterministically by the
+    #     guardrail. The two-word homophones ("site win") are ordinary English, so they
+    #     get an LLM intent check over the whole utterance instead — see
+    #     app/answer/alias_intent.py for why no regex can do this. Costs one short call,
+    #     and ONLY on a message actually containing "site|cite|sight win", which is
+    #     essentially never in normal traffic. Set False to disable (the question then
+    #     refuses exactly as it did before).
+    citevyn_alias_intent_check: bool = True
+
     conversation_memory: bool = True
     memory_recent_turns: int = Field(default=6, ge=1)
 
     # --- Answer cache (Slice 5+) ---
-    answer_policy_version: str = "v1"
+    # Part of the cache-key pre-image, so bumping it invalidates EVERY cached answer by
+    # design. Bump it whenever an answer-pipeline change makes previously-cached answers
+    # wrong — a code fix alone cannot clear rows that are already persisted.
+    #
+    # v1 → v2 (#169): follow-up answers were generated from the memory CONCATENATION
+    # ("What is Codex CLI? who built it?"), so the LLM answered the leading clause and the
+    # follow-up was stored as a verbatim duplicate of the previous turn's answer. Those
+    # rows are POISONED: they sit under their own valid keys with a correct
+    # ``source_version_hash`` and ``embedder_identity``, so nothing else invalidates them
+    # and they would keep replaying the wrong answer after the fix ships. A targeted
+    # DELETE was rejected — it cannot be expressed as a sound predicate (a legitimate
+    # multi-clause question is textually indistinguishable from a concatenation), it would
+    # have to be re-run by hand against every environment, and it leaves no record in the
+    # code. The version bump is declarative, applies everywhere the build is deployed, and
+    # its only cost is a cold cache that refills on demand.
+    answer_policy_version: str = "v2"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 

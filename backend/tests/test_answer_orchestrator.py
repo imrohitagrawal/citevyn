@@ -950,6 +950,615 @@ async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> No
 
 
 # ---------------------------------------------------------------------------
+# 4c. Follow-up condensation (#169) — the concatenation must not reach the LLM
+# ---------------------------------------------------------------------------
+#
+# ``build_contextual_query`` CONCATENATES ("What is Codex CLI? who built it?"). That is
+# correct for ROUTING (it is what resolves the follow-up onto the ``codex`` domain) but
+# actively wrong for RETRIEVAL / GENERATION / the CACHE KEY: the first clause is a
+# complete self-contained question, so the LLM answers THAT and ignores the trailing
+# fragment — the user gets the PREVIOUS answer verbatim, and it is then cached under its
+# own key and replayed forever. These tests lock the split: routing keeps the
+# concatenation, everything downstream sees a true standalone question.
+
+
+_CONDENSED = "Who built Codex CLI?"
+
+
+class _CondensingLLM:
+    """Fake LLM that answers the condense prompt and the generation prompt differently.
+
+    Records every ``user`` prompt it is handed, split by call site, so a test can assert
+    which TEXT reached generation without reaching into orchestrator internals.
+    """
+
+    def __init__(self, *, condensed: str = _CONDENSED, condense_error: bool = False) -> None:
+        self._condensed = condensed
+        self._condense_error = condense_error
+        self.condense_prompts: list[str] = []
+        self.generate_prompts: list[str] = []
+
+    async def complete(self, *, system: str, user: str, **_kwargs: Any) -> Any:
+        from app.answer.memory import _CONDENSE_SYSTEM
+        from app.llm.types import LLMResult
+
+        if system == _CONDENSE_SYSTEM:
+            self.condense_prompts.append(user)
+            if self._condense_error:
+                raise RuntimeError("condense provider down")
+            return LLMResult(
+                text=self._condensed, input_tokens=1, output_tokens=1, model="f", provider="router"
+            )
+        self.generate_prompts.append(user)
+        return LLMResult(
+            text="OpenAI builds Codex CLI [1].",
+            input_tokens=1,
+            output_tokens=1,
+            model="f",
+            provider="router",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _codex_followup(
+    session: Any, llm: _CondensingLLM, **settings_overrides: Any
+) -> tuple[_FakeRetriever, dict[str, Any]]:
+    """Drive the canonical two-turn Codex chain and return (retriever, turn-2 response)."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router", **settings_overrides)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+    await orch.ask(question="What is Codex CLI?", request_id="c1", session_id=sid)
+    response = await orch.ask(question="who built it?", request_id="c2", session_id=sid)
+    return retriever, response
+
+
+async def test_followup_is_condensed_before_retrieval_and_generation(session: Any) -> None:
+    """#169: retrieval + generation must see the CONDENSED standalone question, never the
+    concatenation whose leading clause hijacks the answer."""
+    llm = _CondensingLLM()
+    retriever, response = await _codex_followup(session, llm)
+
+    assert response["no_answer"] is False
+    # The condenser ran and saw the real prior turn.
+    assert len(llm.condense_prompts) == 1
+    assert "What is Codex CLI?" in llm.condense_prompts[0]
+    # Retrieval got the standalone question — NOT "What is Codex CLI? who built it?".
+    assert retriever.calls[-1]["question"] == _CONDENSED
+    # Generation got it too (the prompt embeds the question verbatim).
+    assert _CONDENSED in llm.generate_prompts[-1]
+    assert "What is Codex CLI? who built it?" not in llm.generate_prompts[-1]
+
+
+async def test_followup_condensation_preserves_routing(session: Any) -> None:
+    """The concatenation is what routes a bare anaphor onto the product domain. Condensing
+    must happen AFTER routing is fixed, so the follow-up still scopes to ``codex`` — a
+    rewrite can never flip a topic pivot onto the scoped, un-gated path."""
+    llm = _CondensingLLM()
+    retriever, response = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["product_area"] == "codex"
+    assert response["domain"] == "codex"
+    assert response["unsupported"] is False
+
+
+async def test_followup_condensation_keys_the_cache_on_the_standalone_question(
+    session: Any,
+) -> None:
+    """The poisoned row is cached under the CONCATENATION's key. Once condensed, the cache
+    row must carry the standalone question so the replay-forever loop cannot re-form."""
+    llm = _CondensingLLM()
+    await _codex_followup(session, llm)
+
+    normalized_qs = {
+        r.normalized_question for r in (await session.execute(select(AnswerCache))).scalars().all()
+    }
+    assert _CONDENSED.lower() in normalized_qs
+    assert "what is codex cli? who built it?" not in normalized_qs
+
+
+async def test_followup_condensation_failure_falls_back_to_the_concatenation(
+    session: Any,
+) -> None:
+    """Worst case must be TODAY's behaviour, never worse. On any condenser failure we keep
+    the concatenation — falling back to the bare fragment "who built it?" would strip the
+    antecedent and refuse a perfectly answerable question."""
+    llm = _CondensingLLM(condense_error=True)
+    retriever, response = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+    assert retriever.calls[-1]["product_area"] == "codex"
+    assert response["no_answer"] is False
+
+
+async def test_followup_condensation_declined_falls_back_to_the_concatenation(
+    session: Any,
+) -> None:
+    """``condense_question_llm`` returns the question VERBATIM when it declines (empty or
+    overlong output, or the question already stands alone). For a deterministic rewrite
+    that is the same regression as an error — keep the concatenation."""
+    llm = _CondensingLLM(condensed="who built it?")
+    retriever, _ = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+
+
+async def test_stub_provider_keeps_the_concatenation_unchanged(session: Any) -> None:
+    """The stub's canned text is not a rewrite, so the condenser stays off under
+    ``llm_provider='stub'`` — every hermetic stub-based test keeps its existing behaviour."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="s1", session_id=sid)
+    await orch.ask(question="who built it?", request_id="s2", session_id=sid)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+
+
+async def test_single_turn_never_calls_the_condenser(session: Any) -> None:
+    """Regression guard A: a new chat / single-turn question is byte-for-byte unchanged —
+    no condense call, no rewrite, no extra LLM spend."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    await orch.ask(
+        question="How do I install the Codex CLI?", request_id="one", session_id=uuid.uuid4()
+    )
+
+    assert llm.condense_prompts == []
+    assert retriever.calls[-1]["question"] == "How do I install the Codex CLI?"
+
+
+async def test_self_contained_midsession_question_never_calls_the_condenser(
+    session: Any,
+) -> None:
+    """Cost guard: a mid-session question that already stands on its own routes to a product
+    AND is left alone by the deterministic rewrite — there is nothing to resolve, so we must
+    not pay an LLM round-trip per turn for a rewrite the condenser would decline anyway."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="m1", session_id=sid)
+    await orch.ask(question="How do I install the Codex CLI?", request_id="m2", session_id=sid)
+
+    assert llm.condense_prompts == []
+    assert retriever.calls[-1]["question"] == "How do I install the Codex CLI?"
+
+
+# ---------------------------------------------------------------------------
+# 4d. CiteVyn alias canonicalization reaches retrieval (#84 item 1)
+# ---------------------------------------------------------------------------
+#
+# Routing the alias is only half the fix. "what is sitewin?" routes to ``citevyn``
+# from the guardrail alone, but its ONLY content word is the mangled token, which
+# appears nowhere in the corpus — so both retrieval arms come back empty and the
+# user still gets the refusal. ``canonicalize_product_name`` in ``ask`` is what
+# closes that, and these tests cover the WIRING: the unit tests in
+# test_guardrails_domain.py exercise the function in isolation and stay green even
+# if the orchestrator stops calling it.
+
+
+async def test_alias_is_canonicalized_before_retrieval(session: Any) -> None:
+    """The query handed to the retriever must carry the canonical name, not the
+    mangled one. Deleting the call site in ``ask`` must fail HERE."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="Is sitewin free to use right now?",
+        request_id="alias_1",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "Is CiteVyn free to use right now?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_alias_canonicalization_reaches_the_generator(session: Any) -> None:
+    """Generation sees the canonical name too — otherwise the LLM is asked about a
+    product whose name appears in none of the evidence it was handed."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
+
+    await orch.ask(question="what is sitewin?", request_id="alias_2", session_id=uuid.uuid4())
+
+    prompt = llm_spy.complete.await_args.kwargs["user"]
+    assert "CiteVyn" in prompt
+    assert "sitewin" not in prompt
+
+
+async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
+    session: Any,
+) -> None:
+    """The transcript must show what the user actually typed. Canonicalization rebinds
+    ``retrieval_query``; rebinding ``question`` instead would garble the persisted
+    message, the audit trail, and the prior turns conversation memory reads back."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="what is sitewin?", request_id="alias_3", session_id=uuid.uuid4())
+
+    user_msgs = (
+        (await session.execute(select(Message).where(Message.role == MessageRole.user)))
+        .scalars()
+        .all()
+    )
+    assert [m.content for m in user_msgs] == ["what is sitewin?"]
+
+
+async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
+    """Regression guard: canonicalization is a no-op for every question that contains
+    no alias, so no existing single-turn path changes."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="alias_4",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "How do I configure Claude Code permissions?"
+
+
+async def test_alias_canonicalization_does_not_trigger_the_condenser(session: Any) -> None:
+    """Merge-interaction guard (#169 x #84).
+
+    ``needs_condense`` keys off ``retrieval_query != question``, which was written to mean
+    "the deterministic MEMORY rewrite fired". Canonicalization now also mutates
+    ``retrieval_query``, so an aliased mid-session question makes the two differ for an
+    unrelated reason — firing the LLM condenser on a question that has nothing to resolve,
+    burning a round-trip and letting the condenser overwrite the canonical name.
+
+    Neither PR could catch this alone; it only exists once both are on the same branch.
+    """
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    # Turn 1 establishes history so ``prior_questions`` is non-empty.
+    await orch.ask(question="What is Codex CLI?", request_id="x1", session_id=sid)
+    # Turn 2 is a self-contained aliased question — nothing to condense.
+    await orch.ask(question="is sitewin free?", request_id="x2", session_id=sid)
+
+    assert llm.condense_prompts == [], "condenser fired on a question with nothing to resolve"
+    assert retriever.calls[-1]["question"] == "is CiteVyn free?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+class _IntentLLM:
+    """LLM double whose intent verdict the test controls. Records every call."""
+
+    def __init__(self, *, verdict: str = "YES", error: bool = False) -> None:
+        self._verdict = verdict
+        self._error = error
+        self.intent_questions: list[str] = []
+
+    async def complete(self, *, system: str, user: str, **_kw: Any) -> Any:
+        from app.answer.alias_intent import _INTENT_SYSTEM
+        from app.llm.types import LLMResult
+
+        if system == _INTENT_SYSTEM:
+            self.intent_questions.append(user)
+            if self._error:
+                raise RuntimeError("intent provider down")
+            return LLMResult(
+                text=self._verdict, input_tokens=1, output_tokens=1, model="f", provider="router"
+            )
+        return LLMResult(
+            text="CiteVyn is a docs Q&A product [1].",
+            input_tokens=1,
+            output_tokens=1,
+            model="f",
+            provider="router",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _ask_ambiguous(session: Any, llm: Any, question: str, **over: Any) -> Any:
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(
+        _settings(llm_provider="router", **over), session, llm=llm, retriever=retriever
+    )
+    response = await orch.ask(question=question, request_id="amb", session_id=uuid.uuid4())
+    return retriever, response
+
+
+async def test_two_word_alias_is_recovered_when_intent_says_yes(session: Any) -> None:
+    """The owner's dictated phrasing. "site win" is not routed by the guardrail (it is
+    ordinary English), so an intent check over the whole utterance decides — and on YES
+    the TEXT is canonicalized so retrieval can match the About-CiteVyn chunks."""
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert len(llm.intent_questions) == 1
+    assert "what is site win?" in llm.intent_questions[0]
+    assert retriever.calls[-1]["question"] == "what is CiteVyn?"
+
+
+async def test_confirmed_two_word_alias_routes_like_any_other_alias(session: Any) -> None:
+    """On a confirmed YES the question behaves exactly like the single-token aliases the
+    guardrail already accepts — same route, same retrieval, same cache key.
+
+    An earlier revision deliberately left it on the global confidence-gated path, reasoning
+    that a second gate was safer. Live testing killed that: "what is CiteVyn?" retrieves
+    five near-identical About-CiteVyn chunks, so the gate's MARGIN requirement is never met
+    and the headline question refused anyway. The intent check is the gate — and it is a
+    stricter one than "sitewin" gets, since that routes on token rarity alone with no check
+    at all.
+    """
+    llm = _IntentLLM(verdict="YES")
+    retriever, response = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+    assert response["domain"] == "citevyn"
+
+
+async def test_intent_check_cannot_override_a_question_that_names_a_product(
+    session: Any,
+) -> None:
+    """The recovery only fires on a question that ALREADY routes ``unsupported`` — one that
+    would otherwise refuse outright. It can never pull a product question off its route,
+    which is what keeps this from being the hijack #169 guards against.
+
+    KNOWN COST, accepted: this also means a coverage question that names both the alias and
+    a product ("does site win cover codex?") routes to ``codex`` and is never recovered, so
+    it refuses instead of answering from the About-CiteVyn source — a divergence from the
+    #49 "CiteVyn wins over a product keyword" invariant, which holds only for the canonical
+    spelling and the single-token aliases. Verified live. It is a MISS, not a wrong answer,
+    and relaxing the precondition is exactly the hijack surface this guard exists to close.
+    """
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(
+        session, llm, "did the site win break my Claude Code settings?"
+    )
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["product_area"] == "claude_code"
+
+
+@pytest.mark.parametrize("verdict", ["NO", "NO — this is a sales figure", "", "maybe"])
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what is site win?",
+        # The phrases that killed regex rounds 1-3. Previously these were only
+        # asserted under llm_provider="stub", where this branch is short-circuited,
+        # so they passed trivially and proved nothing about the live path.
+        "may the best site win!",
+        "did the site win the award?",
+        "what is our site win rate?",
+    ],
+)
+async def test_two_word_alias_is_left_alone_unless_the_verdict_is_exactly_yes(
+    session: Any, verdict: str, question: str
+) -> None:
+    """Strict parse. Anything that is not a leading YES — a hedge, an explanation that
+    merely contains other text, empty output — leaves the query untouched."""
+    llm = _IntentLLM(verdict=verdict)
+    retriever, _ = await _ask_ambiguous(session, llm, question)
+
+    assert retriever.calls[-1]["question"] == question
+
+
+async def test_two_word_alias_intent_failure_degrades_to_the_old_refusal(
+    session: Any,
+) -> None:
+    """A provider outage must leave the request indistinguishable from the flag being off —
+    no rewrite, no route change, and no 500.
+
+    The previous assertion here was ``no_answer is False or unsupported is False``, which is
+    near-vacuous: both are False on this path, so it passed without testing the claim.
+    """
+    llm = _IntentLLM(error=True)
+    retriever, response = await _ask_ambiguous(session, llm, "what is site win?")
+
+    # The call was attempted (so the outage is real, not a skipped branch)...
+    assert len(llm.intent_questions) == 1
+    # ...and nothing downstream moved: no rewrite, no route change, no 500.
+    assert retriever.calls[-1]["question"] == "what is site win?"
+    assert retriever.calls[-1]["product_area"] is None
+    assert response["domain"] == "unsupported"
+
+
+async def test_intent_check_is_not_called_without_an_ambiguous_alias(session: Any) -> None:
+    """Cost guard: the deterministic prefilter keeps this free for real traffic. No
+    "site|cite|sight win" in the text, no LLM call."""
+    llm = _IntentLLM(verdict="YES")
+    await _ask_ambiguous(session, llm, "what is the meaning of life?")
+
+    assert llm.intent_questions == []
+
+
+async def test_stub_provider_never_calls_the_intent_llm(session: Any) -> None:
+    """Hermeticity guard. Without the ``llm_provider != "stub"`` precondition every
+    stub-provider test whose text happens to contain "site win" would start issuing a real
+    LLM call — and the pre-existing ordinary-English test would begin exercising a path it
+    was never written for."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _IntentLLM(verdict="YES")
+    orch = Orchestrator(_settings(), session, llm=llm, retriever=retriever)  # stub provider
+
+    await orch.ask(question="what is site win?", request_id="stub", session_id=uuid.uuid4())
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["question"] == "what is site win?"
+
+
+async def test_intent_check_kill_switch(session: Any) -> None:
+    """``citevyn_alias_intent_check=False`` restores the pre-#84 behaviour exactly."""
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(
+        session, llm, "what is site win?", citevyn_alias_intent_check=False
+    )
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["question"] == "what is site win?"
+
+
+async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any) -> None:
+    """The costly failure: ordinary English containing an alias-like phrase must not be
+    silently rewritten and answered from the CiteVyn docs. "may the best site win!" is a
+    set phrase that an earlier version of the matcher turned into "may the best CiteVyn!"."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever([])
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(
+        question="may the best site win!",
+        request_id="alias_5",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["domain"] == "unsupported"
+    assert all(c["question"] == "may the best site win!" for c in retriever.calls)
+    assert all(c["product_area"] is None for c in retriever.calls)
+
+
+# ---------------------------------------------------------------------------
+# 4e. Uncited answers are not presented as grounded (#174)
+# ---------------------------------------------------------------------------
+
+
+async def test_uncited_answer_is_not_returned_with_every_chunk_attached(
+    session: Any,
+) -> None:
+    """#174. The system prompt is explicit: "Every factual claim MUST be followed by a [n]
+    marker", and an answer that cannot ground itself must "refuse ... and emit no markers".
+
+    So prose with NO markers that is NOT the refusal is a CONTRACT VIOLATION — the model
+    either ignored its evidence or invented the claim. The orchestrator used to let it
+    through and then attach EVERY retrieved chunk to it, so the citation count was highest
+    exactly when the answer was least grounded. That inverts the product's core promise.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    uncited = AsyncMock()
+    uncited.complete.return_value = LLMResult(
+        text="Claude Code costs $200 per seat per month.",  # confident, evidence-free
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=uncited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="uncited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    assert response["citations"] == []
+    # The ungrounded claim must not reach the user at all — the fallback copy replaces it.
+    assert response["answer"] == _settings().no_answer_fallback
+    assert "$200" not in str(response["answer"])
+    assert response["confidence"] == Confidence.none.value
+    # An IN-DOMAIN question must not be labelled "Outside scope". An unregistered audit
+    # reason silently coerces to unsupported=true, which is exactly what shipped first.
+    assert response["unsupported"] is False
+    # Nothing ungrounded may enter the answer cache and be replayed for the TTL.
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+    # The audit reason is the ONLY way an operator distinguishes a polite refusal from a
+    # model that ignored its evidence — it is the whole observability payload of this fix.
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["outcome"] == "no_answer"
+    assert audits[0].metadata_["reason"] == "uncited_answer"
+
+
+async def test_refusal_paragraph_is_still_recorded_as_a_plain_no_answer(
+    session: Any,
+) -> None:
+    """The sibling case: the model DID refuse politely. Same user-visible outcome, but the
+    audit reason must stay "no_answer" so the two are still tellable apart."""
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    refusing = AsyncMock()
+    refusing.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=refusing, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="polite",
+        session_id=uuid.uuid4(),
+    )
+
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["reason"] == "no_answer"
+
+
+async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
+    session: Any,
+) -> None:
+    """Cite-once is unchanged: an answer that DOES ground itself keeps exactly the chunks it
+    referenced — the fix must not make grounded answers stingier.
+
+    (Cites [1], not [2]: ``validate_citations`` requires markers contiguous from 1, so a
+    lone [2] is a genuine validation failure and would not exercise the grounded path.)
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    cited = AsyncMock()
+    cited.complete.return_value = LLMResult(
+        text="Use the settings file [1].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=cited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="cited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is False
+    # Cite-once: exactly the referenced chunk, not all five, and the confidence reflects
+    # the 1-of-5 ratio rather than being waved through.
+    assert len(response["citations"]) == 1
+    assert response["confidence"] == Confidence.low.value
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 

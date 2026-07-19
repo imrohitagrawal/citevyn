@@ -34,7 +34,10 @@ def test_default_retrieval_and_cache_settings() -> None:
     settings = Settings()
     assert settings.retrieval_top_k == 6
     assert settings.retrieval_max_candidates == 20
-    assert settings.answer_policy_version == "v1"
+    # v2 since #169 — the bump is the cache-invalidation mechanism for the poisoned
+    # follow-up rows, so this pin is load-bearing: silently reverting it to "v1" would
+    # re-serve them.
+    assert settings.answer_policy_version == "v2"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 

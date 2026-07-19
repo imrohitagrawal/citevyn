@@ -428,6 +428,49 @@ It is **not** the full regression suite — `make ci`, `make golden`,
 `make eval` and `make e2e` still run before the cut (see
 `docs/DEMO_CHECKLIST.md`).
 
+#### 5.3a Rolling back across an `answer_policy_version` bump
+
+**Check this before rolling back — it has no migration and no error to
+warn you.**
+
+`CITEVYN_ANSWER_POLICY_VERSION` is part of the answer-cache key
+pre-image, so bumping it invalidates every cached answer by design. It
+gets bumped when a release makes previously-cached answers *wrong*
+(v1 → v2 in #169: follow-up answers had been generated from a
+concatenated query, so each was stored as a verbatim duplicate of the
+previous turn's answer).
+
+A rollback restores the OLD value — which brings those poisoned rows
+back into key scope and re-serves them, for as long as
+`CITEVYN_CACHE_TTL_SECONDS` (default 24h) has left to run. Nothing else
+evicts them: their `source_version_hash` and `embedder_identity` are
+still perfectly valid.
+
+So when rolling back across a bump, roll the version *forward* instead
+of letting it revert:
+
+```bash
+git checkout v0.1.0
+# The bad release shipped v2; do NOT go back to v1 — pick a THIRD value
+# so the cache is cold in both directions.
+CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.1.0 make refresh
+```
+
+Check which value you are leaving before you roll back:
+
+```bash
+grep -n 'answer_policy_version' backend/app/core/config.py   # the default
+grep -rn 'CITEVYN_ANSWER_POLICY_VERSION' infra/docker/.env   # any override
+```
+
+The only cost of a third value is a cold answer cache, which refills on
+demand. Re-serving a known-bad answer is much worse, and silent.
+
+`infra/docker/scripts/rollback.sh` performs exactly the naive revert
+described above and does not (yet) handle this — see its "What it does
+NOT do" header, alongside the equivalent migration and index-promotion
+caveats.
+
 ---
 
 ## 6. Emergency contacts
