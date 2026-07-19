@@ -52,6 +52,31 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 ## Recently closed
 
+- **[#161](https://github.com/imrohitagrawal/citevyn/issues/161)** — CLOSED, no demonstrable
+  behavioural impact. The `${v:1:-1}` observation was linguistically correct (bash 4.2+; bash 3.2
+  raises "substring expression < 0"), but no failing invocation was ever produced. The code was
+  hardened anyway — #179 repaired four silently-failing `test_env_guard.sh` cases and #181 gave
+  `tests/shell/` a runner matrixed over ubuntu-latest **and macos-latest** (bash 3.2). With that
+  lane green on both, the guard is proven on 3.2. Reopen with a concrete reproducer.
+
+- **[PR #39](https://github.com/imrohitagrawal/citevyn/pull/39)** — CLOSED as superseded. The
+  landing page shipped by another route: `frontend/src/components/LandingPage.tsx` (+
+  `landing-sections.tsx`, `Hero.tsx`, `styles/landing.css`), wired via `App.tsx` and covered by
+  `LandingPage.test.tsx`. Salvage was checked first: `frontend/playwright.config.ts` is already on
+  `main`; `.agents/skills/**` is superseded by `SKILL.md` + `skills-lock.json`; `.vite/deps/*` were
+  accidental build artifacts. Branch retained. (Aside, still true: `make e2e` runs a curl smoke and
+  its help text still points at "Slice 11" for the Playwright upgrade.)
+
+- **[#153](https://github.com/imrohitagrawal/citevyn/issues/153) Layers 0 + 6** — PR #182
+  (main `112c3ff`). Judged eval now runs on `main` / `full-eval`-labelled PRs only, at FULL
+  coverage. Case sampling was measured and REJECTED (42/58 cases carry a zero-tolerance oracle that
+  sampling switches off, not averages down; ceiling was ~28%). Also fixed: the job's PR-only `if:`
+  meant it never ran on `main` at all. New `docs/COST_CONTROLS.md`.
+
+- **[#153](https://github.com/imrohitagrawal/citevyn/issues/153) Layer 1** — PR #184
+  (main `3464aa3`). Per-call cost metering: `provider_calls` + migration 0005, priced by
+  provider+model. **Layers 2-5 remain open** — see `docs/AUTORUN_HANDOFF_2026-07-20.md`.
+
 - **[#82](https://github.com/imrohitagrawal/citevyn/issues/82)** — No CI job built/booted the
   api+worker images, so a container-runtime break (interpreter/CMD, which `docker build` does
   NOT catch) shipped green (the class that let the 3.14 bump merge non-booting). Fixed via
