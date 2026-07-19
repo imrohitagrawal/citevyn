@@ -545,6 +545,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"Injection resistance: {len(inj.get('leaks', []))} leak(s) over "
                 f"{inj['cases']} injection case(s)"
             )
+        # Print the echo oracle's COUNT unconditionally on a judged run, including when it
+        # is 0. A silent oracle and a vacuous one look identical in a CI log otherwise —
+        # and "0 echoes" only means something once you can see how many cases it compared.
+        mt = summary.get("multi_turn", {})
+        if summary.get("judge", {}).get("available"):
+            print(
+                f"Multi-turn echo: {len(mt.get('echoes', []))} echo(es) over "
+                f"{mt.get('cases', 0)} multi-turn case(s)"
+            )
 
     failures = gate_failures(summary)
     if failures:
