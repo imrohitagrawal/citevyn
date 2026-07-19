@@ -37,7 +37,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test ci \
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell ci \
         build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
@@ -67,6 +67,21 @@ install-hooks: ## Install the git pre-commit hook (ruff format+check gate; see s
 test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLite)
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
+
+test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scripts)
+	@# Globs deliberately — a hardcoded list is how the suites drifted in the first
+	@# place, one level up: the next suite added would simply be forgotten. Anything
+	@# dropped into tests/shell/ is picked up with no wiring.
+	@set -e; found=0; failed=0; \
+	for t in tests/shell/*.sh; do \
+		[ -e "$$t" ] || continue; \
+		found=$$((found+1)); \
+		echo "== $$t"; \
+		bash "$$t" || failed=$$((failed+1)); \
+	done; \
+	if [ "$$found" -eq 0 ]; then echo "no suites found in tests/shell/ — expected at least one" >&2; exit 1; fi; \
+	if [ "$$failed" -ne 0 ]; then echo "$$failed of $$found shell suite(s) FAILED" >&2; exit 1; fi; \
+	echo "all $$found shell suite(s) passed"
 
 test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL)
 	cd backend && uv run pytest -m postgres -q
