@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Anaphoric follow-ups returned the previous answer verbatim (#169).** Conversation
+  memory resolved a follow-up by CONCATENATION (`"What is Codex CLI? who built it?"`),
+  and the leading clause is a complete self-contained question — so the LLM answered
+  that and ignored the follow-up. Routing still uses the concatenation (it is what
+  pulls a bare anaphor onto the right product domain); retrieval, generation and the
+  cache key now get a condensed standalone question. Every multi-turn eval case now
+  asserts its answer is not byte-identical to the previous turn's.
+
+### Changed
+- **`answer_policy_version` `v1` → `v2`** — invalidates every cached answer, which is
+  how the answers poisoned by #169 are evicted. They sit under valid keys with a
+  correct `source_version_hash` and `embedder_identity`, so nothing else would clear
+  them.
+
+  > **Rollback caveat.** Reverting past this release restores `v1` and brings those
+  > poisoned rows back into key scope for the remainder of the cache TTL (default
+  > 24h). When rolling back across this bump, set
+  > `CITEVYN_ANSWER_POLICY_VERSION=v3` rather than accepting the reverted default —
+  > a cold cache costs a refill, re-serving a known-bad answer is silent. See
+  > RUNBOOK §5.3a; `infra/docker/scripts/rollback.sh` does the naive revert.
+
 ## [0.10.0] — 2026-07-19
 
 MVP demo release. Closes the RAG quality plan (Phases 0–4), turns the vector
