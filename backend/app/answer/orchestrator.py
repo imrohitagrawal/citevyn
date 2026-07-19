@@ -764,10 +764,24 @@ class Orchestrator:
                 reason=validation.reason or "citation_validation_failed",
             )
 
-        # The LLM may emit the no-answer refusal even when evidence
-        # is non-empty. Honor the contract and treat it as a
-        # weak-evidence fallback.
-        if not validation.cited_indices and self._is_no_answer_refusal(llm_result.text):
+        # An answer that cited NOTHING is not a grounded answer (#174).
+        #
+        # The system prompt is explicit in both directions: every factual claim MUST carry a
+        # ``[n]`` marker, and an answer that cannot ground itself must emit the refusal
+        # paragraph with NO markers. So zero markers means one of exactly two things — the
+        # model refused (honour it), or it produced a claim it could not attribute, which is
+        # a contract violation, not a loosely-cited answer.
+        #
+        # This used to require the text to ALSO match the refusal paragraph. Anything else
+        # fell through to the citation block below, where ``used_indices`` defaulted to
+        # EVERY retrieved chunk — so an ungrounded claim was returned at full confidence
+        # wearing every citation the retriever produced. The citation count was highest
+        # exactly where the grounding was weakest, which inverts the product's promise that
+        # each answer links to the source that supports it.
+        #
+        # Both cases now collapse to no_answer; only the audit reason distinguishes them, so
+        # an operator can still tell a polite refusal from a model that ignored its evidence.
+        if not validation.cited_indices:
             return await self._respond_no_answer(
                 request_id=request_id,
                 session_id=session_id,
@@ -776,7 +790,9 @@ class Orchestrator:
                 domain=domain,
                 intent=intent,
                 source_version_hash=source_version_hash,
-                reason="no_answer",
+                reason=(
+                    "no_answer" if self._is_no_answer_refusal(llm_result.text) else "uncited_answer"
+                ),
                 evidence=evidence,
                 strategy=strategy,
             )
@@ -786,7 +802,10 @@ class Orchestrator:
         # the model actually referenced. The trace keeps every
         # retrieved chunk.
         cited_set = set(validation.cited_indices)
-        used_indices = sorted(cited_set) if cited_set else list(range(1, len(evidence) + 1))
+        # ``cited_set`` is guaranteed non-empty here — an uncited answer returned above.
+        # The old ``else list(range(1, len(evidence) + 1))`` fallback was what attached every
+        # chunk to an ungrounded answer (#174); it is gone rather than left dormant.
+        used_indices = sorted(cited_set)
         used_chunk_ids = {evidence[i - 1].chunk_id for i in used_indices}
         visible_citations = [
             c for c, hit in zip(citations, evidence, strict=True) if hit.chunk_id in used_chunk_ids

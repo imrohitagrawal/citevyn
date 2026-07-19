@@ -1440,6 +1440,81 @@ async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any
 
 
 # ---------------------------------------------------------------------------
+# 4e. Uncited answers are not presented as grounded (#174)
+# ---------------------------------------------------------------------------
+
+
+async def test_uncited_answer_is_not_returned_with_every_chunk_attached(
+    session: Any,
+) -> None:
+    """#174. The system prompt is explicit: "Every factual claim MUST be followed by a [n]
+    marker", and an answer that cannot ground itself must "refuse ... and emit no markers".
+
+    So prose with NO markers that is NOT the refusal is a CONTRACT VIOLATION — the model
+    either ignored its evidence or invented the claim. The orchestrator used to let it
+    through and then attach EVERY retrieved chunk to it, so the citation count was highest
+    exactly when the answer was least grounded. That inverts the product's core promise.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    uncited = AsyncMock()
+    uncited.complete.return_value = LLMResult(
+        text="Claude Code costs $200 per seat per month.",  # confident, evidence-free
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=uncited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="uncited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    assert response["citations"] == []
+
+
+async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
+    session: Any,
+) -> None:
+    """Cite-once is unchanged: an answer that DOES ground itself keeps exactly the chunks it
+    referenced — the fix must not make grounded answers stingier.
+
+    (Cites [1], not [2]: ``validate_citations`` requires markers contiguous from 1, so a
+    lone [2] is a genuine validation failure and would not exercise the grounded path.)
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    cited = AsyncMock()
+    cited.complete.return_value = LLMResult(
+        text="Use the settings file [1].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=cited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="cited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is False
+    assert len(response["citations"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 
