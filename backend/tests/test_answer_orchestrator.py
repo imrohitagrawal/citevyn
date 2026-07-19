@@ -1440,6 +1440,125 @@ async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any
 
 
 # ---------------------------------------------------------------------------
+# 4e. Uncited answers are not presented as grounded (#174)
+# ---------------------------------------------------------------------------
+
+
+async def test_uncited_answer_is_not_returned_with_every_chunk_attached(
+    session: Any,
+) -> None:
+    """#174. The system prompt is explicit: "Every factual claim MUST be followed by a [n]
+    marker", and an answer that cannot ground itself must "refuse ... and emit no markers".
+
+    So prose with NO markers that is NOT the refusal is a CONTRACT VIOLATION — the model
+    either ignored its evidence or invented the claim. The orchestrator used to let it
+    through and then attach EVERY retrieved chunk to it, so the citation count was highest
+    exactly when the answer was least grounded. That inverts the product's core promise.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    uncited = AsyncMock()
+    uncited.complete.return_value = LLMResult(
+        text="Claude Code costs $200 per seat per month.",  # confident, evidence-free
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=uncited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="uncited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True
+    assert response["citations"] == []
+    # The ungrounded claim must not reach the user at all — the fallback copy replaces it.
+    assert response["answer"] == _settings().no_answer_fallback
+    assert "$200" not in str(response["answer"])
+    assert response["confidence"] == Confidence.none.value
+    # An IN-DOMAIN question must not be labelled "Outside scope". An unregistered audit
+    # reason silently coerces to unsupported=true, which is exactly what shipped first.
+    assert response["unsupported"] is False
+    # Nothing ungrounded may enter the answer cache and be replayed for the TTL.
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+    # The audit reason is the ONLY way an operator distinguishes a polite refusal from a
+    # model that ignored its evidence — it is the whole observability payload of this fix.
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["outcome"] == "no_answer"
+    assert audits[0].metadata_["reason"] == "uncited_answer"
+
+
+async def test_refusal_paragraph_is_still_recorded_as_a_plain_no_answer(
+    session: Any,
+) -> None:
+    """The sibling case: the model DID refuse politely. Same user-visible outcome, but the
+    audit reason must stay "no_answer" so the two are still tellable apart."""
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    refusing = AsyncMock()
+    refusing.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=refusing, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="polite",
+        session_id=uuid.uuid4(),
+    )
+
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["reason"] == "no_answer"
+
+
+async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
+    session: Any,
+) -> None:
+    """Cite-once is unchanged: an answer that DOES ground itself keeps exactly the chunks it
+    referenced — the fix must not make grounded answers stingier.
+
+    (Cites [1], not [2]: ``validate_citations`` requires markers contiguous from 1, so a
+    lone [2] is a genuine validation failure and would not exercise the grounded path.)
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    cited = AsyncMock()
+    cited.complete.return_value = LLMResult(
+        text="Use the settings file [1].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=cited, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="cited",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is False
+    # Cite-once: exactly the referenced chunk, not all five, and the confidence reflects
+    # the 1-of-5 ratio rather than being waved through.
+    assert len(response["citations"]) == 1
+    assert response["confidence"] == Confidence.low.value
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 

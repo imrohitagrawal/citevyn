@@ -768,6 +768,15 @@ async def test_reranker_passthrough() -> None:
         # word "streaming" so a future unrelated gemini chunk mentioning "streaming"
         # can't satisfy this without the actual #87 streaming-response content.
         ("google gemini streaming responses", Domain.gemini_api.value, "streamGenerateContent"),
+        # #170, same class: claude_code.md had NO installation content at all, so this
+        # refused identically single-turn and as a follow-up. Assert the package name
+        # rather than the bare word "install" — the Permissions text already contains
+        # "install"-adjacent noise, and only the real content carries this token.
+        (
+            "How do I install Claude Code?",
+            Domain.claude_code.value,
+            "@anthropic-ai/claude-code",
+        ),
     ],
 )
 async def test_source_named_question_word_returns_evidence_hermetically(
