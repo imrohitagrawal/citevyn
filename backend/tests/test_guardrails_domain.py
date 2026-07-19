@@ -261,6 +261,14 @@ def test_canonical_name_is_never_narrowed_by_the_identifier_guards(question: str
         "sitewin:8080 is down",
         "the sitewin/main branch",
         "package sitewin==1.2.3",
+        # ...and as the FINAL segment, where nothing follows the alias. These are the
+        # ONLY shape the BEFORE guard covers — every case above is also caught by the
+        # AFTER guard, so without these the BEFORE guard could be deleted silently.
+        "docs.sitewin",
+        "v2.sitewin is deployed",
+        "the github.com/acme/sitewin repo",
+        "api.sitewin returned 500",
+        "ping svc:sitewin",
     ],
 )
 def test_alias_inside_an_identifier_is_left_alone(text: str) -> None:
