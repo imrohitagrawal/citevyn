@@ -107,7 +107,11 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
     if [[ ${#v} -ge 2 ]]; then
         local f="${v:0:1}" l="${v: -1}"
         if [[ "${f}" == "'" && "${l}" == "'" ]] || [[ "${f}" == '"' && "${l}" == '"' ]]; then
-            v="${v:1:-1}"
+            # NB: `${v:1:-1}` is bash 4.2+; on macOS's bash 3.2 it raises
+            # "substring expression < 0", which would abort this function and
+            # return an empty value (failing closed with a misleading "unset"
+            # error). Compute the length explicitly so this stays 3.2-safe.
+            v="${v:1:$((${#v} - 2))}"
         fi
     fi
     printf '%s' "${v}"
