@@ -49,10 +49,12 @@ REPO_ROOT="$(cd "${COMPOSE_DIR}/../.." && pwd)"
 
 SKIP_ROLLBACK=0
 DRY_RUN=0
+VERIFY_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-rollback-drill) SKIP_ROLLBACK=1; shift ;;
+        --verify-only)         VERIFY_ONLY=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         -h|--help)             sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
@@ -116,7 +118,10 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
     fi
     printf '%s' "${v}"
 }
-DEMO_KEY="$(read_env CITEVYN_DEMO_API_KEY)"
+# An explicit env override wins over the compose .env. This is what makes
+# --verify-only usable against a locally-run api whose key lives elsewhere
+# (e.g. backend/.env) without editing the prod env file.
+DEMO_KEY="${CITEVYN_DEMO_API_KEY:-$(read_env CITEVYN_DEMO_API_KEY)}"
 PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
 VERSION="${VERSION_REQUESTED:-$(git describe --tags --exact-match 2>/dev/null || echo '')}"
@@ -155,31 +160,38 @@ EOF
     exit 0
 fi
 
-# ── Real-run guards. Everything below can mutate production. ───────────────
-[[ -n "${VERSION}" ]] || die "VERSION is unset and HEAD is not tagged; pass VERSION=vX.Y.Z"
-git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null \
-    || die "VERSION='${VERSION}' is not an existing git tag (the gate deploys a tagged release, not a branch)"
-[[ -n "${BASE_URL}" ]] || die "BASE_URL is unset and CITEVYN_PUBLIC_HOST is empty in ${COMPOSE_DIR}/.env"
-[[ -n "${DEMO_KEY}" ]] || die "CITEVYN_DEMO_API_KEY is unset in ${COMPOSE_DIR}/.env"
+# ── Real-run guards. These apply only when we will MUTATE production. ──────
+# --verify-only deploys nothing, so requiring a tagged release, a clean tree
+# and a non-stub prod .env would be wrong there: its whole purpose is to probe
+# an already-running stack (typically local or staging) from a work branch.
+RETURN_REF=""
+if [[ "${VERIFY_ONLY}" == "0" ]]; then
+    [[ -n "${VERSION}" ]] || die "VERSION is unset and HEAD is not tagged; pass VERSION=vX.Y.Z"
+    git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null \
+        || die "VERSION='${VERSION}' is not an existing git tag (the gate deploys a tagged release, not a branch)"
+    [[ -n "${BASE_URL}" ]] || die "BASE_URL is unset and CITEVYN_PUBLIC_HOST is empty in ${COMPOSE_DIR}/.env"
+    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_DEMO_API_KEY is unset in ${COMPOSE_DIR}/.env"
 
-# A dirty tree must be caught BEFORE we redeploy production — otherwise we ship
-# uncommitted local edits and only discover it when the rollback drill refuses.
-if [[ -n "$(git status --porcelain)" ]]; then
-    git status --short >&2
-    die "working tree is dirty; commit or stash before running the live gate"
+    # A dirty tree must be caught BEFORE we redeploy production — otherwise we
+    # ship uncommitted local edits and only discover it when the rollback
+    # drill refuses.
+    if [[ -n "$(git status --porcelain)" ]]; then
+        git status --short >&2
+        die "working tree is dirty; commit or stash before running the live gate"
+    fi
+
+    if [[ "${SKIP_ROLLBACK}" == "0" ]]; then
+        [[ -n "${PREV_VERSION}" ]] \
+            || die "no previous v* tag for the rollback drill; pass PREV_VERSION= or --skip-rollback-drill"
+    fi
+
+    RETURN_REF="$(git rev-parse --abbrev-ref HEAD)"
+    [[ "${RETURN_REF}" == "HEAD" ]] && RETURN_REF="$(git rev-parse HEAD)"
+
+    # shellcheck source=infra/docker/scripts/_env_guard.sh
+    source "${COMPOSE_DIR}/scripts/_env_guard.sh" "${COMPOSE_DIR}" \
+        || die "env guard refused: refusing to run the live gate against a stub .env"
 fi
-
-if [[ "${SKIP_ROLLBACK}" == "0" ]]; then
-    [[ -n "${PREV_VERSION}" ]] \
-        || die "no previous v* tag for the rollback drill; pass PREV_VERSION= or --skip-rollback-drill"
-fi
-
-RETURN_REF="$(git rev-parse --abbrev-ref HEAD)"
-[[ "${RETURN_REF}" == "HEAD" ]] && RETURN_REF="$(git rev-parse HEAD)"
-
-# shellcheck source=infra/docker/scripts/_env_guard.sh
-source "${COMPOSE_DIR}/scripts/_env_guard.sh" "${COMPOSE_DIR}" \
-    || die "env guard refused: refusing to run the live gate against a stub .env"
 
 # shellcheck disable=SC2206  # deliberate word-splitting of operator-supplied flags
 CURL=(curl --silent --show-error --max-time 30 ${CURL_OPTS:-})
@@ -330,6 +342,49 @@ deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deplo
     git checkout --quiet "${tag}" || return 1
     VERSION="${tag}" "${COMPOSE_DIR}/scripts/refresh.sh"
 }
+
+# ── --verify-only: run ONLY the probe suite against BASE_URL. ──────────────
+# Mutates nothing: no backup, no deploy, no checkout, no rollback. This exists
+# so the probe logic — the part most likely to be wrong, and the part static
+# review cannot fully validate — can be exercised against a real running stack
+# (local or staging) WITHOUT a production release. Use it to smoke-test the
+# gate itself before trusting it on a real cut.
+#
+# MUST stay below the verify_suite definition: an earlier revision placed this
+# block above it, so `verify_suite` was undefined, ZERO probes ran, FAIL_COUNT
+# stayed 0 and the script printed "all probes passed" and exited 0 — a false
+# green in the very tool built to prevent false greens. Hence also the
+# zero-probe guard below.
+if [[ "${VERIFY_ONLY}" == "1" ]]; then
+    [[ -n "${BASE_URL}" ]] || die "--verify-only needs BASE_URL (or CITEVYN_PUBLIC_HOST)"
+    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_DEMO_API_KEY"
+    echo "==> --verify-only: probing ${BASE_URL} (no deploy, no rollback)"
+    verify_suite "verify-only"
+    echo
+    echo "════════════════════════════════════════════════════════════════"
+    echo " verify-only summary — ${BASE_URL}"
+    echo "════════════════════════════════════════════════════════════════"
+    if [[ "${#RESULTS[@]}" -gt 0 ]]; then
+        for row in "${RESULTS[@]}"; do
+            IFS='|' read -r status name detail <<<"${row}"
+            printf ' %-6s %s%s\n' "[${status}]" "${name}" "${detail:+ — ${detail}}"
+        done
+    fi
+    echo "────────────────────────────────────────────────────────────────"
+    echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}"
+    # A run that recorded NOTHING is a broken harness, not a pass.
+    if [[ "${#RESULTS[@]}" -eq 0 ]]; then
+        echo " RESULT: ✗ no probes executed — the harness is broken, not the stack."
+        exit 1
+    fi
+    if [[ "${FAIL_COUNT}" -gt 0 ]]; then
+        echo " RESULT: ✗ probes FAILED"
+        exit 1
+    fi
+    echo " RESULT: ✓ all probes passed (NOTE: this is not the release gate —"
+    echo "         it proves the probes, not the deploy/rollback path)."
+    exit 0
+fi
 
 # ── 2. Safety backup ───────────────────────────────────────────────────────
 echo "==> [2/6] safety backup before touching the live stack"
