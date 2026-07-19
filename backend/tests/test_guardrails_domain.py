@@ -123,35 +123,35 @@ def test_classify_domain_citevyn_requires_word_boundary(question: str, expected:
 #
 # The asymmetry that shapes these tests: this guardrail ROUTES, so a false
 # positive produces a confidently-WRONG, confidently-CITED answer sourced from
-# the CiteVyn docs. A MISS just makes the user rephrase. Every alias below is
-# therefore paired with a false-positive guard, and the guard tests matter more
-# than the happy-path ones.
+# the CiteVyn docs, and rewrites the user's text on the way. A MISS just makes
+# the user rephrase. The rejection tests below therefore matter more than the
+# happy-path ones, and every phrase in them came from an adversarial review that
+# broke an earlier, looser version of this matcher.
 
 
 @pytest.mark.parametrize(
     "question",
     [
-        # --- unambiguous: single tokens that are not English words ---
+        # Single tokens — no language a user of this tool is likely to type
+        # spells a word this way, so these need no contextual guard.
         "what is sitewin?",
         "what is citevin?",
         "what is sitevyn?",
         "what is sitevin?",
         "what is citewin?",
         "what is sightvyn?",
+        "what is sightwin?",
         "Is SiteWin free to use?",
-        # --- unambiguous: two tokens, second is not an English word ---
+        "Is sitewin free to use right now?",
+        "does sitewin cover gemini?",
+        # Separated only where the tail ("vyn") is not a word anywhere.
         "what is cite vyn?",
         "what is site vyn?",
-        "what is cite vin?",
-        "what is site vin?",
         "what is sight vyn?",
-        # --- hyphenated ---
         "what is cite-vyn?",
         "what is site-vyn?",
-        # --- ambiguous pair, but with no metric noun following ---
-        "what is site win?",
-        "what does site win cover?",
-        "is cite win accurate?",
+        # A sentence-final alias is still the product, not a filename.
+        "I was reading about sitewin.",
     ],
 )
 def test_classify_domain_recognizes_citevyn_aliases(question: str) -> None:
@@ -163,94 +163,83 @@ def test_classify_domain_recognizes_citevyn_aliases(question: str) -> None:
 @pytest.mark.parametrize(
     "question",
     [
-        # The owner's named false positives: ordinary analytics phrasing.
+        # --- "win" as a VERB. "may the best site win!" is a set phrase; an
+        #     earlier matcher rewrote it to "may the best CiteVyn!". ---
+        "may the best site win!",
+        "did Bob's site win?",
+        "does our new site win?",
+        "did the site win the award?",
+        "which site win does better?",
+        # --- "site win" as ordinary sales/analytics vocabulary ---
         "what is our site win rate?",
         "the site win percentage",
-        # Same shape, other metric nouns.
-        "improve the site win ratio",
-        "site win conversion for this quarter",
-        "what is the site win probability?",
-        "cite win rate in the report",
-        # Possessives are a strong "this is my business metric" signal.
-        "our site win numbers are up",
-        "my site win streak",
-        # Plural is a different word and must not match at all.
-        "how many site wins did we have?",
-        # Embedded in a larger token — the word-boundary rule still holds.
-        "mysitewinapp settings",
-    ],
-)
-def test_classify_domain_ambiguous_aliases_do_not_false_positive(question: str) -> None:
-    """A false hit here yields a confidently-cited answer about the WRONG subject,
-    so an ordinary phrase that merely contains "site win" must never route to
-    ``citevyn``. A miss is far cheaper than a false hit."""
-    assert classify_domain(question) is not Domain.citevyn
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        # Ends the input, so ONLY the determiner guard can reject these.
-        "our site win",
-        "my site win",
-        "your site win",
-        "their site win",
-        "its site win",
-        "the site win",
-        "a site win",
-        "every site win",
-        "another site win",
-    ],
-)
-def test_determiner_guard_blocks_ambiguous_alias_on_its_own(question: str) -> None:
-    """A determiner before the alias marks a noun phrase or a verb clause, never the
-    product. Each case here ends the input, so the follower allowlist would ACCEPT it —
-    the determiner guard is the only thing rejecting, and it is proven alone."""
-    assert classify_domain(question) is not Domain.citevyn
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        # Regression cases from the adversarial review. The first design BLOCKLISTED
-        # metric nouns and every one of these defeated it: an unlisted noun, a "%"
-        # that can never match a \b-terminated list, a hyphen that dodged the "\s+",
-        # and "win" read as a VERB — a reading the blocklist never modelled.
-        "site win rate",
-        "site win percentage",
-        "site win odds",
-        "site win margin",
+        "the recent site win cost us the deal",
+        "congrats on the huge site win!",
+        "we had a big site win, then we celebrated",
         "site win data for Q3",
         "site win trend",
-        "site win history",
-        "site win by region",
         "site win % is up",
         "what was the site win-rate last quarter?",
-        "site win-percentage by region",
         "cite win-loss reasons",
-        "did the site win the award?",
-        "did site win the contract?",
-        "we saw the site win last quarter",
-        "watch the site win big",
-        "is site win rate improving?",
-        "big site win today",
-        "site win versus loss",
+        "how many site wins did we have?",
+        "Q3 site win costs",
+        # --- the product-shaped frames are misses TOO. Recognizing these would
+        #     mean recognizing the ones above; see the module docstring. ---
+        "what is site win?",
+        "site win pro",
+        "is site win free?",
     ],
 )
-def test_follower_allowlist_rejects_every_non_product_continuation(question: str) -> None:
-    """The ambiguous tier FAILS CLOSED: anything not on the product-context allowlist
-    is treated as ordinary English. A blocklist of English nouns is unbounded by
-    construction — these are the cases that proved it."""
+def test_two_ordinary_words_never_route_to_citevyn(question: str) -> None:
+    """ "site win" / "cite win" are two ordinary English words and are DELIBERATELY
+    not recognized.
+
+    Two adversarial review rounds each broke a matcher that tried to admit them —
+    first a blocklist of metric nouns, then a fail-closed allowlist with a
+    determiner guard, which one adjective walked straight through ("may the best
+    site win!"). Surrounding-token rules cannot separate this phrase from ordinary
+    English, and a false hit costs far more than a miss. The last three cases pin
+    that the miss is intentional, not an oversight: a user who says "site win" gets
+    the refusal and can type "sitewin", which works.
+    """
     assert classify_domain(question) is not Domain.citevyn
 
 
 @pytest.mark.parametrize(
-    "question", ["site win-loss", "cite win-rate", "sight win-total", "site-win trust"]
+    "question",
+    [
+        "please cite VIN and mileage",
+        "cite VIN numbers in the claim",
+        "what does the site VIN decoder cost?",
+        "upload the site vin list",
+        "the site-vin lookup",
+        "le site vin est en panne",
+    ],
 )
-def test_hyphenated_ambiguous_alias_is_never_the_product(question: str) -> None:
-    """A hyphen between two ordinary words is the compound-noun reading ("win-loss
-    record"), never the dictated product name — the separator is a plain space only."""
+def test_separated_vin_spellings_are_not_the_product(question: str) -> None:
+    """ "VIN" is an ordinary English noun (Vehicle Identification Number) and "vin"
+    is French for wine, so "cite vin" / "site vin" are NOT safe separated aliases —
+    an earlier version rewrote "please cite VIN and mileage" to "please CiteVyn and
+    mileage". Only the single-token spellings ("citevin", "sitevin") are kept."""
     assert classify_domain(question) is not Domain.citevyn
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Visit https://sitewin.example.com/docs",
+        "why does sitewin.example.com return 502?",
+        "the file sitevin.py failed",
+        "see /srv/sitewin/config.yml",
+        "email me at bob@sitewin.io",
+    ],
+)
+def test_alias_inside_an_identifier_is_left_alone(text: str) -> None:
+    """An alias inside a hostname, URL or filename is the IDENTIFIER the user is
+    asking about, not the product name. Rewriting it corrupts the very string the
+    question is about ("sitewin.example.com" -> "CiteVyn.example.com")."""
+    assert canonicalize_product_name(text) == text
+    assert classify_domain(text) is not Domain.citevyn
 
 
 @pytest.mark.parametrize(
@@ -267,42 +256,19 @@ def test_hyphenated_ambiguous_alias_is_never_the_product(question: str) -> None:
         # Trailing boundary: the alias is a prefix of a longer word.
         "a site window manager",
         "opposite window frame",
+        "mysitewinapp settings",
     ],
 )
 def test_word_boundaries_protect_against_incidental_substrings(question: str) -> None:
-    """ "site win" occurs as a substring inside plenty of ordinary English
-    ("webSITE WINner", "offSITE WINter"). The word boundaries, not the guards, are
-    what stop those — keep them proven separately."""
+    """The aliases occur as substrings inside ordinary English ("webSITE WINner",
+    "offSITE WINter"). Word boundaries, not context rules, are what stop those."""
     assert classify_domain(question) is not Domain.citevyn
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        "site win",
-        "what is site win",
-        "what is site win?",
-        "site win pricing",
-        "SITE WIN",
-        "is site win free?",
-        "does site win cover codex?",
-        "tell me about site win",
-        "what does site win do?",
-        "how accurate is site win?",
-    ],
-)
-def test_ambiguous_alias_still_matches_in_a_product_frame(question: str) -> None:
-    """Failing closed must not mean never firing — that would make the fix a no-op for
-    exactly the phrasing the owner dictates. These are the product-shaped frames the
-    allowlist exists to admit."""
-    assert classify_domain(question) is Domain.citevyn
 
 
 @pytest.mark.parametrize(
     "question,expected",
     [
         ("what is sitewin?", "what is CiteVyn?"),
-        ("what is site win?", "what is CiteVyn?"),
         ("Is SiteWin free to use?", "Is CiteVyn free to use?"),
         ("what is cite-vyn?", "what is CiteVyn?"),
         ("does sitewin cover gemini?", "does CiteVyn cover gemini?"),
@@ -324,35 +290,37 @@ def test_canonicalize_product_name(question: str, expected: str) -> None:
     "question",
     [
         "what is our site win rate?",
-        "the site win percentage",
+        "may the best site win!",
         "website winner announcement",
         "how many site wins did we have?",
-        "our site win",
+        "please cite VIN and mileage",
+        "How do I configure Claude Code permissions?",
     ],
 )
 def test_canonicalize_leaves_non_citevyn_text_untouched(question: str) -> None:
-    """The rewriter shares the guarded pattern with the classifier, so it can never
-    rewrite text the classifier would not also have routed to ``citevyn``. Silently
-    turning "our site win rate" into "our CiteVyn rate" would corrupt the query."""
+    """The rewriter shares its pattern with the classifier, so it can never rewrite
+    text the classifier would not also have routed to ``citevyn``. Silently turning
+    "may the best site win!" into "may the best CiteVyn!" would corrupt the query."""
     assert canonicalize_product_name(question) == question
 
 
-def test_canonicalize_agrees_with_classify_domain() -> None:
-    """The invariant that keeps the two from drifting: a question is rewritten if and
-    only if it routes to ``citevyn``."""
+def test_canonicalize_only_rewrites_what_routes_to_citevyn() -> None:
+    """The invariant that keeps the two from drifting: nothing is rewritten unless it
+    routes to ``citevyn``. (The converse does not hold — a question already spelled
+    canonically routes there but needs no rewrite.)"""
     samples = [
         "what is sitewin?",
         "site win pricing",
         "our site win rate",
-        "website winner",
+        "may the best site win!",
         "What is CiteVyn?",
         "Claude Code permissions",
-        "how many site wins did we have?",
+        "please cite VIN and mileage",
+        "https://sitewin.example.com",
     ]
     for q in samples:
         rewritten = canonicalize_product_name(q) != q
         routed = classify_domain(q) is Domain.citevyn
-        # A question already spelled canonically routes to citevyn but needs no rewrite.
         assert not rewritten or routed, f"{q!r} was rewritten but does not route to citevyn"
 
 

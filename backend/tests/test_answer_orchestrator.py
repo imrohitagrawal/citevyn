@@ -987,11 +987,11 @@ async def test_alias_canonicalization_reaches_the_generator(session: Any) -> Non
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
 
-    await orch.ask(question="what is site win?", request_id="alias_2", session_id=uuid.uuid4())
+    await orch.ask(question="what is sitewin?", request_id="alias_2", session_id=uuid.uuid4())
 
     prompt = llm_spy.complete.await_args.kwargs["user"]
     assert "CiteVyn" in prompt
-    assert "site win" not in prompt
+    assert "sitewin" not in prompt
 
 
 async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
@@ -1004,14 +1004,14 @@ async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
     retriever = _FakeRetriever(_evidence(count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
-    await orch.ask(question="what is site win?", request_id="alias_3", session_id=uuid.uuid4())
+    await orch.ask(question="what is sitewin?", request_id="alias_3", session_id=uuid.uuid4())
 
     user_msgs = (
         (await session.execute(select(Message).where(Message.role == MessageRole.user)))
         .scalars()
         .all()
     )
-    assert [m.content for m in user_msgs] == ["what is site win?"]
+    assert [m.content for m in user_msgs] == ["what is sitewin?"]
 
 
 async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
@@ -1031,20 +1031,21 @@ async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
 
 
 async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any) -> None:
-    """The costly failure: "our site win rate" must not be silently turned into "our
-    CiteVyn rate" and answered from the CiteVyn docs."""
+    """The costly failure: ordinary English containing an alias-like phrase must not be
+    silently rewritten and answered from the CiteVyn docs. "may the best site win!" is a
+    set phrase that an earlier version of the matcher turned into "may the best CiteVyn!"."""
     await _seed_index_version(session)
     retriever = _FakeRetriever([])
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     response = await orch.ask(
-        question="what is our site win rate?",
+        question="may the best site win!",
         request_id="alias_5",
         session_id=uuid.uuid4(),
     )
 
     assert response["domain"] == "unsupported"
-    assert all(c["question"] == "what is our site win rate?" for c in retriever.calls)
+    assert all(c["question"] == "may the best site win!" for c in retriever.calls)
     assert all(c["product_area"] is None for c in retriever.calls)
 
 
