@@ -1341,26 +1341,47 @@ async def test_intent_check_cannot_override_a_question_that_names_a_product(
 
 
 @pytest.mark.parametrize("verdict", ["NO", "NO — this is a sales figure", "", "maybe"])
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what is site win?",
+        # The phrases that killed regex rounds 1-3. Previously these were only
+        # asserted under llm_provider="stub", where this branch is short-circuited,
+        # so they passed trivially and proved nothing about the live path.
+        "may the best site win!",
+        "did the site win the award?",
+        "what is our site win rate?",
+    ],
+)
 async def test_two_word_alias_is_left_alone_unless_the_verdict_is_exactly_yes(
-    session: Any, verdict: str
+    session: Any, verdict: str, question: str
 ) -> None:
     """Strict parse. Anything that is not a leading YES — a hedge, an explanation that
     merely contains other text, empty output — leaves the query untouched."""
     llm = _IntentLLM(verdict=verdict)
-    retriever, _ = await _ask_ambiguous(session, llm, "what is site win?")
+    retriever, _ = await _ask_ambiguous(session, llm, question)
 
-    assert retriever.calls[-1]["question"] == "what is site win?"
+    assert retriever.calls[-1]["question"] == question
 
 
 async def test_two_word_alias_intent_failure_degrades_to_the_old_refusal(
     session: Any,
 ) -> None:
-    """A provider outage must not turn a refusal into a 500, and must not rewrite."""
+    """A provider outage must leave the request indistinguishable from the flag being off —
+    no rewrite, no route change, and no 500.
+
+    The previous assertion here was ``no_answer is False or unsupported is False``, which is
+    near-vacuous: both are False on this path, so it passed without testing the claim.
+    """
     llm = _IntentLLM(error=True)
     retriever, response = await _ask_ambiguous(session, llm, "what is site win?")
 
+    # The call was attempted (so the outage is real, not a skipped branch)...
+    assert len(llm.intent_questions) == 1
+    # ...and nothing downstream moved: no rewrite, no route change, no 500.
     assert retriever.calls[-1]["question"] == "what is site win?"
-    assert response["no_answer"] is False or response["unsupported"] is False
+    assert retriever.calls[-1]["product_area"] is None
+    assert response["domain"] == "unsupported"
 
 
 async def test_intent_check_is_not_called_without_an_ambiguous_alias(session: Any) -> None:
@@ -1370,6 +1391,22 @@ async def test_intent_check_is_not_called_without_an_ambiguous_alias(session: An
     await _ask_ambiguous(session, llm, "what is the meaning of life?")
 
     assert llm.intent_questions == []
+
+
+async def test_stub_provider_never_calls_the_intent_llm(session: Any) -> None:
+    """Hermeticity guard. Without the ``llm_provider != "stub"`` precondition every
+    stub-provider test whose text happens to contain "site win" would start issuing a real
+    LLM call — and the pre-existing ordinary-English test would begin exercising a path it
+    was never written for."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _IntentLLM(verdict="YES")
+    orch = Orchestrator(_settings(), session, llm=llm, retriever=retriever)  # stub provider
+
+    await orch.ask(question="what is site win?", request_id="stub", session_id=uuid.uuid4())
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["question"] == "what is site win?"
 
 
 async def test_intent_check_kill_switch(session: Any) -> None:
