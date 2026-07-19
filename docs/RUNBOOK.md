@@ -179,6 +179,38 @@ The wedged job will be marked `failed` on next startup (or by
 the next worker's poll if `restart: on-failure` is configured
 on the job row).
 
+### 3.4 Editing a source doc (corpus correction)
+
+**Context:** The corpus under `backend/app/worker/sources/*.md` is the ground
+truth every answer is generated from. Correcting a doc is a normal operation —
+a definition is too narrow, a flag is wrong, a section is missing.
+
+**Procedure:** edit the `.md` file, re-run ingestion, then promote:
+
+```bash
+python -m app.worker.cli run          # rebuilds v-local from the edited corpus
+# then promote via POST /v1/admin/index_versions/{version}/promote
+```
+
+**What happens automatically (no manual cache flush needed):**
+
+- `IndexVersion.source_version_hash` is derived from the **bytes of the source
+  docs** (`app.worker.cli._content_version_hash`), so any edit changes it. The
+  answer-cache key includes that hash, so cached answers built from the old text
+  stop being reachable on the next ingest. There is no constant to bump.
+- A re-ingest **replaces** the source's chunks and exact terms rather than
+  appending, so the old wording does not linger in the corpus next to the new.
+- `Document.title` and `source_url` are refreshed from the allowlist, so an
+  allowlist correction reaches rendered citations.
+
+All three hold when re-ingesting **in place** (the default `--index-version
+v-local`, which is what the worker image's `CMD` runs). Before this was fixed,
+each of them silently required building a brand-new index version instead.
+
+**Verify the edit actually shipped:** ask the corrected question and confirm the
+answer reflects the new text. If it still shows the old answer, check that the
+promote step ran — an un-promoted candidate is not served.
+
 ### 3.4a Embeddings: enabling the real provider (#51)
 
 **Context:** By default `CITEVYN_EMBEDDING_PROVIDER=stub` (deterministic,

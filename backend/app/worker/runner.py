@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.embeddings import Embedder
@@ -306,8 +306,18 @@ class IngestionRunner:
         the parse knows the title, but the document needs a
         persistent primary key, so we create it now and
         attach chunks immediately).
+
+        A re-ingest **replaces** the document's chunks rather than adding to
+        them: the previous generation is deleted first (see
+        :meth:`_delete_existing_chunks`). Without that, re-running a source
+        against the same ``index_version`` appended a second copy of every
+        chunk, so an edited source doc left the OLD text in the corpus
+        alongside the new — and retrieval could still surface the stale
+        wording. The module docstring's "replaces the chunks" contract is
+        what this makes true.
         """
         document = await self._upsert_document(session, source=source)
+        await self._delete_existing_chunks(session, document=document)
         # Embed the whole document's chunks in one batched call. Real providers
         # (Gemini) charge and rate-limit per request, so a single
         # ``embed_documents`` beats N per-chunk round-trips; the stub ignores the
@@ -333,6 +343,24 @@ class IngestionRunner:
             chunks.append(chunk)
         return chunks
 
+    async def _delete_existing_chunks(
+        self,
+        session: AsyncSession,
+        *,
+        document: Document,
+    ) -> None:
+        """Delete the previous generation of chunks (and their exact terms).
+
+        :class:`ExactTerm` declares ``ondelete="CASCADE"`` on both FKs, but the
+        hermetic SQLite test engine does not enforce foreign keys by default, so
+        the terms are deleted explicitly first. That keeps the behaviour
+        identical on SQLite and Postgres instead of depending on a PRAGMA.
+        """
+        document_id = document.document_id
+        await session.execute(delete(ExactTerm).where(ExactTerm.document_id == document_id))
+        await session.execute(delete(Chunk).where(Chunk.document_id == document_id))
+        await session.flush()
+
     async def _upsert_document(
         self,
         session: AsyncSession,
@@ -348,6 +376,12 @@ class IngestionRunner:
         duplicate. The ``content_checksum`` here is a
         placeholder; the real per-chunk checksums live on
         the :class:`Chunk` rows.
+
+        The ``title`` and ``source_url`` are refreshed from the
+        :class:`SourceSpec` on re-ingest. Both are stamped straight onto every
+        rendered citation, so leaving them stale meant an allowlist retitle or a
+        corrected upstream URL never reached users until someone built a brand-new
+        index version.
         """
         existing = await _find_document_for_source(
             session,
@@ -358,6 +392,9 @@ class IngestionRunner:
             existing.last_fetched_at = datetime.now(UTC)
             existing.last_indexed_at = datetime.now(UTC)
             existing.status = DocumentStatus.active
+            existing.title = source.title
+            existing.source_url = source.source_url or source.location
+            existing.content_checksum = _checksum(source.name + source.title)
             return existing
         document = Document(
             index_version=self._index_version,
@@ -496,14 +533,22 @@ async def ensure_index_version(
     The embedding provenance (Tier 3 guardrail, #51) records which embedder built
     this index. On a re-ingest it is refreshed on the existing row too, so an
     index rebuilt under a new embedder does not keep a stale stamp.
+
+    ``source_version_hash`` is refreshed on re-ingest for the same reason. The
+    answer-cache key is derived from it (``cache.build_cache_key``), so a stale
+    value meant editing a source doc and re-ingesting in place left the cache
+    serving the OLD answer. Only writing it on INSERT made the content-derived
+    hash a no-op on the default ``--index-version v-local`` path that the
+    worker image and ``docs/RUNBOOK.md`` both use.
     """
     existing = await session.get(IndexVersion, index_version)
     if existing is not None:
+        existing.source_version_hash = source_version_hash
         if embedding_provider is not None:
             existing.embedding_provider = embedding_provider
             existing.embedding_model = embedding_model
             existing.embedding_dim = embedding_dim
-            await session.flush()
+        await session.flush()
         return existing
     row = IndexVersion(
         index_version=index_version,

@@ -2,12 +2,15 @@
 
 The MVP source list lives in code so the worker is hermetic
 and reproducible — there is no separate ``sources.yaml`` for
-the worker to read at boot. The lock between this list and
-the actual production source feed is the ``source_version_hash``
-column on :class:`IndexVersion`: when an external operator
-publishes a new "official docs snapshot", they update
-:meth:`SOURCE_VERSION_HASH` and the next worker run produces a
-new ``IndexVersion(index_version=..., source_version_hash=...)``.
+the worker to read at boot. The lock between this list and the
+corpus actually ingested is the ``source_version_hash`` column
+on :class:`IndexVersion`, which the worker derives from the
+bytes of these source docs (see
+:func:`app.worker.cli._content_version_hash`). Editing any doc
+below therefore changes the hash on the next run, which changes
+the answer-cache key and retires stale cached answers. There is
+no constant for an operator to bump — the content *is* the
+version.
 
 Design notes
 ------------
@@ -92,7 +95,7 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         title="Codex Reference",
         fetcher="local",
         location="app/worker/sources/codex.md",
-        source_url="https://openai.com/codex/",
+        source_url="https://developers.openai.com/codex/",
     ),
     SourceSpec(
         name="gemini_api",

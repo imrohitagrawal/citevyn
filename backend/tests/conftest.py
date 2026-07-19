@@ -163,7 +163,7 @@ async def seed_catalog(
         {
             "product_area": "codex",
             "source_name": "codex",
-            "title": "Codex CLI Reference",
+            "title": "Codex Reference",
             "source_url": "https://docs.example.com/codex",
             "chunk_heading": "CLI flags",
             # Mirrors the real shipped worker source (codex.md: Installation +

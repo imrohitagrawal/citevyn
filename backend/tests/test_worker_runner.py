@@ -273,3 +273,110 @@ async def test_run_all_mvp_sources(
     docs = (await session.execute(select(Document))).scalars().all()
     assert {d.source_name for d in docs} == {s.name for s in MVP_SOURCES}
     assert len(docs) == len(MVP_SOURCES)
+
+
+# ---------------------------------------------------------------------------
+# In-place re-ingest (same index_version)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reingest_replaces_chunks_instead_of_appending(
+    session: AsyncSession, runner: IngestionRunner
+) -> None:
+    """Re-running a source must REPLACE its chunks, not add a second copy.
+
+    Previously an in-place re-ingest appended a whole new generation (7 chunks
+    became 14 for ``claude_api``), so an edited source doc left the OLD text in
+    the corpus next to the new — and retrieval could still surface the stale
+    wording. That silently defeats any content correction.
+    """
+    source = get_source("claude_api")
+    first = await runner.run(session, source=source)
+    after_one = (await session.execute(select(Chunk))).scalars().all()
+    assert len(after_one) == first.chunk_count
+
+    second = await runner.run(session, source=source)
+    after_two = (await session.execute(select(Chunk))).scalars().all()
+
+    assert second.status is JobStatus.completed
+    assert len(after_two) == second.chunk_count == first.chunk_count
+    # One document, one generation of chunks — no duplicates.
+    docs = (await session.execute(select(Document))).scalars().all()
+    assert len(docs) == 1
+    assert {c.chunk_id for c in after_two}.isdisjoint({c.chunk_id for c in after_one})
+
+
+@pytest.mark.asyncio
+async def test_reingest_drops_the_previous_generations_exact_terms(
+    session: AsyncSession, runner: IngestionRunner
+) -> None:
+    """Exact terms are rebuilt with the chunks, so they cannot accumulate either."""
+    source = get_source("codex")
+    first = await runner.run(session, source=source)
+    second = await runner.run(session, source=source)
+    terms = (await session.execute(select(ExactTerm))).scalars().all()
+    assert first.term_count == second.term_count
+    assert len(terms) == second.term_count
+    chunk_ids = {c.chunk_id for c in (await session.execute(select(Chunk))).scalars().all()}
+    # Every surviving term points at a chunk that still exists.
+    assert {t.chunk_id for t in terms} <= chunk_ids
+
+
+@pytest.mark.asyncio
+async def test_reingest_refreshes_document_title_and_source_url(session: AsyncSession) -> None:
+    """A retitled/retargeted source must update the live document.
+
+    ``title`` and ``source_url`` are stamped onto every rendered citation, so a
+    stale value meant an allowlist correction never reached users on the
+    in-place re-ingest path.
+    """
+    spec = get_source("codex")
+    old = SourceSpec(
+        name=spec.name,
+        product_area=spec.product_area,
+        title="Codex CLI Reference",
+        fetcher=spec.fetcher,
+        location=spec.location,
+        source_url="https://example.invalid/old",
+    )
+    runner = IngestionRunner(
+        fetcher=LocalFetcher(),
+        embedder=StubEmbedder(dim=16),
+        index_version="v-retitle",
+    )
+    await runner.run(session, source=old)
+    await runner.run(session, source=spec)
+
+    docs = (await session.execute(select(Document))).scalars().all()
+    assert len(docs) == 1
+    assert docs[0].title == spec.title
+    assert docs[0].source_url == spec.source_url
+
+
+@pytest.mark.asyncio
+async def test_ensure_index_version_refreshes_the_source_version_hash(
+    session: AsyncSession,
+) -> None:
+    """A re-ingest with new content must update the hash on the EXISTING row.
+
+    This is the link that made the content-derived fingerprint a no-op: the hash
+    was only written on INSERT, while the shipped worker image and
+    ``docs/RUNBOOK.md`` both re-ingest into the same default ``v-local``. The
+    answer-cache key is derived from this column, so a stale value meant edited
+    docs kept serving cached answers built from the old text.
+    """
+    created = await ensure_index_version(
+        session,
+        index_version="v-local",
+        source_version_hash="sha256:corpus-before-edit",
+    )
+    assert created.source_version_hash == "sha256:corpus-before-edit"
+
+    refreshed = await ensure_index_version(
+        session,
+        index_version="v-local",
+        source_version_hash="sha256:corpus-after-edit",
+    )
+    assert refreshed.source_version_hash == "sha256:corpus-after-edit"
+    assert await _index_version_count(session) == 1

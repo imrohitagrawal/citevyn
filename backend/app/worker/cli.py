@@ -31,10 +31,14 @@ from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
 from app.embeddings import build_embedder, validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
-from app.worker.fetchers import build_fetcher
+from app.worker.fetchers import FetchError, build_fetcher
 from app.worker.runner import IngestionRunner, RunResult, ensure_index_version
 
 logger = logging.getLogger(__name__)
+
+# Folded into the corpus fingerprint in place of a source that cannot be read,
+# so one unfetchable spec degrades the hash instead of aborting the whole run.
+_UNFETCHABLE_SENTINEL = "\x00<unfetchable>"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -179,14 +183,36 @@ def _content_version_hash(
     the full ``MVP_SOURCES`` (not just the ``--source`` subset) keeps the fingerprint
     corpus-wide, so a single-source re-ingest still reflects the true snapshot.
 
+    A source that cannot be fetched contributes a stable sentinel instead of
+    aborting the run. Hashing spans the whole corpus, so without this a single
+    unreadable spec — a missing local fixture, or the first ``fetcher="http"``
+    source, which :class:`HttpFetcher` always rejects in the MVP — would raise
+    here at runner-build time and kill ``run`` before a single
+    :class:`IngestionJob` row existed, even for ``--source <a healthy one>``.
+    Degrading keeps the pre-existing behaviour: the bad source still fails, but
+    as its own job row with ``error_type="FetchError"``, and the other sources
+    still ingest.
+
     ``fetch`` is injectable for testing; it defaults to the real per-source fetcher.
     """
-    read = fetch if fetch is not None else (lambda spec: build_fetcher(spec).fetch(spec))
+
+    def _default_read(spec: SourceSpec) -> str:
+        return build_fetcher(spec).fetch(spec)
+
+    read: Callable[[SourceSpec], str] = fetch if fetch is not None else _default_read
     digest = hashlib.sha256()
     for spec in sorted(sources, key=lambda s: s.name):
+        try:
+            text = read(spec)
+        except FetchError as exc:
+            logger.warning(
+                "source_version_hash_source_unfetchable",
+                extra={"source": spec.name, "error": str(exc)},
+            )
+            text = _UNFETCHABLE_SENTINEL
         digest.update(spec.name.encode("utf-8"))
         digest.update(b"\x1f")
-        digest.update(read(spec).encode("utf-8"))
+        digest.update(text.encode("utf-8"))
         digest.update(b"\x1e")
     return f"sha256:{digest.hexdigest()}"
 
