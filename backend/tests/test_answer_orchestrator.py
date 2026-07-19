@@ -950,6 +950,105 @@ async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> No
 
 
 # ---------------------------------------------------------------------------
+# 4c. CiteVyn alias canonicalization reaches retrieval (#84 item 1)
+# ---------------------------------------------------------------------------
+#
+# Routing the alias is only half the fix. "what is sitewin?" routes to ``citevyn``
+# from the guardrail alone, but its ONLY content word is the mangled token, which
+# appears nowhere in the corpus — so both retrieval arms come back empty and the
+# user still gets the refusal. ``canonicalize_product_name`` in ``ask`` is what
+# closes that, and these tests cover the WIRING: the unit tests in
+# test_guardrails_domain.py exercise the function in isolation and stay green even
+# if the orchestrator stops calling it.
+
+
+async def test_alias_is_canonicalized_before_retrieval(session: Any) -> None:
+    """The query handed to the retriever must carry the canonical name, not the
+    mangled one. Deleting the call site in ``ask`` must fail HERE."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="Is sitewin free to use right now?",
+        request_id="alias_1",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "Is CiteVyn free to use right now?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_alias_canonicalization_reaches_the_generator(session: Any) -> None:
+    """Generation sees the canonical name too — otherwise the LLM is asked about a
+    product whose name appears in none of the evidence it was handed."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
+
+    await orch.ask(question="what is site win?", request_id="alias_2", session_id=uuid.uuid4())
+
+    prompt = llm_spy.complete.await_args.kwargs["user"]
+    assert "CiteVyn" in prompt
+    assert "site win" not in prompt
+
+
+async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
+    session: Any,
+) -> None:
+    """The transcript must show what the user actually typed. Canonicalization rebinds
+    ``retrieval_query``; rebinding ``question`` instead would garble the persisted
+    message, the audit trail, and the prior turns conversation memory reads back."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="what is site win?", request_id="alias_3", session_id=uuid.uuid4())
+
+    user_msgs = (
+        (await session.execute(select(Message).where(Message.role == MessageRole.user)))
+        .scalars()
+        .all()
+    )
+    assert [m.content for m in user_msgs] == ["what is site win?"]
+
+
+async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
+    """Regression guard: canonicalization is a no-op for every question that contains
+    no alias, so no existing single-turn path changes."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="alias_4",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "How do I configure Claude Code permissions?"
+
+
+async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any) -> None:
+    """The costly failure: "our site win rate" must not be silently turned into "our
+    CiteVyn rate" and answered from the CiteVyn docs."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever([])
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(
+        question="what is our site win rate?",
+        request_id="alias_5",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["domain"] == "unsupported"
+    assert all(c["question"] == "what is our site win rate?" for c in retriever.calls)
+    assert all(c["product_area"] is None for c in retriever.calls)
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 

@@ -188,19 +188,68 @@ def test_classify_domain_ambiguous_aliases_do_not_false_positive(question: str) 
 
 
 @pytest.mark.parametrize(
-    "question", ["our site win", "my site win", "your site win", "their site win", "its site win"]
+    "question",
+    [
+        # Ends the input, so ONLY the determiner guard can reject these.
+        "our site win",
+        "my site win",
+        "your site win",
+        "their site win",
+        "its site win",
+        "the site win",
+        "a site win",
+        "every site win",
+        "another site win",
+    ],
 )
-def test_possessive_guard_blocks_ambiguous_alias_on_its_own(question: str) -> None:
-    """The possessive guard must hold WITHOUT help from the metric-noun guard, so a
-    later edit cannot drop one and have the other mask the regression."""
+def test_determiner_guard_blocks_ambiguous_alias_on_its_own(question: str) -> None:
+    """A determiner before the alias marks a noun phrase or a verb clause, never the
+    product. Each case here ends the input, so the follower allowlist would ACCEPT it —
+    the determiner guard is the only thing rejecting, and it is proven alone."""
     assert classify_domain(question) is not Domain.citevyn
 
 
 @pytest.mark.parametrize(
-    "question", ["site win rate", "site win percentage", "site win odds", "site win margin"]
+    "question",
+    [
+        # Regression cases from the adversarial review. The first design BLOCKLISTED
+        # metric nouns and every one of these defeated it: an unlisted noun, a "%"
+        # that can never match a \b-terminated list, a hyphen that dodged the "\s+",
+        # and "win" read as a VERB — a reading the blocklist never modelled.
+        "site win rate",
+        "site win percentage",
+        "site win odds",
+        "site win margin",
+        "site win data for Q3",
+        "site win trend",
+        "site win history",
+        "site win by region",
+        "site win % is up",
+        "what was the site win-rate last quarter?",
+        "site win-percentage by region",
+        "cite win-loss reasons",
+        "did the site win the award?",
+        "did site win the contract?",
+        "we saw the site win last quarter",
+        "watch the site win big",
+        "is site win rate improving?",
+        "big site win today",
+        "site win versus loss",
+    ],
 )
-def test_metric_noun_guard_blocks_ambiguous_alias_on_its_own(question: str) -> None:
-    """Mirror of the above: the metric-noun guard must hold without a possessive."""
+def test_follower_allowlist_rejects_every_non_product_continuation(question: str) -> None:
+    """The ambiguous tier FAILS CLOSED: anything not on the product-context allowlist
+    is treated as ordinary English. A blocklist of English nouns is unbounded by
+    construction — these are the cases that proved it."""
+    assert classify_domain(question) is not Domain.citevyn
+
+
+@pytest.mark.parametrize(
+    "question", ["site win-loss", "cite win-rate", "sight win-total", "site-win trust"]
+)
+def test_hyphenated_ambiguous_alias_is_never_the_product(question: str) -> None:
+    """A hyphen between two ordinary words is the compound-noun reading ("win-loss
+    record"), never the dictated product name — the separator is a plain space only."""
     assert classify_domain(question) is not Domain.citevyn
 
 
@@ -228,11 +277,24 @@ def test_word_boundaries_protect_against_incidental_substrings(question: str) ->
 
 
 @pytest.mark.parametrize(
-    "question", ["site win", "what is site win", "site win pricing", "SITE WIN", "Site-Win trust"]
+    "question",
+    [
+        "site win",
+        "what is site win",
+        "what is site win?",
+        "site win pricing",
+        "SITE WIN",
+        "is site win free?",
+        "does site win cover codex?",
+        "tell me about site win",
+        "what does site win do?",
+        "how accurate is site win?",
+    ],
 )
-def test_ambiguous_alias_still_matches_when_no_guard_applies(question: str) -> None:
-    """The guards must not be so broad that the alias never fires — that would make
-    the fix a no-op for exactly the phrasing the owner dictates."""
+def test_ambiguous_alias_still_matches_in_a_product_frame(question: str) -> None:
+    """Failing closed must not mean never firing — that would make the fix a no-op for
+    exactly the phrasing the owner dictates. These are the product-shaped frames the
+    allowlist exists to admit."""
     assert classify_domain(question) is Domain.citevyn
 
 

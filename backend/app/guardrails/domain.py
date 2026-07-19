@@ -81,16 +81,34 @@ ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
 #   part is not a word ("cite vyn", "site vin"). A word-bounded match carries no
 #   realistic false-positive risk.
 # * AMBIGUOUS — two ordinary English words ("site win", "cite win"). "What is
-#   our site win rate?" is an analytics question, not a CiteVyn question. These
-#   match only when NOT followed by a metric noun and NOT preceded by a
-#   possessive, the two signals that reliably mark the business-metric reading.
+#   our site win rate?" and "did the site win the award?" are ordinary English,
+#   not CiteVyn questions. These match only inside a positively product-shaped
+#   frame; see :data:`_CITEVYN_AMBIGUOUS_RE`.
+#
+# The ambiguous tier FAILS CLOSED, and that polarity is the whole point. The
+# first attempt BLOCKLISTED the non-product readings — "not followed by a metric
+# noun, not preceded by a possessive" — and adversarial review broke it in five
+# different ways within minutes:
+#
+#     "site win data for Q3"       -> citevyn   (noun not on the metric list)
+#     "site win trend"             -> citevyn   (ditto)
+#     "site win % is up"           -> citevyn   ("%" can never match a list that
+#                                                ends in \b — it is not a word char)
+#     "what was the site win-rate" -> citevyn   (hyphen dodged the "\s+" in the guard)
+#     "did the site win the award?"-> citevyn   ("win" as a VERB — a reading the
+#                                                blocklist never modelled at all)
+#
+# A blocklist of English continuations is unbounded by construction: every noun
+# added to the list leaves the next one open. An ALLOWLIST is finite and
+# auditable, so the ambiguous tier now requires an explicitly product-shaped
+# context and rejects everything else.
 #
 # Deliberately NOT phonetic/fuzzy: an edit-distance or Metaphone tier cannot be
 # bounded tightly enough here to be worth it. "site win" already sits one token
 # away from ordinary English, so a fuzzy tier would widen exactly the class of
 # false positive that costs the most, to buy manglings this list does not cover.
-# Extend the list instead — it is greppable, each entry is a deliberate choice,
-# and every entry has a test.
+# Extend the lists instead — they are greppable, each entry is a deliberate
+# choice, and every entry has a test.
 _CITEVYN_UNAMBIGUOUS_ALIASES: tuple[str, ...] = (
     "citevyn",
     "citevin",
@@ -109,37 +127,69 @@ _CITEVYN_UNAMBIGUOUS_ALIASES: tuple[str, ...] = (
     r"sight[\s-]vin",
 )
 
-# Two ordinary English words, so they need the guards below.
+# Two ordinary English words. Separator is a single space only — a hyphen
+# ("site win-rate") is overwhelmingly the compound-noun reading, never the name.
 _CITEVYN_AMBIGUOUS_ALIASES: tuple[str, ...] = (
-    r"cite[\s-]win",
-    r"site[\s-]win",
-    r"sight[\s-]win",
+    r"cite\s+win",
+    r"site\s+win",
+    r"sight\s+win",
 )
 
-# A metric noun immediately after the alias means the business reading ("site
-# win RATE"), never the product.
-_METRIC_NOUN = (
-    r"(?:rates?|ratios?|percentages?|percent|%|counts?|numbers?|scores?|totals?"
-    r"|averages?|streaks?|records?|stats?|statistics|metrics?|probabilit(?:y|ies)"
-    r"|odds|conversions?|shares?|margins?|targets?|goals?|quotas?)"
+# A determiner immediately before the alias marks a noun phrase or a verb
+# clause, never the product name: "THE site win rate", "did THE site win the
+# award?", "A site win is great". Each lookbehind must be individually
+# fixed-width, which is what Python's ``re`` requires.
+_DETERMINERS = (
+    "the",
+    "a",
+    "an",
+    "our",
+    "my",
+    "your",
+    "his",
+    "her",
+    "its",
+    "their",
+    "this",
+    "that",
+    "each",
+    "every",
+    "any",
+    "no",
+    "another",
 )
+_DETERMINER_GUARD = "".join(rf"(?<!\b{d}\s)" for d in _DETERMINERS)
 
-# A possessive determiner before the alias is the same signal from the other
-# side ("OUR site win ..."). Each lookbehind is individually fixed-width, which
-# is what Python's ``re`` requires.
-_POSSESSIVE_GUARD = r"(?<!\bour\s)(?<!\bmy\s)(?<!\byour\s)(?<!\btheir\s)(?<!\bits\s)"
+# What may legitimately FOLLOW the product name. Anything not on this list —
+# including any other noun, "%", or a hyphen — rejects the match. This is the
+# fail-closed half: an unanticipated continuation is treated as ordinary
+# English, so the guardrail errs toward a cheap miss rather than a costly
+# false hit.
+#
+# A LOOKAHEAD, not part of the match, so canonicalization replaces only the
+# alias itself: "site win pro" -> "CiteVyn pro", never "CiteVyn".
+_PRODUCT_CONTEXT_FOLLOWER = (
+    r"(?="
+    r"[?!.,;:]"  # terminal punctuation — "what is site win?"
+    r"|$"  # end of input — "tell me about site win"
+    # ...or a word that only makes sense about the PRODUCT.
+    r"|\s+(?:pro|free|paid|pricing|price|cost|costs|subscription|membership|demo"
+    r"|cover|covers|covering|support|supports|index|indexes|source|sources"
+    r"|cite|cites|citation|citations|accurate|accuracy|hallucinate|hallucinates"
+    r"|trustworthy|trust|work|works|do|does|answer|answers|use|uses|used)\b"
+    r")"
+)
 
 _CITEVYN_RE = re.compile(
     r"\b(?:"
     + "|".join(_CITEVYN_UNAMBIGUOUS_ALIASES)
+    + r")\b"
     + r"|"
-    + _POSSESSIVE_GUARD
-    + r"(?:"
+    + _DETERMINER_GUARD
+    + r"\b(?:"
     + "|".join(_CITEVYN_AMBIGUOUS_ALIASES)
-    + r")(?!\s+"
-    + _METRIC_NOUN
-    + r"\b)"
-    + r")\b",
+    + r")\b"
+    + _PRODUCT_CONTEXT_FOLLOWER,
     re.IGNORECASE,
 )
 
