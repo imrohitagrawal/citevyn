@@ -243,6 +243,13 @@ deploy: ## First-time / cold-start deploy (run from infra/docker/.env host)
 refresh: ## Rebuild + re-deploy in place (no data loss)
 	./infra/docker/scripts/refresh.sh
 
+rollback: ## Roll the live stack back to a tag (usage: make rollback TAG=v0.9.0 | TAG=--previous)
+	@if [[ -z "$(TAG)" ]]; then echo "usage: make rollback TAG=v0.9.0   (or TAG=--previous)" >&2; exit 2; fi
+	./infra/docker/scripts/rollback.sh $(TAG)
+
+deploy-verify: ## THE live release gate: deploy + functional verify + rollback drill (RELEASE_PLAN §10 blocker 9)
+	./infra/docker/scripts/deploy_verify.sh
+
 logs: ## Tail logs from api, worker, caddy
 	$(COMPOSE) --profile $(PROFILE) logs -f --tail=100 api worker caddy
 
