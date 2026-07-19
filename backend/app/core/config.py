@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     #     is rewritten (a self-contained off-domain sentence still reaches the refusal;
     #     see app/answer/memory.py). ``memory_recent_turns`` bounds how far back we
     #     look for the antecedent. Set ``conversation_memory=False`` to disable.
+    # --- CiteVyn alias intent check (#84 follow-up) ---
+    #     Single-token manglings ("sitewin") are matched deterministically by the
+    #     guardrail. The two-word homophones ("site win") are ordinary English, so they
+    #     get an LLM intent check over the whole utterance instead — see
+    #     app/answer/alias_intent.py for why no regex can do this. Costs one short call,
+    #     and ONLY on a message actually containing "site|cite|sight win", which is
+    #     essentially never in normal traffic. Set False to disable (the question then
+    #     refuses exactly as it did before).
+    citevyn_alias_intent_check: bool = True
+
     conversation_memory: bool = True
     memory_recent_turns: int = Field(default=6, ge=1)
 

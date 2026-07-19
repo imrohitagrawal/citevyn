@@ -31,6 +31,7 @@ from typing import Any, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.answer.alias_intent import is_citevyn_intent_llm
 from app.answer.generate import AnswerGenerator
 from app.answer.memory import (
     build_contextual_query,
@@ -51,9 +52,11 @@ from app.embeddings import (
 )
 from app.guardrails.domain import (
     Domain,
+    canonicalize_ambiguous_alias,
     canonicalize_product_name,
     classify_domain,
     classify_domains,
+    contains_ambiguous_citevyn_alias,
     is_unsupported,
 )
 from app.llm.errors import LLMUnavailable
@@ -442,6 +445,40 @@ class Orchestrator:
         # ``citevyn`` — so "our site win rate" is left alone. The ORIGINAL ``question`` is
         # still what gets persisted as the user's message.
         retrieval_query = canonicalize_product_name(retrieval_query)
+
+        # Two-word CiteVyn homophones (#84 follow-up). Dictation renders the product
+        # name as "site win" far more often than anything else, but those are also two
+        # ordinary English words, so the guardrail deliberately does NOT match them —
+        # see app/answer/alias_intent.py for the three review rounds that established no
+        # surrounding-token rule can tell the readings apart.
+        #
+        # An LLM intent check over the WHOLE utterance does what a regex cannot. On a
+        # confirmed YES the alias is canonicalized here, BEFORE routing, so the question
+        # then behaves exactly like the single-token aliases ("sitewin") the guardrail
+        # already accepts — same route, same retrieval, same cache key.
+        #
+        # Why this is not the hijack risk #169 guarded against: that invariant exists so a
+        # free-form LLM REWRITE cannot flip a topic pivot onto the scoped path. This
+        # rewrite is not free-form — it can only ever map "site|cite|sight win" to
+        # "CiteVyn", and only when the question ALREADY routes ``unsupported`` (i.e. it
+        # would otherwise refuse outright). It cannot touch a question that names a
+        # product, and it cannot invent a topic.
+        #
+        # Deterministic prefilter first, so real traffic never pays for this: no
+        # "site|cite|sight win" in the text, no call. Any failure — outage, unparseable
+        # reply, stub provider, flag off — leaves the query untouched and the question
+        # refuses exactly as it did before.
+        if (
+            self._settings.citevyn_alias_intent_check
+            and self._settings.llm_provider != "stub"
+            and contains_ambiguous_citevyn_alias(retrieval_query)
+            and classify_domain(retrieval_query) is Domain.unsupported
+        ):
+            try:
+                if await is_citevyn_intent_llm(question, self._llm):
+                    retrieval_query = canonicalize_ambiguous_alias(retrieval_query)
+            except Exception:  # noqa: BLE001 — degrade to the pre-existing refusal
+                pass
 
         domain = classify_domain(retrieval_query)
         intent = classify_intent(retrieval_query, domain)
