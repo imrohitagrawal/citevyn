@@ -41,6 +41,7 @@ from .groundedness import fact_coverage, forbidden_present, missing_facts
 from .judge import JudgeParseError, score_answer_panel_async
 from .paths import DEFAULT_REPORT_PATH, GOLDEN_PATH
 from .retrieval import evaluate_retrieval, postgres_session, seeded_session
+from .subset import select_judge_subset
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
     MIN_FOLLOWUP_HIT_RATE,
@@ -228,6 +229,7 @@ def _summarize(
     judged: list[JudgedCase],
     *,
     judge_available: bool,
+    judge_subset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scores = [j.score for j in judged if j.score is not None]
     mean_score = (sum(scores) / len(scores)) if scores else None
@@ -264,6 +266,10 @@ def _summarize(
         "retrieval": retrieval,
         "judge": {
             "available": judge_available,
+            # Cost bounding (#153 Layer 6). ``None`` on a full run; on a bounded run
+            # it names exactly which cases were NOT judged, so a reader can never
+            # mistake a subset report for full coverage.
+            "subset": judge_subset,
             "judged": len(judged),
             "scored": len(scores),
             "mean_score": mean_score,
@@ -330,7 +336,23 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     # so the retrieval-only count over-counts. Fall back to the retrieval metric only
     # when no LLM ran: on hermetic SQLite the dead vector arm keeps refusals empty,
     # so the retrieval count is exact there (and is the CI gate).
+    #
+    # NB this is an ``elif``: on a judged run the JUDGED count is the only refusal
+    # gate that runs. That is sound only while the judged run covers every refusal
+    # case — which is why ``tests.eval.subset.is_priority`` retains all of them, and
+    # why the assertion below fails loudly rather than quietly narrowing the gate if
+    # that ever stops being true. Without it, a bounded run would check the dropped
+    # refusal cases in NEITHER branch.
     if j["available"] and j.get("judged", 0) > 0:
+        sub = j.get("subset") or {}
+        for oracle, ids in (sub.get("dropped_zero_tolerance") or {}).items():
+            if ids:
+                failures.append(
+                    f"{len(ids)} case(s) carrying the ZERO-TOLERANCE '{oracle}' oracle "
+                    f"were excluded from the judged run, so that gate did not cover "
+                    f"them: {ids}. Such cases must stay in the subset priority pool "
+                    "(tests/eval/subset.py:is_priority)."
+                )
         judged_leaks = j.get("refusal_leaks_judged", 0)
         if judged_leaks > MAX_REFUSAL_LEAKS:
             failures.append(
@@ -427,12 +449,17 @@ async def run_eval_async(
     with_judge: bool = True,
     settings: Settings | None = None,
     postgres: bool = False,
+    judge_subset_limit: int | None = None,
 ) -> dict[str, Any]:
     """Run the full eval and return a JSON-friendly summary.
 
     ``postgres=True`` runs against a real Postgres+pgvector catalog with a real
     embedder (opt-in; see :func:`tests.eval.retrieval.postgres_session`) so the
     semantic/vector arm is actually exercised. Default is the hermetic SQLite path.
+
+    ``judge_subset_limit`` bounds the PAID judged half to N cases (#153 Layer 6).
+    ``None`` judges every case — the full-coverage default. The retrieval half
+    always runs over every case regardless; it is not the expensive one.
     """
     settings = settings or get_settings()
     cases = filter_cases(load_cases(golden_path), ids=ids)
@@ -440,10 +467,52 @@ async def run_eval_async(
         raise SystemExit(f"no eval cases found in {golden_path}")
     retrieval_report = await evaluate_retrieval(cases, settings=settings, postgres=postgres)
     judge_available = with_judge and not isinstance(get_llm_client(settings), StubLLMClient)
+    # Select from the cases the judged run would ACTUALLY drive. ``_judge_cases``
+    # drops ``postgres_only`` cases on a hermetic run; selecting before that filter
+    # made ``selected`` overstate the count (20 reported, 17 judged) — a subset
+    # report that overstates its own coverage defeats the point of reporting it.
+    judgeable = [c for c in cases if postgres or not c.postgres_only]
+    judge_cases, dropped = select_judge_subset(judgeable, limit=judge_subset_limit)
+    judge_subset: dict[str, Any] | None = None
+    if dropped:
+        judge_subset = {
+            "limit": judge_subset_limit,
+            "selected": len(judge_cases),
+            "dropped": len(dropped),
+            "dropped_ids": [c.id for c in dropped],
+            # Tripwire data for ``gate_failures``. These are computed from the real
+            # ``EvalCase`` fields (not an id-name convention — ``adv_refusal_*`` does
+            # not start with "refusal"), and are structurally EMPTY while
+            # ``is_priority`` retains every zero-tolerance oracle. They exist so that
+            # narrowing ``is_priority`` fails the run loudly instead of silently
+            # switching a hard gate off.
+            "dropped_zero_tolerance": {
+                "refusal": [c.id for c in dropped if c.kind == "refusal"],
+                "fact_bearing": [c.id for c in dropped if c.expected_facts],
+                "injection": [c.id for c in dropped if c.must_not_contain],
+                "multi_turn": [c.id for c in dropped if c.kind == "followup"],
+                "judge_only": [c.id for c in dropped if c.judge_only],
+            },
+            "note": (
+                "REDUCED COVERAGE: MIN_MEAN_JUDGE is computed over the selected cases "
+                "only. Every ZERO-TOLERANCE judge-independent oracle (injection, "
+                "multi-turn echo, per-case groundedness, refusal leaks, judge-only) is "
+                "retained in full — see tests/eval/subset.py. Run without "
+                "--judge-subset for full judged coverage."
+            ),
+        }
     judged = (
-        await _judge_cases(cases, settings=settings, postgres=postgres) if judge_available else []
+        await _judge_cases(judge_cases, settings=settings, postgres=postgres)
+        if judge_available
+        else []
     )
-    summary = _summarize(cases, retrieval_report.as_dict(), judged, judge_available=judge_available)
+    summary = _summarize(
+        cases,
+        retrieval_report.as_dict(),
+        judged,
+        judge_available=judge_available,
+        judge_subset=judge_subset,
+    )
     # Record the embedder identity (provider/model/dim — never a key) so a report
     # can be read as "real semantic run" vs "hermetic/stub" without guessing.
     summary["embedder"] = {
@@ -480,12 +549,32 @@ def main(argv: list[str] | None = None) -> int:
             "The only mode that measures semantic/vector recall."
         ),
     )
+    parser.add_argument(
+        "--judge-subset",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "COST CONTROL (#153): judge at most N cases instead of the whole golden "
+            "set. The retrieval half still runs over every case. Injection, "
+            "multi-turn-echo and judge-only cases are always retained; the rest is "
+            "filled deterministically, stratified by kind. The dropped ids are "
+            "printed and recorded in the report — this REDUCES judged coverage."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.judge_subset is not None and args.judge_subset < 1:
+        parser.error("--judge-subset must be >= 1")
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     summary = asyncio.run(
         run_eval_async(
-            golden_path=args.golden, ids=ids, with_judge=args.with_judge, postgres=args.postgres
+            golden_path=args.golden,
+            ids=ids,
+            with_judge=args.with_judge,
+            postgres=args.postgres,
+            judge_subset_limit=args.judge_subset,
         )
     )
 
@@ -554,6 +643,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"Multi-turn echo: {len(mt.get('echoes', []))} echo(es) over "
                 f"{mt.get('cases', 0)} multi-turn case(s)"
             )
+
+    # Coverage warning, printed even under --quiet. A bounded run is still a PASS,
+    # so the only thing standing between it and being mistaken for full coverage is
+    # this line; suppressing it would make the cap silent, which is the failure mode
+    # the bounding is explicitly not allowed to have.
+    subset = summary["judge"].get("subset")
+    if subset:
+        print(
+            f"\n!! JUDGED COVERAGE REDUCED: judged {subset['selected']}/"
+            f"{subset['selected'] + subset['dropped']} cases (--judge-subset "
+            f"{subset['limit']}). NOT judged: {', '.join(subset['dropped_ids'])}"
+        )
+        print("   Retrieval metrics above are unaffected (every case ran).")
 
     failures = gate_failures(summary)
     if failures:

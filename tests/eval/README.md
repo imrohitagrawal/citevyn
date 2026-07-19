@@ -88,9 +88,36 @@ It requires the OpenRouter key as a **repo Actions secret** (`CITEVYN_OPENROUTER
 which only the repo **owner** can add. Until it is present the job **skips** every
 meaningful step (a loud `::notice::`) and stays green — the key is never hardcoded or
 faked. **To enable the gate:** add `CITEVYN_OPENROUTER_API_KEY` under *Settings → Secrets
-and variables → Actions*; the next run flips it on. Cost is bounded via
-`CITEVYN_EVAL_JUDGE_PANEL=1` (1 rubric framing + the adversarial veto = 2 judge
-calls/case) on a small model over the ~31-case golden set.
+and variables → Actions*; the next run flips it on.
+
+### Cost bounding (#153)
+
+The judged half is the harness's only meaningful spend line — ~$0.026 per full run
+(call volume counted by `scripts/measure_eval_spend.py`; the dollar figure is an
+extrapolation — see `docs/COST_CONTROLS.md` §6). CI bounds it by **frequency, at full
+coverage**:
+
+* **push to `main`** → runs.
+* **PR labelled `full-eval`** → runs (the `labeled` event triggers the workflow).
+* **any other PR** → does not run.
+
+`CITEVYN_EVAL_JUDGE_PANEL=1` further caps each run at 2 judge calls/case (1 rubric
+framing + the adversarial veto) instead of the local default of 4.
+
+**CI does not sample cases.** `--judge-subset N` exists for local iteration, but 42 of
+the 58 golden cases carry a zero-tolerance judge-independent oracle (injection,
+multi-turn echo, per-case groundedness, refusal leak, judge-only) that sampling would
+*switch off* rather than average down — so the honest saving ceiling is ~28%. The
+subset always retains those cases, and the runner **fails** the run if one is ever
+excluded. Note that the judged refusal-leak gate is the *only* refusal gate on a
+judged run (the retrieval fallback in `gate_failures` is an `elif`), so it is not
+backstopped by the retrieval half.
+
+The **retrieval half always runs over every case**, gating literal/overall hit-rate,
+MRR/precision@1, multihop and followup.
+
+Tradeoff, stated: an unlabelled PR gets no judged gate; a judged regression surfaces
+on merge to `main`. Label the PR `full-eval` to gate it before merge.
 
 ## Kinds
 
