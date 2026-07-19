@@ -213,13 +213,18 @@ migrate: ## Apply Alembic migrations to head against DB_URL
 	@echo "==> alembic upgrade head (DB_URL redacted)"
 	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend alembic -c db/alembic.ini upgrade head
 
-seed: ## Seed demo users + catalog (idempotent)
+# ``seed_catalog`` INGESTS backend/app/worker/sources/*.md (the authoritative
+# corpus) into index v1 rather than inserting a hand-written copy — that copy
+# was a fourth place corpus content lived, and it drifted (#178). This is why
+# ``demo`` needs no separate ingest step: seeding IS the ingest, offline (local
+# files) and free (stub embedder by default).
+seed: ## Seed demo users + ingest the shipped corpus into index v1 (idempotent)
 	@echo "==> seeding demo users (DB_URL redacted)"
 	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_users
 	@echo "==> seeding catalog (DB_URL redacted)"
 	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_catalog
 
-demo: db-up migrate seed ## Bring up db, migrate, seed (one-shot)
+demo: db-up migrate seed ## Bring up db, migrate, seed + ingest the corpus (one-shot)
 	@echo "Demo stack is up. Run 'make stop' to tear down."
 
 demo-frontend: ## Build the optional React/Vite frontend into frontend/dist

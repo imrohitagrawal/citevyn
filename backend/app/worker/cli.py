@@ -14,6 +14,14 @@ deliberately out of scope for the MVP — the admin
 ``POST /v1/admin/index_versions/{version}/promote`` is
 the only way to ship a build, and that gate is gated
 behind the admin API key.
+
+:func:`build_runner`, :func:`content_version_hash` and :func:`drive` are
+PUBLIC (they used to be underscore-private). ``db/seed/seed_catalog.py``
+now seeds the demo/bootstrap catalog by running this very pipeline over
+:data:`MVP_SOURCES` instead of carrying its own hand-written copy of the
+corpus (#178), and it must not fork the fingerprint or the
+publish-the-hash-only-after-a-clean-full-run ordering — sharing the
+functions is what makes that impossible.
 """
 
 from __future__ import annotations
@@ -75,13 +83,13 @@ def _cmd_list_sources() -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     """Ingest all sources (or the one named by ``--source``)."""
     settings = get_settings()
-    runner = _build_runner(settings, index_version=args.index_version)
+    runner = build_runner(settings, index_version=args.index_version)
     sessionmaker = get_sessionmaker()
     sources = _resolve_sources(args.source)
-    return asyncio.run(_drive(runner, sessionmaker, sources, args.index_version))
+    return asyncio.run(drive(runner, sessionmaker, sources, args.index_version))
 
 
-async def _drive(
+async def drive(
     runner: IngestionRunner,
     sessionmaker: async_sessionmaker[AsyncSession],
     sources: list[SourceSpec],
@@ -165,7 +173,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
+def build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     """Build the runner with the default fetcher + embedder.
 
     ``index_version`` is plumbed into the constructor (not defaulted
@@ -192,14 +200,14 @@ def _build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
         # bumped the constant or the TTL expired. Hashing real content makes any
         # edit change the hash → the cache key changes → stale answers invalidate
         # on the next ingest, automatically.
-        source_version_hash=_content_version_hash(MVP_SOURCES),
+        source_version_hash=content_version_hash(MVP_SOURCES),
         index_version=index_version,
         embedding_provider=settings.embedding_provider,
         embedding_model=settings.embedding_model,
     )
 
 
-def _content_version_hash(
+def content_version_hash(
     sources: Sequence[SourceSpec],
     *,
     fetch: Callable[[SourceSpec], str] | None = None,

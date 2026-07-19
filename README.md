@@ -316,7 +316,11 @@ Full threat model: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 The single most useful command is `make demo`. It brings up the
 docker-compose `db` + `redis` services, waits for Postgres to
 accept connections, applies alembic migrations, and seeds the demo
-catalog.
+catalog — which means ingesting `backend/app/worker/sources/*.md`, the
+authoritative corpus, into index `v1`. Editing one of those markdown
+files and re-running `make seed` is the only way to change what a local
+stack answers; there is no second hand-written catalog to keep in sync
+(#178).
 
 ```bash
 make demo          # one-shot stack bring-up
