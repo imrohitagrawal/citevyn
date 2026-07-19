@@ -42,7 +42,12 @@ from app.worker.chunker import ChunkDraft
 # the boundary inside the token.
 
 _FLAG_RE = re.compile(r"--[a-z][a-z0-9-]{1,40}")
-_SLASH_CMD_RE = re.compile(r"(?<!\w)/[a-z][a-z0-9-]{1,40}")
+# ``(?<!/)`` keeps a URL from minting a bogus slash command: in
+# ``https://claude.ai/install.sh`` the ``/claude`` is preceded by ``/``, not a word
+# character, so ``(?<!\\w)`` alone admits it — and an ExactRetriever lookup for
+# ``/claude`` then returns that chunk as a "slash command". Found live once the
+# Claude Code install section introduced the corpus's first inline URL (#170).
+_SLASH_CMD_RE = re.compile(r"(?<!\w)(?<!/)/[a-z][a-z0-9-]{1,40}")
 _ENV_VAR_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,40}\b")
 _HEADER_RE = re.compile(r"\bx-[a-z][a-z0-9-]{2,30}-[a-z][a-z0-9-]{2,30}\b")
 # ``file_name`` is the most ambiguous pattern — a file
