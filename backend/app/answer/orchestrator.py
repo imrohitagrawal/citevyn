@@ -46,6 +46,7 @@ from app.cache.answer_cache import (
 )
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings
+from app.cost.call_site import CallSite, call_site
 from app.embeddings import (
     configured_embedder_identity,
     get_embedder,
@@ -740,7 +741,8 @@ class Orchestrator:
             # still declined: the routed chunk carries no support for the new topic, so
             # the LLM grounding-refusal net refuses (the multi-turn refusal golden cases
             # gate this). Single-turn ``retrieval_query == question`` so this is a no-op.
-            llm_result = await self._generator.generate(retrieval_query, evidence)
+            with call_site(CallSite.answer):
+                llm_result = await self._generator.generate(retrieval_query, evidence)
         except LLMUnavailable as exc:
             # Slice 7 maps this to ``cost_limit_reached`` (503) when
             # the cause is 429, otherwise to ``internal_error`` (500).

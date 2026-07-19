@@ -75,6 +75,32 @@ that the implementation must honour:
   session. The **global daily cap is the real protection**; the per-user limit exists
   to stop one client monopolising the demo.
 
+### Spend rows are durable on purpose — including under the eval harness
+
+The meter (`app/cost/meter.py`) commits each `provider_calls` row on **its own
+session**, not the caller's. That is what makes a spend record survive a request that
+later rolls back — a validation error, a failed citation check, a 500. The money left
+the account before our transaction failed; a spend ledger that unwinds with our own
+failures under-reports exactly the paths that go wrong most.
+
+The same rule holds for tests, and it has one visible consequence worth stating
+plainly, because it contradicts a claim made elsewhere in the repo:
+
+> `tests/eval/retrieval.py` and `tests/eval/runner.py` advertise **"zero residue"**
+> for the judged `--postgres` eval — it seeds under a unique `index_version` with
+> `commit=False` and rolls back on every exit path.
+
+That guarantee covers the **catalog** (documents, chunks, index_versions, sessions,
+messages) and nothing else. A judged `--postgres` run makes real paid calls, so it now
+also writes `provider_calls` rows, and those **persist after the rollback by design**.
+Erasing them would mean the run that spends the most real money is the one the §9
+daily budget cannot see. The eval's pre-flight "target catalog must be empty" check
+counts `Chunk` only, so leftover spend rows never block a subsequent run.
+
+If you genuinely want to forget spend history (a throwaway scratch DB, a
+reproducibility experiment), truncate `provider_calls` explicitly. It is never done
+for you.
+
 ---
 
 ## 6. CI spend — measured, then bounded

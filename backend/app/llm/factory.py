@@ -71,6 +71,11 @@ def build_llm_client(settings: Settings) -> LLMClient:
     The factory never raises on missing API keys for the stub path;
     the anthropic path raises eagerly so a misconfigured production
     deploy fails at startup instead of on the first request.
+
+    This function is **provider selection only** — it returns the bare client and
+    adds no behaviour. Cost metering is applied one level up, in
+    :func:`get_llm_client`; keeping the two apart means a test can still assert
+    which concrete provider a config selects without unwrapping a decorator.
     """
     if settings.llm_provider == "anthropic":
         return AnthropicLLMClient(
@@ -85,6 +90,29 @@ def build_llm_client(settings: Settings) -> LLMClient:
     if settings.llm_provider == "router":
         return _build_openrouter(settings)
     return StubLLMClient(model=f"stub-{settings.llm_model}")
+
+
+def _metered(client: LLMClient) -> LLMClient:
+    """Wrap a PAID client so every completion is recorded as spend (#153 Layer 1).
+
+    Applied at the single place the shared client is constructed, so a future call
+    site is metered by construction rather than by remembering to instrument it.
+    The failure mode of per-call-site instrumentation is silent under-counting: the
+    budget reads low, nothing errors, and the first symptom is the provider bill.
+
+    The **stub is deliberately not wrapped.** Safety mechanisms test the client's
+    identity — most importantly ``isinstance(get_llm_client(settings),
+    StubLLMClient)`` in ``tests/eval/runner.py``, which is what makes the LLM judge
+    self-skip on the free hermetic path. Wrapping the stub would hide that identity
+    behind the decorator, silently re-enabling the judge on every stub run and
+    spending real money on exactly the path chosen to avoid it. It also has nothing
+    to meter: the stub makes no network call and costs nothing.
+    """
+    if isinstance(client, StubLLMClient):
+        return client
+    from app.cost.metered import MeteredLLMClient
+
+    return MeteredLLMClient(client)
 
 
 def _build_openrouter(settings: Settings) -> OpenRouterLLMClient:
@@ -170,7 +198,7 @@ def get_llm_client(settings: Settings | None = None) -> LLMClient:
             from app.core.config import get_settings
 
             settings = get_settings()
-        _client = build_llm_client(settings)
+        _client = _metered(build_llm_client(settings))
         _logger.info(
             "llm_client_initialized",
             extra={"provider": settings.llm_provider, "model": settings.llm_model},

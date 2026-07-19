@@ -49,7 +49,13 @@ def test_get_llm_client_builds_anthropic_when_configured() -> None:
         llm_model="claude-sonnet-4-6",
     )
     client = llm_factory.get_llm_client(settings)
-    assert isinstance(client, AnthropicLLMClient)
+    # get_llm_client returns the WIRED client, which for a paid provider is wrapped
+    # in the cost-metering decorator (#153 Layer 1). Look through it: the assertion
+    # here is about which provider the config selects, not about the wiring.
+    from app.cost.metered import MeteredLLMClient
+
+    assert isinstance(client, MeteredLLMClient)
+    assert isinstance(client.inner, AnthropicLLMClient)
 
 
 def test_anthropic_factory_raises_on_missing_api_key() -> None:

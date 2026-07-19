@@ -279,7 +279,19 @@ async def postgres_session(
     * Refuses a database whose catalog is non-empty (a pre-existing active index or
       chunks), so it can never collide with or mutate a demo/prod index.
     * Seeds with ``commit=False`` under a UNIQUE per-run ``index_version`` and rolls
-      back on EVERY exit path (normal, exception, cancellation) → **zero residue**.
+      back on EVERY exit path (normal, exception, cancellation) → **zero CATALOG
+      residue** (documents / chunks / index_versions / sessions / messages).
+
+    "Zero residue" is scoped to the catalog, and deliberately so. Since #153 Layer 1
+    a judged run also writes ``provider_calls`` rows, and those **survive this
+    rollback on purpose**: the meter commits on its own session
+    (``app.cost.meter.record_call``) precisely so a spend record is never transactional
+    with our success. Money that left for a judged eval left for real; rolling it back
+    with our own test teardown would make the §9 daily budget under-read by exactly the
+    runs we spend the most on. So the durable rows are the correct outcome, not leakage
+    — and the pre-flight emptiness check below counts ``Chunk`` only, so they cannot
+    block a later run either. Truncate ``provider_calls`` only when you deliberately
+    want to forget spend history.
     * Stamps the index provenance from ``configured_embedder_identity(settings)`` —
       the exact identity the read path compares against — so the Tier-3 gate treats
       the index as query-compatible (asserted ``VectorDegrade.none`` per case).

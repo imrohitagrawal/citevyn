@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from alembic.command import downgrade as alembic_downgrade
 from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine
@@ -33,6 +34,7 @@ EXPECTED_TABLES = {
     "evaluation_cases",
     "evaluation_runs",
     "audit_events",
+    "provider_calls",
 }
 
 
@@ -93,6 +95,38 @@ def test_chunks_embedding_column_is_added_by_migration(
     # the column is NOT NULL; 0 (or absent) means nullable.
     notnull_flags = {row[1]: row[3] for row in rows}
     assert notnull_flags["embedding"] == 0, "embedding should be nullable"
+
+
+def test_migration_0005_downgrade_drops_provider_calls(
+    alembic_config: AlembicConfig,
+) -> None:
+    """The 0005 rollback removes ``provider_calls`` and its index cleanly.
+
+    ``code_review.md`` blocks a migration without a working rollback. 0005 is
+    purely additive (new table, no FKs, no edits to existing tables), so unlike
+    the 0004 vector rollback this needs no Postgres-only types and can be
+    exercised on the hermetic SQLite engine — the same ``alembic_downgrade``
+    pattern ``test_pg_integration.py`` uses for 0004, minus the Postgres gate.
+    Downgrading only to 0004 keeps the pgvector-dependent 0004 rollback out of
+    the path, which SQLite cannot run.
+    """
+    alembic_upgrade(alembic_config, "head")
+    alembic_downgrade(alembic_config, "0004")
+
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        objects = connection.exec_driver_sql(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index')"
+        ).all()
+    names = {name for _, name in objects}
+    assert "provider_calls" not in names
+    # A leaked index would make a re-upgrade fail with "index already exists",
+    # so assert the drop_index actually ran rather than relying on the implicit
+    # cascade that only some engines perform.
+    assert "ix_provider_calls_occurred_at" not in names
+    # Everything else must survive: an over-broad downgrade that took out the
+    # pre-existing schema would still pass the two assertions above.
+    assert (EXPECTED_TABLES - {"provider_calls"}) <= names
 
 
 def test_versions_directory_contains_initial_migration() -> None:

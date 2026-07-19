@@ -15,6 +15,7 @@ The model supports:
 7. Evaluation runs.
 8. Audit events.
 9. Index versioning.
+10. Per-call provider cost metering.
 
 ## 2. Core Entities
 
@@ -31,6 +32,7 @@ evaluation_runs
 audit_events
 index_versions
 ingestion_jobs
+provider_calls
 ```
 
 ## 3. documents
@@ -230,7 +232,48 @@ Supports candidate index and rollback.
 | promoted_at | timestamp | Promotion time |
 | evaluation_run_id | UUID | FK to evaluation_runs |
 
-## 15. Indexing Recommendations
+## 15. provider_calls
+
+Stores one row per paid provider call. This is the metering substrate the
+`RELEASE_PLAN.md` section 9 daily budget (soft $5 / hard $10) is computed from:
+token counts on `LLMResult` are discarded once an answer is returned, so spend has
+no other record.
+
+| Field | Type | Notes |
+|---|---|---|
+| call_id | UUID | Primary key |
+| occurred_at | timestamp | Call completion time; the daily budget buckets on this |
+| kind | text | llm, embedding |
+| call_site | text | answer, condense, alias_intent, ingest, eval, unknown |
+| provider | text | Provider name |
+| model | text | Model identifier |
+| input_tokens | integer | Prompt tokens |
+| output_tokens | integer | Completion tokens |
+| attempts | integer | Provider HTTP requests issued, including retries (>= 1) |
+| cost_usd | numeric(14,6) | Stored cost, never recomputed |
+| input_price_per_1m | numeric(12,6) | Rate applied; NULL exactly when `priced` is false |
+| output_price_per_1m | numeric(12,6) | Rate applied; NULL exactly when `priced` is false |
+| priced | boolean | False means the price book had no entry |
+| tokens_estimated | boolean | True means token counts are a local estimate |
+| request_id | text | Correlation id; nullable (ingest and eval run outside a request) |
+
+Design decisions:
+
+1. `cost_usd` is stored, not derived. Prices are snapshots, so recomputing from
+   today's price book would silently rewrite yesterday's spend when a provider
+   changes its rates. The rates applied are stored alongside for audit.
+2. `priced = false` means the price book had no entry for `(provider, model)`, so
+   `cost_usd` is 0 and the budget is **under-counting** that call. It is a signal
+   to add a price, not a free call.
+3. `attempts` counts provider HTTP requests including retries, so a flaky provider
+   can cost several times a naive per-call count.
+4. No prompt or answer text is stored — only counts and identifiers — so the table
+   cannot become a second copy of user questions in a log or backup.
+
+Numeric, not float: these values are summed across thousands of rows and compared
+against a dollar threshold, and 6 decimal places resolve a single cheap call.
+
+## 16. Indexing Recommendations
 
 1. Index `documents.source_name`.
 2. Index `documents.product_area`.
@@ -241,3 +284,4 @@ Supports candidate index and rollback.
 7. Index `answer_cache.cache_key`.
 8. Index `messages.session_id`.
 9. Index `retrieved_evidence.message_id`.
+10. Index `provider_calls.occurred_at` (the budget's hot "spend since midnight UTC" query).
