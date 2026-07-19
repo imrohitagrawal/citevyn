@@ -8,25 +8,35 @@ left the cache serving the OLD answer (the cache key includes source_version_has
 The full chain has three links, each pinned somewhere:
 
 1. content edit → new fingerprint (here),
-2. new fingerprint → stamped onto the ``IndexVersion`` row even on an in-place
-   re-ingest (``test_worker_runner.py::test_ensure_index_version_refreshes_*``),
+2. new fingerprint → published onto the ``IndexVersion`` row after a clean
+   in-place re-ingest, and NOT before (``_drive`` tests at the bottom of this
+   file, plus ``test_worker_runner.py::test_advance_source_version_hash_*``),
 3. changed hash → cache miss (``test_cache_invalidation.py``).
 
 Link 2 is the one that made the fix a no-op before: ``ensure_index_version``
 only wrote the hash on INSERT, and the shipped worker image always re-ingests
-into the same default ``--index-version v-local``.
+into the same default ``--index-version v-local``. Publishing it too EARLY is
+the opposite failure — see ``advance_source_version_hash``.
 """
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings
-from app.worker.allowlist import MVP_SOURCES, SourceSpec
-from app.worker.cli import _build_runner, _content_version_hash
-from app.worker.fetchers import FetchError, LocalFetcher
+from app.models.base import Base
+from app.models.index_versions import IndexVersion
+from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source
+from app.worker.cli import _build_runner, _content_version_hash, _drive
+from app.worker.embedder import StubEmbedder
+from app.worker.fetchers import Fetcher, FetchError, LocalFetcher
+from app.worker.runner import IngestionRunner
 
 # ---------------------------------------------------------------------------
 # Fingerprint properties
@@ -164,3 +174,101 @@ def test_build_runner_stamps_the_content_hash(index_version: str) -> None:
     runner = _build_runner(Settings(embedding_provider="stub"), index_version=index_version)
     assert runner.source_version_hash == _content_version_hash(MVP_SOURCES)
     assert runner.source_version_hash.startswith("sha256:")
+
+
+# ---------------------------------------------------------------------------
+# _drive: WHEN the new fingerprint becomes visible
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def sessionmaker_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A per-test sessionmaker; ``_drive`` opens its own sessions, not one session."""
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{fh.name}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+        await engine.dispose()
+
+
+def _runner(hash_value: str, *, fetcher: Fetcher | None = None) -> IngestionRunner:
+    return IngestionRunner(
+        fetcher=fetcher if fetcher is not None else LocalFetcher(),
+        embedder=StubEmbedder(dim=8),
+        source_version_hash=hash_value,
+        index_version="v-local",
+    )
+
+
+async def _stamped_hash(sm: async_sessionmaker[AsyncSession]) -> str:
+    async with sm() as session:
+        row = await session.get(IndexVersion, "v-local")
+        assert row is not None
+        return row.source_version_hash
+
+
+@pytest.mark.asyncio
+async def test_drive_advances_the_hash_after_a_clean_full_run(
+    sessionmaker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The happy path: a full successful ingest publishes the new fingerprint."""
+    sources = list(MVP_SOURCES)
+    assert await _drive(_runner("sha256:before"), sessionmaker_factory, sources, "v-local") == 0
+    assert await _stamped_hash(sessionmaker_factory) == "sha256:before"
+
+    # Corpus "edited": the runner now carries a different content hash.
+    assert await _drive(_runner("sha256:after"), sessionmaker_factory, sources, "v-local") == 0
+    assert await _stamped_hash(sessionmaker_factory) == "sha256:after"
+
+
+@pytest.mark.asyncio
+async def test_drive_does_not_advance_the_hash_when_a_source_fails(
+    sessionmaker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A failed source must leave the OLD fingerprint published.
+
+    Advancing it here would publish a hash the corpus does not match: answers
+    built from the un-rebuilt chunks get cached under the NEW key, and the retry
+    re-hashes the same files so the hash never moves again — the stale answer
+    survives the correction until the TTL expires.
+    """
+    sources = list(MVP_SOURCES)
+    assert await _drive(_runner("sha256:before"), sessionmaker_factory, sources, "v-local") == 0
+
+    class _FlakyFetcher:
+        """Fails only for ``codex`` — a partial-corpus rebuild."""
+
+        def __init__(self) -> None:
+            self._real = LocalFetcher()
+
+        def fetch(self, source: SourceSpec) -> str:
+            if source.name == "codex":
+                raise FetchError("simulated embedder/fetch outage")
+            return self._real.fetch(source)
+
+    exit_code = await _drive(
+        _runner("sha256:after", fetcher=_FlakyFetcher()),
+        sessionmaker_factory,
+        sources,
+        "v-local",
+    )
+    assert exit_code == 2  # non-zero: the run reported failure
+    assert await _stamped_hash(sessionmaker_factory) == "sha256:before"
+
+
+@pytest.mark.asyncio
+async def test_drive_does_not_advance_the_hash_on_a_source_subset(
+    sessionmaker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``--source X`` cannot vouch for the sources it skipped.
+
+    The fingerprint spans the whole corpus, so advancing it after a subset run
+    would claim the untouched docs were rebuilt too.
+    """
+    sources = list(MVP_SOURCES)
+    assert await _drive(_runner("sha256:before"), sessionmaker_factory, sources, "v-local") == 0
+
+    subset = [get_source("codex")]
+    assert await _drive(_runner("sha256:after"), sessionmaker_factory, subset, "v-local") == 0
+    assert await _stamped_hash(sessionmaker_factory) == "sha256:before"

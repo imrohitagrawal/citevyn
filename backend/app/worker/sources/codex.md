@@ -9,11 +9,12 @@ runs in your terminal (the Codex CLI), a desktop app, an IDE extension (for VS
 Code and compatible editors), and a cloud service, and it is also built into
 ChatGPT. It is powered by a large language model (LLM), so Codex is an LLM-based
 tool. This page is an original, paraphrased summary of the official Codex
-documentation. The sections below describe the Codex CLI specifically — the
-installation steps, flags, sandbox, and config file are CLI details and do not
-apply to the ChatGPT, cloud, or IDE surfaces.
+documentation. Every section below is prefixed "CLI" because it describes the
+Codex CLI specifically: installation, flags, authentication, approval modes,
+the sandbox, errors, and configuration are all CLI details and do not apply to
+the ChatGPT, cloud, desktop, or IDE surfaces.
 
-## Installation
+## CLI installation
 
 Install the Codex CLI globally with npm — run 'npm install -g @openai/codex' — or, on
 macOS, with Homebrew via 'brew install codex'. Once it is installed, run 'codex'
@@ -29,14 +30,14 @@ The --model flag selects the model Codex uses for code generation. Run
 directory, the approval mode for commands, and whether the session runs in a
 sandbox. Flags passed on the command line override values set in the config file.
 
-## Authentication
+## CLI authentication
 
 Codex reads its credentials from the OPENAI_API_KEY environment variable, or from
 a stored login created by signing in through the CLI. Keep the key out of source
 control; prefer an environment variable or the CLI's own credential store over
 pasting the key into scripts.
 
-## Approval modes
+## CLI approval modes
 
 Codex supports different approval modes that trade autonomy for safety. A
 read-only mode answers questions without changing files; a mode that asks before
@@ -44,21 +45,21 @@ running commands keeps a human in the loop; and a fuller-auto mode lets the agen
 run commands within a sandbox. Choose the least-privileged mode that still lets the
 task finish.
 
-## Sandbox
+## CLI sandbox
 
 When sandboxing is enabled, commands run with restricted file-system and network
 access so a mistaken or unsafe command cannot damage the wider system. The sandbox
 is the safety net that makes higher autonomy modes reasonable; disabling it removes
 those guarantees, so do so only when you understand the risk.
 
-## Errors
+## CLI errors
 
 A "rate limit exceeded" error means the OPENAI_API_KEY environment variable is set
 and valid but the account is over its quota; wait and retry, or raise the account
 limit. An authentication error instead means the key is missing or invalid. A
 sandbox-denied error means a command tried to touch a resource the sandbox blocks.
 
-## Configuration
+## CLI configuration
 
 Persistent settings live in a config file so you do not repeat flags every run.
 The file can pin a default model, an approval mode, and sandbox behavior.

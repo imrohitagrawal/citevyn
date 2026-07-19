@@ -32,7 +32,12 @@ from app.core.logging import configure_logging
 from app.embeddings import build_embedder, validate_embedder_provider
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
 from app.worker.fetchers import FetchError, build_fetcher
-from app.worker.runner import IngestionRunner, RunResult, ensure_index_version
+from app.worker.runner import (
+    IngestionRunner,
+    RunResult,
+    advance_source_version_hash,
+    ensure_index_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +92,9 @@ async def _drive(
     async with sessionmaker() as session:
         # One IndexVersion row for the whole run. Idempotent
         # — a re-run for the same ``index_version`` returns
-        # the existing row.
+        # the existing row. On a re-ingest this deliberately
+        # leaves ``source_version_hash`` alone; see the
+        # ``advance_source_version_hash`` call below.
         await ensure_index_version(
             session,
             index_version=index_version,
@@ -104,6 +111,29 @@ async def _drive(
         _print_result(result)
         if result.status.value == "failed":
             failed += 1
+
+    # Publish the new corpus fingerprint only once the corpus actually matches
+    # it: every source ingested, and the whole corpus ingested. The fingerprint
+    # spans all of MVP_SOURCES, so a ``--source`` subset run cannot vouch for
+    # the sources it skipped — advancing there would claim the untouched docs
+    # were rebuilt too. Publishing early (or on a partial run) caches answers
+    # built from the OLD chunks under the NEW key, and a retry re-hashes the
+    # same files, so nothing would evict them until the TTL.
+    full_corpus = {s.name for s in sources} == {s.name for s in MVP_SOURCES}
+    if failed == 0 and full_corpus:
+        async with sessionmaker() as session:
+            await advance_source_version_hash(
+                session,
+                index_version=index_version,
+                source_version_hash=runner.source_version_hash,
+            )
+            await session.commit()
+    elif failed == 0:
+        logger.info(
+            "source_version_hash_not_advanced_partial_run",
+            extra={"index_version": index_version, "ingested": sorted(s.name for s in sources)},
+        )
+
     return 0 if failed == 0 else 2
 
 

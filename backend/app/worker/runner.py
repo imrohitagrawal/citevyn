@@ -534,21 +534,18 @@ async def ensure_index_version(
     this index. On a re-ingest it is refreshed on the existing row too, so an
     index rebuilt under a new embedder does not keep a stale stamp.
 
-    ``source_version_hash`` is refreshed on re-ingest for the same reason. The
-    answer-cache key is derived from it (``cache.build_cache_key``), so a stale
-    value meant editing a source doc and re-ingesting in place left the cache
-    serving the OLD answer. Only writing it on INSERT made the content-derived
-    hash a no-op on the default ``--index-version v-local`` path that the
-    worker image and ``docs/RUNBOOK.md`` both use.
+    ``source_version_hash`` is set only when the row is CREATED. On re-ingest it
+    is deliberately left alone here and advanced afterwards by
+    :func:`advance_source_version_hash`, once the corpus actually matches it —
+    see that function for why the ordering matters.
     """
     existing = await session.get(IndexVersion, index_version)
     if existing is not None:
-        existing.source_version_hash = source_version_hash
         if embedding_provider is not None:
             existing.embedding_provider = embedding_provider
             existing.embedding_model = embedding_model
             existing.embedding_dim = embedding_dim
-        await session.flush()
+            await session.flush()
         return existing
     row = IndexVersion(
         index_version=index_version,
@@ -563,3 +560,34 @@ async def ensure_index_version(
     session.add(row)
     await session.flush()
     return row
+
+
+async def advance_source_version_hash(
+    session: AsyncSession,
+    *,
+    index_version: str,
+    source_version_hash: str,
+) -> None:
+    """Point ``index_version`` at the corpus fingerprint it now actually holds.
+
+    Call this only AFTER every source ingested successfully. The ordering is the
+    whole point, because the answer-cache key derives from this column:
+
+    * Advancing it *before* the chunks are rewritten would publish a hash that
+      lies. A query landing in that window is answered from the OLD chunks but
+      cached under the NEW hash — and because a retry re-hashes the same
+      (already-correct) files, the hash never moves again and nothing evicts
+      that entry until the TTL expires.
+    * Advancing it *after* a fully successful run makes the window harmless:
+      answers generated mid-run are cached under the OLD hash, which this call
+      then makes unreachable.
+
+    A partial or failed run therefore leaves the hash where it was — stale, but
+    honest, and no worse than not having re-ingested at all. The next clean run
+    advances it.
+    """
+    existing = await session.get(IndexVersion, index_version)
+    if existing is None:  # pragma: no cover - ensure_index_version runs first
+        return
+    existing.source_version_hash = source_version_hash
+    await session.flush()
