@@ -28,6 +28,7 @@ from app.worker.embedder import StubEmbedder
 from app.worker.fetchers import LocalFetcher
 from app.worker.runner import (
     IngestionRunner,
+    _checksum,
     advance_source_version_hash,
     ensure_index_version,
 )
@@ -181,6 +182,7 @@ async def test_run_marks_job_failed_on_fetch_error(
     runner = IngestionRunner(
         fetcher=LocalFetcher(),
         embedder=StubEmbedder(dim=8),
+        source_version_hash="sha256:test-snapshot",
     )
     result = await runner.run(session, source=bad_spec)
     assert result.status is JobStatus.failed
@@ -267,6 +269,7 @@ async def test_run_all_mvp_sources(
     runner = IngestionRunner(
         fetcher=LocalFetcher(),
         embedder=StubEmbedder(dim=16),
+        source_version_hash="sha256:test-snapshot",
         index_version="v-all",
     )
     for source in MVP_SOURCES:
@@ -347,6 +350,7 @@ async def test_reingest_refreshes_document_title_and_source_url(session: AsyncSe
     runner = IngestionRunner(
         fetcher=LocalFetcher(),
         embedder=StubEmbedder(dim=16),
+        source_version_hash="sha256:test-snapshot",
         index_version="v-retitle",
     )
     await runner.run(session, source=old)
@@ -356,6 +360,98 @@ async def test_reingest_refreshes_document_title_and_source_url(session: AsyncSe
     assert len(docs) == 1
     assert docs[0].title == spec.title
     assert docs[0].source_url == spec.source_url
+
+
+@pytest.mark.asyncio
+async def test_document_identity_checksum_hashes_identity_not_content(
+    session: AsyncSession,
+) -> None:
+    """``Document.identity_checksum`` is name+title, NOT the document's prose (#163).
+
+    Regression for the misnamed column: it used to be called
+    ``content_checksum``, which invited the next person to reach for it as a
+    change-detection signal. This pins the honest semantics — it equals
+    ``sha256(source_name + title)`` and never equals a hash of the fetched text
+    — so a future rewrite that changes one without the other is loud.
+    """
+    spec = get_source("codex")
+    runner = IngestionRunner(
+        fetcher=LocalFetcher(),
+        embedder=StubEmbedder(dim=8),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-identity",
+    )
+    await runner.run(session, source=spec)
+
+    document = (await session.execute(select(Document))).scalars().one()
+    assert document.identity_checksum == _checksum(spec.name + spec.title)
+    # The real prose hashes elsewhere: every chunk's own text, never the doc row.
+    raw_text = LocalFetcher().fetch(spec)
+    assert document.identity_checksum != _checksum(raw_text)
+
+
+@pytest.mark.asyncio
+async def test_identity_checksum_tracks_retitle_and_ignores_body_edits(
+    session: AsyncSession,
+) -> None:
+    """Edge case that names the column: a retitle moves it, a body edit does not.
+
+    Two runs of the SAME source with a different ``title`` must produce a
+    different ``identity_checksum``; a run whose fetched body differs but whose
+    identity is unchanged must leave it alone. That asymmetry is precisely why
+    the old name was a lie.
+    """
+    spec = get_source("codex")
+    renamed = SourceSpec(
+        name=spec.name,
+        product_area=spec.product_area,
+        title="Codex CLI Reference (2026 edition)",
+        fetcher=spec.fetcher,
+        location=spec.location,
+        source_url=spec.source_url,
+    )
+    runner = IngestionRunner(
+        fetcher=LocalFetcher(),
+        embedder=StubEmbedder(dim=8),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-retitle-checksum",
+    )
+    await runner.run(session, source=spec)
+    before = (await session.execute(select(Document))).scalars().one().identity_checksum
+
+    await runner.run(session, source=renamed)
+    after = (await session.execute(select(Document))).scalars().one().identity_checksum
+    assert after != before, "a retitle must move the identity checksum"
+
+    # Same identity, different body: the fetcher returns edited prose but the
+    # doc row's checksum is identity-derived, so it must NOT move.
+    class _EditedBodyFetcher:
+        def fetch(self, source: SourceSpec) -> str:
+            return LocalFetcher().fetch(source) + "\n\nAn edit to the prose.\n"
+
+    edited_runner = IngestionRunner(
+        fetcher=_EditedBodyFetcher(),
+        embedder=StubEmbedder(dim=8),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-retitle-checksum",
+    )
+    await edited_runner.run(session, source=renamed)
+    unmoved = (await session.execute(select(Document))).scalars().one().identity_checksum
+    assert unmoved == after, "a body edit must NOT move an identity checksum"
+
+
+def test_ingestion_runner_requires_an_explicit_source_version_hash() -> None:
+    """The retired ``sha256:mvp-snapshot-2`` placeholder default is gone (#163).
+
+    The answer-cache key includes this hash, so a default let an ad-hoc caller
+    silently stamp a fingerprint that does not describe the corpus it indexed.
+    Failing loudly at construction is the whole point of the change.
+    """
+    with pytest.raises(TypeError, match="source_version_hash"):
+        IngestionRunner(  # type: ignore[call-arg]
+            fetcher=LocalFetcher(),
+            embedder=StubEmbedder(dim=8),
+        )
 
 
 @pytest.mark.asyncio

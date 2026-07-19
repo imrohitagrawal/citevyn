@@ -115,7 +115,7 @@ async def test_keyword_retriever_requires_two_token_matches(session) -> None:
         product_area="gemini_api",
         source_url="https://docs.test/gemini-streaming",
         title="Gemini API",
-        content_checksum="sha256:demo-streaming",
+        identity_checksum="sha256:demo-streaming",
         status=DocumentStatus.active,
         last_fetched_at=now,
         last_indexed_at=now,
@@ -669,7 +669,7 @@ async def _seed_two_versions(session) -> tuple:
             product_area="codex",
             source_url=f"https://docs.example.com/{version}",
             title=f"Codex {version}",
-            content_checksum=f"sha256:{version}",
+            identity_checksum=f"sha256:{version}",
             last_fetched_at=now,
             last_indexed_at=now,
             status=DocumentStatus.active,  # BOTH active — the coexistence bug

@@ -36,7 +36,15 @@ class Document(Base):
     product_area: Mapped[str] = mapped_column(String(64), nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    content_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
+    # NOT a content fingerprint: this hashes the source *identity*
+    # (``source_name`` + ``title``), so it changes on a retitle and does NOT
+    # change when the document's prose is edited. It was named
+    # ``content_checksum`` until migration 0006; the name invited callers to
+    # trust it as a change-detection signal, which it never was. The real
+    # content fingerprint is ``app.worker.cli._content_version_hash`` (drives
+    # answer-cache invalidation via ``IndexVersion.source_version_hash``);
+    # per-chunk content hashes live on ``Chunk.content_checksum``.
+    identity_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     last_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(StrEnumType(DocumentStatus), nullable=False)

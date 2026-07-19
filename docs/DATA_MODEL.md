@@ -46,7 +46,7 @@ Represents an official documentation page or file.
 | product_area | text | Product area classification |
 | source_url | text | Official source URL |
 | title | text | Document title |
-| content_checksum | text | Hash of normalized content |
+| identity_checksum | text | Hash of the source's IDENTITY (`source_name` + `title`), NOT its prose. Renamed from `content_checksum` in migration 0005 (#163) because the old name invited use as a change-detection signal. Content fingerprints: per-chunk `chunks.content_checksum`; corpus-wide `index_versions.source_version_hash` |
 | last_fetched_at | timestamp | Last fetch time |
 | last_indexed_at | timestamp | Last successful index time |
 | status | text | active, failed, deprecated |

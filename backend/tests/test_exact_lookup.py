@@ -102,7 +102,7 @@ async def test_exact_lookup_scoped_to_product_area(session) -> None:
         product_area="claude_api",
         source_url="https://example.com/claude-api",
         title="Claude API extras",
-        content_checksum="deadbeef" * 8,
+        identity_checksum="deadbeef" * 8,
         last_fetched_at=now,
         status=DocumentStatus.active,
     )
@@ -216,7 +216,7 @@ async def test_exact_lookup_clamps_limit_to_max_results(session) -> None:
             product_area="codex",
             source_url=f"https://example.com/{i}",
             title=f"src {i}",
-            content_checksum=f"chk_{i}" + "0" * 60,
+            identity_checksum=f"chk_{i}" + "0" * 60,
             last_fetched_at=now,
             status=DocumentStatus.active,
         )
@@ -303,7 +303,7 @@ async def test_exact_lookup_pins_to_specific_index_version(session) -> None:
         product_area="replay",
         source_url="https://example.com/old",
         title="Replay old",
-        content_checksum="x" * 64,
+        identity_checksum="x" * 64,
         last_fetched_at=now,
         status=DocumentStatus.active,
     )
@@ -385,7 +385,7 @@ async def test_exact_lookup_pinned_version_skips_active_filter(session) -> None:
         product_area="cand",
         source_url="https://example.com/cand",
         title="Candidate",
-        content_checksum="y" * 64,
+        identity_checksum="y" * 64,
         last_fetched_at=datetime.now(UTC),
         status=DocumentStatus.active,
     )

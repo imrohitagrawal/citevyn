@@ -209,7 +209,7 @@ async def seed(database_url: str) -> dict[str, int]:
                     product_area=definition.product_area,
                     source_url=definition.source_url,
                     title=definition.title,
-                    content_checksum=f"sha256:demo-{definition.product_area}",
+                    identity_checksum=f"sha256:demo-{definition.product_area}",
                     status=DocumentStatus.active,
                     last_fetched_at=now,
                     last_indexed_at=now,

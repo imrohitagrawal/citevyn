@@ -233,7 +233,7 @@ async def seed_eval_distractors(
             product_area=DISTRACTOR_AREA,
             source_url=f"/eval/{source_name}",
             title=f"{source_name} ({heading})",
-            content_checksum=f"sha256:{source_name}-chunk-{chunk_order}",
+            identity_checksum=f"sha256:{source_name}-chunk-{chunk_order}",
             last_fetched_at=now,
             last_indexed_at=now,
             status=DocumentStatus.active,

@@ -96,7 +96,7 @@ class IngestionRunner:
         *,
         fetcher: Fetcher,
         embedder: Embedder,
-        source_version_hash: str = "sha256:mvp-snapshot-2",
+        source_version_hash: str,
         index_version: str = "v-local",
         embedding_provider: str | None = None,
         embedding_model: str | None = None,
@@ -104,17 +104,22 @@ class IngestionRunner:
         """Create a runner with explicit collaborators.
 
         ``source_version_hash`` is the "what snapshot are we
-        building against?" fingerprint. ``index_version`` is
-        the key the runner writes to. ``embedding_provider`` and
+        building against?" fingerprint. It is REQUIRED (no default):
+        the CLI derives it from the actual corpus bytes
+        (``cli._content_version_hash``) because the answer-cache key
+        includes it, so a silent placeholder default would let an
+        ad-hoc run stamp a hash that does not describe the content it
+        just indexed — exactly the stale-cache bug #162 fixed. Callers
+        that genuinely do not care (tests) must say so explicitly.
+
+        ``index_version`` is the key the runner writes to.
+        ``embedding_provider`` and
         ``embedding_model`` are the provenance stamped onto the
         :class:`IndexVersion` (Tier 3 groundwork, #51) — WRITE-ONLY
         today (nothing reads it yet); a future enforcement check will
         compare the read-path embedder against it. See
         ``docs/ADR/0003-embeddings-provider.md``. ``None`` leaves the
-        stamp unset (e.g. ad-hoc test runs). The CLI defaults are good
-        for the MVP; production
-        swaps them for real values from the operator-issued source
-        feed.
+        stamp unset (e.g. ad-hoc test runs).
         """
         self._fetcher = fetcher
         self._embedder = embedder
@@ -373,9 +378,12 @@ class IngestionRunner:
         re-run for the same snapshot finds the existing
         document and stamps ``last_fetched_at`` +
         ``last_indexed_at`` rather than inserting a
-        duplicate. The ``content_checksum`` here is a
-        placeholder; the real per-chunk checksums live on
-        the :class:`Chunk` rows.
+        duplicate. The ``identity_checksum`` here fingerprints the
+        source's IDENTITY (name + title), not its prose — it is
+        deliberately not a content hash, and the column is named for
+        what it actually is (#163). Real content hashes live per-chunk
+        on :class:`Chunk.content_checksum`; the corpus-wide content
+        fingerprint is ``cli._content_version_hash``.
 
         The ``title`` and ``source_url`` are refreshed from the
         :class:`SourceSpec` on re-ingest. Both are stamped straight onto every
@@ -394,7 +402,7 @@ class IngestionRunner:
             existing.status = DocumentStatus.active
             existing.title = source.title
             existing.source_url = source.source_url or source.location
-            existing.content_checksum = _checksum(source.name + source.title)
+            existing.identity_checksum = _checksum(source.name + source.title)
             return existing
         document = Document(
             index_version=self._index_version,
@@ -404,7 +412,7 @@ class IngestionRunner:
             # source; fall back to the local location for ad-hoc specs.
             source_url=source.source_url or source.location,
             title=source.title,
-            content_checksum=_checksum(source.name + source.title),
+            identity_checksum=_checksum(source.name + source.title),
             last_fetched_at=datetime.now(UTC),
             last_indexed_at=datetime.now(UTC),
             status=DocumentStatus.active,
@@ -462,9 +470,10 @@ class IngestionRunner:
 def _checksum(text: str) -> str:
     """SHA-256 of ``text`` as a hex string.
 
-    Used for ``Document.content_checksum`` and
-    ``Chunk.content_checksum``. The DB column is 128 chars
-    so the hex digest fits with room to spare.
+    Used for ``Document.identity_checksum`` (name + title — an
+    identity fingerprint, not a content one) and
+    ``Chunk.content_checksum`` (the chunk's real text). The DB column
+    is 128 chars so the hex digest fits with room to spare.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

@@ -16,6 +16,8 @@ from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine
 
+from app.models.documents import Document
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "db" / "alembic.ini"
 VERSIONS_DIR = REPO_ROOT / "db" / "versions"
@@ -127,6 +129,81 @@ def test_migration_0005_downgrade_drops_provider_calls(
     # Everything else must survive: an over-broad downgrade that took out the
     # pre-existing schema would still pass the two assertions above.
     assert (EXPECTED_TABLES - {"provider_calls"}) <= names
+
+
+def test_documents_identity_checksum_rename_round_trips(
+    alembic_config: AlembicConfig,
+) -> None:
+    """Migration 0006 renames ``documents.content_checksum`` → ``identity_checksum``.
+
+    Both directions are exercised because a rename with a broken downgrade is
+    an un-rollbackable schema change. The values must survive the round trip:
+    the rename carries data, it does not recreate the column.
+    """
+    # Stop at 0005: the rename is 0006, so this is the state immediately before it.
+    alembic_upgrade(alembic_config, "0005")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def _document_columns() -> set[str]:
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql("PRAGMA table_info(documents)").all()
+        return {row[1] for row in rows}
+
+    assert "content_checksum" in _document_columns()
+
+    # Seed a row so the rename is proven to CARRY data, not just reshape the
+    # schema (SQLite batch mode recreates the table and copies rows).
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO index_versions (index_version, status, source_version_hash, "
+            "created_at) VALUES ('v-mig', 'candidate', 'sha256:x', CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO documents (document_id, index_version, source_name, "
+            "product_area, source_url, title, content_checksum, last_fetched_at, status) "
+            "VALUES ('doc-1', 'v-mig', 'codex', 'cli', '/x', 'T', 'sha256:keepme', "
+            "CURRENT_TIMESTAMP, 'active')"
+        )
+
+    alembic_upgrade(alembic_config, "0006")
+    columns = _document_columns()
+    assert "identity_checksum" in columns
+    assert "content_checksum" not in columns, "the misleading name must be gone"
+    with engine.connect() as connection:
+        value = connection.exec_driver_sql(
+            "SELECT identity_checksum FROM documents WHERE document_id = 'doc-1'"
+        ).scalar_one()
+    assert value == "sha256:keepme"
+
+    # Rollback path: the column name (and its data) must come back.
+    alembic_downgrade(alembic_config, "0005")
+    assert "content_checksum" in _document_columns()
+    with engine.connect() as connection:
+        value = connection.exec_driver_sql(
+            "SELECT content_checksum FROM documents WHERE document_id = 'doc-1'"
+        ).scalar_one()
+    assert value == "sha256:keepme"
+
+
+def test_migrated_documents_table_matches_the_orm_model(
+    alembic_config: AlembicConfig,
+) -> None:
+    """Guard against model/migration drift on ``documents``.
+
+    The hermetic suite builds its schema with ``Base.metadata.create_all``, NOT
+    alembic — so a column renamed in the model but not in a migration passes
+    every other test in this repo and only explodes on a real Postgres deploy.
+    This test is the one place the two are compared.
+    """
+    alembic_upgrade(alembic_config, "head")
+
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql("PRAGMA table_info(documents)").all()
+    migrated = {row[1] for row in rows}
+
+    model = {column.name for column in Document.__table__.columns}
+    assert migrated == model, f"documents drift: migration={migrated} model={model}"
 
 
 def test_versions_directory_contains_initial_migration() -> None:

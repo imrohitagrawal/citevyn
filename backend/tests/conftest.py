@@ -279,7 +279,7 @@ async def seed_catalog(
             product_area=spec["product_area"],
             source_url=spec["source_url"],
             title=spec["title"],
-            content_checksum=f"sha256:{spec['product_area']}",
+            identity_checksum=f"sha256:{spec['product_area']}",
             last_fetched_at=now,
             last_indexed_at=now,
             status=DocumentStatus.active,
