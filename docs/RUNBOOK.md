@@ -23,7 +23,10 @@ make logs
 docker compose -f infra/docker/docker-compose.yml --profile prod restart api
 
 # Roll back a release
-git checkout v0.1.0 && VERSION=v0.1.0 make refresh
+make rollback TAG=--previous
+
+# Verify a release (deploy + functional verify + rollback drill)
+VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
 ```
 
 ---
@@ -381,6 +384,20 @@ images up. Brief 502s on :443 are expected (~10s).
 
 ### 5.3 Roll back
 
+**Use the script — it is the same path the release gate drills.**
+
+```bash
+make rollback TAG=v0.1.0        # explicit tag
+make rollback TAG=--previous    # the tag before HEAD, resolved for you
+```
+
+`infra/docker/scripts/rollback.sh` refuses a stub `.env` and a dirty
+tree, warns when migrations landed after the target, checks out the
+target tag, re-deploys via `refresh.sh`, and waits for the api to
+report healthy. Preview with `--dry-run` (safe on a dirty tree).
+
+Equivalent by hand:
+
 ```bash
 git checkout v0.1.0                 # source tree at the previous tag
 VERSION=v0.1.0 make refresh
@@ -390,7 +407,26 @@ The compose file re-builds the images from the old source. Migrations
 that were forward-only in `v0.2.0` will NOT be rolled back — for
 those, restore a backup (see §4.2). For pure application rollbacks
 (no schema change), `make refresh` after the `git checkout` is
-sufficient.
+sufficient. After the incident, return with `git checkout main` (the
+rollback leaves you on a detached HEAD).
+
+### 5.4 Verify a release (the live gate)
+
+Before tagging/announcing a release, run the one-command gate **on the
+deploy host**:
+
+```bash
+VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
+```
+
+Backup → deploy → functional verify (cited answer, refusal, exact
+lookup, admin protected) → rollback drill → roll forward → re-verify,
+with a PASS/FAIL summary. Non-zero exit means **do not tag**. This is
+what satisfies `RELEASE_PLAN` §10 blocker 9.
+
+It is **not** the full regression suite — `make ci`, `make golden`,
+`make eval` and `make e2e` still run before the cut (see
+`docs/DEMO_CHECKLIST.md`).
 
 ---
 
