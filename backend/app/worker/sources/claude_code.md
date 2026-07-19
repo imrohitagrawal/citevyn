@@ -26,16 +26,21 @@ later; do not install it with sudo. Supported platforms are macOS 13.0+, Windows
 Confirm the install with 'claude --version', and run 'claude doctor' for read-only
 diagnostics of install health and settings. Native installs auto-update in the
 background by default and can also be updated on demand with 'claude update'; set
-DISABLE_AUTOUPDATER=1 to turn that off. Package-manager and npm installs do not
-auto-update — refresh them with 'brew upgrade claude-code',
-'winget upgrade Anthropic.ClaudeCode', or
-'npm install -g @anthropic-ai/claude-code@latest'.
+DISABLE_AUTOUPDATER=1 to turn that off. Homebrew, WinGet and Linux
+package-manager installs do not auto-update — refresh those with
+'brew upgrade claude-code' or 'winget upgrade Anthropic.ClaudeCode'. An npm global
+install does auto-update, because it installs the same native binary; refresh it
+on demand with 'npm install -g @anthropic-ai/claude-code@latest'.
 
 ## First run and sign-in
 
-Run 'claude' to start it; the first launch opens a browser to sign in, and where no
-browser is available it shows a code you paste back into the terminal. Sign-in works
-with a Claude Pro or Max subscription, with Claude for Teams or Enterprise, or with a
+Run 'claude' to start it; the first launch opens a browser to sign in. If the browser
+does not open, press 'c' to copy the login URL and open it yourself. If the browser
+shows a login code instead of redirecting back — common over SSH, in WSL2 and in
+containers, where it cannot reach the local callback server — paste that code into
+the terminal.
+
+Sign-in works with a Claude Pro or Max subscription, with Claude for Teams or Enterprise, or with a
 Claude Console account. The free Claude.ai plan does not include Claude Code. As an
 alternative to signing in, set the ANTHROPIC_API_KEY environment variable, or run
 'claude setup-token' to mint a long-lived token for CI and scripts. Use '/logout' to

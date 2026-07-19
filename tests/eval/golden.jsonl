@@ -26,6 +26,11 @@
 # #170: claude_code.md had no installation content at all, so "How do I install Claude Code?"
 # refused — identical single-turn and as a follow-up. A CORPUS gap, and an obvious first
 # question for a CLI tool. Mirrors the codex_lit_install shape.
+# NOTE: the hit-rate contribution of this case does NOT guard the install content —
+# `evaluate_retrieval` scores a hit at SOURCE level, so it stays green if the content is
+# removed (true of codex_lit_install too). The real guards are `expected_facts` (via
+# test_every_expected_fact_is_groundable_in_the_corpus) and the test_retrieval.py case that
+# asserts "@anthropic-ai/claude-code" is actually retrieved.
 {"id": "claude_code_lit_install", "area": "claude_code", "kind": "literal", "question": "How do I install Claude Code?", "expected_source": "claude_code", "expected_gist": "Install Claude Code with the native installer ('curl -fsSL https://claude.ai/install.sh | bash') or from npm with 'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 or later.", "expect_no_answer": false, "expected_facts": ["@anthropic-ai/claude-code"], "gold_chunks": ["claude_code#0"]}
 {"id": "codex_lit_install", "area": "codex", "kind": "literal", "question": "How do I install the Codex CLI?", "expected_source": "codex", "expected_gist": "Install the Codex CLI globally with npm ('npm install -g @openai/codex') or with Homebrew ('brew install codex') on macOS.", "expect_no_answer": false, "expected_facts": ["npm"], "gold_chunks": ["codex#0"]}
 {"id": "gemini_api_lit_authheader", "area": "gemini_api", "kind": "literal", "question": "Which header carries the Gemini API key?", "expected_source": "gemini_api", "expected_gist": "Pass the Gemini API key in the x-goog-api-key header.", "expect_no_answer": false, "expected_facts": ["x-goog-api-key"], "gold_chunks": ["gemini_api#0"]}
