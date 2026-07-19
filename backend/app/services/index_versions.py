@@ -124,17 +124,33 @@ async def promote_version(
         # audit row — the state didn't change.
         return target
 
-    # Find the current active row (if any) and demote it. We do
-    # not take a row-level lock on the demotion candidate; the
-    # promotion is a single-step read+update and the
-    # ``active`` status is logically a singleton.
-    current_active = (
-        await session.execute(
-            select(IndexVersion).where(IndexVersion.status == IndexStatus.active).with_for_update()
+    # Find the current active row(s) and demote them. We do not take a
+    # row-level lock on the demotion candidate; the promotion is a
+    # single-step read+update.
+    #
+    # ``active`` is logically a singleton, but nothing in the schema
+    # ENFORCES that, and a database that has drifted into a dual-active
+    # state really happens (seed + repeated local ingests will do it).
+    # This used to be ``scalar_one_or_none()``, which raised
+    # ``MultipleResultsFound`` on >1 active row and surfaced as an opaque
+    # HTTP 500 — with promotion being the only API that can repair index
+    # state, that made a drifted database UNRECOVERABLE through the API.
+    # Demote every active row instead: correct for the normal
+    # single-row case and self-healing for the drifted one.
+    current_active_rows = (
+        (
+            await session.execute(
+                select(IndexVersion)
+                .where(IndexVersion.status == IndexStatus.active)
+                .with_for_update()
+            )
         )
-    ).scalar_one_or_none()
-    if current_active is not None and current_active.index_version != target.index_version:
-        current_active.status = IndexStatus.previous_good
+        .scalars()
+        .all()
+    )
+    for current_active in current_active_rows:
+        if current_active.index_version != target.index_version:
+            current_active.status = IndexStatus.previous_good
 
     target.status = IndexStatus.active
     target.promoted_at = now

@@ -26,9 +26,10 @@ import type { ServerResponse } from "node:http";
 const STUB_DELAY_MS = 800;
 
 const CANNED_ANSWER =
-  "Claude Code is Anthropic's agentic coding CLI. It runs from your terminal, " +
-  "reads your repo, and applies edits through permissioned tools. Use it for " +
-  "multi-file refactors, test runs, and PR preparation.";
+  "Claude Code is Anthropic's agentic coding tool. It runs in your terminal, as a " +
+  "desktop or web app, or as an IDE extension; it reads your repo and applies edits " +
+  "through permissioned tools. Use it for multi-file refactors, test runs, and PR " +
+  "preparation.";
 
 const CANNED_CITATIONS = [
   {

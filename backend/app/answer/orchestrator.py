@@ -31,6 +31,7 @@ from typing import Any, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.answer.alias_intent import is_citevyn_intent_llm
 from app.answer.generate import AnswerGenerator
 from app.answer.memory import (
     build_contextual_query,
@@ -49,7 +50,15 @@ from app.embeddings import (
     configured_embedder_identity,
     get_embedder,
 )
-from app.guardrails.domain import Domain, classify_domain, classify_domains, is_unsupported
+from app.guardrails.domain import (
+    Domain,
+    canonicalize_ambiguous_alias,
+    canonicalize_product_name,
+    classify_domain,
+    classify_domains,
+    contains_ambiguous_citevyn_alias,
+    is_unsupported,
+)
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
@@ -416,6 +425,61 @@ class Orchestrator:
             )
             retrieval_query = build_contextual_query(question, prior_questions)
 
+        # Whether the deterministic MEMORY rewrite fired, captured HERE — before
+        # canonicalization also starts mutating ``retrieval_query``. The condense gate
+        # below keys off this, and it used to test ``retrieval_query != question``
+        # directly; once alias canonicalization landed, that comparison silently started
+        # meaning "memory rewrote it OR it contained an alias", firing the LLM condenser
+        # on self-contained aliased questions that have nothing to resolve.
+        memory_rewrote = retrieval_query != question
+
+        # Speech-to-text mangles the product name ("sitewin", "site win"), and the
+        # guardrail now recognizes those aliases — but recognition alone still refuses
+        # the commonest phrasing. "what is sitewin?" routes to ``citevyn`` correctly, yet
+        # its ONLY content word is the mangled token, which appears nowhere in the corpus,
+        # so both retrieval arms come back empty. Normalizing the alias to "CiteVyn" here
+        # is what lets the indexed About-CiteVyn chunks match (#84 item 1).
+        #
+        # A no-op for every question that contains no alias, and the guarded pattern means
+        # it can never rewrite text the classifier would not also have routed to
+        # ``citevyn`` — so "our site win rate" is left alone. The ORIGINAL ``question`` is
+        # still what gets persisted as the user's message.
+        retrieval_query = canonicalize_product_name(retrieval_query)
+
+        # Two-word CiteVyn homophones (#84 follow-up). Dictation renders the product
+        # name as "site win" far more often than anything else, but those are also two
+        # ordinary English words, so the guardrail deliberately does NOT match them —
+        # see app/answer/alias_intent.py for the three review rounds that established no
+        # surrounding-token rule can tell the readings apart.
+        #
+        # An LLM intent check over the WHOLE utterance does what a regex cannot. On a
+        # confirmed YES the alias is canonicalized here, BEFORE routing, so the question
+        # then behaves exactly like the single-token aliases ("sitewin") the guardrail
+        # already accepts — same route, same retrieval, same cache key.
+        #
+        # Why this is not the hijack risk #169 guarded against: that invariant exists so a
+        # free-form LLM REWRITE cannot flip a topic pivot onto the scoped path. This
+        # rewrite is not free-form — it can only ever map "site|cite|sight win" to
+        # "CiteVyn", and only when the question ALREADY routes ``unsupported`` (i.e. it
+        # would otherwise refuse outright). It cannot touch a question that names a
+        # product, and it cannot invent a topic.
+        #
+        # Deterministic prefilter first, so real traffic never pays for this: no
+        # "site|cite|sight win" in the text, no call. Any failure — outage, unparseable
+        # reply, stub provider, flag off — leaves the query untouched and the question
+        # refuses exactly as it did before.
+        if (
+            self._settings.citevyn_alias_intent_check
+            and self._settings.llm_provider != "stub"
+            and contains_ambiguous_citevyn_alias(retrieval_query)
+            and classify_domain(retrieval_query) is Domain.unsupported
+        ):
+            try:
+                if await is_citevyn_intent_llm(question, self._llm):
+                    retrieval_query = canonicalize_ambiguous_alias(retrieval_query)
+            except Exception:  # noqa: BLE001 — degrade to the pre-existing refusal
+                pass
+
         domain = classify_domain(retrieval_query)
         intent = classify_intent(retrieval_query, domain)
         # The router emits ``Intent.unsupported`` when the guardrail refused, but the
@@ -446,30 +510,62 @@ class Orchestrator:
         # off-corpus questions. When the flag is off, keep the old refuse-early.
         answer_globally = self._settings.answer_when_grounded and intent is Intent.unsupported
 
-        # Entity-aware follow-up rewrite (#112). A CONTENT-NOUN follow-up ("is there a
-        # credentials file option?", "what are the different models?") names no product and
-        # carries no bare anaphora, so ``build_contextual_query`` above left it unchanged and
-        # it routed ``unsupported``. Only HERE — on the answer-when-grounded path, with
-        # ``domain``/``intent``/``answer_globally`` ALREADY fixed from the un-rewritten query
-        # (so this can never flip a pivot onto the scoped, un-gated path) and only when there
-        # are prior turns the deterministic rewrite did NOT already resolve — ask the LLM to
-        # condense it into a standalone question. It is a PURE RECALL improver: it changes only
-        # the TEXT fed to the GLOBAL confidence-gated retrieval + generation below; the gate +
-        # the grounding-refusal net remain the sole authority on declining an off-corpus pivot.
+        # Standalone-question condensation (#112 + #169). ``retrieval_query`` has now done
+        # its ROUTING job (everything above this line is derived and FIXED), and from here
+        # on it feeds only RETRIEVAL, GENERATION and the CACHE KEY. Those two roles want
+        # different strings, which is the whole of this block:
+        #
+        # * ROUTING wants the deterministic CONCATENATION ("What is Codex CLI? who built
+        #   it?") — prepending the antecedent is exactly what pulls a bare anaphor onto the
+        #   ``codex`` domain instead of ``unsupported``.
+        # * RETRIEVAL/GENERATION want a TRUE STANDALONE question ("Who built Codex CLI?").
+        #   Handed the concatenation, the LLM sees a leading clause that is already a
+        #   complete self-contained question, answers THAT, and ignores the trailing
+        #   fragment — so the follow-up returns the PREVIOUS answer verbatim, which is then
+        #   cached under its own key and replayed forever (#169).
+        #
+        # So we condense here, for BOTH follow-up shapes:
+        #
+        # * the CONTENT-NOUN follow-up ("is there a credentials file option?", #112), which
+        #   names no product and carries no bare anaphora, so ``build_contextual_query``
+        #   left it unchanged and it routed ``unsupported`` → answer-when-grounded; and
+        # * the ANAPHORIC follow-up ("who built it?", #169), which the deterministic rewrite
+        #   DID resolve — by concatenation. This case was previously locked out by a
+        #   ``retrieval_query == question`` guard, i.e. excluded exactly where it was needed.
+        #
+        # This stays a PURE RECALL improver. ``domain``/``intent``/``multi_domains``/
+        # ``answer_globally`` are already computed above from the un-condensed query, so a
+        # rewrite can NEVER flip a topic pivot onto the scoped, un-gated path; the
+        # confidence gate + the LLM grounding-refusal net remain the sole authority on
+        # declining an off-corpus pivot.
+        #
         # Skipped when no real LLM is configured (``llm_provider == "stub"``) — the stub's
         # canned text is not a rewrite, and a test spy that wraps the stub must behave the
-        # same as the stub. Any error degrades to the un-rewritten query so a rewrite failure
-        # never turns an answer/refusal into a 500.
-        if (
-            answer_globally
-            and prior_questions
-            and retrieval_query == question
-            and self._settings.llm_provider != "stub"
-        ):
+        # same as the stub.
+        #
+        # Gated to the two shapes above and nothing else. A mid-session question that
+        # ALREADY stands on its own ("how do I install the Codex CLI?") routes to a product
+        # domain AND was left unchanged by the deterministic rewrite — it has nothing to
+        # resolve, so we skip the call rather than pay an LLM round-trip per turn for a
+        # rewrite the condenser is instructed to decline anyway. Keyed off
+        # ``memory_rewrote`` rather than ``retrieval_query != question`` so that alias
+        # canonicalization — which also rewrites ``retrieval_query`` — cannot drag a
+        # self-contained question ("is sitewin free?") into the condenser.
+        needs_condense = answer_globally or memory_rewrote
+        if needs_condense and prior_questions and self._settings.llm_provider != "stub":
+            # The fallback is whatever routing already resolved: the concatenation when the
+            # deterministic rewrite fired, else the raw question. NEVER the bare fragment —
+            # dropping back to "who built it?" would strip the antecedent and refuse a
+            # perfectly answerable question, i.e. worse than today. ``condense_question_llm``
+            # returns ``question`` VERBATIM when it declines (no history, empty/overlong
+            # output, or the question already stands alone), so that is treated as "no
+            # rewrite" and lands on the same fallback.
+            fallback = retrieval_query
             try:
-                retrieval_query = await condense_question_llm(question, prior_questions, self._llm)
-            except Exception:  # noqa: BLE001 — any LLM failure falls back to the raw query
-                retrieval_query = question
+                condensed = await condense_question_llm(question, prior_questions, self._llm)
+            except Exception:  # noqa: BLE001 — any LLM failure degrades to today's behaviour
+                condensed = question
+            retrieval_query = fallback if condensed == question else condensed
 
         if intent is Intent.unsupported and not answer_globally:
             return await self._respond_unsupported(
@@ -668,10 +764,26 @@ class Orchestrator:
                 reason=validation.reason or "citation_validation_failed",
             )
 
-        # The LLM may emit the no-answer refusal even when evidence
-        # is non-empty. Honor the contract and treat it as a
-        # weak-evidence fallback.
-        if not validation.cited_indices and self._is_no_answer_refusal(llm_result.text):
+        # An answer that cited NOTHING is not a grounded answer (#174).
+        #
+        # The system prompt requires a ``[n]`` marker on every FACTUAL CLAIM, and requires
+        # the refusal paragraph when there is nothing to ground against. So an answer with
+        # zero markers is either the refusal (honour it) or prose making claims it did not
+        # attribute. A third case exists and is deliberately swept in with them: output
+        # truncated by ``llm_max_tokens`` before its first marker. Refusing that is also the
+        # behaviour we want — a half-sentence with every chunk stapled to it is worse than a
+        # clean no-answer.
+        #
+        # This used to require the text to ALSO match the refusal paragraph. Anything else
+        # fell through to the citation block below, where ``used_indices`` defaulted to
+        # EVERY retrieved chunk — so an ungrounded claim was returned at full confidence
+        # wearing every citation the retriever produced. The citation count was highest
+        # exactly where the grounding was weakest, which inverts the product's promise that
+        # each answer links to the source that supports it.
+        #
+        # Both cases now collapse to no_answer; only the audit reason distinguishes them, so
+        # an operator can still tell a polite refusal from a model that ignored its evidence.
+        if not validation.cited_indices:
             return await self._respond_no_answer(
                 request_id=request_id,
                 session_id=session_id,
@@ -680,7 +792,9 @@ class Orchestrator:
                 domain=domain,
                 intent=intent,
                 source_version_hash=source_version_hash,
-                reason="no_answer",
+                reason=(
+                    "no_answer" if self._is_no_answer_refusal(llm_result.text) else "uncited_answer"
+                ),
                 evidence=evidence,
                 strategy=strategy,
             )
@@ -690,7 +804,10 @@ class Orchestrator:
         # the model actually referenced. The trace keeps every
         # retrieved chunk.
         cited_set = set(validation.cited_indices)
-        used_indices = sorted(cited_set) if cited_set else list(range(1, len(evidence) + 1))
+        # ``cited_set`` is guaranteed non-empty here — an uncited answer returned above.
+        # The old ``else list(range(1, len(evidence) + 1))`` fallback was what attached every
+        # chunk to an ungrounded answer (#174); it is gone rather than left dormant.
+        used_indices = sorted(cited_set)
         used_chunk_ids = {evidence[i - 1].chunk_id for i in used_indices}
         visible_citations = [
             c for c, hit in zip(citations, evidence, strict=True) if hit.chunk_id in used_chunk_ids

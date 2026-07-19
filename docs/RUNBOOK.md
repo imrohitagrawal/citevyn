@@ -272,6 +272,48 @@ $EDITOR /etc/docker/daemon.json
 
 ---
 
+### 3.7 Editing a source doc (corpus correction)
+
+**Context:** The corpus under `backend/app/worker/sources/*.md` is the ground
+truth every answer is generated from. Correcting a doc is a normal operation —
+a definition is too narrow, a flag is wrong, a section is missing.
+
+**Procedure:** edit the `.md` file, re-run ingestion, then promote:
+
+```bash
+python -m app.worker.cli run          # rebuilds v-local from the edited corpus
+# then promote via POST /v1/admin/index_versions/{version}/promote
+```
+
+**What happens automatically (no manual cache flush needed):**
+
+- `IndexVersion.source_version_hash` is derived from the **bytes of the source
+  docs** (`app.worker.cli._content_version_hash`), so any edit changes it. The
+  answer-cache key includes that hash, so cached answers built from the old text
+  stop being reachable. There is no constant to bump.
+- A re-ingest **replaces** the source's chunks and exact terms rather than
+  appending, so the old wording does not linger in the corpus next to the new.
+- `Document.title` and `source_url` are refreshed from the allowlist, so an
+  allowlist correction reaches rendered citations.
+
+All three hold when re-ingesting **in place** (the default `--index-version
+v-local`, which is what the worker image's `CMD` runs). Before this was fixed,
+each of them silently required building a brand-new index version instead.
+
+**The new fingerprint is published only after a clean, whole-corpus run.** If
+any source fails, or you ingested a subset with `--source`, the hash stays where
+it was. That is deliberate: publishing a hash the corpus does not yet match
+would let a query be answered from the un-rebuilt chunks and then *cached under
+the new key*, and because a retry re-hashes the same files the hash never moves
+again — the stale answer would survive the correction until the TTL expires.
+So after a partial failure, **fix the cause and re-run the full ingest**; the
+correction is not live until a run completes cleanly.
+
+**Verify the edit actually shipped:** ask the corrected question and confirm the
+answer reflects the new text. If it still shows the old answer, check (a) that
+the run reported no failed sources, and (b) that the promote step ran — an
+un-promoted candidate is not served.
+
 ## 4. Backup & restore
 
 ### 4.1 Backups (operator)
@@ -349,6 +391,49 @@ that were forward-only in `v0.2.0` will NOT be rolled back — for
 those, restore a backup (see §4.2). For pure application rollbacks
 (no schema change), `make refresh` after the `git checkout` is
 sufficient.
+
+#### 5.3a Rolling back across an `answer_policy_version` bump
+
+**Check this before rolling back — it has no migration and no error to
+warn you.**
+
+`CITEVYN_ANSWER_POLICY_VERSION` is part of the answer-cache key
+pre-image, so bumping it invalidates every cached answer by design. It
+gets bumped when a release makes previously-cached answers *wrong*
+(v1 → v2 in #169: follow-up answers had been generated from a
+concatenated query, so each was stored as a verbatim duplicate of the
+previous turn's answer).
+
+A rollback restores the OLD value — which brings those poisoned rows
+back into key scope and re-serves them, for as long as
+`CITEVYN_CACHE_TTL_SECONDS` (default 24h) has left to run. Nothing else
+evicts them: their `source_version_hash` and `embedder_identity` are
+still perfectly valid.
+
+So when rolling back across a bump, roll the version *forward* instead
+of letting it revert:
+
+```bash
+git checkout v0.1.0
+# The bad release shipped v2; do NOT go back to v1 — pick a THIRD value
+# so the cache is cold in both directions.
+CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.1.0 make refresh
+```
+
+Check which value you are leaving before you roll back:
+
+```bash
+grep -n 'answer_policy_version' backend/app/core/config.py   # the default
+grep -rn 'CITEVYN_ANSWER_POLICY_VERSION' infra/docker/.env   # any override
+```
+
+The only cost of a third value is a cold answer cache, which refills on
+demand. Re-serving a known-bad answer is much worse, and silent.
+
+`infra/docker/scripts/rollback.sh` performs exactly the naive revert
+described above and does not (yet) handle this — see its "What it does
+NOT do" header, alongside the equivalent migration and index-promotion
+caveats.
 
 ---
 

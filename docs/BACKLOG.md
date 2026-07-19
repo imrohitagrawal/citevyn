@@ -9,16 +9,46 @@ in the same change.
 > This file mirrors GitHub issues; GitHub is the source of truth for status. If a row
 > here and the issue disagree, trust the issue and fix the row.
 
-## Open follow-ups
+## Roadmap milestones
+
+Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §11–12):
+
+- **[V1](https://github.com/imrohitagrawal/citevyn/milestone/1)** — depth/polish for a
+  portfolio-grade demo (no new content domains or heavy surfaces).
+- **[V2](https://github.com/imrohitagrawal/citevyn/milestone/2)** — breadth + heavier
+  surfaces, deferred until V1 depth is proven.
+
+### V1 milestone
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#153](https://github.com/imrohitagrawal/citevyn/issues/153) | Live hosted public demo + cost guardrails | infra / ops | Highest V1 ROI; also completes the Phase-5 live deploy-verify + rollback gate; §9 cost limits are a hard prerequisite before a public URL |
+| [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Real SSE streaming for chat answers | frontend / API | Verified: **no streaming route exists on `main`** — a real backend build, not a rewire |
+| [#154](https://github.com/imrohitagrawal/citevyn/issues/154) | Feedback capture wired into the eval loop | backend / frontend | Value is the eval flywheel, **not** model retraining; most invasive V1 item (DB + API) |
+| [#155](https://github.com/imrohitagrawal/citevyn/issues/155) | Evaluation + live-ops dashboard | frontend / observability | Surfaces existing eval metrics + live cost/latency/refusal; pairs with #154 |
+| [#156](https://github.com/imrohitagrawal/citevyn/issues/156) | Better re-ranking of retrieved chunks | backend / RAG | Feature-flagged, cost-aware, proven on golden + distractor eval sets |
+| [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Composer gating while a live answer is in flight | frontend | Small hardening; do alongside #61 |
+
+### V2 milestone
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#157](https://github.com/imrohitagrawal/citevyn/issues/157) | ChatGPT (OpenAI) official docs — 5th domain | backend / corpus | Deferred: breadth-not-depth **and** licensing-gated (ADR-0003). Not deferred for UI risk |
+| [#158](https://github.com/imrohitagrawal/citevyn/issues/158) | Voice output (TTS) for answers | frontend / API | Large surface, off-core; explicit MVP non-goal |
+
+## Open follow-ups (unmilestoned)
 
 | Issue | Title | Area | Priority | Origin |
 |---|---|---|---|---|
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
-| [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
-| [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
-| [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
+| [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: ~~name recognition~~ (**item 1 done, PR #172** — single-token speech-to-text aliases (`sitewin`, `citevin`, …) route + canonicalize. The two-word `"site win"` form is a tested MISS: three adversarial rounds showed surrounding-token rules cannot separate it from ordinary English (`may the best site win!`), so it needs intent detection over the whole utterance — see the issue thread before retrying a regex), real-embedder no_answer golden, golden-in-CI, offline-copy convergence (frontend `matchCitevynMeta` knows no aliases), refusal-copy nudge, `/about` deploy | backend / frontend | Low (the alias instance hits the owner's own demo flow) | #49 / PR #83 review; #169 live verification |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |
+| [#174](https://github.com/imrohitagrawal/citevyn/issues/174) | Answer path: an uncited, non-refusal answer was returned with ALL retrieved chunks attached at `confidence=high` — citations strongest where grounding was weakest. **Fixed in PR #176.** Deploy note: flush `answer_cache`, since pre-deploy ungrounded answers replay from cache for the 24h TTL | backend / answer | — (fixed, PR open) | #175 adversarial review |
+| [#148](https://github.com/imrohitagrawal/citevyn/issues/148) / [#150](https://github.com/imrohitagrawal/citevyn/issues/150) / [#151](https://github.com/imrohitagrawal/citevyn/issues/151) | Dependabot: fastapi runtime bump + two `actions/*` MAJOR bumps (v4→v7). Left unmerged **by policy** — `DEPENDABOT_TRIAGE.md` requires a named Backend-tech-lead / Ops reviewer for these tiers, unlike dev-only bumps. All CI-green and rebased | deps | Owner-gated | DEPENDABOT_TRIAGE.md |
+| — | `DEPENDABOT_TRIAGE.md` describes a `release-blocker` label and a nightly demo-readiness gate that checks for it, but **no automation applies the label** (all four open dependabot PRs carry only `dependencies`), so that gate can never fire | ops / ci | Low (policy-vs-reality drift) | this session |
+| [#170](https://github.com/imrohitagrawal/citevyn/issues/170) | ~~Corpus: `claude_code.md` has no installation content~~ **(fixed, PR pending — Installation + First run sections added, re-ingested and promoted live). Still open on this row: `db/seed/seed_catalog.py` was NOT mirrored (parallel owner work), so the `make demo` bootstrap — which has no ingest step — still lacks the content; and the frontend offline KB answers this question with the Permissions text.** Original: `claude_code.md` had no installation content, so "How do I install Claude Code?" refuses (identical single-turn and as a follow-up — a corpus gap, not retrieval) | corpus / worker | Medium (an obvious first question for a CLI tool, and a likely demo ask) | #169 live verification |
+| [#163](https://github.com/imrohitagrawal/citevyn/issues/163) | Worker: `Document.content_checksum` is a misnomer (hashes name+title, not content) + `IngestionRunner` still defaults to the retired `sha256:mvp-snapshot-2` placeholder with a now-backwards docstring | backend / worker | Low (latent clarity/correctness; real content fingerprint now lives in `cli._content_version_hash`) | PR #162 adversarial review (F5 / P3) |
 
 ## Recently closed
 

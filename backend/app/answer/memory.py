@@ -41,12 +41,21 @@ Design limitations (documented, not bugs):
 * CONTENT-NOUN follow-ups ("is there a credentials file option?", "what are the different
   models?") name no product and carry no bare anaphora, so the regex above leaves them and
   they would route ``unsupported`` and refuse. :func:`condense_question_llm` (#112) resolves
-  these via the LLM as an ENTITY-AWARE rewrite. It is wired ONLY on the orchestrator's
-  answer-when-grounded (global, confidence-gated) path — a PURE RECALL improver that changes
-  only the retrieval/generation TEXT, never the routing — so it can never hijack a pivot onto
-  the scoped, un-gated path; the confidence gate + grounding-refusal net stay the sole refusal
-  authority. Kept OUT of the pure regex path so the deterministic hermetic followup gate is
-  unchanged (proven on the judged run; see docs/RAG_QUALITY_PLAN.md §8a-10).
+  these via the LLM as an ENTITY-AWARE rewrite.
+
+* The CONCATENATION above is the right answer for ROUTING and the wrong one for GENERATION
+  (#169). ``f"{antecedent} {question}"`` leads with a clause that is itself a complete
+  self-contained question, so the LLM answers THAT and ignores the trailing fragment — the
+  follow-up comes back as the previous turn's answer, verbatim. The orchestrator therefore
+  routes off the concatenation and then hands :func:`condense_question_llm` the job of
+  producing a true standalone question for retrieval, generation and the cache key.
+
+Both wirings are PURE RECALL improvers: the orchestrator fixes domain/intent/multi-hop from
+the un-condensed query BEFORE calling the LLM, so a rewrite can never hijack a pivot onto the
+scoped, un-gated path; the confidence gate + grounding-refusal net stay the sole refusal
+authority. The condenser is kept OUT of the pure regex path above so the deterministic
+hermetic followup gate is unchanged (proven on the judged run; see
+docs/RAG_QUALITY_PLAN.md §8a-10).
 """
 
 from __future__ import annotations
@@ -147,17 +156,28 @@ async def condense_question_llm(
 ) -> str:
     """Rewrite a context-dependent follow-up into a standalone question via the LLM.
 
-    This is the entity-aware companion to :func:`build_contextual_query` (#112): it resolves a
-    CONTENT-NOUN follow-up ("what are the different models?", "is there a credentials file
-    option?") that carries no bare anaphora and so the deterministic regex leaves unchanged.
+    This is the entity-aware companion to :func:`build_contextual_query`. The orchestrator
+    calls it for BOTH follow-up shapes:
 
-    It is a PURE RECALL IMPROVER and is called by the orchestrator ONLY inside the
-    "answer when grounded" (global, confidence-gated) path — after routing is already fixed
-    from the un-rewritten query — so it can NEVER flip a pivot onto the scoped, un-gated
+    * the CONTENT-NOUN follow-up ("what are the different models?", "is there a credentials
+      file option?", #112), which carries no bare anaphora and so the deterministic regex
+      leaves unchanged — it routes ``unsupported`` onto the answer-when-grounded path; and
+    * the ANAPHORIC follow-up ("who built it?", #169), which the deterministic regex DID
+      resolve — by CONCATENATION. That concatenation is right for ROUTING but wrong for
+      generation: its leading clause is a complete self-contained question, so the LLM
+      answers THAT and re-emits the previous turn's answer verbatim.
+
+    It is a PURE RECALL IMPROVER: the orchestrator has ALREADY fixed
+    ``domain``/``intent``/``multi_domains``/``answer_globally`` from the un-condensed query
+    before calling this, so a rewrite can NEVER flip a pivot onto the scoped, un-gated
     retrieval path. The confidence gate + the LLM grounding-refusal net remain the sole
     authority on whether an off-corpus pivot is declined; this only changes the TEXT fed to
-    the global retrieval + generation. Any empty history, empty/overlong output, or LLM error
-    falls back to the original ``question`` (the caller also wraps the call defensively).
+    retrieval + generation (and, through it, the cache key).
+
+    Any empty history, empty/overlong output, or LLM error returns ``question`` VERBATIM.
+    The caller treats that as "declined" and falls back to whatever routing resolved — the
+    concatenation when the deterministic rewrite fired — so the worst case is the previous
+    behaviour, never the bare antecedent-less fragment.
     """
     if not prior_user_questions:
         return question
