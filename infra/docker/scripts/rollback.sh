@@ -26,7 +26,7 @@
 #     back into scope for the rest of the cache TTL. This script warns when the
 #     target tag ships a different value; the fix is to pin a THIRD value in
 #     infra/docker/.env before rolling back, so the cache is cold both ways
-#     (RUNBOOK §5.3).
+#     (RUNBOOK §5.3a).
 #
 # Usage:
 #   ./scripts/rollback.sh v0.9.0            # roll back to an explicit tag
@@ -164,7 +164,7 @@ if [[ -z "${_policy_pinned}" && -n "${_policy_now}" && -n "${_policy_target}" &&
     echo "" >&2
     echo "         It MUST go in ${COMPOSE_DIR}/.env — the containers read their" >&2
     echo "         environment from env_file, so a host-shell variable does NOT" >&2
-    echo "         reach the app. See RUNBOOK §5.3." >&2
+    echo "         reach the app. See RUNBOOK §5.3a." >&2
 fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
