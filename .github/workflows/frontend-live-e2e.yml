@@ -44,7 +44,7 @@ jobs:
         run: VITE_LIVE_STUB=1 npx playwright test --config=playwright.live.config.ts
       - name: Upload HTML report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-live
           path: frontend/playwright-report-live

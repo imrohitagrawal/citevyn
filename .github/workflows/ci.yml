@@ -255,7 +255,7 @@ jobs:
         run: uv run python -m tests.eval.runner --postgres --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: answer-quality-eval-report
           path: artifacts/eval_report.json
