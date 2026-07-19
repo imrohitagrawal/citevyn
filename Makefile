@@ -189,12 +189,20 @@ db-reset: ## Destroy and recreate the database volume (DESTRUCTIVE; requires CON
 	fi
 	$(COMPOSE) down -v
 
+# NOTE: these recipes are ``@``-prefixed on purpose. Without it make echoes the
+# whole command line, which embeds CITEVYN_DATABASE_URL — password included —
+# into stdout, and deploy.sh/CI run these targets. That is the same leak #93
+# fixed inside the seed scripts' own output; the Makefile echo was missed.
+# Keep the ``@`` and print a redacted line instead.
 migrate: ## Apply Alembic migrations to head against DB_URL
-	CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend alembic -c db/alembic.ini upgrade head
+	@echo "==> alembic upgrade head (DB_URL redacted)"
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend alembic -c db/alembic.ini upgrade head
 
 seed: ## Seed demo users + catalog (idempotent)
-	CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_users
-	CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_catalog
+	@echo "==> seeding demo users (DB_URL redacted)"
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_users
+	@echo "==> seeding catalog (DB_URL redacted)"
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_catalog
 
 demo: db-up migrate seed ## Bring up db, migrate, seed (one-shot)
 	@echo "Demo stack is up. Run 'make stop' to tear down."
