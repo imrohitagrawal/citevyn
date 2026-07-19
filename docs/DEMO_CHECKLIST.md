@@ -17,7 +17,9 @@ Last verified against: `main` @ Slice 10 (50-case golden suite green).
       confirms `vX.Y.Z` is the HEAD.
 - [ ] `make demo` succeeds end-to-end on a clean laptop (no cached
       Docker layers).
-- [ ] `curl http://localhost:8000/healthz` returns `{"status":"ok"}`.
+- [ ] `curl http://localhost:8000/health` returns `{"status":"ok"}`.
+      (There is no `/healthz` route — the endpoints are `/health`,
+      `/health/dependencies`, and `/health/index`.)
 - [ ] Browser open at `http://localhost:5173`, the demo banner shows
       "demo build" and not "preview".
 
@@ -32,8 +34,13 @@ Last verified against: `main` @ Slice 10 (50-case golden suite green).
 - [ ] **Slice 5** — `POST /v1/sessions/:id/messages` returns a
       grounded answer with at least one `[1]` citation.
 - [ ] **Slice 6** — `POST /v1/admin/...` requires the admin key.
-- [ ] **Slice 7** — `POST /v1/sessions/:id/messages/stream` streams
-      SSE chunks and a `final` event with a `request_id`.
+- [ ] ~~**Slice 7** — `POST /v1/sessions/:id/messages/stream` streams
+      SSE chunks and a `final` event with a `request_id`.~~
+      **N/A as of v0.10.0** — there is no streaming route on `main`
+      (`messages.py` exposes only POST/GET; no `StreamingResponse` /
+      `text/event-stream`). The chat UI uses a client-side reveal.
+      Real SSE streaming is tracked as [#61](https://github.com/imrohitagrawal/citevyn/issues/61)
+      in the V1 milestone; re-enable this check when it lands.
 - [ ] **Slice 8** — the 31st demo-user request returns 429 within the
       same hour. Redis-backed limiter is the active impl.
 
@@ -73,13 +80,28 @@ Last verified against: `main` @ Slice 10 (50-case golden suite green).
       the demo cannot ship until it's either merged or explicitly
       waived in writing.
 
-## 6. Rollback drill (must succeed in <5 min)
+## 6. Live gate — deploy-verify + rollback drill (one command)
 
+Run this **on the deploy host** against the real stack. It is the gate that
+satisfies `RELEASE_PLAN` §10 blocker 9 ("rollback is not tested"):
+
+```bash
+VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
+```
+
+It backs up, deploys the target, functionally verifies the *deployed* system
+(cited answer, refusal, exact lookup, admin protected), rolls back to the
+previous tag and re-verifies, then rolls forward and re-verifies. It prints a
+PASS/FAIL summary and exits non-zero on any failure.
+
+- [ ] `make deploy-verify` exits 0 with `RESULT: ✓ GATE PASSED`.
 - [ ] `git tag` records the previous green tag.
 - [ ] `make deploy` is documented to a fresh VM.
-- [ ] `make refresh` rolls forward and `make restore` rolls back.
-- [ ] `infra/docker/scripts/rollback.sh` was last executed successfully
-      within the past 14 days.
+- [ ] The drill was executed within the past 14 days.
+
+Preview the plan without touching anything:
+`./infra/docker/scripts/deploy_verify.sh --dry-run`.
+Standalone incident rollback: `make rollback TAG=v0.9.0` (or `TAG=--previous`).
 
 ## 7. Demo script alignment
 
