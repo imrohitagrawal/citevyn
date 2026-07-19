@@ -1478,6 +1478,47 @@ async def test_uncited_answer_is_not_returned_with_every_chunk_attached(
 
     assert response["no_answer"] is True
     assert response["citations"] == []
+    # The ungrounded claim must not reach the user at all — the fallback copy replaces it.
+    assert response["answer"] == _settings().no_answer_fallback
+    assert "$200" not in str(response["answer"])
+    assert response["confidence"] == Confidence.none.value
+    # An IN-DOMAIN question must not be labelled "Outside scope". An unregistered audit
+    # reason silently coerces to unsupported=true, which is exactly what shipped first.
+    assert response["unsupported"] is False
+    # Nothing ungrounded may enter the answer cache and be replayed for the TTL.
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+    # The audit reason is the ONLY way an operator distinguishes a polite refusal from a
+    # model that ignored its evidence — it is the whole observability payload of this fix.
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["outcome"] == "no_answer"
+    assert audits[0].metadata_["reason"] == "uncited_answer"
+
+
+async def test_refusal_paragraph_is_still_recorded_as_a_plain_no_answer(
+    session: Any,
+) -> None:
+    """The sibling case: the model DID refuse politely. Same user-visible outcome, but the
+    audit reason must stay "no_answer" so the two are still tellable apart."""
+    from app.llm.prompts import NO_ANSWER_REFUSAL
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    refusing = AsyncMock()
+    refusing.complete.return_value = LLMResult(
+        text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
+    )
+    orch = Orchestrator(
+        _settings(), session, llm=refusing, retriever=_FakeRetriever(_evidence(count=5))
+    )
+
+    await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="polite",
+        session_id=uuid.uuid4(),
+    )
+
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["reason"] == "no_answer"
 
 
 async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
@@ -1511,7 +1552,10 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
     )
 
     assert response["no_answer"] is False
+    # Cite-once: exactly the referenced chunk, not all five, and the confidence reflects
+    # the 1-of-5 ratio rather than being waved through.
     assert len(response["citations"]) == 1
+    assert response["confidence"] == Confidence.low.value
 
 
 # ---------------------------------------------------------------------------

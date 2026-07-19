@@ -29,7 +29,17 @@ if TYPE_CHECKING:
 # Map from orchestrator exit-reason to the public ``no_answer`` flag.
 # Every reason maps to True so clients see one consistent flag.
 _NO_ANSWER_REASONS: frozenset[str] = frozenset(
-    {"unsupported", "weak_evidence", "no_answer", "citation_validation_failed"}
+    {
+        "unsupported",
+        "weak_evidence",
+        "no_answer",
+        "citation_validation_failed",
+        # #174. An unregistered reason silently coerces to "unsupported" below, which
+        # would label an IN-DOMAIN question "Outside scope" in the UI and emit
+        # suggestions alongside unsupported=true — the combination #117 forbids. Any
+        # new orchestrator exit reason must be added here.
+        "uncited_answer",
+    }
 )
 
 # How many nearest-doc suggestions to surface on a graceful fallback. A short list

@@ -36,7 +36,10 @@ def test_unsupported_reason_flips_unsupported_flag() -> None:
     assert response["domain"] == "unsupported"
 
 
-@pytest.mark.parametrize("reason", ["weak_evidence", "no_answer", "citation_validation_failed"])
+@pytest.mark.parametrize(
+    "reason",
+    ["weak_evidence", "no_answer", "citation_validation_failed", "uncited_answer"],
+)
 def test_other_reasons_keep_unsupported_false(reason: str) -> None:
     response = build_no_answer_response(
         request_id="req_1",

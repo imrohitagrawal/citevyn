@@ -766,11 +766,13 @@ class Orchestrator:
 
         # An answer that cited NOTHING is not a grounded answer (#174).
         #
-        # The system prompt is explicit in both directions: every factual claim MUST carry a
-        # ``[n]`` marker, and an answer that cannot ground itself must emit the refusal
-        # paragraph with NO markers. So zero markers means one of exactly two things — the
-        # model refused (honour it), or it produced a claim it could not attribute, which is
-        # a contract violation, not a loosely-cited answer.
+        # The system prompt requires a ``[n]`` marker on every FACTUAL CLAIM, and requires
+        # the refusal paragraph when there is nothing to ground against. So an answer with
+        # zero markers is either the refusal (honour it) or prose making claims it did not
+        # attribute. A third case exists and is deliberately swept in with them: output
+        # truncated by ``llm_max_tokens`` before its first marker. Refusing that is also the
+        # behaviour we want — a half-sentence with every chunk stapled to it is worse than a
+        # clean no-answer.
         #
         # This used to require the text to ALSO match the refusal paragraph. Anything else
         # fell through to the citation block below, where ``used_indices`` defaulted to
