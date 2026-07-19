@@ -19,6 +19,25 @@ on:
     branches: [main]
 
 jobs:
+  shell-tests:
+    name: shell suites (bash 3.2 + 5.x)
+    # Matrixed on purpose. The ops scripts are the one place a BASH VERSION
+    # difference is a real defect class: ${v:1:-1} is bash 4.2+, and on the bash
+    # 3.2 macOS still ships it errors "substring expression < 0". A Linux-only
+    # job would report green on exactly the bug #161 describes. macos-latest's
+    # /bin/bash is 3.2, so it reproduces the maintainer's own shell.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Show bash version under test
+        run: /bin/bash --version | head -1
+      - name: Run every tests/shell suite
+        run: make test-shell
+
   test:
     name: pytest + lint
     runs-on: ubuntu-latest
