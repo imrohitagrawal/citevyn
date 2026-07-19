@@ -22,7 +22,7 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 | Issue | Title | Area | Notes |
 |---|---|---|---|
-| [#153](https://github.com/imrohitagrawal/citevyn/issues/153) | Live hosted public demo + cost guardrails | infra / ops | Highest V1 ROI; also completes the Phase-5 live deploy-verify + rollback gate; §9 cost limits are a hard prerequisite before a public URL |
+| [#153](https://github.com/imrohitagrawal/citevyn/issues/153) | Live hosted public demo + cost guardrails | infra / ops | Highest V1 ROI; also completes the Phase-5 live deploy-verify + rollback gate; §9 cost limits are a hard prerequisite before a public URL. **Layer 0 (provider cap) + Layer 6 (CI spend) DONE** — see `docs/COST_CONTROLS.md`; CI now runs the judged eval on main / `full-eval`-labelled PRs only, at full coverage (case sampling was measured and rejected: 42/58 golden cases carry a zero-tolerance oracle). **Layers 1–5 (metering, admission control, §9 daily budget, persisted per-user limiter, spend visibility + `make budget`) remain open** |
 | [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Real SSE streaming for chat answers | frontend / API | Verified: **no streaming route exists on `main`** — a real backend build, not a rewire |
 | [#154](https://github.com/imrohitagrawal/citevyn/issues/154) | Feedback capture wired into the eval loop | backend / frontend | Value is the eval flywheel, **not** model retraining; most invasive V1 item (DB + API) |
 | [#155](https://github.com/imrohitagrawal/citevyn/issues/155) | Evaluation + live-ops dashboard | frontend / observability | Surfaces existing eval metrics + live cost/latency/refusal; pairs with #154 |

@@ -17,6 +17,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # ``labeled`` is beyond the default [opened, synchronize, reopened] so that
+    # adding the `full-eval` label to an OPEN pr actually triggers a run. Without
+    # it the label is inert until the next push, and "Re-run jobs" replays the
+    # original event payload — so the label would be invisible there too, i.e. the
+    # documented escape hatch would silently not work. See the answer-quality-eval
+    # job for why that label exists.
+    types: [opened, synchronize, reopened, labeled]
 
 jobs:
   shell-tests:
@@ -212,7 +219,34 @@ jobs:
     # loud ``::notice::``) so the job is green and the branch protection is unblocked —
     # never hardcoded, never faked. Adding the secret flips the gate on with no further
     # change. Forks never receive secrets, so this job is scoped to same-repo events.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
+    #
+    # This job is the project's largest recurring spend: ~58 orchestrator answers +
+    # ~116 judge calls, ≈$0.026 a run (measured — see docs/COST_CONTROLS.md §6).
+    # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
+    # PRs would consume most of a $1.10 key.
+    #
+    # Sampling CASES was evaluated and REJECTED: 42 of the 58 golden cases carry a
+    # ZERO-TOLERANCE judge-independent oracle (injection, multi-turn echo, per-case
+    # groundedness, refusal leak), which a subset does not average down — it
+    # switches off. The maximum honest saving was ~28%, in exchange for silently
+    # disabling hard gates on a PR. Bounding frequency is both cheaper and lossless:
+    # every run that happens is a FULL run.
+    #
+    # So: run on every push to main, and on a pull request only when it carries the
+    # `full-eval` label. ``github.event.pull_request`` is NULL on a push, so the
+    # PR-only form of this condition skipped the job on every push to main — that
+    # bug is why main had no judged gate at all. A push to main is always same-repo
+    # (a fork cannot push here), so allowing it does not widen fork-secret exposure.
+    #
+    # TRADEOFF, stated: an unlabelled PR gets no judged gate; a judged regression
+    # surfaces on merge to main. Label a PR `full-eval` to gate it before merge —
+    # `labeled` is in the trigger types above, so the label alone re-runs this.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'full-eval'))
     services:
       postgres:
         # pgvector so the vector arm actually runs (the only mode that measures
@@ -237,7 +271,7 @@ jobs:
       CITEVYN_EMBEDDING_MODEL: openai/text-embedding-3-small
       CITEVYN_LLM_PROVIDER: router
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
-      # calls/case over the ~31-case golden set on a small model.
+      # calls/case over the 58-case golden set on a small model.
       CITEVYN_EVAL_JUDGE_PANEL: "1"
     steps:
       - uses: actions/checkout@v7
@@ -271,7 +305,12 @@ jobs:
         working-directory: backend
         # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
         # and rolls back (zero residue). Non-zero exit on any gate regression.
-        run: uv run python -m tests.eval.runner --postgres --report ../artifacts/eval_report.json
+        #
+        # Always the FULL golden set. Cost is bounded by RUN FREQUENCY (the job's
+        # `if:` above), not by sampling cases — see the rationale there.
+        run: >-
+          uv run python -m tests.eval.runner --postgres
+          --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()
         uses: actions/upload-artifact@v7
