@@ -144,7 +144,15 @@ if ! (
             local f="${v:0:1}" l="${v: -1}"
             if [[ "${f}" == "'" && "${l}" == "'" ]] \
                || [[ "${f}" == '"' && "${l}" == '"' ]]; then
-                v="${v:1:-1}"
+                # Peel the two quote chars separately. ``${v:1:-1}`` needs a
+                # negative-length substring, which is bash 4.2+; on the bash 3.2
+                # that ships with macOS it errors "substring expression < 0" and
+                # yields the EMPTY string — so a correctly-quoted secret stripped
+                # to nothing and the guard rejected a VALID production .env,
+                # blocking every prod entry point on a Mac (#161). ``%?``/``#?``
+                # are portable to both.
+                v="${v%?}"
+                v="${v#?}"
             fi
         fi
         printf '%s' "${v}"
