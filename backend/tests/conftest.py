@@ -154,16 +154,26 @@ async def seed_catalog(
             "title": "Claude Code Reference",
             "source_url": "https://docs.example.com/claude-code",
             "chunk_heading": "Permissions",
+            # Mirrors the real shipped worker source (claude_code.md: Permissions +
+            # Installation) so an install question — "How do I install Claude Code?" —
+            # is answerable on the HERMETIC path (exact + keyword; the vector arm is off
+            # on SQLite), the same way #87 enriched the codex/gemini fixtures. Without
+            # this the hermetic run cannot see a shipped-corpus regression (#162).
             "chunk_text": (
                 "Claude Code permissions are configured in the project's "
                 "settings file. Use the allow/deny lists to gate tools and "
-                "commands the assistant can run."
+                "commands the assistant can run. Install Claude Code with the "
+                "native installer by running 'curl -fsSL https://claude.ai/install.sh "
+                "| bash' on macOS, Linux or WSL, or from npm with "
+                "'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 "
+                "or later. Confirm the install with 'claude --version' and diagnose it "
+                "with 'claude doctor'."
             ),
         },
         {
             "product_area": "codex",
             "source_name": "codex",
-            "title": "Codex CLI Reference",
+            "title": "Codex Reference",
             "source_url": "https://docs.example.com/codex",
             "chunk_heading": "CLI flags",
             # Mirrors the real shipped worker source (codex.md: Installation +
