@@ -225,13 +225,42 @@ def test_separated_vin_spellings_are_not_the_product(question: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "question",
+    [
+        # All of these routed to citevyn BEFORE aliases existed and must keep doing so.
+        # An earlier revision applied the identifier guards to the canonical token too
+        # and silently broke every one of them.
+        "is citevyn.com free?",
+        "what does citevyn.io cost",
+        "email support@citevyn please",
+        "docs.citevyn pricing",
+        "anti-citevyn rant",
+        "pre-citevyn workflow",
+        "the claude-code-vs-citevyn writeup",
+    ],
+)
+def test_canonical_name_is_never_narrowed_by_the_identifier_guards(question: str) -> None:
+    """The guards exist for the lower-confidence ALIASES. The canonical spelling keeps its
+    original un-guarded match, so a branch whose purpose is to make MORE product questions
+    answer cannot end up making fewer of them answer."""
+    assert classify_domain(question) is Domain.citevyn
+
+
+@pytest.mark.parametrize(
     "text",
     [
+        # Alias as the TRAILING segment of an identifier...
         "Visit https://sitewin.example.com/docs",
         "why does sitewin.example.com return 502?",
         "the file sitevin.py failed",
         "see /srv/sitewin/config.yml",
         "email me at bob@sitewin.io",
+        # ...and as the LEADING segment. Guarding only one side left these open.
+        "sitewin@example.com is the contact",
+        "SITEWIN-1234 is blocked",
+        "sitewin:8080 is down",
+        "the sitewin/main branch",
+        "package sitewin==1.2.3",
     ],
 )
 def test_alias_inside_an_identifier_is_left_alone(text: str) -> None:

@@ -115,8 +115,11 @@ ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
 # widens exactly the class of false positive that costs the most, to buy
 # manglings this list does not cover. Extend the list instead — it is greppable,
 # each entry is a deliberate choice, and every entry has a test.
+#
+# NOTE: the canonical spelling is deliberately NOT in this list. It is matched by its
+# own un-guarded branch below, so the identifier guards — which exist for the
+# lower-confidence ALIASES — cannot narrow the pre-existing literal-name behaviour.
 _CITEVYN_ALIASES: tuple[str, ...] = (
-    "citevyn",
     "citevin",
     "citewin",
     "sitevyn",
@@ -132,21 +135,32 @@ _CITEVYN_ALIASES: tuple[str, ...] = (
     r"sight[ \t-]vyn",
 )
 
-# An alias inside a hostname, URL or filename is an IDENTIFIER the user is asking
-# about, not the product name — rewriting "sitewin.example.com" to
-# "CiteVyn.example.com" corrupts the very string the question is about. Reject a
-# match preceded by a URL/path character, or followed by "." + a word character
-# (a domain or extension). A sentence-final "sitewin." is followed by "." + space
-# or end, so it still matches.
-_IDENTIFIER_GUARD_BEFORE = r"(?<![\w./@-])"
-_IDENTIFIER_GUARD_AFTER = r"(?!\.\w)"
+# An alias inside a hostname, URL, email, ticket id or filename is an IDENTIFIER the
+# user is asking about, not the product name — rewriting "sitewin.example.com" to
+# "CiteVyn.example.com" corrupts the very string the question is about.
+#
+# The two guards are deliberately SYMMETRIC: an alias can be the trailing segment of
+# an identifier ("docs.sitewin") or the leading one ("sitewin@example.com",
+# "SITEWIN-1234", "sitewin:8080", "sitewin/main", "sitewin==1.2.3"). Guarding only one
+# side leaves the other open, which is what a review round caught.
+#
+# The AFTER guard rejects when a run of identifier punctuation leads to another word
+# character. Sentence-final "sitewin." still matches: the "." is followed by a space or
+# end of input, so no word character follows.
+#
+# These apply to the ALIASES ONLY. The canonical "citevyn" keeps its original
+# un-guarded ``\bcitevyn\b`` match so this change cannot narrow behaviour that already
+# worked ("is citevyn.com free?", "anti-citevyn rant" — both routed to citevyn before).
+_IDENTIFIER_GUARD_BEFORE = r"(?<![\w./@:=-])"
+_IDENTIFIER_GUARD_AFTER = r"(?![\w./@:=-]*\w)"
 
 _CITEVYN_RE = re.compile(
-    _IDENTIFIER_GUARD_BEFORE
-    + r"\b(?:"
-    + "|".join(_CITEVYN_ALIASES)
-    + r")\b"
-    + _IDENTIFIER_GUARD_AFTER,
+    # Branch 1 — the canonical spelling, byte-for-byte as it was before aliases
+    # existed. Un-guarded on purpose (see _IDENTIFIER_GUARD_* above).
+    r"\bcitevyn\b"
+    # Branch 2 — the speech-to-text aliases, identifier-guarded on both sides.
+    r"|" + _IDENTIFIER_GUARD_BEFORE + r"\b(?:" + "|".join(_CITEVYN_ALIASES) + r")\b"
+    r"" + _IDENTIFIER_GUARD_AFTER,
     re.IGNORECASE,
 )
 

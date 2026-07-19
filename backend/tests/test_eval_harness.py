@@ -1089,3 +1089,46 @@ def test_llm_judge_scores_a_grounded_answer() -> None:  # pragma: no cover - opt
     assert verdict is not None, "judge returned unavailable despite a real provider key"
     assert 1 <= verdict.score <= 5
     assert verdict.score >= 3, "a correct grounded answer should not score below 3"
+
+
+def test_eval_harness_mirrors_the_orchestrator_alias_canonicalization() -> None:
+    """The harness re-implements the orchestrator's query pipeline, so any step it omits
+    makes the eval measure a DIFFERENT system than production.
+
+    This pins the ``canonicalize_product_name`` mirror specifically. "what is sitewin?" is
+    the precise probe: it routes to ``citevyn`` from the guardrail alone, but its ONLY
+    content word is the mangled token, which appears nowhere in the corpus — so without
+    canonicalization retrieval comes back EMPTY, exactly as it did in production before
+    #84. Deleting the mirror in ``retrieval.py`` must fail HERE rather than leaving it to
+    the judged eval, which is secret-gated and gates on an aggregate mean.
+    """
+    from app.core.config import Settings
+    from tests.eval.cases import EvalCase
+    from tests.eval.retrieval import _chunk_key_map, _retrieve_sources, seeded_session
+
+    probe = EvalCase(
+        id="alias_mirror_probe",
+        area="citevyn",
+        kind="literal",
+        question="what is sitewin?",
+        expected_source="citevyn",
+        expected_gist="",
+        expect_no_answer=False,
+        raw={},
+    )
+
+    async def _run() -> tuple[tuple[str, ...], str]:
+        settings = Settings(llm_provider="stub")
+        async with seeded_session() as session:
+            key_map = await _chunk_key_map(session)
+            sources, _keys, _degrade, routed = await _retrieve_sources(
+                session, probe, settings=settings, key_map=key_map
+            )
+            return sources, routed
+
+    sources, routed = asyncio.run(_run())
+    assert routed == "citevyn", f"probe routed to {routed!r}, not citevyn"
+    assert "citevyn" in sources, (
+        "the harness did not canonicalize 'sitewin' -> 'CiteVyn', so retrieval found "
+        "nothing — it has drifted from Orchestrator.ask"
+    )
