@@ -167,3 +167,60 @@ evidenced individually — blocker 9 in particular is **still open** (see Phase 
 - **Eval `--postgres` runs now leave durable `provider_calls` rows.** This is
   *intentional* — spend is a fact about money already gone and must not be rolled back
   by our own teardown — and is documented where the "zero residue" claim is made.
+
+---
+
+## ADDENDUM — Phase-3 verification verdicts (workflow completed after the above was written)
+
+**1 of 5 branches passed adversarial verification. Do not merge the other four as-is.**
+Each was implemented by one agent in an isolated worktree, then attacked by a separate
+skeptic instructed to refute it and to default to "fails" when uncertain.
+
+### PASSED
+
+- **`fix/163-checksum-misnomer`** (#163). The only branch that survived. Still read the
+  diff before merging — it adds **migration 0006**, so verify the downgrade on real
+  Postgres and check `EXPECTED_TABLES` in `backend/tests/test_migrations.py`.
+
+### FAILED — with the specific defect
+
+- **`fix/167-ratelimit-code`** (#167) — **HIGH: the frontend half is dead code.**
+  `error_response()` returns an `HTTPException(detail=envelope)`, and no `HTTPException`
+  handler flattens it, so the wire body is `{"detail": {...}}`. `ApiClientError.errorCode()`
+  reads `body.error`, gets `undefined`, and the new `rate_limiter_unavailable` branch can
+  **never fire in production** — the user still sees the wrong-fault copy the change
+  exists to remove. Its three frontend tests pass **vacuously** because they
+  hand-construct a flat envelope the real client never produces. The *backend* change is
+  correct and its backend test is genuine (mutation-confirmed).
+  Also surfaced: this is a **spec violation** — `docs/API_SPEC.md` §4 documents a flat
+  envelope — and `index_unavailable` now has **zero producers**, so a documented public
+  code became unreachable.
+
+- **`fix/168-demo-checklist`** (#168) — **HIGH: the guard test exempts 13 of 16 routes.**
+  The "absence marker" exemption is applied to the whole bullet rather than to the route
+  it disclaims, so every `/health` box — the thing #168 was filed about — is unchecked.
+  The verifier reintroduced #168's original defect verbatim (`curl .../healthz`, keeping
+  the `(there is no /healthz)` clause) and **the suite stayed green**. The guard also
+  ignores the HTTP verb, so a `GET` documented against a POST-only path passes.
+
+- **`fix/84-citevyn-meta`** (#84) — **MEDIUM: a regex lookbehind** built via `new RegExp`
+  at module top level, below the project's declared browser baseline. Also: the two
+  matchers are **not** equivalent as claimed (JS `\w`/`\b` are ASCII-only, Python's are
+  Unicode-aware), and `GENERIC_REFUSAL` is a hand-copied mirror with no cross-language
+  pin — the same silent-drift failure mode the diff exists to fix.
+
+- **`fix/178-corpus-single-source`** (#178) — **HIGH: the bootstrap seed writes STUB
+  embedding vectors** and stamps the index `embedding_provider="stub"`, which flips the
+  pgvector arm from dead to *live-with-meaningless-vectors* on every `make demo`. Its
+  documented failure-path guarantee is also wrong on the common case, and both drift
+  guards are **one-directional** — they catch the corpus *losing* a claim but not
+  *gaining* content, which is exactly the #170 shape they were built for.
+
+### Why this is recorded rather than fixed
+
+Context was exhausted. These branches are preserved and are worth salvaging — most of
+each diff is sound and the defects are contained — but each needs the named fix plus a
+test that actually bites before it merges. The pattern across all four is the same and
+worth internalising: **the implementation was largely right and the TEST was the weak
+part**, which is precisely why `AGENTS.md` requires mutation-testing anything called a
+guard.
