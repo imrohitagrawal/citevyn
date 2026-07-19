@@ -232,6 +232,45 @@ async def test_promote_version_demotes_current_active(
 
 
 @pytest.mark.asyncio
+async def test_promote_version_recovers_from_dual_active_state(
+    session: AsyncSession,
+) -> None:
+    """A drifted database with >1 active row is repaired, not crashed on.
+
+    Regression: ``promote_version`` used ``scalar_one_or_none()`` to find the
+    row to demote, so two ``active`` rows raised ``MultipleResultsFound`` and
+    surfaced as an opaque HTTP 500. Because promotion is the only API that can
+    repair index state, that made the database unrecoverable through the API.
+    Found on a live stack, where seeding plus repeated local ingests had left
+    two rows marked ``active``.
+    """
+    await seed_catalog(session)
+
+    # Drift the database: a SECOND row is active alongside the seeded ``v1``.
+    stale_active = await _make_candidate(session, index_version="v-stale")
+    stale_active.status = IndexStatus.active
+    await session.flush()
+
+    candidate = await _make_candidate(session, index_version="v2")
+
+    updated = await index_version_service.promote_version(
+        session,
+        index_version=candidate.index_version,
+        admin_user_id="admin",
+        request_id="req-dual",
+    )
+    await session.commit()
+    await session.refresh(updated)
+
+    # The promotion succeeds and leaves exactly one active row.
+    assert updated.status is IndexStatus.active
+    for demoted in ("v1", "v-stale"):
+        row = await index_version_service.get_version(session, index_version=demoted)
+        assert row is not None
+        assert row.status is IndexStatus.previous_good, f"{demoted} should be demoted"
+
+
+@pytest.mark.asyncio
 async def test_promote_version_writes_audit_event(session: AsyncSession) -> None:
     """A successful promote appends one ``promote_index`` audit row."""
     from app.models.audit_events import AuditEvent
