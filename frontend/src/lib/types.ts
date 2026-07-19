@@ -264,6 +264,20 @@ export class ApiClientError extends Error {
     return this.status >= 500;
   }
 
+  /**
+   * The backend's machine-readable error code, when the response carried
+   * the standard envelope (``docs/API_SPEC.md`` §15). Returns ``null`` for
+   * network/timeout failures and for non-JSON bodies, so callers must always
+   * keep a status-based fallback — the code is a REFINEMENT of the status,
+   * never a replacement for it.
+   */
+  errorCode(): string | null {
+    if (typeof this.body === "object" && this.body !== null && this.body.error) {
+      return this.body.error.code ?? null;
+    }
+    return null;
+  }
+
   /** True for the standard error envelope. */
   hasEnvelope(): boolean {
     return typeof this.body === "object" && this.body !== null;

@@ -28,6 +28,17 @@ class APIErrorCode(StrEnum):
     evaluation_failed = "evaluation_failed"
     index_unavailable = "index_unavailable"
     cost_limit_reached = "cost_limit_reached"
+    # Spec-side (not a transport helper) on purpose: this code is
+    # returned to ordinary clients from EVERY rate-limited public
+    # endpoint whenever Redis is unreachable, and the frontend branches
+    # on it to choose user-facing copy. That makes it part of the public
+    # contract, unlike ``validation_error`` / ``not_found`` /
+    # ``internal_error`` below, which are framework-level fallbacks no
+    # client is expected to special-case. It is listed in
+    # docs/API_SPEC.md §15. Reusing ``index_unavailable`` here (the old
+    # behaviour, #167) lied about WHICH dependency was down and sent
+    # operators chasing the search index during a Redis outage.
+    rate_limiter_unavailable = "rate_limiter_unavailable"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -49,6 +60,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.evaluation_failed: 500,
     APIErrorCode.index_unavailable: 503,
     APIErrorCode.cost_limit_reached: 503,
+    APIErrorCode.rate_limiter_unavailable: 503,
     APIErrorCode.internal_error: 500,
 }
 

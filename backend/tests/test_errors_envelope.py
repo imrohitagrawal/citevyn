@@ -80,8 +80,23 @@ def test_error_envelope_model_validates_against_pydantic() -> None:
         (APIErrorCode.evaluation_failed, 500),
         (APIErrorCode.index_unavailable, 503),
         (APIErrorCode.cost_limit_reached, 503),
+        (APIErrorCode.rate_limiter_unavailable, 503),
         (APIErrorCode.internal_error, 500),
     ],
 )
 def test_status_code_mapping_is_stable(code: APIErrorCode, expected: int) -> None:
     assert status_code_for(code) == expected
+
+
+def test_rate_limiter_unavailable_is_documented_in_the_api_spec() -> None:
+    """#167: the new code is public contract, so §15 of the spec must list it.
+
+    ``docs/API_SPEC.md`` §15 mirrors the non-transport-helper half of
+    :class:`APIErrorCode`; a code the frontend branches on must not drift out
+    of the published table.
+    """
+    from pathlib import Path
+
+    spec = Path(__file__).resolve().parents[2] / "docs" / "API_SPEC.md"
+    text = spec.read_text(encoding="utf-8")
+    assert APIErrorCode.rate_limiter_unavailable.value in text

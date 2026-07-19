@@ -485,6 +485,16 @@ export function useLandingState() {
         // This is CiteVyn's own request throttle (not a provider quota), so it
         // clears on its own — "wait a moment" is the right, non-technical guidance.
         message = "You're sending requests a little too quickly — please wait a moment and try again.";
+      } else if (apiErr?.errorCode() === "rate_limiter_unavailable") {
+        // The throttle's backing store (Redis) is down and the server rejects
+        // fail-closed (#167). This is NOT the answer service failing, so the
+        // generic 5xx copy below would misdescribe it, and it is NOT the user
+        // sending requests too fast, so the amber "slow down" copy would blame
+        // the wrong party. Distinct, honest copy; still the transport
+        // "TEMPORARILY UNAVAILABLE" notice, never a content-refusal badge.
+        title = "We can't take requests right now";
+        message =
+          "CiteVyn is temporarily unable to accept requests. Please try again in a moment — if it keeps happening, contact support.";
       } else if (apiErr?.isServerError()) {
         // A 5xx here covers a transient answer-service outage: the answer provider
         // not responding, a timeout, or a provider usage limit. Keep the copy plain

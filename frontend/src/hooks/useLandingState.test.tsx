@@ -277,6 +277,56 @@ describe("useLandingState — live error path", () => {
     });
   });
 
+  it("gives a limiter outage its own copy — not answer-service copy, not a refusal (#167)", async () => {
+    // A Redis outage makes the server reject fail-closed with 503
+    // ``rate_limiter_unavailable``. The old code (``index_unavailable``) fell
+    // through to the generic 5xx branch and told the user the ANSWER SERVICE
+    // was unreachable, which is a different (and wrong) fault.
+    mockAskQuestion.mockRejectedValue(
+      new ApiClientError("Rate limiter is temporarily unavailable.", 503, {
+        request_id: "r",
+        status: "error",
+        error: { code: "rate_limiter_unavailable", message: "Rate limiter is temporarily unavailable." },
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("A question during a Redis outage"));
+    await settle();
+
+    const bot = result.current.state.messages[1];
+    // Transport failure, so the "TEMPORARILY UNAVAILABLE" notice — never the
+    // "NO SOURCE — REFUSED" content-refusal badge (#120/#142).
+    expect(bot.errorKind).toBe("error");
+    expect(bot.refusal).toBe(false);
+    // Does not blame the answer service, and does not tell the user to slow down.
+    expect(bot.text).toContain("temporarily unable to accept requests");
+    expect(bot.text.toLowerCase()).not.toContain("answer service");
+    expect(bot.text.toLowerCase()).not.toContain("too quickly");
+    // No Redis/limiter internals leak into user-facing copy.
+    expect(bot.text.toLowerCase()).not.toContain("redis");
+    expect(result.current.toasts[0]).toMatchObject({
+      kind: "error",
+      title: "We can't take requests right now",
+    });
+  });
+
+  it("still uses answer-service copy for an unrelated 503 (#167 regression guard)", async () => {
+    // Edge case: a 503 WITHOUT the limiter code must keep the old copy — the
+    // new branch must not swallow every 503.
+    mockAskQuestion.mockRejectedValue(
+      new ApiClientError("boom", 503, {
+        request_id: "r",
+        status: "error",
+        error: { code: "index_unavailable", message: "boom" },
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+    act(() => result.current.send("A question during an index outage"));
+    await settle();
+    expect(result.current.state.messages[1].text).toContain("reaching the answer service");
+  });
+
   it("uses a distinct toast kind for a rate limit vs a server error", async () => {
     // Rate limit → warning (transient, recoverable).
     mockAskQuestion.mockRejectedValueOnce(new ApiClientError("Slow down.", 429, "Slow down."));

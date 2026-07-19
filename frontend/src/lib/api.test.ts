@@ -135,3 +135,17 @@ describe("error envelope handling", () => {
     }
   });
 });
+
+describe("ApiClientError.errorCode", () => {
+  it("returns the envelope code, and null when there is no envelope", () => {
+    const withEnvelope = new ApiClientError("nope", 503, {
+      request_id: "r",
+      status: "error",
+      error: { code: "rate_limiter_unavailable", message: "nope" },
+    });
+    expect(withEnvelope.errorCode()).toBe("rate_limiter_unavailable");
+    // Network/timeout failures carry a raw string body — callers must fall
+    // back to the status, so the code has to be null rather than throwing.
+    expect(new ApiClientError("Network error", 0, "boom").errorCode()).toBeNull();
+  });
+});
