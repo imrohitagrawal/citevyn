@@ -49,7 +49,13 @@ from app.embeddings import (
     configured_embedder_identity,
     get_embedder,
 )
-from app.guardrails.domain import Domain, classify_domain, classify_domains, is_unsupported
+from app.guardrails.domain import (
+    Domain,
+    canonicalize_product_name,
+    classify_domain,
+    classify_domains,
+    is_unsupported,
+)
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
@@ -415,6 +421,19 @@ class Orchestrator:
                 self._session, session_id, limit=self._settings.memory_recent_turns
             )
             retrieval_query = build_contextual_query(question, prior_questions)
+
+        # Speech-to-text mangles the product name ("sitewin", "site win"), and the
+        # guardrail now recognizes those aliases — but recognition alone still refuses
+        # the commonest phrasing. "what is sitewin?" routes to ``citevyn`` correctly, yet
+        # its ONLY content word is the mangled token, which appears nowhere in the corpus,
+        # so both retrieval arms come back empty. Normalizing the alias to "CiteVyn" here
+        # is what lets the indexed About-CiteVyn chunks match (#84 item 1).
+        #
+        # A no-op for every question that contains no alias, and the guarded pattern means
+        # it can never rewrite text the classifier would not also have routed to
+        # ``citevyn`` — so "our site win rate" is left alone. The ORIGINAL ``question`` is
+        # still what gets persisted as the user's message.
+        retrieval_query = canonicalize_product_name(retrieval_query)
 
         domain = classify_domain(retrieval_query)
         intent = classify_intent(retrieval_query, domain)
