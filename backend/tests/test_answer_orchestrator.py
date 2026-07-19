@@ -1246,6 +1246,143 @@ async def test_alias_canonicalization_does_not_trigger_the_condenser(session: An
     assert retriever.calls[-1]["product_area"] == "citevyn"
 
 
+class _IntentLLM:
+    """LLM double whose intent verdict the test controls. Records every call."""
+
+    def __init__(self, *, verdict: str = "YES", error: bool = False) -> None:
+        self._verdict = verdict
+        self._error = error
+        self.intent_questions: list[str] = []
+
+    async def complete(self, *, system: str, user: str, **_kw: Any) -> Any:
+        from app.answer.alias_intent import _INTENT_SYSTEM
+        from app.llm.types import LLMResult
+
+        if system == _INTENT_SYSTEM:
+            self.intent_questions.append(user)
+            if self._error:
+                raise RuntimeError("intent provider down")
+            return LLMResult(
+                text=self._verdict, input_tokens=1, output_tokens=1, model="f", provider="router"
+            )
+        return LLMResult(
+            text="CiteVyn is a docs Q&A product [1].",
+            input_tokens=1,
+            output_tokens=1,
+            model="f",
+            provider="router",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _ask_ambiguous(session: Any, llm: Any, question: str, **over: Any) -> Any:
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(
+        _settings(llm_provider="router", **over), session, llm=llm, retriever=retriever
+    )
+    response = await orch.ask(question=question, request_id="amb", session_id=uuid.uuid4())
+    return retriever, response
+
+
+async def test_two_word_alias_is_recovered_when_intent_says_yes(session: Any) -> None:
+    """The owner's dictated phrasing. "site win" is not routed by the guardrail (it is
+    ordinary English), so an intent check over the whole utterance decides — and on YES
+    the TEXT is canonicalized so retrieval can match the About-CiteVyn chunks."""
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert len(llm.intent_questions) == 1
+    assert "what is site win?" in llm.intent_questions[0]
+    assert retriever.calls[-1]["question"] == "what is CiteVyn?"
+
+
+async def test_confirmed_two_word_alias_routes_like_any_other_alias(session: Any) -> None:
+    """On a confirmed YES the question behaves exactly like the single-token aliases the
+    guardrail already accepts — same route, same retrieval, same cache key.
+
+    An earlier revision deliberately left it on the global confidence-gated path, reasoning
+    that a second gate was safer. Live testing killed that: "what is CiteVyn?" retrieves
+    five near-identical About-CiteVyn chunks, so the gate's MARGIN requirement is never met
+    and the headline question refused anyway. The intent check is the gate — and it is a
+    stricter one than "sitewin" gets, since that routes on token rarity alone with no check
+    at all.
+    """
+    llm = _IntentLLM(verdict="YES")
+    retriever, response = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+    assert response["domain"] == "citevyn"
+
+
+async def test_intent_check_cannot_override_a_question_that_names_a_product(
+    session: Any,
+) -> None:
+    """The recovery only fires on a question that ALREADY routes ``unsupported`` — one that
+    would otherwise refuse outright. It can never pull a product question off its route,
+    which is what keeps this from being the hijack #169 guards against.
+
+    KNOWN COST, accepted: this also means a coverage question that names both the alias and
+    a product ("does site win cover codex?") routes to ``codex`` and is never recovered, so
+    it refuses instead of answering from the About-CiteVyn source — a divergence from the
+    #49 "CiteVyn wins over a product keyword" invariant, which holds only for the canonical
+    spelling and the single-token aliases. Verified live. It is a MISS, not a wrong answer,
+    and relaxing the precondition is exactly the hijack surface this guard exists to close.
+    """
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(
+        session, llm, "did the site win break my Claude Code settings?"
+    )
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["product_area"] == "claude_code"
+
+
+@pytest.mark.parametrize("verdict", ["NO", "NO — this is a sales figure", "", "maybe"])
+async def test_two_word_alias_is_left_alone_unless_the_verdict_is_exactly_yes(
+    session: Any, verdict: str
+) -> None:
+    """Strict parse. Anything that is not a leading YES — a hedge, an explanation that
+    merely contains other text, empty output — leaves the query untouched."""
+    llm = _IntentLLM(verdict=verdict)
+    retriever, _ = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert retriever.calls[-1]["question"] == "what is site win?"
+
+
+async def test_two_word_alias_intent_failure_degrades_to_the_old_refusal(
+    session: Any,
+) -> None:
+    """A provider outage must not turn a refusal into a 500, and must not rewrite."""
+    llm = _IntentLLM(error=True)
+    retriever, response = await _ask_ambiguous(session, llm, "what is site win?")
+
+    assert retriever.calls[-1]["question"] == "what is site win?"
+    assert response["no_answer"] is False or response["unsupported"] is False
+
+
+async def test_intent_check_is_not_called_without_an_ambiguous_alias(session: Any) -> None:
+    """Cost guard: the deterministic prefilter keeps this free for real traffic. No
+    "site|cite|sight win" in the text, no LLM call."""
+    llm = _IntentLLM(verdict="YES")
+    await _ask_ambiguous(session, llm, "what is the meaning of life?")
+
+    assert llm.intent_questions == []
+
+
+async def test_intent_check_kill_switch(session: Any) -> None:
+    """``citevyn_alias_intent_check=False`` restores the pre-#84 behaviour exactly."""
+    llm = _IntentLLM(verdict="YES")
+    retriever, _ = await _ask_ambiguous(
+        session, llm, "what is site win?", citevyn_alias_intent_check=False
+    )
+
+    assert llm.intent_questions == []
+    assert retriever.calls[-1]["question"] == "what is site win?"
+
+
 async def test_ambiguous_alias_in_ordinary_english_is_not_rewritten(session: Any) -> None:
     """The costly failure: ordinary English containing an alias-like phrase must not be
     silently rewritten and answered from the CiteVyn docs. "may the best site win!" is a

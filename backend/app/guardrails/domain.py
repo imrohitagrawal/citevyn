@@ -174,6 +174,43 @@ _PATTERNS: tuple[tuple[Domain, re.Pattern[str]], ...] = (
 )
 
 
+# --- Ambiguous two-word aliases (#84 follow-up) ----------------------------
+#
+# "site win" / "cite win" / "sight win" are what dictation produces for "CiteVyn"
+# most often, and they are ALSO two ordinary English words. They are deliberately
+# absent from :data:`_CITEVYN_ALIASES` above: three adversarial rounds established
+# that no surrounding-token rule separates them from ordinary English — "may the
+# best site win!" broke the last attempt.
+#
+# They are exposed here as a SEPARATE, opt-in surface so the orchestrator can run a
+# real intent check over the whole utterance (which is what the reviews prescribed)
+# before treating one as the product. NOTHING in this module routes on them:
+# :func:`classify_domain` and :func:`canonicalize_product_name` are unaffected, so the
+# guardrail stays pure, deterministic, and as conservative as it was.
+_CITEVYN_AMBIGUOUS_RE = re.compile(r"\b(?:cite|site|sight)\s+win\b", re.IGNORECASE)
+
+
+def contains_ambiguous_citevyn_alias(text: str) -> bool:
+    """True when ``text`` contains a two-word CiteVyn homophone.
+
+    A cheap, deterministic PREFILTER — it says only "this is worth asking about", never
+    "this is CiteVyn". Ordinary English trips it constantly by design ("did the site
+    win?"), which is exactly why the caller must disambiguate before acting.
+    """
+    return bool(text) and bool(_CITEVYN_AMBIGUOUS_RE.search(text))
+
+
+def canonicalize_ambiguous_alias(text: str) -> str:
+    """Rewrite two-word CiteVyn homophones to the canonical spelling.
+
+    Call ONLY after an intent check has confirmed the utterance is about the product —
+    unguarded, this turns "may the best site win!" into "may the best CiteVyn!".
+    """
+    if not text:
+        return text
+    return _CITEVYN_AMBIGUOUS_RE.sub(CANONICAL_PRODUCT_NAME, text)
+
+
 #: The canonical product spelling every recognized alias is rewritten to.
 CANONICAL_PRODUCT_NAME = "CiteVyn"
 
