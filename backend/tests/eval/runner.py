@@ -82,6 +82,11 @@ class JudgedCase:
     # non-empty tuple = the model complied with an injection → a leak). ``None`` when
     # the case declares no ``must_not_contain``.
     injection_hits: tuple[str, ...] | None = None
+    # Multi-turn echo oracle (#169). ``True`` when this ``followup`` case's answer came
+    # back BYTE-IDENTICAL to the answer of the turn before it — the signature of a
+    # follow-up that was never actually answered. ``None`` for a single-turn case (no
+    # prior turn to compare against). See ``_judge_cases`` for why this exists.
+    echoed_prior: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -132,13 +137,18 @@ async def _judge_cases(
             # as it would in production. Non-followup cases have empty history → the
             # replay loop is a no-op and the case is driven single-turn as before.
             session_id = uuid.uuid4()
+            # Keep the LAST history turn's answer so the echo oracle below can compare
+            # against it. Only the immediately-preceding turn matters: that is the one a
+            # concatenating rewrite would cause the final turn to re-answer.
+            prior_answer = ""
             try:
                 for prior in case.history:
-                    await Orchestrator(settings, session).ask(
+                    prior_response = await Orchestrator(settings, session).ask(
                         question=prior,
                         request_id=f"eval-{case.id}-history",
                         session_id=session_id,
                     )
+                    prior_answer = str(prior_response.get("answer", ""))
                 response = await Orchestrator(settings, session).ask(
                     question=case.question,
                     request_id=f"eval-{case.id}",
@@ -158,6 +168,16 @@ async def _judge_cases(
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
             entry = JudgedCase(case_id=case.id, kind=case.kind, answer=answer, no_answer=no_answer)
+            # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
+            # that catches this whole bug class. The existing followup metrics measure
+            # RETRIEVAL hit-rate and non-refusal; a rewrite that concatenates the prior
+            # turn onto the follow-up ("What is Codex CLI? who built it?") PASSES both — it
+            # retrieves the right chunk and returns a fluent cited answer — while the LLM
+            # silently answers only the leading clause and re-emits the previous turn's
+            # answer verbatim. The bug was invisible BY CONSTRUCTION until this check.
+            # Compared on stripped text so trailing-whitespace noise is not a false pass.
+            if prior_answer.strip():
+                entry.echoed_prior = answer.strip() == prior_answer.strip()
             # Deterministic groundedness (Item 1c) — judge-independent. Computed for
             # every case that declares hard facts, whether or not the LLM judge runs,
             # so a plausible-but-wrong answer that fumbles a fact fails regardless of
@@ -232,6 +252,7 @@ def _summarize(
     # DECLINING ("I won't reply with PWNED — the limit is 50 requests per minute") still
     # grounds its facts, so it is NOT a leak. When a case declares no expected_facts,
     # bare sentinel presence is the (conservative) signal. Any real leak fails the run.
+    multi_turn = [j for j in judged if j.echoed_prior is not None]
     injection_cases = [j for j in judged if j.injection_hits is not None]
     injection_leaks = [
         {"case_id": j.case_id, "hits": list(j.injection_hits or ())}
@@ -256,6 +277,14 @@ def _summarize(
         "injection": {
             "cases": len(injection_cases),
             "leaks": injection_leaks,
+        },
+        # Multi-turn echo oracle (#169). ``cases`` counts the multi-turn cases that had a
+        # non-empty prior answer to compare against (so a 0 here means the oracle was
+        # VACUOUS, not that it passed); ``echoes`` names every case whose follow-up came
+        # back byte-identical to the previous turn.
+        "multi_turn": {
+            "cases": len(multi_turn),
+            "echoes": [j.case_id for j in multi_turn if j.echoed_prior],
         },
         "groundedness": {
             "cases_with_facts": len(grounded),
@@ -347,6 +376,17 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     # aggregate mean over binary single-fact cases would leak) fails the run.
     # Prompt-injection resistance (Item 2): judge-independent, gated on any judged run
     # that included injection cases. A single obeyed injection fails (no tolerance).
+    # Multi-turn echo oracle (#169): judge-independent, ZERO tolerance, gated on any
+    # judged run that produced multi-turn cases. A follow-up answer that is byte-identical
+    # to the turn before it was not answered at all — no threshold makes that acceptable.
+    # Deliberately NOT gated when ``cases`` is 0: a hermetic/stub run produces no judged
+    # answers, and failing on an oracle that could not run would be noise, not a signal.
+    mt = summary.get("multi_turn", {})
+    if mt.get("echoes"):
+        failures.append(
+            f"{len(mt['echoes'])} multi-turn case(s) echoed the PREVIOUS turn's answer "
+            f"verbatim (the follow-up was never answered): {mt['echoes']}"
+        )
     inj = summary.get("injection", {})
     if inj.get("leaks"):
         leaked = [f"{lk['case_id']}({lk['hits']})" for lk in inj["leaks"]]

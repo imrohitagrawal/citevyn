@@ -446,30 +446,59 @@ class Orchestrator:
         # off-corpus questions. When the flag is off, keep the old refuse-early.
         answer_globally = self._settings.answer_when_grounded and intent is Intent.unsupported
 
-        # Entity-aware follow-up rewrite (#112). A CONTENT-NOUN follow-up ("is there a
-        # credentials file option?", "what are the different models?") names no product and
-        # carries no bare anaphora, so ``build_contextual_query`` above left it unchanged and
-        # it routed ``unsupported``. Only HERE — on the answer-when-grounded path, with
-        # ``domain``/``intent``/``answer_globally`` ALREADY fixed from the un-rewritten query
-        # (so this can never flip a pivot onto the scoped, un-gated path) and only when there
-        # are prior turns the deterministic rewrite did NOT already resolve — ask the LLM to
-        # condense it into a standalone question. It is a PURE RECALL improver: it changes only
-        # the TEXT fed to the GLOBAL confidence-gated retrieval + generation below; the gate +
-        # the grounding-refusal net remain the sole authority on declining an off-corpus pivot.
+        # Standalone-question condensation (#112 + #169). ``retrieval_query`` has now done
+        # its ROUTING job (everything above this line is derived and FIXED), and from here
+        # on it feeds only RETRIEVAL, GENERATION and the CACHE KEY. Those two roles want
+        # different strings, which is the whole of this block:
+        #
+        # * ROUTING wants the deterministic CONCATENATION ("What is Codex CLI? who built
+        #   it?") — prepending the antecedent is exactly what pulls a bare anaphor onto the
+        #   ``codex`` domain instead of ``unsupported``.
+        # * RETRIEVAL/GENERATION want a TRUE STANDALONE question ("Who built Codex CLI?").
+        #   Handed the concatenation, the LLM sees a leading clause that is already a
+        #   complete self-contained question, answers THAT, and ignores the trailing
+        #   fragment — so the follow-up returns the PREVIOUS answer verbatim, which is then
+        #   cached under its own key and replayed forever (#169).
+        #
+        # So we condense here, for BOTH follow-up shapes:
+        #
+        # * the CONTENT-NOUN follow-up ("is there a credentials file option?", #112), which
+        #   names no product and carries no bare anaphora, so ``build_contextual_query``
+        #   left it unchanged and it routed ``unsupported`` → answer-when-grounded; and
+        # * the ANAPHORIC follow-up ("who built it?", #169), which the deterministic rewrite
+        #   DID resolve — by concatenation. This case was previously locked out by a
+        #   ``retrieval_query == question`` guard, i.e. excluded exactly where it was needed.
+        #
+        # This stays a PURE RECALL improver. ``domain``/``intent``/``multi_domains``/
+        # ``answer_globally`` are already computed above from the un-condensed query, so a
+        # rewrite can NEVER flip a topic pivot onto the scoped, un-gated path; the
+        # confidence gate + the LLM grounding-refusal net remain the sole authority on
+        # declining an off-corpus pivot.
+        #
         # Skipped when no real LLM is configured (``llm_provider == "stub"``) — the stub's
         # canned text is not a rewrite, and a test spy that wraps the stub must behave the
-        # same as the stub. Any error degrades to the un-rewritten query so a rewrite failure
-        # never turns an answer/refusal into a 500.
-        if (
-            answer_globally
-            and prior_questions
-            and retrieval_query == question
-            and self._settings.llm_provider != "stub"
-        ):
+        # same as the stub.
+        #
+        # Gated to the two shapes above and nothing else. A mid-session question that
+        # ALREADY stands on its own ("how do I install the Codex CLI?") routes to a product
+        # domain AND was left unchanged by the deterministic rewrite — it has nothing to
+        # resolve, so we skip the call rather than pay an LLM round-trip per turn for a
+        # rewrite the condenser is instructed to decline anyway.
+        needs_condense = answer_globally or retrieval_query != question
+        if needs_condense and prior_questions and self._settings.llm_provider != "stub":
+            # The fallback is whatever routing already resolved: the concatenation when the
+            # deterministic rewrite fired, else the raw question. NEVER the bare fragment —
+            # dropping back to "who built it?" would strip the antecedent and refuse a
+            # perfectly answerable question, i.e. worse than today. ``condense_question_llm``
+            # returns ``question`` VERBATIM when it declines (no history, empty/overlong
+            # output, or the question already stands alone), so that is treated as "no
+            # rewrite" and lands on the same fallback.
+            fallback = retrieval_query
             try:
-                retrieval_query = await condense_question_llm(question, prior_questions, self._llm)
-            except Exception:  # noqa: BLE001 — any LLM failure falls back to the raw query
-                retrieval_query = question
+                condensed = await condense_question_llm(question, prior_questions, self._llm)
+            except Exception:  # noqa: BLE001 — any LLM failure degrades to today's behaviour
+                condensed = question
+            retrieval_query = fallback if condensed == question else condensed
 
         if intent is Intent.unsupported and not answer_globally:
             return await self._respond_unsupported(

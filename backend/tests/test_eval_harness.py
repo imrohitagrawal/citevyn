@@ -809,6 +809,61 @@ def test_refusal_gate_uses_judged_metric_when_llm_ran() -> None:
     assert gate_failures(summary) == []
 
 
+def _echo_summary(multi_turn: dict[str, Any]) -> dict[str, Any]:
+    """A summary that is healthy on every OTHER axis, so only the echo oracle can fail it."""
+    return {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0, "followup": 1.0},
+            "refusal_leaks": 0,
+            "followup_total": 3,
+            "followup_hit_rate": 1.0,
+        },
+        "judge": {
+            "available": True,
+            "judged": 15,
+            "scored": 15,
+            "mean_score": 4.0,
+            "refusal_leaks_judged": 0,
+        },
+        "multi_turn": multi_turn,
+    }
+
+
+def test_echo_oracle_fails_when_a_followup_repeats_the_prior_answer() -> None:
+    """#169: this is the assertion that catches the whole bug class. The summary below is
+    healthy on EVERY pre-existing axis — followup hit-rate 1.0, no refusal leaks, judge mean
+    4.0 — which is precisely why the concatenation bug shipped invisibly. The echo alone
+    must fail the run."""
+    from tests.eval.runner import gate_failures
+
+    failures = gate_failures(_echo_summary({"cases": 3, "echoes": ["codex_followup_built_by"]}))
+
+    assert any("echoed the PREVIOUS turn" in f for f in failures)
+    assert any("codex_followup_built_by" in f for f in failures)
+
+
+def test_echo_oracle_passes_when_followups_are_distinct() -> None:
+    """Zero tolerance must not mean zero signal: distinct follow-up answers pass cleanly."""
+    from tests.eval.runner import gate_failures
+
+    assert gate_failures(_echo_summary({"cases": 3, "echoes": []})) == []
+
+
+def test_echo_oracle_is_silent_when_it_could_not_run() -> None:
+    """A hermetic/stub run judges nothing, so the oracle is vacuous. Failing on an oracle
+    that could not run would be noise — but the count is reported so a VACUOUS pass is
+    visible in the report rather than indistinguishable from a real one."""
+    from tests.eval.runner import gate_failures
+
+    assert gate_failures(_echo_summary({"cases": 0, "echoes": []})) == []
+    # ...and a summary predating the oracle entirely must not KeyError.
+    legacy = _echo_summary({"cases": 0, "echoes": []})
+    del legacy["multi_turn"]
+    assert gate_failures(legacy) == []
+
+
 def _multihop_summary(*, mode: str, multihop_hit_rate: float) -> dict[str, Any]:
     return {
         "retrieval": {

@@ -950,6 +950,194 @@ async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> No
 
 
 # ---------------------------------------------------------------------------
+# 4c. Follow-up condensation (#169) — the concatenation must not reach the LLM
+# ---------------------------------------------------------------------------
+#
+# ``build_contextual_query`` CONCATENATES ("What is Codex CLI? who built it?"). That is
+# correct for ROUTING (it is what resolves the follow-up onto the ``codex`` domain) but
+# actively wrong for RETRIEVAL / GENERATION / the CACHE KEY: the first clause is a
+# complete self-contained question, so the LLM answers THAT and ignores the trailing
+# fragment — the user gets the PREVIOUS answer verbatim, and it is then cached under its
+# own key and replayed forever. These tests lock the split: routing keeps the
+# concatenation, everything downstream sees a true standalone question.
+
+
+_CONDENSED = "Who built Codex CLI?"
+
+
+class _CondensingLLM:
+    """Fake LLM that answers the condense prompt and the generation prompt differently.
+
+    Records every ``user`` prompt it is handed, split by call site, so a test can assert
+    which TEXT reached generation without reaching into orchestrator internals.
+    """
+
+    def __init__(self, *, condensed: str = _CONDENSED, condense_error: bool = False) -> None:
+        self._condensed = condensed
+        self._condense_error = condense_error
+        self.condense_prompts: list[str] = []
+        self.generate_prompts: list[str] = []
+
+    async def complete(self, *, system: str, user: str, **_kwargs: Any) -> Any:
+        from app.answer.memory import _CONDENSE_SYSTEM
+        from app.llm.types import LLMResult
+
+        if system == _CONDENSE_SYSTEM:
+            self.condense_prompts.append(user)
+            if self._condense_error:
+                raise RuntimeError("condense provider down")
+            return LLMResult(
+                text=self._condensed, input_tokens=1, output_tokens=1, model="f", provider="router"
+            )
+        self.generate_prompts.append(user)
+        return LLMResult(
+            text="OpenAI builds Codex CLI [1].",
+            input_tokens=1,
+            output_tokens=1,
+            model="f",
+            provider="router",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _codex_followup(
+    session: Any, llm: _CondensingLLM, **settings_overrides: Any
+) -> tuple[_FakeRetriever, dict[str, Any]]:
+    """Drive the canonical two-turn Codex chain and return (retriever, turn-2 response)."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router", **settings_overrides)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+    await orch.ask(question="What is Codex CLI?", request_id="c1", session_id=sid)
+    response = await orch.ask(question="who built it?", request_id="c2", session_id=sid)
+    return retriever, response
+
+
+async def test_followup_is_condensed_before_retrieval_and_generation(session: Any) -> None:
+    """#169: retrieval + generation must see the CONDENSED standalone question, never the
+    concatenation whose leading clause hijacks the answer."""
+    llm = _CondensingLLM()
+    retriever, response = await _codex_followup(session, llm)
+
+    assert response["no_answer"] is False
+    # The condenser ran and saw the real prior turn.
+    assert len(llm.condense_prompts) == 1
+    assert "What is Codex CLI?" in llm.condense_prompts[0]
+    # Retrieval got the standalone question — NOT "What is Codex CLI? who built it?".
+    assert retriever.calls[-1]["question"] == _CONDENSED
+    # Generation got it too (the prompt embeds the question verbatim).
+    assert _CONDENSED in llm.generate_prompts[-1]
+    assert "What is Codex CLI? who built it?" not in llm.generate_prompts[-1]
+
+
+async def test_followup_condensation_preserves_routing(session: Any) -> None:
+    """The concatenation is what routes a bare anaphor onto the product domain. Condensing
+    must happen AFTER routing is fixed, so the follow-up still scopes to ``codex`` — a
+    rewrite can never flip a topic pivot onto the scoped, un-gated path."""
+    llm = _CondensingLLM()
+    retriever, response = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["product_area"] == "codex"
+    assert response["domain"] == "codex"
+    assert response["unsupported"] is False
+
+
+async def test_followup_condensation_keys_the_cache_on_the_standalone_question(
+    session: Any,
+) -> None:
+    """The poisoned row is cached under the CONCATENATION's key. Once condensed, the cache
+    row must carry the standalone question so the replay-forever loop cannot re-form."""
+    llm = _CondensingLLM()
+    await _codex_followup(session, llm)
+
+    normalized_qs = {
+        r.normalized_question for r in (await session.execute(select(AnswerCache))).scalars().all()
+    }
+    assert _CONDENSED.lower() in normalized_qs
+    assert "what is codex cli? who built it?" not in normalized_qs
+
+
+async def test_followup_condensation_failure_falls_back_to_the_concatenation(
+    session: Any,
+) -> None:
+    """Worst case must be TODAY's behaviour, never worse. On any condenser failure we keep
+    the concatenation — falling back to the bare fragment "who built it?" would strip the
+    antecedent and refuse a perfectly answerable question."""
+    llm = _CondensingLLM(condense_error=True)
+    retriever, response = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+    assert retriever.calls[-1]["product_area"] == "codex"
+    assert response["no_answer"] is False
+
+
+async def test_followup_condensation_declined_falls_back_to_the_concatenation(
+    session: Any,
+) -> None:
+    """``condense_question_llm`` returns the question VERBATIM when it declines (empty or
+    overlong output, or the question already stands alone). For a deterministic rewrite
+    that is the same regression as an error — keep the concatenation."""
+    llm = _CondensingLLM(condensed="who built it?")
+    retriever, _ = await _codex_followup(session, llm)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+
+
+async def test_stub_provider_keeps_the_concatenation_unchanged(session: Any) -> None:
+    """The stub's canned text is not a rewrite, so the condenser stays off under
+    ``llm_provider='stub'`` — every hermetic stub-based test keeps its existing behaviour."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="s1", session_id=sid)
+    await orch.ask(question="who built it?", request_id="s2", session_id=sid)
+
+    assert retriever.calls[-1]["question"] == "What is Codex CLI? who built it?"
+
+
+async def test_single_turn_never_calls_the_condenser(session: Any) -> None:
+    """Regression guard A: a new chat / single-turn question is byte-for-byte unchanged —
+    no condense call, no rewrite, no extra LLM spend."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    await orch.ask(
+        question="How do I install the Codex CLI?", request_id="one", session_id=uuid.uuid4()
+    )
+
+    assert llm.condense_prompts == []
+    assert retriever.calls[-1]["question"] == "How do I install the Codex CLI?"
+
+
+async def test_self_contained_midsession_question_never_calls_the_condenser(
+    session: Any,
+) -> None:
+    """Cost guard: a mid-session question that already stands on its own routes to a product
+    AND is left alone by the deterministic rewrite — there is nothing to resolve, so we must
+    not pay an LLM round-trip per turn for a rewrite the condenser would decline anyway."""
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="m1", session_id=sid)
+    await orch.ask(question="How do I install the Codex CLI?", request_id="m2", session_id=sid)
+
+    assert llm.condense_prompts == []
+    assert retriever.calls[-1]["question"] == "How do I install the Codex CLI?"
+
+
+# ---------------------------------------------------------------------------
 # 5. Citation validation failure
 # ---------------------------------------------------------------------------
 
