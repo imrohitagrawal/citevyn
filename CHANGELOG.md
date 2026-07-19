@@ -6,7 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-19
+
+MVP demo release. Closes the RAG quality plan (Phases 0–4), turns the vector
+arm back on with real embeddings and real prod ingestion, hardens the
+answer-quality eval into a CI gate, ships the live chat UI end-to-end, and
+clears the Phase-5 release blockers (#81, #82, #87, #93).
+
 ### Added
+- **RAG quality plan complete (`docs/RAG_QUALITY_PLAN.md`, Phases 0–4).**
+  - Phase 0 — RAG eval harness (#96): golden set + retrieval hit-rate +
+    opt-in LLM-as-judge, CI-gated (`make eval`).
+  - Phase 1 — revived the dead vector arm (#97) with an OpenRouter/OpenAI
+    `text-embedding-3-small` embedder behind the seam, embedding-aware
+    seeders, and read-time index provenance; real prod ingestion ships
+    source docs as worker package data (#92).
+  - Phase 2 — answer-when-grounded (#107): global retrieval + confidence
+    gate + an LLM grounding-refusal net, with a judged eval metric.
+  - Phase 3 — multi-hop query decomposition by product domain (#109) and
+    conversation memory that resolves anaphoric and content-noun follow-ups
+    (#112, #113).
+  - Phase 4 — graceful degradation: nearest-doc suggestions on in-domain
+    no_answer (#117, 4a), a distinct 429 rate-limit toast (#116, 4b), and
+    vector-arm health on `/health/index` (#115, 4c).
+- **Real LLM + embeddings providers** (#47, #51/#56): Gemini primary +
+  OpenRouter fallback for chat, real Gemini/pgvector embeddings, exact-lookup
+  fallback, and CiteVyn-meta answers.
+- **Live chat UI wired to the backend** behind a live/demo toggle (#45), plus
+  the full React landing page and polished Q&A chat surface.
+- **Answer-quality eval hardening**: a trustworthy judge (panel + adversarial
+  veto + groundedness + prompt-injection resistance, #124/#126), enforced in
+  CI behind the OpenRouter secret (#127); chunk-level retrieval identity with
+  MRR/precision@1 (#132), a distractor corpus with context precision/recall
+  (#133), and golden-set growth to 50 cases (#134).
+- **CI image build+boot smoke gate** (#82): `make image-smoke` builds and
+  *boots* the api (GET /health=200) and worker (`python -m app.worker.cli`)
+  images as a PR gate and a release-publish gate, so a non-booting container
+  can no longer ship green.
 - RAG eval harness (Phase 0 of `docs/RAG_QUALITY_PLAN.md`, #96): a JSONL
   golden set at `tests/eval/golden.jsonl` (20 cases across all 5 product
   areas × {literal, paraphrase} plus out-of-corpus refusals) scored by
