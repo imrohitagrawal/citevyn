@@ -98,8 +98,14 @@ async def _judge_session(settings: Settings, *, postgres: bool):
     """Yield the DB session the judge drives the orchestrator against.
 
     Hermetic SQLite by default; the real Postgres+pgvector catalog (with a real
-    embedder, rolled back for zero residue) when ``postgres=True`` so the judged
-    answers reflect the live semantic retrieval path.
+    embedder, rolled back for zero CATALOG residue) when ``postgres=True`` so the
+    judged answers reflect the live semantic retrieval path.
+
+    The rollback covers seeded catalog/session rows only. ``provider_calls`` rows
+    written by the cost meter (#153 Layer 1) are committed on a separate session and
+    intentionally OUTLIVE the run — spend is a fact about money that already left the
+    account, so our own teardown must not erase it. See :func:`postgres_session` and
+    ``docs/COST_CONTROLS.md`` §1.
     """
     if postgres:
         async with postgres_session(settings) as (session, _embedder):

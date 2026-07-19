@@ -28,6 +28,7 @@ from app.models.exact_terms import ExactTerm
 from app.models.index_versions import IndexVersion
 from app.models.ingestion_jobs import IngestionJob
 from app.models.messages import Message
+from app.models.provider_calls import ProviderCall
 from app.models.retrieved_evidence import RetrievedEvidence
 from app.models.sessions import Session
 from app.models.users import User
@@ -55,6 +56,7 @@ __all__ = [
     "Message",
     "MessageRole",
     "PickledEmbedding",
+    "ProviderCall",
     "RetrievedEvidence",
     "RetrievalType",
     "Session",

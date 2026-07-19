@@ -67,6 +67,7 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cost.call_site import CallSite, call_site
 from app.guardrails.domain import Domain, classify_domain
 from app.llm.protocol import LLMClient
 from app.models import Message, MessageRole
@@ -187,7 +188,10 @@ async def condense_question_llm(
         f"Earlier questions in this conversation (oldest first):\n{convo}\n\n"
         f"Latest question: {question}\n\nStandalone question:"
     )
-    result = await llm.complete(system=_CONDENSE_SYSTEM, user=user, max_tokens=80, temperature=0.0)
+    with call_site(CallSite.condense):
+        result = await llm.complete(
+            system=_CONDENSE_SYSTEM, user=user, max_tokens=80, temperature=0.0
+        )
     rewritten = result.text.strip().strip('"').strip()
     if not rewritten or len(rewritten) > _MAX_REWRITE_CHARS:
         return question
