@@ -7,6 +7,8 @@
  * will be swapped out for vector search.
  */
 
+import { mentionsCitevyn } from "../lib/citevynAliases";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -189,9 +191,15 @@ export const PLACEHOLDERS = [
   "Which Claude models are available?",
 ];
 
-/** Fallback answer when no KB entry matches */
+/**
+ * Fallback answer when no KB entry matches.
+ *
+ * Mirrors the backend's `DEFAULT_UNSUPPORTED_REFUSAL`, including the
+ * "or about CiteVyn itself" nudge (#84 item 5) — a demo user who hits the
+ * refusal should learn the same thing a live user does.
+ */
 export const GENERIC_REFUSAL =
-  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.";
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I don't have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Keyword matcher — routes free-typed questions to a KB entry
@@ -299,14 +307,21 @@ export function matchKB(text: string): KBEntry {
  * Returns ``null`` when the question is not about CiteVyn itself, so the caller
  * falls through to ``matchKB`` in demo mode.
  *
- * The guard is deliberately narrow — it only fires when the text mentions
- * "citevyn" — so in demo mode genuine product questions ("does Claude Code
- * cost money?") still fall through to ``matchKB``. (In live mode this matcher
- * is never consulted; the caller routes every question to the backend.)
+ * The guard is deliberately narrow — it only fires when the text NAMES CiteVyn
+ * — so in demo mode genuine product questions ("does Claude Code cost money?")
+ * still fall through to ``matchKB``. (In live mode this matcher is never
+ * consulted; the caller routes every question to the backend.)
+ *
+ * The name check is ``mentionsCitevyn``, the offline mirror of the backend
+ * guardrail (#84 item 4). Before that it was a bare ``includes("citevyn")``,
+ * which recognized none of the speech-to-text manglings the backend accepts
+ * ("what is sitewin?") and, in the other direction, fired on strings the
+ * backend deliberately rejects as identifiers ("sitewin.example.com") — so the
+ * same question was answered live and refused offline, or vice versa.
  */
 export function matchCitevynMeta(text: string): KBEntry | null {
   const t = text.toLowerCase();
-  if (!t.includes("citevyn")) return null;
+  if (!mentionsCitevyn(text)) return null;
 
   const meta = (a: string, tag = "CITEVYN"): KBEntry => ({ q: text, tag, a, sources: [] });
 

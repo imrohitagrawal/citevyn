@@ -59,11 +59,12 @@ ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
 # a product/unsupported path rather than the meta domain — the stricter,
 # more correct behavior for a live query.
 #
-# The frontend's offline matcher (knowledgeBase.ts::matchCitevynMeta) still
-# uses a looser bare-substring "citevyn" check and so recognizes NEITHER the
-# word boundary NOR the aliases below. That path only runs in demo/offline
-# mode — in live mode every question goes to this guardrail — so it is a
-# cosmetic divergence rather than a live defect, tracked on #84 item 4.
+# The frontend's offline matcher (knowledgeBase.ts::matchCitevynMeta) MIRRORS
+# this pattern via frontend/src/lib/citevynAliases.ts — same canonical branch,
+# same alias list, same identifier guards (#84 item 4). It is a hand-kept copy
+# because the demo path never reaches this module, so any edit below must be
+# made there too; both sides pin the alias list in a test, so a one-sided edit
+# fails rather than drifting silently.
 # --- CiteVyn name recognition (#84 item 1) ---------------------------------
 #
 # The owner dictates questions, and speech-to-text reliably mangles "CiteVyn"

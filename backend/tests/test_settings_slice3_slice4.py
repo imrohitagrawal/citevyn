@@ -50,6 +50,16 @@ def test_default_response_copy_matches_spec() -> None:
     assert "Codex" in settings.unsupported_refusal
 
 
+def test_unsupported_refusal_nudges_toward_citevyn_meta_questions() -> None:
+    """#84 item 5. A near-miss meta question ("what is Pro?") never says "CiteVyn",
+    so it routes to ``unsupported``; naming the meta-domain in the refusal is the
+    only hint the user gets that a phrasing exists which works. Additive — the four
+    products still come first, so this reads as scope, not as an upsell."""
+    refusal = Settings().unsupported_refusal
+    assert "CiteVyn itself" in refusal
+    assert refusal.index("Claude") < refusal.index("CiteVyn itself")
+
+
 def test_settings_env_override(monkeypatch) -> None:
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("CITEVYN_RETRIEVAL_TOP_K", "10")
