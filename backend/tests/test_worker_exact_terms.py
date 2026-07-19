@@ -72,3 +72,32 @@ def test_filename_extracted() -> None:
     fn = next((t for t in terms if t.term_text == ".bashrc"), None)
     assert fn is not None
     assert fn.term_type is TermType.file_name
+
+
+def test_url_path_does_not_mint_a_slash_command() -> None:
+    """A URL in the corpus prose must not become an exact-lookup slash command.
+
+    ``(?<!\\w)`` alone admits the ``/claude`` inside ``https://claude.ai/install.sh``,
+    because the preceding character is ``/`` rather than a word character. An
+    ExactRetriever lookup for ``/claude`` then returns that chunk as a "slash command".
+    Found live when the Claude Code install section introduced the corpus's first inline
+    URL (#170): ``/claude`` was the only bogus entry among the corpus's slash commands.
+    """
+    terms = {
+        t.term_text
+        for t in extract_terms(
+            _draft("Install with 'curl -fsSL https://claude.ai/install.sh | bash'.")
+        )
+    }
+    assert not any(t.startswith("/") for t in terms), f"URL minted a slash command: {terms}"
+
+
+def test_real_slash_commands_still_extract() -> None:
+    """The guard above must not silence genuine slash commands."""
+    terms = {
+        t.term_text
+        for t in extract_terms(
+            _draft("Use /clear to reset, /compact to summarize, /logout to sign out.")
+        )
+    }
+    assert {"/clear", "/compact", "/logout"} <= terms
