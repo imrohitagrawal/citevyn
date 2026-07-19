@@ -9,13 +9,38 @@ in the same change.
 > This file mirrors GitHub issues; GitHub is the source of truth for status. If a row
 > here and the issue disagree, trust the issue and fix the row.
 
-## Open follow-ups
+## Roadmap milestones
+
+Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §11–12):
+
+- **[V1](https://github.com/imrohitagrawal/citevyn/milestone/1)** — depth/polish for a
+  portfolio-grade demo (no new content domains or heavy surfaces).
+- **[V2](https://github.com/imrohitagrawal/citevyn/milestone/2)** — breadth + heavier
+  surfaces, deferred until V1 depth is proven.
+
+### V1 milestone
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#153](https://github.com/imrohitagrawal/citevyn/issues/153) | Live hosted public demo + cost guardrails | infra / ops | Highest V1 ROI; also completes the Phase-5 live deploy-verify + rollback gate; §9 cost limits are a hard prerequisite before a public URL |
+| [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Real SSE streaming for chat answers | frontend / API | Verified: **no streaming route exists on `main`** — a real backend build, not a rewire |
+| [#154](https://github.com/imrohitagrawal/citevyn/issues/154) | Feedback capture wired into the eval loop | backend / frontend | Value is the eval flywheel, **not** model retraining; most invasive V1 item (DB + API) |
+| [#155](https://github.com/imrohitagrawal/citevyn/issues/155) | Evaluation + live-ops dashboard | frontend / observability | Surfaces existing eval metrics + live cost/latency/refusal; pairs with #154 |
+| [#156](https://github.com/imrohitagrawal/citevyn/issues/156) | Better re-ranking of retrieved chunks | backend / RAG | Feature-flagged, cost-aware, proven on golden + distractor eval sets |
+| [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Composer gating while a live answer is in flight | frontend | Small hardening; do alongside #61 |
+
+### V2 milestone
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#157](https://github.com/imrohitagrawal/citevyn/issues/157) | ChatGPT (OpenAI) official docs — 5th domain | backend / corpus | Deferred: breadth-not-depth **and** licensing-gated (ADR-0003). Not deferred for UI risk |
+| [#158](https://github.com/imrohitagrawal/citevyn/issues/158) | Voice output (TTS) for answers | frontend / API | Large surface, off-core; explicit MVP non-goal |
+
+## Open follow-ups (unmilestoned)
 
 | Issue | Title | Area | Priority | Origin |
 |---|---|---|---|---|
 | [#59](https://github.com/imrohitagrawal/citevyn/issues/59) | Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh) | embeddings | Low (at scale / if Gemini insufficient) | #51 / PR #56, ADR-0003 |
-| [#61](https://github.com/imrohitagrawal/citevyn/issues/61) | Frontend: real SSE streaming for chat answers (replace client-side reveal) | frontend / API | Low (V1 UX polish; needs new backend `text/event-stream` endpoint) | PR #45, RELEASE_PLAN §11 |
-| [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | Frontend: gate the composer while a live answer is in flight (concurrent-send interleave) | frontend | Low (V1 hardening; cosmetic, never wrong answer/citation) | PR #45 review, RELEASE_PLAN §11 |
 | [#84](https://github.com/imrohitagrawal/citevyn/issues/84) | CiteVyn-meta maturation: intent-detect token-absent phrasings, real-embedder no_answer golden, golden-in-CI, offline-copy convergence, refusal-copy nudge, `/about` deploy | backend / frontend | Low | #49 / PR #83 review |
 | [#119](https://github.com/imrohitagrawal/citevyn/issues/119) | Conversation memory: scale to long conversations (rolling summary via `sessions.summary` + LLM standalone-question rewrite + token-budgeted generator context + `(session_id, created_at)` index) | backend / RAG | Low (current design is constant-cost per turn; this adds depth) | live-test review |
 | [#125](https://github.com/imrohitagrawal/citevyn/issues/125) | Eval harness: **most landed** (PR #132 chunk-level identity + MRR/precision@1; PR #133 distractor corpus + context precision/recall; PR #134 golden growth 31→50). **Remaining:** human-labeled judge-calibration subset (judge-vs-human agreement) | eval / RAG | Low (remaining piece is calibration, not gating) | Item 2 eval-hardening plan review (deferred) |

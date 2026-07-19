@@ -242,25 +242,55 @@ Do not release if:
 
 ## 11. V1 Roadmap
 
-1. ChatGPT official docs.
-2. Voice output.
-3. Feedback capture.
-4. Scheduled source refresh.
-5. Evaluation dashboard.
-6. Better reranking.
-7. Real SSE streaming for chat answers — stream tokens as generated instead of the
-   client-side reveal; needs a new backend `text/event-stream` endpoint ([#61](https://github.com/imrohitagrawal/citevyn/issues/61)).
-8. Frontend hardening: gate the composer while a live answer is in flight to prevent
-   concurrent-send stream interleave ([#62](https://github.com/imrohitagrawal/citevyn/issues/62)).
+V1 is deliberately **depth over breadth**: portfolio-grade polish, a reachable live
+demo, and the answer-quality/feedback flywheel — no new content domains and no new
+heavy surfaces (those are V2). Tracked under the **V1** GitHub milestone.
+
+1. **Live hosted public demo + cost guardrails** — deploy the existing stack to a
+   reachable HTTPS URL; wire the §9 soft/hard daily cost limits (a hard prerequisite
+   before any public URL) and confirm the abuse rate-limiter on the public path. This
+   is the highest-ROI V1 item and also completes the Phase-5 live deploy-verify +
+   rollback gate ([#153](https://github.com/imrohitagrawal/citevyn/issues/153)).
+2. **Real SSE streaming for chat answers** — stream tokens as generated instead of the
+   client-side reveal. Verified on `main` @ v0.10.0: **no streaming route exists today**
+   (`messages.py` has only POST/GET; no `StreamingResponse`/`text/event-stream`), so this
+   is a real backend build (new endpoint + frontend consumer), not a rewire
+   ([#61](https://github.com/imrohitagrawal/citevyn/issues/61)).
+3. **Feedback capture → eval loop** — 👍/👎 (+ reason) per answer, persisted, and piped
+   into the golden eval harness. NB: the value is the eval/data flywheel and corpus-gap
+   detection, **not** model retraining (the LLMs are hosted, not ours to fine-tune). Most
+   invasive V1 item — touches DB + API ([#154](https://github.com/imrohitagrawal/citevyn/issues/154)).
+4. **Evaluation + live-ops dashboard** — surface the existing eval metrics (hit-rate,
+   judge, groundedness, refusal leaks, MRR/precision@1, distractor precision/recall) plus
+   live cost/latency/refusal-rate ([#155](https://github.com/imrohitagrawal/citevyn/issues/155)).
+5. **Better re-ranking** — a re-rank stage after candidate retrieval; feature-flagged,
+   cost-aware, and proven on the golden + distractor eval sets
+   ([#156](https://github.com/imrohitagrawal/citevyn/issues/156)).
+6. **Frontend hardening: composer gating** — gate the composer while a live answer is in
+   flight to prevent concurrent-send stream interleave
+   ([#62](https://github.com/imrohitagrawal/citevyn/issues/62)).
 
 ## 12. V2 Roadmap
 
-1. Cursor docs.
-2. Voice input.
-3. Reviewer-agent workflow.
-4. Automated freshness.
-5. Cache invalidation by document version.
-6. Browser extension.
+Breadth and heavier surfaces, deferred until V1 depth is proven. Tracked under the
+**V2** GitHub milestone.
+
+1. **ChatGPT (OpenAI) official docs** — a 5th product domain. Deferred for two real
+   reasons: it is *breadth, not depth* (low portfolio signal), and it is
+   *licensing-gated* (ADR-0003 requires curated, license-clean docs; OpenAI doc
+   redistribution terms must be checked first). Not deferred for UI risk — the UI delta
+   is small and test-covered ([#157](https://github.com/imrohitagrawal/citevyn/issues/157)).
+2. **Voice output (TTS)** — large surface (TTS, audio UI, latency) that does not
+   reinforce the core retrieval-with-citations story; also an explicit MVP non-goal
+   ([#158](https://github.com/imrohitagrawal/citevyn/issues/158)).
+3. Voice input.
+4. Cursor docs.
+5. Reviewer-agent workflow.
+6. Automated freshness / scheduled source refresh — low value while the corpus is
+   curated, static, and license-clean (`HttpFetcher` is a deliberately-unwired seam);
+   a manual `make refresh` runbook suffices until the corpus actually needs automation.
+7. Cache invalidation by document version.
+8. Browser extension.
 
 ## 13. Enterprise Roadmap
 
