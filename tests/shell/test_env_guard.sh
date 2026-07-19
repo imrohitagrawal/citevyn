@@ -34,6 +34,16 @@ GUARD="${REPO_ROOT}/infra/docker/scripts/_env_guard.sh"
 
 # ─────────────────────── Test harness ───────────────────────
 
+# The guard requires more fields than these fixtures originally supplied
+# (CITEVYN_PUBLIC_HOST, CITEVYN_DATABASE_URL, CITEVYN_LLM_PROVIDER were added to
+# _env_guard.sh later). Without them every "is accepted" case died on the first
+# missing field and never reached the behaviour it was written to test — four
+# silent false failures, invisible because tests/shell/ is not wired into CI.
+# Reject-cases do NOT need this: the harness also asserts the stderr substring,
+# so a wrong-reason rejection already fails.
+REST_OK="CITEVYN_PUBLIC_HOST=citevyn.example.com"$'\n'"CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:s3cret@db:5432/citevyn"$'\n'"CITEVYN_LLM_PROVIDER=gemini"$'\n'
+
+
 PASS=0
 FAIL=0
 FAILURES=()
@@ -97,7 +107,7 @@ assert_guard "local dev POSTGRES_PASSWORD=citevyn is rejected" \
 assert_guard "prod password containing 'citevyn' is accepted" \
     0 \
     "" \
-    "POSTGRES_PASSWORD=citevynS3cret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
+    "POSTGRES_PASSWORD=citevynS3cret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'"${REST_OK}"
 
 # 1a''. QUOTED dev sentinels must be rejected. docker compose strips one
 # matched quote pair, so POSTGRES_PASSWORD="citevyn" would RUN with the weak
@@ -153,7 +163,7 @@ assert_guard 'CITEVYN_ACME_EMAIL="dev@local.invalid" is rejected' \
 assert_guard "real secrets + real ACME email is accepted" \
     0 \
     "" \
-    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'"${REST_OK}"
 
 # 5. CRLF .env with stubs — regression for the bare ``$`` anchor. The
 # guard must still reject the stub.
@@ -192,12 +202,12 @@ assert_guard "stub CITEVYN_ACME_EMAIL is rejected" \
 assert_guard "single-quoted ACME email is accepted (quotes stripped)" \
     0 \
     "" \
-    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL='ops@example.com'"$'\n'
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL='ops@example.com'"$'\n'"${REST_OK}"
 
 assert_guard "double-quoted ACME email is accepted (quotes stripped)" \
     0 \
     "" \
-    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=\"ops@example.com\""$'\n'
+    "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=realadminkey"$'\n'"CITEVYN_ACME_EMAIL=\"ops@example.com\""$'\n'"${REST_OK}"
 
 # 10. C2 (ruthless-critic): garbage command in .env. A stray
 # non-zero command (here ``false``) on the last line of a
