@@ -20,6 +20,13 @@
 #     warns when the target tag is behind the current alembic head.
 #   - It does NOT promote a previous index version. Index rollback is a separate
 #     concern (RELEASE_PLAN §8) — use the admin promote API.
+#   - It does NOT reset the ANSWER CACHE. `answer_policy_version` is part of the
+#     cache-key pre-image, so a release bumps it when it makes previously-cached
+#     answers WRONG. Rolling back restores the OLD value and brings those answers
+#     back into scope for the rest of the cache TTL. This script warns when the
+#     target tag ships a different value; the fix is to pin a THIRD value in
+#     infra/docker/.env before rolling back, so the cache is cold both ways
+#     (RUNBOOK §5.3).
 #
 # Usage:
 #   ./scripts/rollback.sh v0.9.0            # roll back to an explicit tag
@@ -47,7 +54,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,30p' "${BASH_SOURCE[0]}"
+            # Print the whole header block: line 2 through the closing ─── rule.
+            # A hard-coded end line silently truncates --help whenever the header
+            # grows (it did — the usage examples and exit codes vanished).
+            sed -n '2,/^# ─\{10,\}/p' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         -*)
@@ -103,6 +113,58 @@ if [[ "${_migrations_ahead}" != "0" ]]; then
     echo "         rollback.sh does NOT reverse forward-only migrations." >&2
     echo "         If the bad release changed the schema, restore a backup" >&2
     echo "         instead — see RUNBOOK §4.2." >&2
+fi
+
+# Warn — do not block — when the target tag ships a DIFFERENT answer_policy_version.
+# That value is part of the answer-cache key pre-image, so a release bumps it when the
+# release makes previously-cached answers WRONG (v1 -> v2 in #169, where follow-ups had
+# been stored as verbatim duplicates of the previous turn's answer). Rolling back
+# restores the OLD value, which brings those poisoned rows back INTO key scope and
+# re-serves them for the remainder of CITEVYN_CACHE_TTL_SECONDS. Nothing else evicts
+# them — their source_version_hash and embedder_identity are still perfectly valid.
+#
+# This one is worth warning loudly about because it is SILENT: no migration, no error,
+# and the stale answer comes back cited and well-formed.
+#
+# Returns the code default for a revision, or EMPTY when that revision has no
+# config.py (a tag old enough to predate it). The `|| true` is load-bearing: this
+# script runs under `set -euo pipefail`, so a failing `git show` would otherwise take
+# the pipeline's non-zero status and ABORT THE ROLLBACK — turning a best-effort warning
+# into an incident-path outage. Verified: without it, rolling back to a pre-config.py
+# tag exits 128.
+#
+# Matches both the bare `= "v2"` literal and the `= Field(default="v2")` form other
+# settings in that file use, so a later refactor of the field cannot silently switch
+# this guard off.
+_read_policy_version() {  # $1 = git revision
+    { git show "$1:backend/app/core/config.py" 2>/dev/null |
+        sed -nE 's/^[[:space:]]*answer_policy_version[[:space:]]*:[[:space:]]*str[[:space:]]*=[[:space:]]*(Field\(default=)?"([^"]+)".*/\2/p' |
+        head -1; } || true
+}
+
+# An explicit pin in infra/docker/.env BEATS the code default (pydantic-settings,
+# env_prefix CITEVYN_), so when one is present the rollback does not change the
+# effective version at all and the warning would be actively wrong — it would push the
+# operator to burn a cache that is not affected. Stay silent in that case.
+_policy_pinned="$(sed -nE 's/^[[:space:]]*CITEVYN_ANSWER_POLICY_VERSION[[:space:]]*=.*/pinned/p' \
+    "${COMPOSE_DIR}/.env" 2>/dev/null | head -1 || true)"
+_policy_now="$(_read_policy_version HEAD)"
+_policy_target="$(_read_policy_version "${TARGET}")"
+if [[ -z "${_policy_pinned}" && -n "${_policy_now}" && -n "${_policy_target}" &&
+      "${_policy_now}" != "${_policy_target}" ]]; then
+    echo "WARNING: answer_policy_version differs — ${TARGET} ships '${_policy_target}'," >&2
+    echo "         the current tree ships '${_policy_now}'." >&2
+    echo "         Rolling back RESTORES '${_policy_target}', so every answer cached" >&2
+    echo "         under it is served again for up to CITEVYN_CACHE_TTL_SECONDS." >&2
+    echo "         If '${_policy_now}' was bumped to EVICT bad answers, pin a THIRD" >&2
+    echo "         value FIRST so the cache is cold in both directions:" >&2
+    echo "" >&2
+    echo "           echo 'CITEVYN_ANSWER_POLICY_VERSION=v-rollback-\$(date +%s)' \\" >&2
+    echo "               >> ${COMPOSE_DIR}/.env" >&2
+    echo "" >&2
+    echo "         It MUST go in ${COMPOSE_DIR}/.env — the containers read their" >&2
+    echo "         environment from env_file, so a host-shell variable does NOT" >&2
+    echo "         reach the app. See RUNBOOK §5.3." >&2
 fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
