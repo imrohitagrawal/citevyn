@@ -53,6 +53,12 @@
 {"id": "followup_claude_api_raise", "area": "claude_api", "kind": "followup", "history": ["What is the rate limit for the Claude API?"], "question": "How can I raise it?", "expected_source": "claude_api", "expected_gist": "Raise the Claude API rate limit by setting the CLAUDE_API_RATE_LIMIT environment variable to override the default 50 requests per minute.", "expected_facts": ["CLAUDE_API_RATE_LIMIT"], "gold_chunks": ["claude_api#0"]}
 {"id": "followup_gemini_api_altkey", "area": "gemini_api", "kind": "followup", "history": ["Which header carries the Gemini API key?"], "question": "Is there another way to provide it?", "expected_source": "gemini_api", "expected_gist": "Yes — besides the x-goog-api-key header, the Gemini CLI can also read the API key from a credentials file.", "expected_facts": ["credentials file"], "gold_chunks": ["gemini_api#0"]}
 {"id": "followup_codex_otherflags", "area": "codex", "kind": "followup", "history": ["What does the --model flag do in Codex?"], "question": "How do I see the others?", "expected_source": "codex", "expected_gist": "Run 'codex --help' to see the full list of Codex CLI flags besides --model.", "expected_facts": ["codex --help"], "gold_chunks": ["codex#0"]}
+# echo regression (#169): the reported bug's exact SHAPE — turn 1 is a COMPLETE self-contained
+# question, so the memory concatenation ("How do I install the Codex CLI? Does it require a
+# key?") leads with a clause the LLM can fully answer; it answers THAT and re-emits turn 1's
+# answer verbatim. Retrieval hit-rate and non-refusal both stay green through that failure,
+# which is why it shipped invisibly — the multi_turn echo oracle is what catches it.
+{"id": "followup_codex_echo_apikey", "area": "codex", "kind": "followup", "history": ["How do I install the Codex CLI?"], "question": "Does it require a key?", "expected_source": "codex", "expected_gist": "Yes — Codex reads its credentials from the OPENAI_API_KEY environment variable, or from a stored login created by signing in through the CLI.", "expected_facts": ["OPENAI_API_KEY"], "gold_chunks": ["codex#0"]}
 # content-noun followup (#112): no bare anaphora, so the deterministic regex leaves it — only
 # the orchestrator's LLM rewrite resolves it. judge_only (excluded from the LLM-free retrieval
 # report) + postgres_only (validated on the judged run through the real orchestrator).
