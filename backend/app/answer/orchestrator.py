@@ -63,7 +63,8 @@ from app.guardrails.domain import (
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
-from app.llm.validation import validate_citations
+from app.llm.types import LLMResult
+from app.llm.validation import CitationValidationResult, validate_citations
 from app.models import (
     Confidence,
     Message,
@@ -785,6 +786,32 @@ class Orchestrator:
         #
         # Both cases now collapse to no_answer; only the audit reason distinguishes them, so
         # an operator can still tell a polite refusal from a model that ignored its evidence.
+        #
+        # ...with ONE second chance first (#208). ``classify_intent`` is a token-shape
+        # regex cascade: a prose question that merely MENTIONS a flag ("Is there a config
+        # file option for the Codex --model flag instead?") routes to ``exact_lookup``,
+        # the exact arm returns the flag's own chunk, and the hybrid retriever
+        # short-circuits on that non-empty exact result — so keyword+vector never run and
+        # the LLM correctly refuses on a chunk that does not answer the question. The
+        # identical question WITHOUT the flag token answers with a citation. Rather than
+        # teach the regex to guess prose (which is what produced the bug), give the
+        # retrieval layer a deterministic fallthrough: when the exact short-circuit
+        # produced NO grounded answer, re-retrieve through the full hybrid path and keep
+        # the retry ONLY if it grounds. Off-corpus and genuinely ungrounded questions
+        # keep the original refusal, and a bare flag lookup that DID ground never reaches
+        # here, so the exact fast path is untouched.
+        if not validation.cited_indices and strategy is RetrievalStrategy.exact_lookup:
+            retried = await self._retry_without_exact_lookup(
+                retriever=retriever,
+                retrieval_query=retrieval_query,
+                product_area=None if answer_globally else domain.value,
+                multi_hop=multi_hop,
+                multi_domains=multi_domains,
+            )
+            if retried is not None:
+                evidence, vector_degrade, llm_result, validation = retried
+                strategy = self._strategy_for(Intent.faq, evidence)
+
         if not validation.cited_indices:
             return await self._respond_no_answer(
                 request_id=request_id,
@@ -839,6 +866,62 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _retry_without_exact_lookup(
+        self,
+        *,
+        retriever: _RetrieverLike,
+        retrieval_query: str,
+        product_area: str | None,
+        multi_hop: bool,
+        multi_domains: list[Domain],
+    ) -> tuple[list[EvidenceHit], VectorDegrade, LLMResult, CitationValidationResult] | None:
+        """Second chance at retrieval for an ungrounded ``exact_lookup`` (#208).
+
+        Re-runs retrieval as :attr:`Intent.faq` — which makes the hybrid
+        retriever query keyword + vector and rerank instead of
+        short-circuiting on the exact-term arm — and regenerates.
+
+        Returns the retry's ``(evidence, vector_degrade, llm_result,
+        validation)`` ONLY when it produced a valid, citation-bearing
+        answer. Any other outcome (no evidence, refusal, uncited prose,
+        invalid citations, a provider that fell over on the retry)
+        returns ``None`` so the caller's original no-answer stands. This
+        is a second look at the corpus, never a licence to answer
+        ungrounded.
+        """
+        if multi_hop:
+            result = await retriever.retrieve_multi(
+                retrieval_query,
+                product_areas=[d.value for d in multi_domains],
+                intent=Intent.faq,
+                limit=self._settings.retrieval_max_candidates,
+                top_k=self._settings.retrieval_top_k,
+            )
+        else:
+            result = await retriever.retrieve(
+                retrieval_query,
+                product_area=product_area,
+                intent=Intent.faq,
+                limit=self._settings.retrieval_max_candidates,
+                top_k=self._settings.retrieval_top_k,
+            )
+        if not result.hits:
+            return None
+
+        try:
+            with call_site(CallSite.answer):
+                llm_result = await self._generator.generate(retrieval_query, result.hits)
+        except LLMUnavailable:
+            # The first generation succeeded, so this is a mid-flight provider
+            # failure on a BEST-EFFORT retry. Keep the original refusal rather
+            # than turning a 200 no-answer into a 5xx.
+            return None
+
+        validation = validate_citations(answer_text=llm_result.text, evidence=result.hits)
+        if not validation.valid or not validation.cited_indices:
+            return None
+        return (result.hits, result.vector_degrade, llm_result, validation)
 
     async def _respond_unsupported(
         self,
