@@ -26,7 +26,36 @@ values. Do not rely on unit norm downstream (e.g. raw inner product).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class DocumentEmbedder(Protocol):
+    """The write path's half of the seam: batch-embed documents, that is all.
+
+    Split out of :class:`Embedder` because the ingestion runner never embeds a
+    query — it only needs ``dim`` (for the ``IndexVersion`` stamp) and
+    ``embed_documents``. Narrowing the runner's parameter to this protocol is
+    what lets the demo/bootstrap seeder pass an
+    :class:`~app.embeddings.null.NullEmbedder`, which writes no vectors at all
+    and therefore cannot produce a query vector either.
+
+    The return element is ``list[float] | None`` rather than ``list[float]``:
+    ``None`` means "persist this chunk with a NULL embedding", the state the
+    read path already short-circuits on. ``Sequence`` (covariant) rather than
+    ``list`` (invariant) so a real :class:`Embedder` returning
+    ``list[list[float]]`` satisfies this protocol unchanged.
+    """
+
+    @property
+    def dim(self) -> int:
+        """The vector dimension this embedder produces."""
+        ...
+
+    async def embed_documents(self, texts: list[str]) -> Sequence[list[float] | None]:
+        """Embed a batch of document strings, preserving input order and length."""
+        ...
 
 
 @runtime_checkable

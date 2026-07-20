@@ -352,8 +352,11 @@ checkpoint, not a formality.
 bootstrap seed deliberately leaves every embedding NULL and the index unstamped,
 so `GET /health/index` reports `vector_arm.status: "dead"`. That is correct: the
 stub's vectors are hash-bucketed and meaningless, and ranking by them would be
-worse than not ranking at all. Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a
-key) and re-seed to get a live, stamped vector arm.
+worse than not ranking at all. They are never *written* — the seeder builds its
+runner with `write_vectors=False`, so there is no moment at which a live reader
+can see them (the seed commits per source, and a re-seed runs against an
+already-active `v1`). Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a key) and
+re-seed to get a live, stamped vector arm.
 
 ## 4. Backup & restore
 

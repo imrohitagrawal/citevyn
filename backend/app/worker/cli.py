@@ -37,7 +37,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
 from app.core.logging import configure_logging
-from app.embeddings import build_embedder, validate_embedder_provider
+from app.embeddings import (
+    DocumentEmbedder,
+    NullEmbedder,
+    build_embedder,
+    validate_embedder_provider,
+)
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
 from app.worker.fetchers import FetchError, build_fetcher
 from app.worker.runner import (
@@ -173,7 +178,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
+def build_runner(
+    settings: Settings, *, index_version: str, write_vectors: bool = True
+) -> IngestionRunner:
     """Build the runner with the default fetcher + embedder.
 
     ``index_version`` is plumbed into the constructor (not defaulted
@@ -182,14 +189,43 @@ def build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
     :class:`IndexVersion` row during ``ensure_index_version``, (b)
     stamp every :class:`Document` / :class:`Chunk` row it creates,
     and (c) satisfy the FK on ``documents``.
+
+    ``write_vectors=False`` is the seam for the demo/bootstrap seeder
+    (``db/seed/seed_catalog.py``) under the default **stub** provider: it swaps
+    in a :class:`~app.embeddings.null.NullEmbedder` so every chunk is persisted
+    with a NULL embedding, and stamps NO provenance on the
+    :class:`IndexVersion`. The point is that hash-bucketed stub vectors are
+    never *written*, not that they are cleaned up afterwards — ``drive`` commits
+    each source as it goes and a re-seed runs against an already-active index,
+    so any after-the-fact strip leaves a window in which a reader sees a vector
+    arm that is enabled (matching ``stub`` stamp), ranking by SHA-256 distance,
+    and reported ``healthy``. See :class:`~app.embeddings.null.NullEmbedder`.
+
+    ``citevyn-worker run`` leaves this at ``True``: an operator building a
+    throwaway stub index has asked for exactly that, explicitly.
     """
     # Fail fast on a bad embedding config (unknown provider, stub-in-prod, or a
     # dimension that does not match the pgvector column) so a standalone worker
     # cannot silently build a hash-only or wrong-dim index. Mirrors the API's
-    # startup guard in app.main.
+    # startup guard in app.main. Validated even when ``write_vectors=False``:
+    # the bootstrap must still refuse a stub provider in production.
     validate_embedder_provider(settings)
     fetcher = build_fetcher(_pick_first_source())  # build default-root LocalFetcher
-    embedder = build_embedder(settings)
+    # The provenance stamp is a property OF the embedder, so it is decided here
+    # in one place rather than re-tested per field: an embedder that writes no
+    # vectors stamps no provider. A ``stub`` stamp with no vectors behind it
+    # would be a claim the index cannot honour, and it is exactly the stamp the
+    # Tier-3 gate reads; ``None`` is the "unknown provenance ⇒ allow" state
+    # (:func:`app.embeddings.factory.is_index_embedder_mismatch`), which leaves a
+    # later real-embedder deploy free to re-stamp instead of being wedged into a
+    # permanent mismatch degrade.
+    embedder: DocumentEmbedder
+    if write_vectors:
+        embedder = build_embedder(settings)
+        provider, model = settings.embedding_provider, settings.embedding_model
+    else:
+        embedder = NullEmbedder(settings.embedding_dim)
+        provider, model = None, None
     return IngestionRunner(
         fetcher=fetcher,
         embedder=embedder,
@@ -202,8 +238,8 @@ def build_runner(settings: Settings, *, index_version: str) -> IngestionRunner:
         # on the next ingest, automatically.
         source_version_hash=content_version_hash(MVP_SOURCES),
         index_version=index_version,
-        embedding_provider=settings.embedding_provider,
-        embedding_model=settings.embedding_model,
+        embedding_provider=provider,
+        embedding_model=model,
     )
 
 

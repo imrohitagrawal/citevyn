@@ -31,15 +31,16 @@ Two consequences worth knowing:
 * Chunk *content* now matches production exactly (title-prefixed contextual
   chunks, real ``source_url`` citations), and the row counts are whatever
   the chunker produces — not a fixed five.
-* Under the default **stub** embedder the vectors are discarded again before
-  the index goes live (see :func:`_disarm_stub_vectors`): a hash-bucketed
-  vector arm is worse than no vector arm.
+* Under the default **stub** embedder NO vectors are written at all
+  (``build_runner(..., write_vectors=False)`` swaps in
+  :class:`app.embeddings.null.NullEmbedder`): a hash-bucketed vector arm is
+  worse than no vector arm, and not writing one has no window in which a
+  reader can see one.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,7 +49,7 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-from sqlalchemy import delete, func, select, update  # noqa: E402
+from sqlalchemy import delete, func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -71,8 +72,6 @@ from app.worker.cli import build_runner, drive  # noqa: E402
 # ``python -m seed.seed_catalog`` with ``PYTHONPATH=/db`` (package ``seed``, no
 # top-level ``db``). An absolute ``from db.seed import ...`` breaks the latter.
 from . import redact_database_url  # noqa: E402
-
-logger = logging.getLogger(__name__)
 
 INDEX_VERSION: str = "v1"
 
@@ -132,61 +131,6 @@ async def _retire_orphans(session: AsyncSession, index_version: str) -> int:
     await session.execute(delete(Document).where(Document.document_id.in_(ids)))
     await session.flush()
     return len(orphans)
-
-
-async def _disarm_stub_vectors(session: AsyncSession, index_version: str) -> int:
-    """Discard the stub embedder's vectors (and its stamp) before ``v1`` goes live.
-
-    :class:`~app.embeddings.stub.StubEmbedder` hash-buckets a SHA-256 digest: the
-    vectors are deterministic and unit-normalised, but they carry NO meaning —
-    two chunks about the same topic are as far apart as two unrelated ones. That
-    is fine for the worker (an operator running ``citevyn-worker run`` under the
-    stub is explicitly building a throwaway index) but not for the bootstrap
-    path, which is what ``make demo`` / ``deploy.sh`` / ``scripts/smoke.sh``
-    serve to a human.
-
-    Left in place, those vectors would flip the pgvector arm from DEAD to
-    LIVE-WITH-NONSENSE on every ``make demo``: the demo API is configured with
-    the same stub embedder, so ``is_index_embedder_mismatch`` sees stamp ==
-    config and the Tier-3 gate ALLOWS the arm
-    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`), which
-    then ranks by hash distance and hands the LLM confidently mis-ordered
-    chunks. Silent mis-ranking is strictly worse than a missing arm, because the
-    lexical arms alone still answer and the operator has no signal at all.
-
-    So we NULL the vectors and clear the provenance stamp, which puts the index
-    in exactly the state the read path already documents and handles:
-
-    * :class:`app.retrieval.vector.VectorRetriever` filters on
-      ``Chunk.embedding.is_not(None)``, so the arm contributes nothing and
-      retrieval falls back to exact + keyword — the pre-#178 demo behaviour.
-    * ``GET /health/index`` reports ``vector_arm.status == "dead"``
-      (:func:`app.services.index_health.derive_vector_arm_status`), which is the
-      honest, operator-visible signal that the demo has no semantic recall.
-    * A cleared stamp is the "unknown provenance ⇒ allow" case the Tier-3 gate
-      is written for, so a later real-embedder deploy reading this index is not
-      wedged into a permanent mismatch degrade by a stamp that was never true.
-
-    Configure a real provider (``CITEVYN_EMBEDDING_PROVIDER=gemini``) and none of
-    this runs: real vectors are kept and stamped. Returns the rows nulled, which
-    :func:`seed` reports so a "why is my demo not doing semantic search?" answer
-    is one seed log away.
-    """
-    doc_ids = select(Document.document_id).where(Document.index_version == index_version)
-    # Subquery rather than UPDATE ... FROM: the hermetic test engine is SQLite,
-    # where a multi-table UPDATE is not portable.
-    result = await session.execute(
-        update(Chunk)
-        .where(Chunk.document_id.in_(doc_ids), Chunk.embedding.is_not(None))
-        .values(embedding=None)
-    )
-    row = await session.get(IndexVersion, index_version)
-    if row is not None:
-        row.embedding_provider = None
-        row.embedding_model = None
-        row.embedding_dim = None
-    await session.flush()
-    return int(result.rowcount or 0)
 
 
 async def _activate(session: AsyncSession, index_version: str) -> str:
@@ -262,13 +206,13 @@ async def seed(database_url: str) -> dict[str, int | str]:
     :func:`_retire_orphans` for why a re-seed would otherwise serve the corpus
     twice on any database bootstrapped before #178.
 
-    Under the default stub embedder the vectors are discarded again before the
-    index is activated — see :func:`_disarm_stub_vectors`.
+    Under the default stub embedder no vectors are written at all — see
+    ``write_vectors`` on :func:`app.worker.cli.build_runner`.
 
     **Failure path — what is and is not guaranteed.** If any source fails this
-    raises :class:`SeedError`, having skipped retirement, the stub-vector strip
-    and activation. That is NOT the same as "a broken corpus edit cannot go
-    live", and this seeder is not transactional across sources:
+    raises :class:`SeedError`, having skipped retirement and activation. That
+    is NOT the same as "a broken corpus edit cannot go live", and this seeder is
+    not transactional across sources:
 
     * :func:`app.worker.cli.drive` commits each source as it goes, so the
       sources that succeeded are already written into ``v1``.
@@ -299,57 +243,41 @@ async def seed(database_url: str) -> dict[str, int | str]:
     # Fails loud on a stub embedder in production / a wrong-dim config, exactly
     # as ``citevyn-worker run`` and the API startup guard do — the old seeder
     # had no such guard, so a production bootstrap could quietly build an index
-    # nothing validated. Under a real provider the vectors it produces here are
-    # kept; under the stub they are stripped again below.
-    runner = build_runner(settings, index_version=INDEX_VERSION)
+    # nothing validated.
+    #
+    # ``write_vectors=False`` under the stub: the bootstrap must never PERSIST
+    # hash-bucketed vectors. They would flip the demo's pgvector arm from DEAD
+    # to LIVE-WITH-NONSENSE — the demo API runs the same stub, so the Tier-3
+    # stamp check would see a match, enable the arm, and rank by SHA-256
+    # distance while ``/health/index`` reported it healthy. NULL embeddings are
+    # the state the read path already short-circuits on (``VectorRetriever``
+    # filters ``embedding IS NOT NULL``) and reports honestly as ``dead``.
+    #
+    # Not written, rather than written-then-stripped: ``drive`` commits each
+    # source as it goes and a re-seed runs against an already-ACTIVE ``v1``, so
+    # any after-the-fact strip leaves a window in which a live reader sees them.
+    runner = build_runner(
+        settings,
+        index_version=INDEX_VERSION,
+        write_vectors=settings.embedding_provider != "stub",
+    )
     engine = create_async_engine(database_url, future=True)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     try:
         exit_code = await drive(runner, sessionmaker, list(MVP_SOURCES), INDEX_VERSION)
         if exit_code != 0:
-            # Disarm BEFORE raising. ``drive`` commits each source as it goes, so
-            # by the time a later source fails the earlier ones' stub vectors are
-            # already persisted — and on a RE-SEED (the deploy.sh path) v1 is
-            # already ``active``, so those rows are LIVE. Leaving them would hand
-            # a reader an index whose vector arm ranks by SHA-256 hash distance
-            # while ``/health/index`` reports it healthy, which is strictly worse
-            # than a dead arm: the lexical fallback never engages.
-            #
-            # Best-effort and swallowed: the SeedError below is the operator's
-            # actionable signal, and a disarm failure must not mask it.
-            if settings.embedding_provider == "stub":
-                try:
-                    async with sessionmaker() as session:
-                        await _disarm_stub_vectors(session, INDEX_VERSION)
-                        await session.commit()
-                except Exception:  # noqa: BLE001 - never mask the real failure
-                    logger.exception("stub_vector_disarm_failed_on_error_path")
             raise SeedError(
                 "one or more sources failed to ingest; the demo catalog is incomplete "
                 f"and {INDEX_VERSION} was left unpromoted (see the ingestion job rows)"
             )
         async with sessionmaker() as session:
             retired = await _retire_orphans(session, INDEX_VERSION)
-            # Before activation, so on a FIRST-TIME bootstrap the index is never
-            # visible to a reader while it still carries hash-bucketed vectors.
-            # NB on a RE-SEED there is still a window: ``drive`` commits per
-            # source against an already-active v1, so a query landing mid-seed can
-            # see stub vectors. Closing that needs the bootstrap to never WRITE
-            # them (a null-embedder seam in build_runner) rather than to strip
-            # them afterwards — tracked separately; this path bounds the damage
-            # rather than eliminating it.
-            disarmed = (
-                await _disarm_stub_vectors(session, INDEX_VERSION)
-                if settings.embedding_provider == "stub"
-                else 0
-            )
             status = await _activate(session, INDEX_VERSION)
             summary: dict[str, int | str] = dict(await _tally(session, INDEX_VERSION))
             await session.commit()
     finally:
         await engine.dispose()
     summary["retired_documents"] = retired
-    summary["stub_vectors_discarded"] = disarmed
     summary["index_version"] = INDEX_VERSION
     summary["status"] = status
     return summary
@@ -367,10 +295,6 @@ def main() -> None:
         f"chunks={summary['chunks']} "
         f"exact_terms={summary['exact_terms']} "
         f"retired_documents={summary['retired_documents']} "
-        # Non-zero means the stub embedder ran: the vector arm is deliberately
-        # dead on this stack (see _disarm_stub_vectors). ``.get`` so an older
-        # caller / a monkeypatched seed without the key still prints a line.
-        f"stub_vectors_discarded={summary.get('stub_vectors_discarded', 0)} "
         f"index_version={summary['index_version']} ({summary['status']})"
     )
 

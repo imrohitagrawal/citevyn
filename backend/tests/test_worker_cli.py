@@ -27,10 +27,13 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings
+from app.embeddings import NullEmbedder
 from app.models.base import Base
+from app.models.chunks import Chunk
 from app.models.index_versions import IndexVersion
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source
 from app.worker.cli import build_runner, content_version_hash, drive
@@ -174,6 +177,89 @@ def testbuild_runner_stamps_the_content_hash(index_version: str) -> None:
     runner = build_runner(Settings(embedding_provider="stub"), index_version=index_version)
     assert runner.source_version_hash == content_version_hash(MVP_SOURCES)
     assert runner.source_version_hash.startswith("sha256:")
+
+
+# ---------------------------------------------------------------------------
+# The write_vectors seam (#178): the bootstrap must never PERSIST stub vectors
+# ---------------------------------------------------------------------------
+
+
+async def test_build_runner_write_vectors_false_persists_no_vectors_and_no_stamp() -> None:
+    """``write_vectors=False`` ⇒ every chunk lands unembedded, index unstamped.
+
+    The seam ``db/seed/seed_catalog.py`` uses. Asserted end-to-end through the
+    real runner rather than by inspecting the embedder object, because the thing
+    that matters is what is in the DB: ``VectorRetriever`` filters on
+    ``embedding IS NOT NULL``, and the Tier-3 gate reads ``embedding_provider``.
+    A ``stub`` stamp with no vectors behind it would still enable the arm.
+    """
+    settings = Settings(embedding_provider="stub", _env_file=None)
+    runner = build_runner(settings, index_version="v-local", write_vectors=False)
+    assert (runner.embedding_provider, runner.embedding_model) == (None, None)
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{fh.name}")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+            assert await drive(runner, factory, [get_source("claude_code")], "v-local") == 0
+            async with factory() as session:
+                chunks = (await session.execute(select(Chunk))).scalars().all()
+                row = await session.get(IndexVersion, "v-local")
+        finally:
+            await engine.dispose()
+
+    # Guard against a vacuous pass: no chunks would make the NULL check trivial.
+    assert chunks, "the ingest produced no chunks at all"
+    assert [c for c in chunks if c.embedding is not None] == []
+    assert row is not None
+    # The whole provenance triple, not just the provider: a bare dim is a claim
+    # about a vector space nothing was written into.
+    assert (row.embedding_provider, row.embedding_model, row.embedding_dim) == (None, None, None)
+
+
+async def test_build_runner_defaults_to_writing_vectors_for_the_worker_cli() -> None:
+    """The contrast case: ``citevyn-worker run`` is UNCHANGED by the seam.
+
+    An operator building a throwaway stub index has asked for it explicitly, and
+    a real provider must obviously still embed. Pinned so flipping the default
+    to ``False`` (which would silently kill every real ingest's vector arm)
+    cannot pass.
+    """
+    settings = Settings(embedding_provider="stub", _env_file=None)
+    runner = build_runner(settings, index_version="v-local")
+    assert (runner.embedding_provider, runner.embedding_model) == (
+        settings.embedding_provider,
+        settings.embedding_model,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{fh.name}")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+            assert await drive(runner, factory, [get_source("claude_code")], "v-local") == 0
+            async with factory() as session:
+                chunks = (await session.execute(select(Chunk))).scalars().all()
+        finally:
+            await engine.dispose()
+
+    assert chunks and all(c.embedding is not None for c in chunks)
+
+
+async def test_null_embedder_returns_one_none_per_text() -> None:
+    """Length parity is load-bearing: ``_materialize_chunks`` zips ``strict=True``.
+
+    A short (or long) return would raise ``ValueError`` mid-ingest instead of
+    persisting chunks, so the demo bootstrap would fail rather than silently
+    drop content — but it would still fail. Pinned directly.
+    """
+    embedder = NullEmbedder(dim=1536)
+    assert embedder.dim == 1536
+    assert await embedder.embed_documents([]) == []
+    assert await embedder.embed_documents(["a", "b", "c"]) == [None, None, None]
 
 
 # ---------------------------------------------------------------------------

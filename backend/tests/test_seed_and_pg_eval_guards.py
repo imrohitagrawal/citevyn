@@ -315,7 +315,7 @@ async def test_db_seed_carries_the_claude_code_install_content(monkeypatch) -> N
 
 
 async def test_db_seed_stub_provider_leaves_the_vector_arm_dead_not_nonsense(monkeypatch) -> None:
-    """The default (stub) bootstrap must NOT ship hash-bucketed vectors.
+    """SUCCESS path: the default (stub) bootstrap must NOT ship hash-bucketed vectors.
 
     ``StubEmbedder`` is deterministic but carries no meaning. Persisting its
     vectors would flip ``make demo``'s pgvector arm from DEAD to
@@ -327,20 +327,29 @@ async def test_db_seed_stub_provider_leaves_the_vector_arm_dead_not_nonsense(mon
     ``VectorRetriever`` filters out) and no provenance stamp (so a later
     real-embedder deploy is not wedged into a permanent mismatch degrade by a
     stamp that was never true).
+
+    Nothing here inspects *how* that is achieved, but the mechanism is "never
+    written" (``build_runner(..., write_vectors=False)``) rather than
+    "written then stripped" — see the failure-path twin below, which is the case
+    a post-hoc strip could not cover.
     """
     import db.seed.seed_catalog as seedmod
 
     monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
     with tempfile.NamedTemporaryFile(suffix=".db") as fh:
         url = await _fresh_sqlite_url(fh)
-        summary = await seedmod.seed(url)
+        await seedmod.seed(url)
         chunks, iv = await _read_rows(url)
 
+    # Guard against a vacuous pass: "every embedding is NULL" is trivially true
+    # of an empty index and would prove nothing.
     assert chunks, "the seed produced no chunks at all"
-    assert all(c.embedding is None for c in chunks)
+    embedded = [c for c in chunks if c.embedding is not None]
+    assert not embedded, (
+        f"{len(embedded)} of {len(chunks)} chunks were persisted with stub vectors; "
+        "the vector arm would rank by hash distance while /health/index reports healthy"
+    )
     assert (iv.embedding_provider, iv.embedding_model, iv.embedding_dim) == (None, None, None)
-    # ...and the operator is told, rather than left to wonder why recall is lexical.
-    assert summary["stub_vectors_discarded"] == len(chunks)
 
 
 async def test_db_seed_stub_index_reports_a_dead_vector_arm_to_operators(monkeypatch) -> None:
@@ -372,8 +381,8 @@ async def test_db_seed_stub_index_reports_a_dead_vector_arm_to_operators(monkeyp
     assert health["chunks_embedded"] == 0 and health["chunks_total"] > 0
 
 
-async def test_db_seed_stub_disarm_does_not_touch_other_index_versions(monkeypatch) -> None:
-    """Edge case: the strip is scoped to ``v1``.
+async def test_db_seed_stub_bootstrap_does_not_touch_other_index_versions(monkeypatch) -> None:
+    """Edge case: the bootstrap is scoped to ``v1``.
 
     An operator's real-embedder index living in the same database must keep its
     vectors and its stamp — a bootstrap re-seed that blanked them would silently
@@ -405,7 +414,7 @@ async def test_db_seed_stub_disarm_does_not_touch_other_index_versions(monkeypat
                 title="op",
                 source_url="https://example.com",
                 status=DocumentStatus.active,
-                content_checksum="c",
+                identity_checksum="c",
                 last_fetched_at=datetime.now(UTC),
                 last_indexed_at=datetime.now(UTC),
             )
@@ -611,20 +620,23 @@ async def test_db_seed_failed_source_on_an_active_index_is_already_live(monkeypa
 async def test_db_seed_failed_source_leaves_the_vector_arm_DEAD_not_nonsense(
     monkeypatch,
 ) -> None:
-    """The failure path must not leave hash-bucketed stub vectors LIVE.
+    """FAILURE path: a half-finished re-seed must not leave stub vectors LIVE either.
 
-    Adversarial review caught this: ``_disarm_stub_vectors`` originally ran only
-    on the success path, but ``drive`` COMMITS each source as it goes and, on a
-    re-seed, ``v1`` is already ``active``. So a later source failing left the
-    succeeded sources' stub vectors persisted under a matching ``stub`` stamp —
-    at which point ``is_index_embedder_mismatch`` returns False, the vector arm is
-    ENABLED, and retrieval ranks by SHA-256 hash distance while ``/health/index``
-    reports the index healthy.
+    This is the case that forced the design. ``drive`` COMMITS each source as it
+    goes and, on a re-seed, ``v1`` is already ``active`` — so the sources that
+    succeeded before the failure are visible to readers *immediately*, whatever
+    the seeder does afterwards. Under a matching ``stub`` stamp,
+    ``is_index_embedder_mismatch`` returns False, the vector arm is ENABLED, and
+    retrieval ranks by SHA-256 hash distance while ``/health/index`` reports the
+    index healthy. Strictly worse than a dead arm: a dead arm falls back to the
+    lexical ones, a live-with-nonsense arm silently returns garbage rankings.
 
-    That is strictly worse than a dead arm: a dead arm falls back to the lexical
-    one, whereas a live-with-nonsense arm silently returns garbage rankings. So
-    the assertion is that every chunk's embedding is NULL after a FAILED re-seed —
-    dead, which the retriever short-circuits on.
+    An after-the-fact strip cannot close this (there is always a window between
+    the per-source commit and the strip, and on the failure path the strip is
+    racing an exception), which is why the bootstrap runs a
+    :class:`~app.embeddings.null.NullEmbedder` and never writes the vectors at
+    all. The assertion is unchanged and end-to-end: every chunk in ``v1`` is
+    unembedded after a FAILED re-seed.
     """
     import db.seed.seed_catalog as seedmod
 
@@ -707,7 +719,7 @@ async def test_db_seed_retires_a_pre_178_hand_written_catalog(monkeypatch) -> No
                 product_area="claude_api",
                 source_url="https://docs.test/claude",
                 title="Claude API",
-                content_checksum="sha256:demo-claude_api",
+                identity_checksum="sha256:demo-claude_api",
                 status=DocumentStatus.active,
                 last_fetched_at=datetime.now(UTC),
                 last_indexed_at=datetime.now(UTC),
@@ -784,7 +796,7 @@ async def test_db_seed_leaves_other_index_versions_alone(monkeypatch) -> None:
                     product_area="claude_api",
                     source_url="https://example.test/x",
                     title="Operator doc",
-                    content_checksum="sha256:x",
+                    identity_checksum="sha256:x",
                     status=DocumentStatus.active,
                     last_fetched_at=datetime.now(UTC),
                     last_indexed_at=datetime.now(UTC),
