@@ -250,8 +250,41 @@ was about).
 
 | # | Path | What it is | Status |
 |---|---|---|---|
-| A | **Data-recovery rollback** (RUNBOOK §4.2) | `backup.sh` → stop `api`/`worker` → `restore.sh` → api healthy → full functional re-verify | **PROVEN** by every `make deploy-verify` run. Drill A always runs. |
-| B | **Code rollback to the previous tag** | `rollback.sh <prev>` → re-verify → roll forward → re-verify | **PROVEN only when `PREV_VERSION` is the same migration generation.** Otherwise NOT proven, and the run says so. |
+| A | **Data-recovery rollback** (RUNBOOK §4.2) | `backup.sh` → stop `api`/`worker` → `restore.sh` → api healthy → full functional re-verify | **PROVEN end to end** — run 2026-07-20, see the evidence below. Drill A always runs. |
+| B | **Code rollback to the previous tag** | `rollback.sh <prev>` → re-verify → roll forward → re-verify | **PROVEN end to end** — same run. Runs only when `PREV_VERSION` is the same migration generation; otherwise the run says so and does not claim it. |
+
+#### The evidence
+
+A full `deploy_verify.sh` run against a real local prod stack on **2026-07-20**
+scored **42 passed / 0 failed**, exercising both drills end to end:
+
+```
+ [PASS] drill A: backup -> pg_restore -> stack healthy
+ [PASS] post-restore …: in-corpus question returns a CITED answer   (+7 more probes)
+ [PASS] drill B: rollback to v0.10.1-drillbase
+ [PASS] rolled-back …: in-corpus question returns a CITED answer    (+7 more probes)
+ [PASS] roll forward to v0.10.2-drilltop
+ [PASS] restored …: in-corpus question returns a CITED answer       (+7 more probes)
+ passed: 42   failed: 0
+ production: api container UP and healthy, serving v0.10.2-drilltop
+ rollback coverage:
+   ✓ data-recovery rollback (RUNBOOK §4.2) — PROVEN end to end
+   ✓ code rollback to v0.10.1-drillbase + roll forward — PROVEN end to end
+```
+
+The full probe suite — cited answer, refusal, exact lookup, admin 401 — was
+re-run against the **rolled-back** stack, not just a health check. A rollback
+that boots but cannot answer is not a rollback.
+
+**What this does and does not establish.** `v0.10.1-drillbase` and
+`v0.10.2-drilltop` are **local, unpushed** drill tags (a pushed `v*` tag triggers
+an image publish via `release.yml`). They are a genuine same-migration-generation
+pair — both ship `0001`–`0006` — so the drill exercised the real mechanism:
+`rollback.sh` checked out the older tree, rebuilt the images, redeployed,
+re-verified, and rolled forward again. What it does **not** establish is that any
+particular *published* release pair is rollback-compatible; that is a property of
+the tags, checked per release by the same gate. `v0.9.0` in particular is neither
+same-generation nor bootable (#195).
 
 **Why B is conditional.** `rollback.sh` rolls back code by checking out an older
 tag and rebuilding; the database is untouched, so it stays stamped at the newest
@@ -273,12 +306,28 @@ What changed as a result:
   the operator narrows the scope with `--data-rollback-only` — in which case the
   summary prints `blocker 9 is PARTIAL, not closed`.
 
-**Not proven today, and honestly so:** as of v0.10.0 the repo has no second tag
-in the same migration generation (`v0.9.0` predates four migrations *and* cannot
-boot — #195), so drill B has never run end to end. It becomes provable at the
-first release pair that ships no migration; until then blocker 9 is satisfied by
-path A only. `tests/shell/` covers the refusal logic and the argument guards, not
-the drills — those need a live prod stack.
+**Still not proven, and honestly so:** the **cross-generation** recovery — restore
+a dump taken while the OLDER release was live, then
+`rollback.sh <target> --allow-migration-mismatch` — has not been run end to end.
+Drill A restores a dump it took seconds earlier at the *same* schema generation,
+which proves the backup/restore plumbing and that the stack survives its database
+being dropped and rebuilt underneath it. It does not prove the §4.2 sequence for a
+dump that predates a migration. `--allow-migration-mismatch` has argument-level
+coverage only.
+
+There is also no **published** release pair in the same migration generation
+(`v0.9.0` predates four migrations *and* cannot boot — #195), so the drill above
+used local tags. The first release pair that ships no migration makes drill B
+reproducible by anyone.
+
+**Test coverage vs drill coverage.** `tests/shell/test_drill_crash_safety.sh`
+drives the real drill (`_drill_lib.sh`) with `docker`, `backup.sh` and
+`restore.sh` stubbed, and asserts the property that matters — every exit path
+leaves the writers running — including a failed restore, a failed restart, an
+unhealthy api, a failed `stop`, and an abort between the stop and the restart.
+`test_rollback_migration_guard.sh` covers the refusal logic and the `--base-ref`
+contract. Neither needs docker. What still needs a live prod stack is the drill
+itself, which is what `make deploy-verify` is for.
 
 ## 11. V1 Roadmap
 

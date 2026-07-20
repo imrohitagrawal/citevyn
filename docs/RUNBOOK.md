@@ -430,7 +430,7 @@ images up. Brief 502s on :443 are expected (~10s).
 **Use the script — it is the same path the release gate drills.**
 
 ```bash
-make rollback TAG=v0.1.0        # explicit tag
+make rollback TAG=v0.9.0        # explicit tag
 make rollback TAG=--previous    # the tag before HEAD, resolved for you
 ```
 
@@ -450,18 +450,33 @@ live:
 ```bash
 docker compose -f infra/docker/docker-compose.yml --profile prod stop api worker
 ./infra/docker/scripts/restore.sh infra/docker/backups/citevyn-<ts>.dump   # §4.2
-./infra/docker/scripts/rollback.sh v0.1.0 --allow-migration-mismatch
+./infra/docker/scripts/rollback.sh v0.9.0 --allow-migration-mismatch
 ```
 
 `--allow-migration-mismatch` is the deliberate override. Use it only
 after such a restore, or when you know the intervening migrations are
 additive-only **and** the old code tolerates the current schema.
 
+**Rolling back a SECOND time — you will need `--base-ref`.** A successful
+rollback leaves you on a detached HEAD at the target tag. The migration
+check compares the target against the *deployed* tree and uses `HEAD` as
+that proxy, so from a detached HEAD it would be comparing against the
+release you already rolled back to — while the database is still stamped
+at the newest revision. The boundary would become invisible and the
+check would wave through the very failure it exists to prevent. So it
+refuses, and you name the deployed release yourself:
+
+```bash
+./infra/docker/scripts/rollback.sh v0.9.0 --base-ref v0.10.0
+```
+
+Or just `git checkout main` first, if the incident allows it.
+
 Equivalent by hand:
 
 ```bash
-git checkout v0.1.0                 # source tree at the previous tag
-VERSION=v0.1.0 make refresh
+git checkout v0.9.0                 # source tree at the previous tag
+VERSION=v0.9.0 make refresh
 ```
 
 The compose file re-builds the images from the old source. Migrations
@@ -524,10 +539,10 @@ So when rolling back across a bump, roll the version *forward* instead
 of letting it revert:
 
 ```bash
-git checkout v0.1.0
+git checkout v0.9.0
 # The bad release shipped v2; do NOT go back to v1 — pick a THIRD value
 # so the cache is cold in both directions.
-CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.1.0 make refresh
+CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.9.0 make refresh
 ```
 
 Check which value you are leaving before you roll back:
