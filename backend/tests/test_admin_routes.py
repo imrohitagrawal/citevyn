@@ -515,3 +515,52 @@ def test_get_ingestion_job_404(admin_app) -> None:
     with TestClient(admin_app) as client:
         response = client.get(f"/v1/admin/ingestion_jobs/{uuid.uuid4()}", headers=_admin_headers())
     assert response.status_code == 404
+
+
+def test_budget_endpoint_requires_the_admin_key(admin_app) -> None:
+    """Spend is operational detail about the demo's economics, not public."""
+    with TestClient(admin_app) as client:
+        assert client.get("/v1/admin/budget").status_code == 401
+
+
+def test_budget_endpoint_reports_todays_spend_and_warn_flags(
+    admin_app, session: AsyncSession
+) -> None:
+    """The Layer-5 surface must reflect real rows, not a hardcoded shape.
+
+    Asserting ``remaining == hard_limit`` on an empty meter and then a specific
+    non-zero split after a write is what distinguishes "reads the meter" from
+    "returns a plausible constant".
+    """
+    import asyncio
+    from decimal import Decimal
+
+    from app.models.provider_calls import ProviderCall
+
+    with TestClient(admin_app) as client:
+        body = client.get("/v1/admin/budget", headers=_admin_headers()).json()
+        assert body["state"] == "ok"
+        assert Decimal(body["spend_usd"]) == Decimal(0)
+        assert Decimal(body["remaining_usd"]) == Decimal(str(body["hard_limit_usd"]))
+        assert body["warn_60pct"] is False
+
+        session.add(
+            ProviderCall(
+                occurred_at=datetime.now(UTC),
+                kind="llm",
+                call_site="answer",
+                provider="router",
+                model="openai/gpt-4o-mini",
+                input_tokens=1,
+                output_tokens=1,
+                cost_usd=Decimal("8.50"),  # 85% of the $10 hard limit
+            )
+        )
+        asyncio.get_event_loop().run_until_complete(session.commit())
+
+        body = client.get("/v1/admin/budget", headers=_admin_headers()).json()
+        assert Decimal(body["spend_usd"]) == Decimal("8.50")
+        assert Decimal(body["remaining_usd"]) == Decimal("1.50")
+        assert body["state"] == "soft"
+        assert body["warn_60pct"] is True
+        assert body["warn_85pct"] is True

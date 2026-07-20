@@ -13,7 +13,7 @@ assumes the one above it has failed.
 | 2 | Admission control (concurrency + budget check) | **Live** — see §2 |
 | 3 | Global daily budget (§9 soft/hard) | **Live** — see §3 |
 | 4 | Per-user rate limit behind a persisted store | Partial (in-process today) |
-| 5 | Spend visibility + `make budget` | Planned — #153 |
+| 5 | Spend visibility + `make budget` | **Live** — see §5 |
 | 6 | CI spend bounding | **Live** — see §6 |
 
 ---
@@ -93,7 +93,45 @@ as metering, **before** the provider call:
 `budget_snapshot()` exposes today's spend, remaining budget and the 60% / 85% warn
 flags for the Layer-5 admin surface.
 
-## 4-5. Still open
+## 5. Visibility — LIVE
+
+Two surfaces, one per question an operator actually asks.
+
+**"What has the app spent today?"** — `GET /v1/admin/budget` (admin-key gated, like
+every route on that router). Returns today's spend, remaining budget, the §9 state,
+and `warn_60pct` / `warn_85pct` flags mirroring the enforcement thresholds so a
+dashboard cannot drift from them.
+
+**"How much is left on the KEY?"** — `make budget`. This is the more important of
+the two, because app-side metering can only see what *this app* spent; only the
+provider knows the key's total. It is a **free** metadata read (`GET
+/api/v1/key` — no model invoked, no tokens billed), so it is safe in a deploy gate
+or a loop. It is also the check that caught the key at **96.6% consumed**, which no
+application-side layer could have known.
+
+```bash
+make budget                       # warn below $1 of headroom
+MIN_REMAINING_USD=5 make budget    # require more
+```
+
+Exit codes are deliberately distinct, because a deploy gate branches on them:
+
+| Code | Meaning | Gate behaviour |
+|---|---|---|
+| 0 | Checked, has headroom | proceed |
+| 1 | Checked, and it is LOW — or no provider-side limit is set at all, or the response was unparseable | **block** |
+| 2 | Could NOT check (no key found) | warn, do not block |
+
+Collapsing 1 and 2 would either block every deploy on a host without an OpenRouter
+key, or let an exhausted key through. A **missing** provider limit is a failure, not
+a pass: §0 calls that cap the only layer app code cannot bypass, so its absence is
+the single most important thing this check can report.
+
+Wired into `make deploy-verify` preflight, so a release cannot proceed on an
+exhausted key — the stack would otherwise deploy, boot, pass `/health`, and then
+fail every actual question with a provider 402.
+
+## 4. Still open
 
 Tracked on
 [#153](https://github.com/imrohitagrawal/citevyn/issues/153). The design constraints
