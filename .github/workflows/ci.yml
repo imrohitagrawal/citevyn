@@ -13,8 +13,15 @@
 name: ci
 
 on:
+  # ``workflow_dispatch`` exists so the PAID judged eval can be run deliberately
+  # from the Actions tab without pushing anything. See the answer-quality-eval job.
+  workflow_dispatch:
   push:
     branches: [main]
+    # Release tags run the full CI, which is what turns the judged eval into the
+    # release gate. Actions minutes are free on this public repo, so re-running the
+    # deterministic jobs on a tag costs nothing and the judged gate is worth it.
+    tags: ['v*']
   pull_request:
     branches: [main]
     # ``labeled`` is beyond the default [opened, synchronize, reopened] so that
@@ -241,17 +248,29 @@ jobs:
     # disabling hard gates on a PR. Bounding frequency is both cheaper and lossless:
     # every run that happens is a FULL run.
     #
-    # So: run on every push to main, and on a pull request only when it carries the
-    # `full-eval` label. ``github.event.pull_request`` is NULL on a push, so the
-    # PR-only form of this condition skipped the job on every push to main — that
-    # bug is why main had no judged gate at all. A push to main is always same-repo
-    # (a fork cannot push here), so allowing it does not widen fork-secret exposure.
+    # It ran on EVERY push to main, i.e. on every merge. At ≈$0.026 a merge that is
+    # a standing charge for ordinary development, which is not what the key is for.
+    # Owner policy: the paid key is spent when FINALISING a release, not while
+    # coding. So the job now runs on exactly three deliberate triggers:
     #
-    # TRADEOFF, stated: an unlabelled PR gets no judged gate; a judged regression
-    # surfaces on merge to main. Label a PR `full-eval` to gate it before merge —
-    # `labeled` is in the trigger types above, so the label alone re-runs this.
+    #   1. a `v*` TAG push        — the release gate; a bad tag still cannot ship
+    #   2. `workflow_dispatch`    — run it on demand, from the Actions tab
+    #   3. a PR labelled `full-eval` — gate a risky PR before merging it
+    #
+    # Note it is the TRIGGER that controls spend, not the secret. Removing the
+    # secret would also stop the spend, but the job then self-skips SILENTLY and
+    # every release would need the secret re-added by hand — a worse failure mode
+    # than an explicit trigger.
+    #
+    # TRADEOFF, stated plainly: an ordinary merge to main now has NO judged gate,
+    # so an answer-quality regression can sit on main until the next tag or manual
+    # run. That is deliberate at this budget. The hermetic half of the eval
+    # (hit-rate, MRR, refusal leaks, the multi-turn echo oracle) still runs on
+    # every push inside `pytest + lint` and costs nothing — only the LLM-JUDGED
+    # half is deferred.
     if: >-
-      github.event_name == 'push' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'full-eval'))
     services:
