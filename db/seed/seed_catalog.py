@@ -39,6 +39,7 @@ Two consequences worth knowing:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,6 +71,8 @@ from app.worker.cli import build_runner, drive  # noqa: E402
 # ``python -m seed.seed_catalog`` with ``PYTHONPATH=/db`` (package ``seed``, no
 # top-level ``db``). An absolute ``from db.seed import ...`` breaks the latter.
 from . import redact_database_url  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 INDEX_VERSION: str = "v1"
 
@@ -304,14 +307,37 @@ async def seed(database_url: str) -> dict[str, int | str]:
     try:
         exit_code = await drive(runner, sessionmaker, list(MVP_SOURCES), INDEX_VERSION)
         if exit_code != 0:
+            # Disarm BEFORE raising. ``drive`` commits each source as it goes, so
+            # by the time a later source fails the earlier ones' stub vectors are
+            # already persisted — and on a RE-SEED (the deploy.sh path) v1 is
+            # already ``active``, so those rows are LIVE. Leaving them would hand
+            # a reader an index whose vector arm ranks by SHA-256 hash distance
+            # while ``/health/index`` reports it healthy, which is strictly worse
+            # than a dead arm: the lexical fallback never engages.
+            #
+            # Best-effort and swallowed: the SeedError below is the operator's
+            # actionable signal, and a disarm failure must not mask it.
+            if settings.embedding_provider == "stub":
+                try:
+                    async with sessionmaker() as session:
+                        await _disarm_stub_vectors(session, INDEX_VERSION)
+                        await session.commit()
+                except Exception:  # noqa: BLE001 - never mask the real failure
+                    logger.exception("stub_vector_disarm_failed_on_error_path")
             raise SeedError(
                 "one or more sources failed to ingest; the demo catalog is incomplete "
                 f"and {INDEX_VERSION} was left unpromoted (see the ingestion job rows)"
             )
         async with sessionmaker() as session:
             retired = await _retire_orphans(session, INDEX_VERSION)
-            # Before activation, so on a first-time bootstrap the index is never
+            # Before activation, so on a FIRST-TIME bootstrap the index is never
             # visible to a reader while it still carries hash-bucketed vectors.
+            # NB on a RE-SEED there is still a window: ``drive`` commits per
+            # source against an already-active v1, so a query landing mid-seed can
+            # see stub vectors. Closing that needs the bootstrap to never WRITE
+            # them (a null-embedder seam in build_runner) rather than to strip
+            # them afterwards — tracked separately; this path bounds the damage
+            # rather than eliminating it.
             disarmed = (
                 await _disarm_stub_vectors(session, INDEX_VERSION)
                 if settings.embedding_provider == "stub"

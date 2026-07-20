@@ -608,6 +608,78 @@ async def test_db_seed_failed_source_on_an_active_index_is_already_live(monkeypa
     assert iv.source_version_hash == before_hash
 
 
+async def test_db_seed_failed_source_leaves_the_vector_arm_DEAD_not_nonsense(
+    monkeypatch,
+) -> None:
+    """The failure path must not leave hash-bucketed stub vectors LIVE.
+
+    Adversarial review caught this: ``_disarm_stub_vectors`` originally ran only
+    on the success path, but ``drive`` COMMITS each source as it goes and, on a
+    re-seed, ``v1`` is already ``active``. So a later source failing left the
+    succeeded sources' stub vectors persisted under a matching ``stub`` stamp —
+    at which point ``is_index_embedder_mismatch`` returns False, the vector arm is
+    ENABLED, and retrieval ranks by SHA-256 hash distance while ``/health/index``
+    reports the index healthy.
+
+    That is strictly worse than a dead arm: a dead arm falls back to the lexical
+    one, whereas a live-with-nonsense arm silently returns garbage rankings. So
+    the assertion is that every chunk's embedding is NULL after a FAILED re-seed —
+    dead, which the retriever short-circuits on.
+    """
+    import db.seed.seed_catalog as seedmod
+
+    import app.worker.cli as cli
+
+    good = next(s for s in MVP_SOURCES if s.name == "codex")
+    broken = SourceSpec(
+        name="claude_code",
+        product_area="claude_code",
+        title="Claude Code Reference",
+        fetcher="local",
+        location="app/worker/sources/does_not_exist.md",
+    )
+    monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = await _fresh_sqlite_url(fh)
+        monkeypatch.setattr(seedmod, "MVP_SOURCES", (good,))
+        monkeypatch.setattr(cli, "MVP_SOURCES", (good,))
+        assert (await seedmod.seed(url))["status"] == "promoted"
+
+        monkeypatch.setattr(seedmod, "MVP_SOURCES", (good, broken))
+        monkeypatch.setattr(cli, "MVP_SOURCES", (good, broken))
+        with pytest.raises(seedmod.SeedError, match="incomplete"):
+            await seedmod.seed(url)
+
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                # Chunk carries no index_version of its own; it reaches v1
+                # through its Document.
+                chunks = (
+                    (
+                        await session.execute(
+                            select(Chunk)
+                            .join(Document, Chunk.document_id == Document.document_id)
+                            .where(Document.index_version == "v1")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+        finally:
+            await engine.dispose()
+
+    # Guard against a vacuous pass: if the failed re-seed left NO chunks at all,
+    # "every embedding is NULL" would be trivially true and prove nothing.
+    assert chunks, "no chunks survived the failed re-seed; the assertion below would be vacuous"
+    live = [c for c in chunks if c.embedding is not None]
+    assert not live, (
+        f"{len(live)} of {len(chunks)} chunks kept stub vectors after a FAILED re-seed; "
+        "the vector arm would rank by hash distance while /health/index reports healthy"
+    )
+
+
 async def test_db_seed_retires_a_pre_178_hand_written_catalog(monkeypatch) -> None:
     """Regression: upgrading an EXISTING database must not serve the corpus twice.
 
