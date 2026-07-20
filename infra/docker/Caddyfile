@@ -118,6 +118,15 @@
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
+        # STRIP any client-supplied edge headers before proxying (#203).
+        # The app derives its rate-limit bucket from a configured client-IP
+        # header. Caddy OVERWRITES X-Real-IP/X-Forwarded-For with the real peer,
+        # but it would forward a header it does not set — so a visitor could send
+        # `Fly-Client-IP: <anything>` and mint a fresh 30/hour bucket per request,
+        # bypassing the limit entirely. These are set by the Fly and Cloudflare
+        # edges respectively; behind Caddy there is no legitimate inbound copy.
+        header_up -Fly-Client-IP
+        header_up -CF-Connecting-IP
     }
 
     # Everything else is the JSON API.
@@ -126,6 +135,15 @@
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
+        # STRIP any client-supplied edge headers before proxying (#203).
+        # The app derives its rate-limit bucket from a configured client-IP
+        # header. Caddy OVERWRITES X-Real-IP/X-Forwarded-For with the real peer,
+        # but it would forward a header it does not set — so a visitor could send
+        # `Fly-Client-IP: <anything>` and mint a fresh 30/hour bucket per request,
+        # bypassing the limit entirely. These are set by the Fly and Cloudflare
+        # edges respectively; behind Caddy there is no legitimate inbound copy.
+        header_up -Fly-Client-IP
+        header_up -CF-Connecting-IP
         # Generous timeouts — the /v1/ask endpoint can take 30s+
         # when the LLM provider is slow to respond. Streaming
         # responses are even longer; the API's own timeout (set

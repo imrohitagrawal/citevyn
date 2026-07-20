@@ -282,11 +282,20 @@ class Settings(BaseSettings):
     worker_fetch_timeout_seconds: float = Field(default=20.0, gt=0.0)
     worker_max_chunks_per_doc: int = Field(default=500, ge=1)
 
-    # --- Index promotion gate (Slice 8) ---
-    # Per ``docs/RELEASE_PLAN.md §7`` the promotion gate rejects a
-    # candidate index whose latest ``EvaluationRun.metrics.pass_rate``
-    # is below this threshold. Default 0.95 matches the
-    # "golden pass rate >= 95%" gate.
+    # --- Index promotion gate (Slice 8) — DECLARED BUT NOT ENFORCED ---
+    # ``docs/RELEASE_PLAN.md §7`` specifies that promotion should reject a
+    # candidate index whose latest ``EvaluationRun.metrics.pass_rate`` is below
+    # this threshold.
+    #
+    # NOTHING READS THIS SETTING. ``promote_version``
+    # (app/services/index_versions.py) demotes the active index and activates
+    # the candidate; there is no pass-rate check on that path, and the only
+    # other references are this line and its own settings tests.
+    #
+    # Said plainly because the previous wording described the gate in the
+    # present tense, and a deploy runbook was then written that promised
+    # operators a safety check which does not exist. Until it is implemented,
+    # the human running `make golden` before promoting IS the gate.
     index_promotion_min_pass_rate: float = Field(default=0.95, ge=0.0, le=1.0)
 
     # (The former ``source_version_hash`` setting was removed alongside the

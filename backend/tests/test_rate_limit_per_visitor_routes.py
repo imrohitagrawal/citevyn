@@ -145,3 +145,86 @@ def test_requests_without_the_header_share_one_fallback_bucket(
         "requests with no client address were never limited — the fallback is "
         "handing out a fresh bucket per request"
     )
+
+
+def test_global_backstop_binds_across_distinct_visitors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The shared backstop must actually be enforced on the request path.
+
+    Found by adversarial review: deleting the backstop call from
+    ``rate_limited_demo`` outright left the WHOLE suite green (1274 passed). The
+    only test that named it built a limiter by hand and called ``check`` itself,
+    which proves the limiter CAN hold a global bucket, never that any request
+    uses one — and the route tests deliberately set the backstop out of reach.
+
+    So: set the global limit BELOW the per-visitor limit and drive requests from
+    DISTINCT addresses. A 429 then cannot come from per-visitor keying, which
+    makes it observable proof that the backstop is wired.
+    """
+    import app.core.rate_limit as rate_limit
+
+    db_module.reset_engine()
+    get_settings.cache_clear()
+    db_file = tmp_path / "global_backstop.db"
+    monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_DEMO_USER_PER_HOUR", "10")
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_GLOBAL_PER_HOUR", "3")
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_CLIENT_IP_HEADER", "Fly-Client-IP")
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_KEY_SALT", "backstop-test-salt")
+    get_settings.cache_clear()
+    rate_limit.reset_limiter()
+
+    engine = db_module.get_engine()
+
+    async def _init_schema() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    import asyncio
+
+    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_init_schema())
+
+    try:
+        with TestClient(create_app()) as c:
+            codes = [_create_session(c, f"203.0.113.{i + 20}").status_code for i in range(5)]
+    finally:
+        get_settings.cache_clear()
+        db_module.reset_engine()
+        rate_limit.reset_limiter()
+
+    assert codes[:3] == [201, 201, 201], codes
+    assert 429 in codes[3:], (
+        f"five DIFFERENT visitors, global cap 3, per-visitor cap 10 — expected the "
+        f"backstop to bind but got {codes}. The shared bucket is not being enforced "
+        f"on the request path."
+    )
+
+
+def test_a_spoofed_client_ip_header_cannot_mint_unlimited_buckets(
+    limited_client: TestClient,
+) -> None:
+    """Trusting a header is only safe behind a proxy that OVERWRITES it.
+
+    This is the abuse case: if the app is reachable other than through the
+    trusted proxy, a visitor supplies their own header value and gets a brand
+    new quota every request. The deployment answer is the proxy (compose/Caddy
+    now uses X-Real-IP, which Caddy overwrites, and strips inbound Fly-Client-IP;
+    Fly's edge sets Fly-Client-IP itself). This test pins the CONSEQUENCE so the
+    coupling is visible: with a spoofable header configured, the per-visitor
+    limit does not bind, and only the global backstop stands between an attacker
+    and the corpus.
+
+    It is deliberately an assertion about REALITY, not a wish — if someone later
+    adds a trusted-proxy check, this test should be updated to assert the limit
+    now binds, and that edit is the signal the behaviour changed.
+    """
+    codes = [
+        _create_session(limited_client, f"198.51.100.{i + 1}").status_code for i in range(LIMIT + 3)
+    ]
+    assert codes.count(201) > LIMIT, (
+        "expected distinct spoofed values to each get their own bucket — if this "
+        "now fails, a trusted-proxy check was added and this test should assert "
+        "the limit binds instead"
+    )

@@ -52,6 +52,23 @@ git status             # clean tree on the commit you intend to ship
 You will also need accounts on **Neon** and **Upstash** (both free, both
 sign-in-with-GitHub), and access to the `stackclimb.com` zone in Cloudflare.
 
+### 1a. Create the Fly app (first deploy only)
+
+Everything below resolves the app from `app = "citevyn"` in `fly.toml`, so the
+app has to exist first. Skipping this is not subtle — the first `fly secrets
+set` fails with `Could not find App "citevyn"` — but it is easy to miss when
+following the runbook top to bottom:
+
+```bash
+fly apps create citevyn      # name must match `app` in fly.toml
+fly apps list                # confirm it is there
+```
+
+Use `fly apps create`, **not** `fly launch`: `launch` is the interactive
+scaffolder and will offer to overwrite the `fly.toml` in this repo, along with
+provisioning a Fly Postgres/Redis you are deliberately not using (Neon and
+Upstash are free; Fly's are not).
+
 ---
 
 ## 2. Create the managed data resources
@@ -199,6 +216,9 @@ To ingest into a *candidate* index instead (the normal path for a corpus
 update, RUNBOOK §3.7):
 
 ```bash
+cd /app   # REQUIRED: the backend is a uv *virtual* project, so `app` is not
+          # installed into site-packages — it is importable only from /app.
+          # Without this you get ModuleNotFoundError: No module named 'app'.
 python -m app.worker.cli run   # writes a candidate IndexVersion, does not serve it
 ```
 
@@ -209,12 +229,20 @@ A candidate index is not served until it is promoted. From your laptop:
 ```bash
 curl -sS -X POST \
   -H "X-Admin-API-Key: $CITEVYN_ADMIN_API_KEY" \
-  https://citevyn.stackclimb.com/internal/v1/indexes/<index_version>/promote
+  https://citevyn.stackclimb.com/v1/admin/index_versions/<index_version>/promote
 ```
 
-The promotion gate rejects a candidate whose latest evaluation `pass_rate` is
-below `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (0.95). That is deliberate:
-promotion is the moment bad retrieval reaches users.
+> The path is `/v1/admin/index_versions/<v>/promote` — verified against the
+> running app's OpenAPI, not from memory. An earlier draft of this runbook said
+> `/internal/v1/indexes/...`, which does not exist and 404s.
+
+**Promotion does NOT gate on evaluation quality.** `promote_version`
+(`backend/app/services/index_versions.py`) demotes the current active index and
+activates the candidate — that is all. There is no pass-rate check anywhere in
+the promote path, so *you* are the gate: run `make golden` (and the judged eval
+if the change is risky) BEFORE promoting, because promotion is the moment bad
+retrieval reaches users. `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` exists as a
+setting but nothing reads it.
 
 ### 4.4 Confirm it is actually working
 
