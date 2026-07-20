@@ -181,6 +181,44 @@ def build_embedder(settings: Settings) -> Embedder:
     return StubEmbedder(dim=settings.embedding_dim)
 
 
+def metered_embedder(embedder: Embedder, settings: Settings) -> Embedder:
+    """Wrap a PAID embedder so every embedding call is recorded as spend (#153).
+
+    Applied at the production construction sites — :func:`get_embedder` (the API
+    singleton, query path) and ``app.worker.cli.build_runner`` (ingest) — rather
+    than inside :func:`build_embedder`, which stays **provider selection only**.
+    That split mirrors ``build_llm_client``/``get_llm_client`` and matters for two
+    concrete callers: ``tests/eval/retrieval.py`` and ``tests/eval/distractors.py``
+    deliberately use ``build_embedder`` to avoid the singleton, and a test that
+    asserts *which provider a config selects* must not have to unwrap a decorator.
+
+    The **stub is deliberately not wrapped**, for the same reason
+    :func:`app.llm.factory._metered` does not wrap ``StubLLMClient``: safety
+    mechanisms test the client's identity. ``tests/eval/retrieval.py`` and
+    ``tests/eval/distractors.py`` both branch on
+    ``isinstance(embedder, StubEmbedder)`` to skip the vector arm on the free
+    hermetic path, and ``tests/test_eval_semantic_discrimination.py`` asserts
+    ``not isinstance(..., StubEmbedder)`` to prove a REAL embedder is configured.
+    Behind a decorator the first two go False — the eval would run a hash-bucket
+    "vector" arm and quietly report meaningless retrieval numbers — and the third
+    would pass while the stub was still in place. The stub also has nothing to
+    meter: no network call, no cost.
+    """
+    if isinstance(embedder, StubEmbedder):
+        return embedder
+    from app.cost.metered import MeteredEmbedder
+
+    return MeteredEmbedder(
+        embedder,
+        # Taken from Settings because the Embedder seam returns bare vectors and
+        # carries no provider/model metadata. Exact by construction: these are the
+        # same three values ``configured_embedder_identity`` calls the vector
+        # space's identity, and the embedder above was built from them.
+        provider=settings.embedding_provider,
+        model=settings.embedding_model,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Process-wide singleton
 # ---------------------------------------------------------------------------
@@ -203,7 +241,7 @@ def get_embedder(settings: Settings | None = None) -> Embedder:
             from app.core.config import get_settings
 
             settings = get_settings()
-        _embedder = build_embedder(settings)
+        _embedder = metered_embedder(build_embedder(settings), settings)
         _logger.info(
             "embedder_initialized",
             extra={
@@ -249,6 +287,7 @@ __all__ = [
     "configured_embedder_identity",
     "get_embedder",
     "is_index_embedder_mismatch",
+    "metered_embedder",
     "reset_embedder",
     "shutdown_embedder",
     "validate_embedder_provider",

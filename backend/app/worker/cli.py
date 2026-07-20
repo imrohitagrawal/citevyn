@@ -41,6 +41,7 @@ from app.embeddings import (
     DocumentEmbedder,
     NullEmbedder,
     build_embedder,
+    metered_embedder,
     validate_embedder_provider,
 )
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
@@ -219,9 +220,19 @@ def build_runner(
     # (:func:`app.embeddings.factory.is_index_embedder_mismatch`), which leaves a
     # later real-embedder deploy free to re-stamp instead of being wedged into a
     # permanent mismatch degrade.
+    #
+    # Metering wraps the REAL embedder only, and is applied here as well as in
+    # ``get_embedder``: the worker builds its OWN embedder (it never touches the
+    # API's process-wide singleton), and ingest is the burstiest embedding spend
+    # there is — a whole corpus in one run. Wrapping only the API path would
+    # leave the §9 budget blind to exactly that.
+    #
+    # ``NullEmbedder`` is deliberately NOT wrapped: it issues no provider call,
+    # so metering it would write rows for spend that never happened — the same
+    # reason ``_metered`` refuses to wrap the stub LLM client.
     embedder: DocumentEmbedder
     if write_vectors:
-        embedder = build_embedder(settings)
+        embedder = metered_embedder(build_embedder(settings), settings)
         provider, model = settings.embedding_provider, settings.embedding_model
     else:
         embedder = NullEmbedder(settings.embedding_dim)

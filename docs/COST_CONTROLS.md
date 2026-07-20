@@ -9,7 +9,7 @@ assumes the one above it has failed.
 | Layer | Control | Status |
 |---|---|---|
 | 0 | Provider-side per-key spend cap | **Live** (owner-configured, outside the app) |
-| 1 | Per-call metering (tokens + priced cost) | **Live** (LLM only; embedder open) |
+| 1 | Per-call metering (tokens + priced cost) | **Live** (LLM + embedder) |
 | 2 | Admission control (concurrency + budget check) | **Live** — see §2 |
 | 3 | Global daily budget (§9 soft/hard) | **Live** — see §3 |
 | 4 | Per-user rate limit behind a persisted store | Partial (in-process today) |
@@ -55,8 +55,17 @@ transient 5xx, not as a content refusal — which is the right shape (see §3).
 
 **Layer 1 — metering.** `provider_calls` (migration 0005) records tokens, priced
 cost, provider, model, call site and attempts for every paid LLM call. Priced from
-`app/cost/pricing.py`, keyed by **provider + model**. Covers the LLM only; the
-embedder seam is identical but ~1/10th the per-token price and is still open.
+`app/cost/pricing.py`, keyed by **provider + model**.
+
+The **embedder is metered on the same seam** (`app/cost/metered.MeteredEmbedder`,
+`kind="embedding"`), wrapped at both production construction sites: the API
+singleton (`app/embeddings/factory.get_embedder`, query path, `call_site=answer`)
+and the worker (`app/worker/cli`, ingest path, `call_site=ingest`). Embedding
+tokens come from the provider's `usage.prompt_tokens` where it sends one
+(OpenAI-compatible `/embeddings`) and from a flagged chars/4 estimate where it does
+not (Gemini sends none). Neither stub is wrapped — `isinstance` checks in the eval
+harness depend on the concrete stub types being visible, and the stubs cost
+nothing.
 
 **Layer 2 — admission control.** `app/cost/admission.py` caps paid calls **in
 flight** at `CITEVYN_COST_MAX_CONCURRENT_CALLS` (default 8). This exists because of
@@ -89,6 +98,17 @@ as metering, **before** the provider call:
   database blip into an unmetered spending window. Flip
   `CITEVYN_COST_BUDGET_FAIL_CLOSED=false` to trade cost for availability —
   deliberately, not by accident of error handling.
+
+**The budget gates embeddings too**, not just generation. Two reasons, and the
+second is the load-bearing one: (a) ingest embeds a whole corpus in one burst,
+which is the fastest way to move the daily number, and (b) once the hard limit is
+reached the answer cannot be generated anyway, so embedding the query first is pure
+waste. A hard trip on the query path raises `CostLimitReached` out of the vector
+arm — the retriever only catches `EmbedderUnavailable`, so a cost stop is *not*
+swallowed into a "no source" refusal (#142). The cost is one extra indexed
+aggregate query per embed; a corpus-wide ingest that trips the cap mid-run fails
+that job and is resumed by re-running it, which is strictly cheaper than the
+alternative.
 
 `budget_snapshot()` exposes today's spend, remaining budget and the 60% / 85% warn
 flags for the Layer-5 admin surface.

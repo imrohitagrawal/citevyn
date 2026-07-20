@@ -40,6 +40,7 @@ from typing import Any, cast
 import httpx
 
 from app.core.middleware import get_current_request_id
+from app.cost.usage import report_embedding_usage
 from app.embeddings.errors import EmbedderUnavailable
 
 _logger = logging.getLogger("citevyn.embeddings")
@@ -88,6 +89,29 @@ def _extract_vector(item: Any, *, dim: int) -> list[float]:
             f"OpenRouter embeddings returned dim {len(vector)}, expected {dim}"
         )
     return vector
+
+
+def _prompt_tokens(body: dict[str, Any]) -> int | None:
+    """The billed input-token count from an OpenAI-compatible ``usage`` block.
+
+    ``None`` when the response omits it — OpenRouter really does return 200 with no
+    ``usage`` on some routed upstreams, and the meter must then ESTIMATE and flag
+    rather than record a call as free (see :mod:`app.cost.usage`).
+
+    ``prompt_tokens`` is preferred over ``total_tokens`` only because embeddings
+    have no completion half, so the two agree; ``total_tokens`` is accepted as a
+    fallback for a provider that sends only the aggregate. Anything non-numeric is
+    treated as absent rather than raised on: a bookkeeping field must never be able
+    to fail an embedding that already succeeded.
+    """
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    for key in ("prompt_tokens", "total_tokens"):
+        value = cast(dict[str, Any], usage).get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
 
 
 class OpenRouterEmbedder:
@@ -259,7 +283,13 @@ class OpenRouterEmbedder:
                 raise EmbedderUnavailable(
                     "OpenRouter embeddings returned non-JSON body", cause=exc
                 ) from exc
-            return cast(dict[str, Any], raw)
+            body = cast(dict[str, Any], raw)
+            # Report what the provider says this request cost BEFORE returning, so
+            # the meter records billed tokens rather than a chars/4 guess (#153).
+            # ``attempt + 1`` is the number of HTTP requests actually issued for this
+            # body, so a retried request is not counted as one cheap attempt.
+            report_embedding_usage(input_tokens=_prompt_tokens(body), requests=attempt + 1)
+            return body
 
         # Retries exhausted.
         if isinstance(last_exc, EmbedderUnavailable):

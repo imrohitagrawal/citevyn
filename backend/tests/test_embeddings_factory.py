@@ -16,6 +16,7 @@ import asyncio
 import pytest
 
 from app.core.config import Settings
+from app.cost.metered import MeteredEmbedder
 from app.embeddings import factory as emb_factory
 from app.embeddings.factory import (
     EmbedderIdentity,
@@ -145,9 +146,16 @@ def test_shutdown_embedder_noop_without_singleton() -> None:
 def test_shutdown_embedder_closes_real_client() -> None:
     settings = Settings(embedding_provider="gemini", gemini_api_key="k-123")
     embedder = emb_factory.get_embedder(settings)
-    assert isinstance(embedder, GeminiEmbedder)
+    # The singleton is METERED (#153), so the concrete provider lives one level in.
+    # ``shutdown_embedder`` must still reach through the decorator and close the
+    # real httpx pool — a wrapper that swallowed ``aclose`` would leak a socket per
+    # config reload with nothing to show for it.
+    assert isinstance(embedder, MeteredEmbedder)
+    assert isinstance(embedder.inner, GeminiEmbedder)
+    inner = embedder.inner
     # Close via the factory; a second get builds a fresh instance.
     asyncio.run(emb_factory.shutdown_embedder())
+    assert inner._http_client.is_closed, "shutdown did not reach the wrapped client"
     rebuilt = emb_factory.get_embedder(settings)
     assert rebuilt is not embedder
 
