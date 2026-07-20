@@ -89,13 +89,22 @@ docker compose \
     --no-deps \
     api caddy
 
-# Caddy auto-reloads its config on SIGHUP; explicit ``caddy reload``
-# is only needed if we change the Caddyfile.
-docker compose \
-    --profile prod \
-    exec \
-    caddy \
-    caddy reload --config /etc/caddy/Caddyfile
+# NO explicit ``caddy reload`` here, deliberately.
+#
+# ``caddy reload`` talks to Caddy's ADMIN API on localhost:2019, and our
+# Caddyfile sets ``admin off`` (see infra/docker/Caddyfile). The two are
+# mutually exclusive: the reload always failed with
+#   Post "http://localhost:2019/load": dial tcp [::1]:2019: connect: connection refused
+# and, because this script runs under ``set -e``, it aborted EVERY deploy at the
+# caddy step — so ``make refresh`` and ``make deploy-verify`` could never finish.
+# Caddy itself was healthy throughout; only the reload call failed.
+#
+# It is also redundant: the ``docker compose up --force-recreate`` above
+# recreates the caddy container, which loads the Caddyfile fresh on start. There
+# is no running instance holding stale config to reload.
+#
+# If a future change needs a hot reload without a recreate, enable the admin API
+# bound to loopback INSIDE the container rather than reinstating this call.
 
 echo "==> waiting for the api to become healthy + caddy to be running (max 60s)"
 # Poll the api container's OWN health status, NOT http://localhost/health:
