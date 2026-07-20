@@ -7,6 +7,8 @@
  * will be swapped out for vector search.
  */
 
+import { mentionsCitevyn } from "../lib/citevynAliases";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -24,6 +26,35 @@ export interface KBEntry {
   sources: Source[];
   refusal?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// The one refusal string
+// ---------------------------------------------------------------------------
+
+/**
+ * Fallback answer when no KB entry matches, and the answer of every refusing KB
+ * entry. THE demo-mode refusal — there is deliberately only one.
+ *
+ * BYTE-IDENTICAL to the backend's `DEFAULT_UNSUPPORTED_REFUSAL`
+ * (`backend/app/core/config.py`), including the "or about CiteVyn itself" nudge
+ * (#84 item 5) — a demo user who hits the refusal should read exactly what a
+ * live user reads, so the demo is not quietly a different product.
+ *
+ * Declared ABOVE `KB` on purpose: `const` has no value hoisting, and the `KB`
+ * object literal is evaluated at module load, so the canned "laptop" refusal
+ * entry could not reference this if it were declared further down.
+ *
+ * `backend/tests/test_settings_slice3_slice4.py` pins BOTH this declaration and
+ * the absence of any second refusal literal anywhere in this file. Both halves
+ * are load-bearing: the string had already drifted once (this copy said "I don't
+ * have" where the backend says "I do not have"), and the "laptop" entry then
+ * carried a THIRD, separately-drifted hand-copy that a whole-file substring
+ * check could not see — demo mode emitted two different refusals, and the one
+ * users hit most visibly was the one missing the nudge. Edit the backend
+ * constant and re-copy here; never add a second literal.
+ */
+export const GENERIC_REFUSAL =
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I do not have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Knowledge base entries
@@ -144,7 +175,11 @@ export const KB: Record<string, KBEntry> = {
     q: "What's the best laptop for AI coding?",
     tag: "OUT OF SCOPE",
     refusal: true,
-    a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.",
+    // References the constant rather than re-typing it. This entry is the most
+    // visible refusal in the product (it is in MARQUEE and DEMO_ORDER), and as a
+    // hand-copy it had drifted from the backend wording and never gained the
+    // #84-item-5 nudge.
+    a: GENERIC_REFUSAL,
     sources: [],
   },
   // Canned answer for the "Get Pro" pricing CTA. Keyed like any other entry so
@@ -188,10 +223,6 @@ export const PLACEHOLDERS = [
   "What does --model do in Codex?",
   "Which Claude models are available?",
 ];
-
-/** Fallback answer when no KB entry matches */
-export const GENERIC_REFUSAL =
-  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Keyword matcher — routes free-typed questions to a KB entry
@@ -299,14 +330,21 @@ export function matchKB(text: string): KBEntry {
  * Returns ``null`` when the question is not about CiteVyn itself, so the caller
  * falls through to ``matchKB`` in demo mode.
  *
- * The guard is deliberately narrow — it only fires when the text mentions
- * "citevyn" — so in demo mode genuine product questions ("does Claude Code
- * cost money?") still fall through to ``matchKB``. (In live mode this matcher
- * is never consulted; the caller routes every question to the backend.)
+ * The guard is deliberately narrow — it only fires when the text NAMES CiteVyn
+ * — so in demo mode genuine product questions ("does Claude Code cost money?")
+ * still fall through to ``matchKB``. (In live mode this matcher is never
+ * consulted; the caller routes every question to the backend.)
+ *
+ * The name check is ``mentionsCitevyn``, the offline mirror of the backend
+ * guardrail (#84 item 4). Before that it was a bare ``includes("citevyn")``,
+ * which recognized none of the speech-to-text manglings the backend accepts
+ * ("what is sitewin?") and, in the other direction, fired on strings the
+ * backend deliberately rejects as identifiers ("sitewin.example.com") — so the
+ * same question was answered live and refused offline, or vice versa.
  */
 export function matchCitevynMeta(text: string): KBEntry | null {
   const t = text.toLowerCase();
-  if (!t.includes("citevyn")) return null;
+  if (!mentionsCitevyn(text)) return null;
 
   const meta = (a: string, tag = "CITEVYN"): KBEntry => ({ q: text, tag, a, sources: [] });
 

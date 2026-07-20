@@ -14,10 +14,16 @@ DEFAULT_NO_ANSWER_FALLBACK: str = (
     "Claude, Claude Code, Codex, or the Gemini API."
 )
 
+# The refusal names the CiteVyn meta-domain alongside the four products (#84 item 5).
+# A near-miss meta question ("what is Pro?") routes to ``unsupported`` because it never
+# says "CiteVyn"; without the hint the user has no way to learn that naming the product
+# is the phrasing that works, and reads the refusal as "this tool cannot answer that at
+# all". Additive only — the four products stay first, so the refusal still reads as a
+# scope statement rather than an upsell.
 DEFAULT_UNSUPPORTED_REFUSAL: str = (
     "I can answer questions about Claude, Claude Code, Codex, and Gemini using "
-    "their official documentation. I do not have credible source material in "
-    "this assistant to answer that."
+    "their official documentation — or about CiteVyn itself. I do not have "
+    "credible source material in this assistant to answer that."
 )
 
 # Sensible default origins for local development. Production deploys
