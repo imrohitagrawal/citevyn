@@ -94,13 +94,21 @@ docker compose \
     api \
     python -m seed.seed_users
 
-echo "==> seeding the demo knowledge catalog (idempotent)"
+echo "==> seeding the knowledge catalog (ingests the shipped corpus; idempotent)"
 # Without this step the production DB has zero chunks on cold start and
 # every retrieval arm returns [], so the orchestrator serves no_answer
-# for every question (Issue 2 / F0). ``seed_catalog.seed()`` is
-# idempotent — existing ``v1`` rows are left untouched — so re-running
-# on a populated database is a no-op. Operators ingest richer content
-# via the worker (``refresh.sh`` + admin promote) once the stack is up.
+# for every question (Issue 2 / F0). Since #178 ``seed_catalog.seed()``
+# INGESTS ``app/worker/sources/*.md`` (shipped inside this image, read
+# off the local filesystem — no network) into index ``v1`` instead of
+# inserting a hand-written copy of the corpus, so a corpus correction
+# reaches a cold-start deploy without being mirrored by hand.
+# Idempotent: a re-ingest REPLACES a document's chunks rather than
+# appending, so re-running on a populated database converges instead of
+# doubling the corpus. It will NOT demote an index an operator promoted
+# (``refresh.sh`` + admin promote stays the way to ship richer content).
+# It embeds with the configured provider, so a production deploy makes
+# real embedding calls here — and fails loud rather than seeding a
+# vector-less index if the embedder is misconfigured.
 # Resolves as ``seed.seed_catalog`` for the same reason as the admin
 # seed above (``/db`` is the package root on ``PYTHONPATH``).
 docker compose \
@@ -134,8 +142,9 @@ echo "==> bringing up the long-running services (api + caddy)"
 # It writes a *candidate* IndexVersion that an admin then promotes; the
 # live demo answers from the seeded ``v1`` active index until then, so
 # the deploy does not depend on ingestion. (The default CLI fetcher
-# reads local test fixtures that are not shipped in the runtime image —
-# a prod HTTP fetcher + source config is tracked as a follow-up.)
+# reads the corpus markdown under ``app/worker/sources/``, which DOES
+# ship in the image — the seed step above ingests the very same files.
+# A prod HTTP fetcher pulling upstream docs is a follow-up.)
 docker compose --profile prod up -d api caddy
 
 echo "==> waiting for the api to become healthy + caddy to be running (max 60s)"

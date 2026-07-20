@@ -235,7 +235,7 @@ class Settings(BaseSettings):
     # (The former ``source_version_hash`` setting was removed alongside the
     # content-derived snapshot hash: it was a static placeholder that nothing
     # could usefully change. The worker now derives the hash from the actual
-    # corpus bytes — see ``app.worker.cli._content_version_hash`` — so an
+    # corpus bytes — see ``app.worker.cli.content_version_hash`` — so an
     # operator "bumping the constant" had no effect and only invited confusion.
     # ``model_config`` uses ``extra="ignore"``, so a leftover
     # ``CITEVYN_SOURCE_VERSION_HASH`` in an existing ``.env`` is harmless.)

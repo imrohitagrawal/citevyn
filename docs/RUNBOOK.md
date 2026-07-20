@@ -291,7 +291,7 @@ python -m app.worker.cli run          # rebuilds v-local from the edited corpus
 **What happens automatically (no manual cache flush needed):**
 
 - `IndexVersion.source_version_hash` is derived from the **bytes of the source
-  docs** (`app.worker.cli._content_version_hash`), so any edit changes it. The
+  docs** (`app.worker.cli.content_version_hash`), so any edit changes it. The
   answer-cache key includes that hash, so cached answers built from the old text
   stop being reachable. There is no constant to bump.
 - A re-ingest **replaces** the source's chunks and exact terms rather than
@@ -316,6 +316,47 @@ correction is not live until a run completes cleanly.
 answer reflects the new text. If it still shows the old answer, check (a) that
 the run reported no failed sources, and (b) that the promote step ran — an
 un-promoted candidate is not served.
+
+**Where else a correction has to land (#178).** A corpus edit reaches the *live*
+index only through the re-ingest + promote above. Three other paths serve corpus
+content, and they used to need hand-mirroring:
+
+| Path | How the correction reaches it |
+|---|---|
+| Live index | `citevyn-worker run` + admin promote (above). Nothing else. |
+| Fresh bootstrap (`make demo`, `scripts/smoke.sh`, `deploy.sh`) | Automatic. `db/seed/seed_catalog.py` *is* an ingest of `app/worker/sources/*.md` into `v1` — it no longer carries its own copy. |
+| Hermetic test fixture (`tests/conftest.py`) | Manual, but enforced: `backend/tests/test_corpus_single_source.py` fails if the fixture still claims a command the corpus dropped. |
+| Frontend offline KB (`frontend/src/data/knowledgeBase.ts`) | Manual, but enforced: `knowledgeBase.corpus.test.ts` fails the same way (the frontend workflow triggers on `backend/app/worker/sources/**`). |
+
+If a corpus edit turns one of those guards red, the guard is right: update the
+copy it names, or revert the corpus edit.
+
+**The guards above only catch content the corpus LOSES.** A copy that says
+*less* than the corpus contradicts nothing, so nothing goes red — which is
+exactly how #170 shipped (`claude_code.md` had no installation content at all;
+the fix added it in some places and not others). Containment cannot fix that:
+the copies are deliberate abridgements. So each source doc's content digest is
+pinned in `backend/tests/corpus_mirror_manifest.json`, and **any** edit — one
+added sentence included — fails
+`test_corpus_edits_are_reconciled_with_the_downstream_copies` until a human has
+re-read the copies and re-pinned:
+
+```bash
+cd backend && uv run python -m tests.corpus_mirror --write
+```
+
+Re-pinning without reading the copies defeats the entire check. It is a review
+checkpoint, not a formality.
+
+**Note on `make demo` and semantic search.** Under the default stub embedder the
+bootstrap seed deliberately leaves every embedding NULL and the index unstamped,
+so `GET /health/index` reports `vector_arm.status: "dead"`. That is correct: the
+stub's vectors are hash-bucketed and meaningless, and ranking by them would be
+worse than not ranking at all. They are never *written* — the seeder builds its
+runner with `write_vectors=False`, so there is no moment at which a live reader
+can see them (the seed commits per source, and a re-seed runs against an
+already-active `v1`). Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a key) and
+re-seed to get a live, stamped vector arm.
 
 ## 4. Backup & restore
 

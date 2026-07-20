@@ -24,16 +24,19 @@ from app.embeddings.factory import (
     validate_embedder_provider,
 )
 from app.embeddings.gemini import GeminiEmbedder
-from app.embeddings.protocol import Embedder
+from app.embeddings.null import NullEmbedder
+from app.embeddings.protocol import DocumentEmbedder, Embedder
 from app.embeddings.stub import StubEmbedder
 
 __all__ = [
     "ALLOWED_EMBEDDING_PROVIDERS",
+    "DocumentEmbedder",
     "Embedder",
     "EmbedderIdentity",
     "EmbedderUnavailable",
     "EmbeddingProviderNotConfigured",
     "GeminiEmbedder",
+    "NullEmbedder",
     "StubEmbedder",
     "build_embedder",
     "configured_embedder_identity",

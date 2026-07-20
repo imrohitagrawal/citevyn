@@ -119,6 +119,27 @@ export const KB: Record<string, KBEntry> = {
       },
     ],
   },
+  // Offline counterpart to "codex-install". Without it, "How do I install
+  // Claude Code?" fell through to the catch-all `t.includes("claude")` branch
+  // and returned the PERMISSIONS answer — a confident, cited, wrong-topic reply
+  // to the exact question #170 was about (#178).
+  //
+  // The wording mirrors `backend/app/worker/sources/claude_code.md`, which is
+  // the authoritative corpus; `knowledgeBase.corpus.test.ts` fails the build if
+  // the commands here stop matching that file. Do not edit one without the
+  // other, and change the corpus first.
+  "claude-code-install": {
+    q: "How do I install Claude Code?",
+    tag: "SETUP",
+    a: "Use the native installer: on macOS, Linux or WSL run curl -fsSL https://claude.ai/install.sh | bash, and on Windows PowerShell run irm https://claude.ai/install.ps1 | iex. Package managers work too — brew install --cask claude-code on macOS, winget install Anthropic.ClaudeCode on Windows. You can also install from npm with npm install -g @anthropic-ai/claude-code, which needs Node.js v22 or later; don't install it with sudo. Confirm it worked with claude --version, and run claude doctor for install diagnostics.",
+    sources: [
+      {
+        n: "1",
+        title: "Claude Code — Advanced setup",
+        url: "code.claude.com/docs/en/setup",
+      },
+    ],
+  },
   "laptop": {
     q: "What's the best laptop for AI coding?",
     tag: "OUT OF SCOPE",
@@ -220,6 +241,14 @@ export function matchKB(text: string): KBEntry {
   // Codex install
   if (t.includes("install") && t.includes("codex")) {
     return KB["codex-install"];
+  }
+
+  // Claude Code install. MUST stay below the Codex branch (so "install codex"
+  // still routes to Codex) and above the catch-all `t.includes("claude")`
+  // branch, which would otherwise answer an install question with the
+  // Permissions text (#178).
+  if (t.includes("install") && t.includes("claude")) {
+    return KB["claude-code-install"];
   }
 
   // Codex flags / --model

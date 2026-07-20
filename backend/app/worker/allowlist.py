@@ -6,7 +6,7 @@ the worker to read at boot. The lock between this list and the
 corpus actually ingested is the ``source_version_hash`` column
 on :class:`IndexVersion`, which the worker derives from the
 bytes of these source docs (see
-:func:`app.worker.cli._content_version_hash`). Editing any doc
+:func:`app.worker.cli.content_version_hash`). Editing any doc
 below therefore changes the hash on the next run, which changes
 the answer-cache key and retires stale cached answers. There is
 no constant for an operator to bump — the content *is* the

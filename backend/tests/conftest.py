@@ -97,6 +97,140 @@ def client() -> Generator[TestClient, None, None]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# The hermetic corpus fixture
+# ---------------------------------------------------------------------------
+#
+# Module-level (not a local inside ``seed_catalog``) so a drift guard can read it
+# without seeding a database: ``test_corpus_single_source.py`` asserts every
+# verbatim claim below is still present in the SHIPPED corpus under
+# ``app/worker/sources/``. That corpus is authoritative; this is a deliberately
+# abridged mirror of it, kept small and stable because the golden/eval suite is
+# anchored to these exact chunks (#178).
+_CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
+    {
+        "product_area": "claude_api",
+        "source_name": "claude_api",
+        "title": "Claude API Reference",
+        "source_url": "https://docs.example.com/claude-api",
+        "chunk_heading": "Rate limits",
+        "chunk_text": (
+            "The Claude API enforces a default rate limit of 50 requests "
+            "per minute. The CLAUDE_API_RATE_LIMIT environment variable "
+            "can override this for self-serve customers."
+        ),
+    },
+    {
+        "product_area": "claude_code",
+        "source_name": "claude_code",
+        "title": "Claude Code Reference",
+        "source_url": "https://docs.example.com/claude-code",
+        "chunk_heading": "Permissions",
+        # Mirrors the real shipped worker source (claude_code.md: Permissions +
+        # Installation) so an install question — "How do I install Claude Code?" —
+        # is answerable on the HERMETIC path (exact + keyword; the vector arm is off
+        # on SQLite), the same way #87 enriched the codex/gemini fixtures. Without
+        # this the hermetic run cannot see a shipped-corpus regression (#162).
+        "chunk_text": (
+            "Claude Code permissions are configured in the project's "
+            "settings file. Use the allow/deny lists to gate tools and "
+            "commands the assistant can run. Install Claude Code with the "
+            "native installer by running 'curl -fsSL https://claude.ai/install.sh "
+            "| bash' on macOS, Linux or WSL, or from npm with "
+            "'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 "
+            "or later. Confirm the install with 'claude --version' and diagnose it "
+            "with 'claude doctor'."
+        ),
+    },
+    {
+        "product_area": "codex",
+        "source_name": "codex",
+        "title": "Codex Reference",
+        "source_url": "https://docs.example.com/codex",
+        "chunk_heading": "CLI flags",
+        # Mirrors the real shipped worker source (codex.md: Installation +
+        # Authentication + CLI flags) so a source-named question with a
+        # question word — "How do I install the Codex CLI?", "Does Codex
+        # need an API key?" — is answerable on the HERMETIC path (exact +
+        # keyword, vector arm off on SQLite), guarding #87 against regression.
+        "chunk_text": (
+            "The --model flag selects the model Codex uses for code "
+            "generation. Run 'codex --help' for the full list of flags. "
+            "Install the Codex CLI globally with npm ('npm install -g "
+            "@openai/codex') or on macOS with Homebrew ('brew install codex'). "
+            "Codex reads its credentials from the OPENAI_API_KEY environment "
+            "variable, or a stored login created by signing in through the CLI, "
+            "so it does need an API key (or a ChatGPT sign-in)."
+        ),
+    },
+    {
+        "product_area": "gemini_api",
+        "source_name": "gemini_api",
+        "title": "Gemini API Reference",
+        "source_url": "https://docs.example.com/gemini",
+        "chunk_heading": "Authentication",
+        # Mirrors the real shipped worker source (gemini_api.md:
+        # Authentication + Streaming responses) so "google gemini streaming
+        # responses" is answerable on the HERMETIC path (keyword arm, vector
+        # off on SQLite) — guards #87 against regression.
+        # NOTE: keep this text free of low-value function words shared with
+        # the paraphrase eval cases (e.g. "to") — the keyword arm's ≥2-token
+        # floor would otherwise let a single content token ("gemini") + a
+        # stray function word spuriously satisfy a semantic paraphrase and
+        # trip ``test_paraphrase_baseline_is_dead`` (the false-literal guard).
+        "chunk_text": (
+            "Pass your Gemini API key in the x-goog-api-key header on "
+            "every request. The Gemini CLI also accepts the key in a "
+            "credentials file. The Gemini API also supports streaming "
+            "responses: the streaming generate-content variant "
+            "(streamGenerateContent) returns the answer as a sequence of "
+            "partial chunks rather than one whole response."
+        ),
+    },
+    {
+        # About-CiteVyn source (#49): keeps the demo catalog in lock-step
+        # with MVP_SOURCES so CiteVyn-meta questions ("What is CiteVyn
+        # Pro?") retrieve + cite instead of being refused off-domain.
+        # source_url is the host-agnostic relative /about (see allowlist).
+        "product_area": "citevyn",
+        "source_name": "citevyn",
+        "title": "About CiteVyn",
+        "source_url": "/about",
+        "chunk_heading": "CiteVyn Pro and membership",
+        "chunk_text": (
+            "CiteVyn Pro is not live yet. CiteVyn is an MVP demo and "
+            "everything is free to try. Pro is planned to add higher rate "
+            "limits, exact lookups, saved history, and shareable answers."
+        ),
+    },
+    {
+        # AI concepts/glossary (#112 follow-up): keeps the demo catalog in
+        # lock-step with MVP_SOURCES so conceptual questions ("what is an LLM?",
+        # "is Codex an LLM?") retrieve + cite instead of being refused off-domain.
+        "product_area": "concepts",
+        "source_name": "concepts",
+        "title": "AI Concepts and Glossary",
+        "source_url": "/about",
+        "chunk_heading": "What a large language model (LLM) is",
+        "chunk_text": (
+            "A large language model, or LLM, is an AI system trained on a large "
+            "amount of text so it can understand a plain-language request and "
+            "generate a useful text response. Claude, Claude Code, Codex, and "
+            "Gemini are all LLM-based AI tools."
+        ),
+    },
+]
+
+
+def corpus_fixture_specs() -> list[dict[str, str]]:
+    """Return a copy of the hermetic corpus fixture specs.
+
+    A copy, so a caller that mutates a spec cannot poison the next test in the
+    session.
+    """
+    return [dict(spec) for spec in _CORPUS_FIXTURE_SPECS]
+
+
 async def seed_catalog(
     session: AsyncSession,
     *,
@@ -135,119 +269,7 @@ async def seed_catalog(
     ``commit=False`` and rolls back for zero residue).
     """
     now = datetime.now(UTC)
-    doc_specs: list[dict[str, str]] = [
-        {
-            "product_area": "claude_api",
-            "source_name": "claude_api",
-            "title": "Claude API Reference",
-            "source_url": "https://docs.example.com/claude-api",
-            "chunk_heading": "Rate limits",
-            "chunk_text": (
-                "The Claude API enforces a default rate limit of 50 requests "
-                "per minute. The CLAUDE_API_RATE_LIMIT environment variable "
-                "can override this for self-serve customers."
-            ),
-        },
-        {
-            "product_area": "claude_code",
-            "source_name": "claude_code",
-            "title": "Claude Code Reference",
-            "source_url": "https://docs.example.com/claude-code",
-            "chunk_heading": "Permissions",
-            # Mirrors the real shipped worker source (claude_code.md: Permissions +
-            # Installation) so an install question — "How do I install Claude Code?" —
-            # is answerable on the HERMETIC path (exact + keyword; the vector arm is off
-            # on SQLite), the same way #87 enriched the codex/gemini fixtures. Without
-            # this the hermetic run cannot see a shipped-corpus regression (#162).
-            "chunk_text": (
-                "Claude Code permissions are configured in the project's "
-                "settings file. Use the allow/deny lists to gate tools and "
-                "commands the assistant can run. Install Claude Code with the "
-                "native installer by running 'curl -fsSL https://claude.ai/install.sh "
-                "| bash' on macOS, Linux or WSL, or from npm with "
-                "'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 "
-                "or later. Confirm the install with 'claude --version' and diagnose it "
-                "with 'claude doctor'."
-            ),
-        },
-        {
-            "product_area": "codex",
-            "source_name": "codex",
-            "title": "Codex Reference",
-            "source_url": "https://docs.example.com/codex",
-            "chunk_heading": "CLI flags",
-            # Mirrors the real shipped worker source (codex.md: Installation +
-            # Authentication + CLI flags) so a source-named question with a
-            # question word — "How do I install the Codex CLI?", "Does Codex
-            # need an API key?" — is answerable on the HERMETIC path (exact +
-            # keyword, vector arm off on SQLite), guarding #87 against regression.
-            "chunk_text": (
-                "The --model flag selects the model Codex uses for code "
-                "generation. Run 'codex --help' for the full list of flags. "
-                "Install the Codex CLI globally with npm ('npm install -g "
-                "@openai/codex') or on macOS with Homebrew ('brew install codex'). "
-                "Codex reads its credentials from the OPENAI_API_KEY environment "
-                "variable, or a stored login created by signing in through the CLI, "
-                "so it does need an API key (or a ChatGPT sign-in)."
-            ),
-        },
-        {
-            "product_area": "gemini_api",
-            "source_name": "gemini_api",
-            "title": "Gemini API Reference",
-            "source_url": "https://docs.example.com/gemini",
-            "chunk_heading": "Authentication",
-            # Mirrors the real shipped worker source (gemini_api.md:
-            # Authentication + Streaming responses) so "google gemini streaming
-            # responses" is answerable on the HERMETIC path (keyword arm, vector
-            # off on SQLite) — guards #87 against regression.
-            # NOTE: keep this text free of low-value function words shared with
-            # the paraphrase eval cases (e.g. "to") — the keyword arm's ≥2-token
-            # floor would otherwise let a single content token ("gemini") + a
-            # stray function word spuriously satisfy a semantic paraphrase and
-            # trip ``test_paraphrase_baseline_is_dead`` (the false-literal guard).
-            "chunk_text": (
-                "Pass your Gemini API key in the x-goog-api-key header on "
-                "every request. The Gemini CLI also accepts the key in a "
-                "credentials file. The Gemini API also supports streaming "
-                "responses: the streaming generate-content variant "
-                "(streamGenerateContent) returns the answer as a sequence of "
-                "partial chunks rather than one whole response."
-            ),
-        },
-        {
-            # About-CiteVyn source (#49): keeps the demo catalog in lock-step
-            # with MVP_SOURCES so CiteVyn-meta questions ("What is CiteVyn
-            # Pro?") retrieve + cite instead of being refused off-domain.
-            # source_url is the host-agnostic relative /about (see allowlist).
-            "product_area": "citevyn",
-            "source_name": "citevyn",
-            "title": "About CiteVyn",
-            "source_url": "/about",
-            "chunk_heading": "CiteVyn Pro and membership",
-            "chunk_text": (
-                "CiteVyn Pro is not live yet. CiteVyn is an MVP demo and "
-                "everything is free to try. Pro is planned to add higher rate "
-                "limits, exact lookups, saved history, and shareable answers."
-            ),
-        },
-        {
-            # AI concepts/glossary (#112 follow-up): keeps the demo catalog in
-            # lock-step with MVP_SOURCES so conceptual questions ("what is an LLM?",
-            # "is Codex an LLM?") retrieve + cite instead of being refused off-domain.
-            "product_area": "concepts",
-            "source_name": "concepts",
-            "title": "AI Concepts and Glossary",
-            "source_url": "/about",
-            "chunk_heading": "What a large language model (LLM) is",
-            "chunk_text": (
-                "A large language model, or LLM, is an AI system trained on a large "
-                "amount of text so it can understand a plain-language request and "
-                "generate a useful text response. Claude, Claude Code, Codex, and "
-                "Gemini are all LLM-based AI tools."
-            ),
-        },
-    ]
+    doc_specs = corpus_fixture_specs()
 
     docs: list[Document] = []
     chunks: list[Chunk] = []

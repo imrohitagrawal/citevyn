@@ -1,0 +1,11 @@
+{
+  "_comment": "Pinned digests of backend/app/worker/sources/*.md. Regenerate with `cd backend && uv run python -m tests.corpus_mirror --write` ONLY after reconciling the downstream copies listed in tests/corpus_mirror.py.",
+  "sources": {
+    "citevyn": "sha256:b9bc8842ed80822f1024f6c68c25345f69fc24601c6fa86395be5324fcc48afa",
+    "claude_api": "sha256:b8006b1fce684079397a1984d73cc0e131db4938698c3116f4671a4db3fba8ef",
+    "claude_code": "sha256:b8175725013bf6826bbf68cfb038dbb60c39f95aec4b8f36083a62294ef7e70a",
+    "codex": "sha256:eb5b38338d979170002fd829b129ca46d0f338c235b5e25baff3753698a5fd6a",
+    "concepts": "sha256:18fa2fe25cab22c8a0ccc7419b6fff0b8bce81b6940bbe32e0f2d40b3bb51378",
+    "gemini_api": "sha256:85f3a60753bc5fb0cf1fc08a04ad6f9f64ed1ca9153f6bd86fa2ce1450f94529"
+  }
+}

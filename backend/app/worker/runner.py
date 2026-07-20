@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.embeddings import Embedder
+from app.embeddings import DocumentEmbedder
 from app.models.chunks import Chunk
 from app.models.documents import Document
 from app.models.enums import (
@@ -95,7 +95,7 @@ class IngestionRunner:
         self,
         *,
         fetcher: Fetcher,
-        embedder: Embedder,
+        embedder: DocumentEmbedder,
         source_version_hash: str,
         index_version: str = "v-local",
         embedding_provider: str | None = None,
@@ -113,6 +113,17 @@ class IngestionRunner:
         that genuinely do not care (tests) must say so explicitly.
 
         ``index_version`` is the key the runner writes to.
+
+        ``embedder`` is a :class:`~app.embeddings.protocol.DocumentEmbedder`,
+        not a full :class:`~app.embeddings.protocol.Embedder`: ingestion never
+        embeds a query. The narrower type is what lets the demo/bootstrap
+        seeder pass a :class:`~app.embeddings.null.NullEmbedder`, whose
+        ``embed_documents`` returns ``None`` per chunk so the rows are
+        persisted unembedded (see that class for why a stub-vector index is
+        worse than none). Callers doing that should pass
+        ``embedding_provider=None`` too, so the index carries no provenance it
+        cannot honour.
+
         ``embedding_provider`` and
         ``embedding_model`` are the provenance stamped onto the
         :class:`IndexVersion` (Tier 3 groundwork, #51) — WRITE-ONLY
@@ -144,8 +155,18 @@ class IngestionRunner:
         return self._embedding_model
 
     @property
-    def embedding_dim(self) -> int:
-        """The dimension of the vectors this runner's embedder produces."""
+    def embedding_dim(self) -> int | None:
+        """The dimension stamped onto the index — ``None`` when nothing is stamped.
+
+        Provider / model / dim are ONE provenance claim, so they travel together
+        or not at all. A runner with no provider (an ad-hoc test run, or the
+        bootstrap's :class:`~app.embeddings.null.NullEmbedder` path) publishing a
+        bare dim would leave a half-stamp: a statement about a vector space that
+        nothing was written into. Keeping the rule here rather than at the
+        ``ensure_index_version`` call site means every caller gets it.
+        """
+        if self._embedding_provider is None:
+            return None
         return self._embedder.dim
 
     async def run(
@@ -328,6 +349,12 @@ class IngestionRunner:
         # ``embed_documents`` beats N per-chunk round-trips; the stub ignores the
         # distinction. ``RETRIEVAL_DOCUMENT`` task type is applied inside the
         # embedder (the read path uses ``RETRIEVAL_QUERY``).
+        #
+        # A ``None`` element means "store this chunk unembedded" — the
+        # ``NullEmbedder`` path, which the demo/bootstrap seeder uses so it never
+        # writes meaningless stub vectors. ``strict=True`` keeps that honest:
+        # an embedder returning the wrong number of vectors raises rather than
+        # silently dropping (or mis-pairing) chunks.
         vectors = await self._embedder.embed_documents([draft.text for draft in drafts])
         chunks: list[Chunk] = []
         for draft, vector in zip(drafts, vectors, strict=True):

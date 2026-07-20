@@ -1,15 +1,22 @@
 name: frontend
 
+# The corpus paths are here on purpose: ``knowledgeBase.corpus.test.ts`` asserts
+# the offline KB does not tell a user to paste a command the shipped corpus no
+# longer contains (#178). That guard is only useful if editing the corpus RUNS
+# it, so a change under ``backend/app/worker/sources/`` triggers this workflow
+# even though it touches no frontend file.
 on:
   push:
     branches: [main]
     paths:
       - 'frontend/**'
+      - 'backend/app/worker/sources/**'
       - 'frontend.yml'
       - '.github/workflows/frontend.yml'
   pull_request:
     paths:
       - 'frontend/**'
+      - 'backend/app/worker/sources/**'
       - '.github/workflows/frontend.yml'
 
 permissions:
@@ -17,7 +24,7 @@ permissions:
 
 jobs:
   build:
-    name: type-check + build
+    name: type-check + unit tests + build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -33,6 +40,10 @@ jobs:
         run: npm ci
       - name: Type-check
         run: npm run type-check
+      # The vitest suite existed but nothing ran it in CI, so every frontend unit
+      # test — including the corpus drift guard added in #178 — was decorative.
+      - name: Unit tests
+        run: npm test
       - name: Build
         run: npm run build
       - name: Upload dist artifact
