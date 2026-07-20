@@ -224,3 +224,65 @@ test that actually bites before it merges. The pattern across all four is the sa
 worth internalising: **the implementation was largely right and the TEST was the weak
 part**, which is precisely why `AGENTS.md` requires mutation-testing anything called a
 guard.
+
+---
+
+## ADDENDUM 2 — resumed session
+
+### Landed since the first addendum
+
+| PR | What |
+|---|---|
+| #187 | `fix/163` — `content_checksum` → `identity_checksum` (migration **0006**) |
+| #188 | **Layers 2-3** — §9 daily budget + concurrency cap |
+| #189 | **Layer 5** — admin budget endpoint + `make budget` |
+| #190 | `fix/167` — limiter error code + **flat error envelope on the wire** |
+
+`#153` cost controls now have Layers **0, 1, 2, 3, 5, 6** live. Remaining: Layer 4
+(persist the per-user limiter) and metering the embedder.
+
+### A migration collision worth knowing about
+
+`fix/163` was cut before #184 landed, so **two migrations both claimed
+`revision = "0005"` with `down_revision = "0004"`**. Alembic would have seen two
+heads and `upgrade head` would have failed outright. Renumbered to 0006/0005.
+**Any branch cut before #184 has this hazard** — check `db/versions/` before
+merging one.
+
+### Phase 3 final state
+
+| Branch | State |
+|---|---|
+| `fix/163` | **MERGED** (#187) |
+| `fix/167` | **MERGED** (#190) |
+| `fix/168` | PR #191, green, merging |
+| `fix/178` | **PR #192 — DRAFT, do not merge** |
+| `fix/84` | **PR #193 — DRAFT, do not merge** |
+
+Both drafts carry a written blocker list. Summarised:
+
+* **#192 (`fix/178`)** — the HIGH stub-vector defect on the *failure* path is fixed
+  and mutation-proven, but a **re-seed window remains**: `drive()` commits per
+  source against an already-active `v1` before the strip runs. Closing it needs a
+  null-embedder seam so the bootstrap never *writes* stub vectors. It also needs a
+  **non-trivial rebase** — it rewrites `seed_catalog.py` wholesale and conflicts
+  with #187's rename. I aborted that rebase rather than risk a bad merge in the one
+  file the change is about.
+* **#193 (`fix/84`)** — the cross-language pin is a whole-file substring check, so
+  it passes *by accident*: `knowledgeBase.ts` holds a **second hand-copy** of the
+  refusal, and demo mode currently emits two different refusal texts. The visible
+  one is missing the nudge item 5 exists to add.
+
+### Verification standard applied
+
+Every merged branch was re-verified by me, not accepted on the agent's report:
+
+* **#190** — drove the real `RedisRateLimiter` with a failing client through a real
+  `TestClient`; confirmed `503`, flat envelope, `error.code = rate_limiter_unavailable`.
+* **#191** — re-ran the two mutations that previously survived; both now fail.
+* **#187** — real-Postgres migration round trip, plus a model/migration drift mutation.
+* **#188** — 9 mutations. One survived first: deleting the budget check *from the
+  seam* left all 69 tests green, because every budget test called `enforce_budget`
+  directly and the metering tests disable it.
+
+**No paid provider call was made in this session either.**
