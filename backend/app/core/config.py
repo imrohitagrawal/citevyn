@@ -33,6 +33,27 @@ DEFAULT_UNSUPPORTED_REFUSAL: str = (
 DEFAULT_CORS_ALLOWED_ORIGINS: tuple[str, ...] = ("http://localhost:3000",)
 
 
+def _is_weak_secret(value: str, *, default: str) -> bool:
+    """True when ``value`` is the published default, a trivial variant of it, or short.
+
+    Raw ``==`` was not enough. Verified against a production ``Settings``:
+    ``'local-demo-key '``, ``' local-demo-key'`` and ``'LOCAL-DEMO-KEY'`` all
+    PASSED a plain equality check, leaving the effective bearer guessable in one
+    or two attempts. Docker compose's env-file parser happens to strip quotes and
+    trailing whitespace, so the compose path was incidentally safe — but these
+    guards exist for the NON-compose entry points (a bare ``uvicorn``, ``alembic``,
+    a one-off script), where an exported ``KEY='local-demo-key '`` sails through.
+    ``_env_guard.sh`` grew its own ``_strip`` helper for exactly this class of
+    bypass; this is the Python-side equivalent.
+
+    The length floor is the second half: rejecting only the known default would
+    still accept ``x``. 16 chars is well below any real generated secret and well
+    above anything typed by hand in a hurry.
+    """
+    normalised = value.strip().lower()
+    return normalised == default or len(value.strip()) < 16
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CITEVYN_",
@@ -387,11 +408,18 @@ class Settings(BaseSettings):
         # and ``infra/docker/prod.env.example`` did not even list the variable —
         # so a production deploy silently inherited the default. Found by actually
         # running ``make deploy-verify``, which requires the key and died without it.
-        if self.environment == "production" and self.demo_api_key == "local-demo-key":
+        if self.environment == "production" and _is_weak_secret(
+            self.demo_api_key, default="local-demo-key"
+        ):
             raise ValueError(
                 "CITEVYN_DEMO_API_KEY must be set to a strong secret when "
-                "CITEVYN_ENVIRONMENT='production'. The default value "
-                "'local-demo-key' is publicly known and is not allowed."
+                "CITEVYN_ENVIRONMENT='production'. The value is "
+                + (
+                    "the publicly-known default 'local-demo-key'"
+                    if self.demo_api_key.strip().lower() == "local-demo-key"
+                    else "shorter than the 16-character minimum"
+                )
+                + " and is not allowed."
             )
         return self
 
@@ -404,11 +432,18 @@ class Settings(BaseSettings):
         # var via ``${CITEVYN_ADMIN_API_KEY:?...}`` — this validator
         # is the belt-and-braces guard for non-compose entry points
         # (bare ``uv run uvicorn``, alembic, a one-off admin script).
-        if self.environment == "production" and self.admin_api_key == "local-admin-key":
+        if self.environment == "production" and _is_weak_secret(
+            self.admin_api_key, default="local-admin-key"
+        ):
             raise ValueError(
                 "CITEVYN_ADMIN_API_KEY must be set to a strong secret when "
-                "CITEVYN_ENVIRONMENT='production'. The default value "
-                "'local-admin-key' is publicly known and is not allowed."
+                "CITEVYN_ENVIRONMENT='production'. The value is "
+                + (
+                    "the publicly-known default 'local-admin-key'"
+                    if self.admin_api_key.strip().lower() == "local-admin-key"
+                    else "shorter than the 16-character minimum"
+                )
+                + " and is not allowed."
             )
         return self
 

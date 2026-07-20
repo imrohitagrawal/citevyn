@@ -82,12 +82,26 @@ echo "==> rolling the long-running containers (api + caddy)"
 # The worker is a one-shot ingest job, not a long-running service, so it
 # is excluded from this ``up`` (see deploy.sh). Re-ingest explicitly when
 # needed:  docker compose --profile prod run --rm worker
+# ``--force-recreate caddy``: Caddy parses /etc/caddy/Caddyfile ONCE at start,
+# and a bind-mounted file edit does not change the service config hash — so a
+# plain ``up -d`` leaves the SAME container running with the OLD parsed config.
+# Without this, editing the Caddyfile (a new domain, an HSTS/CSP change, a
+# timeout) would deploy green while Caddy kept serving the previous config
+# indefinitely. The recreate is sub-second and there is no reload alternative:
+# ``caddy reload`` needs the admin API, which Caddyfile:40 disables (``admin off``).
 docker compose \
     --profile prod \
     up \
     -d \
     --no-deps \
-    api caddy
+    api
+docker compose \
+    --profile prod \
+    up \
+    -d \
+    --no-deps \
+    --force-recreate \
+    caddy
 
 # NO explicit ``caddy reload`` here, deliberately.
 #
@@ -99,12 +113,11 @@ docker compose \
 # caddy step — so ``make refresh`` and ``make deploy-verify`` could never finish.
 # Caddy itself was healthy throughout; only the reload call failed.
 #
-# It is also redundant: the ``docker compose up --force-recreate`` above
-# recreates the caddy container, which loads the Caddyfile fresh on start. There
-# is no running instance holding stale config to reload.
-#
-# If a future change needs a hot reload without a recreate, enable the admin API
-# bound to loopback INSIDE the container rather than reinstating this call.
+# The caddy service is instead recreated explicitly above, which is what
+# actually re-parses the Caddyfile. An earlier revision of this comment claimed
+# the plain ``up`` already did that; it did not, and removing the reload without
+# the recreate would have turned a loud always-failing step into a SILENT
+# stale-config deploy.
 
 echo "==> waiting for the api to become healthy + caddy to be running (max 60s)"
 # Poll the api container's OWN health status, NOT http://localhost/health:
