@@ -255,6 +255,25 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         *) record FAIL "provider key budget" "below threshold or unreadable"
            die "refusing to deploy on an exhausted provider key (see docs/COST_CONTROLS.md §0)" ;;
     esac
+
+    # ── Frontend bundle vs the demo key ────────────────────────────────────
+    # Vite bakes VITE_API_DEMO_KEY into the bundle at BUILD time
+    # (frontend/src/lib/api.ts), defaulting to "local-demo-key". Every probe in
+    # this gate curls with the key from .env, so a bundle built against the
+    # OLD default passes the whole gate while every real browser request 401s.
+    # That is a green gate over a demo nobody can use — so check the artifact
+    # itself. Rebuild with `make demo-frontend`, which now threads the key
+    # through. (The prod compose stack serves no frontend at all; the bundle is
+    # built out of band, which is exactly why nothing else notices.)
+    if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
+        if grep -rqF 'local-demo-key' "${REPO_ROOT}/frontend/dist" 2>/dev/null \
+           && [[ "${DEMO_KEY}" != "local-demo-key" ]]; then
+            record FAIL "frontend bundle carries the current demo key" \
+                "frontend/dist has the DEFAULT 'local-demo-key' baked in but .env uses a different key — every browser request would 401. Rebuild: make demo-frontend"
+        else
+            record PASS "frontend bundle carries the current demo key"
+        fi
+    fi
 fi
 
 # shellcheck disable=SC2206  # deliberate word-splitting of operator-supplied flags
