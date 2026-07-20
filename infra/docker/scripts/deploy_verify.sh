@@ -277,13 +277,23 @@ api_post() {  # api_post <path> <json> -> body on stdout
         --data "$2" "${BASE_URL}$1"
 }
 
+# Set by new_session when the demo bucket is exhausted, so callers can report
+# "the gate rate-limited itself" instead of blaming the deployment.
+LAST_SESSION_RATE_LIMITED=0
+
 new_session() {  # -> session id on stdout (empty on failure)
     # The response key is `session_id`, NOT `id` (sessions.py returns
     # {request_id, session_id, expires_at}). Matching `"id"` would require a
     # quote immediately before `id`, which neither `"session_id"` nor
     # `"request_id"` contains — so it would never match and every dependent
     # probe would be skipped on a perfectly healthy stack.
-    api_post /v1/sessions '{}' \
+    local _resp
+    _resp="$(api_post /v1/sessions '{}')"
+    LAST_SESSION_RATE_LIMITED=0
+    case "${_resp}" in
+        *'"rate_limited"'*) LAST_SESSION_RATE_LIMITED=1 ;;
+    esac
+    printf '%s' "${_resp}" \
         | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
@@ -329,6 +339,16 @@ verify_suite() {
     session_id="$(new_session)"
     if [[ -n "${session_id}" ]]; then
         record PASS "${phase}: POST /v1/sessions"
+    elif [[ "${LAST_SESSION_RATE_LIMITED}" == "1" ]]; then
+        # The gate rate-limited ITSELF. Every demo call in this script shares one
+        # bucket with every demo visitor, because require_demo_api_key returns a
+        # CONSTANT user id (#203). One full run spends ~16 demo calls against a
+        # 30/hour cap, so a second run inside the hour exhausts it and the
+        # remaining probes fail for a reason that has nothing to do with the
+        # deployment. Reported as its own failure so nobody debugs the release
+        # for an hour chasing "no session id returned".
+        record FAIL "${phase}: POST /v1/sessions" \
+            "429 rate_limited — the DEMO BUCKET is exhausted, not a deploy fault (#203). One gate run spends ~16 of the 30/hour cap and the bucket is GLOBAL. Wait for it to age out, or clear it: docker exec citevyn-redis redis-cli DEL citevyn:rl:demo_user"
     else
         record FAIL "${phase}: POST /v1/sessions" "no session id returned"
         # Plain echo, not `record`: the FAIL above already fires, and counting a
