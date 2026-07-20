@@ -53,6 +53,43 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 ## Recently closed
 
+- **[#163](https://github.com/imrohitagrawal/citevyn/issues/163)** — `Document.content_checksum`
+  renamed to `identity_checksum` (migration **0006**, reversible); `IngestionRunner` now REQUIRES
+  `source_version_hash` instead of defaulting to a retired placeholder. PR #187. NB the branch was
+  cut before #184 and both migrations claimed `revision="0005"` — alembic would have seen two heads
+  and `upgrade head` would have failed. **Any branch cut before #184 has this hazard.**
+
+- **[#167](https://github.com/imrohitagrawal/citevyn/issues/167)** — a Redis outage no longer
+  reports `index_unavailable`. PR #190. The bigger find: `error_response` returns
+  `HTTPException(detail=envelope)` and nothing flattened it, so the wire body was
+  `{"detail": {...}}` — the frontend read `body.error`, got `undefined`, and the new branch could
+  **never fire in production**. Its three frontend tests passed *vacuously*. Now flattened for
+  EVERY error code, which also fixes an `API_SPEC` §4 violation.
+
+- **[#168](https://github.com/imrohitagrawal/citevyn/issues/168)** — DEMO_CHECKLIST routes/port
+  corrected + a guard test. PR #191. The guard's first version exempted **13 of 16 routes**; the
+  reviewer reintroduced #168's original defect verbatim and the suite stayed green. Now scoped to
+  the disclaimed token and verb-aware.
+
+- **[#178](https://github.com/imrohitagrawal/citevyn/issues/178)** — corpus is single-source:
+  `db/seed/seed_catalog.py` runs the real ingestion pipeline over `app/worker/sources/*.md`
+  instead of carrying a copy. PR #192. Took three rounds: the bootstrap originally wrote **stub
+  vectors** that survived into a live index (vector arm enabled, ranking by SHA-256 hash distance,
+  `/health/index` reporting healthy). Final fix is a `NullEmbedder` seam so they are never written.
+
+- **[#153](https://github.com/imrohitagrawal/citevyn/issues/153) Layers 2, 3, 5** — PRs #188/#189.
+  §9 daily budget (soft $5 warn / hard $10 stop, transient not refusal, SQL-summed since midnight
+  UTC so restart-proof, fail-closed), concurrency cap, `GET /v1/admin/budget`, and `make budget`
+  wired into deploy-verify. **Layer 1 completed for the embedder** in PR #196.
+
+## Open follow-ups filed this session
+
+| Issue | Why it matters |
+|---|---|
+| [#195](https://github.com/imrohitagrawal/citevyn/issues/195) | **Release blocker 9 is worse than "untested": rollback to `v0.9.0` is IMPOSSIBLE.** Its image cannot boot (uvicorn shebang points at a build-stage path), and `rollback.sh` rebuilds from the target tree. `v0.9.0` is the only tag, so there is no reachable rollback target. Fix: tag a bootable `v0.9.1` from any commit after #34. |
+| [#197](https://github.com/imrohitagrawal/citevyn/issues/197) | **#153 Layer 4 must NOT be built as specified.** `DEMO_USER_ID` is a constant, so every demo visitor shares one bucket; persisting it turns a 30 q/h cap into a restart-proof GLOBAL lockout and removes the restart escape hatch. Layer 3 is the real spend control. |
+| [#183](https://github.com/imrohitagrawal/citevyn/issues/183) | `postgres-migrations` never runs on push to `main` (PR-only `if:`, null payload on push). |
+
 - **[#161](https://github.com/imrohitagrawal/citevyn/issues/161)** — CLOSED, no demonstrable
   behavioural impact. The `${v:1:-1}` observation was linguistically correct (bash 4.2+; bash 3.2
   raises "substring expression < 0"), but no failing invocation was ever produced. The code was
