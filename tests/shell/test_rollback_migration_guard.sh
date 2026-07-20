@@ -218,8 +218,13 @@ if [[ "${RC}" -eq 0 ]] || ! grep -q "is not a valid git revision" <<<"${OUT}"; t
 else
     pass "an unresolvable --base-ref is rejected"
 fi
+# NB: deliberately NO _install_scripts here. `git checkout <branch>` from a
+# detached HEAD carries uncommitted modifications across, so the copies survive
+# — and re-installing them six lines above the cmp below would make that
+# assertion compare a file against a copy just made from it, i.e. unable ever to
+# fail. The whole point of case 11 is to detect a revert; it cannot do that if
+# it repairs the tree first.
 git checkout --quiet "${BRANCH}"
-_install_scripts
 
 # 11. meta-assertion: every case above is only meaningful if the scripts under
 #    test are still the WORKING-TREE ones. If a future step resets the tree and

@@ -467,7 +467,7 @@ check would wave through the very failure it exists to prevent. So it
 refuses, and you name the deployed release yourself:
 
 ```bash
-./infra/docker/scripts/rollback.sh v0.9.0 --base-ref v0.10.0
+./infra/docker/scripts/rollback.sh <older-tag> --base-ref <currently-deployed-tag>
 ```
 
 Or just `git checkout main` first, if the incident allows it.

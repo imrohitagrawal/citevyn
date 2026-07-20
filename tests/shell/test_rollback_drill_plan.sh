@@ -126,6 +126,18 @@ else
     pass "the advertised drill is actually defined and wired in"
 fi
 
+# ── 6. The crash-safety traps must actually be ARMED by deploy_verify.sh.
+#      test_drill_crash_safety.sh proves the traps work, but it arms them in its
+#      own driver — so deleting the single `install_drill_traps` call from
+#      deploy_verify.sh left every suite green while production would be left
+#      stopped on a failed restore. That is the exact #195 defect re-opened
+#      through a gap between two test files, so it gets its own assertion.
+if ! grep -q '^install_drill_traps$' "${SCRIPTS}/deploy_verify.sh"; then
+    fail "deploy_verify.sh never calls install_drill_traps — the drill can leave production DOWN"
+else
+    pass "deploy_verify.sh arms the crash-safety traps"
+fi
+
 if [[ "${FAILURES}" -eq 0 ]]; then
     echo "all passed"
     exit 0

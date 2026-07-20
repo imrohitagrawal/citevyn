@@ -37,7 +37,7 @@
 #   ./scripts/rollback.sh v0.9.0            # roll back to an explicit tag
 #   ./scripts/rollback.sh --previous        # roll back to the tag before HEAD
 #   ./scripts/rollback.sh v0.9.0 --dry-run  # print the plan, change nothing
-#   ./scripts/rollback.sh v0.9.0 --base-ref v0.10.0
+#   ./scripts/rollback.sh v0.9.0 --base-ref <deployed-tag>
 #                                           # name the ref whose tree matches the
 #                                           # CURRENTLY DEPLOYED code. Defaults to
 #                                           # HEAD, which is right when you are on
@@ -121,23 +121,57 @@ fi
 
 cd "${REPO_ROOT}"
 
-# Resolve --previous to the tag immediately before the current HEAD so an
-# operator under pressure does not have to look it up.
+# Resolve --previous to the release BEFORE the deployed one, so an operator
+# under pressure does not have to look it up.
 if [[ "${TARGET}" == "__PREVIOUS__" ]]; then
-    # --sort=-version:refname gives newest-first; skip the tag that points at
-    # HEAD (if any) and take the next one.
     # Release-shaped tags ONLY. The bare `v*` glob also matches throwaway drill
     # tags (this repo carries v0.9.1-drill / v0.9.2-drill / v0.10.0-drill), and
     # version:refname sorts them ABOVE the real v0.9.0 — so during an incident
     # --previous would have silently deployed an unreviewed local commit to
     # production. An explicitly named target is still honoured verbatim.
-    _current_tag="$(git describe --tags --exact-match 2>/dev/null || true)"
-    TARGET="$(git tag --list 'v*' --sort=-version:refname \
-        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-        | grep -v "^${_current_tag}$" \
-        | head -1)"
+    #
+    # The deployed release is found with `describe --abbrev=0`, NOT
+    # `--exact-match`. --exact-match only answers "is there a tag ON this exact
+    # commit", so the moment a single commit lands after the release — a doc
+    # merge, the normal state of `main` after a cut — it finds nothing, the
+    # exclusion filters nothing, and `head -1` hands back THE CURRENTLY
+    # DEPLOYED RELEASE. The operator, mid-incident, "rolls back" to the broken
+    # version: the migration guard passes trivially (same tree), refresh.sh
+    # rebuilds the same bad image, and the script reports success.
+    # --abbrev=0 instead walks back to the newest release tag REACHABLE from the
+    # base, which is what "deployed" actually means.
+    #
+    # Resolution is relative to BASE_REF when the caller gave one. Otherwise
+    # --previous + --base-ref would be incoherent: the operator names the
+    # deployed tree explicitly and --previous ignores it and picks that same
+    # tree. That combination is exactly what the detached-HEAD refusal below
+    # tells operators to use.
+    _prev_base="${BASE_REF:-HEAD}"
+    _deployed_tag="$(git describe --tags --abbrev=0 \
+        --match 'v[0-9]*.[0-9]*.[0-9]*' "${_prev_base}" 2>/dev/null || true)"
+    # Everything strictly older than the deployed release, newest first. `sed`
+    # drops the deployed tag and everything above it, so the result cannot be
+    # the release we are rolling back FROM.
+    if [[ -n "${_deployed_tag}" ]]; then
+        TARGET="$(git tag --list 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sed -n "/^${_deployed_tag}\$/,\$p" \
+            | tail -n +2 \
+            | head -1 || true)"
+    else
+        TARGET="$(git tag --list 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -1 || true)"
+    fi
+    # `|| true` above is load-bearing. Under `set -euo pipefail` a grep that
+    # matches nothing makes the whole pipeline non-zero, the assignment takes
+    # that status, and set -e kills the script HERE — with no output at all,
+    # leaving the diagnosis below as dead code. Verified: without it, a repo
+    # whose only tag is v1.0.0-rc1 exits 1 silently. deploy_verify.sh's copy of
+    # this pipeline already had `|| true`; the two had diverged.
     if [[ -z "${TARGET}" ]]; then
-        echo "error: --previous found no earlier release tag (vX.Y.Z) to roll back to" >&2
+        echo "error: --previous found no release tag (vX.Y.Z) older than" >&2
+        echo "       ${_deployed_tag:-the current tree} to roll back to." >&2
         echo "       list tags with: git tag --list 'v*' --sort=-version:refname" >&2
         echo "       pass a tag explicitly if you really mean a non-release tag" >&2
         exit 1
