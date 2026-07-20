@@ -23,6 +23,11 @@ dev = [
     "fakeredis[lua]>=2.20.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24.0",
+    # Declared for tests/test_ci_workflow_conditions.py, which parses the GitHub
+    # workflow YAML. It was already installed transitively via uvicorn[standard];
+    # naming it here means a future uvicorn extras change cannot silently break
+    # that test. No new download — the version is already in uv.lock.
+    "pyyaml>=6.0.3",
     "ruff>=0.15.22",
     "pyright>=1.1.411",
 ]
