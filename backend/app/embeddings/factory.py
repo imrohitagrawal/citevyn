@@ -185,7 +185,7 @@ def metered_embedder(embedder: Embedder, settings: Settings) -> Embedder:
     """Wrap a PAID embedder so every embedding call is recorded as spend (#153).
 
     Applied at the production construction sites — :func:`get_embedder` (the API
-    singleton, query path) and ``app.worker.cli._build_runner`` (ingest) — rather
+    singleton, query path) and ``app.worker.cli.build_runner`` (ingest) — rather
     than inside :func:`build_embedder`, which stays **provider selection only**.
     That split mirrors ``build_llm_client``/``get_llm_client`` and matters for two
     concrete callers: ``tests/eval/retrieval.py`` and ``tests/eval/distractors.py``

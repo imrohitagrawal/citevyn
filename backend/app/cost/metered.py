@@ -306,7 +306,27 @@ class MeteredEmbedder:
             # anything, so neither should consume budget or produce a spend row —
             # a phantom $0 row would be indistinguishable from a real free call.
             return await call()
-        await enforce_budget(_resolve_sessionmaker(self._sessionmaker), settings)
+        # INGEST is metered but NOT budget-gated, and the asymmetry is deliberate.
+        #
+        # ``enforce_budget`` fails CLOSED when the meter store is unreadable — the
+        # right call for user traffic, where an unverifiable budget must not become
+        # an unmetered spending window. It is the wrong call for ingest:
+        #
+        #   * Ingest is an operator-initiated BATCH job with an operator watching,
+        #     not anonymous traffic. Failing it closed turns a metering hiccup into
+        #     a broken corpus, which is a far worse outcome than an over-budget
+        #     ingest that the operator can see and stop.
+        #   * It is a bootstrap-order hazard. A fresh deploy SEEDS before it has
+        #     ever spent anything, so gating the corpus build on a successful read
+        #     of the spend table makes ingestion depend on a table that exists only
+        #     to record ingestion. Observed: the seed died with
+        #     "no such table: provider_calls".
+        #
+        # Spend is still RECORDED, so an expensive ingest is visible in
+        # ``/v1/admin/budget`` and counts against the next query's budget — the
+        # money is accounted for, it just cannot brick the corpus build.
+        if default_site is not CallSite.ingest:
+            await enforce_budget(_resolve_sessionmaker(self._sessionmaker), settings)
         with collect_embedding_usage() as usage:
             async with get_semaphore(settings):
                 result = await call()

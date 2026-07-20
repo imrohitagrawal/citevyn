@@ -222,14 +222,14 @@ def test_the_WORKER_meters_its_own_embedder() -> None:
     hole this layer could leave."""
     from app.worker import cli
 
-    runner = cli._build_runner(_OR_SETTINGS, index_version="v-test")
+    runner = cli.build_runner(_OR_SETTINGS, index_version="v-test")
     assert isinstance(runner._embedder, MeteredEmbedder)
 
 
 def test_the_worker_does_NOT_wrap_the_stub_either() -> None:
     from app.worker import cli
 
-    runner = cli._build_runner(Settings(llm_provider="stub"), index_version="v-test")
+    runner = cli.build_runner(Settings(llm_provider="stub"), index_version="v-test")
     assert isinstance(runner._embedder, StubEmbedder)
 
 
@@ -562,8 +562,8 @@ def test_the_budget_gate_runs_BEFORE_the_provider_call() -> None:
     assert inner.calls == 0, "the provider was called after the budget said stop"
 
 
-def test_the_ingest_path_is_gated_too() -> None:
-    """A corpus-wide re-ingest is the fastest way to blow a daily cap."""
+def test_the_QUERY_path_is_budget_gated() -> None:
+    """User traffic must stop at the hard cap — that is what the budget is for."""
     inner = _FakeEmbedder()
 
     async def _tripped(sm, settings):  # type: ignore[no-untyped-def]
@@ -580,11 +580,57 @@ def test_the_ingest_path_is_gated_too() -> None:
                     model="openai/text-embedding-3-small",
                     sessionmaker=object(),  # type: ignore[arg-type]
                     settings=Settings(llm_provider="stub"),
-                ).embed_documents(["a", "b"])
+                ).embed("a query")
             )
     finally:
         metered_mod.enforce_budget = original  # type: ignore[assignment]
-    assert inner.calls == 0
+    assert inner.calls == 0, "the provider was called despite a tripped budget"
+
+
+def test_the_INGEST_path_is_metered_but_NOT_budget_gated() -> None:
+    """Ingest is deliberately exempt from the gate, and the asymmetry is the point.
+
+    ``enforce_budget`` fails CLOSED on an unreadable meter store — correct for
+    anonymous user traffic, wrong for an operator-initiated batch job:
+
+    * Failing ingest closed turns a metering hiccup into a BROKEN CORPUS, which is
+      worse than an over-budget ingest the operator can see and stop.
+    * It is a bootstrap-order hazard. A fresh deploy seeds before it has ever
+      spent anything, so gating the corpus build on reading the spend table makes
+      ingestion depend on a table that exists only to record ingestion. This was
+      observed for real: the seed died with "no such table: provider_calls".
+
+    Spend is still RECORDED, so an expensive ingest shows up in /v1/admin/budget
+    and counts against the next query — the money is accounted for, it just
+    cannot brick the build.
+    """
+    inner = _FakeEmbedder()
+    called = {"n": 0}
+
+    async def _tripped(sm, settings):  # type: ignore[no-untyped-def]
+        called["n"] += 1
+        raise CostLimitReached("daily cap")
+
+    original = metered_mod.enforce_budget
+    metered_mod.enforce_budget = _tripped  # type: ignore[assignment]
+    try:
+        # Must NOT raise, even with the budget hard-tripped.
+        asyncio.run(
+            MeteredEmbedder(
+                inner,
+                provider="openrouter",
+                model="openai/text-embedding-3-small",
+                sessionmaker=object(),  # type: ignore[arg-type]
+                settings=Settings(llm_provider="stub"),
+            ).embed_documents(["a", "b"])
+        )
+    finally:
+        metered_mod.enforce_budget = original  # type: ignore[assignment]
+
+    assert inner.calls == 1, "ingest was blocked by the budget gate"
+    # The gate must not merely be tolerated — it must not be CONSULTED, or a
+    # fail-closed meter read would still raise from inside enforce_budget.
+    assert called["n"] == 0, "enforce_budget was called on the ingest path"
 
 
 def test_a_cost_stop_is_NOT_swallowed_by_the_vector_arms_degrade_path() -> None:
