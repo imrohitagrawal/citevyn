@@ -77,12 +77,16 @@ effective cap is `workers x limit`. The daily budget is the cross-process contro
 **Layer 3 — the §9 daily budget.** `app/cost/budget.py`, enforced on the same seam
 as metering, **before** the provider call:
 
-| Setting | Default |
-|---|---|
-| `CITEVYN_COST_SOFT_DAILY_USD` | `5.0` |
-| `CITEVYN_COST_HARD_DAILY_USD` | `10.0` |
-| `CITEVYN_COST_BUDGET_FAIL_CLOSED` | `true` |
-| `CITEVYN_COST_BUDGET_ENABLED` | `true` (kill switch) |
+| Setting | Code default | **This deployment** |
+|---|---|---|
+| `CITEVYN_COST_SOFT_DAILY_USD` | `5.0` | **`1`** |
+| `CITEVYN_COST_HARD_DAILY_USD` | `10.0` | **`2`** |
+| `CITEVYN_COST_BUDGET_FAIL_CLOSED` | `true` | `true` |
+| `CITEVYN_COST_BUDGET_ENABLED` | `true` (kill switch) | `true` |
+
+The deployment column is set in `infra/docker/prod.env.example` and reflects the
+owner's real ceiling of **$2/day**. The code defaults are left at $5/$10 as the
+upstream reference; do not read them as policy.
 
 * **Soft** warns and biases toward cache. Correctness is deliberately unchanged —
   a $5 day must not silently start degrading answers.
@@ -256,14 +260,28 @@ and Layers 1–3 remain the controls that actually cap exposure.
 
 CI runs the judged eval **at full coverage, less often**:
 
-* **push to `main`** → runs (full set).
+* **push of a `v*` tag** → runs (full set). This is the **release gate** — a tag
+  cannot ship without the judged eval passing.
+* **`workflow_dispatch`** → runs (full set). Run it on demand from the Actions tab.
 * **pull request labelled `full-eval`** → runs (full set). The `labeled` event is in
   the workflow's trigger `types`, so adding the label to an open PR starts a run on
   its own.
+* **an ordinary merge to `main`** → does **not** run.
 * **any other pull request** → does not run.
 
-Previously it ran on every PR *push*, so a five-push PR cost ~$0.13. Bounding
-frequency is where the saving actually is.
+It first ran on every PR *push* (a five-push PR cost ~$0.13), then on every push to
+`main` — i.e. on every merge, ~$0.026 a time. That is a standing charge for ordinary
+development, and the paid key is meant to be spent when **finalising a release**, not
+while coding. Hence the three deliberate triggers above.
+
+Note the **trigger** is the control, not the secret. Removing the repo secret would
+also stop the spend, but the job then self-skips *silently* and every release needs
+the secret re-added by hand — a worse failure mode than an explicit trigger.
+
+`backend/tests/test_ci_workflow_conditions.py` pins this: the eval job is listed in
+`_INTENTIONALLY_NOT_ON_PUSH` with its reason, and a dedicated test asserts the tag
+trigger survives — deleting it (which would turn "deferred to release" into "never
+runs") fails the suite. Mutation-verified.
 
 #### Why sampling cases was rejected
 
@@ -291,9 +309,11 @@ dropped refusal case would be checked by neither. `is_priority` retains all of t
 and the runner fails the run outright if a subset ever excludes a zero-tolerance case
 (`judge.subset.dropped_zero_tolerance`), so narrowing that rule is loud, not silent.
 
-**Tradeoff, stated.** An unlabelled PR gets no judged gate at all; a judged
-regression surfaces on merge to `main`. Label a PR `full-eval` to gate it before
-merge.
+**Tradeoff, stated.** Neither an unlabelled PR nor an ordinary merge gets a judged
+gate, so an answer-quality regression can sit on `main` until the next tag or manual
+run. That is accepted deliberately at a $2/day budget, and it is bounded: the release
+tag still runs the full judged set, so a regression cannot reach a *published*
+release unnoticed. Label a PR `full-eval` to gate a risky change before merge.
 
 The **retrieval half is unaffected** — it runs over every case on every run, and it
 is what gates literal/overall hit-rate, MRR/precision@1, multihop and followup. It

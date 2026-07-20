@@ -206,12 +206,23 @@ Promotion gates:
 
 ## 9. Cost Controls
 
-MVP defaults:
+Code defaults (the upstream reference values):
 
 ```text
 soft daily limit: $5
 hard daily limit: $10
 ```
+
+**This deployment's policy is $2/day**, set in `infra/docker/prod.env.example`:
+
+```text
+CITEVYN_COST_SOFT_DAILY_USD=1
+CITEVYN_COST_HARD_DAILY_USD=2
+```
+
+The daily budget is the only control that caps money. The per-hour rate limits
+are fairness/anti-nuisance — a distributed source still spends. See
+`docs/COST_CONTROLS.md`.
 
 On soft limit:
 

@@ -45,12 +45,15 @@ place to catch the regression.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import ipaddress
 import time
 import uuid
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Annotated, Protocol
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from app.core.config import Settings, get_settings
 from app.core.errors import APIErrorCode, error_response
@@ -63,6 +66,15 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
+
+
+# Fallback for the shared backstop bucket when a caller constructs a limiter
+# directly (tests, scripts) without naming one. Production passes
+# ``settings.rate_limit_global_per_hour``. It is deliberately far above the
+# per-visitor limit: this bucket exists to stop a distributed flood, not to
+# throttle normal traffic, and if it ever binds during ordinary use it has
+# re-created the #203 lockout.
+_DEFAULT_GLOBAL_PER_WINDOW = 600
 
 
 class _LimiterLike(Protocol):
@@ -106,15 +118,24 @@ class RateLimiter:
         window_seconds: int,
         demo_user_per_window: int,
         admin_per_window: int,
+        global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
         if demo_user_per_window < 1 or admin_per_window < 1:
             raise ValueError("per-window limits must be >= 1")
+        if global_per_window < 1:
+            raise ValueError("global_per_window must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
             "admin": admin_per_window,
+            # Backstop across ALL demo visitors (#203). Defaults high enough that
+            # it never binds on ordinary use. Registered explicitly rather than
+            # left to fall through ``limit_for``'s default, which would silently
+            # apply the 30/hour DEMO limit to the shared bucket and re-create the
+            # global lockout this change exists to remove.
+            "global": global_per_window,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -227,11 +248,14 @@ class RedisRateLimiter:
         demo_user_per_window: int,
         admin_per_window: int,
         key_prefix: str,
+        global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
         if demo_user_per_window < 1 or admin_per_window < 1:
             raise ValueError("per-window limits must be >= 1")
+        if global_per_window < 1:
+            raise ValueError("global_per_window must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -239,6 +263,12 @@ class RedisRateLimiter:
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
             "admin": admin_per_window,
+            # Backstop across ALL demo visitors (#203). Defaults high enough that
+            # it never binds on ordinary use. Registered explicitly rather than
+            # left to fall through ``limit_for``'s default, which would silently
+            # apply the 30/hour DEMO limit to the shared bucket and re-create the
+            # global lockout this change exists to remove.
+            "global": global_per_window,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -346,12 +376,27 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             demo_user_per_window=settings.rate_limit_demo_user_per_hour,
             admin_per_window=settings.rate_limit_admin_per_hour,
             key_prefix=settings.redis_key_prefix,
+            global_per_window=_effective_global_limit(settings),
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
         demo_user_per_window=settings.rate_limit_demo_user_per_hour,
         admin_per_window=settings.rate_limit_admin_per_hour,
+        global_per_window=_effective_global_limit(settings),
     )
+
+
+def _effective_global_limit(settings: Settings) -> int:
+    """The backstop limit to build the limiter with.
+
+    ``rate_limit_global_per_hour = 0`` means "no backstop". The limiters reject a
+    limit below 1, and a 0 would in any case deny EVERY request, so the disabled
+    case is carried as a large sentinel and the dependency simply skips the check.
+    Encoding "disabled" as 0 in the limiter itself would be a footgun: one missed
+    branch and the backstop becomes a total outage.
+    """
+    configured = settings.rate_limit_global_per_hour
+    return configured if configured > 0 else _DEFAULT_GLOBAL_PER_WINDOW
 
 
 def get_limiter(settings: Settings) -> _LimiterLike:
@@ -383,6 +428,7 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         limiter.window_seconds == settings.rate_limit_window_seconds
         and limiter.limit_for(role="demo_user") == settings.rate_limit_demo_user_per_hour
         and limiter.limit_for(role="admin") == settings.rate_limit_admin_per_hour
+        and limiter.limit_for(role=_GLOBAL_ROLE) == _effective_global_limit(settings)
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -432,12 +478,112 @@ async def enforce_rate_limit(
 # (they replace ``require_demo_api_key`` with ``rate_limited_demo``).
 
 
+# ---------------------------------------------------------------------------
+# Per-visitor identity for the DEMO bucket (#203)
+# ---------------------------------------------------------------------------
+#
+# The demo API key is shared by construction, so ``require_demo_api_key`` returns
+# a CONSTANT (``DEMO_USER_ID``). Keying the limiter on it gave every visitor on
+# earth ONE bucket: 30 questions from one person denied the demo to everyone else
+# for a rolling hour, and because the bucket lives in Redis a restart no longer
+# cleared it.
+#
+# The fix separates the two identities that were conflated:
+#   * AUDIT identity  — still ``DEMO_USER_ID``. Attribution, logs and the
+#     orchestrator are unchanged, and the dependency still RETURNS it, so no
+#     route signature changes.
+#   * RATE-LIMIT key  — derived per visitor, below.
+#
+# What this does and does not buy: per-visitor limiting is FAIRNESS. It stops one
+# visitor monopolising the demo. It does NOT cap spend — a distributed source
+# still costs money, and the §9 daily budget is the control for that.
+
+_GLOBAL_BUCKET_KEY = "demo_global"
+_GLOBAL_ROLE = "global"
+# Every failure path lands here rather than inventing a per-request key. Sharing
+# one bucket is the OLD behaviour, so an unparseable address degrades to "no
+# worse than before" instead of handing out an unlimited fresh allowance each
+# request — which is what keying on something unknown would do.
+_UNKNOWN_CLIENT_KEY = "demo_unknown"
+
+
+def _client_address(request: Request | None, settings: Settings) -> str | None:
+    """Best-effort client address: trusted header first, then the socket peer."""
+    if request is None:
+        return None
+
+    header = (settings.rate_limit_client_ip_header or "").strip()
+    if header:
+        raw = request.headers.get(header)
+        if raw:
+            # X-Forwarded-For is a list, "client, proxy1, proxy2". The LEFTMOST
+            # entry is the original client. Single-value headers (Fly-Client-IP,
+            # CF-Connecting-IP) are unaffected by the split.
+            candidate = raw.split(",")[0].strip()
+            if candidate:
+                return candidate
+
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None)
+    return host or None
+
+
+def _normalise_address(raw: str) -> str | None:
+    """Canonicalise an address, collapsing IPv6 to its /64.
+
+    A single IPv6 customer is routinely handed a whole /64, so limiting per
+    ADDRESS would be free to evade — one visitor could walk through billions of
+    source addresses. IPv4 is used as-is.
+    """
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return None
+    if addr.version == 6:
+        network = ipaddress.ip_network(f"{addr}/64", strict=False)
+        return str(network)
+    return str(addr)
+
+
+def client_rate_key(request: Request | None, settings: Settings) -> str:
+    """Return the demo rate-limit bucket key for this request.
+
+    The address is HMAC'd, never stored raw: an IP is personal data, and an
+    unsalted hash of an IPv4 address is reversible by brute force (2^32
+    candidates). The salt falls back to the demo API key, which production
+    already requires to be a strong, non-default secret.
+    """
+    raw = _client_address(request, settings)
+    normalised = _normalise_address(raw) if raw else None
+    if normalised is None:
+        return _UNKNOWN_CLIENT_KEY
+
+    salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
+    digest = hmac.new(salt, normalised.encode(), hashlib.sha256).hexdigest()
+    return f"demo_{digest[:32]}"
+
+
 async def rate_limited_demo(
+    request: Request,
     user_id: Annotated[str, Depends(require_demo_api_key)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> str:
-    """Demo-user auth + rate limit. Returns the demo user id."""
-    await enforce_rate_limit(user_id=user_id, role="demo_user", settings=settings)
+    """Demo-user auth + per-visitor rate limit. Returns the demo user id.
+
+    Returns ``user_id`` unchanged so every route signature and all downstream
+    attribution stay exactly as they were; only the limiter's key differs.
+    """
+    await enforce_rate_limit(
+        user_id=client_rate_key(request, settings),
+        role="demo_user",
+        settings=settings,
+    )
+    # Backstop across all visitors. Per-visitor limiting alone leaves a
+    # distributed source unbounded; this caps total request volume. Checked
+    # AFTER the per-visitor limit so an individual flood is attributed to that
+    # visitor rather than burning the shared allowance.
+    if settings.rate_limit_global_per_hour > 0:
+        await enforce_rate_limit(user_id=_GLOBAL_BUCKET_KEY, role=_GLOBAL_ROLE, settings=settings)
     return user_id
 
 
@@ -453,6 +599,7 @@ async def rate_limited_admin(
 __all__ = [
     "RateLimiter",
     "RedisRateLimiter",
+    "client_rate_key",
     "enforce_rate_limit",
     "get_limiter",
     "rate_limited_admin",
