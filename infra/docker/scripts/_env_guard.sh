@@ -34,6 +34,12 @@
 #     address to register with Let's Encrypt, so a missing or
 #     default value silently disables cert-expiry notifications
 #     on the prod host)
+#   - asserts CITEVYN_PUBLIC_HOST, CITEVYN_DATABASE_URL and a
+#     non-stub CITEVYN_LLM_PROVIDER are set
+#   - asserts CITEVYN_DEMO_API_KEY passes the same weak-secret
+#     test the app applies in production (non-empty, not the
+#     published ``local-demo-key``, at least 16 chars) — see
+#     Settings._is_weak_secret in backend/app/core/config.py
 #   - exits non-zero with a remediation message if any fails
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -139,7 +145,16 @@ if ! (
     # plus stray spaces (``echo value >> .env``) is fully trimmed.
     _strip() {
         local v="$1"
+        # BOTH ends, because the Python predicate this mirrors is
+        # `value.strip()` (backend/app/core/config.py:54-55), which is
+        # symmetric. Trailing-only was an ASYMMETRY BUG, not a simplification:
+        # CITEVYN_DEMO_API_KEY="  local-demo-key" is 16 chars with two leading
+        # spaces, so it is neither == 'local-demo-key' nor < 16 — the guard
+        # passed it, and then Python stripped both ends, saw the publicly-known
+        # default, and crash-looped the api. Which is exactly the failure this
+        # guard exists to catch BEFORE the 60s health poll burns.
         while [[ "${v}" =~ [[:space:]]$ ]]; do v="${v%%[[:space:]]}"; done
+        while [[ "${v}" =~ ^[[:space:]] ]]; do v="${v#?}"; done
         if [[ ${#v} -ge 2 ]]; then
             local f="${v:0:1}" l="${v: -1}"
             if [[ "${f}" == "'" && "${l}" == "'" ]] \
@@ -228,6 +243,56 @@ if ! (
         echo "       Set CITEVYN_LLM_PROVIDER=gemini (or anthropic)." >&2
         exit 1
     fi
+    # CITEVYN_DEMO_API_KEY is the bearer every public /api/v1 request
+    # carries. ``infra/docker/prod.env.example`` ships it EMPTY, and
+    # Settings._is_weak_secret (backend/app/core/config.py) rejects an
+    # empty / default / short value once CITEVYN_ENVIRONMENT=production
+    # — which compose pins. Without this block an operator who copied
+    # the template and skipped the field passes the guard, deploy.sh
+    # proceeds, and the api dies at boot on a pydantic error AFTER the
+    # 60s health poll has burned, reporting only ``api health=unknown``.
+    #
+    # Mirror the Python predicate exactly: strip (quotes + whitespace at BOTH
+    # ends, via _strip), lower-case, reject the publicly-known default, and
+    # reject anything under 16 characters — which also covers the empty case.
+    # The lower-casing matters: ``LOCAL-DEMO-KEY`` is as guessable as the
+    # default.
+    #
+    # One helper for BOTH keys. CITEVYN_ADMIN_API_KEY had the identical gap and
+    # was only ever compared against the Makefile bootstrap stub
+    # (``dev-only-change-me``): empty, absent, and the PUBLISHED code default
+    # ``local-admin-key`` (config.py:71) all passed the guard, and the admin key
+    # is the one that can promote an index and read the budget.
+    _assert_strong_key() {  # $1 = var name, $2 = published default, $3 = raw value
+        local _name="$1" _default="$2" _val _lc
+        _val="$(_strip "${3:-}")"
+        _lc="$(printf '%s' "${_val}" | tr '[:upper:]' '[:lower:]')"
+        if [[ -z "${_val}" ]]; then
+            echo "error: ${_name} is not set in .env." >&2
+            echo "       prod.env.example ships it empty and the api refuses" >&2
+            echo "       to boot in production without a strong value." >&2
+            echo "       Generate one with e.g. openssl rand -hex 32." >&2
+            exit 1
+        fi
+        if [[ "${_lc}" == "${_default}" ]]; then
+            echo "error: ${_name} is still the publicly-known default" >&2
+            echo "       ('${_default}'). It is in the open-source repo, so" >&2
+            echo "       anyone can use it against your deployment." >&2
+            echo "       Generate one with e.g. openssl rand -hex 32." >&2
+            exit 1
+        fi
+        if [[ ${#_val} -lt 16 ]]; then
+            echo "error: ${_name} is shorter than the 16-character minimum" >&2
+            echo "       the api enforces in production, so the api would" >&2
+            echo "       crash-loop on a pydantic validation error." >&2
+            echo "       Generate one with e.g. openssl rand -hex 32." >&2
+            exit 1
+        fi
+    }
+    # The bearer every public /api/v1 request carries.
+    _assert_strong_key CITEVYN_DEMO_API_KEY  local-demo-key  "${CITEVYN_DEMO_API_KEY:-}"
+    # The key that can promote an index, read the budget, and inspect jobs.
+    _assert_strong_key CITEVYN_ADMIN_API_KEY local-admin-key "${CITEVYN_ADMIN_API_KEY:-}"
 ); then
     return 1 2>/dev/null || exit 1
 fi

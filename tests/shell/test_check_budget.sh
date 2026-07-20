@@ -28,6 +28,7 @@
 #   5. unparseable response                              -> 1 (never a false pass)
 #   6. exactly at the threshold                          -> 0 (>=, not >)
 #   7. 90% used but above the threshold                  -> 0, with a warning
+#   8. the provider key never appears in curl argv (stdin --config, #200)
 # ────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -108,6 +109,45 @@ if [[ ${rc} -eq 0 ]] && grep -q "85%" <<<"${out}"; then
 else
     bad "85% warning -> expected exit 0 + warning, got ${rc}: ${out}"
 fi
+
+# 8. The provider key must NEVER appear in curl's argv — argv is world-readable
+#    via `ps aux` on a multi-user host, and also lands in process accounting.
+#    deploy_verify.sh already feeds bearers through `curl --config -` on stdin;
+#    this asserts check_budget.sh does the same (#200).
+#
+#    Hermetic: a `curl` shim on PATH records its argv and its stdin, then emits
+#    a healthy-key JSON body so the script proceeds normally. No network.
+#
+#    The script is run with stdin on /dev/null so the shim's `cat` cannot block:
+#    under the OLD `-H` form curl inherits the caller's stdin rather than a
+#    pipe, and without this the suite would HANG instead of failing.
+shimdir="$(mktemp -d)"
+cat > "${shimdir}/curl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${SHIM_ARGV_FILE}"
+cat > "${SHIM_STDIN_FILE}"
+printf '%s' '{"data":{"usage":0.5,"limit":10}}'
+SHIM
+chmod +x "${shimdir}/curl"
+
+SHIM_ARGV_FILE="${shimdir}/argv" SHIM_STDIN_FILE="${shimdir}/stdin" \
+    PATH="${shimdir}:${PATH}" \
+    CITEVYN_OPENROUTER_API_KEY=sk-or-SENTINEL-DO-NOT-LEAK \
+    bash -c "cd /tmp && '${REPO_ROOT}/scripts/check_budget.sh'" </dev/null >/dev/null 2>&1
+
+argv="$(cat "${shimdir}/argv" 2>/dev/null || true)"
+stdin_seen="$(cat "${shimdir}/stdin" 2>/dev/null || true)"
+
+if grep -q "SENTINEL" <<<"${argv}"; then
+    bad "provider key LEAKED into curl argv: ${argv}"
+elif ! grep -q -- "--config" <<<"${argv}"; then
+    bad "curl was not invoked with --config (argv: ${argv})"
+elif ! grep -q "Authorization: Bearer sk-or-SENTINEL-DO-NOT-LEAK" <<<"${stdin_seen}"; then
+    bad "the bearer never reached curl on stdin (stdin: ${stdin_seen})"
+else
+    ok "provider key goes to curl on stdin via --config, never in argv"
+fi
+rm -rf "${shimdir}"
 
 echo "  passed: ${PASS}  failed: ${FAIL}"
 [[ ${FAIL} -eq 0 ]] || exit 1

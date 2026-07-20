@@ -46,8 +46,16 @@ if [[ -z "${KEY}" ]]; then
 fi
 
 # --fail-with-body so a 401/429 is an error here rather than a body we misparse.
-RESPONSE="$(curl --silent --show-error --max-time 20 --fail-with-body \
-    -H "Authorization: Bearer ${KEY}" "${API}" 2>&1)"
+#
+# The Authorization header is fed to curl via ``--config -`` on STDIN rather
+# than ``-H``, so the key never appears in curl's argv — where any user on the
+# host can read it out of ``ps aux`` (and where it lands in shell history and
+# process accounting). Same pattern as ``curl_demo`` in
+# infra/docker/scripts/deploy_verify.sh. ``set -o pipefail`` is already on, so
+# ``$?`` after the pipeline reflects a curl failure even though curl is last.
+RESPONSE="$(printf 'header = "Authorization: Bearer %s"\n' "${KEY}" \
+    | curl --silent --show-error --max-time 20 --fail-with-body \
+        --config - "${API}" 2>&1)"
 CURL_RC=$?
 if [[ ${CURL_RC} -ne 0 ]]; then
     # Never echo RESPONSE unfiltered — an error body can quote the request,

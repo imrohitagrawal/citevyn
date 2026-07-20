@@ -15,13 +15,30 @@
 # dev-up`` and ``make deploy`` invoke it. CI does not use it; tests
 # run against an in-memory SQLite engine.
 #
-# Secrets handling: every secret (POSTGRES_PASSWORD, API keys,
-# ACME email) is sourced from the host-side ``infra/docker/.env``
-# via ``env_file``. We deliberately avoid interpolating secrets
-# into the inline ``environment:`` map — that leaks them into
-# ``docker compose config`` output and the ``Cmd`` field of
-# ``/proc/1/environ`` on every container. Use ``env_file:`` for
-# anything sensitive.
+# Secrets handling: every secret (POSTGRES_PASSWORD, API keys)
+# is sourced from the host-side ``infra/docker/.env`` via
+# ``env_file``, and is never written into this file or
+# interpolated into the inline ``environment:`` map. That keeps
+# secrets out of git.
+#
+# It does NOT keep them out of the rendered config or out of the
+# containers. ``env_file`` is resolved at render time: verified
+# with ``docker compose -f infra/docker/docker-compose.yml
+# --profile prod config``, every key in .env is printed in full
+# under ``environment:`` for EVERY service that lists the file —
+# db, api, worker, the one-shot ``backup`` job AND the
+# internet-facing caddy (only redis, which has no ``env_file``,
+# is clean). ``backup`` is easy to overlook because it is
+# profile-gated, but it runs a shell in a postgres image with a
+# host bind-mount at ./backups, so it is a more interesting
+# surface than its size suggests. Each of those containers
+# therefore also holds the whole secret set in its own
+# ``/proc/1/environ``.
+#
+# Treat ``docker compose config`` output as secret material: do
+# not paste it into an issue, a CI log, or a support thread.
+# Narrowing this properly means per-service ``env_file`` scoping
+# or compose ``secrets:``; neither is done yet. See #200.
 # ────────────────────────────────────────────────────────────────────────────
 
 x-logging: &default-logging
@@ -42,10 +59,12 @@ x-app-defaults: &app-defaults
   environment: &app-env
     # Non-secret overrides that differ from the host-side defaults
     # in .env.example. Connection strings live in infra/docker/.env
-    # (``env_file:`` above) so secrets do not leak into ``docker
-    # compose config`` output or ``/proc/1/environ`` — the .env
-    # file uses the docker-internal hostnames (``db``, ``redis``)
-    # which are not reachable from outside the compose network.
+    # (``env_file:`` above) so they stay out of git — but NOT out of
+    # ``docker compose config`` output or ``/proc/1/environ``, which
+    # render/receive the whole .env regardless (see the file header).
+    # The .env file uses the docker-internal hostnames (``db``,
+    # ``redis``) which are not reachable from outside the compose
+    # network.
     CITEVYN_ENVIRONMENT: production
     CITEVYN_RATE_LIMIT_ENABLED: "true"
     CITEVYN_RATE_LIMIT_WINDOW_SECONDS: "3600"
