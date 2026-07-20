@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchCitevynMeta, GENERIC_REFUSAL } from "./knowledgeBase";
+import { matchCitevynMeta, matchKB, KB, GENERIC_REFUSAL } from "./knowledgeBase";
 
 describe("matchCitevynMeta", () => {
   it("answers CiteVyn Pro / membership questions from built-in copy", () => {
@@ -66,5 +66,22 @@ describe("GENERIC_REFUSAL", () => {
     expect(GENERIC_REFUSAL.indexOf("Claude")).toBeLessThan(
       GENERIC_REFUSAL.indexOf("CiteVyn itself"),
     );
+  });
+
+  it("is the only refusal text demo mode can emit", () => {
+    // The "laptop" entry used to re-type the refusal, so demo mode shipped two
+    // different texts and the most visible one (MARQUEE + DEMO_ORDER) lacked the
+    // nudge. Checked over every refusing surface, not just that entry, so a new
+    // canned refusal cannot reintroduce a hand-copy.
+    const refusingEntries = Object.entries(KB).filter(([, e]) => e.refusal);
+    expect(refusingEntries.length).toBeGreaterThan(0);
+    for (const [key, entry] of refusingEntries) {
+      expect(entry.a, `KB["${key}"] must reference GENERIC_REFUSAL`).toBe(GENERIC_REFUSAL);
+    }
+
+    // Both refusal exits of the free-text matcher: the out-of-scope keyword
+    // branch and the fall-through.
+    expect(matchKB("what's the best laptop for AI coding?").a).toBe(GENERIC_REFUSAL);
+    expect(matchKB("what's the weather in Berlin?").a).toBe(GENERIC_REFUSAL);
   });
 });

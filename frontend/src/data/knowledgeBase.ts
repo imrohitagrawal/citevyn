@@ -28,6 +28,35 @@ export interface KBEntry {
 }
 
 // ---------------------------------------------------------------------------
+// The one refusal string
+// ---------------------------------------------------------------------------
+
+/**
+ * Fallback answer when no KB entry matches, and the answer of every refusing KB
+ * entry. THE demo-mode refusal — there is deliberately only one.
+ *
+ * BYTE-IDENTICAL to the backend's `DEFAULT_UNSUPPORTED_REFUSAL`
+ * (`backend/app/core/config.py`), including the "or about CiteVyn itself" nudge
+ * (#84 item 5) — a demo user who hits the refusal should read exactly what a
+ * live user reads, so the demo is not quietly a different product.
+ *
+ * Declared ABOVE `KB` on purpose: `const` has no value hoisting, and the `KB`
+ * object literal is evaluated at module load, so the canned "laptop" refusal
+ * entry could not reference this if it were declared further down.
+ *
+ * `backend/tests/test_settings_slice3_slice4.py` pins BOTH this declaration and
+ * the absence of any second refusal literal anywhere in this file. Both halves
+ * are load-bearing: the string had already drifted once (this copy said "I don't
+ * have" where the backend says "I do not have"), and the "laptop" entry then
+ * carried a THIRD, separately-drifted hand-copy that a whole-file substring
+ * check could not see — demo mode emitted two different refusals, and the one
+ * users hit most visibly was the one missing the nudge. Edit the backend
+ * constant and re-copy here; never add a second literal.
+ */
+export const GENERIC_REFUSAL =
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I do not have credible source material in this assistant to answer that.";
+
+// ---------------------------------------------------------------------------
 // Knowledge base entries
 // ---------------------------------------------------------------------------
 
@@ -146,7 +175,11 @@ export const KB: Record<string, KBEntry> = {
     q: "What's the best laptop for AI coding?",
     tag: "OUT OF SCOPE",
     refusal: true,
-    a: "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation. I don't have credible source material in this assistant to answer that.",
+    // References the constant rather than re-typing it. This entry is the most
+    // visible refusal in the product (it is in MARQUEE and DEMO_ORDER), and as a
+    // hand-copy it had drifted from the backend wording and never gained the
+    // #84-item-5 nudge.
+    a: GENERIC_REFUSAL,
     sources: [],
   },
   // Canned answer for the "Get Pro" pricing CTA. Keyed like any other entry so
@@ -190,23 +223,6 @@ export const PLACEHOLDERS = [
   "What does --model do in Codex?",
   "Which Claude models are available?",
 ];
-
-/**
- * Fallback answer when no KB entry matches.
- *
- * BYTE-IDENTICAL to the backend's `DEFAULT_UNSUPPORTED_REFUSAL`
- * (`backend/app/core/config.py`), including the "or about CiteVyn itself" nudge
- * (#84 item 5) — a demo user who hits the refusal should read exactly what a
- * live user reads, so the demo is not quietly a different product.
- *
- * `backend/tests/test_settings_slice3_slice4.py` asserts this file contains the
- * backend string verbatim. It is pinned because it had ALREADY drifted: this
- * copy said "I don't have" where the backend says "I do not have" — a hand-copied
- * mirror with no pin, which is the exact failure mode #84 item 4 fixed for the
- * alias list. Edit the backend constant and re-copy; do not edit only this line.
- */
-export const GENERIC_REFUSAL =
-  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I do not have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Keyword matcher — routes free-typed questions to a KB entry
