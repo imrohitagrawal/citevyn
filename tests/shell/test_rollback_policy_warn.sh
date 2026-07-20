@@ -41,6 +41,13 @@ fail() { echo "  FAIL — $1"; FAILURES=$((FAILURES + 1)); }
 # A throwaway clone so throwaway tags/commits never touch the real repo.
 git clone --quiet --no-hardlinks "${REPO_ROOT}" "${WORK}/repo" 2>/dev/null
 cd "${WORK}/repo" || exit 1
+# Pin the clone to a BRANCH. A clone inherits the source repo's HEAD state, and
+# in CI `actions/checkout` leaves the workspace on a DETACHED HEAD — so the
+# clone was detached too, rollback.sh's detached-HEAD refusal fired before the
+# policy check, and every case here failed for a reason that has nothing to do
+# with answer_policy_version. Locally the clone inherited a branch and the suite
+# passed, which is exactly the environment-dependence this suite should not have.
+git checkout -q -B rollback-test-branch
 # `git clone` copies COMMITTED history only, so without this the suite would
 # silently exercise the last committed rollback.sh and report green on a stale
 # script while your edits sit uncommitted. Test what is on disk.

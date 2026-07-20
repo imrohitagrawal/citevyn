@@ -41,6 +41,13 @@ fail() { echo "  FAIL — $1"; FAILURES=$((FAILURES + 1)); }
 
 git clone --quiet --no-hardlinks "${REPO_ROOT}" "${WORK}/repo" 2>/dev/null
 cd "${WORK}/repo" || exit 1
+# Pin the clone to a BRANCH before anything else. A clone inherits the source
+# repo's HEAD state, and in CI `actions/checkout` leaves the workspace on a
+# DETACHED HEAD — so the clone was detached too and rollback.sh's new
+# detached-HEAD refusal fired in every case, including the ones asserting a
+# rollback must NOT be blocked. Locally the clone inherited a branch and the
+# suite passed. Cases 7-10 detach deliberately and re-attach to ${BRANCH}.
+git checkout -q -B rollback-test-branch
 # `git clone` copies COMMITTED history only, so without this the suite would
 # exercise the last committed scripts and report green on a stale tree.
 #
