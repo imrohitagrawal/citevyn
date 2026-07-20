@@ -12,6 +12,15 @@
  * fourth hand-maintained copy that nothing checks, which is the bug #178 is
  * about. Nothing here is bundled — vitest runs in node and the import is a
  * `readFileSync`, not a module import.
+ *
+ * Scope: this catches the corpus LOSING or renaming a command the KB still tells
+ * a user to paste. It cannot catch the corpus GAINING content the KB never
+ * learned about — the #170 shape — because a KB that says less contradicts
+ * nothing. That direction is guarded once, centrally, by the pinned content
+ * digests in `backend/tests/corpus_mirror_manifest.json`
+ * (`test_corpus_edits_are_reconciled_with_the_downstream_copies`), which names
+ * this file as one of the copies to reconcile. Duplicating the digest here would
+ * be a fifth copy to keep in lock-step.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";

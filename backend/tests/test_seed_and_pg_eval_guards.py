@@ -314,30 +314,152 @@ async def test_db_seed_carries_the_claude_code_install_content(monkeypatch) -> N
     assert "npm install -g @anthropic-ai/claude-code" in corpus
 
 
-async def test_db_seed_stub_provider_embeds_locally_without_a_key(monkeypatch) -> None:
-    """Default (stub) provider: vectors are written, offline and free.
+async def test_db_seed_stub_provider_leaves_the_vector_arm_dead_not_nonsense(monkeypatch) -> None:
+    """The default (stub) bootstrap must NOT ship hash-bucketed vectors.
 
-    Behaviour CHANGE from the hand-written seeder, which left every vector NULL
-    under the stub. The seeder now runs the same pipeline as the worker, and the
-    stub embedder is deterministic and in-process — no key, no network, no cost.
+    ``StubEmbedder`` is deterministic but carries no meaning. Persisting its
+    vectors would flip ``make demo``'s pgvector arm from DEAD to
+    LIVE-WITH-NONSENSE: the demo API is configured with the same stub, so the
+    Tier-3 stamp check sees a MATCH and enables the arm, which then ranks by
+    hash distance. Silent mis-ranking beats no arm at all in exactly zero ways.
+
+    Asserted at the level that matters to the read path: NULL embeddings (which
+    ``VectorRetriever`` filters out) and no provenance stamp (so a later
+    real-embedder deploy is not wedged into a permanent mismatch degrade by a
+    stamp that was never true).
     """
     import db.seed.seed_catalog as seedmod
 
-    settings = Settings(_env_file=None)
-    monkeypatch.setattr(seedmod, "get_settings", lambda: settings)
+    monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = await _fresh_sqlite_url(fh)
+        summary = await seedmod.seed(url)
+        chunks, iv = await _read_rows(url)
+
+    assert chunks, "the seed produced no chunks at all"
+    assert all(c.embedding is None for c in chunks)
+    assert (iv.embedding_provider, iv.embedding_model, iv.embedding_dim) == (None, None, None)
+    # ...and the operator is told, rather than left to wonder why recall is lexical.
+    assert summary["stub_vectors_discarded"] == len(chunks)
+
+
+async def test_db_seed_stub_index_reports_a_dead_vector_arm_to_operators(monkeypatch) -> None:
+    """...and the honesty is visible on ``GET /health/index``, not just in the DB.
+
+    A demo with no semantic recall is fine; a demo that CLAIMS semantic recall is
+    not. ``derive_vector_arm_status`` must call the stub-seeded index ``dead`` —
+    the operator signal #97 exists for — instead of ``healthy``.
+    """
+    import db.seed.seed_catalog as seedmod
+
+    from app.services.index_health import STATUS_DEAD, active_index_vector_health
+
+    monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
     with tempfile.NamedTemporaryFile(suffix=".db") as fh:
         url = await _fresh_sqlite_url(fh)
         await seedmod.seed(url)
-        chunks, iv = await _read_rows(url)
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                iv = (await session.execute(select(IndexVersion))).scalars().one()
+                health = await active_index_vector_health(session, iv, Settings(_env_file=None))
+        finally:
+            await engine.dispose()
 
-    assert chunks and all(
-        c.embedding is not None and len(c.embedding) == settings.embedding_dim for c in chunks
-    )
-    assert iv.embedding_provider == "stub"
+    assert health["status"] == STATUS_DEAD
+    assert health["healthy"] is False
+    assert health["chunks_embedded"] == 0 and health["chunks_total"] > 0
+
+
+async def test_db_seed_stub_disarm_does_not_touch_other_index_versions(monkeypatch) -> None:
+    """Edge case: the strip is scoped to ``v1``.
+
+    An operator's real-embedder index living in the same database must keep its
+    vectors and its stamp — a bootstrap re-seed that blanked them would silently
+    kill production's vector arm.
+    """
+    import db.seed.seed_catalog as seedmod
+
+    monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = await _fresh_sqlite_url(fh)
+        engine = create_async_engine(url)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            session.add(
+                IndexVersion(
+                    index_version="v-op",
+                    status=IndexStatus.candidate,
+                    source_version_hash="sha256:op",
+                    embedding_provider="openrouter",
+                    embedding_model="openai/text-embedding-3-small",
+                    embedding_dim=1536,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            doc = Document(
+                index_version="v-op",
+                source_name="claude_code",
+                product_area="claude_code",
+                title="op",
+                source_url="https://example.com",
+                status=DocumentStatus.active,
+                content_checksum="c",
+                last_fetched_at=datetime.now(UTC),
+                last_indexed_at=datetime.now(UTC),
+            )
+            session.add(doc)
+            await session.flush()
+            session.add(
+                Chunk(
+                    document_id=doc.document_id,
+                    product_area="claude_code",
+                    section_path="s",
+                    heading="s",
+                    chunk_text="t",
+                    context_summary="t",
+                    exact_terms=[],
+                    chunk_order=0,
+                    content_checksum="c",
+                    embedding=[0.5] + [0.0] * 1535,
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+        await seedmod.seed(url)
+
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                op = await session.get(IndexVersion, "v-op")
+                kept = (
+                    (
+                        await session.execute(
+                            select(Chunk)
+                            .join(Document, Document.document_id == Chunk.document_id)
+                            .where(Document.index_version == "v-op")
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+        finally:
+            await engine.dispose()
+
+    assert op is not None and op.embedding_provider == "openrouter"
+    assert kept and all(c.embedding is not None for c in kept)
 
 
 async def test_db_seed_real_provider_embeds_and_stamps_provenance(monkeypatch) -> None:
-    """A real provider's identity is stamped so the Tier-3 read gate can check it."""
+    """A real provider's identity is stamped so the Tier-3 read gate can check it.
+
+    The contrast case for the stub test above: the stub strip is about the
+    stub's meaninglessness, not about the bootstrap path disliking vectors. A
+    real provider must ship a live, stamped arm.
+    """
     import db.seed.seed_catalog as seedmod
 
     import app.worker.cli as cli
@@ -384,11 +506,12 @@ async def test_db_seed_reseed_replaces_chunks_instead_of_appending(monkeypatch) 
 
 
 async def test_db_seed_failed_source_raises_and_leaves_v1_unpromoted(monkeypatch) -> None:
-    """Failure path: an unreadable source must not go live as a half-corpus.
+    """Failure path on a FRESH database: an incomplete corpus never becomes active.
 
-    A partially-seeded catalog answers some questions and refuses others, which
-    reads as a retrieval bug rather than a broken bootstrap — so the seed fails
-    loud and leaves ``v1`` a candidate (whatever was active keeps serving).
+    This is the real (narrow) guarantee: on a first-time bootstrap ``v1`` stays a
+    candidate, so a broken corpus edit does not become the live index. It does
+    NOT generalise to a re-seed — see
+    :func:`test_db_seed_failed_source_on_an_active_index_is_already_live`.
     """
     import db.seed.seed_catalog as seedmod
 
@@ -409,6 +532,80 @@ async def test_db_seed_failed_source_raises_and_leaves_v1_unpromoted(monkeypatch
 
     assert iv.status is IndexStatus.candidate
     assert iv.promoted_at is None
+
+
+async def test_db_seed_failed_source_on_an_active_index_is_already_live(monkeypatch) -> None:
+    """The documented failure-path guarantee, pinned to what it ACTUALLY is.
+
+    The docstring used to claim that on a failed source "``v1`` is NOT activated
+    ... so a broken corpus edit cannot go live". That is vacuous on the common
+    case, and the review that found it was right: ``deploy.sh`` re-seeds an
+    existing stack where ``v1`` is ALREADY active, and
+    :func:`app.worker.cli.drive` commits each source as it goes. So the sources
+    that succeeded are live the moment they commit — declining to promote an
+    index that is already promoted changes nothing.
+
+    This test pins the true behaviour so nobody re-derives the comfortable
+    wrong one from the code: after a partial failure the succeeded source's NEW
+    text is readable in the ACTIVE index. What the failure path does buy is
+    asserted alongside: it raises, and it does not advance
+    ``source_version_hash`` (so the answer cache is not re-keyed to a snapshot
+    that was never fully built).
+    """
+    import db.seed.seed_catalog as seedmod
+
+    import app.worker.cli as cli
+
+    good = next(s for s in MVP_SOURCES if s.name == "codex")
+    broken = SourceSpec(
+        name="claude_code",
+        product_area="claude_code",
+        title="Claude Code Reference",
+        fetcher="local",
+        location="app/worker/sources/does_not_exist.md",
+    )
+    monkeypatch.setattr(seedmod, "get_settings", lambda: Settings(_env_file=None))
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = await _fresh_sqlite_url(fh)
+        # First seed: healthy corpus, v1 becomes active — the deployed stack.
+        # ``cli.MVP_SOURCES`` too: that is what the corpus fingerprint and
+        # ``drive``'s "was this the WHOLE corpus?" check read.
+        monkeypatch.setattr(seedmod, "MVP_SOURCES", (good,))
+        monkeypatch.setattr(cli, "MVP_SOURCES", (good,))
+        assert (await seedmod.seed(url))["status"] == "promoted"
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                before_hash = (await session.get(IndexVersion, "v1")).source_version_hash  # type: ignore[union-attr]
+        finally:
+            await engine.dispose()
+
+        # Second seed: one source now unreadable (the "broken corpus edit").
+        monkeypatch.setattr(seedmod, "MVP_SOURCES", (good, broken))
+        monkeypatch.setattr(cli, "MVP_SOURCES", (good, broken))
+        with pytest.raises(seedmod.SeedError, match="incomplete"):
+            await seedmod.seed(url)
+
+        engine = create_async_engine(url)
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                iv = await session.get(IndexVersion, "v1")
+                live_docs = (
+                    (await session.execute(select(Document).where(Document.index_version == "v1")))
+                    .scalars()
+                    .all()
+                )
+        finally:
+            await engine.dispose()
+
+    assert iv is not None
+    # The half-refreshed corpus IS the live one: v1 never stopped being active.
+    assert iv.status is IndexStatus.active
+    assert {d.source_name for d in live_docs} == {"codex"}
+    # ...but the failed run did not re-key the answer cache to it.
+    assert iv.source_version_hash == before_hash
 
 
 async def test_db_seed_retires_a_pre_178_hand_written_catalog(monkeypatch) -> None:

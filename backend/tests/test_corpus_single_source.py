@@ -18,10 +18,20 @@ derived, for reasons that are deliberate, not accidental:
   change being tested.
 * The frontend offline KB is TypeScript and cannot import Python.
 
-So instead of deriving them, this module makes drift *fail the build*: every
-verbatim claim the fixture makes about a product must still be present in that
-product's shipped source doc. Edit ``claude_code.md``'s install command without
-updating the fixture and this test goes red — the failure mode #178 describes.
+So instead of deriving them, this module makes drift *fail the build*, in BOTH
+directions:
+
+* **The corpus loses or renames a claim a copy still makes.** Every verbatim
+  claim the fixture states must still be present in that product's shipped
+  source doc. Edit ``claude_code.md``'s install command without updating the
+  fixture and this goes red.
+* **The corpus GAINS content the copies lack.** This is the direction the first
+  guard structurally cannot see — a copy that says LESS never contradicts the
+  corpus — and it is precisely the #170 shape: ``claude_code.md`` had no
+  installation content at all, the fix added it in some places and not others,
+  and every subset check stayed green. Containment cannot express it (the copies
+  are deliberate abridgements), so it is enforced as a review checkpoint on the
+  authoritative doc's content digest — see :mod:`tests.corpus_mirror`.
 """
 
 from __future__ import annotations
@@ -33,6 +43,13 @@ import pytest
 from app.worker.allowlist import MVP_SOURCES, SourceSpec
 from app.worker.fetchers import build_fetcher
 from tests.conftest import corpus_fixture_specs
+from tests.corpus_mirror import (
+    MANIFEST_PATH,
+    MIRRORS,
+    compute_digests,
+    load_manifest,
+    source_digest,
+)
 
 # ---------------------------------------------------------------------------
 # Claim extraction
@@ -143,6 +160,70 @@ def test_fixture_claims_are_still_in_the_shipped_corpus(spec: dict[str, str]) ->
         f"in {_SOURCES_BY_AREA[spec['product_area']].location}. Update the fixture (and the "
         "frontend KB) to match the corpus, or revert the corpus edit."
     )
+
+
+# ---------------------------------------------------------------------------
+# The other direction: the corpus GAINING content the copies lack (#170)
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_edits_are_reconciled_with_the_downstream_copies() -> None:
+    """The #170 direction: new corpus content must not land unmirrored.
+
+    A claim-subset guard is blind here by construction — adding an Installation
+    section to ``claude_code.md`` contradicts nothing the copies say, so nothing
+    goes red, and the demo stack refuses install questions while CI is green.
+    Containment cannot fix that: the copies are abridgements on purpose.
+
+    So this pins each shipped doc's content digest. Any edit — an added
+    sentence included — fails until a human has reconciled the copies that
+    cannot be derived and re-pinned the manifest. Noisy by design: the noise IS
+    the review, and it is one command to clear.
+    """
+    actual = compute_digests()
+    pinned = load_manifest()
+    added = sorted(set(actual) - set(pinned))
+    removed = sorted(set(pinned) - set(actual))
+    changed = sorted(name for name in set(actual) & set(pinned) if actual[name] != pinned[name])
+    mirrors = "\n  - ".join(MIRRORS)
+    assert not (added or removed or changed), (
+        f"the shipped corpus changed (added={added} removed={removed} changed={changed}).\n"
+        "Corpus content is mirrored by copies that cannot be derived from it. Re-read the "
+        f"edited doc against each of:\n  - {mirrors}\n"
+        "then re-pin with `cd backend && uv run python -m tests.corpus_mirror --write` "
+        f"({MANIFEST_PATH.name}). Do not re-pin without reading the copies — that is the "
+        "whole check."
+    )
+
+
+def test_guard_fires_when_a_source_gains_a_sentence() -> None:
+    """Failure path, mutation-style: one added sentence must move the digest.
+
+    Hermetic stand-in for the manual proof (append a sentence to a worker source
+    → the guard above goes red → revert). Pinned on a sentence with no commands
+    or identifiers in it, because that is the case a claim extractor is blind to:
+    prose the copies simply never learned about.
+    """
+    original = build_fetcher(_SOURCES_BY_AREA["claude_code"]).fetch(_SOURCES_BY_AREA["claude_code"])
+    gained = original + "\n\nClaude Code can also be run inside a devcontainer.\n"
+    assert source_digest(gained) != source_digest(original)
+    # ...and the claim-subset guard genuinely cannot see it: the fixture makes no
+    # claim that the enlarged corpus contradicts, so it stays green.
+    for spec in corpus_fixture_specs():
+        if spec["product_area"] != "claude_code":
+            continue
+        assert all(_present_in(c, _normalize(gained)) for c in extract_claims(spec["chunk_text"]))
+
+
+def test_guard_ignores_a_pure_reflow() -> None:
+    """Edge case: re-wrapping a paragraph is not a content change.
+
+    A guard that fires on every ``prettier``-style reflow gets re-pinned on
+    autopilot, which destroys the review it exists to force.
+    """
+    wrapped = "install with\n'npm install -g\n@anthropic-ai/claude-code'\nto begin"
+    flowed = "install with 'npm install -g @anthropic-ai/claude-code' to begin"
+    assert source_digest(wrapped) == source_digest(flowed)
 
 
 # ---------------------------------------------------------------------------
