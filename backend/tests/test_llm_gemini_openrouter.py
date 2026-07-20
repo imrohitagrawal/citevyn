@@ -370,13 +370,14 @@ def test_factory_gemini_no_keys_dev_falls_back_to_stub() -> None:
 
 
 def test_factory_gemini_no_keys_production_raises() -> None:
-    # A production Settings requires a strong admin key (validator); supply one
-    # so the factory's own missing-LLM-key guard is what raises.
+    # A production Settings requires strong admin AND demo keys (validators);
+    # supply both so the factory's own missing-LLM-key guard is what raises.
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         build_llm_client(
             _settings(
                 environment="production",
                 admin_api_key="prod-strong-admin-secret",
+                demo_api_key="prod-strong-demo-secret",
                 gemini_api_key=None,
                 openrouter_api_key=None,
             )

@@ -177,13 +177,14 @@ async def test_seed_embed_failure_propagates_and_leaves_no_partial_vectors() -> 
 async def test_postgres_session_refuses_production() -> None:
     settings = Settings(
         environment="production",
+        demo_api_key="prod-demo-key-0123456789",
         database_url="postgresql+psycopg://u:p@localhost:5432/db",
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
         openrouter_api_key="or-k",
         llm_provider="gemini",
         gemini_api_key="gk",
-        admin_api_key="strong-secret",
+        admin_api_key="a-strong-admin-secret",
         _env_file=None,
     )
     with pytest.raises(PostgresEvalError, match="production"):
