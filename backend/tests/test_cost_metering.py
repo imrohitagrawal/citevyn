@@ -20,6 +20,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.core.config import Settings
 from app.cost.call_site import CallSite, call_site, get_call_site
 from app.cost.meter import build_call
 from app.cost.metered import MeteredLLMClient
@@ -27,6 +28,12 @@ from app.cost.pricing import known_models, price_for
 from app.llm.factory import build_llm_client, get_llm_client, reset_llm_client
 from app.llm.stub import StubLLMClient
 from app.llm.types import LLMResult
+
+# These tests exercise METERING with a dummy sessionmaker. The budget check (Layer 3)
+# now runs on the same seam and would correctly FAIL CLOSED against that dummy, so it
+# is disabled here explicitly. Budget behaviour has its own suite in
+# tests/test_cost_budget.py — turning it off here keeps each test about one thing.
+_NO_BUDGET = Settings(llm_provider="stub", cost_budget_enabled=False)
 
 
 class _FakeLLM:
@@ -354,7 +361,7 @@ def test_metered_client_returns_the_inner_result_unchanged() -> None:
     async def _fake_record(sm, call):  # type: ignore[no-untyped-def]
         recorded.append(call)
 
-    client = MeteredLLMClient(inner, sessionmaker=object())  # type: ignore[arg-type]
+    client = MeteredLLMClient(inner, sessionmaker=object(), settings=_NO_BUDGET)  # type: ignore[arg-type]
     import app.cost.metered as metered_mod
 
     original = metered_mod.record_call
@@ -371,7 +378,7 @@ def test_metered_client_returns_the_inner_result_unchanged() -> None:
 def test_metering_failure_does_not_break_the_answer() -> None:
     """The user already paid for this call; losing the ROW is the acceptable loss."""
     inner = _FakeLLM()
-    client = MeteredLLMClient(inner, sessionmaker=object())  # type: ignore[arg-type]
+    client = MeteredLLMClient(inner, sessionmaker=object(), settings=_NO_BUDGET)  # type: ignore[arg-type]
     import app.cost.metered as metered_mod
 
     async def _boom(sm, call):  # type: ignore[no-untyped-def]
@@ -390,7 +397,7 @@ def test_metering_failure_does_not_break_the_answer() -> None:
 def test_metered_client_delegates_aclose() -> None:
     """The wrapper must not strand the inner httpx connection pool."""
     inner = _FakeLLM()
-    client = MeteredLLMClient(inner, sessionmaker=object())  # type: ignore[arg-type]
+    client = MeteredLLMClient(inner, sessionmaker=object(), settings=_NO_BUDGET)  # type: ignore[arg-type]
     asyncio.run(client.aclose())
     assert inner.closed is True
 
@@ -412,7 +419,7 @@ def test_a_failed_completion_is_not_metered() -> None:
 
     import app.cost.metered as metered_mod
 
-    client = MeteredLLMClient(_Failing(), sessionmaker=object())  # type: ignore[arg-type]
+    client = MeteredLLMClient(_Failing(), sessionmaker=object(), settings=_NO_BUDGET)  # type: ignore[arg-type]
     original = metered_mod.record_call
     metered_mod.record_call = _fake_record  # type: ignore[assignment]
     try:
@@ -619,7 +626,9 @@ def test_meter_wiring_flags_an_estimated_call_on_the_recorded_row() -> None:
     metered_mod.record_call = _capture  # type: ignore[assignment]
     try:
         asyncio.run(
-            metered_mod.MeteredLLMClient(_NoUsage(), sessionmaker=object()).complete(  # type: ignore[arg-type]
+            metered_mod.MeteredLLMClient(
+                _NoUsage(), sessionmaker=object(), settings=_NO_BUDGET
+            ).complete(  # type: ignore[arg-type]
                 system="s" * 100, user="u" * 300, max_tokens=512, temperature=0.0
             )
         )
@@ -646,7 +655,9 @@ def test_meter_wiring_does_NOT_flag_a_call_that_reported_real_usage() -> None:
     metered_mod.record_call = _capture  # type: ignore[assignment]
     try:
         asyncio.run(
-            metered_mod.MeteredLLMClient(_FakeLLM(), sessionmaker=object()).complete(  # type: ignore[arg-type]
+            metered_mod.MeteredLLMClient(
+                _FakeLLM(), sessionmaker=object(), settings=_NO_BUDGET
+            ).complete(  # type: ignore[arg-type]
                 system="s", user="u", max_tokens=10, temperature=0.0
             )
         )
