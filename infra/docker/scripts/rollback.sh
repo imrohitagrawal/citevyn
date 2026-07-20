@@ -37,6 +37,13 @@
 #   ./scripts/rollback.sh v0.9.0            # roll back to an explicit tag
 #   ./scripts/rollback.sh --previous        # roll back to the tag before HEAD
 #   ./scripts/rollback.sh v0.9.0 --dry-run  # print the plan, change nothing
+#   ./scripts/rollback.sh v0.9.0 --base-ref v0.10.0
+#                                           # name the ref whose tree matches the
+#                                           # CURRENTLY DEPLOYED code. Defaults to
+#                                           # HEAD, which is right when you are on
+#                                           # the deployed branch. Required when
+#                                           # HEAD is detached, because then HEAD
+#                                           # is not evidence of what is deployed.
 #   ./scripts/rollback.sh v0.9.0 --allow-migration-mismatch
 #                                           # proceed across a migration
 #                                           # boundary anyway. ONLY correct when
@@ -60,12 +67,18 @@ REPO_ROOT="$(cd "${COMPOSE_DIR}/../.." && pwd)"
 TARGET=""
 DRY_RUN=0
 ALLOW_MIGRATION_MISMATCH=0
+BASE_REF=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --previous)
             TARGET="__PREVIOUS__"
             shift
+            ;;
+        --base-ref)
+            BASE_REF="${2:-}"
+            [[ -n "${BASE_REF}" ]] || { echo "error: --base-ref needs a value" >&2; exit 2; }
+            shift 2
             ;;
         --allow-migration-mismatch)
             ALLOW_MIGRATION_MISMATCH=1
@@ -79,7 +92,14 @@ while [[ $# -gt 0 ]]; do
             # Print the whole header block: line 2 through the closing ─── rule.
             # A hard-coded end line silently truncates --help whenever the header
             # grows (it did — the usage examples and exit codes vanished).
-            sed -n '2,/^# ─\{10,\}/p' "${BASH_SOURCE[0]}"
+            #
+            # No `\{10,\}` interval: the rule is U+2500, a 3-byte sequence, and a
+            # BRE interval binds to its LAST byte. Under LC_ALL=C with BSD sed
+            # (macOS — the platform the shell suite is matrixed for) that asks for
+            # one `e2 94` followed by ten `80`s, which never matches, so the range
+            # runs to EOF and --help dumps the entire script. A literal prefix is
+            # byte-exact in every locale.
+            sed -n '2,/^# ────/p' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         -*)
@@ -106,16 +126,27 @@ cd "${REPO_ROOT}"
 if [[ "${TARGET}" == "__PREVIOUS__" ]]; then
     # --sort=-version:refname gives newest-first; skip the tag that points at
     # HEAD (if any) and take the next one.
+    # Release-shaped tags ONLY. The bare `v*` glob also matches throwaway drill
+    # tags (this repo carries v0.9.1-drill / v0.9.2-drill / v0.10.0-drill), and
+    # version:refname sorts them ABOVE the real v0.9.0 — so during an incident
+    # --previous would have silently deployed an unreviewed local commit to
+    # production. An explicitly named target is still honoured verbatim.
     _current_tag="$(git describe --tags --exact-match 2>/dev/null || true)"
     TARGET="$(git tag --list 'v*' --sort=-version:refname \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
         | grep -v "^${_current_tag}$" \
         | head -1)"
     if [[ -z "${TARGET}" ]]; then
-        echo "error: --previous found no earlier v* tag to roll back to" >&2
+        echo "error: --previous found no earlier release tag (vX.Y.Z) to roll back to" >&2
         echo "       list tags with: git tag --list 'v*' --sort=-version:refname" >&2
+        echo "       pass a tag explicitly if you really mean a non-release tag" >&2
         exit 1
     fi
-    echo "==> rollback.sh: --previous resolved to ${TARGET}"
+    # Print the commit and date too: --previous is used under incident pressure,
+    # and "which commit is that?" is the question the operator cannot afford to
+    # answer wrong.
+    echo "==> rollback.sh: --previous resolved to ${TARGET}" \
+         "($(git log -1 --format='%h %ad' --date=short "${TARGET}" 2>/dev/null || echo 'unknown'))"
 fi
 
 if ! git rev-parse -q --verify "refs/tags/${TARGET}" >/dev/null; then
@@ -137,7 +168,51 @@ echo "==> rollback.sh: target=${TARGET} (from $(git rev-parse --short HEAD))"
 # real run would refuse is worse than useless during an incident.
 # shellcheck source=infra/docker/scripts/_migration_gen.sh
 source "${COMPOSE_DIR}/scripts/_migration_gen.sh"
-_missing_migrations="$(migrations_missing_at "${TARGET}" HEAD)"
+
+# The guard compares the target tree against HEAD's tree, using HEAD as a proxy
+# for what the live database is stamped at. That proxy holds only while HEAD is
+# the deployed branch. It BREAKS on a detached HEAD, and this script is itself
+# how you get one: after a successful rollback you are sitting on the target tag.
+#
+# Concretely: roll back to v0.9.2 (HEAD now ships 0001-0004, DB still stamped at
+# 0006 because a rollback never touches the database), then roll back again to
+# v0.9.0. The guard compares v0.9.0 against v0.9.2, sees only 0004 missing —
+# 0005/0006 are invisible because HEAD no longer ships them — and lets the
+# rollback proceed straight into the alembic failure it exists to prevent.
+#
+# So: reason from an EXPLICIT base when the caller can name one (deploy_verify.sh
+# passes --base-ref "${VERSION}", which it knows because it just deployed it), and
+# refuse to reason from a bare detached HEAD rather than reason wrongly.
+if [[ -z "${BASE_REF}" ]]; then
+    if git symbolic-ref -q HEAD >/dev/null; then
+        BASE_REF="HEAD"
+    elif [[ "${ALLOW_MIGRATION_MISMATCH}" == "1" ]]; then
+        echo "WARNING: HEAD is detached and no --base-ref was given, so the" >&2
+        echo "         migration-boundary check cannot be trusted; proceeding" >&2
+        echo "         because --allow-migration-mismatch was given." >&2
+        BASE_REF="HEAD"
+    else
+        echo "error: HEAD is detached, so rollback.sh cannot tell which migrations the" >&2
+        echo "       live database is stamped at — it compares the target tree against" >&2
+        echo "       the DEPLOYED tree, and a detached HEAD is not evidence of what is" >&2
+        echo "       deployed. This is the state a PREVIOUS rollback leaves you in, and" >&2
+        echo "       chaining rollbacks is exactly when the check would be wrong: the" >&2
+        echo "       database is still stamped at the newest revision even though HEAD" >&2
+        echo "       no longer contains it." >&2
+        echo "" >&2
+        echo "       Either return to the deployed branch:" >&2
+        echo "         git checkout main" >&2
+        echo "       or name the deployed release explicitly:" >&2
+        echo "         ./infra/docker/scripts/rollback.sh ${TARGET} --base-ref <deployed-tag>" >&2
+        exit 1
+    fi
+fi
+if ! git rev-parse -q --verify "${BASE_REF}^{commit}" >/dev/null; then
+    echo "error: --base-ref '${BASE_REF}' is not a valid git revision" >&2
+    exit 1
+fi
+
+_missing_migrations="$(migrations_missing_at "${TARGET}" "${BASE_REF}")"
 if [[ -n "${_missing_migrations}" ]]; then
     _missing_list="$(printf '%s' "${_missing_migrations}" | tr '\n' ' ')"
     if [[ "${ALLOW_MIGRATION_MISMATCH}" == "1" ]]; then

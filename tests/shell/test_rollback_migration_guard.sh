@@ -43,8 +43,17 @@ git clone --quiet --no-hardlinks "${REPO_ROOT}" "${WORK}/repo" 2>/dev/null
 cd "${WORK}/repo" || exit 1
 # `git clone` copies COMMITTED history only, so without this the suite would
 # exercise the last committed scripts and report green on a stale tree.
-cp "${REPO_ROOT}/infra/docker/scripts/rollback.sh"       infra/docker/scripts/rollback.sh
-cp "${REPO_ROOT}/infra/docker/scripts/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
+#
+# These copies are UNCOMMITTED modifications to tracked files, so anything that
+# resets the working tree throws them away — `git reset --hard` in case 5 did
+# exactly that, and every case after it silently ran the committed scripts. Hence
+# a helper, re-invoked after any tree-resetting step, plus an assertion at the
+# end that the copies really are still in place.
+_install_scripts() {
+    cp "${REPO_ROOT}/infra/docker/scripts/rollback.sh"       infra/docker/scripts/rollback.sh
+    cp "${REPO_ROOT}/infra/docker/scripts/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
+}
+_install_scripts
 git config user.email t@t.invalid
 git config user.name t
 rm -f infra/docker/.env   # the env guard is never reached under --dry-run
@@ -126,7 +135,14 @@ _assert "same migration generation -> proceeds" 0
 
 # 4. a migration file that CHANGED but is still present is not a boundary
 printf 'revision = "9001"  # edited\n' > db/versions/9001_test_added.py
-git commit --quiet --no-verify -am "test: edit 9001"
+# Explicit pathspec, NOT `-am`. `-a` stages every modified tracked file, which
+# includes the two working-tree scripts copied over the clone above — and the
+# `git reset --hard HEAD~1` in case 5 would then restore the COMMITTED versions
+# of those scripts, silently reverting the code under test. From that point the
+# suite would be exercising the last committed rollback.sh, so case 6 (the only
+# assertion that runs it for real and the only proof that the refusal precedes
+# the checkout) would pass against stale code no matter what the branch changed.
+git commit --quiet --no-verify -m "test: edit 9001" -- db/versions/9001_test_added.py
 _run _t_new
 _assert "changed-but-present migration -> proceeds" 0
 
@@ -134,6 +150,7 @@ _assert "changed-but-present migration -> proceeds" 0
 _add_migration 9002_test_target_only.py
 git tag -f _t_ahead HEAD >/dev/null 2>&1
 git reset --quiet --hard HEAD~1        # HEAD no longer has 9002; _t_ahead does
+_install_scripts                       # --hard discarded the copies; put them back
 _run _t_ahead
 _assert "target ahead of HEAD -> proceeds" 0
 
@@ -147,6 +164,72 @@ elif [[ "${_here}" != "${BRANCH}" ]]; then
     fail "refusal happened AFTER the checkout (now on ${_here}, expected ${BRANCH})"
 else
     pass "refusal fires before any checkout (still on ${BRANCH})"
+fi
+
+# ── The base-ref contract ──────────────────────────────────────────────────
+# The guard compares the target tree against the DEPLOYED tree, using HEAD as
+# the proxy. That proxy is only valid while HEAD is the deployed branch — and
+# rollback.sh is itself how you get a detached HEAD, so chaining rollbacks is
+# exactly when it would be wrong (the DB is still stamped at a revision HEAD no
+# longer ships, so the boundary becomes INVISIBLE and the guard waves through
+# the failure it exists to prevent).
+
+# 7. a bare detached HEAD is refused rather than reasoned from
+git checkout --quiet --detach HEAD
+OUT="$(./infra/docker/scripts/rollback.sh _t_old --dry-run 2>&1)"; RC=$?
+if [[ "${RC}" -eq 0 ]]; then
+    fail "detached HEAD: proceeded without a --base-ref"
+elif ! grep -q "HEAD is detached" <<<"${OUT}"; then
+    fail "detached HEAD: exited ${RC} but not for the detached-HEAD reason; output: ${OUT}"
+else
+    pass "detached HEAD without --base-ref -> refuses"
+fi
+
+# 8. --base-ref restores the check: naming the deployed tree reaches the REAL
+#    migration verdict rather than the detached-HEAD refusal.
+OUT="$(./infra/docker/scripts/rollback.sh _t_old --base-ref "${BRANCH}" --dry-run 2>&1)"; RC=$?
+if grep -q "HEAD is detached" <<<"${OUT}"; then
+    fail "--base-ref was ignored; still refused for detached HEAD"
+elif ! grep -q "cannot roll back to" <<<"${OUT}"; then
+    fail "--base-ref did not reach the migration refusal; output: ${OUT}"
+else
+    pass "--base-ref <deployed> reaches the migration verdict on a detached HEAD"
+fi
+
+# 9. ...and it is a REAL comparison, not a rubber stamp: with the base pointing
+#    at a tree of the same generation as the target, the same invocation
+#    proceeds. Without this case, case 8 would pass for a --base-ref that was
+#    parsed and thrown away.
+OUT="$(./infra/docker/scripts/rollback.sh _t_old --base-ref _t_old --dry-run 2>&1)"; RC=$?
+if [[ "${RC}" -ne 0 ]]; then
+    fail "--base-ref of the same generation was blocked (rc=${RC}); output: ${OUT}"
+elif ! grep -q "would run" <<<"${OUT}"; then
+    fail "--base-ref of the same generation never reached the plan; output: ${OUT}"
+else
+    pass "--base-ref is compared, not merely accepted"
+fi
+
+# 10. a --base-ref that does not resolve is rejected, not silently treated as
+#     empty (an empty base lists no migrations, so EVERY rollback would look
+#     same-generation and the guard would be off).
+OUT="$(./infra/docker/scripts/rollback.sh _t_old --base-ref no_such_ref_xyz --dry-run 2>&1)"; RC=$?
+if [[ "${RC}" -eq 0 ]] || ! grep -q "is not a valid git revision" <<<"${OUT}"; then
+    fail "an unresolvable --base-ref was not rejected; rc=${RC}, output: ${OUT}"
+else
+    pass "an unresolvable --base-ref is rejected"
+fi
+git checkout --quiet "${BRANCH}"
+_install_scripts
+
+# 11. meta-assertion: every case above is only meaningful if the scripts under
+#    test are still the WORKING-TREE ones. If a future step resets the tree and
+#    nobody re-installs them, the whole suite silently degrades to testing the
+#    last commit — which is precisely how a broken guard could ship green.
+if cmp -s "${REPO_ROOT}/infra/docker/scripts/rollback.sh" infra/docker/scripts/rollback.sh \
+   && cmp -s "${REPO_ROOT}/infra/docker/scripts/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh; then
+    pass "the scripts under test are the working-tree copies, not the committed ones"
+else
+    fail "the working-tree scripts were reverted mid-suite; earlier results are STALE"
 fi
 
 if [[ "${FAILURES}" -eq 0 ]]; then

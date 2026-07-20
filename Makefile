@@ -267,8 +267,14 @@ rollback: ## Roll the live stack back to a tag (usage: make rollback TAG=v0.9.0 
 	@if [[ -z "$(TAG)" ]]; then echo "usage: make rollback TAG=v0.9.0   (or TAG=--previous)" >&2; exit 2; fi
 	./infra/docker/scripts/rollback.sh $(TAG)
 
-deploy-verify: ## THE live release gate: deploy + functional verify + rollback drill (RELEASE_PLAN §10 blocker 9)
-	./infra/docker/scripts/deploy_verify.sh
+deploy-verify: ## THE live release gate: deploy + functional verify + rollback drills (RELEASE_PLAN §10 blocker 9)
+	@# ARGS is a pass-through so the documented flags are reachable from the
+	@# documented entry point. Without it, RUNBOOK/RELEASE_PLAN told the operator
+	@# to "narrow the scope with --data-rollback-only" via a recipe that accepted
+	@# no flags at all. Usage:
+	@#   make deploy-verify ARGS=--data-rollback-only
+	@#   make deploy-verify ARGS=--dry-run
+	./infra/docker/scripts/deploy_verify.sh $(ARGS)
 
 budget: ## Read the OpenRouter key's remaining balance (FREE — metadata only, no inference)
 	@# The check that caught the key at 96.6% consumed. App-side metering can only
@@ -292,7 +298,9 @@ restore: ## Restore a pg_dump file (usage: make restore FILE=path)
 	@# defect that made `make backup` unusable until #199 — pg_restore is a libpq
 	@# CLIENT and does not read POSTGRES_PASSWORD) and piped a seekable
 	@# custom-format archive through a TTY-allocating `compose run`.
-	./infra/docker/scripts/restore.sh $(FILE)
+	@# Quoted: an unquoted $(FILE) word-splits on a path containing a space and
+	@# restore.sh then reports "dump file not found" for a file that exists.
+	./infra/docker/scripts/restore.sh "$(FILE)"
 
 # ─────────────────────────── Convenience composites ───────────────────────────
 # ``make ci`` is the deterministic gate the pr-quality workflow uses

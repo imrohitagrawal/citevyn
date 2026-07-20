@@ -31,12 +31,20 @@
 # The proxy is CONSERVATIVE in the safe direction: it can refuse a rollback that
 # would in fact have worked (a migration file that landed but was never applied
 # because the deploy failed first), and the escape hatch for that case is the
-# operator-supplied --allow-migration-mismatch. It cannot MISS a boundary that a
-# normal deploy already crossed.
+# operator-supplied --allow-migration-mismatch.
 #
-# Only MISSING files matter. A migration file that merely CHANGED content
-# between the two trees still resolves by revision id, so it is not fatal and is
-# not reported here.
+# LIMITS OF THE PROXY — it is only as good as the base revision it is given:
+#   • It can MISS a boundary if <base> is not the deployed tree. rollback.sh
+#     therefore refuses a bare detached HEAD (the state a previous rollback
+#     leaves you in) and makes the caller name the deployed ref with --base-ref.
+#   • It compares FILENAMES, not revision ids. Renaming a migration file without
+#     changing its `revision = "NNNN"` is reported as a boundary even though
+#     alembic would resolve it fine — a false refusal, cleared with
+#     --allow-migration-mismatch. Changing a file's CONTENT is correctly not
+#     reported, since the revision id is what alembic resolves.
+#   • A migration in a SUBDIRECTORY of db/versions/ is dropped from both lists by
+#     the `^[0-9]+_` filter below. The repo has never used one; if that changes,
+#     this filter must change with it or a boundary goes unseen.
 # ────────────────────────────────────────────────────────────────────────────
 
 # List the alembic revision files a git revision ships, one basename per line.

@@ -57,6 +57,7 @@ git clone --quiet --no-hardlinks "${REPO_ROOT}" "${WORK}/repo" 2>/dev/null
 cd "${WORK}/repo" || exit 1
 cp "${SCRIPTS}/deploy_verify.sh"  infra/docker/scripts/deploy_verify.sh
 cp "${SCRIPTS}/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
+cp "${SCRIPTS}/_drill_lib.sh"     infra/docker/scripts/_drill_lib.sh
 # --dry-run exits before the env guard, so a stub .env is enough to get past the
 # preflight file check.
 printf 'CITEVYN_PUBLIC_HOST=citevyn.test\nCITEVYN_DEMO_API_KEY=k\n' > infra/docker/.env
@@ -95,11 +96,34 @@ fi
 
 # ── 4. The gate must not be able to claim blocker 9 is satisfied on a run where
 #      the code rollback was not proven. Both flags gate that sentence.
+#
+#      This is a SOURCE-TEXT assertion, and it is a weak one: it breaks on any
+#      reformatting and it would still pass if CODE_ROLLBACK_PROVEN were never
+#      set to 1 anywhere. It is kept as a cheap tripwire on the exact sentence
+#      that must not loosen — not as evidence the gate behaves correctly. The
+#      behavioural coverage of the drill lives in test_drill_crash_safety.sh,
+#      which drives _drill_lib.sh with stubbed docker/backup/restore.
 if grep -q 'DATA_ROLLBACK_PROVEN}" == "1" && "${CODE_ROLLBACK_PROVEN}" == "1"' \
         "${SCRIPTS}/deploy_verify.sh"; then
-    pass "the 'blocker 9 satisfied' claim is gated on BOTH drills"
+    pass "the 'blocker 9 satisfied' claim is gated on BOTH drills (source tripwire)"
 else
     fail "the 'blocker 9 satisfied' claim is no longer gated on both drills"
+fi
+
+# ── 5. The dry-run plan is a PROMISE. The cases above grep a static heredoc, so
+#      on their own they would still pass if the drill code were deleted
+#      outright — documentation asserting itself. Pin the promise to something
+#      that has to exist for it to be keepable: the drill the plan advertises
+#      must actually be defined, and _drill_lib.sh must be reachable from the
+#      script that claims it will run it.
+if [[ ! -f "${SCRIPTS}/_drill_lib.sh" ]]; then
+    fail "the plan promises drill A but _drill_lib.sh does not exist"
+elif ! grep -q '_drill_lib.sh' "${SCRIPTS}/deploy_verify.sh"; then
+    fail "deploy_verify.sh promises drill A but never sources _drill_lib.sh"
+elif ! ( COMPOSE_DIR="${SCRIPTS}/.." bash -c 'source "$0"; declare -f data_restore_drill >/dev/null && declare -f restart_writers >/dev/null' "${SCRIPTS}/_drill_lib.sh" ); then
+    fail "_drill_lib.sh does not define data_restore_drill + restart_writers"
+else
+    pass "the advertised drill is actually defined and wired in"
 fi
 
 if [[ "${FAILURES}" -eq 0 ]]; then

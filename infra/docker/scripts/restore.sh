@@ -15,7 +15,9 @@
 #   ./scripts/restore.sh <dump>
 #   docker compose --profile prod up -d api
 #
-# Exit codes: 0 = restored, non-zero = nothing (or only part) was restored.
+# Exit codes: 0 = restored, non-zero = NOTHING was restored (the restore runs in
+# a single transaction, so a failure rolls the whole thing back and leaves the
+# live database exactly as it was).
 # ────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -74,11 +76,26 @@ echo "==> restoring ${DUMP_ABS} into the live database"
 # --clean --if-exists: drop and recreate the objects present in the dump; rows
 # outside the dump are untouched.
 #
+# --single-transaction is LOAD-BEARING, not tidiness. Without it, --clean commits
+# each DROP as it goes and pg_restore continues past errors, so a failure part-way
+# through (a lock held by a stray connection, disk pressure, an extension ordering
+# problem) leaves the LIVE database half-dropped — and this is the disaster-
+# recovery tool, so "we broke it worse while restoring it" is the one outcome that
+# must be impossible. Inside one transaction the restore is all-or-nothing: on any
+# error the database is left exactly as it was.
+#
+# It also fixes the exit status. --single-transaction implies --exit-on-error, so
+# a non-zero exit now means "nothing was restored". Previously pg_restore returned
+# 1 whenever it had IGNORED any error at all, including cosmetic ones (an extension
+# COMMENT, an ownership/ACL statement it may not issue), so the drill's pass/fail
+# signal was "zero errors of any kind" rather than "the data is back" — it could
+# fail the gate after a perfectly good restore.
+#
 # Invoked exactly like the compose ``backup`` service's own command (sh -c
 # through the postgres image's entrypoint, which execs any non-postgres argv),
 # so the two stay symmetric.
 docker compose --profile backup run --rm backup sh -c \
-    "export PGPASSWORD=\"\$POSTGRES_PASSWORD\"; exec pg_restore --clean --if-exists --no-owner --no-privileges -h db -U citevyn -d citevyn '${IN_CONTAINER}'"
+    "export PGPASSWORD=\"\$POSTGRES_PASSWORD\"; exec pg_restore --clean --if-exists --single-transaction --no-owner --no-privileges -h db -U citevyn -d citevyn '${IN_CONTAINER}'"
 
 echo "==> restore complete"
 echo "    NOTE: the database is now at the dump's schema AND its alembic stamp."

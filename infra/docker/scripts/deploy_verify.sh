@@ -77,7 +77,10 @@ while [[ $# -gt 0 ]]; do
         --dry-run)             DRY_RUN=1; shift ;;
         # Print the header block up to its closing rule. A hard-coded end line
         # (it was '2,43p') silently truncates --help every time the header grows.
-        -h|--help)             sed -n '2,/^# ─\{10,\}/p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # No `\{10,\}` interval — see the note in rollback.sh: a BRE interval over
+        # the 3-byte U+2500 rule never matches under LC_ALL=C with BSD sed, and
+        # --help would dump the whole script.
+        -h|--help)             sed -n '2,/^# ────/p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -103,8 +106,11 @@ die() { echo "error: $*" >&2; exit 1; }
 # ── 1. Preflight ───────────────────────────────────────────────────────────
 echo "==> [1/6] preflight"
 
-command -v docker >/dev/null || die "docker not found on PATH"
-command -v curl   >/dev/null || die "curl not found on PATH"
+# NB: the docker/curl checks deliberately live BELOW the --dry-run early exit
+# (search "dry-run tool checks"). A dry run starts no container and makes no
+# request, so requiring a docker daemon to print a plan is wrong on its own
+# terms — and it made the shell suite red on the macos-latest matrix leg, where
+# the runners ship no docker CLI at all.
 [[ -f "${COMPOSE_DIR}/.env" ]] || die "${COMPOSE_DIR}/.env not found; copy prod.env.example first"
 
 # Caller-supplied values are captured FIRST. The prod .env also defines VERSION
@@ -147,7 +153,13 @@ PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
 VERSION="${VERSION_REQUESTED:-$(git describe --tags --exact-match 2>/dev/null || echo '')}"
 if [[ -z "${PREV_VERSION:-}" ]]; then
+    # Release-shaped tags ONLY. `v*` also matches throwaway drill tags — this
+    # repo currently carries v0.9.1-drill / v0.9.2-drill / v0.10.0-drill — and
+    # version:refname sorts them ABOVE the real v0.9.0, so the bare glob would
+    # auto-select an unreviewed local commit as the rollback target. An explicit
+    # PREV_VERSION= is still honoured verbatim, which is how the drill runs.
     PREV_VERSION="$(git tag --list 'v*' --sort=-version:refname \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
         | grep -v "^${VERSION}$" | head -1 || true)"
 fi
 
@@ -183,6 +195,11 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 EOF
     exit 0
 fi
+
+# ── dry-run tool checks ────────────────────────────────────────────────────
+# Below the --dry-run exit on purpose; see the note at the top of preflight.
+command -v docker >/dev/null || die "docker not found on PATH"
+command -v curl   >/dev/null || die "curl not found on PATH"
 
 # ── Real-run guards. These apply only when we will MUTATE production. ──────
 # --verify-only deploys nothing, so requiring a tagged release, a clean tree
@@ -381,53 +398,13 @@ verify_suite() {
     fi
 }
 
-wait_api_healthy() {  # poll the api CONTAINER's health (max 60s)
-    # Container health, not http://localhost/health: the :80 site 301s to HTTPS
-    # and a bare curl would read the redirect as success from a dead api. Same
-    # reasoning as refresh.sh.
-    local _ state=""
-    for _ in $(seq 1 30); do
-        state="$(docker inspect --format '{{.State.Health.Status}}' citevyn-api 2>/dev/null || true)"
-        [[ "${state}" == "healthy" ]] && return 0
-        sleep 2
-    done
-    echo "    api did not become healthy within 60s (state=${state:-unknown})" >&2
-    return 1
-}
-
-# ── Drill A: the DATA-recovery rollback (RUNBOOK §4.2) ─────────────────────
-# Dump the live database, stop the writers, pg_restore that dump, bring the api
-# back, and let the caller re-run the probe suite. This exercises every moving
-# part of the recovery the runbook prescribes when a rollback crosses a
-# migration boundary: backup.sh, the ./backups mount, pg_restore's credentials,
-# and the stack's ability to serve after its database has been dropped and
-# rebuilt underneath it.
-#
-# It takes a FRESH dump rather than reusing the step-2 one, deliberately. The
-# step-2 dump predates this deploy, so if VERSION shipped a migration that dump
-# is a generation BEHIND the running code; restoring it would not rehearse a
-# rollback, it would prove that a mismatched restore breaks the app. Matching
-# generations is what makes this a rehearsal instead of a corruption test.
-data_restore_drill() {
-    local dump
-    echo "  -- drill A: data-recovery (RUNBOOK §4.2) --"
-    if ! "${COMPOSE_DIR}/scripts/backup.sh" >/dev/null; then
-        echo "    backup.sh failed; nothing to restore" >&2
-        return 1
-    fi
-    dump="$(ls -t "${COMPOSE_DIR}"/backups/citevyn-*.dump 2>/dev/null | head -1)"
-    if [[ -z "${dump}" ]]; then
-        echo "    backup.sh reported success but produced no dump" >&2
-        return 1
-    fi
-    echo "    restoring $(basename "${dump}")"
-    ( cd "${COMPOSE_DIR}" && docker compose --profile prod stop api worker ) || return 1
-    "${COMPOSE_DIR}/scripts/restore.sh" "${dump}" || return 1
-    # The worker is a one-shot ingest job, not a service, so only the api comes
-    # back up (same reasoning as refresh.sh).
-    ( cd "${COMPOSE_DIR}" && docker compose --profile prod up -d --no-deps api ) || return 1
-    wait_api_healthy
-}
+# The data-recovery drill and its crash-safety machinery live in a sourceable
+# helper so tests/shell/ can exercise them with stubbed docker/backup/restore.
+# This is the only code here that deliberately stops production, so it is the
+# code most worth testing — see _drill_lib.sh for the contract it upholds.
+# shellcheck source=infra/docker/scripts/_drill_lib.sh
+source "${COMPOSE_DIR}/scripts/_drill_lib.sh"
+install_drill_traps
 
 deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deploy it
     local tag="$1"
@@ -539,9 +516,29 @@ else
         # What CAN be proven here is the fail-fast contract (#195): the incident
         # tool must refuse before it touches production, not die inside an
         # alembic container half-way through. --dry-run mutates nothing.
-        if "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}" --dry-run >/dev/null 2>&1; then
+        #
+        # Assert the refusal TEXT, not just a non-zero exit. Exit-status-only
+        # would record a PASS for any failure whatsoever — rollback.sh missing
+        # (127), not executable (126), a syntax error, _migration_gen.sh failing
+        # to source, an unknown-flag exit 2. Delete the migration guard entirely
+        # and replace it with a bare `exit 1` and an exit-status-only check still
+        # reports the fail-fast contract as proven. So we require both the
+        # refusal sentence AND at least one of the specific missing revisions,
+        # which is what proves the guard reasoned about migrations at all.
+        # --base-ref is REQUIRED here: step 2 checked out VERSION, so we are on a
+        # detached HEAD and rollback.sh refuses to infer the deployed tree from
+        # it. We can name it, because we just deployed it.
+        _refusal="$( "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}" --base-ref "${VERSION}" --dry-run 2>&1 )" && _refused_rc=0 || _refused_rc=$?
+        _first_missing="${_prev_missing%% *}"
+        if [[ "${_refused_rc}" == "0" ]]; then
             record FAIL "rollback.sh refuses a cross-migration target" \
                 "it did NOT refuse — it would die mid-deploy inside a container"
+        elif ! printf '%s' "${_refusal}" | grep -qF "cannot roll back to"; then
+            record FAIL "rollback.sh refuses a cross-migration target" \
+                "it exited ${_refused_rc} but not with the migration refusal; it may be failing for an unrelated reason"
+        elif ! printf '%s' "${_refusal}" | grep -qF "${_first_missing}"; then
+            record FAIL "rollback.sh refuses a cross-migration target" \
+                "it refused but never named the missing revision ${_first_missing}"
         else
             record PASS "rollback.sh refuses a cross-migration target (fail-fast)"
         fi
@@ -557,7 +554,13 @@ else
         fi
     else
         echo "  -- drill B: code rollback -> ${PREV_VERSION} (same migration generation) --"
-        if "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}"; then
+        # Pessimistic BEFORE the mutation, not optimistic after it. rollback.sh
+        # checks out the target and rebuilds; if refresh.sh dies part-way the
+        # stack is mid-roll and belongs to neither release. Leaving ENDED_ON at
+        # VERSION through that window is what suppressed the loud prod-state
+        # warning on exactly the paths that needed it.
+        ENDED_ON="unknown (interrupted mid-rollback)"
+        if "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}" --base-ref "${VERSION}"; then
             record PASS "drill B: rollback to ${PREV_VERSION}"
             ENDED_ON="${PREV_VERSION}"
             verify_suite "rolled-back ${PREV_VERSION}"
@@ -569,6 +572,7 @@ else
         echo "==> [6/6] rolling forward to ${VERSION}"
         # Hard-fail on a bad checkout. Falling back to another ref here would
         # redeploy the PREVIOUS release while reporting the roll-forward as green.
+        ENDED_ON="unknown (interrupted mid-roll-forward)"
         if deploy_at "${VERSION}"; then
             record PASS "roll forward to ${VERSION}"
             ENDED_ON="${VERSION}"
@@ -594,6 +598,25 @@ if [[ "${#RESULTS[@]}" -gt 0 ]]; then
 fi
 echo "────────────────────────────────────────────────────────────────"
 echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}"
+
+# Production state is reported UNCONDITIONALLY, and from a real probe rather
+# than from a variable that tracks intent. This block used to fire only when
+# ENDED_ON != VERSION, so a drill that stopped the api and never restarted it
+# ended the run with production down and NOT ONE LINE saying so (#195).
+_api_state="$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' citevyn-api 2>/dev/null || echo 'absent/unknown')"
+echo "────────────────────────────────────────────────────────────────"
+case "${_api_state}" in
+    running/healthy)
+        echo " production: api container UP and healthy, serving ${ENDED_ON}" ;;
+    *)
+        echo
+        echo " ****************************************************************"
+        echo " ** WARNING: production is NOT serving. citevyn-api is"
+        echo " **          ${_api_state} (status/health)."
+        echo " ** Recover with:"
+        echo " **     cd ${COMPOSE_DIR} && docker compose --profile prod up -d api"
+        echo " ****************************************************************" ;;
+esac
 
 if [[ "${ENDED_ON}" != "${VERSION}" ]]; then
     echo
