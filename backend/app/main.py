@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.answer.orchestrator import OrchestratorError
 from app.api.routes.admin import router as admin_router
@@ -111,6 +112,7 @@ def create_app() -> FastAPI:
     # Exception handlers are defined at module scope (below) so pyright
     # can see them as referenced symbols; the FastAPI decorator binds
     # them to the app instance.
+    app.add_exception_handler(StarletteHTTPException, _http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(OrchestratorError, _orchestrator_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, _validation_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, _unhandled_exception_handler)  # type: ignore[arg-type]
@@ -120,6 +122,58 @@ def create_app() -> FastAPI:
 def _resolve_request_id(request: Request) -> str:
     """Return the request id stamped on :class:`Request` by the middleware."""
     return str(getattr(request.state, "request_id", "") or get_current_request_id())
+
+
+# Fallback code per HTTP status, used only for HTTPExceptions that did NOT
+# come from :func:`app.core.errors.error_response` — Starlette's own 404 for
+# an unrouted path and 405 for a wrong method. Everything the app raises
+# itself already carries an envelope.
+_STATUS_FALLBACK_CODE: dict[int, APIErrorCode] = {
+    401: APIErrorCode.auth_required,
+    404: APIErrorCode.not_found,
+    422: APIErrorCode.validation_error,
+    429: APIErrorCode.rate_limited,
+}
+
+
+def _is_envelope(detail: object) -> bool:
+    """True when ``detail`` is already a serialized :class:`ErrorEnvelope`."""
+    return isinstance(detail, dict) and {"request_id", "status", "error"} <= detail.keys()
+
+
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Emit every :class:`HTTPException` as a FLAT envelope.
+
+    :func:`app.core.errors.error_response` puts the envelope in
+    ``HTTPException.detail``, and FastAPI's DEFAULT handler serializes that
+    as ``{"detail": {...}}``. That nesting violates ``docs/API_SPEC.md`` §4,
+    which documents a flat ``{request_id, status, error}`` body, and it broke
+    every client that reads ``body.error.code`` — the frontend's
+    ``ApiClientError.errorCode()`` returned ``null`` for EVERY error, so
+    code-specific UI copy (e.g. ``rate_limiter_unavailable``, #167) was dead
+    code. Unwrapping here fixes it once, for every code, rather than teaching
+    each client to peek inside ``detail``.
+
+    ``exc.headers`` is forwarded verbatim so the ``WWW-Authenticate: Bearer``
+    challenge that ``auth_required`` attaches survives the re-emit — dropping
+    it would make the 401 non-compliant with RFC 7235.
+    """
+    detail = exc.detail
+    if _is_envelope(detail):
+        content: dict[str, Any] = dict(detail)  # type: ignore[arg-type]
+    else:
+        # Framework-raised (unrouted path, wrong method): give it the same
+        # shape so clients never need a second parser.
+        code = _STATUS_FALLBACK_CODE.get(exc.status_code, APIErrorCode.internal_error)
+        content = ErrorEnvelope(
+            request_id=_resolve_request_id(request),
+            error=ErrorDetail(code=code, message=str(detail)),
+        ).model_dump(mode="json")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=content,
+        headers=exc.headers or None,
+    )
 
 
 async def _orchestrator_error_handler(request: Request, exc: OrchestratorError) -> JSONResponse:

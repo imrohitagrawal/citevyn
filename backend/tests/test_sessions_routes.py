@@ -96,8 +96,8 @@ def test_create_session_rejects_non_chat_channel(in_memory_client: TestClient) -
     )
 
     assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "validation_error"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "validation_error"
 
 
 def test_create_session_requires_bearer_token(in_memory_client: TestClient) -> None:
@@ -105,8 +105,8 @@ def test_create_session_requires_bearer_token(in_memory_client: TestClient) -> N
 
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"] == "Bearer"
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "auth_required"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "auth_required"
 
 
 def test_create_session_rejects_wrong_bearer_token(in_memory_client: TestClient) -> None:
@@ -117,8 +117,8 @@ def test_create_session_rejects_wrong_bearer_token(in_memory_client: TestClient)
     )
 
     assert response.status_code == 401
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "auth_required"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "auth_required"
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +155,8 @@ def test_get_session_returns_404_when_missing(in_memory_client: TestClient) -> N
     )
 
     assert response.status_code == 404
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "not_found"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "not_found"
 
 
 def test_get_session_rejects_invalid_uuid(in_memory_client: TestClient) -> None:
@@ -217,8 +217,8 @@ def test_delete_session_returns_404_when_missing(in_memory_client: TestClient) -
     )
 
     assert response.status_code == 404
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "not_found"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "not_found"
 
 
 def test_delete_session_requires_bearer_token(in_memory_client: TestClient) -> None:

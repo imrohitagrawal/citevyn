@@ -180,7 +180,7 @@ def test_get_index_version_404(admin_app, session) -> None:
     assert response.status_code == 404
     body = response.json()
     # FastAPI wraps HTTPException bodies in ``{"detail": ...}``.
-    assert body["detail"]["error"]["code"] == "not_found"
+    assert body["error"]["code"] == "not_found"
 
 
 # ---------------------------------------------------------------------------

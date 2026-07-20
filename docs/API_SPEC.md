@@ -354,5 +354,6 @@ GET /health/dependencies
 | auth_required | Missing or invalid auth |
 | ingestion_failed | Ingestion job failed |
 | evaluation_failed | Evaluation gate failed |
-| index_unavailable | Active index unavailable |
+| index_unavailable | Active index unavailable (reserved — not currently emitted) |
 | cost_limit_reached | Demo daily cost cap reached |
+| rate_limiter_unavailable | Rate limiter backend (Redis) unreachable — request rejected fail-closed |

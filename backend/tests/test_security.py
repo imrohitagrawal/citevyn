@@ -22,6 +22,12 @@ def test_missing_bearer_token_is_rejected() -> None:
     assert response.status_code == 401
     # The 401 body carries the standard envelope (per the Slice 7
     # contract), not a bare string in ``detail``.
+    #
+    # NOTE: this is a BARE ``FastAPI()`` built by ``_protected_app`` — it does
+    # not install the app's ``_http_exception_handler``, so the envelope is
+    # still nested under ``detail`` here. The flat wire shape that real
+    # clients see is asserted in ``test_errors_envelope.py`` against
+    # ``create_app()``; this test only pins what the dependency RAISES.
     body = response.json()
     assert body["detail"]["error"]["code"] == "auth_required"
     assert "Missing bearer token" in body["detail"]["error"]["message"]

@@ -270,7 +270,10 @@ class RedisRateLimiter:
 
         Failure mode: if Redis is unreachable (connection refused,
         timeout, MOVED redirection) we fail **closed** by raising
-        503. Fail-open would let a Redis outage disable rate
+        503 ``rate_limiter_unavailable`` — a code that names the
+        dependency that actually broke, so an operator reading the
+        access log is not sent after the search index (#167).
+        Fail-open would let a Redis outage disable rate
         limiting entirely, which is the worst possible outcome
         for a security control. Operators can re-enable traffic
         by fixing Redis; the 503s are visible in the access log
@@ -299,7 +302,10 @@ class RedisRateLimiter:
             request_id = get_current_request_id()
             raise error_response(
                 request_id=request_id,
-                code=APIErrorCode.index_unavailable,
+                # NOT ``index_unavailable`` (#167): retrieval is fine, the
+                # limiter is what is down. A code that names the wrong
+                # dependency misdirects both operators and the UI copy.
+                code=APIErrorCode.rate_limiter_unavailable,
                 message="Rate limiter is temporarily unavailable.",
             ) from exc
         if not int(allowed):
