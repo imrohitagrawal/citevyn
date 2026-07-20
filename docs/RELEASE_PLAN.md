@@ -261,20 +261,30 @@ scored **42 passed / 0 failed**, exercising both drills end to end:
 ```
  [PASS] drill A: backup -> pg_restore -> stack healthy
  [PASS] post-restore …: in-corpus question returns a CITED answer   (+7 more probes)
- [PASS] drill B: rollback to v0.10.1-drillbase
+ [PASS] drill B: rollback to v0.10.5-drillbase
  [PASS] rolled-back …: in-corpus question returns a CITED answer    (+7 more probes)
- [PASS] roll forward to v0.10.2-drilltop
+ [PASS] roll forward to v0.10.6-drilltop
  [PASS] restored …: in-corpus question returns a CITED answer       (+7 more probes)
  passed: 42   failed: 0
- production: api container UP and healthy, serving v0.10.2-drilltop
+ production: api container UP and healthy, serving v0.10.6-drilltop
  rollback coverage:
    ✓ data-recovery rollback (RUNBOOK §4.2) — PROVEN end to end
-   ✓ code rollback to v0.10.1-drillbase + roll forward — PROVEN end to end
+   ✓ code rollback to v0.10.5-drillbase + roll forward — PROVEN end to end
+ RESULT: ✓ GATE PASSED — deploy verified and BOTH rollback paths proven.
 ```
 
 The full probe suite — cited answer, refusal, exact lookup, admin 401 — was
 re-run against the **rolled-back** stack, not just a health check. A rollback
 that boots but cannot answer is not a rollback.
+
+> **You cannot run this gate twice in one hour.** An intermediate run scored
+> 32/2: both drills and the roll-forward passed, but two `POST /v1/sessions`
+> probes failed with HTTP 429. Every demo call in the gate shares ONE rate-limit
+> bucket with every demo visitor, because `require_demo_api_key` returns a
+> constant user id ([#203](https://github.com/imrohitagrawal/citevyn/issues/203)).
+> A single run spends ~16 of the 30/hour cap. The gate now names this explicitly
+> instead of reporting "no session id returned"; the escape hatch is
+> `docker exec citevyn-redis redis-cli DEL citevyn:rl:demo_user`.
 
 **What this does and does not establish.** `v0.10.1-drillbase` and
 `v0.10.2-drilltop` are **local, unpushed** drill tags (a pushed `v*` tag triggers
