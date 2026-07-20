@@ -1,0 +1,172 @@
+# ────────────────────────────────────────────────────────────────────────────
+# CiteVyn on Fly.io — single-machine demo deployment.
+#
+# Runbook: docs/DEPLOY_FLY.md (read it before your first `fly deploy`).
+#
+# Shape of this deployment, and why it differs from infra/docker/:
+#   * ONE Fly machine runs the API image. Postgres is Neon (managed, free
+#     tier, pgvector) and Redis is Upstash (managed, free tier) — neither
+#     runs on the machine, so the whole 256 MB is the API's.
+#   * There is NO Caddy here. Fly's edge proxy already terminates TLS and
+#     issues/renews the certificate (`fly certs add`). A second reverse
+#     proxy would spend RAM we do not have on a 256 MB machine and would add
+#     a hop to the client-IP chain for no benefit. infra/docker/Caddyfile
+#     stays the config for the self-hosted single-VM path; it is unused here.
+#   * The ingestion worker is NOT a process here. It is a one-shot batch
+#     (`python -m app.worker.cli run`) that an operator runs on demand via
+#     `fly console`; a resident second process would not fit the budget.
+# ────────────────────────────────────────────────────────────────────────────
+
+app = "citevyn"
+
+# Swap does not turn 256 MB into 512 MB, but it absorbs the short allocation
+# spikes (a large ingest batch, a burst of concurrent answers) that would
+# otherwise be an outright OOM kill on a machine with no headroom. Paging is
+# slow; being killed mid-answer is worse. This is a TOP-LEVEL key — Fly ignores
+# it inside [[vm]], where it would look right and do nothing.
+swap_size_mb = 512
+
+# Put the app in the SAME region as the Neon project and the Upstash
+# database. Every request does several DB round-trips, and a cross-continent
+# hop costs more latency than anything else in the pipeline. `iad` is chosen
+# because Neon and Upstash both offer a free-tier region there — if you pick
+# a different Neon region, change this to match it.
+primary_region = "iad"
+
+[build]
+  # Reuse the production API image as-is. It already: runs as non-root,
+  # invokes uvicorn via `python -m` (the venv console-script shebangs point
+  # at the builder path and do not resolve at runtime — see the Dockerfile),
+  # listens on 8000, and carries the alembic tree at /db with /db on
+  # PYTHONPATH, which is what the release command below relies on.
+  dockerfile = "infra/docker/Dockerfile.api"
+
+[build.args]
+  # Stamped into the image and reported by the app. Override per release:
+  #   fly deploy --build-arg VERSION=$(git describe --tags --always)
+  VERSION = "dev"
+
+[deploy]
+  # Fly runs the release command in a THROWAWAY machine built from the new
+  # image, before any traffic machine is updated. If it exits non-zero the
+  # deploy aborts and the old machine keeps serving — which is exactly the
+  # behaviour we want for migrations.
+  #
+  # `python -m alembic` (not the bare `alembic` console script): uv wrote that
+  # script's shebang against the builder venv path, which does not exist in
+  # the runtime stage. `--config /db/alembic.ini` because the migration tree
+  # is copied to /db, deliberately outside the app's import path.
+  # No --sqlalchemy-url: alembic/env.py reads CITEVYN_DATABASE_URL from the
+  # environment, and Fly injects secrets into the release machine too.
+  release_command = "python -m alembic --config /db/alembic.ini upgrade head"
+
+  # One machine, so there is no rolling window to manage. `immediate` swaps
+  # it after the release command succeeds instead of waiting on a canary that
+  # cannot exist with a single instance.
+  strategy = "immediate"
+
+[env]
+  # ── Non-secret configuration only. Everything with a credential in it is
+  # ── set with `fly secrets set` (see docs/DEPLOY_FLY.md §3) so it is stored
+  # ── encrypted and never committed. Do not add API keys or DSNs here.
+
+  # Turns on the production guards in backend/app/core/config.py: they reject
+  # the stub LLM, the publicly-known default demo/admin keys, and a missing
+  # provider key AT PARSE TIME — including inside the release machine, so a
+  # misconfigured deploy fails during migrations rather than at first query.
+  CITEVYN_ENVIRONMENT = "production"
+
+  CITEVYN_LLM_PROVIDER = "gemini"
+  CITEVYN_EMBEDDING_PROVIDER = "gemini"
+
+  # Rate limiting is Redis-backed here and that is NOT optional. With
+  # auto-stop the machine is destroyed and recreated on every idle period, so
+  # the in-process limiter (the fallback when CITEVYN_REDIS_URL is unset)
+  # would hand out a fresh 30 q/h allowance on every wake. Upstash keeps the
+  # window across restarts.
+  CITEVYN_RATE_LIMIT_ENABLED = "true"
+
+  # The per-client identity for the limiter. Behind Fly's proxy the socket
+  # peer is always the proxy, so the real client address arrives in
+  # `Fly-Client-IP`. This header is trustworthy ONLY because the app is
+  # reachable exclusively through that proxy — Fly overwrites it on every
+  # inbound request, so a client-supplied value cannot survive.
+  # If Cloudflare proxying is ever switched on (orange cloud), Fly then sees
+  # Cloudflare's edge as the client and this value becomes a per-datacentre
+  # bucket: change it to `CF-Connecting-IP` in the same change. See
+  # docs/DEPLOY_FLY.md §5.
+  CITEVYN_RATE_LIMIT_CLIENT_IP_HEADER = "Fly-Client-IP"
+
+  # Spend ceiling for the demo (owner's cap). The daily budget is computed by
+  # summing `provider_calls` since midnight UTC, so it survives the machine
+  # being stopped and started — unlike an in-process counter, which under
+  # auto-stop would reset the allowance every wake.
+  CITEVYN_COST_HARD_DAILY_USD = "2"
+  CITEVYN_COST_SOFT_DAILY_USD = "1"
+
+  # Browser origin allowed to call this API. The API serves JSON only (there
+  # is no StaticFiles mount), so the frontend is hosted separately — set this
+  # to wherever the built frontend actually lives before the first deploy.
+  CITEVYN_CORS_ALLOWED_ORIGINS = "https://citevyn.stackclimb.com"
+
+  # Neon's free tier meters connections, and a machine that is stopped and
+  # started repeatedly re-establishes the whole pool each time. One machine
+  # with one uvicorn worker does not need five sockets; three leaves headroom
+  # for the release machine, which briefly runs alongside it.
+  CITEVYN_DATABASE_POOL_SIZE = "3"
+
+[http_service]
+  # uvicorn's listener inside the container (Dockerfile.api EXPOSE 8000).
+  internal_port = 8000
+
+  # Fly's proxy terminates TLS and redirects :80 → :443, which is the job the
+  # Caddyfile does in the self-hosted stack.
+  force_https = true
+
+  # ── Scale-to-zero. This is what makes the demo free: the machine stops
+  # ── when idle and Fly's proxy starts it again on the next request (a few
+  # ── seconds of cold start on the first hit). "suspend" is not used because
+  # ── a suspended machine still holds its memory allocation.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+  # Zero means "it is allowed to be fully off". Set to 1 only if the cold
+  # start becomes unacceptable — that also ends the free-tier arithmetic and
+  # re-introduces the DB/Redis connections being held open around the clock.
+  min_machines_running = 0
+
+  # Concurrency doubles as the auto-stop signal: Fly stops a machine it sees
+  # as idle by these counters. The limits are low on purpose — one uvicorn
+  # worker in 256 MB (measured ~103 MiB RSS) cannot absorb a burst, and
+  # queueing at the proxy is far better than being OOM-killed mid-answer.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+  # Liveness check. Deliberately GET /health and NOT /health/dependencies:
+  # /health is a pure in-process liveness answer, while /health/dependencies
+  # probes Postgres and returns 503 when it is unreachable. Pointing Fly at
+  # the dependency probe would let a Neon free-tier cold start — or any
+  # transient upstream blip — be read as "this machine is broken" and get the
+  # machine replaced, which fixes nothing and loses the warm process.
+  # /health/dependencies is the OPERATOR's deeper probe (RUNBOOK §2.1), and
+  # the external uptime monitor in docs/DEPLOY_FLY.md §7 polls /health.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    interval = "30s"
+    timeout = "5s"
+    # Long enough for a cold boot (image pull is already done; this is
+    # process start + FastAPI lifespan) without flapping the machine.
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # Measured: the api holds ~103 MiB RSS and the image is 282 MB, so 256 MB
+  # is viable but has little headroom. If the machine starts getting
+  # OOM-killed, raise this BEFORE trying to trim the app — 512 MB is the next
+  # step and is still cheap.
+  memory = "256mb"
+  # (swap is configured at the top of this file — it is not a [[vm]] field.)
