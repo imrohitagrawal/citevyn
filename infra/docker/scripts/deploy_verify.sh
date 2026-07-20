@@ -193,6 +193,23 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         || die "env guard refused: refusing to run the live gate against a stub .env"
 fi
 
+# ── Provider-side budget (#153 Layer 5). FREE: a metadata read, no inference. ──
+# A release must not proceed on an exhausted key — the stack would deploy, boot,
+# pass /health, and then fail every actual question with a provider 402. The
+# exit codes are distinguished deliberately: 1 means "checked, and it is low"
+# (fatal), 2 means "could not check" (a warning, not a reason to block a deploy
+# that may not even use OpenRouter).
+if [[ "${VERIFY_ONLY}" == "0" ]]; then
+    echo "==> [1b/6] provider-side budget check"
+    "${REPO_ROOT}/scripts/check_budget.sh"
+    case $? in
+        0) record PASS "provider key has budget remaining" ;;
+        2) echo "    [WARN] provider budget could not be checked (no key found)" >&2 ;;
+        *) record FAIL "provider key budget" "below threshold or unreadable"
+           die "refusing to deploy on an exhausted provider key (see docs/COST_CONTROLS.md §0)" ;;
+    esac
+fi
+
 # shellcheck disable=SC2206  # deliberate word-splitting of operator-supplied flags
 CURL=(curl --silent --show-error --max-time 30 ${CURL_OPTS:-})
 

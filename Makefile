@@ -265,6 +265,12 @@ rollback: ## Roll the live stack back to a tag (usage: make rollback TAG=v0.9.0 
 deploy-verify: ## THE live release gate: deploy + functional verify + rollback drill (RELEASE_PLAN §10 blocker 9)
 	./infra/docker/scripts/deploy_verify.sh
 
+budget: ## Read the OpenRouter key's remaining balance (FREE — metadata only, no inference)
+	@# The check that caught the key at 96.6% consumed. App-side metering can only
+	# see what THIS app spent; only the provider knows the key's total. Wired into
+	# deploy-verify so a release cannot proceed on an exhausted key.
+	@MIN_REMAINING_USD=$${MIN_REMAINING_USD:-1} ./scripts/check_budget.sh
+
 logs: ## Tail logs from api, worker, caddy
 	$(COMPOSE) --profile $(PROFILE) logs -f --tail=100 api worker caddy
 

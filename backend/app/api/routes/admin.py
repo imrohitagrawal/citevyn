@@ -26,17 +26,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
 from app.core.rate_limit import rate_limited_admin
 from app.core.security import ADMIN_USER_ID
+from app.cost.budget import classify, spend_since, utc_day_start
 from app.models.enums import IndexStatus, JobStatus
 from app.services import evaluations as evaluation_service
 from app.services import index_versions as index_version_service
@@ -371,3 +374,42 @@ async def get_ingestion_job(
         request_id=request_id,
         job=IngestionJobSummary.model_validate(job),
     )
+
+
+@router.get("/budget")
+async def get_budget(
+    request: Request,
+    _: Annotated[str, Depends(rate_limited_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, object]:
+    """Today's spend against the §9 daily limits (#153 Layer 5).
+
+    Admin-gated, like every other route on this router: spend is operational
+    detail about the demo's economics, not something an anonymous demo user needs.
+
+    Reads through the REQUEST's session rather than opening its own. The meter
+    deliberately writes on a separate session (spend must not roll back with a
+    failed request), but a read has no such constraint, and reusing the request
+    session keeps this endpoint from adding a second connection per call.
+    """
+    since = utc_day_start()
+    spend = await spend_since(db, since)
+    hard = Decimal(str(settings.cost_hard_daily_usd))
+    fraction = float(spend / hard) if hard > 0 else 0.0
+    return {
+        "request_id": _request_id(request),
+        "day_start_utc": since.isoformat(),
+        "spend_usd": str(spend),
+        "soft_limit_usd": settings.cost_soft_daily_usd,
+        "hard_limit_usd": settings.cost_hard_daily_usd,
+        "remaining_usd": str(max(Decimal(0), hard - spend)),
+        "state": str(classify(spend, settings)),
+        "fraction_of_hard": round(fraction, 4),
+        # Mirrors the thresholds the operator runbook quotes, so a dashboard does
+        # not re-derive them and drift from the enforcement path.
+        "warn_60pct": fraction >= 0.60,
+        "warn_85pct": fraction >= 0.85,
+        "budget_enabled": settings.cost_budget_enabled,
+        "fail_closed": settings.cost_budget_fail_closed,
+    }
