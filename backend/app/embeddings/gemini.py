@@ -38,6 +38,7 @@ from typing import Any, cast
 import httpx
 
 from app.core.middleware import get_current_request_id
+from app.cost.usage import report_embedding_usage
 from app.embeddings.errors import EmbedderUnavailable
 
 _logger = logging.getLogger("citevyn.embeddings")
@@ -241,6 +242,12 @@ class GeminiEmbedder:
                 raise EmbedderUnavailable(
                     "Gemini embeddings returned non-JSON body", cause=exc
                 ) from exc
+            # ``embedContent``/``batchEmbedContents`` return NO usage block, so the
+            # meter has to estimate the tokens. Report the request anyway
+            # (``input_tokens=None``): it keeps ``attempts`` truthful — a retried
+            # request costs the provider-side quota three times — and it is what
+            # tells the meter "no usage block" apart from "no request was made".
+            report_embedding_usage(input_tokens=None, requests=attempt + 1)
             return cast(dict[str, Any], raw)
 
         # Retries exhausted.

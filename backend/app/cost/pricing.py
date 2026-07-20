@@ -85,7 +85,39 @@ _PRICE_BOOK: dict[tuple[str, str], TokenPrice] = {
     # rates is 6.25x over on output).
     ("gemini", "gemini-2.5-flash-lite"): TokenPrice(Decimal("0.10"), Decimal("0.40")),
     ("router", "google/gemini-2.5-flash-lite"): TokenPrice(Decimal("0.10"), Decimal("0.40")),
+    # --- EMBEDDING models (kind="embedding") -------------------------------
+    # Embeddings bill INPUT ONLY — there are no output tokens to charge for — so
+    # the output rate is a true zero rather than a placeholder. The meter passes
+    # output_tokens=0 on this path, so the two agree either way; the zero is here
+    # so a future non-zero output rate cannot be introduced by accident.
+    #
+    # OpenAI text-embedding-3-*, reached through OpenRouter's OpenAI-compatible
+    # /embeddings endpoint, keyed by the OpenRouter model id we actually send.
+    ("router", "openai/text-embedding-3-small"): TokenPrice(Decimal("0.02"), Decimal(0)),
+    ("router", "openai/text-embedding-3-large"): TokenPrice(Decimal("0.13"), Decimal(0)),
+    # The same two under their BARE OpenAI names. OpenRouter wants the "openai/"
+    # prefix, but ``CITEVYN_EMBEDDING_MODEL`` is free-form and an operator who sets
+    # the bare name would otherwise land every ingest row in ``unpriced_calls``.
+    ("router", "text-embedding-3-small"): TokenPrice(Decimal("0.02"), Decimal(0)),
+    ("router", "text-embedding-3-large"): TokenPrice(Decimal("0.13"), Decimal(0)),
+    # Gemini direct — the shipped default ``CITEVYN_EMBEDDING_MODEL``. Priced at
+    # the PAID tier: the free tier is a quota, not a discount, and a budget built
+    # on "it might be free today" under-counts the moment the quota is raised.
+    ("gemini", "gemini-embedding-001"): TokenPrice(Decimal("0.15"), Decimal(0)),
 }
+
+# ``CITEVYN_EMBEDDING_PROVIDER`` spells OpenRouter "openrouter" while
+# ``LLMResult.provider`` spells it "router". Left alone, one vendor would occupy two
+# rows in every spend-by-provider report and an operator adding a price would have
+# to guess which spelling the meter used. Canonicalised on the way in, so the column
+# has exactly one name per vendor and the price book has exactly one key.
+_PROVIDER_ALIASES: dict[str, str] = {"openrouter": "router"}
+
+
+def canonical_provider(provider: str) -> str:
+    """The single spelling of a vendor used by both the meter and the price book."""
+    return _PROVIDER_ALIASES.get(provider, provider)
+
 
 # The stub provider makes no network call and costs nothing. It is priced by
 # PROVIDER rather than by an entry above, because the stub's model string is
@@ -104,6 +136,7 @@ def price_for(*, provider: str, model: str) -> TokenPrice | None:
     ``None`` is a first-class outcome — see the module docstring. Callers must
     record the call as unpriced rather than treating it as free.
     """
+    provider = canonical_provider(provider)
     if provider in _FREE_PROVIDERS:
         return _FREE
     exact = _PRICE_BOOK.get((provider, model))
@@ -174,4 +207,4 @@ def known_models() -> list[tuple[str, str]]:
     return sorted(_PRICE_BOOK)
 
 
-__all__ = ["TokenPrice", "known_models", "price_for"]
+__all__ = ["TokenPrice", "canonical_provider", "known_models", "price_for"]
