@@ -9,9 +9,9 @@ assumes the one above it has failed.
 | Layer | Control | Status |
 |---|---|---|
 | 0 | Provider-side per-key spend cap | **Live** (owner-configured, outside the app) |
-| 1 | Per-call metering (tokens + priced cost) | Planned — #153 |
-| 2 | Admission control (concurrency + budget check) | Planned — #153 |
-| 3 | Global daily budget (§9 soft/hard) | Planned — #153 |
+| 1 | Per-call metering (tokens + priced cost) | **Live** (LLM only; embedder open) |
+| 2 | Admission control (concurrency + budget check) | **Live** — see §2 |
+| 3 | Global daily budget (§9 soft/hard) | **Live** — see §3 |
 | 4 | Per-user rate limit behind a persisted store | Partial (in-process today) |
 | 5 | Spend visibility + `make budget` | Planned — #153 |
 | 6 | CI spend bounding | **Live** — see §6 |
@@ -51,9 +51,51 @@ transient 5xx, not as a content refusal — which is the right shape (see §3).
 
 ---
 
-## 1–5. Application-side layers
+## 1-3. Metering, admission control, and the daily budget — LIVE
 
-Not yet implemented; tracked on
+**Layer 1 — metering.** `provider_calls` (migration 0005) records tokens, priced
+cost, provider, model, call site and attempts for every paid LLM call. Priced from
+`app/cost/pricing.py`, keyed by **provider + model**. Covers the LLM only; the
+embedder seam is identical but ~1/10th the per-token price and is still open.
+
+**Layer 2 — admission control.** `app/cost/admission.py` caps paid calls **in
+flight** at `CITEVYN_COST_MAX_CONCURRENT_CALLS` (default 8). This exists because of
+how the budget reads: every in-flight call sees a spend total that excludes its
+peers, so an unbounded burst can collectively overshoot a limit each member
+individually satisfies. Scope is per process; under multi-worker uvicorn the
+effective cap is `workers x limit`. The daily budget is the cross-process control.
+
+**Layer 3 — the §9 daily budget.** `app/cost/budget.py`, enforced on the same seam
+as metering, **before** the provider call:
+
+| Setting | Default |
+|---|---|
+| `CITEVYN_COST_SOFT_DAILY_USD` | `5.0` |
+| `CITEVYN_COST_HARD_DAILY_USD` | `10.0` |
+| `CITEVYN_COST_BUDGET_FAIL_CLOSED` | `true` |
+| `CITEVYN_COST_BUDGET_ENABLED` | `true` (kill switch) |
+
+* **Soft** warns and biases toward cache. Correctness is deliberately unchanged —
+  a $5 day must not silently start degrading answers.
+* **Hard** raises `CostLimitReached`, which subclasses `LLMUnavailable` so every
+  existing caller surfaces it as a **transient 5xx, never a content refusal**.
+  A no-answer envelope would teach the client the corpus lacks an answer and
+  suppress retry (#142).
+* Spend is a **SQL sum over `provider_calls` since midnight UTC**, so a restart
+  cannot reset it — the exact flaw that makes the 30 q/h per-user limiter
+  anti-nuisance only rather than a spend control.
+* **Fail-closed** when the meter store is unreadable: if we cannot tell what has
+  been spent, we cannot tell whether we are over budget, and fail-open turns a
+  database blip into an unmetered spending window. Flip
+  `CITEVYN_COST_BUDGET_FAIL_CLOSED=false` to trade cost for availability —
+  deliberately, not by accident of error handling.
+
+`budget_snapshot()` exposes today's spend, remaining budget and the 60% / 85% warn
+flags for the Layer-5 admin surface.
+
+## 4-5. Still open
+
+Tracked on
 [#153](https://github.com/imrohitagrawal/citevyn/issues/153). The design constraints
 that the implementation must honour:
 

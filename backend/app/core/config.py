@@ -177,6 +177,25 @@ class Settings(BaseSettings):
     conversation_memory: bool = True
     memory_recent_turns: int = Field(default=6, ge=1)
 
+    # --- Cost controls (#153, RELEASE_PLAN section 9) ---
+    # The daily budget is computed by SUMMING ``provider_calls`` since midnight UTC,
+    # so it survives an API restart. An in-process counter would hand out a fresh
+    # allowance on every restart -- which is exactly why the 30 q/h per-user limiter
+    # below is anti-nuisance only and NOT a spend control.
+    cost_budget_enabled: bool = True
+    cost_soft_daily_usd: float = Field(default=5.0, ge=0.0)
+    cost_hard_daily_usd: float = Field(default=10.0, ge=0.0)
+    # When the meter store cannot be read we do not know what has been spent.
+    # FAIL CLOSED by default: an unreadable meter must not become an unmetered
+    # spending window whose only ceiling is the provider-side cap. An operator who
+    # genuinely prefers availability over cost can flip this -- deliberately, and
+    # visibly, rather than by accident of error handling.
+    cost_budget_fail_closed: bool = True
+    # Layer 2 admission control: a ceiling on paid calls IN FLIGHT at once. There is
+    # no such cap today, so a burst can run up spend faster than the daily budget can
+    # observe it (every in-flight call reads a spend total that predates its peers).
+    cost_max_concurrent_calls: int = Field(default=8, ge=1)
+
     # --- Answer cache (Slice 5+) ---
     # Part of the cache-key pre-image, so bumping it invalidates EVERY cached answer by
     # design. Bump it whenever an answer-pipeline change makes previously-cached answers

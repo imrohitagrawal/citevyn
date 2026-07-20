@@ -33,6 +33,9 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import Settings
+from app.cost.admission import get_semaphore
+from app.cost.budget import enforce_budget
 from app.cost.meter import build_call, record_call
 from app.llm.protocol import LLMClient
 from app.llm.types import LLMResult
@@ -56,8 +59,13 @@ class MeteredLLMClient:
         inner: LLMClient,
         *,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._inner = inner
+        # Resolved per call when None, for the same reason as the sessionmaker:
+        # ``get_settings`` is already an lru_cache, and pinning a Settings instance
+        # here would make a config reload invisible to the budget it gates.
+        self._settings = settings
         # An explicit override (tests) or ``None`` to resolve per call. NOT cached:
         # ``get_sessionmaker()`` is already a process-wide lazy cache, and
         # ``reset_engine()`` clears it. Caching it here would pin a DISPOSED engine
@@ -90,11 +98,32 @@ class MeteredLLMClient:
         max_tokens: int,
         temperature: float,
     ) -> LLMResult:
-        result = await self._inner.complete(
-            system=system, user=user, max_tokens=max_tokens, temperature=temperature
-        )
+        """Admit, call, meter — in that order.
+
+        Admission runs BEFORE the provider call, which is the only ordering that
+        can actually prevent spend; checking afterwards would merely record it.
+        The budget check raises :class:`~app.llm.errors.CostLimitReached`, a
+        transient failure, never a content refusal (#142).
+
+        The concurrency slot is held across the call so the cap bounds calls
+        IN FLIGHT, not calls started. Releasing before the await would make it a
+        rate of admission rather than a ceiling on concurrency.
+        """
+        settings = self._resolve_settings()
+        await enforce_budget(self._resolve_sessionmaker(), settings)
+        async with get_semaphore(settings):
+            result = await self._inner.complete(
+                system=system, user=user, max_tokens=max_tokens, temperature=temperature
+            )
         await self._meter(result, prompt_chars=len(system) + len(user), max_tokens=max_tokens)
         return result
+
+    def _resolve_settings(self) -> Settings:
+        if self._settings is not None:
+            return self._settings
+        from app.core.config import get_settings
+
+        return get_settings()
 
     async def _meter(self, result: LLMResult, *, prompt_chars: int, max_tokens: int) -> None:
         """Record one completion. Never raises — metering must not break answers."""
