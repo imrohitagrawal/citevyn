@@ -179,6 +179,21 @@ class RetrievalStrategy(enum.StrEnum):
 AnswerResponse = dict[str, object]
 
 
+_FLAG_TOKEN_RE = re.compile(r"(?<!\S)--?[A-Za-z][\w-]*")
+
+
+def _strip_flag_tokens(question: str) -> str:
+    """Drop CLI-flag tokens (``--model``, ``-m``) from a retrieval query.
+
+    Used ONLY on the #208 retry path. A question that reached the retry is one
+    the exact-term arm already failed to answer, so the literal flag is the
+    least informative token in it while also being the one that dominates
+    lexical retrieval. Whitespace is re-normalised so the remaining prose reads
+    naturally to the embedder.
+    """
+    return " ".join(_FLAG_TOKEN_RE.sub(" ", question).split())
+
+
 class OrchestratorError(RuntimeError):
     """Raised when the orchestrator cannot answer the question at all.
 
@@ -889,10 +904,23 @@ class Orchestrator:
         returns ``None`` so the caller's original no-answer stands. This
         is a second look at the corpus, never a licence to answer
         ungrounded.
+
+        The flag token is STRIPPED from the retry query, and that is the part
+        that actually makes this work. Switching the intent alone was measured
+        against the real corpus and still refused: retrieval ran and returned
+        different hits, but a query containing ``--model`` keeps pulling the
+        flag's own chunk, so the generator saw evidence about the flag and not
+        about the thing being asked. The question being retried is by definition
+        one the exact-term arm could not answer, so the literal token is the
+        least useful part of it — dropping it is what turns
+        "what does --model do" into "config file option for the model setting",
+        which the corpus does cover. Only the RETRY query is rewritten; the
+        answer is still generated against the original question.
         """
+        retry_query = _strip_flag_tokens(retrieval_query) or retrieval_query
         if multi_hop:
             result = await retriever.retrieve_multi(
-                retrieval_query,
+                retry_query,
                 product_areas=[d.value for d in multi_domains],
                 intent=Intent.faq,
                 limit=self._settings.retrieval_max_candidates,
@@ -900,7 +928,7 @@ class Orchestrator:
             )
         else:
             result = await retriever.retrieve(
-                retrieval_query,
+                retry_query,
                 product_area=product_area,
                 intent=Intent.faq,
                 limit=self._settings.retrieval_max_candidates,

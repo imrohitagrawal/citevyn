@@ -23,7 +23,12 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from app.answer.orchestrator import Orchestrator, RetrievalStrategy
+from app.answer.orchestrator import (
+    _FLAG_TOKEN_RE,
+    Orchestrator,
+    RetrievalStrategy,
+    _strip_flag_tokens,
+)
 from app.llm.prompts import NO_ANSWER_REFUSAL
 from app.llm.types import LLMResult
 from app.models import AuditEvent, RetrievalType
@@ -318,3 +323,114 @@ async def test_uncited_retry_answer_is_rejected(session: Any) -> None:
     audits = (await session.execute(select(AuditEvent))).scalars().all()
     # The ORIGINAL refusal is what is recorded, not the retry's uncited prose.
     assert audits[0].metadata_["reason"] == "no_answer"
+
+
+# ---------------------------------------------------------------------------
+# Flag-token stripping on the retry query (#208)
+# ---------------------------------------------------------------------------
+#
+# Switching the intent alone was NOT enough. Measured against the real corpus,
+# the retry ran, retrieved different hits, and still refused: a query containing
+# ``--model`` keeps pulling the flag's own chunk, so the generator saw evidence
+# about the flag rather than about the thing being asked. Stripping the literal
+# token is what turns the retry into a question the corpus can actually answer.
+# These tests pin that helper.
+
+
+def test_strip_removes_a_long_flag() -> None:
+    assert (
+        _strip_flag_tokens("Is there a config file option for the --model flag?")
+        == "Is there a config file option for the flag?"
+    )
+
+
+def test_strip_removes_a_short_flag() -> None:
+    assert _strip_flag_tokens("what does -m do") == "what does do"
+
+
+def test_strip_keeps_ordinary_prose_untouched() -> None:
+    question = "Does Codex have a config file for persistent settings?"
+    assert _strip_flag_tokens(question) == question
+
+
+def test_strip_does_not_eat_hyphenated_words_or_negative_numbers() -> None:
+    """``--`` must be flag-shaped, not any hyphen.
+
+    Over-stripping would quietly degrade retrieval for ordinary questions, which
+    is the failure mode this whole issue is about.
+    """
+    assert _strip_flag_tokens("is rate-limiting per-user?") == "is rate-limiting per-user?"
+    assert _strip_flag_tokens("what about x-1 and 3-4") == "what about x-1 and 3-4"
+
+
+def test_strip_collapses_the_whitespace_it_leaves_behind() -> None:
+    assert _strip_flag_tokens("config for  --model  setting") == "config for setting"
+
+
+def test_stripping_everything_leaves_an_empty_string_for_the_caller_to_handle() -> None:
+    """The caller falls back to the original query when the strip empties it."""
+    assert _strip_flag_tokens("--model") == ""
+
+
+class _FlagSensitiveRetriever(_IntentAwareRetriever):
+    """Mirrors what the REAL corpus does, not just what the intent switch does.
+
+    Measured against the live index: switching the intent alone was not enough.
+    The retry ran and returned hits, but a query still containing ``--model``
+    kept surfacing the flag's own chunk, so the generator refused. The config
+    passage only came back once the flag token was gone.
+
+    So this double returns the hybrid (config) hits ONLY when the query it is
+    handed carries no flag token. Without that fidelity the suite cannot tell a
+    working fix from a broken one — and it could not: disabling the strip
+    entirely left all 13 earlier tests green.
+    """
+
+    def __init__(self, *, exact: list[EvidenceHit], hybrid: list[EvidenceHit]) -> None:
+        super().__init__(exact=exact, hybrid=hybrid)
+        self.queries: list[str] = []
+
+    async def retrieve(
+        self,
+        question: str,
+        *,
+        product_area: str | None,
+        intent: Intent,
+        limit: int,
+        top_k: int,
+    ) -> RetrievalResult:
+        self.queries.append(question)
+        self.calls.append(intent)
+        if intent is Intent.exact_lookup:
+            return RetrievalResult(hits=list(self._exact), vector_degrade=VectorDegrade.none)
+        # The flag token still dominates retrieval — no config evidence.
+        if _FLAG_TOKEN_RE.search(question):
+            return RetrievalResult(hits=[], vector_degrade=VectorDegrade.none)
+        return RetrievalResult(hits=list(self._hybrid), vector_degrade=VectorDegrade.none)
+
+
+async def test_retry_query_has_the_flag_token_removed(session: Any) -> None:
+    """The property that actually made the live system answer.
+
+    Regression guard for a real gap: with a retriever that only mirrors the
+    INTENT switch, removing the strip changed nothing and the suite stayed
+    green — while the deployed system still refused the reported question.
+    """
+    retriever = _FlagSensitiveRetriever(
+        exact=[_hit(_FLAG_PASSAGE, retrieval_type=RetrievalType.exact)],
+        hybrid=[_hit(_CONFIG_PASSAGE, retrieval_type=RetrievalType.hybrid)],
+    )
+
+    response = await _ask(
+        session, question=_FLAG_QUESTION, retriever=retriever, llm=_GroundedOnlyLLM()
+    )
+
+    assert response["no_answer"] is False, (
+        "the retry did not ground — the flag token is still reaching the retriever"
+    )
+    assert len(retriever.queries) == 2, "expected an exact attempt then a retry"
+    first, retry = retriever.queries
+    assert _FLAG_TOKEN_RE.search(first), "the FIRST attempt must use the question verbatim"
+    assert not _FLAG_TOKEN_RE.search(retry), (
+        f"the retry query still contains a flag token: {retry!r}"
+    )
