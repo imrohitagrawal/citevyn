@@ -36,16 +36,33 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHECKLIST = REPO_ROOT / "docs" / "DEMO_CHECKLIST.md"
 VITE_CONFIG = REPO_ROOT / "frontend" / "vite.config.ts"
 
-# A path token in the doc: /health, /health/index, /v1/sessions/:id/messages.
+# A path token in the doc: /health, /health/index, /v1/sessions/:id/messages,
+# optionally preceded by the HTTP verb it is documented under.
+#
+# The verb is only captured when it *immediately* precedes the path — nothing
+# between them but whitespace and markdown backticks. Prose that merely names
+# a verb near a path ("there is no collection ``GET`` under
+# ``/v1/sessions/:id/messages``") must NOT bind, because there the verb is the
+# thing being denied, not the thing being asserted. Such a path falls back to
+# the shape-only check.
+#
 # Trailing punctuation (``.``, ``,``, backtick) is excluded so "…/health."
 # does not become a path named "/health.".
-_PATH_RE = re.compile(r"/(?:v1|health)[A-Za-z0-9_/:{}.\-]*")
+_PATH_RE = re.compile(
+    r"(?:\b(GET|POST|PUT|PATCH|DELETE)\b[ \t`]*\n?[ \t`]*)?(/(?:v1|health)[A-Za-z0-9_/:{}.\-]*)"
+)
 
-# Lines that document a route as *absent* rather than asserting it works.
+# Phrases that mark a *sentence* as documenting something absent.
+#
 # These are the deliberate "do not delete, mark it" entries: #168 asked for
 # the SSE line to stay visible-but-flagged so nobody re-adds it as a live
 # check, and the negative assertions ("there is no /healthz") must be
 # allowed to name the route they are denying.
+#
+# ``~~`` is in the list because a struck-through box is the doc's own way of
+# saying "this check is disabled" (Slice 7), and the strike lands on the
+# sentence holding the route while the prose explanation is the next
+# sentence.
 _ABSENCE_MARKERS = (
     "N/A as of",
     "there is no",
@@ -53,6 +70,26 @@ _ABSENCE_MARKERS = (
     "No route exposes",
     "does not exist",
     "NOT YET WRITTEN",
+    "~~",
+)
+
+# The routes the doc is permitted to name *negatively*, normalised.
+#
+# The exemption is scoped two ways — to the disclaiming *sentence*, and to
+# these tokens. The first cut of this guard exempted the whole bullet, which
+# meant one "there is no …" anywhere in a bullet blinded the exists-check for
+# every other route it named — including the ``/health`` box that #168 was
+# filed about, so the original defect (``curl http://localhost:8000/healthz``)
+# could be restored verbatim with the suite still green. Token-scoping alone
+# is not enough either: ``/healthz`` is legitimately named by the disclaimer
+# in that same bullet, so only sentence-scoping distinguishes "the endpoint
+# you curl" from "the endpoint we are telling you not to curl".
+_DISCLAIMABLE_PATHS = frozenset(
+    {
+        "/healthz",  # #168 item 2: never existed, the routes are /health*
+        "/v1/products",  # Slice 2: the catalog is asserted at the DB, not over HTTP
+        "/v1/sessions/*/messages/stream",  # Slice 7 SSE, tracked as #61
+    }
 )
 
 
@@ -62,6 +99,14 @@ def _checklist_text() -> str:
 
 def _live_paths() -> set[str]:
     return set(create_app().openapi()["paths"])
+
+
+def _live_operations() -> dict[str, set[str]]:
+    """``{normalised path: {verb, …}}`` for the live schema."""
+    return {
+        _normalise(path): {verb.lower() for verb in item}
+        for path, item in create_app().openapi()["paths"].items()
+    }
 
 
 def _normalise(path: str) -> str:
@@ -103,14 +148,48 @@ def _items() -> list[tuple[int, str]]:
     return [(n, "\n".join(ls)) for n, ls in items]
 
 
-def _documented_paths() -> list[tuple[int, str]]:
-    """Return ``(line_number, path)`` for every *asserted* path in the doc."""
-    out: list[tuple[int, str]] = []
+def _sentences(item: str) -> list[str]:
+    """Split a folded bullet into sentence-ish segments.
+
+    Sentence granularity is what makes the absence markers usable. A bullet
+    wraps across lines, so a per-line scope mis-flags a correctly disclaimed
+    route; a per-bullet scope is far too coarse (see ``_DISCLAIMABLE_PATHS``).
+    The disclaimer and the thing it disclaims live in the same *sentence* —
+    "(There is no ``/healthz`` route — the endpoints are …)" — while the
+    command you are told to run is a different one.
+
+    Splitting only on ``. `` (period + whitespace) keeps abbreviations and
+    dotted identifiers like ``app.main:app`` intact.
+    """
+    return re.split(r"(?<=\.)\s+", item)
+
+
+def _disclaims(segment: str) -> bool:
+    return any(marker in segment for marker in _ABSENCE_MARKERS)
+
+
+def _documented_paths() -> list[tuple[int, str, str]]:
+    """``(line_number, verb, path)`` for every *asserted* route in the doc.
+
+    ``verb`` is ``""`` when the doc names a path without an adjacent HTTP
+    method (a ``curl`` URL, a prose reference) — those get a shape-only
+    check.
+
+    A bullet carrying an absence marker does not become invisible. The
+    exemption applies only to a ``_DISCLAIMABLE_PATHS`` token appearing in
+    the disclaiming *sentence*, so a bullet that says "there is no
+    ``/healthz``" still has its ``/health``, ``/health/dependencies`` and
+    ``/health/index`` verified — and a ``/healthz`` that reappears in the
+    *command* half of the same bullet is still caught.
+    """
+    out: list[tuple[int, str, str]] = []
     for lineno, item in _items():
-        if any(marker in item for marker in _ABSENCE_MARKERS):
-            continue
-        for match in _PATH_RE.findall(item):
-            out.append((lineno, match))
+        for segment in _sentences(item):
+            disclaims = _disclaims(segment)
+            for verb, path in _PATH_RE.findall(segment):
+                if disclaims and _normalise(path) in _DISCLAIMABLE_PATHS:
+                    continue
+                out.append((lineno, verb, path))
     return out
 
 
@@ -120,12 +199,38 @@ def _documented_paths() -> list[tuple[int, str]]:
 
 
 def test_every_documented_route_exists_in_the_openapi_schema() -> None:
-    live = {_normalise(p) for p in _live_paths()}
-    bad = [(lineno, path) for lineno, path in _documented_paths() if _normalise(path) not in live]
+    live = _live_operations()
+    bad = [
+        (lineno, verb, path)
+        for lineno, verb, path in _documented_paths()
+        if _normalise(path) not in live
+    ]
     assert not bad, (
         "docs/DEMO_CHECKLIST.md references routes that do not exist: "
-        + ", ".join(f"line {n}: {p}" for n, p in bad)
+        + ", ".join(f"line {n}: {v} {p}".strip() for n, v, p in bad)
         + f"\nlive routes: {sorted(live)}"
+    )
+
+
+def test_every_documented_route_is_documented_under_a_live_verb() -> None:
+    """Shape alone is not enough — the *method* has to exist too.
+
+    #168 item 3 was verb drift, not path drift: the doc asserted a
+    collection ``GET /v1/sessions/:id/messages`` against a path that is
+    ``POST``-only. A shape-only guard passes that happily, so it cannot
+    catch the class of bug it was written for.
+    """
+    live = _live_operations()
+    bad = [
+        (lineno, verb, path)
+        for lineno, verb, path in _documented_paths()
+        if verb and verb.lower() not in live.get(_normalise(path), set())
+    ]
+    assert not bad, (
+        "docs/DEMO_CHECKLIST.md documents routes under a method they do not support: "
+        + ", ".join(
+            f"line {n}: {v} {p} (live: {sorted(live.get(_normalise(p), ()))})" for n, v, p in bad
+        )
     )
 
 
@@ -133,18 +238,38 @@ def test_the_parser_actually_found_routes() -> None:
     """Vacuous-pass guard.
 
     If the doc is restructured such that ``_PATH_RE`` stops matching, the
-    test above passes on an empty set and silently stops protecting
+    tests above pass on an empty set and silently stop protecting
     anything — the exact failure mode that makes doc tests worthless.
-
-    Counted over the raw text, *including* disclaimed bullets: the risk
-    being guarded is the regex going blind, not the marker logic. (A
-    bullet that disclaims a route — "there is no ``/healthz``" — is
-    deliberately exempt from the exists-check, so the asserted subset is
-    legitimately small and would make a poor canary.)
     """
     found = _PATH_RE.findall(_checklist_text())
     assert len(found) >= 8, f"expected the checklist to name several routes, got {found}"
     assert _documented_paths(), "no route is positively asserted any more"
+
+
+def test_the_health_boxes_are_actually_covered_by_the_exists_check() -> None:
+    """The exemption must be per-route, not per-bullet.
+
+    Both boxes #168 was filed about — the §1 pre-flight ``curl`` and the
+    Slice 1 assertion — sit in bullets that *also* say "there is no
+    ``/healthz``". The first cut of this guard therefore skipped them
+    wholesale, and the original defect could be pasted straight back in
+    with the suite green. These are the two entries that must survive
+    the disclaimer.
+    """
+    asserted = {(verb, _normalise(path)) for _, verb, path in _documented_paths()}
+
+    # §1: `curl http://localhost:8000/health` — a bare URL, no verb.
+    assert ("", "/health") in asserted, "the §1 pre-flight curl box is not being checked"
+    # Slice 1: `GET /health` returns 200.
+    assert ("GET", "/health") in asserted, "the Slice 1 health box is not being checked"
+    # The disclaimed token itself stays exempt, in both bullets.
+    assert not [p for _, p in asserted if p == "/healthz"]
+    # The sibling routes named in the same §1 bullet are checked too.
+    assert ("", "/health/dependencies") in asserted
+    assert ("", "/health/index") in asserted
+
+    # Whole-bullet exemption collapsed this to 3; per-token keeps ~all of it.
+    assert len(asserted) >= 10, f"too few routes asserted, exemption is over-broad: {asserted}"
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +280,13 @@ def test_the_parser_actually_found_routes() -> None:
 def test_healthz_is_never_asserted_as_a_live_route() -> None:
     """#168 item 2. ``/healthz`` has never existed; the routes are /health*."""
     assert "/healthz" not in _live_paths()
+    # Sentence-scoped, same as ``_documented_paths``: the disclaimer sentence
+    # may name /healthz, the imperative half of the same bullet may not.
     offenders = [
-        (lineno, item)
+        (lineno, segment)
         for lineno, item in _items()
-        if "/healthz" in item and not any(m in item for m in _ABSENCE_MARKERS)
+        for segment in _sentences(item)
+        if "/healthz" in segment and not _disclaims(segment)
     ]
     assert not offenders, f"checklist asserts /healthz as live: {offenders}"
 
