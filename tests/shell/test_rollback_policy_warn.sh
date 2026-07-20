@@ -41,10 +41,21 @@ fail() { echo "  FAIL — $1"; FAILURES=$((FAILURES + 1)); }
 # A throwaway clone so throwaway tags/commits never touch the real repo.
 git clone --quiet --no-hardlinks "${REPO_ROOT}" "${WORK}/repo" 2>/dev/null
 cd "${WORK}/repo" || exit 1
+# Pin the clone to a BRANCH. A clone inherits the source repo's HEAD state, and
+# in CI `actions/checkout` leaves the workspace on a DETACHED HEAD — so the
+# clone was detached too, rollback.sh's detached-HEAD refusal fired before the
+# policy check, and every case here failed for a reason that has nothing to do
+# with answer_policy_version. Locally the clone inherited a branch and the suite
+# passed, which is exactly the environment-dependence this suite should not have.
+git checkout -q -B rollback-test-branch
 # `git clone` copies COMMITTED history only, so without this the suite would
 # silently exercise the last committed rollback.sh and report green on a stale
 # script while your edits sit uncommitted. Test what is on disk.
 cp "${REPO_ROOT}/infra/docker/scripts/rollback.sh" infra/docker/scripts/rollback.sh
+# rollback.sh sources this one; copy it for the same reason, and because a
+# freshly added helper does not exist in the clone's committed history at all
+# (it fails to source, `set -e` fires, and every case reports a bogus exit 1).
+cp "${REPO_ROOT}/infra/docker/scripts/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
 git config user.email t@t.invalid
 git config user.name t
 # The env guard is never reached under --dry-run, but keep a .env absent by
@@ -63,8 +74,8 @@ PY
     git commit --quiet --no-verify -am "test: $1"
 }
 
-_run() {  # $1 = tag -> sets RC / OUT
-    OUT="$(./infra/docker/scripts/rollback.sh "$1" --dry-run 2>&1)"
+_run() {  # $@ = rollback.sh args (tag first) -> sets RC / OUT
+    OUT="$(./infra/docker/scripts/rollback.sh "$@" --dry-run 2>&1)"
     RC=$?
 }
 
@@ -101,7 +112,11 @@ git tag -f _t_root "$(git rev-list --max-parents=0 HEAD | head -1)" >/dev/null 2
 if git show "_t_root:backend/app/core/config.py" >/dev/null 2>&1; then
     echo "  skip — root commit already has config.py; cannot exercise the missing-file path"
 else
-    _run _t_root; _assert "target predates config.py -> silent, exit 0, proceeds" 0
+    # --allow-migration-mismatch: the root commit also predates db/versions, so
+    # the #195 migration guard would refuse first and this case would never
+    # reach the policy code it exists to exercise.
+    _run _t_root --allow-migration-mismatch
+    _assert "target predates config.py -> silent, exit 0, proceeds" 0
 fi
 
 # 4. Field(default=...) form is still recognised

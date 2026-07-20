@@ -15,8 +15,22 @@
 #       - a REFUSAL for an out-of-corpus question              (§10 blocker 5)
 #       - exact lookup returns a hit                           (§10 blocker 4)
 #       - admin endpoints reject an unauthenticated call       (§10 blocker 7)
-#   • a real ROLLBACK DRILL to the previous tag + re-verify    (§10 blocker 9)
+#   • ROLLBACK DRILLS (§10 blocker 9) — see below
 #   • roll forward to the target again + re-verify
+#
+# THE TWO ROLLBACK DRILLS, and why there are two (#195):
+#   A. DATA-recovery drill (always runs). Dump the live database, stop the
+#      writers, pg_restore that dump, bring the api back, re-verify. This is the
+#      procedure RUNBOOK §4.2 prescribes and the ONLY rollback that works once a
+#      forward-only migration has been applied.
+#   B. CODE-rollback drill (runs only when it CAN work). Roll the code back to
+#      PREV_VERSION, re-verify, roll forward, re-verify. A code-only rollback
+#      across a migration boundary is impossible: the live DB stays stamped at a
+#      revision the older tree does not contain, and alembic dies with
+#      "Can't locate revision identified by 'NNNN'". So when PREV_VERSION is a
+#      different migration generation this gate does NOT pretend to prove it —
+#      it asserts that rollback.sh REFUSES fast, and then FAILS unless the
+#      operator explicitly narrows the scope with --data-rollback-only.
 #
 # SCOPE — what this gate does NOT cover (deliberately):
 #   It is NOT the full demo/release regression suite. The 50-case golden suite
@@ -31,6 +45,9 @@
 # Usage:
 #   VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
 #   ./scripts/deploy_verify.sh --skip-rollback-drill   # deploy + verify only
+#   ./scripts/deploy_verify.sh --data-rollback-only    # gate drill A only, and
+#                                                      # SAY SO in the summary
+#                                                      # (blocker 9 stays PARTIAL)
 #   ./scripts/deploy_verify.sh --dry-run               # print the plan, change nothing
 #
 # Env:
@@ -50,13 +67,20 @@ REPO_ROOT="$(cd "${COMPOSE_DIR}/../.." && pwd)"
 SKIP_ROLLBACK=0
 DRY_RUN=0
 VERIFY_ONLY=0
+DATA_ROLLBACK_ONLY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-rollback-drill) SKIP_ROLLBACK=1; shift ;;
+        --data-rollback-only)  DATA_ROLLBACK_ONLY=1; shift ;;
         --verify-only)         VERIFY_ONLY=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
-        -h|--help)             sed -n '2,43p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # Print the header block up to its closing rule. A hard-coded end line
+        # (it was '2,43p') silently truncates --help every time the header grows.
+        # No `\{10,\}` interval — see the note in rollback.sh: a BRE interval over
+        # the 3-byte U+2500 rule never matches under LC_ALL=C with BSD sed, and
+        # --help would dump the whole script.
+        -h|--help)             sed -n '2,/^# ────/p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -82,8 +106,11 @@ die() { echo "error: $*" >&2; exit 1; }
 # ── 1. Preflight ───────────────────────────────────────────────────────────
 echo "==> [1/6] preflight"
 
-command -v docker >/dev/null || die "docker not found on PATH"
-command -v curl   >/dev/null || die "curl not found on PATH"
+# NB: the docker/curl checks deliberately live BELOW the --dry-run early exit
+# (search "dry-run tool checks"). A dry run starts no container and makes no
+# request, so requiring a docker daemon to print a plan is wrong on its own
+# terms — and it made the shell suite red on the macos-latest matrix leg, where
+# the runners ship no docker CLI at all.
 [[ -f "${COMPOSE_DIR}/.env" ]] || die "${COMPOSE_DIR}/.env not found; copy prod.env.example first"
 
 # Caller-supplied values are captured FIRST. The prod .env also defines VERSION
@@ -126,7 +153,13 @@ PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
 VERSION="${VERSION_REQUESTED:-$(git describe --tags --exact-match 2>/dev/null || echo '')}"
 if [[ -z "${PREV_VERSION:-}" ]]; then
+    # Release-shaped tags ONLY. `v*` also matches throwaway drill tags — this
+    # repo currently carries v0.9.1-drill / v0.9.2-drill / v0.10.0-drill — and
+    # version:refname sorts them ABOVE the real v0.9.0, so the bare glob would
+    # auto-select an unreviewed local commit as the rollback target. An explicit
+    # PREV_VERSION= is still honoured verbatim, which is how the drill runs.
     PREV_VERSION="$(git tag --list 'v*' --sort=-version:refname \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
         | grep -v "^${VERSION}$" | head -1 || true)"
 fi
 
@@ -154,11 +187,19 @@ if [[ "${DRY_RUN}" == "1" ]]; then
       1. backup.sh                                   (safety net)
       2. git checkout ${VERSION:-<tag>} && VERSION=${VERSION:-<tag>} refresh.sh
       3. functional verify against ${BASE_URL:-<base-url>}
-      4. rollback.sh ${PREV_VERSION:-<skipped>} + re-verify
-      5. git checkout ${VERSION:-<tag>} && refresh.sh (roll forward) + re-verify
+      4. drill A (data): backup.sh -> stop api/worker -> restore.sh -> re-verify
+      5. drill B (code): rollback.sh ${PREV_VERSION:-<skipped>} + re-verify,
+         but ONLY if ${PREV_VERSION:-<prev>} ships every migration ${VERSION:-<tag>} does;
+         otherwise assert rollback.sh REFUSES and fail unless --data-rollback-only
+      6. git checkout ${VERSION:-<tag>} && refresh.sh (roll forward) + re-verify
 EOF
     exit 0
 fi
+
+# ── dry-run tool checks ────────────────────────────────────────────────────
+# Below the --dry-run exit on purpose; see the note at the top of preflight.
+command -v docker >/dev/null || die "docker not found on PATH"
+command -v curl   >/dev/null || die "curl not found on PATH"
 
 # ── Real-run guards. These apply only when we will MUTATE production. ──────
 # --verify-only deploys nothing, so requiring a tagged release, a clean tree
@@ -183,6 +224,12 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     if [[ "${SKIP_ROLLBACK}" == "0" ]]; then
         [[ -n "${PREV_VERSION}" ]] \
             || die "no previous v* tag for the rollback drill; pass PREV_VERSION= or --skip-rollback-drill"
+        # Must be checked HERE. Downstream, a non-existent ref lists no
+        # migrations at all, which the drill-B check would read as "a different
+        # migration generation" — reporting a typo'd tag as a migration boundary
+        # and silently narrowing the gate.
+        git rev-parse -q --verify "refs/tags/${PREV_VERSION}" >/dev/null \
+            || die "PREV_VERSION='${PREV_VERSION}' is not an existing git tag"
     fi
 
     RETURN_REF="$(git rev-parse --abbrev-ref HEAD)"
@@ -230,13 +277,23 @@ api_post() {  # api_post <path> <json> -> body on stdout
         --data "$2" "${BASE_URL}$1"
 }
 
+# Set by new_session when the demo bucket is exhausted, so callers can report
+# "the gate rate-limited itself" instead of blaming the deployment.
+LAST_SESSION_RATE_LIMITED=0
+
 new_session() {  # -> session id on stdout (empty on failure)
     # The response key is `session_id`, NOT `id` (sessions.py returns
     # {request_id, session_id, expires_at}). Matching `"id"` would require a
     # quote immediately before `id`, which neither `"session_id"` nor
     # `"request_id"` contains — so it would never match and every dependent
     # probe would be skipped on a perfectly healthy stack.
-    api_post /v1/sessions '{}' \
+    local _resp
+    _resp="$(api_post /v1/sessions '{}')"
+    LAST_SESSION_RATE_LIMITED=0
+    case "${_resp}" in
+        *'"rate_limited"'*) LAST_SESSION_RATE_LIMITED=1 ;;
+    esac
+    printf '%s' "${_resp}" \
         | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
 }
 
@@ -282,6 +339,16 @@ verify_suite() {
     session_id="$(new_session)"
     if [[ -n "${session_id}" ]]; then
         record PASS "${phase}: POST /v1/sessions"
+    elif [[ "${LAST_SESSION_RATE_LIMITED}" == "1" ]]; then
+        # The gate rate-limited ITSELF. Every demo call in this script shares one
+        # bucket with every demo visitor, because require_demo_api_key returns a
+        # CONSTANT user id (#203). One full run spends ~16 demo calls against a
+        # 30/hour cap, so a second run inside the hour exhausts it and the
+        # remaining probes fail for a reason that has nothing to do with the
+        # deployment. Reported as its own failure so nobody debugs the release
+        # for an hour chasing "no session id returned".
+        record FAIL "${phase}: POST /v1/sessions" \
+            "429 rate_limited — the DEMO BUCKET is exhausted, not a deploy fault (#203). One gate run spends ~16 of the 30/hour cap and the bucket is GLOBAL. Wait for it to age out, or clear it: docker exec citevyn-redis redis-cli DEL citevyn:rl:demo_user"
     else
         record FAIL "${phase}: POST /v1/sessions" "no session id returned"
         # Plain echo, not `record`: the FAIL above already fires, and counting a
@@ -350,6 +417,14 @@ verify_suite() {
             "expected 401/403, got ${code}"
     fi
 }
+
+# The data-recovery drill and its crash-safety machinery live in a sourceable
+# helper so tests/shell/ can exercise them with stubbed docker/backup/restore.
+# This is the only code here that deliberately stops production, so it is the
+# code most worth testing — see _drill_lib.sh for the contract it upholds.
+# shellcheck source=infra/docker/scripts/_drill_lib.sh
+source "${COMPOSE_DIR}/scripts/_drill_lib.sh"
+install_drill_traps
 
 deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deploy it
     local tag="$1"
@@ -426,30 +501,106 @@ fi
 echo "==> [4/6] verifying the deployed release"
 verify_suite "deployed ${VERSION}"
 
-# ── 5/6. Rollback drill + roll forward ─────────────────────────────────────
+# ── 5/6. Rollback drills + roll forward ────────────────────────────────────
 ENDED_ON="${VERSION}"
+DATA_ROLLBACK_PROVEN=0
+CODE_ROLLBACK_PROVEN=0
 if [[ "${SKIP_ROLLBACK}" == "1" ]]; then
-    echo "==> [5/6] rollback drill SKIPPED (--skip-rollback-drill)"
+    echo "==> [5/6] rollback drills SKIPPED (--skip-rollback-drill)"
     echo "    NOTE: RELEASE_PLAN §10 blocker 9 is NOT satisfied by this run." >&2
 else
-    echo "==> [5/6] rollback drill -> ${PREV_VERSION}"
-    if "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}"; then
-        record PASS "rollback to ${PREV_VERSION}"
-        ENDED_ON="${PREV_VERSION}"
-        verify_suite "rolled-back ${PREV_VERSION}"
+    echo "==> [5/6] rollback drills"
+
+    # ── Drill A: data-recovery. Always runnable, and it is the only rollback
+    #    that works across a forward-only migration boundary.
+    if data_restore_drill; then
+        record PASS "drill A: backup -> pg_restore -> stack healthy"
+        DATA_ROLLBACK_PROVEN=1
+        verify_suite "post-restore ${VERSION}"
     else
-        record FAIL "rollback to ${PREV_VERSION}" "rollback.sh failed"
+        record FAIL "drill A: backup -> pg_restore -> stack healthy" \
+            "the documented §4.2 recovery path does not work"
     fi
 
-    echo "==> [6/6] rolling forward to ${VERSION}"
-    # Hard-fail on a bad checkout. Falling back to another ref here would
-    # redeploy the PREVIOUS release while reporting the roll-forward as green.
-    if deploy_at "${VERSION}"; then
-        record PASS "roll forward to ${VERSION}"
-        ENDED_ON="${VERSION}"
-        verify_suite "restored ${VERSION}"
+    # ── Drill B: code rollback to PREV_VERSION. Only attempted when it CAN
+    #    succeed. `migrations_missing_at` compares the two TREES; a non-empty
+    #    result means the live DB is stamped at a revision PREV_VERSION does not
+    #    ship, so `alembic upgrade head` at that tag cannot resolve the graph.
+    # shellcheck source=infra/docker/scripts/_migration_gen.sh
+    source "${COMPOSE_DIR}/scripts/_migration_gen.sh"
+    _prev_missing="$(migrations_missing_at "${PREV_VERSION}" "${VERSION}" | tr '\n' ' ')"
+
+    if [[ -n "${_prev_missing}" ]]; then
+        echo "  -- drill B: code rollback NOT POSSIBLE to ${PREV_VERSION} --"
+        echo "     ${PREV_VERSION} is missing applied migration(s): ${_prev_missing}"
+        # What CAN be proven here is the fail-fast contract (#195): the incident
+        # tool must refuse before it touches production, not die inside an
+        # alembic container half-way through. --dry-run mutates nothing.
+        #
+        # Assert the refusal TEXT, not just a non-zero exit. Exit-status-only
+        # would record a PASS for any failure whatsoever — rollback.sh missing
+        # (127), not executable (126), a syntax error, _migration_gen.sh failing
+        # to source, an unknown-flag exit 2. Delete the migration guard entirely
+        # and replace it with a bare `exit 1` and an exit-status-only check still
+        # reports the fail-fast contract as proven. So we require both the
+        # refusal sentence AND at least one of the specific missing revisions,
+        # which is what proves the guard reasoned about migrations at all.
+        # --base-ref is REQUIRED here: step 2 checked out VERSION, so we are on a
+        # detached HEAD and rollback.sh refuses to infer the deployed tree from
+        # it. We can name it, because we just deployed it.
+        _refusal="$( "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}" --base-ref "${VERSION}" --dry-run 2>&1 )" && _refused_rc=0 || _refused_rc=$?
+        _first_missing="${_prev_missing%% *}"
+        if [[ "${_refused_rc}" == "0" ]]; then
+            record FAIL "rollback.sh refuses a cross-migration target" \
+                "it did NOT refuse — it would die mid-deploy inside a container"
+        elif ! printf '%s' "${_refusal}" | grep -qF "cannot roll back to"; then
+            record FAIL "rollback.sh refuses a cross-migration target" \
+                "it exited ${_refused_rc} but not with the migration refusal; it may be failing for an unrelated reason"
+        elif ! printf '%s' "${_refusal}" | grep -qF "${_first_missing}"; then
+            record FAIL "rollback.sh refuses a cross-migration target" \
+                "it refused but never named the missing revision ${_first_missing}"
+        else
+            record PASS "rollback.sh refuses a cross-migration target (fail-fast)"
+        fi
+
+        if [[ "${DATA_ROLLBACK_ONLY}" == "1" ]]; then
+            # Explicitly narrowed scope. Not a pass for drill B — it is recorded
+            # nowhere as a pass, and the summary says so in full.
+            echo "     [NOT PROVEN] code rollback to ${PREV_VERSION} was not exercised" >&2
+            echo "                  (--data-rollback-only). Blocker 9 stays PARTIAL." >&2
+        else
+            record FAIL "drill B: code rollback to ${PREV_VERSION}" \
+                "target is a different migration generation; pass PREV_VERSION=<same-generation tag>, or --data-rollback-only to gate the data path alone"
+        fi
     else
-        record FAIL "roll forward to ${VERSION}" "checkout or refresh.sh failed"
+        echo "  -- drill B: code rollback -> ${PREV_VERSION} (same migration generation) --"
+        # Pessimistic BEFORE the mutation, not optimistic after it. rollback.sh
+        # checks out the target and rebuilds; if refresh.sh dies part-way the
+        # stack is mid-roll and belongs to neither release. Leaving ENDED_ON at
+        # VERSION through that window is what suppressed the loud prod-state
+        # warning on exactly the paths that needed it.
+        ENDED_ON="unknown (interrupted mid-rollback)"
+        if "${COMPOSE_DIR}/scripts/rollback.sh" "${PREV_VERSION}" --base-ref "${VERSION}"; then
+            record PASS "drill B: rollback to ${PREV_VERSION}"
+            ENDED_ON="${PREV_VERSION}"
+            verify_suite "rolled-back ${PREV_VERSION}"
+            CODE_ROLLBACK_PROVEN=1
+        else
+            record FAIL "drill B: rollback to ${PREV_VERSION}" "rollback.sh failed"
+        fi
+
+        echo "==> [6/6] rolling forward to ${VERSION}"
+        # Hard-fail on a bad checkout. Falling back to another ref here would
+        # redeploy the PREVIOUS release while reporting the roll-forward as green.
+        ENDED_ON="unknown (interrupted mid-roll-forward)"
+        if deploy_at "${VERSION}"; then
+            record PASS "roll forward to ${VERSION}"
+            ENDED_ON="${VERSION}"
+            verify_suite "restored ${VERSION}"
+        else
+            record FAIL "roll forward to ${VERSION}" "checkout or refresh.sh failed"
+            CODE_ROLLBACK_PROVEN=0
+        fi
     fi
 fi
 
@@ -468,6 +619,25 @@ fi
 echo "────────────────────────────────────────────────────────────────"
 echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}"
 
+# Production state is reported UNCONDITIONALLY, and from a real probe rather
+# than from a variable that tracks intent. This block used to fire only when
+# ENDED_ON != VERSION, so a drill that stopped the api and never restarted it
+# ended the run with production down and NOT ONE LINE saying so (#195).
+_api_state="$(docker inspect --format '{{.State.Status}}/{{.State.Health.Status}}' citevyn-api 2>/dev/null || echo 'absent/unknown')"
+echo "────────────────────────────────────────────────────────────────"
+case "${_api_state}" in
+    running/healthy)
+        echo " production: api container UP and healthy, serving ${ENDED_ON}" ;;
+    *)
+        echo
+        echo " ****************************************************************"
+        echo " ** WARNING: production is NOT serving. citevyn-api is"
+        echo " **          ${_api_state} (status/health)."
+        echo " ** Recover with:"
+        echo " **     cd ${COMPOSE_DIR} && docker compose --profile prod up -d api"
+        echo " ****************************************************************" ;;
+esac
+
 if [[ "${ENDED_ON}" != "${VERSION}" ]]; then
     echo
     echo " ****************************************************************"
@@ -485,10 +655,32 @@ if [[ "${FAIL_COUNT}" -gt 0 ]]; then
 fi
 
 if [[ "${SKIP_ROLLBACK}" == "1" ]]; then
-    echo " RESULT: ✓ verify passed, but the rollback drill was skipped."
+    echo " RESULT: ✓ verify passed, but the rollback drills were skipped."
     echo "         RELEASE_PLAN §10 blocker 9 remains OPEN."
     exit 0
 fi
 
-echo " RESULT: ✓ GATE PASSED — deploy verified and rollback proven."
-echo "         RELEASE_PLAN §10 blocker 9 satisfied on $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+# Never claim more than was actually exercised. The whole point of #195 is that
+# this gate previously reported "rollback proven" for a path that could not run.
+echo " rollback coverage:"
+if [[ "${DATA_ROLLBACK_PROVEN}" == "1" ]]; then
+    echo "   ✓ data-recovery rollback (RUNBOOK §4.2) — PROVEN end to end"
+else
+    echo "   ✗ data-recovery rollback (RUNBOOK §4.2) — NOT proven"
+fi
+if [[ "${CODE_ROLLBACK_PROVEN}" == "1" ]]; then
+    echo "   ✓ code rollback to ${PREV_VERSION} + roll forward — PROVEN end to end"
+else
+    echo "   ✗ code rollback to ${PREV_VERSION} — NOT proven (different migration"
+    echo "     generation; a code-only rollback across that boundary is impossible)"
+fi
+
+if [[ "${DATA_ROLLBACK_PROVEN}" == "1" && "${CODE_ROLLBACK_PROVEN}" == "1" ]]; then
+    echo " RESULT: ✓ GATE PASSED — deploy verified and BOTH rollback paths proven."
+    echo "         RELEASE_PLAN §10 blocker 9 satisfied on $(date -u '+%Y-%m-%dT%H:%M:%SZ')."
+    exit 0
+fi
+
+echo " RESULT: ✓ GATE PASSED (NARROWED) — deploy verified and the data-recovery"
+echo "         rollback proven. Code rollback to ${PREV_VERSION} was NOT exercised."
+echo "         RELEASE_PLAN §10 blocker 9 is PARTIAL, not closed."

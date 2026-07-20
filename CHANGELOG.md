@@ -7,6 +7,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Rolling back across a migration boundary died inside a container (#195).**
+  `rollback.sh` warned that the target predated applied migrations and then
+  proceeded anyway; the live DB stays stamped at the newest revision, which the
+  older tree does not contain, so `alembic upgrade head` failed with
+  `Can't locate revision identified by '0006'` mid-deploy. It now REFUSES before
+  the checkout, names the backup-restore path (RUNBOOK §4.2), and offers
+  `--allow-migration-mismatch` for an operator who knows the schema is
+  compatible. `make restore` had never been executed and was missing
+  `PGPASSWORD` — the same defect that made `make backup` unusable — so it is now
+  a real script, `infra/docker/scripts/restore.sh`.
+
+### Added
+- **`deploy-verify` proves the rollback it claims (#195).** Two drills: A, a
+  data-recovery rollback (dump → `pg_restore` → api healthy → full functional
+  re-verify), which always runs; and B, the code rollback to `PREV_VERSION`,
+  which runs only when that tag is the same migration generation. When it is
+  not, the gate asserts the refusal is fast and FAILS unless narrowed with
+  `--data-rollback-only`, and the summary reports blocker 9 as PARTIAL. The gate
+  no longer prints "rollback proven" for a path it did not run.
 - **Anaphoric follow-ups returned the previous answer verbatim (#169).** Conversation
   memory resolved a follow-up by CONCATENATION (`"What is Codex CLI? who built it?"`),
   and the leading clause is a complete self-contained question — so the LLM answered

@@ -385,6 +385,8 @@ To schedule nightly backups, add a cron job on the host:
 docker compose -f infra/docker/docker-compose.yml --profile prod stop api worker
 
 # Restore. The dump file is read from the host bind-mount.
+# (`make restore` delegates to infra/docker/scripts/restore.sh, which is the
+#  same restore the release gate's data-recovery drill runs.)
 make restore FILE=infra/docker/backups/citevyn-20260620T030000Z.dump
 
 # Restart api + worker
@@ -428,20 +430,53 @@ images up. Brief 502s on :443 are expected (~10s).
 **Use the script — it is the same path the release gate drills.**
 
 ```bash
-make rollback TAG=v0.1.0        # explicit tag
+make rollback TAG=v0.9.0        # explicit tag
 make rollback TAG=--previous    # the tag before HEAD, resolved for you
 ```
 
 `infra/docker/scripts/rollback.sh` refuses a stub `.env` and a dirty
-tree, warns when migrations landed after the target, checks out the
-target tag, re-deploys via `refresh.sh`, and waits for the api to
-report healthy. Preview with `--dry-run` (safe on a dirty tree).
+tree, checks out the target tag, re-deploys via `refresh.sh`, and waits
+for the api to report healthy. Preview with `--dry-run` (safe on a
+dirty tree).
+
+**It also refuses, up front, to attempt the impossible.** If the target
+tag does not contain a migration the current release ships, the live
+database is stamped at a revision that tag cannot resolve, and
+`alembic upgrade head` dies with `Can't locate revision identified by
+'0006'` mid-deploy. The script stops before the checkout and points
+here. Recover the DATA instead, using a dump taken while the target was
+live:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml --profile prod stop api worker
+./infra/docker/scripts/restore.sh infra/docker/backups/citevyn-<ts>.dump   # §4.2
+./infra/docker/scripts/rollback.sh v0.9.0 --allow-migration-mismatch
+```
+
+`--allow-migration-mismatch` is the deliberate override. Use it only
+after such a restore, or when you know the intervening migrations are
+additive-only **and** the old code tolerates the current schema.
+
+**Rolling back a SECOND time — you will need `--base-ref`.** A successful
+rollback leaves you on a detached HEAD at the target tag. The migration
+check compares the target against the *deployed* tree and uses `HEAD` as
+that proxy, so from a detached HEAD it would be comparing against the
+release you already rolled back to — while the database is still stamped
+at the newest revision. The boundary would become invisible and the
+check would wave through the very failure it exists to prevent. So it
+refuses, and you name the deployed release yourself:
+
+```bash
+./infra/docker/scripts/rollback.sh <older-tag> --base-ref <currently-deployed-tag>
+```
+
+Or just `git checkout main` first, if the incident allows it.
 
 Equivalent by hand:
 
 ```bash
-git checkout v0.1.0                 # source tree at the previous tag
-VERSION=v0.1.0 make refresh
+git checkout v0.9.0                 # source tree at the previous tag
+VERSION=v0.9.0 make refresh
 ```
 
 The compose file re-builds the images from the old source. Migrations
@@ -461,9 +496,22 @@ VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
 ```
 
 Backup → deploy → functional verify (cited answer, refusal, exact
-lookup, admin protected) → rollback drill → roll forward → re-verify,
-with a PASS/FAIL summary. Non-zero exit means **do not tag**. This is
-what satisfies `RELEASE_PLAN` §10 blocker 9.
+lookup, admin protected) → **two** rollback drills → roll forward →
+re-verify, with a PASS/FAIL summary. Non-zero exit means **do not tag**.
+
+The two drills, and what each proves (`RELEASE_PLAN` §10 blocker 9):
+
+- **Drill A — data recovery.** Dump, stop the writers, `restore.sh`,
+  bring the api back, re-verify. Always runs.
+- **Drill B — code rollback to `PREV_VERSION`.** Runs only when that tag
+  ships every migration the release does. When it does not, a code-only
+  rollback is impossible (see §5.3), so the gate asserts `rollback.sh`
+  refuses fast and then FAILS — unless you narrow the scope with
+  `--data-rollback-only`, which makes the summary report blocker 9 as
+  **PARTIAL**.
+
+The summary always prints which of the two was proven. It never claims
+a path it did not run.
 
 It is **not** the full regression suite — `make ci`, `make golden`,
 `make eval` and `make e2e` still run before the cut (see
@@ -491,10 +539,10 @@ So when rolling back across a bump, roll the version *forward* instead
 of letting it revert:
 
 ```bash
-git checkout v0.1.0
+git checkout v0.9.0
 # The bad release shipped v2; do NOT go back to v1 — pick a THIRD value
 # so the cache is cold in both directions.
-CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.1.0 make refresh
+CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.9.0 make refresh
 ```
 
 Check which value you are leaving before you roll back:
