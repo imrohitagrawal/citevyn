@@ -88,6 +88,36 @@ class Settings(BaseSettings):
     rate_limit_demo_user_per_hour: int = Field(default=30, ge=1)
     rate_limit_admin_per_hour: int = Field(default=100, ge=1)
     rate_limit_window_seconds: int = Field(default=3600, ge=1)
+
+    # --- Per-visitor rate-limit identity (#203) ---
+    # The demo API key is SHARED by construction, so it can never identify a
+    # visitor: ``require_demo_api_key`` returns a constant, which meant every
+    # visitor on earth shared one bucket and 30 questions from one person locked
+    # out everyone else for an hour.
+    #
+    # The rate-limit key is therefore derived from the client IP, separately from
+    # the AUDIT identity (which stays ``DEMO_USER_ID`` — attribution is unchanged).
+    #
+    # ``rate_limit_client_ip_header`` names the header to trust for the client
+    # address. Trusting a header is only safe when the app cannot be reached
+    # except THROUGH that proxy, which is true on Fly (the app has no public port
+    # of its own). Set it to "" to trust nothing and use the socket peer address.
+    #   * Fly, no CDN in front  -> "Fly-Client-IP"  (default)
+    #   * Cloudflare proxying   -> "CF-Connecting-IP"
+    #   * plain reverse proxy   -> "X-Forwarded-For" (leftmost entry is used)
+    rate_limit_client_ip_header: str = "Fly-Client-IP"
+    # Buckets are keyed on a SALTED HASH of the address — a raw IP is personal
+    # data and must not sit in Redis. An unsalted hash of an IPv4 address is
+    # trivially reversible (2^32 candidates), so the salt is what makes this
+    # meaningful. Empty means "fall back to the demo API key", which production
+    # already requires to be a strong secret (>=16 chars, not the default).
+    rate_limit_key_salt: str = ""
+    # Anti-nuisance backstop across ALL visitors, so a distributed source still
+    # meets a ceiling. Deliberately generous — it must not bind on ordinary use.
+    # 0 disables it. NB this bounds REQUEST VOLUME, not money; the §9 daily budget
+    # is the only control that caps spend.
+    rate_limit_global_per_hour: int = Field(default=600, ge=0)
+
     redis_url: str | None = None
 
     # --- Persistence (Slice 2+) ---
