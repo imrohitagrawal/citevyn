@@ -77,7 +77,14 @@ jobs:
     # Only run on internal pushes / PRs from this repo. Forks do
     # not get a Postgres service — it would be wasted compute and
     # we don't trust secrets on fork PRs.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    #
+    # ``github.event.pull_request`` is NULL on a push, so the PR-only form of this
+    # condition skipped the job on every push to main — the migration/schema-drift
+    # gate was silent post-merge. A push to main is always same-repo (a fork cannot
+    # push here), so allowing it does not widen fork-secret exposure.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     services:
       postgres:
         # pgvector image (Postgres 16 + the ``vector`` extension) so migration
