@@ -255,21 +255,22 @@ was about).
 
 #### The evidence
 
-A full `deploy_verify.sh` run against a real local prod stack on **2026-07-20**
-scored **42 passed / 0 failed**, exercising both drills end to end:
+A full `deploy_verify.sh` run against a real local prod stack on **2026-07-20**,
+against **merged `main`** (`a7a9ce4`), scored **43 passed / 0 failed**,
+exercising both drills end to end:
 
 ```
  [PASS] drill A: backup -> pg_restore -> stack healthy
  [PASS] post-restore …: in-corpus question returns a CITED answer   (+7 more probes)
- [PASS] drill B: rollback to v0.10.5-drillbase
+ [PASS] drill B: rollback to v0.10.7-mainbase
  [PASS] rolled-back …: in-corpus question returns a CITED answer    (+7 more probes)
- [PASS] roll forward to v0.10.6-drilltop
+ [PASS] roll forward to v0.10.8-maintop
  [PASS] restored …: in-corpus question returns a CITED answer       (+7 more probes)
- passed: 42   failed: 0
- production: api container UP and healthy, serving v0.10.6-drilltop
+ passed: 43   failed: 0
+ production: api container UP and healthy, serving v0.10.8-maintop
  rollback coverage:
    ✓ data-recovery rollback (RUNBOOK §4.2) — PROVEN end to end
-   ✓ code rollback to v0.10.5-drillbase + roll forward — PROVEN end to end
+   ✓ code rollback to v0.10.7-mainbase + roll forward — PROVEN end to end
  RESULT: ✓ GATE PASSED — deploy verified and BOTH rollback paths proven.
 ```
 
@@ -286,8 +287,17 @@ that boots but cannot answer is not a rollback.
 > instead of reporting "no session id returned"; the escape hatch is
 > `docker exec citevyn-redis redis-cli DEL citevyn:rl:demo_user`.
 
-**What this does and does not establish.** `v0.10.1-drillbase` and
-`v0.10.2-drilltop` are **local, unpushed** drill tags (a pushed `v*` tag triggers
+> **The 43rd probe is the frontend bundle.** The gate now checks that
+> `frontend/dist` is not carrying the default `local-demo-key` while `.env`
+> uses a real one — and on its first run against `main` it **failed**, correctly:
+> the bundle predated #200 and every browser request would have 401'd while the
+> other 42 probes passed. `make demo-frontend` (which now threads the key
+> through) fixed it and the re-run went 43/0. This is the one probe that looks
+> at an artifact the compose stack does not serve, which is exactly why nothing
+> else noticed.
+
+**What this does and does not establish.** `v0.10.7-mainbase` and
+`v0.10.8-maintop` are **local, unpushed** drill tags (a pushed `v*` tag triggers
 an image publish via `release.yml`). They are a genuine same-migration-generation
 pair — both ship `0001`–`0006` — so the drill exercised the real mechanism:
 `rollback.sh` checked out the older tree, rebuilt the images, redeployed,
