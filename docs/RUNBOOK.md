@@ -385,6 +385,8 @@ To schedule nightly backups, add a cron job on the host:
 docker compose -f infra/docker/docker-compose.yml --profile prod stop api worker
 
 # Restore. The dump file is read from the host bind-mount.
+# (`make restore` delegates to infra/docker/scripts/restore.sh, which is the
+#  same restore the release gate's data-recovery drill runs.)
 make restore FILE=infra/docker/backups/citevyn-20260620T030000Z.dump
 
 # Restart api + worker
@@ -433,9 +435,27 @@ make rollback TAG=--previous    # the tag before HEAD, resolved for you
 ```
 
 `infra/docker/scripts/rollback.sh` refuses a stub `.env` and a dirty
-tree, warns when migrations landed after the target, checks out the
-target tag, re-deploys via `refresh.sh`, and waits for the api to
-report healthy. Preview with `--dry-run` (safe on a dirty tree).
+tree, checks out the target tag, re-deploys via `refresh.sh`, and waits
+for the api to report healthy. Preview with `--dry-run` (safe on a
+dirty tree).
+
+**It also refuses, up front, to attempt the impossible.** If the target
+tag does not contain a migration the current release ships, the live
+database is stamped at a revision that tag cannot resolve, and
+`alembic upgrade head` dies with `Can't locate revision identified by
+'0006'` mid-deploy. The script stops before the checkout and points
+here. Recover the DATA instead, using a dump taken while the target was
+live:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml --profile prod stop api worker
+./infra/docker/scripts/restore.sh infra/docker/backups/citevyn-<ts>.dump   # §4.2
+./infra/docker/scripts/rollback.sh v0.1.0 --allow-migration-mismatch
+```
+
+`--allow-migration-mismatch` is the deliberate override. Use it only
+after such a restore, or when you know the intervening migrations are
+additive-only **and** the old code tolerates the current schema.
 
 Equivalent by hand:
 
@@ -461,9 +481,22 @@ VERSION=v0.10.0 PREV_VERSION=v0.9.0 make deploy-verify
 ```
 
 Backup → deploy → functional verify (cited answer, refusal, exact
-lookup, admin protected) → rollback drill → roll forward → re-verify,
-with a PASS/FAIL summary. Non-zero exit means **do not tag**. This is
-what satisfies `RELEASE_PLAN` §10 blocker 9.
+lookup, admin protected) → **two** rollback drills → roll forward →
+re-verify, with a PASS/FAIL summary. Non-zero exit means **do not tag**.
+
+The two drills, and what each proves (`RELEASE_PLAN` §10 blocker 9):
+
+- **Drill A — data recovery.** Dump, stop the writers, `restore.sh`,
+  bring the api back, re-verify. Always runs.
+- **Drill B — code rollback to `PREV_VERSION`.** Runs only when that tag
+  ships every migration the release does. When it does not, a code-only
+  rollback is impossible (see §5.3), so the gate asserts `rollback.sh`
+  refuses fast and then FAILS — unless you narrow the scope with
+  `--data-rollback-only`, which makes the summary report blocker 9 as
+  **PARTIAL**.
+
+The summary always prints which of the two was proven. It never claims
+a path it did not run.
 
 It is **not** the full regression suite — `make ci`, `make golden`,
 `make eval` and `make e2e` still run before the cut (see

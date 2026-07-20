@@ -45,6 +45,10 @@ cd "${WORK}/repo" || exit 1
 # silently exercise the last committed rollback.sh and report green on a stale
 # script while your edits sit uncommitted. Test what is on disk.
 cp "${REPO_ROOT}/infra/docker/scripts/rollback.sh" infra/docker/scripts/rollback.sh
+# rollback.sh sources this one; copy it for the same reason, and because a
+# freshly added helper does not exist in the clone's committed history at all
+# (it fails to source, `set -e` fires, and every case reports a bogus exit 1).
+cp "${REPO_ROOT}/infra/docker/scripts/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
 git config user.email t@t.invalid
 git config user.name t
 # The env guard is never reached under --dry-run, but keep a .env absent by
@@ -63,8 +67,8 @@ PY
     git commit --quiet --no-verify -am "test: $1"
 }
 
-_run() {  # $1 = tag -> sets RC / OUT
-    OUT="$(./infra/docker/scripts/rollback.sh "$1" --dry-run 2>&1)"
+_run() {  # $@ = rollback.sh args (tag first) -> sets RC / OUT
+    OUT="$(./infra/docker/scripts/rollback.sh "$@" --dry-run 2>&1)"
     RC=$?
 }
 
@@ -101,7 +105,11 @@ git tag -f _t_root "$(git rev-list --max-parents=0 HEAD | head -1)" >/dev/null 2
 if git show "_t_root:backend/app/core/config.py" >/dev/null 2>&1; then
     echo "  skip — root commit already has config.py; cannot exercise the missing-file path"
 else
-    _run _t_root; _assert "target predates config.py -> silent, exit 0, proceeds" 0
+    # --allow-migration-mismatch: the root commit also predates db/versions, so
+    # the #195 migration guard would refuse first and this case would never
+    # reach the policy code it exists to exercise.
+    _run _t_root --allow-migration-mismatch
+    _assert "target predates config.py -> silent, exit 0, proceeds" 0
 fi
 
 # 4. Field(default=...) form is still recognised

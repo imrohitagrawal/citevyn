@@ -240,6 +240,46 @@ Do not release if:
 8. Ingestion failures are hidden.
 9. Rollback is not tested.
 
+### Blocker 9 — what "rollback is tested" means, exactly
+
+There are **two** rollback paths, and only one of them is generally provable.
+`make deploy-verify` runs them as separate drills and its summary states which
+of the two an individual run actually exercised. It never reports a path it did
+not run (that ambiguity is what [#195](https://github.com/imrohitagrawal/citevyn/issues/195)
+was about).
+
+| # | Path | What it is | Status |
+|---|---|---|---|
+| A | **Data-recovery rollback** (RUNBOOK §4.2) | `backup.sh` → stop `api`/`worker` → `restore.sh` → api healthy → full functional re-verify | **PROVEN** by every `make deploy-verify` run. Drill A always runs. |
+| B | **Code rollback to the previous tag** | `rollback.sh <prev>` → re-verify → roll forward → re-verify | **PROVEN only when `PREV_VERSION` is the same migration generation.** Otherwise NOT proven, and the run says so. |
+
+**Why B is conditional.** `rollback.sh` rolls back code by checking out an older
+tag and rebuilding; the database is untouched, so it stays stamped at the newest
+applied alembic revision. If that revision's file does not exist in the older
+tree, `alembic upgrade head` cannot build the version graph and dies with
+`Can't locate revision identified by '0006'` — inside a one-shot container,
+mid-deploy. **A code-only rollback across a forward-only migration boundary is
+impossible.** No tag choice fixes it.
+
+What changed as a result:
+
+- `rollback.sh` now **refuses before touching anything** when the target tree is
+  missing a migration `HEAD` ships, and names the recovery path (§4.2). It used
+  to warn and then proceed into that failure. `--allow-migration-mismatch`
+  overrides it — the correct use is *after* restoring a dump from the target
+  release, or when you know the intervening migrations are additive-only.
+- `deploy_verify.sh` runs drill A always, and drill B only when it can succeed.
+  When it cannot, the gate **asserts the refusal is fast** and then FAILS, unless
+  the operator narrows the scope with `--data-rollback-only` — in which case the
+  summary prints `blocker 9 is PARTIAL, not closed`.
+
+**Not proven today, and honestly so:** as of v0.10.0 the repo has no second tag
+in the same migration generation (`v0.9.0` predates four migrations *and* cannot
+boot — #195), so drill B has never run end to end. It becomes provable at the
+first release pair that ships no migration; until then blocker 9 is satisfied by
+path A only. `tests/shell/` covers the refusal logic and the argument guards, not
+the drills — those need a live prod stack.
+
 ## 11. V1 Roadmap
 
 V1 is deliberately **depth over breadth**: portfolio-grade polish, a reachable live

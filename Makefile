@@ -286,19 +286,13 @@ backup: ## Dump the live database to ./backups/
 	./infra/docker/scripts/backup.sh
 
 restore: ## Restore a pg_dump file (usage: make restore FILE=path)
-	@if [[ -z "$(FILE)" ]]; then echo "usage: make restore FILE=path/to/citevyn-*.dump" >&2; exit 2; fi
-	@if [[ ! -f "$(FILE)" ]]; then echo "error: $(FILE) not found" >&2; exit 1; fi
-	# Source the env file so docker compose + the backup container
-	# can read POSTGRES_PASSWORD (the ``backup`` service has it
-	# in env_file, which docker compose requires to be present
-	# at run-time). The shared guard refuses to run if the .env
-	# is still the dev-only stub that ``make demo`` writes.
-	@if [[ ! -f infra/docker/.env ]]; then echo "error: infra/docker/.env not found; copy prod.env.example first" >&2; exit 1; fi
-	@( source infra/docker/scripts/_env_guard.sh infra/docker ) || exit 1
-	@set -a; . infra/docker/.env; set +a; \
-	docker compose --profile backup run --rm \
-		backup sh -c "pg_restore --clean --if-exists --no-owner --no-privileges \
-			-h db -U citevyn -d citevyn < /dev/stdin" < $(FILE)
+	@# Delegates to restore.sh so the recipe and the rollback drill in
+	@# deploy_verify.sh run the SAME restore. The recipe used to inline its own
+	@# docker command, and it had never been executed: it lacked PGPASSWORD (the
+	@# defect that made `make backup` unusable until #199 — pg_restore is a libpq
+	@# CLIENT and does not read POSTGRES_PASSWORD) and piped a seekable
+	@# custom-format archive through a TTY-allocating `compose run`.
+	./infra/docker/scripts/restore.sh $(FILE)
 
 # ─────────────────────────── Convenience composites ───────────────────────────
 # ``make ci`` is the deterministic gate the pr-quality workflow uses

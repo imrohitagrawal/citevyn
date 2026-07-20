@@ -17,7 +17,12 @@
 # What it does NOT do:
 #   - It does NOT reverse forward-only schema migrations. If the bad release
 #     migrated the schema, restore a backup instead (RUNBOOK §4.2). This script
-#     warns when the target tag is behind the current alembic head.
+#     REFUSES, before touching anything, when the target tag is missing a
+#     migration that HEAD ships — because that rollback cannot work: the live DB
+#     is stamped at a revision the target tree does not contain, so alembic dies
+#     with "Can't locate revision identified by 'NNNN'" inside a container,
+#     mid-deploy (#195). Override with --allow-migration-mismatch only when you
+#     KNOW the schema is compatible (see below).
 #   - It does NOT promote a previous index version. Index rollback is a separate
 #     concern (RELEASE_PLAN §8) — use the admin promote API.
 #   - It does NOT reset the ANSWER CACHE. `answer_policy_version` is part of the
@@ -32,6 +37,18 @@
 #   ./scripts/rollback.sh v0.9.0            # roll back to an explicit tag
 #   ./scripts/rollback.sh --previous        # roll back to the tag before HEAD
 #   ./scripts/rollback.sh v0.9.0 --dry-run  # print the plan, change nothing
+#   ./scripts/rollback.sh v0.9.0 --allow-migration-mismatch
+#                                           # proceed across a migration
+#                                           # boundary anyway. ONLY correct when
+#                                           # either (a) you have just restored a
+#                                           # database backup from that release
+#                                           # (RUNBOOK §4.2), or (b) you know the
+#                                           # migrations since the target are
+#                                           # additive-only AND the old code
+#                                           # tolerates the new schema. Alembic
+#                                           # will still fail if the live DB is
+#                                           # stamped at a revision the target
+#                                           # tree does not contain.
 #
 # Exit codes: 0 = rolled back and healthy, non-zero = rollback failed.
 # ────────────────────────────────────────────────────────────────────────────
@@ -42,11 +59,16 @@ REPO_ROOT="$(cd "${COMPOSE_DIR}/../.." && pwd)"
 
 TARGET=""
 DRY_RUN=0
+ALLOW_MIGRATION_MISMATCH=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --previous)
             TARGET="__PREVIOUS__"
+            shift
+            ;;
+        --allow-migration-mismatch)
+            ALLOW_MIGRATION_MISMATCH=1
             shift
             ;;
         --dry-run)
@@ -72,7 +94,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${TARGET}" ]]; then
-    echo "usage: rollback.sh <tag>|--previous [--dry-run]" >&2
+    echo "usage: rollback.sh <tag>|--previous [--dry-run] [--allow-migration-mismatch]" >&2
     echo "       e.g. rollback.sh v0.9.0" >&2
     exit 2
 fi
@@ -104,15 +126,47 @@ fi
 
 echo "==> rollback.sh: target=${TARGET} (from $(git rev-parse --short HEAD))"
 
-# Warn — do not block — when the target predates migrations that are already
-# applied. The operator may still want the app rolled back; they just need to
-# know the schema will NOT be reversed.
-_migrations_ahead="$(git diff --name-only "${TARGET}..HEAD" -- db/versions 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "${_migrations_ahead}" != "0" ]]; then
-    echo "WARNING: ${_migrations_ahead} migration file(s) landed after ${TARGET}." >&2
-    echo "         rollback.sh does NOT reverse forward-only migrations." >&2
-    echo "         If the bad release changed the schema, restore a backup" >&2
-    echo "         instead — see RUNBOOK §4.2." >&2
+# REFUSE — do not merely warn — when the target tree is missing a migration that
+# HEAD ships. The old behaviour printed this warning and then proceeded, and the
+# rollback died anyway a minute later inside a one-shot alembic container with
+#   "Can't locate revision identified by '0006'"
+# after the stack had already started rolling toward the old release (#195). A
+# rollback tool that cannot succeed must say so BEFORE it touches production.
+#
+# Checked before --dry-run on purpose: a dry run that prints a plan which the
+# real run would refuse is worse than useless during an incident.
+# shellcheck source=infra/docker/scripts/_migration_gen.sh
+source "${COMPOSE_DIR}/scripts/_migration_gen.sh"
+_missing_migrations="$(migrations_missing_at "${TARGET}" HEAD)"
+if [[ -n "${_missing_migrations}" ]]; then
+    _missing_list="$(printf '%s' "${_missing_migrations}" | tr '\n' ' ')"
+    if [[ "${ALLOW_MIGRATION_MISMATCH}" == "1" ]]; then
+        echo "WARNING: ${TARGET} is missing applied migration(s): ${_missing_list}" >&2
+        echo "         proceeding anyway because --allow-migration-mismatch was given." >&2
+        echo "         This only works if the live database is stamped at a revision" >&2
+        echo "         that ${TARGET} DOES contain (e.g. you just restored a backup" >&2
+        echo "         from that release — RUNBOOK §4.2). Otherwise alembic will fail." >&2
+    else
+        echo "error: cannot roll back to ${TARGET} — it does not contain migration(s)" >&2
+        echo "       that HEAD ships: ${_missing_list}" >&2
+        echo "" >&2
+        echo "       The live database is stamped at a revision that is NOT in" >&2
+        echo "       ${TARGET}'s db/versions/, so 'alembic upgrade head' would fail with" >&2
+        echo "         Can't locate revision identified by '<rev>'" >&2
+        echo "       mid-deploy. A code-only rollback across a migration boundary is" >&2
+        echo "       IMPOSSIBLE — no tag choice fixes it." >&2
+        echo "" >&2
+        echo "       Roll back the DATA instead (RUNBOOK §4.2), using a dump taken" >&2
+        echo "       while ${TARGET} was live:" >&2
+        echo "         docker compose --profile prod stop api worker" >&2
+        echo "         ./infra/docker/scripts/restore.sh <dump-from-${TARGET}>" >&2
+        echo "         ./infra/docker/scripts/rollback.sh ${TARGET} --allow-migration-mismatch" >&2
+        echo "" >&2
+        echo "       If instead you KNOW the migrations above are additive-only and" >&2
+        echo "       ${TARGET}'s code tolerates the current schema, re-run with" >&2
+        echo "       --allow-migration-mismatch." >&2
+        exit 1
+    fi
 fi
 
 # Warn — do not block — when the target tag ships a DIFFERENT answer_policy_version.
