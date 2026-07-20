@@ -105,7 +105,7 @@ async def test_document_round_trip(db_session: AsyncSession) -> None:
         product_area="codex",
         source_url="https://example.com/docs",
         title="Codex CLI",
-        content_checksum="deadbeef",
+        identity_checksum="deadbeef",
         last_fetched_at=_now(),
         status=DocumentStatus.active,
     )
@@ -134,7 +134,7 @@ async def test_chunk_round_trip_with_json(db_session: AsyncSession) -> None:
         product_area="codex",
         source_url="https://example.com",
         title="T",
-        content_checksum="h",
+        identity_checksum="h",
         last_fetched_at=_now(),
         status=DocumentStatus.active,
     )
@@ -177,7 +177,7 @@ async def test_exact_term_unique_constraint(db_session: AsyncSession) -> None:
         product_area="codex",
         source_url="u",
         title="t",
-        content_checksum="c",
+        identity_checksum="c",
         last_fetched_at=_now(),
         status=DocumentStatus.active,
     )
@@ -274,7 +274,7 @@ async def test_retrieved_evidence_round_trip(db_session: AsyncSession) -> None:
         product_area="codex",
         source_url="u",
         title="t",
-        content_checksum="c",
+        identity_checksum="c",
         last_fetched_at=_now(),
         status=DocumentStatus.active,
     )

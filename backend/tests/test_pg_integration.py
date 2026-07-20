@@ -423,7 +423,7 @@ async def test_vector_retriever_returns_ranked_hits_on_postgres(pg_schema: str) 
                 product_area="claude_api",
                 source_url="https://docs.anthropic.com/en/api/overview",
                 title="Claude API Reference",
-                content_checksum="c" * 20,
+                identity_checksum="c" * 20,
                 last_fetched_at=now,
                 status=DocumentStatus.active,
             )

@@ -192,7 +192,7 @@ async def test_count_documents_for_version_isolates_per_version(
         product_area="claude_api",
         source_url="https://example.com/v2",
         title="v2 doc",
-        content_checksum="a" * 64,
+        identity_checksum="a" * 64,
         last_fetched_at=datetime.now(UTC),
         status=DocumentStatus.active,
     )

@@ -1751,7 +1751,7 @@ async def _seed_codex_doc(
         product_area="codex",
         source_url=f"https://docs.example.com/{index_version}",
         title=f"Codex {index_version}",
-        content_checksum=f"sha256:{index_version}",
+        identity_checksum=f"sha256:{index_version}",
         last_fetched_at=now,
         last_indexed_at=now,
         status=doc_status,  # type: ignore[arg-type]

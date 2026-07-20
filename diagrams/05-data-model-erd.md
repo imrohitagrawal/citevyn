@@ -68,7 +68,7 @@ erDiagram
         string product_area
         string source_url
         string title
-        string content_checksum
+        string identity_checksum
         datetime last_fetched_at
         datetime last_indexed_at
         string status

@@ -51,7 +51,7 @@ async def active_index_version(session) -> str:
             product_area="test",
             source_url="https://example.com/test",
             title="Test document",
-            content_checksum="abc" * 22,
+            identity_checksum="abc" * 22,
             last_fetched_at=now,
             status=DocumentStatus.active,
         )

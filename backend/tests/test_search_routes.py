@@ -150,7 +150,7 @@ def test_search_exact_scopes_by_product_area(app_with_seeded_session, session) -
             product_area="claude_api",
             source_url="https://example.com/claude-api-extra",
             title="Claude API extras",
-            content_checksum="cafe" * 16,
+            identity_checksum="cafe" * 16,
             last_fetched_at=now,
             status=DocumentStatus.active,
         )
@@ -229,7 +229,7 @@ def test_search_exact_clamps_limit_to_max_results(app_with_seeded_session, sessi
                 product_area="codex",
                 source_url=f"https://example.com/{i}",
                 title=f"src {i}",
-                content_checksum=f"chk_{i}" + "0" * 60,
+                identity_checksum=f"chk_{i}" + "0" * 60,
                 last_fetched_at=now,
                 status=DocumentStatus.active,
             )
