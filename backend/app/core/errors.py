@@ -26,6 +26,16 @@ class APIErrorCode(StrEnum):
     auth_required = "auth_required"
     ingestion_failed = "ingestion_failed"
     evaluation_failed = "evaluation_failed"
+    # RESERVED — currently has ZERO producers in ``backend/app``. It was the
+    # limiter's outage code until #167 moved that to
+    # ``rate_limiter_unavailable``; a genuine "no active index / retrieval
+    # backend down" path does not raise a transport error today (retrieval
+    # degradation rides the 200 envelope as ``no_answer`` with a
+    # ``VectorDegrade`` signal instead). Kept in the enum and in
+    # docs/API_SPEC.md §15 because it is the natural code for that path when
+    # it is wired, and removing a published code is a breaking change for
+    # clients that already branch on it. Do NOT reuse it as a stand-in for a
+    # different dependency — that is precisely the bug #167 fixed.
     index_unavailable = "index_unavailable"
     cost_limit_reached = "cost_limit_reached"
     # Spec-side (not a transport helper) on purpose: this code is

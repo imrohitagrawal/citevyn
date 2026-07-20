@@ -149,3 +149,56 @@ describe("ApiClientError.errorCode", () => {
     expect(new ApiClientError("Network error", 0, "boom").errorCode()).toBeNull();
   });
 });
+
+describe("errorCode() over the REAL wire body (#167)", () => {
+  /**
+   * The literal body captured from the backend during a simulated Redis
+   * outage (POST /v1/sessions with a broken limiter, backend commit for
+   * #167). Hand-constructing an ``ApiClientError`` cannot catch a
+   * server-side envelope-shape change — the first cut of this fix passed
+   * three such tests while the server was wrapping the envelope in
+   * ``detail``, which made ``errorCode()`` return null in production.
+   */
+  const CAPTURED_LIMITER_OUTAGE_BODY = {
+    request_id: "req_e025b4c1d8b44e94bd8060579cc9cf10",
+    status: "error",
+    error: {
+      code: "rate_limiter_unavailable",
+      message: "Rate limiter is temporarily unavailable.",
+      details: null,
+    },
+  };
+
+  it("reads the code off a 503 that went through apiFetch", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse(CAPTURED_LIMITER_OUTAGE_BODY, 503),
+    );
+
+    try {
+      await askQuestion("sess_1", "anything");
+      throw new Error("expected throw");
+    } catch (err) {
+      const e = err as ApiClientError;
+      expect(e).toBeInstanceOf(ApiClientError);
+      expect(e.errorCode()).toBe("rate_limiter_unavailable");
+      expect(e.message).toBe("Rate limiter is temporarily unavailable.");
+    }
+  });
+
+  it("returns null when the envelope is nested under `detail` — the shipped bug", async () => {
+    // Pin the regression itself: this is what the server sent BEFORE the
+    // HTTPException handler was added. If the backend ever regresses to the
+    // nested shape, the UI branch goes dead again — so keep the two shapes
+    // distinguishable and keep the flat one asserted above.
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ detail: CAPTURED_LIMITER_OUTAGE_BODY }, 503),
+    );
+
+    try {
+      await askQuestion("sess_1", "anything");
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ApiClientError).errorCode()).toBeNull();
+    }
+  });
+});

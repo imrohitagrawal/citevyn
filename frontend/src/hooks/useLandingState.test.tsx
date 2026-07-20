@@ -282,6 +282,13 @@ describe("useLandingState — live error path", () => {
     // ``rate_limiter_unavailable``. The old code (``index_unavailable``) fell
     // through to the generic 5xx branch and told the user the ANSWER SERVICE
     // was unreachable, which is a different (and wrong) fault.
+    //
+    // The envelope literal below is hand-built because ``askQuestion`` is
+    // mocked at the hook boundary. That it MATCHES the real wire body is
+    // pinned separately by ``api.test.ts`` ("errorCode() over the REAL wire
+    // body"), which drives ``apiFetch`` with the body captured from the
+    // backend — without that pairing this test proves nothing about
+    // production.
     mockAskQuestion.mockRejectedValue(
       new ApiClientError("Rate limiter is temporarily unavailable.", 503, {
         request_id: "r",

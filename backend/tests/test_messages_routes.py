@@ -238,9 +238,9 @@ def test_post_message_rejects_bad_answer_style(seeded_app: TestClient) -> None:
     )
 
     assert response.status_code == 422
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "validation_error"
-    assert "answer_style" in detail["error"]["message"]
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "validation_error"
+    assert "answer_style" in envelope["error"]["message"]
 
 
 def test_post_message_returns_404_when_session_missing(in_memory_client: TestClient) -> None:
@@ -251,8 +251,8 @@ def test_post_message_returns_404_when_session_missing(in_memory_client: TestCli
     )
 
     assert response.status_code == 404
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "not_found"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "not_found"
 
 
 def test_post_message_requires_bearer_token(in_memory_client: TestClient) -> None:
@@ -320,8 +320,8 @@ def test_get_message_returns_404_when_message_missing(seeded_app: TestClient) ->
         headers={"Authorization": DEMO_BEARER},
     )
     assert response.status_code == 404
-    detail = response.json()["detail"]
-    assert detail["error"]["code"] == "not_found"
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "not_found"
 
 
 def test_get_message_returns_404_when_session_missing(in_memory_client: TestClient) -> None:
