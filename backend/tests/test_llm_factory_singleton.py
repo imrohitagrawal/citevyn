@@ -124,6 +124,7 @@ def test_validate_llm_provider_rejects_stub_in_production() -> None:
 
     settings = Settings.model_construct(
         environment="production",
+        demo_api_key="prod-demo-key",
         llm_provider="stub",
     )
     with pytest.raises(llm_factory.LLMProviderNotConfigured):
@@ -141,7 +142,7 @@ def test_settings_constructor_rejects_stub_in_production() -> None:
     from app.core.config import Settings
 
     with pytest.raises(Exception, match="not allowed when.*production"):
-        Settings(environment="production", llm_provider="stub")
+        Settings(environment="production", demo_api_key="prod-demo-key", llm_provider="stub")
 
 
 def test_settings_constructor_rejects_empty_llm_provider_in_production() -> None:
@@ -152,7 +153,7 @@ def test_settings_constructor_rejects_empty_llm_provider_in_production() -> None
     from app.core.config import Settings
 
     with pytest.raises(Exception, match="not allowed when.*production"):
-        Settings(environment="production", llm_provider="")
+        Settings(environment="production", demo_api_key="prod-demo-key", llm_provider="")
 
 
 def test_settings_constructor_accepts_empty_llm_provider_in_development() -> None:
@@ -185,6 +186,7 @@ def test_validate_llm_provider_accepts_real_provider_in_production() -> None:
 
     settings = Settings.model_construct(
         environment="production",
+        demo_api_key="prod-demo-key",
         llm_provider="anthropic",
         anthropic_api_key="sk-ant-test",
     )
@@ -196,7 +198,7 @@ def test_settings_constructor_rejects_missing_anthropic_key_in_production() -> N
     from app.core.config import Settings
 
     with pytest.raises(Exception, match="CITEVYN_ANTHROPIC_API_KEY"):
-        Settings(environment="production", llm_provider="anthropic")
+        Settings(environment="production", demo_api_key="prod-demo-key", llm_provider="anthropic")
 
 
 def test_settings_constructor_rejects_default_admin_key_in_production() -> None:
@@ -212,6 +214,7 @@ def test_settings_constructor_rejects_default_admin_key_in_production() -> None:
     with pytest.raises(Exception, match="CITEVYN_ADMIN_API_KEY"):
         Settings(
             environment="production",
+            demo_api_key="prod-demo-key",
             llm_provider="anthropic",
             anthropic_api_key="sk-ant-test",
             admin_api_key="local-admin-key",
@@ -231,9 +234,47 @@ def test_settings_constructor_rejects_default_admin_key_in_production_via_env(
     from app.core.config import Settings
 
     monkeypatch.setenv("CITEVYN_ENVIRONMENT", "production")
+    # Satisfies the demo-key prod guard so this test keeps asserting its own subject.
+    monkeypatch.setenv("CITEVYN_DEMO_API_KEY", "a-strong-demo-secret")
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("CITEVYN_ANTHROPIC_API_KEY", "sk-ant-test")
     # ``admin_api_key`` is unset → falls back to default 'local-admin-key'.
     monkeypatch.delenv("CITEVYN_ADMIN_API_KEY", raising=False)
     with pytest.raises(Exception, match="CITEVYN_ADMIN_API_KEY"):
         Settings()
+
+
+def test_settings_constructor_rejects_default_demo_key_in_production() -> None:
+    """``local-demo-key`` is the bearer for EVERY /v1/* route and is published
+    in this repo, so accepting it in production leaves the demo effectively
+    unauthenticated to anyone who has read the source.
+
+    The admin key has had this guard since Slice 8; the demo key did not, and
+    ``infra/docker/prod.env.example`` did not even list the variable — so a
+    production deploy silently inherited the default. Found by running
+    ``make deploy-verify``, which requires the key and died at preflight.
+    """
+    from app.core.config import Settings
+
+    with pytest.raises(Exception, match="CITEVYN_DEMO_API_KEY"):
+        Settings(
+            environment="production",
+            llm_provider="anthropic",
+            anthropic_api_key="sk-ant-test",
+            admin_api_key="a-strong-admin-secret",
+            _env_file=None,
+        )
+
+
+def test_settings_accepts_a_real_demo_key_in_production() -> None:
+    """The mirror: a strong key passes, so the guard is not simply blocking prod."""
+    from app.core.config import Settings
+
+    Settings(
+        environment="production",
+        llm_provider="anthropic",
+        anthropic_api_key="sk-ant-test",
+        admin_api_key="a-strong-admin-secret",
+        demo_api_key="a-strong-demo-secret",
+        _env_file=None,
+    )

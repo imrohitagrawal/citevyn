@@ -234,12 +234,36 @@ services:
       - .env
     volumes:
       - ./backups:/backups
-    command: >
-      sh -c "pg_dump -h db -U citevyn -d citevyn
-             --format=custom
-             --no-owner
-             --no-privileges
-             -f /backups/citevyn-$$(date -u +%Y%m%dT%H%M%SZ).dump"
+    # PGPASSWORD, not POSTGRES_PASSWORD. ``env_file`` supplies the latter, which
+    # is what the postgres SERVER image reads to initialise a cluster; pg_dump is
+    # a libpq CLIENT and reads PGPASSWORD. Without this the dump fails with
+    # "fe_sendauth: no password supplied" — so `make backup` never worked, and
+    # `make deploy-verify` could not get past its pre-deploy safety backup.
+    #
+    # Assigned inside the container from the env_file value rather than via a
+    # compose ``environment:`` interpolation, so the secret still does not land
+    # in the compose config or in /proc/1/environ of every other service (see the
+    # note at the top of this file).
+    # TWO bugs lived here, and the first masked the second.
+    #
+    # 1. ``pg_dump`` is a libpq CLIENT and reads PGPASSWORD. ``env_file`` supplies
+    #    POSTGRES_PASSWORD, which is what the postgres SERVER image reads to
+    #    initialise a cluster. So the dump died with "fe_sendauth: no password
+    #    supplied" — `make backup` never worked, and `make deploy-verify` could
+    #    not get past its pre-deploy safety backup.
+    # 2. The flags were written as continuation lines under a folded (``>``)
+    #    scalar. YAML does NOT fold lines that are more indented than the first,
+    #    so each flag arrived as its own shell command ("sh: --format=custom: not
+    #    found") and pg_dump ran bare — a plain-SQL dump to stdout rather than a
+    #    custom-format dump to a file.
+    #
+    # Written as ONE line to remove the folding ambiguity entirely. PGPASSWORD is
+    # exported inside the container from the env_file value, so the secret still
+    # never enters the compose config (see the note at the top of this file).
+    command:
+      - sh
+      - -c
+      - export PGPASSWORD="$$POSTGRES_PASSWORD"; exec pg_dump -h db -U citevyn -d citevyn --format=custom --no-owner --no-privileges -f "/backups/citevyn-$$(date -u +%Y%m%dT%H%M%SZ).dump"
     depends_on:
       db:
         condition: service_healthy

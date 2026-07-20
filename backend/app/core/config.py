@@ -376,6 +376,26 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _reject_default_demo_key_in_production(self) -> "Settings":
+        # ``local-demo-key`` is the dev default and is PUBLICLY KNOWN — it is
+        # printed in this repo's README, .env.example and test suite. It is also
+        # the bearer for every ``/v1/*`` route, i.e. the auth for the entire demo
+        # surface, so accepting it in production means the demo is effectively
+        # unauthenticated to anyone who has read the source.
+        #
+        # The admin key has had this guard since Slice 8; the demo key never did,
+        # and ``infra/docker/prod.env.example`` did not even list the variable —
+        # so a production deploy silently inherited the default. Found by actually
+        # running ``make deploy-verify``, which requires the key and died without it.
+        if self.environment == "production" and self.demo_api_key == "local-demo-key":
+            raise ValueError(
+                "CITEVYN_DEMO_API_KEY must be set to a strong secret when "
+                "CITEVYN_ENVIRONMENT='production'. The default value "
+                "'local-demo-key' is publicly known and is not allowed."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _reject_default_admin_key_in_production(self) -> "Settings":
         # ``local-admin-key`` is the dev default and is publicly known
         # (it lives in the open-source repo). Reject it in production

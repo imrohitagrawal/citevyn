@@ -125,6 +125,7 @@ def _prod_kwargs(**overrides: object) -> dict[str, object]:
         "environment": "production",
         "llm_provider": "gemini",  # allowed in prod; key checked at client build
         "admin_api_key": "a-strong-admin-secret",  # not the rejected default
+        "demo_api_key": "a-strong-demo-secret",  # likewise; see _reject_default_demo_key
         "_env_file": None,
     }
     base.update(overrides)

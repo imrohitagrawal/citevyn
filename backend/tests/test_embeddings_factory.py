@@ -188,6 +188,7 @@ def test_validate_rejects_stub_in_production() -> None:
     # embedding guard is under test.
     settings = Settings(
         environment="production",
+        demo_api_key="prod-demo-key",
         embedding_provider="stub",
         llm_provider="gemini",
         gemini_api_key="k",

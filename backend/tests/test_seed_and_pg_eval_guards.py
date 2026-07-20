@@ -177,6 +177,7 @@ async def test_seed_embed_failure_propagates_and_leaves_no_partial_vectors() -> 
 async def test_postgres_session_refuses_production() -> None:
     settings = Settings(
         environment="production",
+        demo_api_key="prod-demo-key",
         database_url="postgresql+psycopg://u:p@localhost:5432/db",
         embedding_provider="openrouter",
         embedding_model="openai/text-embedding-3-small",
