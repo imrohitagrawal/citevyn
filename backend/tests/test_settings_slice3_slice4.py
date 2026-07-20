@@ -6,6 +6,8 @@ The defaults documented in ``docs/RELEASE_PLAN.md`` and
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.core.config import (
     DEFAULT_NO_ANSWER_FALLBACK,
     DEFAULT_UNSUPPORTED_REFUSAL,
@@ -58,6 +60,31 @@ def test_unsupported_refusal_nudges_toward_citevyn_meta_questions() -> None:
     refusal = Settings().unsupported_refusal
     assert "CiteVyn itself" in refusal
     assert refusal.index("Claude") < refusal.index("CiteVyn itself")
+
+
+_FRONTEND_KNOWLEDGE_BASE = (
+    Path(__file__).resolve().parents[2] / "frontend" / "src" / "data" / "knowledgeBase.ts"
+)
+
+
+def test_frontend_generic_refusal_is_byte_identical_to_the_backend_default() -> None:
+    """The demo/offline path has its own hand-copied refusal string
+    (``knowledgeBase.ts::GENERIC_REFUSAL``) because it never reaches this module.
+    It had NO pin and had already drifted — it said "I don't have" where this
+    constant says "I do not have", so the demo was quietly a different product
+    from the live one. That is the same silent-drift failure #84 item 4 fixed for
+    the alias list, and it needs the same treatment.
+
+    Asserting containment of the raw constant (rather than parsing the TS) is the
+    strongest available check: the string is a single TS literal with no escapes,
+    so a byte-for-byte substring match is exact. This runs in pytest on purpose —
+    a guard that only fires in a job someone can skip is not a guard.
+    """
+    ts = _FRONTEND_KNOWLEDGE_BASE.read_text(encoding="utf-8")
+    assert DEFAULT_UNSUPPORTED_REFUSAL in ts, (
+        "GENERIC_REFUSAL in knowledgeBase.ts has drifted from "
+        "DEFAULT_UNSUPPORTED_REFUSAL; re-copy the backend string verbatim."
+    )
 
 
 def test_settings_env_override(monkeypatch) -> None:

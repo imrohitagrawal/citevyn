@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -9,8 +10,7 @@ import pytest
 
 from app.guardrails.domain import (
     _CITEVYN_ALIASES,
-    _IDENTIFIER_GUARD_AFTER,
-    _IDENTIFIER_GUARD_BEFORE,
+    _CITEVYN_RE,
     ALLOWED_DOMAINS,
     Domain,
     canonicalize_product_name,
@@ -478,8 +478,48 @@ def test_frontend_offline_alias_list_mirrors_the_guardrail() -> None:
 def test_frontend_offline_mirror_keeps_the_canonical_and_guard_branches() -> None:
     """Mirroring only the alias LIST is not enough: dropping the un-guarded canonical
     branch would narrow "is citevyn.com free?", and dropping the identifier guards
-    would rewrite "sitewin.example.com". Pin both structural halves of the pattern."""
+    would rewrite "sitewin.example.com". Pin both structural halves of the pattern.
+
+    The TS spells these differently from the Python on purpose — `\\w`/`\\b` are
+    ASCII-only in JS, and a lookbehind is below the frontend's browser baseline —
+    so this pins the JS *constructs* rather than the Python source text. What pins
+    the two matchers to the same ANSWERS is the shared corpus test below.
+    """
     ts = _FRONTEND_ALIAS_MODULE.read_text(encoding="utf-8")
-    assert "\\\\bcitevyn\\\\b" in ts
-    assert _IDENTIFIER_GUARD_BEFORE.replace("\\", "\\\\") in ts
-    assert _IDENTIFIER_GUARD_AFTER.replace("\\", "\\\\") in ts
+    # Canonical branch, still un-guarded by the identifier guards.
+    assert "citevyn(?![${WORD_CHAR}])" in ts
+    # Both identifier guards, still symmetric.
+    assert "(?:^|[^${IDENTIFIER_CHAR}])" in ts
+    assert "(?![${IDENTIFIER_CHAR}]*[${WORD_CHAR}])" in ts
+    # The guards must be built from the Unicode word class, not JS's ASCII `\w`,
+    # or the mirror silently accepts what this module rejects (see the corpus).
+    assert "\\\\p{L}\\\\p{N}_" in ts
+    # A lookbehind here throws a SyntaxError at MODULE LOAD on a baseline browser
+    # (Safari < 16.4), taking the whole bundle down rather than degrading.
+    assert "(?<" not in ts
+
+
+_FRONTEND_PARITY_CORPUS = (
+    Path(__file__).resolve().parents[2] / "frontend" / "src" / "lib" / "citevynAliases.cases.json"
+)
+
+
+def _parity_cases() -> list[tuple[str, bool, str]]:
+    payload = json.loads(_FRONTEND_PARITY_CORPUS.read_text(encoding="utf-8"))
+    return [(c["q"], c["match"], c["why"]) for c in payload["cases"]]
+
+
+@pytest.mark.parametrize("question,expected,why", _parity_cases())
+def test_frontend_offline_mirror_agrees_on_the_shared_corpus(
+    question: str, expected: bool, why: str
+) -> None:
+    """Run the SAME corpus the frontend suite runs, against THIS module's regex.
+
+    Pinning the alias list proves the two lists agree; it proves nothing about the
+    matchers wrapped around them, and the two are written in different regex
+    dialects (JS `\\w`/`\\b` are ASCII-only, Python's are Unicode-aware, and the JS
+    side cannot use a lookbehind at all). The list pin passed while the mirror
+    matched "sitewinа"/"cafésitewin" that this module refuses. One corpus, two
+    runners, so a rewrite on either side that changes an answer fails on the other.
+    """
+    assert bool(_CITEVYN_RE.search(question)) is expected, why

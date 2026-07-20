@@ -63,8 +63,17 @@ ALLOWED_DOMAINS: frozenset[Domain] = frozenset(
 # this pattern via frontend/src/lib/citevynAliases.ts — same canonical branch,
 # same alias list, same identifier guards (#84 item 4). It is a hand-kept copy
 # because the demo path never reaches this module, so any edit below must be
-# made there too; both sides pin the alias list in a test, so a one-sided edit
-# fails rather than drifting silently.
+# made there too.
+#
+# The mirror is BEHAVIOURAL, not textual: its regex source deliberately differs.
+# JavaScript's `\w`/`\b` are ASCII-only where Python's are Unicode-aware (so the
+# JS side spells the word class `\p{L}\p{N}_` under the `u` flag), and a
+# lookbehind is below the frontend's browser baseline (Safari gained it in 16.4;
+# Vite 6's default target is safari16.0), so the JS side writes the BEFORE guard
+# as a consumed `(?:^|[^...])` alternation. What pins the two together is
+# frontend/src/lib/citevynAliases.cases.json — one question/expected corpus that
+# BOTH test suites run, plus the alias-list pin. A one-sided edit that changes an
+# answer fails on the other side rather than drifting silently.
 # --- CiteVyn name recognition (#84 item 1) ---------------------------------
 #
 # The owner dictates questions, and speech-to-text reliably mangles "CiteVyn"

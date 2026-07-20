@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "SHARED cross-language parity corpus for CiteVyn name recognition (#84 item 4).",
+    "Read by BOTH frontend/src/lib/citevynAliases.test.ts (against mentionsCitevyn)",
+    "and backend/tests/test_guardrails_domain.py (against _CITEVYN_RE). Pinning the",
+    "alias LIST only proves the two lists agree; it says nothing about the matchers",
+    "around them, and the two are written in different regex dialects. This corpus",
+    "is the behavioural pin: every case must produce `match` on both sides, so a",
+    "structural rewrite on either side that changes an answer fails on the other.",
+    "Add a case here, not to one suite, whenever either matcher changes."
+  ],
+  "cases": [
+    { "q": "What is CiteVyn?", "match": true, "why": "canonical spelling" },
+    { "q": "citevyn pro pricing", "match": true, "why": "canonical, lowercase" },
+    { "q": "CITEVYN plans", "match": true, "why": "canonical, case-insensitive" },
+    { "q": "is citevyn.com free?", "match": true, "why": "canonical branch is un-guarded" },
+    { "q": "email support@citevyn please", "match": true, "why": "canonical branch is un-guarded" },
+    { "q": "anti-citevyn rant", "match": true, "why": "canonical branch is un-guarded" },
+    { "q": "mycitevynapp", "match": false, "why": "canonical is word-bounded" },
+
+    { "q": "what is sitewin?", "match": true, "why": "single-token alias" },
+    { "q": "what is citevin?", "match": true, "why": "single-token alias" },
+    { "q": "is sitevyn free?", "match": true, "why": "single-token alias" },
+    { "q": "what does sightwin cost", "match": true, "why": "single-token alias" },
+    { "q": "what is cite vyn?", "match": true, "why": "separated *vyn spelling" },
+    { "q": "what is site-vyn?", "match": true, "why": "separated *vyn spelling, hyphen" },
+    { "q": "I was reading about sitewin.", "match": true, "why": "sentence-final is not a filename" },
+
+    { "q": "may the best site win!", "match": false, "why": "two ordinary English words" },
+    { "q": "did the site win the award?", "match": false, "why": "win as a verb" },
+    { "q": "what is our site win rate?", "match": false, "why": "two ordinary English words" },
+    { "q": "please cite VIN and mileage", "match": false, "why": "VIN is an ordinary noun" },
+    { "q": "le site vin est en panne", "match": false, "why": "vin is French for wine" },
+
+    { "q": "why does sitewin.example.com return 502?", "match": false, "why": "hostname" },
+    { "q": "sitewin@example.com is the contact", "match": false, "why": "email local part" },
+    { "q": "SITEWIN-1234 is blocked", "match": false, "why": "ticket id" },
+    { "q": "the sitewin/main branch", "match": false, "why": "path" },
+    { "q": "docs.sitewin", "match": false, "why": "trailing hostname segment" },
+    { "q": "sitewin:8080 is down", "match": false, "why": "host:port" },
+    { "q": "pin sitewin==1.2.3 in the lockfile", "match": false, "why": "requirement spec" },
+
+    {
+      "q": "sitewinа is down",
+      "match": false,
+      "why": "trailing Cyrillic а. JS \\w/\\b are ASCII-only and Python's are not; written with \\w the offline mirror fired here and the backend did not."
+    },
+    {
+      "q": "аsitewin is down",
+      "match": false,
+      "why": "leading Cyrillic а — same ASCII-vs-Unicode divergence, before guard"
+    },
+    {
+      "q": "cafésitewin is down",
+      "match": false,
+      "why": "Latin-1 accented letter immediately before the alias"
+    },
+    {
+      "q": "sitewiné is down",
+      "match": false,
+      "why": "Latin-1 accented letter immediately after the alias"
+    },
+
+    { "q": "How do I get a Gemini API key?", "match": false, "why": "off-domain" },
+    { "q": "", "match": false, "why": "empty input" }
+  ]
+}

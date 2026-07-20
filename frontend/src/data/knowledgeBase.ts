@@ -194,12 +194,19 @@ export const PLACEHOLDERS = [
 /**
  * Fallback answer when no KB entry matches.
  *
- * Mirrors the backend's `DEFAULT_UNSUPPORTED_REFUSAL`, including the
- * "or about CiteVyn itself" nudge (#84 item 5) — a demo user who hits the
- * refusal should learn the same thing a live user does.
+ * BYTE-IDENTICAL to the backend's `DEFAULT_UNSUPPORTED_REFUSAL`
+ * (`backend/app/core/config.py`), including the "or about CiteVyn itself" nudge
+ * (#84 item 5) — a demo user who hits the refusal should read exactly what a
+ * live user reads, so the demo is not quietly a different product.
+ *
+ * `backend/tests/test_settings_slice3_slice4.py` asserts this file contains the
+ * backend string verbatim. It is pinned because it had ALREADY drifted: this
+ * copy said "I don't have" where the backend says "I do not have" — a hand-copied
+ * mirror with no pin, which is the exact failure mode #84 item 4 fixed for the
+ * alias list. Edit the backend constant and re-copy; do not edit only this line.
  */
 export const GENERIC_REFUSAL =
-  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I don't have credible source material in this assistant to answer that.";
+  "I can answer questions about Claude, Claude Code, Codex, and Gemini using their official documentation — or about CiteVyn itself. I do not have credible source material in this assistant to answer that.";
 
 // ---------------------------------------------------------------------------
 // Keyword matcher — routes free-typed questions to a KB entry
