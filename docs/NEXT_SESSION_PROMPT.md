@@ -16,7 +16,9 @@ your final report must show it.**
 
 2. **REVIEWERS AND BUILDERS MUST EXECUTE, NOT JUST READ.** A review that only reads the diff is
    half a review. Every reviewer runs the thing. Every builder proves their own work runs BEFORE
-   calling it done.
+   calling it done. **This is enforced per-PR** by the OUTPUT-CORRECTNESS GATE in Phase 4 — a PR
+   whose body carries no executed output cannot be merged, and a review that produced no command
+   output is not a review. Reading is not verifying.
 
 3. **NEVER CONCLUDE ABSENCE FROM A FAILED LOCAL REPRO — AND NEVER TRUST A SUCCESS MESSAGE.**
    Both halves cost the last session real errors, and both are cheap to prevent:
@@ -99,16 +101,37 @@ PHASE 2 — DECOMPOSE
 Small, independently-reviewable, independently-mergeable PRs. One concern each. State the order and
 why. Do NOT batch unrelated fixes.
 
-**Known-correct order (derived last session — change it only with a stated reason):**
+**Known-correct order (derived last session — change it only with a stated reason). Labels match
+the inventory below exactly; do not renumber them.**
 
-1. **A** — restore `white-space: pre-wrap` + a regression test. Trivial, zero-risk, ships first.
-2. **#215** — validator fix **AND** citation numbering, **in ONE PR** (see A2 below for why
-   splitting them ships a wrong-citation bug).
-3. **B** — markdown rendering.
-4. **Chips** — clickable `[n]` citation markers; re-scope `pre-wrap` in the same PR.
-5. **C** — timeout / cold start.
-6. **E** — smaller findings + record hygiene.
-7. **D** — retrieval quality. **STOP-AND-REPORT, do not merge.**
+| # | Item | Notes |
+|---|---|---|
+| 1 | **B1** — restore `white-space: pre-wrap` + regression test | Trivial, zero-risk, fixes a LIVE regression. Ships first |
+| 2 | **A1 + A2** — validator fix **AND** citation numbering, **in ONE PR** | Splitting them ships a wrong-citation bug. See A2 |
+| 3 | **B2** — markdown rendering | |
+| 4 | **B3** — clickable `[n]` chips; re-scope `pre-wrap` in the same PR | |
+| — | ↑ **THE CEILING — stop here** ↑ | |
+| 5 | **C** — timeout / cold start | Only with clear capacity. The `min_machines_running` half is **owner-gated** (it costs money on Fly) — propose, do not change |
+| 6 | **E** — smaller findings + record hygiene | Only with clear capacity |
+| 7 | **D** — retrieval quality | **STOP-AND-REPORT, do not merge** |
+
+### SCOPE CEILING — read this before you plan
+
+**Land items 1–4 WELL, then stop and report.** Do not begin 5, 6 or 7 unless 1–4 are merged AND
+you have clear remaining capacity — and if you do begin them, say explicitly in the report that the
+core four were already done.
+
+This is a deliberate instruction, not a suggestion. The inventory has ~15 entries and **fifteen
+items at 80% is worse than four at 100%** — particularly here, where items 1–4 are the ones a user
+actually sees (a silently-discarded correct answer, a citation pointing at the wrong source, and
+chat text rendered as an unreadable blob) and 5–7 are internal hygiene.
+
+The previous session's worst failure came from moving fast to a conclusion, not from doing too
+little. If you finish 1–4 with real tests and an honest report, this session is a success. Reporting
+"I did not get to C/E/D" is a **correct** outcome, not a shortfall.
+
+`D` is stop-and-report by design regardless of capacity — it is a corpus-wide ranking change and
+the owner's decision.
 
 ═══════════════════════════════════════════════════════════════
 PHASE 3 — IMPLEMENT (parallel where safe; prove it runs)
@@ -157,6 +180,34 @@ angle below that applies. A reviewer that only reads the diff has not reviewed i
 | **Regression** | Locked golden/eval numbers must NOT move; full suite count reported |
 | **Observability** | Does the change alter what lands in `audit_events`? More answers will now survive — confirm the trail still distinguishes outcomes |
 | **Rollback** | Stated per PR |
+
+### THE OUTPUT-CORRECTNESS GATE — applies to every PR, no exceptions
+
+**Reading is not verifying. A claim without executed output is not evidence.** This gate is
+per-PR, not just a final-report formality:
+
+Before a PR may be merged, its body MUST contain, as **pasted real output**:
+
+1. The **command** run and its **actual output** for every behavioural claim made. Not "tests
+   pass" — the line showing the count.
+2. The **RED→GREEN proof** for every guard: output with the fix absent, then present.
+3. The **mutation** applied and the resulting failure, for anything called a guard — plus the
+   `grep` confirming the mutation actually landed in the file.
+4. For anything user-visible: a **rendered screenshot**, not a DOM assertion alone. "The test
+   passes" is not "the user sees the right thing."
+5. The **exact suite counts** before and after, from the repo root.
+
+And for reviews:
+
+- **A review that produced no command output is not a review** — reject it and re-run it.
+  Every reviewing sub-agent must report what it RAN, and what the run printed.
+- A reviewer that only reads the diff may raise questions but may not clear a finding.
+- If a reviewer cannot execute something, it must say so explicitly rather than infer the result.
+
+Rationale, from the last session: a sub-agent's #208 fix passed 7 of its own tests and 4 mutations
+and still failed live; #215 was declared "not reproducible" from an unexecuted assumption; and #229
+was found only because a `passed` message was checked against the resulting STATE. Every one of
+those is the same gap — a conclusion that was reasoned rather than run.
 
 Close each PR with `release-readiness-review` as the ship/no-ship gate. Merge yourself once CI is
 green — verified by the JOB running, not by an unchanged `/health` 200. **Never close an issue
