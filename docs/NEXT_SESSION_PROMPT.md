@@ -9,7 +9,18 @@ Read `AGENTS.md`, `code_review.md`, `docs/BACKLOG.md`, `docs/RAG_QUALITY_PLAN.md
 memory FIRST. Small reviewable PRs off main; adversarial review before each merge; merge each PR
 yourself once CI is green. No Claude attribution footer.
 
-**GOAL: close #215, #216 and #217 — in that order. #215 is the one that matters.**
+**GOAL: close #215, #216, #217 and the missing favicon (Task 4) — in that order.**
+**#215 is the one that matters; the rest are contained.**
+
+Work autonomously: open a small PR per task, review it adversarially, merge it yourself once CI is
+green, and move to the next. Do not batch unrelated tasks into one PR. If a task turns out to be
+bigger than its description (this is called out explicitly for #215), STOP and report rather than
+half-doing it.
+
+**Repo hygiene is already done — do not redo it.** As of 2026-07-21 `main` is the ONLY branch,
+local and remote; 18 local and 11 remote branches were deleted after verifying each was merged or
+superseded. Eight pre-existing stashes remain UNTOUCHED and are the owner's to decide on — do not
+drop them.
 
 ═══════════════════════════════════════════════════════════════
 COST DISCIPLINE — READ FIRST
@@ -121,6 +132,46 @@ shipped invented endpoint paths; a check is cheaper than a third discovery.
 
 Note wherever the README shows a request: auth is `Authorization: Bearer <key>` (NOT
 `X-Demo-API-Key`) and the body field is `message` (NOT `content`).
+
+═══════════════════════════════════════════════════════════════
+TASK 4 — the demo has NO favicon (browser tabs show a blank page icon)
+═══════════════════════════════════════════════════════════════
+`frontend/index.html` contains `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />`, but
+**`frontend/public/` does not exist**, so the file was never shipped. Verified against production:
+
+```
+/favicon.svg          -> 404
+/favicon.ico          -> 404
+/apple-touch-icon.png -> 404
+```
+
+Every browser tab, bookmark and history entry for the live demo therefore shows a generic blank
+icon. On a public portfolio piece that is the first thing a visitor sees.
+
+**The fix is `frontend/public/`** — Vite copies that directory verbatim into `dist/`, which the API
+then serves from the StaticFiles mount. No build config change is needed.
+
+**Scope — keep it proportionate, but do not ship only the SVG:**
+- `favicon.svg` — modern browsers, and the one already referenced.
+- `favicon.ico` (32x32 + 16x16) — Windows, pinned tabs, and anything that still asks for `/favicon.ico`
+  by convention regardless of the `<link>`.
+- `apple-touch-icon.png` (180x180) — iOS home screen; without it iOS renders a screenshot.
+- a minimal `site.webmanifest` + `<meta name="theme-color">`.
+
+**Design constraints (no brand mark exists — this must be created):**
+- There is NO logo asset anywhere in the repo. The wordmark is plain text: "CiteVyn" followed by a
+  small yellow `01` badge. Check `~/Downloads/design_handoff_citevyn_landing/` for the palette
+  (see the `citevyn-landing-design-source` memory) and take the accent colour from there rather
+  than inventing one.
+- **It must read at 16x16.** That rules out the wordmark and anything with fine detail. A single
+  monogram or a citation-bracket motif is the right level of complexity.
+- It must be legible against BOTH light and dark browser chrome — test both, do not assume.
+
+**The engineering lesson matters more than the icon.** `index.html` referenced a file that never
+existed, through a full build, a Docker image, CI, and a production deploy, and nothing caught it.
+**Add a test that parses `frontend/index.html`, extracts every local asset href/src, and asserts
+each one resolves to a real file in the build output.** That closes the whole class, not just this
+instance. A favicon that 404s is cosmetic; a *hero image* that 404s the same way would not be.
 
 ═══════════════════════════════════════════════════════════════
 GOTCHAS — do not rediscover these
