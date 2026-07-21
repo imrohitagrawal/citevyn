@@ -7,15 +7,35 @@ branch `main`, clean and synced with origin.
 
 Read `AGENTS.md`, `code_review.md`, `docs/BACKLOG.md` and the session memory FIRST.
 
-**Two rules govern this whole session:**
+**Three rules govern this whole session. They are not advice — each has a checkable output, and
+your final report must show it.**
 
 1. **PLAN BEFORE CODE.** No implementation until the plan has survived an adversarial fan-out and
    reached a fixpoint. The goal is that PR review finds almost nothing, because the design was
    already attacked and the code was already proven working.
+
 2. **REVIEWERS AND BUILDERS MUST EXECUTE, NOT JUST READ.** A review that only reads the diff is
    half a review. Every reviewer runs the thing. Every builder proves their own work runs BEFORE
-   calling it done. The last session's worst error was a confident conclusion from an unexecuted
-   assumption, overturned later by one database query.
+   calling it done.
+
+3. **NEVER CONCLUDE ABSENCE FROM A FAILED LOCAL REPRO — AND NEVER TRUST A SUCCESS MESSAGE.**
+   Both halves cost the last session real errors, and both are cheap to prevent:
+
+   - *Before* calling ANY live-observed bug transient, not-reproducible, or fixed, **query
+     production's audit trail first** and say so in your report. `audit_events.metadata` records
+     the exact orchestrator exit reason (`no_answer` / `uncited_answer` /
+     `citation_validation_failed` / `weak_evidence`). Last session #215 was declared "not
+     reproducible" from a local repro that could not reproduce it; ONE read-only query for $0
+     overturned that and found the real cause. A local repro that cannot reproduce is **not**
+     evidence of absence.
+   - *After* any command that reports success, **verify the resulting STATE, not the message.**
+     That rule, applied immediately after the production evaluation printed `passed`, is what
+     found **#229** — the run had genuinely succeeded, and the health endpoint still contradicted
+     it. The same discipline applies to sub-agent reports: one agent's #208 fix passed 7 of its own
+     tests and 4 mutations and still failed live.
+
+   Applied to this session's own contents: **do not take any root cause below on faith** — each
+   carries its evidence so you can re-derive it cheaply. Verify, then fix.
 
 ═══════════════════════════════════════════════════════════════
 COST DISCIPLINE — READ FIRST
@@ -295,8 +315,7 @@ demo. If either moves the golden numbers, STOP, write up before/after, and repor
 7. **Stale records:** `docs/BACKLOG.md` still lists dependabot #148/#150/#151 as open; they are not.
    Only **PR #227** is open (node 22→**26**). `DEPENDABOT_TRIAGE.md` now has an explicit
    **build-only base image** row: no human reviewer required, CI `image-smoke` is the gate, and it
-   is green. **Recommendation: merge #227 AFTER the frontend work lands**, so the new Playwright
-   coverage exercises the new toolchain and a bundle oddity is not entangled with a feature change.
+   is green. **But do NOT merge #227 as-is — see E9.**
 8. **[#229](https://github.com/imrohitagrawal/citevyn/issues/229) — `/health/index` and the admin
    API report `evaluation_run_id: null` even when the index HAS passing evidence.**
    `index_versions.evaluation_run_id` is declared in the model, the `0001` migration and the admin
@@ -305,6 +324,25 @@ demo. If either moves the golden numbers, STOP, write up before/after, and repor
    trusts it reaches for `?force=true` — the exact habit #216 removed. Fix `evaluate_index` to set
    it; decide deliberately whether it points at the newest run or only at passing ones, and keep
    `_latest_completed_run` authoritative for the gate.
+9. **[#231](https://github.com/imrohitagrawal/citevyn/issues/231) — CI tests the frontend on Node
+   20; production ships a bundle built on Node 22. Nothing reconciles them.**
+   `frontend.yml:36` and `frontend-live-e2e.yml:28` pin `setup-node` to **20**;
+   `Dockerfile.api:55` builds the shipped bundle on **22**; there is no `.nvmrc` and no `engines`
+   field. **CI has never validated the artifact production serves.** PR #227 would widen that from
+   two majors to six while CI stays on 20 and reports green either way.
+
+   **This supersedes the earlier "merge #227 after the frontend work" advice, which was WRONG**:
+   `setup-node` and the Dockerfile are independent, so Playwright never exercises the Dockerfile's
+   Node no matter when #227 merges. Correct order:
+   1. Add `frontend/.nvmrc` as the single source of truth; point both workflows at it with
+      `node-version-file:`; align `Dockerfile.api` to the same major — **reconcile on the current
+      known-good 22 first**, so the reconciliation itself is not also a version bump.
+   2. Add a guard test asserting the Dockerfile's `FROM node:<major>` matches the pin. The repo
+      already has this pattern (`test_fly_config.py`, `test_readme_endpoints.py`). Without it this
+      silently re-drifts on the next bump.
+   3. **Then** treat 20/22 → 26 as ONE deliberate bump moving CI and the Dockerfile together, so
+      the tests gating it run on the version being shipped. Merge #227 as part of that, or close it
+      in favour of the combined change.
 
 **File GitHub issues for anything without one and index it in `BACKLOG.md`.** Currently unfiled:
 A2, B1, B2, B3, C, and E1–E6.
@@ -351,7 +389,8 @@ LIVE-OPS FACTS
 OWNER-GATED — remind, do not attempt
 ═══════════════════════════════════════════════════════════════
 - `fly deploy --build-arg VERSION=$(git describe --tags --always)` (classifier-blocked).
-- PR #227 (node 22→26 major) needs a named reviewer per `DEPENDABOT_TRIAGE.md`.
+- PR #227 (node 22→26) needs **no** reviewer — `DEPENDABOT_TRIAGE.md`'s build-only base-image row
+  makes CI `image-smoke` the gate. It is held for a technical reason, not a policy one: see E9/#231.
 - Cloudflare MCP token is READ-ONLY; DNS automation needs `Zone:DNS:Edit`.
 - Never paste a credential into chat.
 
