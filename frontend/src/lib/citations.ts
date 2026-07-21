@@ -26,7 +26,16 @@ import type { Source } from "../data/knowledgeBase";
  */
 export function citationsToSources(citations: Citation[]): Source[] {
   return citations.map((citation, index) => {
-    const n = String(index + 1);
+    // Number by the marker the model actually wrote, not by array position
+    // (#215). An answer citing [1] and [3] returns TWO citations; by position
+    // they would render as cards 1 and 2 while the prose says [3], pointing the
+    // reader at a card that does not exist.
+    //
+    // The runtime check is not belt-and-braces: `api.ts` returns `parsed as T`,
+    // a bare cast with no wire validation, so the required type is a
+    // compile-time promise the network does not keep. A response without a
+    // usable marker falls back to position rather than rendering `undefined`.
+    const n = String(Number.isInteger(citation.marker) ? citation.marker : index + 1);
     return {
       n,
       title: citation.title || citation.source_name || `Source ${n}`,

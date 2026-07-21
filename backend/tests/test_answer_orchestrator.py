@@ -1527,8 +1527,8 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
     """Cite-once is unchanged: an answer that DOES ground itself keeps exactly the chunks it
     referenced — the fix must not make grounded answers stingier.
 
-    (Cites [1], not [2]: ``validate_citations`` requires markers contiguous from 1, so a
-    lone [2] is a genuine validation failure and would not exercise the grounded path.)
+    (Cites [1] for simplicity. A lone [2] would also be valid since #215 — see
+    ``test_gapped_citations_survive_with_their_original_markers`` below.)
     """
     from app.llm.types import LLMResult
 
@@ -1556,6 +1556,88 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
     # the 1-of-5 ratio rather than being waved through.
     assert len(response["citations"]) == 1
     assert response["confidence"] == Confidence.low.value
+
+
+async def test_gapped_citations_survive_with_their_original_markers(
+    session: Any,
+) -> None:
+    """An answer citing [1] and [3] is served, and each citation carries the
+    marker the model actually wrote (#215).
+
+    This is the only test in the suite that can catch an A2 regression. The
+    stub LLM client always emits exactly ``[1]``, so in every other test —
+    and in the whole eval harness — ``marker`` equals ``index + 1`` by
+    construction, and numbering by array position is indistinguishable from
+    numbering by marker. Here the model skips bullet 2, so the two differ:
+    array position would label the cards 1 and 2 while the prose says [1]
+    and [3], pointing the reader at a card that does not exist.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    gapped = AsyncMock()
+    gapped.complete.return_value = LLMResult(
+        text="Limits are per organization [1]. Retry after the window [3].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    # Hold ONE evidence list: ``_evidence`` mints fresh UUIDs per call, so the
+    # retriever and the assertions must be looking at the same objects.
+    evidence = _evidence(count=6)
+    orch = Orchestrator(_settings(), session, llm=gapped, retriever=_FakeRetriever(evidence))
+
+    response = await orch.ask(
+        question="What are the rate limits on the Claude API?",
+        request_id="gapped",
+        session_id=uuid.uuid4(),
+    )
+
+    # Served, not discarded — this is the #215 regression itself.
+    assert response["no_answer"] is False
+    citations = response["citations"]
+    assert len(citations) == 2
+    # The markers are the model's own indices, NOT 1 and 2.
+    assert [c["marker"] for c in citations] == [1, 3]
+    # And they point at the evidence the model actually cited.
+    assert [c["chunk_id"] for c in citations] == [
+        str(evidence[0].chunk_id),
+        str(evidence[2].chunk_id),
+    ]
+
+
+async def test_gapped_citation_markers_survive_the_cache_round_trip(
+    session: Any,
+) -> None:
+    """A cache HIT replays the same markers as the miss that populated it.
+
+    The cached path rebuilds citations from stored dicts rather than from
+    evidence, so it is a second, independent place the marker can be lost.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    gapped = AsyncMock()
+    gapped.complete.return_value = LLMResult(
+        text="Limits are per organization [1]. Retry after the window [3].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    question = "What are the rate limits on the Claude API?"
+    orch = Orchestrator(
+        _settings(), session, llm=gapped, retriever=_FakeRetriever(_evidence(count=6))
+    )
+
+    miss = await orch.ask(question=question, request_id="m1", session_id=uuid.uuid4())
+    assert miss["cache_hit"] is False
+    assert [c["marker"] for c in miss["citations"]] == [1, 3]
+
+    hit = await orch.ask(question=question, request_id="m2", session_id=uuid.uuid4())
+    assert hit["cache_hit"] is True
+    assert [c["marker"] for c in hit["citations"]] == [1, 3]
 
 
 # ---------------------------------------------------------------------------

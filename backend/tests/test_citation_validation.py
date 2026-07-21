@@ -92,16 +92,63 @@ def test_invalid_citation_index_zero() -> None:
     assert result.reason is not None and "out of range" in result.reason
 
 
-def test_invalid_gap_in_citation_indices() -> None:
-    """``[1]`` and ``[3]`` with no ``[2]`` is a hard failure."""
+def test_gap_in_citation_indices_is_valid() -> None:
+    """``[1]`` and ``[3]`` with no ``[2]`` is VALID (#215).
+
+    This assertion is inverted from its original form, which required the
+    indices to be contiguous from 1. That rule discarded correct answers in
+    production — three of them are in the audit trail, with exactly this
+    shape:
+
+        citation_validation_failed: citation indices must be contiguous
+        from 1; missing [2]
+
+    and the user saw "I couldn't find a grounded answer", indistinguishable
+    from a retrieval failure. The rule was never part of the contract the
+    model is given: ``prompts.py`` asks only that each ``[n]`` reference the
+    matching evidence bullet, never that the set be gap-free. It also
+    contradicted the cite-once design, where the branch immediately below
+    treats *uncited* bullets as a warning — citing ``[1]`` alone was always
+    fine, but citing ``[1]`` and ``[3]`` threw the answer away.
+
+    Genuine hallucination is still caught by ``out_of_range`` above.
+    """
     result = validate_citations(
         answer_text="Per the docs [1] and followup [3].",
         evidence=_evidence(count=3),
     )
-    assert result.valid is False
+    assert result.valid is True
     assert result.cited_indices == [1, 3]
-    assert result.reason is not None and "contiguous" in result.reason
-    assert "missing" in result.reason and "2" in result.reason
+    assert result.reason is None
+    # The skipped bullet is reported as uncited, not as a failure.
+    assert result.uncited_indices == [2]
+
+
+def test_last_evidence_bullet_is_in_range() -> None:
+    """``[N]`` for N == len(evidence) is valid — the boundary, not past it.
+
+    Paired with the test below. Until #215 the contiguity rule caught an
+    off-by-one in the range check as a side effect; with it gone, mutating
+    ``n > evidence_count`` to ``n > evidence_count + 1`` passes every other
+    test in this file. These two pin the boundary directly.
+    """
+    result = validate_citations(
+        answer_text="Per the docs [3].",
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [3]
+
+
+def test_one_past_the_last_evidence_bullet_is_out_of_range() -> None:
+    """``[N+1]`` is a hallucinated marker and must hard-fail."""
+    result = validate_citations(
+        answer_text="Per the docs [4].",
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is False
+    assert result.cited_indices == [4]
+    assert result.reason is not None and "out of range" in result.reason
 
 
 def test_no_answer_refusal_passes_validation() -> None:

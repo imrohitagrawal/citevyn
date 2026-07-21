@@ -8,11 +8,16 @@ directly with arbitrary evidence.
 
 Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
 
-* ``[n]`` markers in ``answer_text`` must be 1-indexed and contiguous
-  from 1 to ``len(evidence)``. Gaps, ``[0]``, or ``[N+1]`` all fail.
+* ``[n]`` markers in ``answer_text`` must be 1-indexed and in range:
+  ``1 <= n <= len(evidence)``. ``[0]`` and ``[N+1]`` fail.
 * Every ``[n]`` must reference an evidence bullet that exists.
-* Uncited evidence bullets are reported as a warning, not a failure
-  (the model may legitimately not cite every retrieved chunk).
+* Uncited evidence bullets — including bullets SKIPPED between two cited
+  ones — are reported as a warning, not a failure (the model may
+  legitimately not cite every retrieved chunk). A gap is therefore
+  valid: citing ``[1]`` and ``[3]`` is as acceptable as citing ``[1]``
+  alone. Requiring contiguity discarded correct answers in production
+  (#215) and was never asked of the model by
+  :mod:`app.llm.prompts`.
 * When ``answer_text`` is the no-answer refusal (exact match against
   :data:`app.llm.prompts.NO_ANSWER_REFUSAL`, or contains the canonical
   no-answer substring), the result is ``valid=True`` with empty
@@ -43,12 +48,12 @@ _NO_ANSWER_SUBSTRING = "do not have credible source material"
 class CitationValidationResult(BaseModel):
     """Outcome of :func:`validate_citations`.
 
-    ``valid`` is True only when every ``[n]`` in the answer references
-    a real evidence bullet and the indices are contiguous from 1 to
-    the number of evidence bullets the model actually cited. When
-    ``answer_text`` is the no-answer refusal, ``valid`` is True with
-    empty citation lists regardless of how many evidence bullets were
-    passed in.
+    ``valid`` is True when every ``[n]`` in the answer references a real
+    evidence bullet — that is, ``1 <= n <= len(evidence)``. The cited
+    indices need NOT be contiguous; ``uncited_indices`` reports the
+    bullets the model skipped. When ``answer_text`` is the no-answer
+    refusal, ``valid`` is True with empty citation lists regardless of
+    how many evidence bullets were passed in.
     """
 
     valid: bool
@@ -100,15 +105,17 @@ def validate_citations(
             ),
         )
 
-    # Hard-fail: gap in the contiguous 1..N sequence.
-    expected = set(range(1, max(cited_indices, default=0) + 1))
-    missing = sorted(expected - set(cited_indices))
-    if missing:
-        return CitationValidationResult(
-            valid=False,
-            cited_indices=cited_indices,
-            reason=f"citation indices must be contiguous from 1; missing {missing}",
-        )
+    # NOTE: there is deliberately no contiguity check here (#215).
+    #
+    # A gap in the cited set (``[1]`` and ``[3]``, no ``[2]``) used to hard-fail
+    # and discard the whole answer. It was wrong on three counts: the model is
+    # never asked for contiguity (see :mod:`app.llm.prompts`); it contradicted
+    # the branch below, which treats an *uncited* bullet as a warning; and
+    # hallucination is already caught by the range check above. In production it
+    # turned correct, grounded answers into a refusal the user could not
+    # distinguish from "the docs don't cover this".
+    #
+    # A skipped bullet is exactly an uncited bullet, and is reported as such.
 
     # Warning only: bullets the model never cited.
     cited_set = set(cited_indices)
