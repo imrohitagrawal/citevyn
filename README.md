@@ -39,7 +39,7 @@ treated as a feature, not a failure.
 | Type-check (pyright strict)       | 🟢 green | `make typecheck`                            |
 | Lint (ruff + format)              | 🟢 green | `make lint`                                 |
 | Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
-| Smoke (curl against uvicorn)      | 🟢 green | `make smoke`                                |
+| Smoke (`/health` against the stack) | 🟢 green | `make smoke`                              |
 | E2E (Playwright, chat UI)         | 🟢 green | `make e2e`                                  |
 | Production guard: `stub` rejected | 🟢 green | unit test in `test_llm_factory_singleton.py` |
 | Production guard: router empty    | 🟢 green | unit test in `test_llm_factory_singleton.py` |
@@ -299,7 +299,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/sessions/{session_id}/messages` | demo | **Ask a question** — citation-backed Q&A |
 | `GET  /v1/sessions/{session_id}/messages/{message_id}` | demo | Fetch one answer + its citations |
 | `POST /v1/search/exact`     | demo   | Exact-term lookup                             |
-| `GET  /v1/admin/budget`     | admin  | Spend against the §9 daily budget             |
+| `GET  /v1/admin/budget`     | admin  | Spend against the daily budget ([`docs/COST_CONTROLS.md`](docs/COST_CONTROLS.md)) |
 | `GET  /v1/admin/evaluations[/{run_id}]` | admin | List / fetch `evaluation_runs`     |
 | `GET  /v1/admin/index_versions[/{index_version}]` | admin | List / fetch `index_versions` |
 | `POST /v1/admin/index_versions/{index_version}/promote` | admin | Promote an `index_version` to live (evaluation-gated; `?force=true` overrides, audited) |
@@ -316,8 +316,10 @@ shape, refusal envelope, and rate-limit headers are normative.
 
 ## 9. Security model
 
-- **Bearer-token auth.** Two keys (`demo`, `admin`) — never shared
-  in production. Tokens are read from env, never logged.
+- **Two API keys**, never shared in production, read from env and
+  never logged: `demo` is sent as `Authorization: Bearer <key>`,
+  `admin` as the `X-Admin-API-Key` header (deliberately *not* bearer,
+  so a leaked demo token cannot be replayed against admin routes).
 - **Production headers** (set by Caddy): HSTS, X-Frame-Options,
   X-Content-Type-Options, Referrer-Policy, Permissions-Policy,
   restrictive CSP. The API never sets cookies.
@@ -346,8 +348,8 @@ stack answers; there is no second hand-written catalog to keep in sync
 
 ```bash
 make demo          # one-shot stack bring-up
-make test          # 361 tests, no DB needed
-make smoke         # end-to-end curl against a real uvicorn
+make test          # backend suite, no DB needed
+make smoke         # compose stack up, assert /health, tear down
 make verify        # lint + typecheck + test (the pre-merge gate)
 make db-down       # tear down the stack (keeps volumes)
 ```

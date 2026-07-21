@@ -74,9 +74,26 @@ def live() -> dict[str, set[str]]:
     return {_normalise(path): set(ops) for path, ops in schema.items()}
 
 
-def test_the_parser_actually_found_documented_routes(documented: list[tuple[str, str]]) -> None:
-    """Vacuous-pass guard: a regex matching nothing would make every test below pass."""
-    assert len(documented) >= 10, f"parsed too few README routes: {documented}"
+def test_the_table_documents_exactly_the_operations_the_app_serves(
+    documented: list[tuple[str, str]], live: dict[str, set[str]]
+) -> None:
+    """The table's completeness IS the invariant — asserted both directions.
+
+    This subsumes the vacuous-pass guard: a regex that silently stopped matching rows
+    fails here immediately, rather than only once coverage fell past some magic floor.
+    A floor of "at least N" would have let most of the table drop out unnoticed, which
+    is precisely the silent-loss-of-coverage failure this module exists to prevent.
+
+    It also closes the direction the original check could not see: a NEW route added to
+    the app without a README row now fails too, so the table cannot rot by omission the
+    way it previously rotted by invention.
+    """
+    claimed = {(verb, _normalise(path)) for verb, path in documented}
+    serves = {(verb, path) for path, verbs in live.items() for verb in verbs}
+    undocumented = sorted(f"{v.upper()} {p}" for v, p in serves - claimed)
+    invented = sorted(f"{v.upper()} {p}" for v, p in claimed - serves)
+    assert not undocumented, f"routes the app serves but README §8 omits: {undocumented}"
+    assert not invented, f"routes README §8 claims but the app does not serve: {invented}"
 
 
 def test_every_route_in_the_readme_table_exists(

@@ -2,10 +2,15 @@
 # End-to-end smoke test for the CiteVyn backend.
 #
 # Brings up Postgres via docker compose, applies migrations, seeds
-# users + the demo catalog, starts uvicorn in the background, posts a
-# session and a question, asserts the response carries a grounded
-# cited answer, and tears down the stack. Exits 0 on success, non-zero
-# on any failure.
+# users + the demo catalog, starts uvicorn in the background, asserts
+# GET /health reports "healthy", and tears down the stack. Exits 0 on
+# success, non-zero on any failure.
+#
+# NB this comment used to claim the script also "posts a session and a
+# question, asserts the response carries a grounded cited answer". It
+# does not, and never did below the /health check -- the same
+# phantom-claim defect as the endpoints fixed in #217. Asking is worth
+# adding here; until it is, this comment describes what runs.
 #
 # Run from anywhere; the script resolves its own repo root.
 # Requirements: docker, curl, jq, uv.
