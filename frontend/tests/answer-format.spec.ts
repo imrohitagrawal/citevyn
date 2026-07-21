@@ -35,11 +35,18 @@ test.beforeEach(async ({ page }) => {
   await gotoApp(page);
 });
 
-/** Three lines separated by single newlines — the shape a real answer has. */
-const MULTILINE_ANSWER =
-  "Rate limits apply per organization.\n" +
-  "They are returned in the response headers.\n" +
-  "Retry after the window resets.";
+/**
+ * Three SHORT lines separated by single newlines.
+ *
+ * Deliberately short enough that they cannot wrap at any viewport width the
+ * suite might run at. An earlier version used realistic sentence-length lines,
+ * which made the assertion viewport-coupled: below ~500px the *broken* render
+ * wraps into 3+ line boxes on its own and the guard passes while the bug is
+ * present. With unwrappable lines the count is decided purely by whether
+ * newlines are preserved, so the guard holds at any width — including a future
+ * mobile project, which would otherwise silently defuse it.
+ */
+const MULTILINE_ANSWER = "Alpha.\nBeta.\nGamma.";
 
 test.describe("answer formatting", () => {
   test("a multi-line answer renders as multiple lines, not one blob (live only)", async ({
@@ -87,29 +94,30 @@ test.describe("answer formatting", () => {
     await page.keyboard.press("Enter");
 
     const body = page.locator(".message.bot .content").last();
-    await expect(body).toContainText("Retry after the window resets.", {
-      timeout: 20000,
-    });
+    await expect(body).toContainText("Gamma.", { timeout: 20000 });
 
     // Count the line boxes the answer text actually occupies. `getClientRects()`
     // on a Range over the text returns one rect per rendered line, so this reads
     // the real layout rather than the CSS that produced it.
-    const lineCount = await body.evaluate((el) => {
-      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-      let node: Node | null;
-      while ((node = walker.nextNode())) {
-        if ((node.textContent || "").includes("Retry after the window resets.")) {
-          const range = document.createRange();
-          // Measure the whole text node that carries the answer.
-          range.selectNodeContents(node.parentNode as Node);
-          return range.getClientRects().length;
+    // Count the DISTINCT vertical positions the answer text occupies. Counting
+    // `getClientRects().length` directly is unreliable: `pre-wrap` emits extra
+    // zero-width rects at the break points, so the raw count overstates lines.
+    // Distinct `top` values are exactly "how many lines does a human see".
+    const lineTops = await page
+      .locator(".message.bot .message-body")
+      .last()
+      .evaluate((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const tops = new Set<number>();
+        for (const rect of Array.from(range.getClientRects())) {
+          if (rect.width > 0) tops.add(Math.round(rect.top));
         }
-      }
-      return 0;
-    });
+        return tops.size;
+      });
 
-    // Three newline-separated sentences, each far short of the bubble width, so
-    // with newlines preserved they occupy 3 line boxes and without them 1.
-    expect(lineCount).toBeGreaterThanOrEqual(3);
+    // "Alpha.\nBeta.\nGamma." cannot wrap at any width, so the count is decided
+    // solely by whether the newlines survive: 3 when preserved, 1 when not.
+    expect(lineTops).toBe(3);
   });
 });

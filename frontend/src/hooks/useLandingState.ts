@@ -531,7 +531,12 @@ export function useLandingState() {
         const sessionId = await ensureSession();
         const resp = await askQuestion(sessionId, text);
         failedQuestionsRef.current.delete(norm);
-        streamBot(resp.answer, {
+        // Trim the envelope only. Now that the bubble preserves newlines
+        // (#234), a leading/trailing newline the model emitted -- which is
+        // common, and which used to collapse invisibly -- renders as a blank
+        // line that strands the avatar above empty space. Interior blank lines
+        // are the answer's own paragraph breaks and are preserved.
+        streamBot(resp.answer.trim(), {
           refusal: resp.unsupported || resp.no_answer,
           finalSources: citationsToSources(resp.citations ?? []),
           // Graceful fallback (Phase 4a): surface nearest-doc suggestions the backend
