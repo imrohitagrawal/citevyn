@@ -297,7 +297,7 @@ run, so a corrected corpus that still retrieves correctly promotes with **no**
 `force`.
 
 If `evaluate` exits `2` the candidate measured below threshold — read
-`failure_summary` (`GET /v1/admin/evaluations?index_version=<candidate>`) and fix
+`failure_summary` (`GET /v1/admin/evaluations?index_version=<candidate>` to find the run, then `GET /v1/admin/evaluations/{run_id}` for its `failure_summary` — the list endpoint returns counts only) and fix
 the corpus rather than reaching for `force`. `?force=true` still promotes anyway
 and records the override — `force`, `measured_pass_rate`, `threshold`,
 `evaluation_run_id` — in the `promote_index` audit row; with `force` you are the

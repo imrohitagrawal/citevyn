@@ -71,17 +71,21 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import EmbedderIdentity
+from app.embeddings.null import NullEmbedder
 from app.embeddings.protocol import Embedder
+from app.embeddings.stub import StubEmbedder
 from app.guardrails.domain import (
     canonicalize_product_name,
     classify_domain,
     classify_domains,
     is_unsupported,
 )
+from app.models import Chunk, Document, IndexVersion
 from app.models.enums import EvaluationStatus
 from app.models.evaluation import EvaluationRun
 from app.retrieval.hybrid import HybridRetriever
@@ -231,6 +235,88 @@ async def _retrieve_sources(
     return tuple(hit.source_name for hit in result.hits)
 
 
+async def _assert_candidate_is_evaluable(
+    session: AsyncSession,
+    *,
+    index_version: str,
+    embedder: Embedder | None,
+    embedder_identity: EmbedderIdentity | None,
+) -> None:
+    """Refuse to measure a candidate whose result could not be trusted.
+
+    All three conditions below produce a NUMBER that looks like a verdict but is not
+    one, so each raises :class:`PromotionEvalError` (exit 1, "the invocation is
+    unusable") rather than persisting a ``failed`` run (exit 2, which the runbooks
+    tell an operator means "the candidate genuinely regressed"). Confusing those two
+    is how a typo gets read as a corpus regression.
+
+    1. **The index does not exist.** ``evaluation_runs.index_version`` carries no
+       database-level FK (only the reverse direction is constrained), so a typo would
+       otherwise persist an orphan run scoring 0.0 and exit 2.
+
+    2. **A real embedder is configured but the candidate has no vectors.** The suite
+       is satisfiable from the exact+keyword arms alone, so an index built during an
+       embedder outage — or with vectorization half-finished — would score full marks
+       and promote, then serve production with a dead vector arm. The gate would have
+       certified an index in a state it will never actually be served in.
+
+    3. **The candidate's embedding provenance does not match the configured query
+       embedder.** Found in adversarial review: retrieval's Tier-3 check resolves the
+       stamp of the *active* index, not of the version being retrieved, so a
+       mismatched candidate reports its vector arm ENABLED and is measured with
+       meaningless cosine distances. Checking the candidate's own stamp here closes
+       that for the promotion path without changing the shared request path — the
+       retrieval-side scoping is filed separately.
+    """
+    row = await session.get(IndexVersion, index_version)
+    if row is None:
+        raise PromotionEvalError(
+            f"index_version {index_version!r} does not exist. Refusing to evaluate: a "
+            "run against a nonexistent index scores 0.0 and would be indistinguishable "
+            "from a genuine regression."
+        )
+    # Checks 2 and 3 are about the VECTOR arm, so they apply only when a real embedding
+    # provider is in play. Under stub/null (local `make demo`, the bootstrap seeder's
+    # ``write_vectors=False`` path, and the whole hermetic test suite) a NULL-embedding
+    # index is the CORRECT and expected state, and refusing it would break the very
+    # flows that are supposed to work without an API key.
+    if embedder is None or isinstance(embedder, StubEmbedder | NullEmbedder):
+        return
+
+    if embedder_identity is not None and (
+        row.embedding_provider is not None
+        and (
+            row.embedding_provider,
+            row.embedding_model,
+            row.embedding_dim,
+        )
+        != (embedder_identity.provider, embedder_identity.model, embedder_identity.dim)
+    ):
+        raise PromotionEvalError(
+            f"index_version {index_version!r} was built by "
+            f"{row.embedding_provider}/{row.embedding_model}@{row.embedding_dim} but the "
+            f"configured query embedder is {embedder_identity.provider}/"
+            f"{embedder_identity.model}@{embedder_identity.dim}. Refusing to evaluate: the "
+            "vector arm would be scored on meaningless cosine distances, and would be "
+            "degraded once this index went live. Re-ingest under the configured embedder."
+        )
+
+    embedded = await session.scalar(
+        select(func.count())
+        .select_from(Chunk)
+        .join(Document, Chunk.document_id == Document.document_id)
+        .where(Document.index_version == index_version, Chunk.embedding.is_not(None))
+    )
+    if not embedded:
+        raise PromotionEvalError(
+            f"index_version {index_version!r} has no embedded chunks, but a real embedder "
+            f"({embedder_identity.provider if embedder_identity else 'configured'}) is in "
+            "use. Refusing to evaluate: the suite is satisfiable from the keyword arm "
+            "alone, so this index would score full marks and then serve production with a "
+            "dead vector arm. Re-run ingestion with vectors enabled."
+        )
+
+
 async def evaluate_index(
     session: AsyncSession,
     *,
@@ -269,6 +355,12 @@ async def evaluate_index(
     module could persist, and it must be impossible from every direction.
     """
     settings = settings or get_settings()
+    await _assert_candidate_is_evaluable(
+        session,
+        index_version=index_version,
+        embedder=embedder,
+        embedder_identity=embedder_identity,
+    )
     suite = list(cases) if cases is not None else load_cases()
     if not suite:
         raise PromotionEvalError(

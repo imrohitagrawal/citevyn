@@ -132,6 +132,15 @@ async def _latest_completed_run(
 ) -> EvaluationRun | None:
     """Return the newest *completed* evaluation run for ``index_version``.
 
+    Deliberately NOT filtered by ``suite_name``: ANY completed run for the
+    index counts as evidence. That is intentional — a future suite (a judged
+    answer-quality pass, a latency budget) should gate promotion too, without
+    needing this predicate widened. It does mean the gate trusts whatever
+    producer wrote the row, so a new writer must be held to the same standard
+    as :mod:`app.worker.promotion_eval`: measure the CANDIDATE index, and never
+    persist a zero-case run as passing. Today that module is the only producer
+    in the deployed application.
+
     Deliberately a fresh ``SELECT`` rather than a walk through
     :attr:`IndexVersion.evaluation_run`: that relationship is
     configured ``lazy="raise"`` on both sides, so touching the
@@ -300,9 +309,12 @@ async def promote_version(
     below, which runs only when the target is a DIFFERENT version;
     it therefore sits under the gate like any other promotion.
     Re-promoting the row that is already active returns early and
-    demotes nothing. Since production has no evaluation runs at
-    all, converging a dual-active database needs the audited
-    ``force`` override, and ``docs/DEPLOY_FLY.md`` §4.3 says so.
+    demotes nothing. Converging a dual-active database therefore
+    needs evidence for the version being converged ON — run
+    ``citevyn-worker evaluate --index-version <target>`` first
+    (#216) — or the audited ``force`` override when the drift has
+    to be repaired faster than a suite can run.
+    ``docs/DEPLOY_FLY.md`` §4.3 covers both.
 
     Returns the (now-active) target row. The caller is
     responsible for committing the session.

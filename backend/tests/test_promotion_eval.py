@@ -25,6 +25,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
+from app.embeddings.factory import EmbedderIdentity
 from app.models import Base
 from app.models.enums import EvaluationStatus, IndexStatus
 from app.models.evaluation import EvaluationRun
@@ -482,3 +483,91 @@ class TestScoping:
         assert run.status is EvaluationStatus.failed
         assert run.metrics["pass_rate"] == 0.0
         assert run.index_version == empty
+
+
+class TestUntrustworthyCandidateIsRefused:
+    """Conditions that produce a NUMBER but not a verdict must raise, not score.
+
+    Each would otherwise persist a run whose ``pass_rate`` is real arithmetic over
+    meaningless inputs. They raise :class:`PromotionEvalError` (exit 1, "invocation
+    unusable") rather than persisting ``failed`` (exit 2, which the runbooks tell an
+    operator means "the candidate genuinely regressed"). Confusing the two is how a
+    typo gets read as a corpus regression.
+    """
+
+    async def test_a_nonexistent_index_version_raises_instead_of_scoring_zero(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """``evaluation_runs.index_version`` carries no DB-level FK, so a typo would
+        otherwise persist an orphan run at 0.0 and exit 2."""
+        with pytest.raises(PromotionEvalError, match="does not exist"):
+            await evaluate_index(candidate_session, index_version="typo-not-an-index")
+
+        await candidate_session.rollback()
+        assert await candidate_session.scalar(select(func.count()).select_from(EvaluationRun)) == 0
+
+    async def test_a_candidate_whose_stamp_mismatches_the_query_embedder_raises(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """Found in adversarial review of #216.
+
+        Retrieval's Tier-3 check resolves the stamp of the *active* index, not of the
+        version being retrieved, so a candidate ingested under embedder X and
+        evaluated under configured embedder Y reported its vector arm ENABLED and was
+        measured on meaningless cosine distances. The suite still scored well (the
+        keyword arm carries it) and the gate passed -- then the arm degraded the
+        moment the index went live. Checking the CANDIDATE's own stamp closes this
+        for the promotion path without touching the shared request path.
+        """
+        mismatched = "cand-mismatched"
+        await ensure_index_version(
+            candidate_session,
+            index_version=mismatched,
+            source_version_hash="sha256:m",
+            embedding_provider="openrouter",
+            embedding_model="text-embedding-3-small",
+            embedding_dim=1536,
+        )
+        await candidate_session.commit()
+
+        with pytest.raises(PromotionEvalError, match="was built by"):
+            await evaluate_index(
+                candidate_session,
+                index_version=mismatched,
+                embedder=object(),  # never called; the guard fires first
+                embedder_identity=EmbedderIdentity(
+                    provider="gemini", model="gemini-embedding-001", dim=1536
+                ),
+            )
+
+    async def test_a_candidate_with_no_vectors_raises_when_an_embedder_is_configured(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """The suite is satisfiable from the keyword arm ALONE, so an index built
+        during an embedder outage would score full marks and promote, then serve
+        production with a dead vector arm -- certified in a state it will never
+        actually be served in.
+
+        ``candidate_session`` ingests with ``write_vectors=False``, so every chunk has
+        a NULL embedding: exactly that scenario.
+        """
+        with pytest.raises(PromotionEvalError, match="no embedded chunks"):
+            await evaluate_index(
+                candidate_session,
+                index_version=CANDIDATE,
+                embedder=object(),  # never called; the guard fires first
+                embedder_identity=None,
+            )
+
+    async def test_with_no_embedder_a_null_vector_index_still_evaluates(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """Control for the two guards above.
+
+        Without an embedder the vector arm is dead by definition (and is on SQLite
+        regardless), so NULL embeddings are the EXPECTED state and must not be
+        refused. Without this, the guards could be 'always raise' and both tests
+        above would still pass.
+        """
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        assert run.status is EvaluationStatus.passed

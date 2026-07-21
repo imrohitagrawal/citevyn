@@ -312,7 +312,7 @@ fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version
 Exit `0` means it measured at or above `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE`
 and the promote below will succeed with **no** `force`. Exit `2` means the
 candidate genuinely measured below threshold — read `failure_summary` on the run
-(`GET /v1/admin/evaluations?index_version=<candidate>`) before doing anything
+(`GET /v1/admin/evaluations?index_version=<candidate>` to find the run, then `GET /v1/admin/evaluations/{run_id}` for its `failure_summary` — the list endpoint returns counts only) before doing anything
 else, because that is the gate working, not the gate misfiring.
 
 Run it AFTER ingesting into the candidate and BEFORE promoting. A promote with
