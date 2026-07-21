@@ -284,19 +284,24 @@ a definition is too narrow, a flag is wrong, a section is missing.
 **Procedure:** edit the `.md` file, re-run ingestion, then promote:
 
 ```bash
-python -m app.worker.cli run          # rebuilds v-local from the edited corpus
-# then promote via POST /v1/admin/index_versions/{version}/promote?force=true
+python -m app.worker.cli run                          # rebuilds v-local from the edited corpus
+python -m app.worker.cli evaluate --index-version v-local   # writes the EvaluationRun the gate reads
+# then promote via POST /v1/admin/index_versions/{version}/promote
 ```
 
-**The promote is gated, and on a real deployment it will refuse (#210).**
-Promotion requires a completed `EvaluationRun` for the candidate that measured
-at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`); nothing in
-the deployed application writes those rows, so the honest promote returns
-`409 promotion_blocked`. `?force=true` promotes anyway and records the override
-— `force`, `measured_pass_rate`, `threshold`, `evaluation_run_id` — in the
-`promote_index` audit row. Run `make golden` against the corrected corpus first
-and state that in your notes; with `force` you are the gate. Re-promoting the
-already-active index is a no-op and is never blocked.
+**The promote is gated (#210), and the evaluate step is what satisfies it
+(#216).** Promotion requires a completed `EvaluationRun` for the candidate that
+measured at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`).
+`evaluate` measures the candidate against the shipped corpus and persists that
+run, so a corrected corpus that still retrieves correctly promotes with **no**
+`force`.
+
+If `evaluate` exits `2` the candidate measured below threshold — read
+`failure_summary` (`GET /v1/admin/evaluations?index_version=<candidate>` to find the run, then `GET /v1/admin/evaluations/{run_id}` for its `failure_summary` — the list endpoint returns counts only) and fix
+the corpus rather than reaching for `force`. `?force=true` still promotes anyway
+and records the override — `force`, `measured_pass_rate`, `threshold`,
+`evaluation_run_id` — in the `promote_index` audit row; with `force` you are the
+gate. Re-promoting the already-active index is a no-op and is never blocked.
 
 **What happens automatically (no manual cache flush needed):**
 

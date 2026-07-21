@@ -301,14 +301,26 @@ the threshold promotes). Refusing is also what happens when there is **no**
 completed run, or when the run's metrics cannot be read — "unevaluated" is not
 "passing".
 
-Nothing in the deployed application writes `EvaluationRun` rows. The evaluation
-service is read-only and the golden suite runs on your laptop and in CI, not on
-the machine. So **your first production promote will 409**, and so will the
-promote you do after a corpus correction ([RUNBOOK §3.7](RUNBOOK.md)), and so
-will an emergency index rollback (§6). That is not a bug — it is the gate
-telling you the truth: this index has no evidence attached to it.
+**Produce the evidence, then promote.** Since #216 the worker can measure a
+candidate index against the shipped corpus and write the `EvaluationRun` row the
+gate reads:
 
-The supported way through is the audited override:
+```bash
+fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version <candidate>"
+```
+
+Exit `0` means it measured at or above `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE`
+and the promote below will succeed with **no** `force`. Exit `2` means the
+candidate genuinely measured below threshold — read `failure_summary` on the run
+(`GET /v1/admin/evaluations?index_version=<candidate>` to find the run, then `GET /v1/admin/evaluations/{run_id}` for its `failure_summary` — the list endpoint returns counts only) before doing anything
+else, because that is the gate working, not the gate misfiring.
+
+Run it AFTER ingesting into the candidate and BEFORE promoting. A promote with
+no completed run still 409s — "unevaluated" is not "passing".
+
+The audited override remains for the cases that legitimately have no evidence: a
+bootstrap (the seed's `_activate` path), or an emergency index rollback (§6) that
+cannot wait for a suite. It is no longer the ordinary path:
 
 ```bash
 curl -sS -X POST \

@@ -144,6 +144,28 @@ async def _activate(session: AsyncSession, index_version: str) -> str:
     as a candidate. Re-running the bootstrap seed must never silently yank the
     live index out from under a promoted build.
 
+    DOCUMENTED EXCEPTION to the promotion gate (#210 / #216)
+    -------------------------------------------------------
+    This is the ONE promotion path in the repository that does not go through
+    :func:`app.services.index_versions.promote_version`, and therefore not
+    through its evaluation gate. That is deliberate, not an oversight:
+
+    * it is the BOOTSTRAP. At this point the catalog has just been created and
+      no :class:`EvaluationRun` can exist for it — the gate would refuse every
+      time, so a seed of an empty stack would be impossible without ``force``,
+      and a bootstrap that always forces teaches nothing;
+    * it is also how ``v1`` was promoted on the first Fly deploy;
+    * the two guards below bound the blast radius to exactly the bootstrap
+      case: if any OTHER index version is already active (an operator ran
+      ``citevyn-worker run`` and promoted through the gated API), this leaves
+      the live index alone and parks the seed as a candidate.
+
+    Anything that promotes a rebuilt index — as opposed to bootstrapping an
+    empty one — must go through the gated service, with
+    ``citevyn-worker evaluate --index-version <candidate>``
+    (:mod:`app.worker.promotion_eval`) supplying the evidence. Do not widen this
+    function into a general promote helper.
+
     Returns a short status string for the summary line.
     """
     row = await session.get(IndexVersion, index_version)

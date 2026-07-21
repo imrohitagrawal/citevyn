@@ -30,13 +30,21 @@ Design notes
   promote path cannot accidentally route around it.
 * The gate refuses when there is no usable evidence at all, not
   just when the evidence is bad: "unevaluated" is not "passing".
-  Nothing in the deployed application writes
-  :class:`EvaluationRun` rows today (the evaluation service is
-  read-only; the golden suite runs on a laptop and in CI), so
-  "no completed run" is the state production is always in. That
-  is what ``force=True`` is for: it promotes anyway and records
-  the override — including the measured rate and the threshold —
-  in the audit row, so a bypass is evidence rather than a hole.
+  Evidence is produced by ``citevyn-worker evaluate
+  --index-version <candidate>``
+  (:mod:`app.worker.promotion_eval`), which measures the
+  CANDIDATE index against the shipped corpus and writes the
+  :class:`EvaluationRun` row this gate reads (#216). Run it after
+  ingesting and before promoting, and the gate decides on a
+  measurement.
+* ``force=True`` remains for the cases that genuinely have no
+  evidence — a bootstrap, or an emergency rollback that cannot
+  wait for a suite — and records the override, including the
+  measured rate and the threshold, in the audit row, so a bypass
+  is evidence rather than a hole. It is no longer the ordinary
+  path; before #216 nothing wrote these rows at all, so every
+  promote needed it, which is exactly how ``force`` becomes
+  muscle memory.
 """
 
 from __future__ import annotations
@@ -123,6 +131,15 @@ async def _latest_completed_run(
     index_version: str,
 ) -> EvaluationRun | None:
     """Return the newest *completed* evaluation run for ``index_version``.
+
+    Deliberately NOT filtered by ``suite_name``: ANY completed run for the
+    index counts as evidence. That is intentional — a future suite (a judged
+    answer-quality pass, a latency budget) should gate promotion too, without
+    needing this predicate widened. It does mean the gate trusts whatever
+    producer wrote the row, so a new writer must be held to the same standard
+    as :mod:`app.worker.promotion_eval`: measure the CANDIDATE index, and never
+    persist a zero-case run as passing. Today that module is the only producer
+    in the deployed application.
 
     Deliberately a fresh ``SELECT`` rather than a walk through
     :attr:`IndexVersion.evaluation_run`: that relationship is
@@ -292,9 +309,12 @@ async def promote_version(
     below, which runs only when the target is a DIFFERENT version;
     it therefore sits under the gate like any other promotion.
     Re-promoting the row that is already active returns early and
-    demotes nothing. Since production has no evaluation runs at
-    all, converging a dual-active database needs the audited
-    ``force`` override, and ``docs/DEPLOY_FLY.md`` §4.3 says so.
+    demotes nothing. Converging a dual-active database therefore
+    needs evidence for the version being converged ON — run
+    ``citevyn-worker evaluate --index-version <target>`` first
+    (#216) — or the audited ``force`` override when the drift has
+    to be repaired faster than a suite can run.
+    ``docs/DEPLOY_FLY.md`` §4.3 covers both.
 
     Returns the (now-active) target row. The caller is
     responsible for committing the session.

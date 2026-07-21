@@ -208,9 +208,12 @@ produced #210.
 
 **Escape hatch.** `POST .../promote?force=true` bypasses gate 1 and records
 `force`, `measured_pass_rate`, `threshold` and `evaluation_run_id` in the
-`promote_index` audit row. It exists because nothing in the deployed
-application writes `EvaluationRun` rows, so *every* real promote — including the
-§8 rollback below — is refused without it. See
+`promote_index` audit row. Since #216 it is no longer the ordinary path:
+`citevyn-worker evaluate --index-version <candidate>` measures the candidate
+against the shipped corpus and writes the `EvaluationRun` the gate reads, so a
+normal promote passes gate 1 on evidence. `force` is now reserved for the cases
+that genuinely have none — the bootstrap seed, and an emergency §8 index
+rollback that cannot wait for a suite. See
 [DEPLOY_FLY §4.3](DEPLOY_FLY.md).
 
 ## 8. Rollback Strategy
