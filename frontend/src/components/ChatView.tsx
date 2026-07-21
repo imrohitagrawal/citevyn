@@ -167,7 +167,12 @@ export function ChatView({
                       ⚠ NO SOURCE — REFUSED
                     </div>
                   )}
-                  <div className={m.streaming ? "streaming" : ""}>
+                  {/* ``message-body`` is the stable hook for the answer text.
+                      Before it existed this div carried NO class when idle, so
+                      there was nothing for `white-space: pre-wrap` to attach to
+                      — which is how that rule was lost in the landing-design
+                      port (2503dd4) and never noticed. */}
+                  <div className={"message-body" + (m.streaming ? " streaming" : "")}>
                     {m.text}
                     {m.streaming && <span className="typing-cursor" />}
                   </div>
