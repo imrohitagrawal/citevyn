@@ -39,7 +39,7 @@ treated as a feature, not a failure.
 | Type-check (pyright strict)       | 🟢 green | `make typecheck`                            |
 | Lint (ruff + format)              | 🟢 green | `make lint`                                 |
 | Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
-| Smoke (curl against uvicorn)      | 🟢 green | `make smoke`                                |
+| Smoke (`/health` against the stack) | 🟢 green | `make smoke`                              |
 | E2E (Playwright, chat UI)         | 🟢 green | `make e2e`                                  |
 | Production guard: `stub` rejected | 🟢 green | unit test in `test_llm_factory_singleton.py` |
 | Production guard: router empty    | 🟢 green | unit test in `test_llm_factory_singleton.py` |
@@ -68,7 +68,8 @@ demonstrably reproducible.
   Redis-backed atomic implementation that survives uvicorn
   multi-worker (no in-process state).
 - **Operator-first observability.** Structured logs, request-ID
-  propagation, `/health` (DB-free) and `/metrics` endpoints.
+  propagation, and `/health`, `/health/dependencies` and
+  `/health/index` probes.
 
 ---
 
@@ -122,12 +123,19 @@ cd backend && uv run uvicorn app.main:app --reload
 
 # 5. Smoke test
 curl -s http://localhost:8000/health
-# Use whatever key matches your CITEVYN_DEMO_API_KEY. The
-# .env.example ships ``local-demo-key`` as the local default.
-curl -s -H "X-API-Key: $CITEVYN_DEMO_API_KEY" \
+
+# 6. Ask a question. Asking is a two-step flow: open a session, then
+#    post a message to it. Use whatever key matches your
+#    CITEVYN_DEMO_API_KEY; .env.example ships ``local-demo-key``.
+SESSION_ID=$(curl -s -X POST http://localhost:8000/v1/sessions \
+     -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
      -H "Content-Type: application/json" \
-     -d '{"query":"How do I install Claude Code?"}' \
-     http://localhost:8000/v1/ask | jq
+     -d '{"channel":"chat"}' | jq -r .session_id)
+
+curl -s -X POST "http://localhost:8000/v1/sessions/$SESSION_ID/messages" \
+     -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"message":"How do I install Claude Code?","answer_style":"short"}' | jq
 ```
 
 `make demo` is the single command that brings up the local stack;
@@ -148,8 +156,8 @@ production subset lives in
 | Var                              | Required        | Purpose                                           |
 |----------------------------------|-----------------|---------------------------------------------------|
 | `CITEVYN_DATABASE_URL`           | yes             | Async SQLAlchemy URL (Postgres or SQLite)         |
-| `CITEVYN_DEMO_API_KEY`           | yes             | Bearer token for `/v1/*` demo routes              |
-| `CITEVYN_ADMIN_API_KEY`          | yes             | Bearer token for `/v1/admin/*` and ingestion      |
+| `CITEVYN_DEMO_API_KEY`           | yes             | `Authorization: Bearer` token for `/v1/*` demo routes |
+| `CITEVYN_ADMIN_API_KEY`          | yes             | `X-Admin-API-Key` header value for `/v1/admin/*` (not bearer) |
 | `CITEVYN_REDIS_URL`              | recommended     | Enables the Redis rate limiter (production)       |
 | `CITEVYN_LLM_PROVIDER`           | optional        | `stub` (default) or `anthropic`                   |
 | `CITEVYN_LLM_API_KEY`            | if `anthropic`  | Live answer generation                            |
@@ -277,14 +285,29 @@ Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
 
 ## 8. HTTP API
 
+Demo routes authenticate with `Authorization: Bearer $CITEVYN_DEMO_API_KEY`;
+admin routes use the `X-Admin-API-Key` header (**not** bearer).
+
 | Endpoint                    | Auth   | Purpose                                       |
 |-----------------------------|--------|-----------------------------------------------|
 | `GET  /health`              | none   | DB-free liveness probe                        |
-| `GET  /metrics`             | none   | Prometheus-format counters / histograms       |
-| `POST /v1/ask`              | demo   | Citation-backed Q&A                            |
+| `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
+| `GET  /health/index`        | none   | Active index + vector-arm health              |
+| `POST /v1/sessions`         | demo   | Open a chat session                           |
+| `GET  /v1/sessions/{session_id}` | demo | Fetch a session                            |
+| `DELETE /v1/sessions/{session_id}` | demo | End a session                            |
+| `POST /v1/sessions/{session_id}/messages` | demo | **Ask a question** — citation-backed Q&A |
+| `GET  /v1/sessions/{session_id}/messages/{message_id}` | demo | Fetch one answer + its citations |
+| `POST /v1/search/exact`     | demo   | Exact-term lookup                             |
+| `GET  /v1/admin/budget`     | admin  | Spend against the daily budget ([`docs/COST_CONTROLS.md`](docs/COST_CONTROLS.md)) |
+| `GET  /v1/admin/evaluations[/{run_id}]` | admin | List / fetch `evaluation_runs`     |
+| `GET  /v1/admin/index_versions[/{index_version}]` | admin | List / fetch `index_versions` |
 | `POST /v1/admin/index_versions/{index_version}/promote` | admin | Promote an `index_version` to live (evaluation-gated; `?force=true` overrides, audited) |
-| `GET  /v1/admin/ingestion_jobs` | admin | List recent ingestion jobs                |
-| `GET  /v1/admin/index_versions` | admin | List `index_versions`                     |
+| `GET  /v1/admin/ingestion_jobs[/{job_id}]` | admin | List / fetch ingestion jobs        |
+
+There is no `POST /v1/ask` and no `GET /metrics`; the table above is
+asserted against `app.openapi()` by
+[`backend/tests/test_readme_endpoints.py`](backend/tests/test_readme_endpoints.py).
 
 Reference: [`docs/API_SPEC.md`](docs/API_SPEC.md). The request
 shape, refusal envelope, and rate-limit headers are normative.
@@ -293,8 +316,10 @@ shape, refusal envelope, and rate-limit headers are normative.
 
 ## 9. Security model
 
-- **Bearer-token auth.** Two keys (`demo`, `admin`) — never shared
-  in production. Tokens are read from env, never logged.
+- **Two API keys**, never shared in production, read from env and
+  never logged: `demo` is sent as `Authorization: Bearer <key>`,
+  `admin` as the `X-Admin-API-Key` header (deliberately *not* bearer,
+  so a leaked demo token cannot be replayed against admin routes).
 - **Production headers** (set by Caddy): HSTS, X-Frame-Options,
   X-Content-Type-Options, Referrer-Policy, Permissions-Policy,
   restrictive CSP. The API never sets cookies.
@@ -323,8 +348,8 @@ stack answers; there is no second hand-written catalog to keep in sync
 
 ```bash
 make demo          # one-shot stack bring-up
-make test          # 361 tests, no DB needed
-make smoke         # end-to-end curl against a real uvicorn
+make test          # backend suite, no DB needed
+make smoke         # compose stack up, assert /health, tear down
 make verify        # lint + typecheck + test (the pre-merge gate)
 make db-down       # tear down the stack (keeps volumes)
 ```
@@ -358,8 +383,9 @@ the opt-in integration tests against a real Postgres if you set
   sliding-window logic is exercised in-process.
 - **Postgres tests** — opt-in via the `postgres` marker; require
   a live Postgres + pgvector. Run only in CI or pre-release.
-- **Smoke** — `scripts/smoke.sh` boots a real uvicorn against
-  SQLite, hits `/v1/ask` end-to-end, and tears down.
+- **Smoke** — `scripts/smoke.sh` brings up the compose stack
+  (Postgres), waits for the API, asserts `/health` reports
+  `healthy`, and tears down.
 
 Test strategy: [`docs/TEST_STRATEGY.md`](docs/TEST_STRATEGY.md).
 
@@ -416,11 +442,13 @@ Full template + changelog format: [`.github/RELEASE.md`](.github/RELEASE.md).
 - **Structured logs** (JSON) with `request_id`, `user_role`,
   `route`, `status`, `latency_ms`. Propagated to the worker via
   the `X-Request-ID` header.
-- **Metrics** at `/metrics` (Prometheus format). Counters cover
-  asks, refusals, cache hits, embedding latency; histograms cover
-  retrieval and answer latency.
-- **Health** at `/health` (DB-free). DB-touching readiness is
-  included as a separate `/ready` (worker only).
+- **Metrics** — there is no `/metrics` endpoint. Per-call cost and
+  latency land in the `provider_calls` table and are surfaced by
+  `GET /v1/admin/budget` (see `docs/COST_CONTROLS.md`); a Prometheus
+  exporter is not shipped.
+- **Health** at `/health` (DB-free). DB-touching readiness is a
+  separate `/health/dependencies`, and index/vector-arm health is
+  `/health/index`. There is no `/ready`.
 - **Sentry** — drop-in compatible via `SENTRY_DSN` env (not
   shipped by default; see `docs/OBSERVABILITY.md`).
 
