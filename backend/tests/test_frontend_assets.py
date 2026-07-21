@@ -7,9 +7,14 @@ the public demo showed a blank icon as a result.
 
 A favicon that 404s is cosmetic. The *class* is not: a hero image, an OG preview or a
 web-app manifest referenced the same way would fail exactly as silently. So this module
-does not assert "a favicon exists" — it parses the shell, extracts EVERY local asset
-reference, and asserts each one resolves to a real file. Adding a new ``<link>`` or
-``<img>`` to a file that was never created now fails the build.
+does not assert "a favicon exists" — it parses the shell and asserts that referenced
+local assets resolve to real files. Adding a new ``<link>``, ``<img>`` or ``og:image``
+pointing at a file that was never created now fails the build.
+
+Coverage is the ``href`` / ``src`` / ``content`` attributes, quoted. Known gaps, none of
+which occur in the shell today: unquoted attribute values, ``srcset`` candidate lists,
+``poster``, and CSS ``url()`` inside ``<style>`` or a ``style=`` attribute. They are
+listed rather than silently omitted so the next person knows what this does not catch.
 
 Resolution mirrors how Vite actually serves these:
 
@@ -47,20 +52,31 @@ _REF_RE = re.compile(r"""\b(href|src|content)\s*=\s*["']([^"']+)["']""")
 
 _REMOTE_PREFIXES = ("http://", "https://", "data:", "//", "mailto:", "#")
 
+# A trailing ``.ext`` on the final path segment — what separates an asset path from a
+# page path in a ``content`` value. Query strings and fragments are stripped first.
+_HAS_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{2,5}$")
+
 
 def _local_refs(html: str) -> list[str]:
     """Local asset references in ``html`` — remote and inline URLs dropped.
 
-    ``content`` carries free prose as often as it carries a path (``<meta
-    name="description">``, ``theme-color``), so a ``content`` value counts only when it
-    is shaped like one. ``href``/``src`` are always references, so they are not narrowed
-    that way — a bare relative ``href="app.css"`` must still be checked.
+    ``content`` carries free prose and non-asset URLs as often as it carries a path
+    (``<meta name="description">``, ``theme-color``, ``og:url``), so a ``content`` value
+    counts only when it is BOTH rooted and has a file extension. Requiring the extension
+    matters: ``<meta property="og:url" content="/about">`` is a page reference, not an
+    asset, and demanding ``frontend/public/about`` would be a false build failure.
+
+    ``href``/``src`` are always references, so they are not narrowed that way — a bare
+    relative ``href="app.css"`` must still be checked.
     """
-    refs = []
+    refs: list[str] = []
     for attr, value in _REF_RE.findall(html):
         if value.startswith(_REMOTE_PREFIXES):
             continue
-        if attr == "content" and not value.startswith(("/", "./", "../")):
+        bare = value.split("?", 1)[0].split("#", 1)[0]
+        if attr == "content" and not (
+            value.startswith(("/", "./", "../")) and _HAS_EXTENSION_RE.search(bare)
+        ):
             continue
         refs.append(value)
     return refs
@@ -200,9 +216,16 @@ def test_the_committed_raster_icons_match_their_generator() -> None:
 def test_every_local_asset_resolves_in_the_build_output(refs: list[str]) -> None:
     """When a build exists, assert the STRONGER claim: the asset is in what ships.
 
-    ``dist/`` is gitignored, so this cannot be the primary gate — it skips on a clean
-    checkout. It runs for anyone who has built, and inside the API image build, where it
-    is the closest available proxy for "what production actually serves".
+    ``dist/`` is gitignored, so this cannot be the primary gate — it SKIPS on a clean
+    checkout, and it skips in CI, whose ``pytest + lint`` job never builds the frontend.
+    It runs only for someone who has built locally.
+
+    Being explicit about that because the alternative is worse than a gap: the API image
+    build (``infra/docker/Dockerfile.api``) does not run pytest and does not copy
+    ``backend/tests/`` into any stage, so nothing automated checks the *built* output
+    today. The source-tree test above is the real gate — it does not skip anywhere — and
+    it is sufficient, because Vite copies ``public/`` verbatim and cannot drop a file
+    that exists. This one only adds confirmation when a build happens to be present.
     """
     built = (DIST / "index.html").read_text(encoding="utf-8")
     missing = [
