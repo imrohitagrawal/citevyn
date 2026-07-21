@@ -1981,6 +1981,16 @@ footer {
   animation: cv-fadeup 0.4s ease both;
 }
 
+/* Answers arrive with real newlines (paragraph breaks, bullet lists, steps).
+   Without this they collapse into one run-on blob — the #215 / B1 regression,
+   introduced by 2503dd4 and invisible to 94 jsdom tests because jsdom does not
+   compute CSS. Guarded by tests/answer-format.spec.ts, which asserts rendered
+   line-box COUNT rather than this property, so the guard survives the markdown
+   container overriding it later. */
+.message.bot .message-body {
+  white-space: pre-wrap;
+}
+
 .message.bot .streaming {
   display: inline;
 }

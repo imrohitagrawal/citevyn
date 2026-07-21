@@ -30,7 +30,17 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     url: "http://localhost:3000",
-    reuseExistingServer: true,
+    // Do NOT reuse. Playwright cannot inspect the env of a server it adopts, so
+    // a leftover `npm run dev` (started from ``.env.local``, which sets
+    // VITE_API_LIVE=true) silently defeats the ``VITE_API_LIVE: "false"``
+    // override below and the entire chat suite fails against a backend that
+    // isn't running. That is precisely what happened here: a 19-hour-old dev
+    // server turned a green suite into 13 phantom failures that read as an app
+    // regression. With reuse off, a stray server causes a LOUD port conflict
+    // instead of a quietly wrong result — the failure mode you can debug.
+    // (The conventional `!process.env.CI` does not help: the contamination is a
+    // LOCAL problem, and that setting keeps reuse switched on locally.)
+    reuseExistingServer: false,
     timeout: 120000,
     stdout: "pipe",
     stderr: "pipe",

@@ -43,7 +43,11 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     url: "http://localhost:3000",
-    reuseExistingServer: true,
+    // Must match playwright.config.ts: never adopt a server whose env we cannot
+    // inspect. This config is the one CI actually runs, and the failure mode
+    // here is the worst kind -- a stray demo-mode server makes the live tests
+    // read `DEMO` from the badge and `test.skip` themselves into a SILENT GREEN.
+    reuseExistingServer: false,
     timeout: 120000,
     stdout: "pipe",
     stderr: "pipe",
