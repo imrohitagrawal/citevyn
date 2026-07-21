@@ -60,13 +60,21 @@ def test_release_command_runs_migrations_via_python_dash_m(
     assert release_command.endswith("upgrade head")
 
 
-def test_machine_is_the_measured_256mb_shared_cpu_shape(
+def test_machine_is_a_single_shared_cpu_of_a_deliberate_size(
     fly_config: dict[str, Any],
 ) -> None:
+    """The machine shape is an owner decision, so pin it rather than infer it.
+
+    The memory figure moved 256mb -> 512mb for the first real deploy (the
+    measured app RSS is ~103 MiB, but the PEAK is ingestion, not serving).
+    This assertion exists so that change can never happen silently: a bump is
+    a bump in the monthly bill, and ``fly.toml`` says in its own comments that
+    the value is not to be changed without asking.
+    """
     vms = fly_config["vm"]
     assert len(vms) == 1, "this deployment is deliberately a single machine"
     assert vms[0]["size"] == "shared-cpu-1x"
-    assert vms[0]["memory"] == "256mb"
+    assert vms[0]["memory"] == "512mb"
 
 
 def test_machine_scales_to_zero(fly_config: dict[str, Any]) -> None:

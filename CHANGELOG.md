@@ -7,6 +7,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The browser UI is served from the API at `/`.** `infra/docker/Dockerfile.api`
+  gained a Node stage that builds `frontend/dist` (the bundle is gitignored, so a
+  host-built copy would be absent or stale in a remote `fly deploy`), and
+  `app/main.py` mounts it with `StaticFiles(html=True)` **after** every router.
+  One origin serves both the UI and the API: no CORS, and the deployment stays one
+  subdomain deep, which matters because Cloudflare's free Universal SSL covers only
+  one level. A missing bundle is a no-op, so tests and local runs are unaffected.
+  `VITE_API_LIVE=true` is passed explicitly at build time — anything else leaves the
+  chat answering from its canned in-bundle `knowledgeBase`, a demo that looks
+  perfect and never reaches the backend.
+
+### Changed
+- **`fly.toml` machine memory 256mb -> 512mb**, on the owner's explicit instruction
+  for the first real deploy. The measured serving RSS is ~103 MiB; the peak is
+  ingestion, not serving. `test_fly_config.py` pins the new value so the size (and
+  the bill) cannot move silently.
+
+### Fixed
+- **`docs/DEPLOY_FLY.md` had four errors that only surface when you actually run
+  it**, all found during the first live deploy:
+  - `fly apps create` does **not** allocate IPs (only `fly launch` does). Without
+    `fly ips allocate-v4 --shared` + `allocate-v6` the deploy succeeds, health
+    checks pass, and every request fails `Could not resolve host` — which reads as
+    a DNS or TLS fault and is neither. Added as §1b.
+  - §2.2 said to use the `rediss://` TLS URL. Wrong for a Fly-provisioned Upstash
+    database, which lives on Fly's private 6PN network (`fdaa:…`, unreachable from
+    the internet) and has no public TLS endpoint. The section now documents
+    `fly redis create` (no separate Upstash account), its TTY requirement, the
+    $200/mo ProdPack prompt to decline, and records that Lua `EVAL` is **verified
+    working** against a live instance with the real limiter script.
+  - §4.4 said "ask a question through the UI" without saying where the UI was
+    hosted — it was not hosted anywhere. Now points at `/` and documents the two
+    request shapes that cost a debugging round-trip (`Authorization: Bearer`, not
+    `X-Demo-API-Key`; body field `message`, not `content`), plus the fact that a
+    refusal is often correct rather than a regression.
+  - §5.1 recommended a `CNAME`; `fly certs add` asks for `A` + `AAAA`.
+
+### Added
 - **Index promotion is now gated on evaluation quality (#210).**
   `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`) had been declared
   since Slice 8 and read by nothing, while `RELEASE_PLAN` §7 and the deploy

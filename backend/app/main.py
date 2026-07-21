@@ -19,11 +19,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.answer.orchestrator import OrchestratorError
@@ -116,7 +118,39 @@ def create_app() -> FastAPI:
     app.add_exception_handler(OrchestratorError, _orchestrator_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, _validation_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, _unhandled_exception_handler)  # type: ignore[arg-type]
+
+    _mount_frontend(app)
     return app
+
+
+# Where the Docker image puts the built browser bundle (see
+# ``infra/docker/Dockerfile.api``, stage 0). Overridable so a developer can
+# point at ``frontend/dist`` from a local ``npm run build``.
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend_dist"
+
+
+def _mount_frontend(app: FastAPI) -> None:
+    """Serve the built browser bundle at ``/`` when it is present.
+
+    Mounted LAST, after every router, because a mount at ``/`` is a
+    catch-all: anything registered afterwards would be shadowed by it.
+    Ordering here is the difference between ``/v1/ask`` reaching the API and
+    ``/v1/ask`` returning ``index.html`` with a 200 — which would look like a
+    broken client rather than a routing bug.
+
+    Absent directory is a NO-OP on purpose. The bundle is gitignored and only
+    exists inside the image, so tests, local uvicorn runs and any tooling that
+    imports ``create_app`` must keep working without it. In that case ``/``
+    stays a 404, which is exactly the pre-existing API-only behaviour.
+
+    ``html=True`` serves ``index.html`` for ``/`` and falls back to it for
+    unknown paths, which is what a single-page app needs.
+    """
+    if not FRONTEND_DIST.is_dir():
+        _logger.info("frontend_bundle_absent", extra={"path": str(FRONTEND_DIST)})
+        return
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+    _logger.info("frontend_bundle_mounted", extra={"path": str(FRONTEND_DIST)})
 
 
 def _resolve_request_id(request: Request) -> str:

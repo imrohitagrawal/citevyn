@@ -69,6 +69,24 @@ scaffolder and will offer to overwrite the `fly.toml` in this repo, along with
 provisioning a Fly Postgres/Redis you are deliberately not using (Neon and
 Upstash are free; Fly's are not).
 
+### 1b. Allocate IP addresses (first deploy only)
+
+**`fly apps create` does not allocate any IPs — only `fly launch` does.** This
+is the one consequence of avoiding `launch` that bites, and it bites late: the
+deploy succeeds, the machine passes its health check, and then *every* request
+fails with `Could not resolve host: citevyn.fly.dev`, because the hostname has
+no address records at all. It reads like a DNS or TLS problem and is neither.
+
+```bash
+fly ips allocate-v4 --shared   # FREE. A dedicated v4 is $2/mo and is not needed.
+fly ips allocate-v6            # free
+fly ips list                   # both should be listed before you deploy
+```
+
+`--shared` is deliberate: a shared IPv4 is fine for an HTTP service behind
+Fly's proxy, and a dedicated one would quietly add $2/mo to a deployment whose
+entire budget is a couple of dollars.
+
 ---
 
 ## 2. Create the managed data resources
@@ -103,10 +121,47 @@ Upstash are free; Fly's are not).
 
 ### 2.2 Upstash (Redis)
 
-1. Create a Redis database in the **same region** (`us-east-1` for `iad`).
-2. Copy the connection string. Use the **TLS** URL — it starts `rediss://`
-   (two `s`), not `redis://`. Upstash only accepts TLS on the public
-   endpoint.
+**Provision it through Fly, not by signing up to Upstash separately.** Fly
+resells Upstash as a first-party integration, so there is no second account to
+create and no separate dashboard:
+
+```bash
+fly redis create --name citevyn-redis --org personal --region iad \
+    --no-replicas --disable-eviction
+```
+
+This command **requires a TTY** — piping input or wrapping it in `script` both
+fail with `Error: prompt: non interactive`, so it cannot be automated. Two
+answers matter:
+
+* **ProdPack: no.** It is a $200/mo add-on and the prompt is easy to skim past.
+* **Plan: Pay-as-you-go.** $0 base + $0.20 per 100K commands. At the demo's
+  30 q/h ceiling that is cents a month. (Pass it interactively — `--plan
+  "pay-as-you-go"` is rejected with `plan "pay-as-you-go" not found`; the flag
+  string does not match what `fly redis plans` prints.)
+
+Then read the URL back with `fly redis status citevyn-redis`.
+
+> **Use the `redis://` URL exactly as Fly prints it — NOT `rediss://`.**
+> A Fly-provisioned Upstash database lives on Fly's private 6PN network: the
+> host resolves to an `fdaa:…` address that is unreachable from the public
+> internet (verify with `nc -z fly-citevyn-redis.upstash.io 6379` from your
+> laptop — it fails, by design). There is no public TLS endpoint to point
+> `rediss://` at. The TLS advice applies only if you sign up to Upstash
+> directly and use their public endpoint, which this runbook no longer does.
+
+**Lua `EVAL` is supported** — verified against a live instance with the real
+`_SLIDING_WINDOW_LUA` script from `app/core/rate_limit.py`, which returned
+`{1, 1}` (allowed) then `{0, 1}` (denied) on a `limit=1` bucket. `SCRIPT LOAD`
+works too. The rate limiter depends on this, so it was worth proving rather
+than assuming.
+
+> **`fly redis reset` is a breaking change.** It rotates the password and the
+> running app immediately starts returning
+> `503 rate_limiter_unavailable` until you follow it with a matching
+> `fly secrets set CITEVYN_REDIS_URL=…` and give it ~30s to propagate. Do not
+> paste the new URL into a chat, ticket or terminal transcript — read it with
+> `fly redis status` and pipe it straight into `fly secrets set`.
 3. Free tier is 500K commands/month. The limiter spends a handful of
    commands per question, so the demo is nowhere near it; the number to watch
    is a runaway client, which is what the rate limiter itself is for.
@@ -322,8 +377,46 @@ curl -sS https://citevyn.stackclimb.com/health/index           # vector_arm must
 embedder and every embedding is NULL — semantic search is off and answers
 degrade to lexical matching. Fix the embedding provider/key and re-seed.
 
-Then ask a real question through the UI and confirm it comes back **grounded
-and cited**. A 200 is not a passing demo.
+Then ask a real question and confirm it comes back **grounded and cited**. A
+200 is not a passing demo.
+
+The image serves the browser bundle at `/` (built in stage 0 of
+`infra/docker/Dockerfile.api` and mounted by `_mount_frontend` in
+`app/main.py`), so the UI and the API share one origin — no CORS, and the
+deployment stays one subdomain deep. Open `https://citevyn.stackclimb.com/`
+and ask there.
+
+To check the same thing from a terminal, note two shapes that are easy to get
+wrong (both cost a debugging round-trip the first time):
+
+* auth is **`Authorization: Bearer <key>`**, not an `X-Demo-API-Key` header;
+* the message field is **`message`**, not `content` (a wrong name gives a
+  422 whose `details.errors[].input` is `<redacted>`, so the body you sent is
+  deliberately not echoed back).
+
+```bash
+SID=$(curl -sS -X POST https://citevyn.stackclimb.com/v1/sessions \
+        -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+        -H 'Content-Type: application/json' -d '{}' \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+
+curl -sS -X POST "https://citevyn.stackclimb.com/v1/sessions/$SID/messages" \
+  -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"How does streaming work in the Claude API?"}'
+```
+
+Expect `retrieval_strategy: hybrid_reranked` and a non-empty `citations`
+array. **A refusal is not automatically a bug** — the corpus is six documents,
+and asking about something it does not cover (`prompt caching`, say) *should*
+return "I couldn't find a grounded answer". Check the corpus with `grep -ri
+"<term>" backend/app/worker/sources/` before treating a refusal as a
+regression; refusing beats inventing, and that is the product working.
+
+Two more routing facts worth knowing before you call something broken: a
+question with no product noun ("what is prompt caching?") routes to
+`domain: unsupported` by design, and the same question naming a product
+("...in the Claude API") routes correctly. Test with the product named.
 
 ---
 
@@ -337,14 +430,23 @@ and cited**. A 200 is not a passing demo.
    fly ips list          # note the IPv4 (shared or dedicated) and IPv6
    ```
 
-2. In Cloudflare, in the `stackclimb.com` zone, create:
+2. In Cloudflare, in the `stackclimb.com` zone, create **both** records, using
+   the addresses `fly ips list` just printed:
 
    | Type | Name | Target | Proxy status |
    |---|---|---|---|
-   | `CNAME` | `citevyn` | `citevyn.fly.dev` | **DNS only (grey cloud)** |
+   | `A` | `citevyn` | the shared IPv4, e.g. `66.241.124.66` | **DNS only (grey cloud)** |
+   | `AAAA` | `citevyn` | the dedicated IPv6, e.g. `2a09:8280:1::151:b3cc:0` | **DNS only (grey cloud)** |
 
-   A `CNAME` to the `.fly.dev` name is preferred over `A`/`AAAA` records: it
-   keeps following Fly if the app's shared IP changes.
+   These are what `fly certs add` itself asks for — run it (step 3) and it
+   prints a "Recommended DNS setup" block naming exactly these two record
+   types.
+
+   > An earlier version of this runbook recommended a `CNAME` to
+   > `citevyn.fly.dev` instead, on the reasoning that it would keep following
+   > a changing shared IP. Fly's own instruction is `A` + `AAAA`, so follow
+   > that. If you use a `CNAME`, add only the `A`-side equivalent — do not mix
+   > a `CNAME` with `AAAA` records on the same name, which is invalid DNS.
 
 3. Issue the certificate:
 
