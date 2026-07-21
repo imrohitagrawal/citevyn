@@ -282,10 +282,9 @@ Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
 | `GET  /health`              | none   | DB-free liveness probe                        |
 | `GET  /metrics`             | none   | Prometheus-format counters / histograms       |
 | `POST /v1/ask`              | demo   | Citation-backed Q&A                            |
-| `POST /v1/admin/ingest`     | admin  | Enqueue an ingestion job                      |
-| `POST /v1/admin/promote`    | admin  | Promote an `index_version` to live            |
-| `GET  /v1/admin/jobs`       | admin  | List recent ingestion jobs                    |
-| `GET  /v1/admin/indexes`    | admin  | List `index_versions`                         |
+| `POST /v1/admin/index_versions/{index_version}/promote` | admin | Promote an `index_version` to live (evaluation-gated; `?force=true` overrides, audited) |
+| `GET  /v1/admin/ingestion_jobs` | admin | List recent ingestion jobs                |
+| `GET  /v1/admin/index_versions` | admin | List `index_versions`                     |
 
 Reference: [`docs/API_SPEC.md`](docs/API_SPEC.md). The request
 shape, refusal envelope, and rate-limit headers are normative.

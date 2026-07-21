@@ -81,6 +81,7 @@ def test_error_envelope_model_validates_against_pydantic() -> None:
         (APIErrorCode.index_unavailable, 503),
         (APIErrorCode.cost_limit_reached, 503),
         (APIErrorCode.rate_limiter_unavailable, 503),
+        (APIErrorCode.promotion_blocked, 409),
         (APIErrorCode.internal_error, 500),
     ],
 )

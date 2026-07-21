@@ -319,10 +319,39 @@ POST /internal/v1/evaluations/run
 ## 13. Admin: Promote Index
 
 ```http
-POST /internal/v1/indexes/{index_version}/promote
+POST /v1/admin/index_versions/{index_version}/promote?force=false
 ```
 
-Promotion is allowed only if required evaluation gates pass.
+(The path was previously documented as `/internal/v1/indexes/{index_version}/promote`,
+which has never existed and 404s — see `docs/DEPLOY_FLY.md` §4.3. Corrected here
+against the implemented route in `backend/app/api/routes/admin.py`.)
+
+Promotion is gated on evaluation quality. The service resolves the candidate's
+newest **completed** `EvaluationRun` and refuses with **409 `promotion_blocked`**
+unless the measured pass rate is at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE`
+(default `0.95`; a rate exactly equal to the threshold promotes). A candidate with
+no completed run, or whose run metrics cannot be read, is refused as well —
+"unevaluated" is not "passing". Only gate 1 of `docs/RELEASE_PLAN.md` §7 is
+machine-enforced; gates 2-5 remain operator-verified.
+
+`?force=true` promotes regardless. It is not a hole: the `promote_index` audit row
+records `force`, `measured_pass_rate`, `threshold` and `evaluation_run_id` — on the
+non-forced path too.
+
+Re-promoting the index that is already active is a no-op that returns 200 and is
+never gated.
+
+```json
+{
+  "request_id": "req_009",
+  "index_version": "index_v12",
+  "status": "active",
+  "promoted_at": "2026-06-07T10:05:00Z",
+  "already_active": false,
+  "forced": true,
+  "measured_pass_rate": null
+}
+```
 
 ## 14. Health Checks
 
@@ -357,3 +386,4 @@ GET /health/dependencies
 | index_unavailable | Active index unavailable (reserved — not currently emitted) |
 | cost_limit_reached | Demo daily cost cap reached |
 | rate_limiter_unavailable | Rate limiter backend (Redis) unreachable — request rejected fail-closed |
+| promotion_blocked | Index promotion refused: the candidate has no completed evaluation run, or measured a pass rate below `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` |

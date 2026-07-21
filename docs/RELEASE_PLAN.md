@@ -190,11 +190,28 @@ Fetch docs
 
 Promotion gates:
 
-1. Golden pass rate >=95%.
-2. Citation correctness >=95%.
-3. Retrieval hit rate >=95%.
-4. Domain guardrail critical failures = 0.
-5. Ingestion errors = 0.
+1. Golden pass rate >=95%. **Machine-enforced (#210).**
+   `promote_version` reads the candidate's newest *completed* `EvaluationRun`
+   and refuses with HTTP 409 `promotion_blocked` unless the measured pass rate
+   is at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`;
+   equality passes). A candidate with no completed run, or with unreadable
+   metrics, is refused too — "unevaluated" is not "passing".
+2. Citation correctness >=95%. *Operator-verified.*
+3. Retrieval hit rate >=95%. *Operator-verified.*
+4. Domain guardrail critical failures = 0. *Operator-verified.*
+5. Ingestion errors = 0. *Operator-verified.*
+
+Gates 2-5 are **not** checked by any code. They are listed here as the release
+checklist, and this section is annotated because an earlier version presented
+all five as one enforced list — which is precisely the prose-vs-code drift that
+produced #210.
+
+**Escape hatch.** `POST .../promote?force=true` bypasses gate 1 and records
+`force`, `measured_pass_rate`, `threshold` and `evaluation_run_id` in the
+`promote_index` audit row. It exists because nothing in the deployed
+application writes `EvaluationRun` rows, so *every* real promote — including the
+§8 rollback below — is refused without it. See
+[DEPLOY_FLY §4.3](DEPLOY_FLY.md).
 
 ## 8. Rollback Strategy
 

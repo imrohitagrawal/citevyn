@@ -49,6 +49,16 @@ class APIErrorCode(StrEnum):
     # behaviour, #167) lied about WHICH dependency was down and sent
     # operators chasing the search index during a Redis outage.
     rate_limiter_unavailable = "rate_limiter_unavailable"
+    # Spec-side, and the only 409 in the app: the admin promote endpoint
+    # refuses a candidate index whose newest completed evaluation run did
+    # not measure at least ``index_promotion_min_pass_rate`` — including
+    # the case where there is no completed run at all, because
+    # "unevaluated" is not "passing". It is a conflict rather than a
+    # validation error: the request is well-formed, the CANDIDATE's state
+    # is what makes it unacceptable, and re-issuing it with ``?force=true``
+    # (audited) is the documented way through. Operators branch on this
+    # code in the deploy runbook, so it is part of the published contract.
+    promotion_blocked = "promotion_blocked"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -71,6 +81,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.index_unavailable: 503,
     APIErrorCode.cost_limit_reached: 503,
     APIErrorCode.rate_limiter_unavailable: 503,
+    APIErrorCode.promotion_blocked: 409,
     APIErrorCode.internal_error: 500,
 }
 

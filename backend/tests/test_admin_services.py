@@ -64,16 +64,28 @@ async def _make_run(
     *,
     index_version: str,
     status: EvaluationStatus = EvaluationStatus.passed,
+    metrics: dict[str, object] | None = None,
+    started_at: datetime | None = None,
 ) -> EvaluationRun:
-    """Insert an evaluation run for ``index_version`` and return it."""
-    now = datetime.now(UTC)
+    """Insert an evaluation run for ``index_version`` and return it.
+
+    The default ``metrics`` blob is the admin-API shape
+    (``cases_total``/``cases_passed``) and scores 15/15, i.e. a pass rate
+    of 1.0 — enough to clear the #210 promotion gate. Tests that care
+    about the gate itself pass their own blob and ``started_at``.
+    """
+    now = started_at or datetime.now(UTC)
     row = EvaluationRun(
         suite_name="golden_v1",
         index_version=index_version,
         started_at=now,
-        completed_at=now,
+        completed_at=None if status is EvaluationStatus.running else now,
         status=status,
-        metrics={"cases_total": 15, "cases_passed": 15, "cases_failed": 0},
+        metrics=(
+            {"cases_total": 15, "cases_passed": 15, "cases_failed": 0}
+            if metrics is None
+            else metrics
+        ),
         failure_summary={},
     )
     session.add(row)
@@ -212,6 +224,10 @@ async def test_promote_version_demotes_current_active(
     """Promoting a candidate moves the current active to previous_good."""
     await seed_catalog(session)
     candidate = await _make_candidate(session, index_version="v2")
+    # The promotion gate (#210) needs evidence; ``_make_run`` writes a
+    # 15/15 passing run. This test is about the demotion mechanics, so we
+    # give it a clean pass rather than forcing past the gate.
+    await _make_run(session, index_version="v2")
 
     updated = await index_version_service.promote_version(
         session,
@@ -252,6 +268,7 @@ async def test_promote_version_recovers_from_dual_active_state(
     await session.flush()
 
     candidate = await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2")  # satisfy the #210 gate
 
     updated = await index_version_service.promote_version(
         session,
@@ -278,6 +295,7 @@ async def test_promote_version_writes_audit_event(session: AsyncSession) -> None
 
     await seed_catalog(session)
     candidate = await _make_candidate(session, index_version="v2")
+    run = await _make_run(session, index_version="v2")  # satisfy the #210 gate
 
     await index_version_service.promote_version(
         session,
@@ -301,6 +319,11 @@ async def test_promote_version_writes_audit_event(session: AsyncSession) -> None
     assert audit.resource_id == candidate.index_version
     assert audit.user_id == "admin-actor"
     assert audit.metadata_.get("request_id") == "req-audit"
+    # A clean promote is evidenced as loudly as a forced one (#210).
+    assert audit.metadata_.get("force") is False
+    assert audit.metadata_.get("measured_pass_rate") == 1.0
+    assert audit.metadata_.get("threshold") == 0.95
+    assert audit.metadata_.get("evaluation_run_id") == str(run.run_id)
 
 
 @pytest.mark.asyncio
@@ -348,6 +371,463 @@ async def test_promote_version_raises_when_target_missing(
             request_id="req-404",
         )
     assert exc_info.value.index_version == "does-not-exist"
+
+
+# ---------------------------------------------------------------------------
+# promote_version — evaluation gate (#210)
+#
+# The threshold under test is the shipped default, 0.95. These tests
+# deliberately do not override it (except the one that proves it IS the
+# setting being read), so they also assert that the default has not
+# drifted out from under the deploy runbook.
+# ---------------------------------------------------------------------------
+
+
+async def _promote_candidate(
+    session: AsyncSession,
+    *,
+    index_version: str = "v2",
+    force: bool = False,
+) -> IndexVersion:
+    """Promote ``index_version`` with the service's default arguments."""
+    return await index_version_service.promote_version(
+        session,
+        index_version=index_version,
+        admin_user_id="admin",
+        request_id="req-gate",
+        force=force,
+    )
+
+
+@pytest.mark.asyncio
+async def test_promote_version_allows_pass_rate_above_threshold(
+    session: AsyncSession,
+) -> None:
+    """A run comfortably above the gate promotes."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2", metrics={"pass_rate": 0.99})
+
+    updated = await _promote_candidate(session)
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_is_gated_when_force_is_not_passed_at_all(
+    session: AsyncSession,
+) -> None:
+    """The ``force`` parameter DEFAULTS to off.
+
+    Called deliberately without a ``force`` kwarg, rather than through
+    ``_promote_candidate``, because the thing under test is the default in
+    the signature. The route always passes ``force=`` explicitly, so nothing
+    on the HTTP surface pins it; without this test the default was held in
+    place only by an assertion inside an audit-content test, and flipping it
+    to ``True`` would un-gate every direct service caller (worker, CLI, any
+    future promote path) with a fully green suite.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked):
+        await index_version_service.promote_version(
+            session,
+            index_version="v2",
+            admin_user_id="admin",
+            request_id="req-gate",
+        )
+
+
+@pytest.mark.asyncio
+async def test_promote_version_allows_pass_rate_exactly_at_threshold(
+    session: AsyncSession,
+) -> None:
+    """A rate EQUAL to the threshold promotes.
+
+    The gate is ``rate >= threshold``. Written as ``>`` it would reject a
+    candidate that measured exactly the configured minimum — the classic
+    off-by-one that makes a 0.95 gate refuse a 0.95 index, and one that no
+    "clearly passing" or "clearly failing" fixture can catch.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2", metrics={"pass_rate": 0.95})
+
+    updated = await _promote_candidate(session)
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_blocks_pass_rate_just_below_threshold(
+    session: AsyncSession,
+) -> None:
+    """A rate a hair under the threshold refuses, and says both numbers."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    run = await _make_run(session, index_version="v2", metrics={"pass_rate": 0.94})
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    exc = exc_info.value
+    assert exc.reason == "below_threshold"
+    assert exc.measured_pass_rate == 0.94
+    assert exc.threshold == 0.95
+    assert exc.run_id == run.run_id
+    # The operator has to decide whether to re-run the eval or to force;
+    # "how far short" is the entire input to that decision.
+    assert "0.94" in str(exc)
+    assert "0.95" in str(exc)
+
+    # Nothing moved: the seeded active index is still active.
+    v1 = await index_version_service.get_version(session, index_version="v1")
+    assert v1 is not None
+    assert v1.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_blocks_when_no_evaluation_run_exists(
+    session: AsyncSession,
+) -> None:
+    """No run at all refuses. "Unevaluated" must not silently pass.
+
+    This is the state production is always in — nothing in the deployed
+    app writes ``EvaluationRun`` rows — so a gate that failed open here
+    would be no gate at all.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    exc = exc_info.value
+    assert exc.reason == "no_evaluation_run"
+    assert exc.measured_pass_rate is None
+    assert exc.run_id is None
+    assert "0.95" in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_promote_version_ignores_a_still_running_evaluation(
+    session: AsyncSession,
+) -> None:
+    """A ``running`` run is not evidence, so it cannot satisfy the gate."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.running,
+        metrics={"pass_rate": 1.0},
+    )
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    # Not "unusable metrics" — the run is skipped entirely, so from the
+    # gate's point of view there is no completed run at all.
+    assert exc_info.value.reason == "no_evaluation_run"
+
+
+@pytest.mark.asyncio
+async def test_promote_version_skips_running_run_to_an_older_completed_one(
+    session: AsyncSession,
+) -> None:
+    """Newest COMPLETED wins — not newest-then-check.
+
+    A build that is mid-evaluation must not mask the last finished
+    verdict, in either direction.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.passed,
+        metrics={"pass_rate": 1.0},
+        started_at=base,
+    )
+    await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.running,
+        metrics={"pass_rate": 0.0},
+        started_at=base.replace(day=2),
+    )
+
+    updated = await _promote_candidate(session)
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_uses_the_newest_completed_run(
+    session: AsyncSession,
+) -> None:
+    """A newer FAILED run supersedes an older PASSED one."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    base = datetime(2026, 7, 1, tzinfo=UTC)
+    await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.passed,
+        metrics={"pass_rate": 1.0},
+        started_at=base,
+    )
+    newer = await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.failed,
+        metrics={"pass_rate": 0.4},
+        started_at=base.replace(day=2),
+    )
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    assert exc_info.value.run_id == newer.run_id
+    assert exc_info.value.measured_pass_rate == 0.4
+
+
+@pytest.mark.asyncio
+async def test_promote_version_ignores_runs_for_a_different_index(
+    session: AsyncSession,
+) -> None:
+    """Evidence for ``v3`` must not let ``v2`` through."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_candidate(session, index_version="v3", source_hash="sha256:v3")
+    await _make_run(session, index_version="v3", metrics={"pass_rate": 1.0})
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    assert exc_info.value.reason == "no_evaluation_run"
+
+
+@pytest.mark.asyncio
+async def test_promote_version_derives_pass_rate_from_case_counts(
+    session: AsyncSession,
+) -> None:
+    """No ``pass_rate`` key → derive it from ``cases_passed/cases_total``.
+
+    The two producers of a metrics blob disagree: the golden scorer emits
+    ``pass_rate``, while the admin API's summariser (and every fixture)
+    writes the ``cases_*`` counts. Both must resolve.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(
+        session,
+        index_version="v2",
+        metrics={"cases_total": 50, "cases_passed": 49, "cases_failed": 1},
+    )
+
+    updated = await _promote_candidate(session)  # 0.98 >= 0.95
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_blocks_on_derived_rate_below_threshold(
+    session: AsyncSession,
+) -> None:
+    """The derived rate is gated the same as an explicit one."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(
+        session,
+        index_version="v2",
+        metrics={"cases_total": 50, "cases_passed": 40, "cases_failed": 10},
+    )
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    assert exc_info.value.measured_pass_rate == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        pytest.param({}, id="empty"),
+        pytest.param({"pass_rate": "0.99"}, id="string-rate"),
+        pytest.param({"pass_rate": None}, id="null-rate"),
+        pytest.param({"pass_rate": True}, id="bool-rate"),
+        pytest.param({"pass_rate": 1.5}, id="rate-above-one"),
+        pytest.param({"pass_rate": -0.1}, id="negative-rate"),
+        pytest.param({"cases_total": 0, "cases_passed": 0}, id="zero-cases"),
+        pytest.param({"cases_passed": 10}, id="counts-missing-total"),
+        pytest.param({"total": 10, "passed": 10}, id="scorer-count-keys-only"),
+        # The zero-case fail-open. ``scoring.py`` scores an empty suite
+        # ``1.0``, so these two blobs are what a golden run that collected
+        # NOTHING looks like — a flawless rate over no evidence at all.
+        pytest.param(
+            {"pass_rate": 1.0, "total": 0, "passed": 0},
+            id="zero-case-scorer-blob",
+        ),
+        pytest.param(
+            {"pass_rate": 1.0, "cases_total": 0, "cases_passed": 0},
+            id="zero-case-admin-blob",
+        ),
+        # A corrupt headline metric discredits the counts beside it rather
+        # than quietly falling through to them.
+        pytest.param(
+            {"pass_rate": 42.0, "cases_total": 10, "cases_passed": 10},
+            id="corrupt-rate-with-good-counts",
+        ),
+        pytest.param(
+            {"pass_rate": float("nan"), "cases_total": 10, "cases_passed": 10},
+            id="nan-rate-with-good-counts",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_promote_version_blocks_on_unusable_metrics(
+    session: AsyncSession,
+    metrics: dict[str, object],
+) -> None:
+    """A run we cannot score is not a pass.
+
+    ``scorer-count-keys-only`` is deliberate: ``backend/tests/golden/
+    scoring.py`` emits ``total``/``passed`` alongside ``pass_rate``, and we
+    must NOT read those as the ``cases_*`` counts — blending the two
+    conventions would score one producer's blob with the other's
+    semantics.
+    """
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2", metrics=metrics)
+
+    with pytest.raises(index_version_service.IndexPromotionBlocked) as exc_info:
+        await _promote_candidate(session)
+
+    assert exc_info.value.reason == "unusable_metrics"
+    assert exc_info.value.measured_pass_rate is None
+
+
+@pytest.mark.asyncio
+async def test_promote_version_reads_the_threshold_from_settings(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bar is the setting, not a constant baked into the service."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE", "0.5")
+    get_settings.cache_clear()
+
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2", metrics={"pass_rate": 0.6})
+
+    # 0.6 would be refused at the 0.95 default; at 0.5 it promotes.
+    updated = await _promote_candidate(session)
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_promote_version_force_promotes_without_any_run(
+    session: AsyncSession,
+) -> None:
+    """``force=True`` is the documented way past an unevaluated index."""
+    from app.models.audit_events import AuditEvent
+    from app.models.enums import AuditAction
+
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+
+    updated = await _promote_candidate(session, force=True)
+    await session.commit()
+    assert updated.status is IndexStatus.active
+
+    rows = (
+        (
+            await session.execute(
+                select(AuditEvent).where(AuditEvent.action == AuditAction.promote_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    # The override is evidence, not a hole.
+    assert rows[0].metadata_.get("force") is True
+    assert rows[0].metadata_.get("threshold") == 0.95
+    assert rows[0].metadata_.get("measured_pass_rate") is None
+    assert rows[0].metadata_.get("evaluation_run_id") is None
+
+
+@pytest.mark.asyncio
+async def test_promote_version_force_records_the_rate_it_overrode(
+    session: AsyncSession,
+) -> None:
+    """Forcing past a BAD run still records how bad it was."""
+    from app.models.audit_events import AuditEvent
+    from app.models.enums import AuditAction
+
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    run = await _make_run(
+        session,
+        index_version="v2",
+        status=EvaluationStatus.failed,
+        metrics={"pass_rate": 0.3},
+    )
+
+    updated = await _promote_candidate(session, force=True)
+    await session.commit()
+    assert updated.status is IndexStatus.active
+
+    audit = (
+        (
+            await session.execute(
+                select(AuditEvent).where(AuditEvent.action == AuditAction.promote_index)
+            )
+        )
+        .scalars()
+        .one()
+    )
+    assert audit.metadata_.get("force") is True
+    assert audit.metadata_.get("measured_pass_rate") == 0.3
+    assert audit.metadata_.get("evaluation_run_id") == str(run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_promote_version_idempotent_path_is_never_gated(
+    session: AsyncSession,
+) -> None:
+    """Re-promoting the ACTIVE index is a no-op, gate or no gate.
+
+    The seeded ``v1`` is active and has no evaluation run. Promotion is
+    the only API that can repair a database drifted into a dual-active
+    state, so a gate placed above the idempotent early return would make
+    that repair impossible in exactly the environment (production) that
+    has no runs.
+    """
+    await seed_catalog(session)
+
+    updated = await index_version_service.promote_version(
+        session,
+        index_version="v1",
+        admin_user_id="admin",
+        request_id="req-noop-gate",
+    )
+    assert updated.status is IndexStatus.active
+
+
+@pytest.mark.asyncio
+async def test_measured_pass_rate_matches_what_the_gate_sees(
+    session: AsyncSession,
+) -> None:
+    """The route reports the same number the gate acted on."""
+    await seed_catalog(session)
+    await _make_candidate(session, index_version="v2")
+    await _make_run(session, index_version="v2", metrics={"pass_rate": 0.42})
+
+    assert await index_version_service.measured_pass_rate(session, index_version="v2") == 0.42
+    assert await index_version_service.measured_pass_rate(session, index_version="v1") is None
 
 
 # ---------------------------------------------------------------------------

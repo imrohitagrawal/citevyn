@@ -90,6 +90,11 @@ class PromoteIndexResponse(BaseModel):
     status: IndexStatus
     promoted_at: datetime
     already_active: bool
+    # Whether the caller asked to bypass the evaluation gate, and what the
+    # gate measured. Reported back so the operator's terminal (and their
+    # deploy notes) record which path the promotion actually took.
+    forced: bool
+    measured_pass_rate: float | None
 
 
 class EvaluationRunSummary(BaseModel):
@@ -164,6 +169,31 @@ def _http_404(message: str, *, request_id: str) -> HTTPException:
     )
 
 
+def _http_409_promotion_blocked(
+    exc: index_version_service.IndexPromotionBlocked,
+    *,
+    request_id: str,
+) -> HTTPException:
+    """Build a 409 for a promotion the evaluation gate refused.
+
+    The structured fields ride in ``details`` rather than only in the
+    message so an operator (or a script) can see the two numbers that
+    matter without parsing prose.
+    """
+    return error_response(
+        request_id=request_id,
+        code=APIErrorCode.promotion_blocked,
+        message=str(exc),
+        details={
+            "reason": exc.reason,
+            "index_version": exc.index_version,
+            "measured_pass_rate": exc.measured_pass_rate,
+            "threshold": exc.threshold,
+            "evaluation_run_id": None if exc.run_id is None else str(exc.run_id),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # /v1/admin/index_versions
 # ---------------------------------------------------------------------------
@@ -223,12 +253,20 @@ async def promote_index_version(
     index_version: str,
     admin_user_id: Annotated[str, Depends(rate_limited_admin)],
     db: Annotated[AsyncSession, Depends(get_session)],
+    force: bool = Query(default=False),  # noqa: B008
 ) -> PromoteIndexResponse:
     """Promote ``index_version`` to :data:`IndexStatus.active`.
 
     Idempotent on the same target: if the row is already
     active, the call returns ``already_active=True`` and
     does not write an audit row.
+
+    The service refuses (409 ``promotion_blocked``) when the
+    candidate's newest completed evaluation run measured a pass
+    rate below ``CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE``, or when
+    there is no such run at all. ``?force=true`` promotes anyway
+    and records the override in the audit log. The gate itself
+    lives in the service, not here, so every caller is gated.
     """
     request_id = _request_id(request)
     actor = admin_user_id or ADMIN_USER_ID
@@ -240,18 +278,27 @@ async def promote_index_version(
         raise _http_404(f"index_version not found: {index_version}", request_id=request_id)
     already_active = prior.status is IndexStatus.active
 
+    # The same reading the gate acts on (same service function), reported
+    # back on the response so a forced promote shows what was overridden.
+    measured = await index_version_service.measured_pass_rate(db, index_version=index_version)
+
     try:
         updated = await index_version_service.promote_version(
             db,
             index_version=index_version,
             admin_user_id=actor,
             request_id=request_id,
+            force=force,
         )
     except index_version_service.IndexVersionNotFound as exc:
         # Race: row deleted between the snapshot and the lock.
         raise _http_404(
             f"index_version not found: {exc.index_version}", request_id=request_id
         ) from exc
+    except index_version_service.IndexPromotionBlocked as exc:
+        # The candidate has no passing evidence. Nothing was committed —
+        # ``get_session`` rolls back — so the active index is untouched.
+        raise _http_409_promotion_blocked(exc, request_id=request_id) from exc
 
     # The service does not commit (it leaves the transaction
     # boundary to the caller). The route's FastAPI dependency
@@ -271,6 +318,14 @@ async def promote_index_version(
         status=updated.status,
         promoted_at=promoted_at,
         already_active=already_active,
+        # ``force`` is what the CALLER asked for; ``forced`` reports whether an
+        # override was actually exercised. On the already-active path the gate
+        # never ran and no audit row was written, so reporting ``forced=true``
+        # there would put an override in a deploy note that has no counterpart
+        # in the audit log — and leave a later reviewer unable to tell whether
+        # the audit log had lost a row.
+        forced=force and not already_active,
+        measured_pass_rate=measured,
     )
 
 

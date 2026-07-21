@@ -4,6 +4,50 @@ All notable changes to CiteVyn are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Index promotion is now gated on evaluation quality (#210).**
+  `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`) had been declared
+  since Slice 8 and read by nothing, while `RELEASE_PLAN` §7 and the deploy
+  runbook described promotion gates as if they were enforced. `promote_version`
+  now resolves the candidate's newest **completed** `EvaluationRun` (a `running`
+  run is not evidence), reads `metrics["pass_rate"]` — falling back to
+  `cases_passed / cases_total` — and refuses unless the measured rate is at
+  least the threshold. A rate exactly equal to the threshold promotes. A
+  candidate with no completed run, or with metrics that cannot be read, is
+  refused as well: "unevaluated" is not "passing". The gate lives in the
+  service, not the route, so every caller is gated.
+
+  Refusals surface as a new error code **`promotion_blocked` → HTTP 409**
+  (`docs/API_SPEC.md` §15), whose body names both the measured rate and the
+  required threshold. `PromoteIndexResponse` gains `forced` and
+  `measured_pass_rate`.
+
+  > **Operator note.** Nothing in the deployed application writes
+  > `EvaluationRun` rows — the evaluation service is read-only and the golden
+  > suite runs on a laptop and in CI. So the promote step in
+  > `docs/DEPLOY_FLY.md` §4.3 now returns **409** on a real stack, and so do the
+  > corpus-correction promote (`RUNBOOK` §3.7) and the emergency index rollback
+  > (`RELEASE_PLAN` §8). Use `POST .../promote?force=true`, which promotes
+  > anyway and records `force`, `measured_pass_rate`, `threshold` and
+  > `evaluation_run_id` in the `promote_index` audit row — those fields are
+  > recorded on the non-forced path too, so a clean promote is evidenced as
+  > loudly as an override. Run `make golden` yourself before forcing. Only gate
+  > 1 of `RELEASE_PLAN` §7 is machine-enforced; gates 2-5 remain
+  > operator-verified. Re-promoting the already-active index is still a no-op
+  > and is never blocked — but note that this no-op is *not* the dual-active
+  > repair. Converging a dual-active database means promoting a **different**
+  > version, which runs the demotion loop below the gate; that repair is
+  > therefore gated too, and needs `?force=true` on a stack with no evaluation
+  > runs.
+
+### Fixed
+- **`docs/API_SPEC.md` §13 documented a promote path that does not exist.**
+  It said `POST /internal/v1/indexes/{index_version}/promote`, which 404s;
+  `docs/DEPLOY_FLY.md` had already recorded the discrepancy. Corrected to the
+  implemented route, `POST /v1/admin/index_versions/{index_version}/promote`.
+
 ## [0.11.0] — 2026-07-21
 
 > **Operator summary for this release.** Four items need action, in this order:
