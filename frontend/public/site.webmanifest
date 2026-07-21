@@ -1,0 +1,19 @@
+{
+  "name": "CiteVyn — Cited answers for your AI tools",
+  "short_name": "CiteVyn",
+  "description": "A cited RAG assistant for Claude, Claude Code, Codex, and Gemini.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#faf9f6",
+  "theme_color": "#ffd75e",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

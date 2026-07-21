@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="CiteVyn">
+  <!--
+    CiteVyn mark (#221). A full-bleed rounded tile in the brand highlighter yellow
+    (--hl) carrying a bold "C" with squared, bracket-like terminals.
+
+    The tile carries its own contrast field, so the mark reads against BOTH light and
+    dark browser chrome. Only the tile colour is theme-aware (--hl light / dark from
+    frontend/src/styles/tokens.css); the ink glyph is deliberately theme-INVARIANT,
+    matching --hl-ink, because it is always drawn on yellow.
+
+    Geometry is mirrored by scripts/gen_favicon.py, which generates favicon.ico and
+    apple-touch-icon.png for clients that cannot render SVG.
+  -->
+  <style>
+    .tile { fill: #ffd75e; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #f6c453; }
+    }
+  </style>
+  <rect class="tile" width="32" height="32" rx="7" />
+  <path
+    fill="none"
+    stroke="#1c1b19"
+    stroke-width="4.5"
+    d="M 21.14 22.13 A 8 8 0 1 1 21.14 9.87"
+  />
+</svg>

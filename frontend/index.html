@@ -2,7 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      Icons live in frontend/public/, which Vite copies verbatim into dist/ and the
+      API then serves from its StaticFiles mount. favicon.ico is listed alongside the
+      SVG because plenty of clients (Windows, pinned tabs, feed readers) request
+      /favicon.ico by convention regardless of what these tags say.
+      backend/tests/test_frontend_assets.py asserts every local href below resolves.
+    -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffd75e" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161618" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
