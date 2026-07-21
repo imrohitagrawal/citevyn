@@ -30,13 +30,21 @@ Design notes
   promote path cannot accidentally route around it.
 * The gate refuses when there is no usable evidence at all, not
   just when the evidence is bad: "unevaluated" is not "passing".
-  Nothing in the deployed application writes
-  :class:`EvaluationRun` rows today (the evaluation service is
-  read-only; the golden suite runs on a laptop and in CI), so
-  "no completed run" is the state production is always in. That
-  is what ``force=True`` is for: it promotes anyway and records
-  the override — including the measured rate and the threshold —
-  in the audit row, so a bypass is evidence rather than a hole.
+  Evidence is produced by ``citevyn-worker evaluate
+  --index-version <candidate>``
+  (:mod:`app.worker.promotion_eval`), which measures the
+  CANDIDATE index against the shipped corpus and writes the
+  :class:`EvaluationRun` row this gate reads (#216). Run it after
+  ingesting and before promoting, and the gate decides on a
+  measurement.
+* ``force=True`` remains for the cases that genuinely have no
+  evidence — a bootstrap, or an emergency rollback that cannot
+  wait for a suite — and records the override, including the
+  measured rate and the threshold, in the audit row, so a bypass
+  is evidence rather than a hole. It is no longer the ordinary
+  path; before #216 nothing wrote these rows at all, so every
+  promote needed it, which is exactly how ``force`` becomes
+  muscle memory.
 """
 
 from __future__ import annotations

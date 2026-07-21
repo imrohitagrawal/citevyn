@@ -1,0 +1,15 @@
+{"id": "claude_api_rate_limit", "question": "What is the default rate limit for the Claude API?", "expected_source": "claude_api"}
+{"id": "claude_api_auth_header", "question": "Which header carries the Claude API key on a request?", "expected_source": "claude_api"}
+{"id": "claude_api_model_families", "question": "Which Claude API model families are available?", "expected_source": "claude_api"}
+{"id": "claude_code_install", "question": "How do I install Claude Code?", "expected_source": "claude_code"}
+{"id": "claude_code_hooks", "question": "What are hooks in Claude Code?", "expected_source": "claude_code"}
+{"id": "claude_code_memory_file", "question": "What is the CLAUDE.md memory file in Claude Code?", "expected_source": "claude_code"}
+{"id": "claude_code_cost", "question": "How is Claude Code billed?", "expected_source": "claude_code"}
+{"id": "codex_cli_install", "question": "How do I install the Codex CLI?", "expected_source": "codex"}
+{"id": "codex_sandbox", "question": "What does the Codex sandbox restrict?", "expected_source": "codex"}
+{"id": "codex_approval_modes", "question": "What approval modes does Codex support?", "expected_source": "codex"}
+{"id": "gemini_api_auth_header", "question": "Which header authenticates a Gemini API request?", "expected_source": "gemini_api"}
+{"id": "gemini_api_streaming", "question": "How do I stream a response from the Gemini API?", "expected_source": "gemini_api"}
+{"id": "gemini_api_embeddings", "question": "How does the Gemini API produce embeddings?", "expected_source": "gemini_api"}
+{"id": "citevyn_pro", "question": "Is CiteVyn Pro available yet?", "expected_source": "citevyn"}
+{"id": "citevyn_coverage", "question": "Which products does CiteVyn cover?", "expected_source": "citevyn"}

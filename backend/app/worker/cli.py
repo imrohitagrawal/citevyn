@@ -5,6 +5,7 @@ Usage:
     citevyn-worker run                       # ingest all MVP sources
     citevyn-worker run --source codex        # ingest one source
     citevyn-worker run --index-version v-test
+    citevyn-worker evaluate --index-version v-test   # promotion gate evidence
     citevyn-worker list-sources
 
 The CLI is intentionally thin: it builds a single
@@ -44,8 +45,11 @@ from app.embeddings import (
     metered_embedder,
     validate_embedder_provider,
 )
+from app.embeddings.factory import configured_embedder_identity
+from app.models.enums import EvaluationStatus
 from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source, list_source_names
 from app.worker.fetchers import FetchError, build_fetcher
+from app.worker.promotion_eval import evaluate_index
 from app.worker.runner import (
     IngestionRunner,
     RunResult,
@@ -69,6 +73,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_list_sources()
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "evaluate":
+        return _cmd_evaluate(args)
     parser.print_help()
     return 1
 
@@ -93,6 +99,48 @@ def _cmd_run(args: argparse.Namespace) -> int:
     sessionmaker = get_sessionmaker()
     sources = _resolve_sources(args.source)
     return asyncio.run(drive(runner, sessionmaker, sources, args.index_version))
+
+
+def _cmd_evaluate(args: argparse.Namespace) -> int:
+    """Run the promotion suite against ``--index-version`` and persist the result.
+
+    Exit code is the promotion verdict, so a deploy script can gate on it:
+    ``0`` when the run PASSED (the index is promotable without ``force``),
+    ``2`` when it FAILED (mirroring ``_cmd_run``'s non-zero), and the usual
+    traceback/``1`` when the suite itself is unusable
+    (:class:`PromotionEvalError` — missing file, empty suite, duplicate id),
+    which is a different failure and must not read as "index is bad".
+
+    The embedder is built exactly as ``build_runner`` builds it — the REAL,
+    metered one under a real provider — because the suite must measure the same
+    vector arm the product serves, and because query embeddings are spend that
+    the §9 budget has to see.
+    """
+    settings = get_settings()
+    validate_embedder_provider(settings)
+    embedder = metered_embedder(build_embedder(settings), settings)
+    identity = configured_embedder_identity(settings)
+    sessionmaker = get_sessionmaker()
+
+    async def _go() -> int:
+        async with sessionmaker() as session:
+            run = await evaluate_index(
+                session,
+                index_version=args.index_version,
+                embedder=embedder,
+                embedder_identity=identity,
+            )
+        metrics = run.metrics
+        logger.info(
+            "promotion evaluation %s index_version=%s pass_rate=%s cases=%s",
+            run.status.value,
+            args.index_version,
+            metrics.get("pass_rate"),
+            metrics.get("cases_total"),
+        )
+        return 0 if run.status is EvaluationStatus.passed else 2
+
+    return asyncio.run(_go())
 
 
 async def drive(
@@ -175,6 +223,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--index-version",
         default="v-local",
         help="IndexVersion key to write to (default: v-local).",
+    )
+
+    evaluate = sub.add_parser(
+        "evaluate",
+        help="Run the promotion suite against an index version and persist an EvaluationRun.",
+    )
+    evaluate.add_argument(
+        "--index-version",
+        default="v-local",
+        help="Candidate IndexVersion key to evaluate (default: v-local).",
     )
     return parser
 

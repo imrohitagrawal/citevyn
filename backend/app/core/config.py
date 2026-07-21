@@ -295,14 +295,18 @@ class Settings(BaseSettings):
     # This comment used to say NOTHING READS THIS SETTING, and said it in
     # capitals, because an earlier version described the gate in the present
     # tense and a deploy runbook was then written promising operators a safety
-    # check that did not exist. The counterpart warning now applies: nothing in
-    # the deployed application writes ``EvaluationRun`` rows (the evaluation
-    # service is read-only; the golden suite runs on a laptop and in CI), so
-    # the real-world state is "no completed run" and every honest promote will
-    # be refused. ``force=true`` on the admin endpoint is the supported way
-    # through; it is recorded in the ``promote_index`` audit row along with the
-    # measured rate and this threshold. Gates 2-5 of §7 remain operator-
-    # verified, not machine-enforced.
+    # check that did not exist. Its counterpart warning — that nothing WROTE
+    # ``EvaluationRun`` rows, so every honest promote was refused — is also
+    # resolved: ``citevyn-worker evaluate --index-version <candidate>``
+    # (:mod:`app.worker.promotion_eval`) measures the candidate against the
+    # shipped corpus and persists the run this threshold is compared against
+    # (#216). So this setting is now read by the gate AND fed by a producer;
+    # changing it changes which indexes may go live.
+    #
+    # ``force=true`` remains for the bootstrap and emergency-rollback cases that
+    # genuinely have no evidence, recorded in the ``promote_index`` audit row
+    # along with the measured rate and this threshold. Gates 2-5 of §7 remain
+    # operator-verified, not machine-enforced.
     index_promotion_min_pass_rate: float = Field(default=0.95, ge=0.0, le=1.0)
 
     # (The former ``source_version_hash`` setting was removed alongside the
