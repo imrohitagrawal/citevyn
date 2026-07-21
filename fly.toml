@@ -164,9 +164,20 @@ primary_region = "iad"
 
 [[vm]]
   size = "shared-cpu-1x"
-  # Measured: the api holds ~103 MiB RSS and the image is 282 MB, so 256 MB
-  # is viable but has little headroom. If the machine starts getting
-  # OOM-killed, raise this BEFORE trying to trim the app — 512 MB is the next
-  # step and is still cheap.
-  memory = "256mb"
+  # Measured: the api holds ~103 MiB RSS and the image is 282 MB. 256 MB fits
+  # that, but with little headroom — and the memory PEAK is ingestion
+  # (embedding batches), not serving.
+  #
+  # Set to 512 MB on the owner's explicit instruction for the first deploy:
+  # the cost of an OOM-killed first ingest (a half-built index, a confusing
+  # failure on a stack nobody has run yet) is worse than the price
+  # difference. This is a deliberate trade of ~$1-2/mo against a smoother
+  # bring-up, not a measurement.
+  #
+  # Revisit AFTER live QA with real numbers from `fly machine status`: if
+  # steady-state serving sits comfortably inside 256 MB, dropping back is a
+  # one-line change here plus a redeploy. Do NOT change this value without
+  # asking the owner first — deployment sizing is their call, and a silent
+  # bump is a silent bill.
+  memory = "512mb"
   # (swap is configured at the top of this file — it is not a [[vm]] field.)

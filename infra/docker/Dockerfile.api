@@ -29,6 +29,47 @@
 #       citevyn/api:VERSION
 # ────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────── Stage 0: frontend builder ────────────────────────
+# Builds the React/Vite bundle so the API can serve it at ``/`` (see the
+# StaticFiles mount in app/main.py). Built HERE rather than copied from the
+# host because ``frontend/dist`` is gitignored — a host-built bundle would be
+# absent or stale in a remote ``fly deploy``, and the failure mode is a 404 at
+# ``/`` that looks like a routing bug.
+#
+# Both ARGs below are load-bearing and neither has a safe default:
+#
+# * VITE_API_LIVE MUST be the exact string "true". Anything else (including
+#   unset) leaves ``isLiveMode()`` false and the chat answers from the canned
+#   in-bundle ``knowledgeBase`` instead of the real backend — a demo that looks
+#   perfect and never touches the API. That is the single worst outcome here,
+#   so it is passed explicitly rather than defaulted.
+# * VITE_API_DEMO_KEY is baked in at build time. It is not a secret from the
+#   browser's point of view (any visitor can read it out of the bundle); it is
+#   the same anti-nuisance bearer the rate limiter buckets on. It defaults to
+#   the local value so a plain ``docker build`` still works, and the deploy
+#   passes the production key.
+#
+# VITE_API_BASE_URL is deliberately NOT set: it defaults to "", which makes
+# apiFetch use relative paths. Same-origin is the whole point of serving the
+# bundle from the API — no CORS, no second hostname.
+FROM node:22-bookworm-slim AS frontend
+
+ARG VITE_API_DEMO_KEY=local-demo-key
+ARG VITE_API_LIVE=true
+
+WORKDIR /fe
+
+# Manifest first so the (slow) npm install layer caches independently of
+# source changes — same reasoning as the uv sync split below.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN VITE_API_DEMO_KEY="${VITE_API_DEMO_KEY}" \
+    VITE_API_LIVE="${VITE_API_LIVE}" \
+    npm run build \
+    && test -f dist/index.html   # fail the build loudly rather than ship an empty mount
+
 # ─────────────────────────── Stage 1: builder ──────────────────────────────
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
@@ -109,6 +150,11 @@ COPY --from=builder --chown=appuser:appuser /build/backend/README.md /app/README
 # PYTHONPATH, and the ``alembic`` console script's builder shebang is
 # absent at runtime — see infra/docker/scripts/deploy.sh).
 COPY --from=builder --chown=appuser:appuser /build/db /db
+
+# The browser bundle from stage 0. app/main.py mounts this at ``/`` when the
+# directory exists, so the same origin serves both the UI and the API. Static
+# assets on disk — no RAM cost beyond the OS page cache.
+COPY --from=frontend --chown=appuser:appuser /fe/dist /app/frontend_dist
 
 # No curl: use python's urllib for the healthcheck (the
 # python:3.14-slim-bookworm base ships urllib + ssl).
