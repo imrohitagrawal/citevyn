@@ -16,6 +16,8 @@ prevents a blocked PR from being part of a demo cut.
 | Postgres/Redis client libs (`asyncpg`, `redis`) | ❌ | Backend tech lead + Ops | ✅ | `release-blocker` |
 | Frontend libs (`react`, `vite`, `eslint`) | ❌ | Frontend tech lead | ✅ | `release-blocker` |
 | GitHub Actions runner images (`ubuntu-*`, `actions/*`) | ❌ | Ops | ✅ | `release-blocker` |
+| Docker base images — **runtime** stage (`python:*`, `pgvector/*`, `redis:*`, `caddy:*`) | ❌ | Ops | ✅ | `release-blocker` |
+| Docker base images — **build-only** stage (`node:*`, `ghcr.io/astral-sh/uv:*`) | ❌ | None — CI `image-smoke` is the gate | ✅ | `dependencies` |
 | Security alerts (CVE) | ❌ | **all** | ✅ + manual security review | `security`, `release-blocker` |
 
 ---
@@ -88,7 +90,46 @@ Only after all four gates are green can a maintainer remove the
 `release-blocker` label. The removal must be accompanied by a comment
 that lists the commit SHA where the nightly run confirmed green.
 
-### 4. Security (CVE) — immediate escalation
+### 4. Docker base images — split by whether the image SHIPS
+
+This table previously had no row for base images at all, so a `FROM` bump fell
+through every category and got triaged by analogy. Base images are not one risk
+tier — they are two, and the split is "does this end up in the running
+container?"
+
+**Build-only stages — LOW.** `node:*` (the `frontend` stage of
+`Dockerfile.api:55`) and `ghcr.io/astral-sh/uv:*` (the `builder` stages) produce
+artifacts that are copied out; the image itself never ships. A broken bump
+cannot reach production because it cannot get past the build. The
+`image build+boot smoke` CI job (issue #82, `infra/docker/scripts/image_smoke.sh`)
+genuinely builds and boots the images, so a green run IS the evidence — no
+human reviewer adds signal on top of it.
+
+*Residual gap worth knowing:* a Dockerfile-only PR does not touch `frontend/**`,
+so the frontend workflow (type-check, unit tests, Playwright) does **not**
+trigger. The bundle is built but never exercised in a browser. Prefer merging a
+build-toolchain bump **after** substantive frontend work lands, so the new
+tests exercise it — and so a bundle oddity is not entangled with a feature
+change.
+
+**Runtime stages — CRITICAL, treat as tier 3.** `python:3.14-slim-bookworm`
+(`Dockerfile.api:118`, `Dockerfile.worker:52`), `pgvector/pgvector:pg18`,
+`redis:*` and `caddy:*` all ship. This is not theoretical: in **#34** dependabot's
+runtime-only Python 3.14 bump produced a **non-booting image** and was green all
+the way through, because at the time no CI job built or booted these images. It
+needed the *builder* stage moved in lockstep (`uv:python3.14`) plus a
+`python -m` CMD. `docker build` does not catch an interpreter/CMD break — only
+booting does.
+
+Two consequences that are load-bearing:
+
+1. `.github/dependabot.yml` groups all `docker` `FROM` refs into
+   `docker-base-images` **on purpose**, so a builder and its matching runtime
+   cannot drift apart across two separate PRs.
+2. Never split a grouped base-image PR into per-stage merges for the same
+   Dockerfile.
+
+### 5. Security (CVE) — immediate escalation
 
 **Example:** Dependabot security advisory for `fastapi<0.110.0`.
 

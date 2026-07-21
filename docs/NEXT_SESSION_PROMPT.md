@@ -293,8 +293,18 @@ demo. If either moves the golden numbers, STOP, write up before/after, and repor
 6. **Asset-guard regex gaps** in `backend/tests/test_frontend_assets.py` — misses `srcset`, CSS
    `url()`, unquoted attributes. Documented, not closed.
 7. **Stale records:** `docs/BACKLOG.md` still lists dependabot #148/#150/#151 as open; they are not.
-   Only **PR #227** is open (node 22→**26**, MAJOR) and `DEPENDABOT_TRIAGE.md` requires a named
-   reviewer — leave it and say so.
+   Only **PR #227** is open (node 22→**26**). `DEPENDABOT_TRIAGE.md` now has an explicit
+   **build-only base image** row: no human reviewer required, CI `image-smoke` is the gate, and it
+   is green. **Recommendation: merge #227 AFTER the frontend work lands**, so the new Playwright
+   coverage exercises the new toolchain and a bundle oddity is not entangled with a feature change.
+8. **[#229](https://github.com/imrohitagrawal/citevyn/issues/229) — `/health/index` and the admin
+   API report `evaluation_run_id: null` even when the index HAS passing evidence.**
+   `index_versions.evaluation_run_id` is declared in the model, the `0001` migration and the admin
+   schema, but **nothing has ever assigned it**; the gate resolves evidence the other way, via
+   `evaluation_runs.index_version`. So the health display contradicts the gate, and an operator who
+   trusts it reaches for `?force=true` — the exact habit #216 removed. Fix `evaluate_index` to set
+   it; decide deliberately whether it points at the newest run or only at passing ones, and keep
+   `_latest_completed_run` authoritative for the gate.
 
 **File GitHub issues for anything without one and index it in `BACKLOG.md`.** Currently unfiled:
 A2, B1, B2, B3, C, and E1–E6.
@@ -326,9 +336,14 @@ LIVE-OPS FACTS
 - **https://citevyn.stackclimb.com** — public, live. Fly app `citevyn`, org `personal`, region
   `iad`, ONE `shared-cpu-1x`, scale-to-zero. Neon Postgres + pgvector, Upstash Redis via Fly.
 - Active index `v1`, 42 chunks, vector arm healthy, `gemini/gemini-embedding-001@1536`.
-- **`evaluation_run_id` is `None`** — the #216 promotion gate is deployed but has no evidence, so
-  the next promote still needs `?force=true`. Fix (~15 free-tier embedding calls):
+- **The promotion gate now HAS evidence.** `citevyn-worker evaluate --index-version v1` was run
+  against production and passed (`pass_rate=1.0 cases=15`); the gate's own resolver confirms
+  `promotable WITHOUT force: True`. Re-run it after any re-ingest, since the evidence attests to the
+  corpus as it was measured:
   `fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version v1"`
+  (The machine is scale-to-zero — `curl .../health` first or `fly ssh` fails with "no started VMs".)
+- **BUT `/health/index` still reports `evaluation_run_id: null`** — see **#229**. Do not read that
+  field as "no evidence"; it is a different, never-populated column. Fixing it is in scope (E8).
 - `VITE_API_LIVE=true` is the Dockerfile default — no build-arg needed.
 - Uptime probe every 30 min; do not tighten it (each probe wakes the machine).
 
