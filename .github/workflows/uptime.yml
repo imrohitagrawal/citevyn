@@ -1,0 +1,101 @@
+# Uptime + index-health probe for the public demo.
+#
+# WHY THIS AND NOT UPTIMEROBOT:
+#   * no third-party signup, and the check lives in the repo where it is
+#     reviewed and versioned like anything else;
+#   * free — Actions minutes are unmetered on public repositories;
+#   * and it can assert SEMANTIC health, which a generic HTTP monitor cannot.
+#     A 200 from /health only proves the process is alive. The failure that
+#     actually ruins this demo is a live process serving a dead index — every
+#     answer silently degrades to lexical matching — so this probe also checks
+#     /health/index and fails on `vector_arm.status == "dead"`.
+#
+# WHY EVERY 30 MINUTES AND NOT EVERY 5:
+#   The machine is scale-to-zero, and fly.toml is explicit that this "is what
+#   makes the demo free". Every probe WAKES it, and it then idles for a few
+#   minutes before stopping again. A 5-minute probe would keep it running
+#   essentially 24/7 and turn a ~$0-2/mo deployment into a ~$3-4/mo one — the
+#   monitor would cost more than the thing it monitors. At 30 minutes the
+#   machine wakes ~48x/day instead of ~288x, an outage is caught within half an
+#   hour, and the cost design survives. Tighten the cron only if you decide
+#   faster detection is worth the running time.
+#
+#   GitHub's scheduled runs are best-effort and can be delayed under load, so
+#   treat this as "notices an outage", not "pages you in 30 minutes".
+#
+# ALERTING: a failed scheduled workflow emails the repository owner. There is
+# nothing to configure, and no secret is needed — both probed endpoints are
+# deliberately unauthenticated.
+
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: # so it can be run on demand after a deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  # A delayed run must never pile up behind the next scheduled one.
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_URL: https://citevyn.stackclimb.com
+    steps:
+      - name: Liveness — GET /health
+        run: |
+          set -euo pipefail
+          # --max-time 45, not the default: the FIRST request after an idle
+          # period pays a cold boot (measured ~7s, and the machine has to be
+          # started by Fly's proxy first). A short timeout here would report an
+          # outage that is really just scale-to-zero working as designed.
+          code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 45 --retry 2 --retry-delay 5 "$BASE_URL/health")
+          echo "GET /health -> $code"
+          cat /tmp/health.json
+          test "$code" = "200"
+
+      - name: Index health — GET /health/index (vector arm must not be dead)
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/index.json -w '%{http_code}' --max-time 45 "$BASE_URL/health/index")
+          echo "GET /health/index -> $code"
+          python3 - <<'PY'
+          import json, sys
+
+          with open("/tmp/index.json") as fh:
+              body = json.load(fh)
+
+          status = body.get("status")
+          arm = body.get("vector_arm") or {}
+          arm_status = arm.get("status")
+          ratio = arm.get("embedded_ratio")
+          match = arm.get("embedder_match")
+
+          print(f"status={status} vector_arm={arm_status} embedded_ratio={ratio} embedder_match={match}")
+
+          problems = []
+          if status != "ready":
+              problems.append(f"index status is {status!r}, expected 'ready'")
+          if arm_status == "dead":
+              # The corpus was built with the stub embedder (all-NULL vectors) or
+              # the embeddings were lost. The API still answers 200 the whole
+              # time, which is exactly why this is worth asserting.
+              problems.append("vector_arm is DEAD — semantic search is off")
+          if match is False:
+              # The configured query embedder no longer matches the one that
+              # built the index: retrieval compares vectors from two different
+              # spaces. See docs/ADR/0003.
+              problems.append("embedder_match is False — query/index embedders disagree")
+
+          if problems:
+              print("FAIL: " + "; ".join(problems), file=sys.stderr)
+              sys.exit(1)
+          print("OK: index is ready and the vector arm is healthy")
+          PY
