@@ -236,13 +236,79 @@ curl -sS -X POST \
 > running app's OpenAPI, not from memory. An earlier draft of this runbook said
 > `/internal/v1/indexes/...`, which does not exist and 404s.
 
-**Promotion does NOT gate on evaluation quality.** `promote_version`
-(`backend/app/services/index_versions.py`) demotes the current active index and
-activates the candidate — that is all. There is no pass-rate check anywhere in
-the promote path, so *you* are the gate: run `make golden` (and the judged eval
-if the change is risky) BEFORE promoting, because promotion is the moment bad
-retrieval reaches users. `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` exists as a
-setting but nothing reads it.
+**Promotion gates on evaluation quality, and on a fresh deployment that gate
+will block you.** `promote_version`
+(`backend/app/services/index_versions.py`) reads the newest *completed*
+`EvaluationRun` for the candidate and refuses with **HTTP 409
+`promotion_blocked`** unless the measured pass rate is at least
+`CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`; a rate exactly equal to
+the threshold promotes). Refusing is also what happens when there is **no**
+completed run, or when the run's metrics cannot be read — "unevaluated" is not
+"passing".
+
+Nothing in the deployed application writes `EvaluationRun` rows. The evaluation
+service is read-only and the golden suite runs on your laptop and in CI, not on
+the machine. So **your first production promote will 409**, and so will the
+promote you do after a corpus correction ([RUNBOOK §3.7](RUNBOOK.md)), and so
+will an emergency index rollback (§6). That is not a bug — it is the gate
+telling you the truth: this index has no evidence attached to it.
+
+The supported way through is the audited override:
+
+```bash
+curl -sS -X POST \
+  -H "X-Admin-API-Key: $CITEVYN_ADMIN_API_KEY" \
+  "https://citevyn.stackclimb.com/v1/admin/index_versions/<index_version>/promote?force=true"
+```
+
+`force=true` promotes anyway and writes `force`, `measured_pass_rate`,
+`threshold` and `evaluation_run_id` into the `promote_index` audit row, so the
+override is evidence, not a hole. Before you use it, **run the evaluation
+yourself** — `make golden` locally against the same corpus, and the judged eval
+if the change is risky — because promotion is the moment bad retrieval reaches
+users, and with `force` you are once again the gate. State the reason in your
+deploy notes: "forced: no in-production evaluation runner; golden 50/50 locally
+at &lt;commit&gt;".
+
+The response body tells you which path you took:
+
+```json
+{"index_version": "v2", "status": "active", "already_active": false,
+ "forced": true, "measured_pass_rate": null}
+```
+
+A 409 body names both numbers so you can see how far short the candidate fell:
+
+```json
+{"request_id": "...", "status": "error",
+ "error": {"code": "promotion_blocked",
+           "message": "index_version v2 not promoted: pass rate below the promotion gate (measured pass_rate 0.82, required >= 0.95)",
+           "details": {"reason": "below_threshold", "measured_pass_rate": 0.82,
+                       "threshold": 0.95, "evaluation_run_id": "..."}}}
+```
+
+Re-promoting the index that is already active is a no-op and is **never**
+blocked — the idempotent path returns 200 before the gate runs.
+
+**That no-op is not the dual-active repair**, and it is worth being exact about
+this because the reverse is easy to assume. If the database has drifted into a
+dual-active state (you will see `orchestrator_multiple_active_indexes` in the
+logs), the thing that converges it is the demotion loop, and that loop only runs
+when you promote a **different** version — which means it runs *below* the gate.
+So the repair is gated like any other promotion, and on a stack with no
+evaluation runs it will 409 until you pass `?force=true`. Mid-incident, that is
+the command you want:
+
+```bash
+curl -X POST -H "X-API-Key: $CITEVYN_ADMIN_API_KEY" \
+  "https://citevyn.stackclimb.com/v1/admin/index_versions/<index_version>/promote?force=true"
+```
+
+Promoting the row that is *already* active will return 200 and change nothing.
+
+Only gate 1 of [RELEASE_PLAN §7](RELEASE_PLAN.md) is machine-enforced; citation
+correctness, retrieval hit rate, guardrail failures and ingestion errors are
+still yours to check.
 
 ### 4.4 Confirm it is actually working
 
@@ -361,7 +427,9 @@ what actually matters:
    the release you are reverting bumped it, pin a **third**, unused value in
    `fly.toml` before rolling back so the cache is cold in both directions.
 4. **A rollback does not demote an index.** Index rollback is the admin
-   promote API (§4.3), separately.
+   promote API (§4.3), separately — and it needs `?force=true`, because the
+   previous-good index has no evaluation run either and the promotion gate
+   will 409 you in the middle of an incident.
 
 ### 6.1 The Fly-native rollback
 

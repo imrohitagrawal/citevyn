@@ -24,7 +24,11 @@
 #     mid-deploy (#195). Override with --allow-migration-mismatch only when you
 #     KNOW the schema is compatible (see below).
 #   - It does NOT promote a previous index version. Index rollback is a separate
-#     concern (RELEASE_PLAN §8) — use the admin promote API.
+#     concern (RELEASE_PLAN §8) — use the admin promote API, and use it with
+#     ?force=true: promotion is gated on the candidate's evaluation pass rate
+#     (#210) and the previous-good index has no evaluation run either, so an
+#     unforced rollback promote returns 409 promotion_blocked mid-incident. The
+#     force is recorded in the promote_index audit row (DEPLOY_FLY §4.3).
 #   - It does NOT reset the ANSWER CACHE. `answer_policy_version` is part of the
 #     cache-key pre-image, so a release bumps it when it makes previously-cached
 #     answers WRONG. Rolling back restores the OLD value and brings those answers

@@ -60,6 +60,46 @@ def _admin_headers() -> dict[str, str]:
     return {ADMIN_HEADER: ADMIN_KEY}
 
 
+def _add_candidate(session, index_version: str) -> None:
+    """Insert a candidate index version and commit it."""
+    import asyncio
+
+    session.add(
+        IndexVersion(
+            index_version=index_version,
+            status=IndexStatus.candidate,
+            source_version_hash=f"sha256:{index_version}",
+            created_at=datetime.now(UTC),
+            promoted_at=None,
+        )
+    )
+    asyncio.get_event_loop().run_until_complete(session.commit())
+
+
+def _add_passing_run(session, index_version: str, *, pass_rate: float = 1.0) -> None:
+    """Attach a completed evaluation run so the #210 gate has evidence.
+
+    The promote endpoint refuses a candidate with no completed run, so
+    every route test that is about promotion MECHANICS (rather than about
+    the gate) has to supply this.
+    """
+    import asyncio
+
+    now = datetime.now(UTC)
+    session.add(
+        EvaluationRun(
+            suite_name="golden_v1",
+            index_version=index_version,
+            started_at=now,
+            completed_at=now,
+            status=EvaluationStatus.passed,
+            metrics={"pass_rate": pass_rate},
+            failure_summary={},
+        )
+    )
+    asyncio.get_event_loop().run_until_complete(session.commit())
+
+
 # ---------------------------------------------------------------------------
 # Auth gate
 # ---------------------------------------------------------------------------
@@ -193,16 +233,8 @@ def test_promote_index_version_demotes_current(admin_app, session) -> None:
     import asyncio
 
     asyncio.get_event_loop().run_until_complete(seed_catalog(session))
-    session.add(
-        IndexVersion(
-            index_version="v2",
-            status=IndexStatus.candidate,
-            source_version_hash="sha256:v2",
-            created_at=datetime.now(UTC),
-            promoted_at=None,
-        )
-    )
-    asyncio.get_event_loop().run_until_complete(session.commit())
+    _add_candidate(session, "v2")
+    _add_passing_run(session, "v2")
 
     with TestClient(admin_app) as client:
         response = client.post(
@@ -214,6 +246,8 @@ def test_promote_index_version_demotes_current(admin_app, session) -> None:
     assert body["index_version"] == "v2"
     assert body["status"] == "active"
     assert body["already_active"] is False
+    assert body["forced"] is False
+    assert body["measured_pass_rate"] == 1.0
 
     # Current state: v1 is previous_good, v2 is active.
     with TestClient(admin_app) as client:
@@ -257,16 +291,8 @@ def test_promote_index_version_writes_audit_event(admin_app, session) -> None:
     from app.models.enums import AuditAction
 
     asyncio.get_event_loop().run_until_complete(seed_catalog(session))
-    session.add(
-        IndexVersion(
-            index_version="v3",
-            status=IndexStatus.candidate,
-            source_version_hash="sha256:v3",
-            created_at=datetime.now(UTC),
-            promoted_at=None,
-        )
-    )
-    asyncio.get_event_loop().run_until_complete(session.commit())
+    _add_candidate(session, "v3")
+    _add_passing_run(session, "v3")
 
     with TestClient(admin_app) as client:
         response = client.post(
@@ -288,6 +314,114 @@ def test_promote_index_version_writes_audit_event(admin_app, session) -> None:
     )
     assert len(rows) == 1
     assert rows[0].resource_id == "v3"
+
+
+def test_promote_index_version_blocked_returns_409(admin_app, session) -> None:
+    """An unevaluated candidate is refused with ``promotion_blocked`` (#210)."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+    _add_candidate(session, "v2")
+
+    with TestClient(admin_app) as client:
+        response = client.post(
+            "/v1/admin/index_versions/v2/promote",
+            headers=_admin_headers(),
+        )
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error"]["code"] == "promotion_blocked"
+    assert body["error"]["details"]["reason"] == "no_evaluation_run"
+    assert body["error"]["details"]["threshold"] == 0.95
+
+    # The refusal is a refusal: the seeded active index still serves.
+    with TestClient(admin_app) as client:
+        rows = client.get("/v1/admin/index_versions", headers=_admin_headers()).json()
+    statuses = {r["index_version"]: r["status"] for r in rows["versions"]}
+    assert statuses["v1"] == "active"
+    assert statuses["v2"] == "candidate"
+
+
+def test_promote_index_version_blocked_below_threshold_names_both_numbers(
+    admin_app, session
+) -> None:
+    """A failing candidate's 409 body carries the measured rate."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+    _add_candidate(session, "v2")
+    _add_passing_run(session, "v2", pass_rate=0.5)
+
+    with TestClient(admin_app) as client:
+        response = client.post(
+            "/v1/admin/index_versions/v2/promote",
+            headers=_admin_headers(),
+        )
+    assert response.status_code == 409
+    details = response.json()["error"]["details"]
+    assert details["reason"] == "below_threshold"
+    assert details["measured_pass_rate"] == 0.5
+    assert details["evaluation_run_id"] is not None
+
+
+def test_promote_index_version_force_query_param_promotes(admin_app, session) -> None:
+    """``?force=true`` promotes an unevaluated candidate and says so."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+    _add_candidate(session, "v2")
+
+    with TestClient(admin_app) as client:
+        response = client.post(
+            "/v1/admin/index_versions/v2/promote?force=true",
+            headers=_admin_headers(),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "active"
+    assert body["forced"] is True
+    assert body["measured_pass_rate"] is None
+
+
+def test_promote_index_version_idempotent_is_not_gated(admin_app, session) -> None:
+    """The already-active seed has no eval run and must still return 200."""
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+
+    with TestClient(admin_app) as client:
+        response = client.post(
+            "/v1/admin/index_versions/v1/promote",
+            headers=_admin_headers(),
+        )
+    assert response.status_code == 200
+    assert response.json()["already_active"] is True
+
+
+def test_promote_index_version_does_not_report_an_override_that_never_happened(
+    admin_app, session
+) -> None:
+    """``forced`` reports what the gate DID, not what the caller asked for.
+
+    On the already-active path the gate never runs and no audit row is
+    written. Echoing the caller's ``force=true`` back as ``forced: true``
+    there would put an override in a deploy note with no counterpart in the
+    audit log, leaving a later reviewer unable to tell whether the audit log
+    had dropped a row.
+    """
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+
+    with TestClient(admin_app) as client:
+        response = client.post(
+            "/v1/admin/index_versions/v1/promote?force=true",
+            headers=_admin_headers(),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["already_active"] is True
+    assert body["forced"] is False
 
 
 # ---------------------------------------------------------------------------

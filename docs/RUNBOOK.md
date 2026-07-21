@@ -285,8 +285,18 @@ a definition is too narrow, a flag is wrong, a section is missing.
 
 ```bash
 python -m app.worker.cli run          # rebuilds v-local from the edited corpus
-# then promote via POST /v1/admin/index_versions/{version}/promote
+# then promote via POST /v1/admin/index_versions/{version}/promote?force=true
 ```
+
+**The promote is gated, and on a real deployment it will refuse (#210).**
+Promotion requires a completed `EvaluationRun` for the candidate that measured
+at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`); nothing in
+the deployed application writes those rows, so the honest promote returns
+`409 promotion_blocked`. `?force=true` promotes anyway and records the override
+— `force`, `measured_pass_rate`, `threshold`, `evaluation_run_id` — in the
+`promote_index` audit row. Run `make golden` against the corrected corpus first
+and state that in your notes; with `force` you are the gate. Re-promoting the
+already-active index is a no-op and is never blocked.
 
 **What happens automatically (no manual cache flush needed):**
 
@@ -314,8 +324,10 @@ correction is not live until a run completes cleanly.
 
 **Verify the edit actually shipped:** ask the corrected question and confirm the
 answer reflects the new text. If it still shows the old answer, check (a) that
-the run reported no failed sources, and (b) that the promote step ran — an
-un-promoted candidate is not served.
+the run reported no failed sources, (b) that the promote step ran — an
+un-promoted candidate is not served — and (c) that the promote returned **200
+and not 409 `promotion_blocked`**; a refused promote leaves the old index
+serving and is easy to miss in a scrollback.
 
 **Where else a correction has to land (#178).** A corpus edit reaches the *live*
 index only through the re-ingest + promote above. Three other paths serve corpus
@@ -558,7 +570,9 @@ demand. Re-serving a known-bad answer is much worse, and silent.
 `infra/docker/scripts/rollback.sh` performs exactly the naive revert
 described above and does not (yet) handle this — see its "What it does
 NOT do" header, alongside the equivalent migration and index-promotion
-caveats.
+caveats. Note the index-promotion one in particular: rolling an index back
+is the admin promote API, and it needs `?force=true`, because the
+previous-good index has no evaluation run and the #210 gate will refuse it.
 
 ---
 

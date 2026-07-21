@@ -282,20 +282,27 @@ class Settings(BaseSettings):
     worker_fetch_timeout_seconds: float = Field(default=20.0, gt=0.0)
     worker_max_chunks_per_doc: int = Field(default=500, ge=1)
 
-    # --- Index promotion gate (Slice 8) — DECLARED BUT NOT ENFORCED ---
-    # ``docs/RELEASE_PLAN.md §7`` specifies that promotion should reject a
-    # candidate index whose latest ``EvaluationRun.metrics.pass_rate`` is below
-    # this threshold.
+    # --- Index promotion gate (Slice 8) — ENFORCED (#210) ---
+    # ``docs/RELEASE_PLAN.md §7`` gate 1. Read by ``promote_version``
+    # (app/services/index_versions.py): it resolves the candidate's newest
+    # COMPLETED ``EvaluationRun`` (status in {passed, failed} — a ``running``
+    # run is not evidence), ordered ``started_at`` DESC, reads
+    # ``metrics["pass_rate"]`` (falling back to ``cases_passed/cases_total``),
+    # and refuses with ``IndexPromotionBlocked`` → HTTP 409
+    # ``promotion_blocked`` unless ``rate >= this value``. Equality promotes.
+    # No usable run means refuse: "unevaluated" is not "passing".
     #
-    # NOTHING READS THIS SETTING. ``promote_version``
-    # (app/services/index_versions.py) demotes the active index and activates
-    # the candidate; there is no pass-rate check on that path, and the only
-    # other references are this line and its own settings tests.
-    #
-    # Said plainly because the previous wording described the gate in the
-    # present tense, and a deploy runbook was then written that promised
-    # operators a safety check which does not exist. Until it is implemented,
-    # the human running `make golden` before promoting IS the gate.
+    # This comment used to say NOTHING READS THIS SETTING, and said it in
+    # capitals, because an earlier version described the gate in the present
+    # tense and a deploy runbook was then written promising operators a safety
+    # check that did not exist. The counterpart warning now applies: nothing in
+    # the deployed application writes ``EvaluationRun`` rows (the evaluation
+    # service is read-only; the golden suite runs on a laptop and in CI), so
+    # the real-world state is "no completed run" and every honest promote will
+    # be refused. ``force=true`` on the admin endpoint is the supported way
+    # through; it is recorded in the ``promote_index`` audit row along with the
+    # measured rate and this threshold. Gates 2-5 of §7 remain operator-
+    # verified, not machine-enforced.
     index_promotion_min_pass_rate: float = Field(default=0.95, ge=0.0, le=1.0)
 
     # (The former ``source_version_hash`` setting was removed alongside the

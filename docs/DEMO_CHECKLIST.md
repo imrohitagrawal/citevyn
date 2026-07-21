@@ -66,6 +66,10 @@ Route names below are the live FastAPI paths; cross-check against
       grounded answer with at least one `[1]` citation.
 - [ ] **Slice 6** — `POST /v1/admin/index_versions/:index_version/promote`
       (the only admin `POST`) requires the admin key; without it, 401.
+      (With a valid key, expect **409 `promotion_blocked`** on a candidate —
+      promotion is gated on evaluation pass rate (#210) and nothing writes
+      `EvaluationRun` rows in a running stack. Add `?force=true` to promote;
+      re-promoting the already-active index returns 200.)
 - [ ] ~~**Slice 7** — `POST /v1/sessions/:id/messages/stream` streams
       SSE chunks and a `final` event with a `request_id`.~~
       **N/A as of v0.10.0** — there is no streaming route on `main`
