@@ -7,6 +7,15 @@ CiteVyn answers user questions by retrieving and quoting **official
 documentation** verbatim. Every answer carries a citation; refusal is
 treated as a feature, not a failure.
 
+**Live demo:** [citevyn.stackclimb.com](https://citevyn.stackclimb.com) — the
+public deployment exposes healthy application, dependency, and active-index
+checks. For a zero-cost local path, start with [Quick start](#4-quick-start-local).
+
+**Contribute:** read [CONTRIBUTING.md](CONTRIBUTING.md), then use
+[Discussions](https://github.com/imrohitagrawal/citevyn/discussions) for questions
+and architectural ideas or [Issues](https://github.com/imrohitagrawal/citevyn/issues)
+for reproducible defects and accepted work.
+
 ---
 
 ## 1. Status
@@ -24,7 +33,7 @@ treated as a feature, not a failure.
 
 ---
 
-## 13. Demo Build Status
+## 2. Demo build status
 
 > **🟢 green** — 50/50 golden cases pass on `main` @ v0.10.0.
 > The status is a hard gate: any red case flips the badge to amber
@@ -52,7 +61,7 @@ demonstrably reproducible.
 
 ---
 
-## 2. Features
+## 3. Key capabilities
 
 - **Citation-backed answers.** Every claim links to a source chunk
   with a confidence score and policy marker. The API surfaces a
@@ -73,39 +82,7 @@ demonstrably reproducible.
 
 ---
 
-## 3. Universal Landing Page (UI Option 1 & 2)
-
-The Universal Landing Page is the new standard UI for CiteVyn, designed as a professional landing page that appeals to engineers, PMs, marketers, and general users. 
-
-**Status:** Design plan complete - See [UNIVERSAL_LANDING_PAGE_PLAN.md](UNIVERSAL_LANDING_PAGE_PLAN.md)
-
-### Two UI Alternatives
-
-1. **Browser-Core Modernism** (Prompt 1) - Technical DevTools aesthetic
-   - High-contrast technical elements
-   - Browser chrome frame, tabs, address bar
-   - Custom UI scrollbars, pattern grid background
-   - JetBrains Mono for technical labels
-
-2. **Bold Editorial Studio** (Prompt 2) - Creative typography-first design
-   - Black-and-white aesthetic with custom cursor
-   - Extreme weight/size contrasts (Inter typography)
-   - Asymmetrical rounded corners, smooth animations
-   - Mix-blend-mode difference cursor
-
-### Key Features
-- Instant demo (no signup)
-- How It Works section (3 steps)
-- Interactive citation trace
-- Light/dark theme toggle
-- Mobile bottom navigation
-- Pre-populated demo questions
-- Loading state messages
-- Hallucination challenge
-
----
-
-## 3. Quick start (local)
+## 4. Quick start (local)
 
 ```bash
 # 1. Clone
@@ -139,13 +116,13 @@ curl -s -X POST "http://localhost:8000/v1/sessions/$SESSION_ID/messages" \
 ```
 
 `make demo` is the single command that brings up the local stack;
-see [§4 Configuration](#4-configuration) for the env vars it
-expects, and [§10 Local development](#10-local-development) for
+see [§5 Configuration](#5-configuration) for the env vars it
+expects, and [§11 Local development](#11-local-development) for
 the full workflow.
 
 ---
 
-## 4. Configuration
+## 5. Configuration
 
 All knobs live in environment variables (loaded from `.env` for
 local dev, or passed via `docker compose --env-file` in production).
@@ -169,7 +146,7 @@ production subset lives in
 
 ---
 
-## 5. Architecture (5 minutes)
+## 6. Architecture (5 minutes)
 
 ```
 ┌─────────┐    HTTPS    ┌──────────┐     SQL     ┌──────────┐
@@ -215,7 +192,7 @@ This slice adds [`docs/ADR/0002-deployment.md`](docs/ADR/0002-deployment.md).
 
 ---
 
-## 6. Repository layout
+## 7. Repository layout
 
 ```
 citevyn/
@@ -253,36 +230,6 @@ citevyn/
 
 ---
 
-## 7. Production deployment (operator)
-
-```bash
-# 1. On the host, prepare the env file
-cd infra/docker
-cp prod.env.example .env
-$EDITOR .env                       # set POSTGRES_PASSWORD, CITEVYN_ADMIN_API_KEY, CITEVYN_LLM_API_KEY
-
-# 2. First-time cold start (creates db volume, runs migrations, seeds admin)
-make deploy
-
-# 3. Subsequent updates (rebuild + re-deploy, no data loss)
-make refresh
-
-# 4. Tail logs
-make logs
-
-# 5. Backup
-make backup                        # writes infra/docker/backups/citevyn-<UTC>.dump
-```
-
-DNS for `CITEVYN_PUBLIC_HOST` must point at the host **before** the
-first request hits :443 — Caddy's on-demand TLS will issue a
-Let's Encrypt cert the first time the host is requested.
-
-Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
-[`docs/ADR/0002-deployment.md`](docs/ADR/0002-deployment.md).
-
----
-
 ## 8. HTTP API
 
 Demo routes authenticate with `Authorization: Bearer $CITEVYN_DEMO_API_KEY`;
@@ -314,7 +261,37 @@ shape, refusal envelope, and rate-limit headers are normative.
 
 ---
 
-## 9. Security model
+## 9. Production deployment (operator)
+
+```bash
+# 1. On the host, prepare the env file
+cd infra/docker
+cp prod.env.example .env
+$EDITOR .env                       # set POSTGRES_PASSWORD, CITEVYN_ADMIN_API_KEY, CITEVYN_LLM_API_KEY
+
+# 2. First-time cold start (creates db volume, runs migrations, seeds admin)
+make deploy
+
+# 3. Subsequent updates (rebuild + re-deploy, no data loss)
+make refresh
+
+# 4. Tail logs
+make logs
+
+# 5. Backup
+make backup                        # writes infra/docker/backups/citevyn-<UTC>.dump
+```
+
+DNS for `CITEVYN_PUBLIC_HOST` must point at the host **before** the
+first request hits :443 — Caddy's on-demand TLS will issue a
+Let's Encrypt cert the first time the host is requested.
+
+Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
+[`docs/ADR/0002-deployment.md`](docs/ADR/0002-deployment.md).
+
+---
+
+## 10. Security model
 
 - **Two API keys**, never shared in production, read from env and
   never logged: `demo` is sent as `Authorization: Bearer <key>`,
@@ -335,7 +312,7 @@ Full threat model: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 
 ---
 
-## 10. Local development
+## 11. Local development
 
 The single most useful command is `make demo`. It brings up the
 docker-compose `db` + `redis` services, waits for Postgres to
@@ -375,7 +352,7 @@ the opt-in integration tests against a real Postgres if you set
 
 ---
 
-## 11. Testing
+## 12. Testing
 
 - **Unit + integration** — `pytest` + `pytest-asyncio` against an
   in-memory SQLite engine; no external services required.
@@ -391,7 +368,7 @@ Test strategy: [`docs/TEST_STRATEGY.md`](docs/TEST_STRATEGY.md).
 
 ---
 
-## 12. CI
+## 13. CI
 
 The repo runs four GitHub Actions jobs on every push to `main` and
 on every PR:
@@ -454,7 +431,7 @@ Full template + changelog format: [`.github/RELEASE.md`](.github/RELEASE.md).
 
 ---
 
-## 15. Contributing
+## 16. Contributing
 
 We welcome PRs. Before opening one, please read
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
@@ -486,4 +463,5 @@ License: see [LICENSE](LICENSE).
 - [`docs/TEST_STRATEGY.md`](docs/TEST_STRATEGY.md)
 - [`docs/RELEASE_PLAN.md`](docs/RELEASE_PLAN.md)
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — on-call playbook
-- [`CHANGELOG`](CHANGELOG) (auto-generated by release workflow)
+- [`docs/LANDING_PAGE_DESIGN_NOTES.md`](docs/LANDING_PAGE_DESIGN_NOTES.md) — internal landing-page alternatives and implemented interaction goals
+- [`CHANGELOG.md`](CHANGELOG.md) (auto-generated by release workflow)
