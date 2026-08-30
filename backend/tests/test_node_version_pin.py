@@ -45,11 +45,17 @@ FRONTEND_PACKAGE_JSON = REPO_ROOT / "frontend" / "package.json"
 # ``run:`` steps only, never to an action's ``with:`` inputs.
 NVMRC_WORKFLOW_PATH = "frontend/.nvmrc"
 
-# ``FROM [registry/][namespace/]node:<tag>``. Anchored at FROM so an unrelated
-# ``node:http`` import or a ``python:3.14`` base cannot match.
+# ``FROM [--flag=value ...] [registry[:port]/][namespace/]node:<tag>``.
+#
+# Anchored at FROM so an unrelated ``node:http`` import or a ``python:3.14``
+# base cannot match, and the ``/``-terminated registry groups mean ``mynode:18``
+# does not either. The two easy-to-miss real forms are covered deliberately:
+# ``FROM --platform=$BUILDPLATFORM node:18`` (common in multi-arch builds) and a
+# lowercase ``from`` (Dockerfile keywords are case-insensitive). Both would
+# otherwise be a silent hole in exactly the line this guard exists to watch.
 _FROM_NODE = re.compile(
-    r"^FROM\s+(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)",
-    re.MULTILINE,
+    r"^FROM\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)",
+    re.MULTILINE | re.IGNORECASE,
 )
 _LEADING_MAJOR = re.compile(r"^v?(?P<major>\d+)")
 
@@ -373,3 +379,34 @@ def test_every_node_version_in_the_repo_agrees() -> None:
         "Node major versions disagree across the repo (#231):\n"
         + "\n".join(f"  {where}: {major}" for where, major in sorted(majors.items()))
     )
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        # Forms that MUST be recognised, or a real Node base slips past the guard.
+        ("FROM node:22-bookworm-slim AS frontend", "22-bookworm-slim"),
+        ("FROM --platform=linux/amd64 node:18", "18"),
+        ("FROM --platform=$BUILDPLATFORM node:18-alpine AS build", "18-alpine"),
+        ("from node:18", "18"),
+        ("FROM docker.io/library/node:18-slim", "18-slim"),
+        ("FROM mcr.microsoft.com/devcontainers/node:18", "18"),
+        ("FROM localhost:5000/node:20", "20"),
+        # Forms that must NOT match, or the guard fails on unrelated images.
+        ("FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim", None),
+        ("FROM python:3.14-slim-bookworm", None),
+        ("FROM mynode:18", None),
+        ("# FROM node:14 old comment", None),
+        ("RUN echo FROM node:14", None),
+    ],
+)
+def test_the_dockerfile_scan_recognises_real_from_syntaxes(line: str, expected: str | None) -> None:
+    """The scan is only as good as its pattern, so pin the pattern itself.
+
+    ``--platform`` and a lowercase ``from`` are both legal Dockerfile syntax and
+    both were missed by the first version of this regex. A hole here is
+    invisible: the guard would report green while a ``FROM node:18`` sat in the
+    tree. Drop the ``--flag`` group or ``re.IGNORECASE`` and this goes red.
+    """
+    match = _FROM_NODE.search(line)
+    assert (match.group("tag") if match else None) == expected
