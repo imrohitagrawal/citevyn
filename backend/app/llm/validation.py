@@ -55,6 +55,14 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 # bracketed index exceeded the evidence count — discarded a correct, grounded
 # answer through the out-of-range branch below.
 #
+# What this does NOT fix, deliberately: an answer that cites nothing in prose
+# but contains one bracketed number inside a fence is still served as grounded.
+# Stripping empties the set, the ``or`` fallback restores the raw scan, and the
+# #174 gate at ``orchestrator.py:830`` sees a non-empty set exactly as before.
+# That is the price of the fallback, not an oversight -- closing it would need
+# a distinct "code-only citation" exit reason registered in
+# ``_NO_ANSWER_REASONS``, which is a larger change than this one.
+#
 # The design rule here is asymmetric, because the two error directions are not
 # equally bad. LEAKING a marker out of code leaves a visible phantom card that
 # the range check often catches anyway. LOSING a real marker silently deletes a
@@ -147,10 +155,18 @@ def _strip_code(text: str) -> str:
             fence = match.group("fence")
             info = match.group("info").strip()
             # A bare or one-token info string ("```", "```python") opens a
-            # fence even with no closer in sight: that is output truncated by
-            # ``llm_max_tokens``, and the tail really is code. A multi-word
-            # info string is prose that merely starts with backticks, so it
-            # only opens a fence when a closer genuinely follows.
+            # fence even with no closer in sight, on the assumption that this
+            # is output truncated by ``llm_max_tokens`` and the tail really is
+            # code. That assumption is ASSUMED, not proven, and it is the one
+            # place this function knowingly resolves AGAINST the leak-rather-
+            # than-lose rule above: a model that emits a stray unbalanced
+            # ``` mid-answer loses every marker after it. Measured cost --
+            # "Answer [1].\n```\nMore prose citing [2]." yields [1], dropping a
+            # real card. Accepted because the alternative (never opening an
+            # unterminated fence) leaks the entire tail of every truncated
+            # code answer, which is the commoner shape. A multi-word info
+            # string is prose that merely starts with backticks, so it only
+            # opens a fence when a closer genuinely follows.
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
             if simple or reachable[fence[0]][i + 1] >= len(fence):
                 open_fence = fence

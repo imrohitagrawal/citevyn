@@ -586,3 +586,38 @@ def test_code_stripping_can_only_refuse_less_never_more() -> None:
             assert fails_after <= fails_now, (text, count)
 
     assert changed > 0
+
+
+def test_prose_line_starting_with_backticks_only_opens_a_fence_if_one_closes() -> None:
+    """A multi-word info string opens a fence ONLY when a closer follows.
+
+    ``_strip_code`` decides this with the ``reachable`` reverse pass: a bare or
+    one-token opener (``` or ```python) is truncated output and opens
+    unconditionally, but a line whose "info string" is a SENTENCE is prose that
+    merely begins with backticks, so it opens a fence only if a real closing
+    fence appears later.
+
+    Both directions are pinned here because the whole reverse pass is otherwise
+    dead weight: with ``reachable`` deleted (``if simple:``) the entire suite
+    stayed green at 138 passed, so nothing tested the largest block of this
+    change. The first case goes red without it (``[1]`` leaks out of a genuine
+    fence); the second goes red if the opener is allowed to swallow the rest of
+    the answer, which would DELETE two real citations.
+    """
+    closed = validate_citations(
+        answer_text="```prose with spaces here\ntext [1]\n```\n\nMore [2].",
+        evidence=_evidence(count=2),
+    )
+    assert closed.valid is True
+    assert closed.cited_indices == [2]
+
+    # A real citation sits BEFORE the stray opener on purpose. Without it the
+    # strip empties the set, the ``or`` fallback restores the raw scan, and the
+    # assertion passes even when the opener wrongly swallowed everything --
+    # verified: an ``if True:`` mutant survives the version without ``[1]``.
+    never_closed = validate_citations(
+        answer_text="Answer [1].\n```see the docs for [2]\nmore [3]",
+        evidence=_evidence(count=3),
+    )
+    assert never_closed.valid is True
+    assert never_closed.cited_indices == [1, 2, 3]
