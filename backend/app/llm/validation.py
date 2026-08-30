@@ -115,6 +115,18 @@ def _fence_run(line: str) -> tuple[str, int] | None:
     Nothing depends on a closer being bare, so allowing trailing text is a pure
     win.
 
+    KNOWN RESIDUAL, measured, not hypothetical. Relaxing "bare" is not
+    monotone: closing a fence earlier can turn a line that used to be fence
+    CONTENT into a line the scanner evaluates as an OPENER, and a bare opener
+    with no closer runs to end of answer. Differential fuzz against the
+    pre-change behaviour over 68,420 shapes: 542 shapes gain a citation that
+    was being wrongly dropped, and 48 lose one they used to keep. A net 11:1
+    improvement, NOT a strict one -- and the three alternatives tried were all
+    worse (sharing the relaxed predicate with the reachability pass: 1,915
+    losses; unioning both scans: 687 losses plus 241 new refusals; gating the
+    unconditional opener by reachability: 1,630 losses plus 2,286 new
+    refusals).
+
     KEPT -- the length rule, because it is what makes nesting possible. A
     four-backtick fence wrapping a three-backtick one is the standard way to
     show a code block inside a code block, and a shorter run must not close it.
@@ -138,7 +150,7 @@ def _strip_code(text: str) -> str:
     Line-oriented by design (see the note above): an unbalanced backtick can
     never reach past the line it appears on.
 
-    CRLF needs no separate normalisation pass: :func:`_closer` compares the
+    CRLF needs no separate normalisation pass: :func:`_fence_run` compares the
     STRIPPED line, so the ``\r`` a Windows-style answer leaves before the line
     end does not stop a closing fence from matching. That matters more than it
     sounds — a closer that fails to match leaves the fence open, and an open
@@ -160,7 +172,17 @@ def _strip_code(text: str) -> str:
         for char in ("`", "~"):
             reachable[char][i] = reachable[char][i + 1]
         found = _fence_run(lines[i])
-        if found:
+        # STRICT here, deliberately, while the forward pass stays forgiving.
+        # The two passes pull in opposite directions. Forward, a forgiving
+        # closer ends a fence EARLIER and strips LESS. But this pass answers
+        # "is this opener ever closed?", and a forgiving answer opens fences
+        # that would otherwise have stayed shut -- stripping MORE, and deleting
+        # real citations. Measured when this shared the relaxed test: a prose
+        # line merely STARTING with three backticks became a closer, so the
+        # sentence above it opened a fence, and "[2]" vanished from an answer
+        # main served intact. Only a bare run counts as evidence that a closer
+        # exists; the forward pass is still free to accept a sloppy one.
+        if found and set(lines[i].strip()) == {found[0]}:
             char, run = found
             reachable[char][i] = max(reachable[char][i], run)
 

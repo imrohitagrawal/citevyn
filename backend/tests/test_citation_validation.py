@@ -693,3 +693,34 @@ def test_a_backtick_pair_on_one_line_is_a_real_code_span() -> None:
     )
     assert result.valid is True
     assert result.cited_indices == [1]
+
+
+def test_a_prose_line_starting_with_backticks_is_not_evidence_a_fence_closes() -> None:
+    """The reachability pass must stay STRICT while the closing pass is forgiving.
+
+    The two passes pull in opposite directions and cannot share one predicate.
+    Forward, a forgiving closer ends a fence EARLIER and strips LESS. But the
+    reverse pass answers "is this opener ever closed?", and a forgiving answer
+    there OPENS fences that would otherwise have stayed shut -- stripping MORE
+    and deleting real citations.
+
+    Measured when both passes shared the relaxed test: the sentence below
+    served ``[1, 3]`` instead of ``[1, 2, 3]`` -- a real source card deleted
+    while the prose still cited it, on an answer ``main`` served intact. Goes
+    red by dropping the ``set(...) == {found[0]}`` bareness test from the
+    reachability pass.
+    """
+    result = validate_citations(
+        answer_text=(
+            "CiteVyn caps answers at 1024 tokens [1].\n"
+            "``` fences and inline spans are both stripped before counting [2].\n"
+            "See the example below:\n"
+            "```python title=example\n"
+            "client.ask()\n"
+            "``` <- end of example\n"
+            "That is the whole flow [3].\n"
+        ),
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [1, 2, 3]
