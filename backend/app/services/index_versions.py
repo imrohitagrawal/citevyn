@@ -145,9 +145,13 @@ async def _latest_completed_run(
     :attr:`IndexVersion.evaluation_run`: that relationship is
     configured ``lazy="raise"`` on both sides, so touching the
     attribute raises instead of loading. It is also the wrong
-    question — the column records the run an index was *built*
-    with, whereas the gate wants the newest run that has been
-    executed against the candidate, whoever attached it.
+    question. Since #229 that column IS populated — by
+    :func:`link_evaluation_run`, with the newest terminal run — but it is
+    one mutable field maintained by one writer, and a gate that read it
+    would believe whatever was last stamped there. The gate re-derives the
+    answer from the run table on every promote instead, so the two cannot
+    drift into disagreeing about the same fact. The column is a display
+    convenience; this query is the evidence.
 
     ``started_at`` is the ordering key, with ``run_id`` as a
     deterministic tiebreak: several rows flushed in the same
@@ -257,6 +261,67 @@ async def measured_pass_rate(
     if run is None:
         return None
     return _pass_rate_from_metrics(run.metrics)
+
+
+class EvaluationRunNotLinkable(ValueError):
+    """Raised by :func:`link_evaluation_run` for a run that is not evidence yet."""
+
+
+async def link_evaluation_run(
+    session: AsyncSession,
+    *,
+    run: EvaluationRun,
+) -> IndexVersion | None:
+    """Point ``index_versions.evaluation_run_id`` at ``run`` (#229).
+
+    The single writer of that column. It was declared in the model, in
+    migration ``0001`` and in both read surfaces
+    (:func:`app.api.routes.search._index_payload` and the admin
+    ``IndexVersionSummary``) and **assigned by nothing**, so it was ``NULL``
+    for every index that has ever existed. An operator reading
+    ``/health/index`` therefore could not tell "never evaluated" from
+    "evaluated and passing", and the endpoint contradicted the promotion
+    gate — which resolves evidence the other way round, through
+    :func:`_latest_completed_run`.
+
+    Semantics, chosen deliberately: the pointer names the **newest
+    TERMINAL run**, whether it passed or failed. It is not a certificate.
+    Pointing only at passing runs would make "evaluated and failed"
+    indistinguishable from "never evaluated" — the same defect this fixes,
+    relocated. The field name says which run, not which verdict; read the
+    run itself (``GET /v1/admin/evaluations/{run_id}``) for the verdict.
+
+    Two invariants, both enforced here rather than trusted to callers:
+
+    * **The target index is derived from the run**, never passed in. A
+      display that credited index ``A`` with a passing run measured on
+      index ``B`` would be strictly worse than the ``NULL`` it replaces,
+      and making the caller name the index is how that would happen.
+    * **A ``running`` run is not linkable.** The gate skips ``running``
+      rows precisely so a crashed evaluation cannot read as evidence; a
+      pointer installed before the terminal status would reintroduce that
+      through the display instead.
+
+    Returns the updated row, or ``None`` when the run names an index that
+    no longer exists. The caller commits.
+
+    This is deliberately NOT what the gate reads. The pointer is one
+    mutable field; :func:`_latest_completed_run` re-derives the answer from
+    the run table on every promote. Making a single denormalised column
+    authoritative for a security-relevant gate is how the two drift apart
+    again.
+    """
+    if run.status not in _COMPLETED_EVALUATION_STATUSES:
+        raise EvaluationRunNotLinkable(
+            f"refusing to link evaluation run {run.run_id} to index_version "
+            f"{run.index_version!r}: its status is {run.status.value!r}, not a terminal "
+            "one. A pointer to an unfinished run would display as evidence."
+        )
+    row = await session.get(IndexVersion, run.index_version)
+    if row is None:
+        return None
+    row.evaluation_run_id = run.run_id
+    return row
 
 
 def _format_rate(rate: float | None) -> str:
@@ -492,11 +557,13 @@ class _IndexPromotionBlocked(Exception):
 
 
 __all__ = [
+    "EvaluationRunNotLinkable",
     "IndexPromotionBlocked",
     "IndexVersionNotFound",
     "PromotionBlockedReason",
     "count_documents_for_version",
     "get_version",
+    "link_evaluation_run",
     "list_versions",
     "measured_pass_rate",
     "promote_version",

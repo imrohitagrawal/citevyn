@@ -90,6 +90,7 @@ from app.models.enums import EvaluationStatus
 from app.models.evaluation import EvaluationRun
 from app.retrieval.hybrid import HybridRetriever
 from app.routing.intent import Intent, classify_intent
+from app.services import index_versions as index_version_service
 
 logger = logging.getLogger(__name__)
 
@@ -421,6 +422,14 @@ async def evaluate_index(
     run.failure_summary = {"failures": failures}
     run.status = EvaluationStatus.passed if pass_rate >= limit else EvaluationStatus.failed
     run.completed_at = datetime.now(UTC)
+    # #229: publish the linkage the READ surface displays. Before this, nothing
+    # anywhere assigned ``index_versions.evaluation_run_id``, so ``/health/index``
+    # reported ``null`` for an index that had just measured 1.0 and the display
+    # contradicted the gate. Ordered AFTER the terminal status is set (the linker
+    # refuses a ``running`` run) and BEFORE the commit, so the run's outcome and
+    # the pointer to it land in ONE transaction — a pointer that could survive a
+    # crash without its metrics would be evidence of nothing.
+    await index_version_service.link_evaluation_run(session, run=run)
     await session.commit()
 
     logger.info(
