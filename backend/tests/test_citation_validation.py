@@ -4,8 +4,13 @@ The validator is pure (no DB, no network) so these tests build
 :class:`EvidenceHit` instances by hand. They pin the contract the
 LLM client from Slice 4 already honors:
 
-* ``[n]`` markers must be 1-indexed and contiguous.
-* Every ``[n]`` must reference an existing evidence bullet.
+* ``[n]`` markers are 1-indexed. They are **not** required to be
+  contiguous — a gap is valid (#215). The contiguity hard-fail was
+  discarding correct, grounded answers that cited ``[1]`` and ``[3]``;
+  see ``test_gap_in_citation_indices_is_valid`` below.
+* Every ``[n]`` must reference an existing evidence bullet — this range
+  check is now the only guard against a hallucinated marker, so both of
+  its boundaries (``[N]`` valid, ``[N+1]`` rejected) are pinned.
 * Uncited evidence is reported as a warning, not a failure.
 * The no-answer refusal short-circuits to ``valid=True`` with empty
   citation lists.
