@@ -559,7 +559,13 @@ of letting it revert:
 git checkout v0.9.0
 # The bad release shipped v2; do NOT go back to v1 — pick a THIRD value
 # so the cache is cold in both directions.
-CITEVYN_ANSWER_POLICY_VERSION=v3 VERSION=v0.9.0 make refresh
+#
+# Use a DATED, operator-scoped token, never a bare `vN`. Bare `vN` values are
+# reserved for shipped defaults: an earlier revision of this block suggested
+# `v3`, which #215/#236 then shipped as the default carrying `citations[].marker`.
+# Rows written by a pre-marker build under that token would sit inside the key
+# scope of the marker-aware build and replay as mis-numbered cards for the 24h TTL.
+CITEVYN_ANSWER_POLICY_VERSION=rollback-2026-07-21 VERSION=v0.9.0 make refresh
 ```
 
 Check which value you are leaving before you roll back:

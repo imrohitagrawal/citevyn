@@ -269,7 +269,7 @@ class Settings(BaseSettings):
     # have to be re-run by hand against every environment, and it leaves no record in the
     # code. The version bump is declarative, applies everywhere the build is deployed, and
     # its only cost is a cold cache that refills on demand.
-    answer_policy_version: str = "v2"
+    answer_policy_version: str = "v3"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 

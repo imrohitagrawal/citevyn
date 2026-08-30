@@ -38,10 +38,11 @@ def test_default_retrieval_and_cache_settings() -> None:
     settings = Settings()
     assert settings.retrieval_top_k == 6
     assert settings.retrieval_max_candidates == 20
-    # v2 since #169 — the bump is the cache-invalidation mechanism for the poisoned
-    # follow-up rows, so this pin is load-bearing: silently reverting it to "v1" would
-    # re-serve them.
-    assert settings.answer_policy_version == "v2"
+    # v3 since #215; v2 since #169. The bump is the cache-invalidation mechanism, so
+    # this pin is load-bearing: silently reverting it would re-serve stale rows. v2 rows
+    # were written while the validator discarded gapped citations, so their citations
+    # carry no ``marker`` field — replaying them would render unnumbered cards.
+    assert settings.answer_policy_version == "v3"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 

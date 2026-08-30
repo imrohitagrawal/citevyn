@@ -68,6 +68,16 @@ export interface Citation {
   title: string;
   url: string;
   chunk_id: UuidString;
+  /**
+   * The 1-based evidence index the model actually wrote in the answer text
+   * (#215). NOT the position of this citation in the array.
+   *
+   * The two differ whenever the model skips a bullet: an answer citing ``[1]``
+   * and ``[3]`` returns two citations, so numbering them by array position
+   * would label the cards 1 and 2 while the prose still says ``[3]`` — a
+   * marker pointing at a card that does not exist.
+   */
+  marker: number;
 }
 
 /**

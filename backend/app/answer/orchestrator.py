@@ -843,18 +843,24 @@ class Orchestrator:
                 strategy=strategy,
             )
 
-        citations: list[Citation] = [Citation(chunk_to_citation(hit)) for hit in evidence]
-        # Cite-once: the response surface only shows the citations
-        # the model actually referenced. The trace keeps every
-        # retrieved chunk.
-        cited_set = set(validation.cited_indices)
-        # ``cited_set`` is guaranteed non-empty here — an uncited answer returned above.
-        # The old ``else list(range(1, len(evidence) + 1))`` fallback was what attached every
-        # chunk to an ungrounded answer (#174); it is gone rather than left dormant.
-        used_indices = sorted(cited_set)
-        used_chunk_ids = {evidence[i - 1].chunk_id for i in used_indices}
+        # Cite-once: the response surface only shows the citations the model
+        # actually referenced. The trace keeps every retrieved chunk.
+        #
+        # ``validation.cited_indices`` is guaranteed non-empty here — an uncited
+        # answer returned above. The old ``else list(range(1, len(evidence)+1))``
+        # fallback was what attached every chunk to an ungrounded answer (#174);
+        # it is gone rather than left dormant.
+        #
+        # Each citation carries ``marker``: the 1-based evidence index the model
+        # actually wrote in the text. Without it the client can only number the
+        # cards by array position, so an answer citing [1] and [3] renders cards
+        # 1 and 2 while the prose still says [3] — a marker pointing at a card
+        # that does not exist. That was harmless only while the validator
+        # rejected gaps outright; now that gaps are legitimate (#215), the wire
+        # has to carry the number rather than let the client guess it.
+        used_indices = sorted(set(validation.cited_indices))
         visible_citations = [
-            c for c, hit in zip(citations, evidence, strict=True) if hit.chunk_id in used_chunk_ids
+            Citation(chunk_to_citation(evidence[i - 1]) | {"marker": i}) for i in used_indices
         ]
         confidence = self._confidence_for(used_indices, len(evidence))
 
@@ -1309,6 +1315,14 @@ class Orchestrator:
                 "source_version_hash": source_version_hash,
                 "cache_hit": False,
                 "cache_written": cache_written,
+                # The markers the model actually cited. Before #215 the failure
+                # side of this was recorded ("indices must be contiguous...")
+                # but the SUCCESS side recorded nothing, so once gapped answers
+                # started being served there was no way to tell from the trail
+                # whether they were being served correctly — only that they had
+                # stopped failing. This makes the fix observable rather than
+                # merely un-observable-as-broken.
+                "cited_markers": [c["marker"] for c in citations],
             },
         )
         # Backfill the normalized_question / product_area fields the cache
