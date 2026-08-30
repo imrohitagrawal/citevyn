@@ -54,7 +54,7 @@ NVMRC_WORKFLOW_PATH = "frontend/.nvmrc"
 # lowercase ``from`` (Dockerfile keywords are case-insensitive). Both would
 # otherwise be a silent hole in exactly the line this guard exists to watch.
 _FROM_NODE = re.compile(
-    r"^FROM\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)",
+    r"^[ \t]*FROM\s+(?:--[\w-]+(?:=\S+)?\s+)*(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)",
     re.MULTILINE | re.IGNORECASE,
 )
 _LEADING_MAJOR = re.compile(r"^v?(?P<major>\d+)")
@@ -95,6 +95,21 @@ _EXTERNAL_NODE_OUT_OF_REACH: dict[tuple[str, str], str] = {
     ),
 }
 
+# What this file CANNOT enforce. Named so the coverage claim stays honest.
+_UNGUARDABLE: tuple[str, ...] = (
+    "A job that runs `npm run build` with NO setup-node step: it uses the runner "
+    "image's preinstalled Node. Nothing in the YAML says 'node', so no static "
+    "scan can find it. ubuntu-24.04 ships 22.23.2 (matches today by luck); "
+    "ubuntu-26.04 ships 24.x, so this breaks silently when ubuntu-latest rolls.",
+    "A Dockerfile that resolves its base through ARG indirection "
+    "(`ARG NODE_VERSION=18` + `FROM node:${NODE_VERSION}`). Deliberately not "
+    "supported: the literal FROM is what keeps Dependabot tracking the image.",
+    "Node inside the external reusable workflow's own repository, and any Node a "
+    "third-party action installs internally.",
+    "@types/node in frontend/package.json — a compile-time types package, not a "
+    "runtime pin. Currently ^20.16.0 while the runtime is 22; recorded as debt.",
+)
+
 # Inputs that mean "this external workflow will run something with Node".
 _NODE_INPUT_KEYS = frozenset({"node-directory", "node-version", "node-version-file"})
 
@@ -119,11 +134,20 @@ def _workflow_files() -> list[Path]:
 
 
 def _dockerfiles() -> list[Path]:
-    """Every tracked Dockerfile in the repo, pruning vendored/build trees."""
+    """Every Dockerfile in the WORKING TREE, pruning vendored/build trees.
+
+    Working tree, not ``git ls-files``: an untracked Dockerfile still builds, so
+    it still has to agree. The cost is that a scratch Dockerfile on a laptop can
+    fail this locally; CI checks out clean, so it cannot fire there.
+    """
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
         dirnames[:] = [d for d in dirnames if d not in _PRUNED_DIRS]
-        found.extend(Path(dirpath) / name for name in filenames if name.startswith("Dockerfile"))
+        found.extend(
+            Path(dirpath) / name
+            for name in filenames
+            if name.startswith("Dockerfile") or name.lower().endswith(".dockerfile")
+        )
     assert found, f"no Dockerfile found under {REPO_ROOT}"
     return sorted(found)
 
@@ -147,6 +171,28 @@ def _setup_node_steps() -> list[tuple[Path, str, dict[str, Any]]]:
     return steps
 
 
+def _container_node_images() -> list[tuple[Path, str, str]]:
+    """(workflow, job, tag) for every job-level ``container:`` on a node image.
+
+    ``container: node:18`` runs every step of a job inside that image, with no
+    ``setup-node`` step to scan. It is a second, entirely separate way to build
+    the bundle on an unpinned Node, so it gets the same major rule.
+    """
+    found: list[tuple[Path, str, str]] = []
+    for path in _workflow_files():
+        for job_name, job in (_load_yaml(path).get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            container = job.get("container")
+            image = container.get("image") if isinstance(container, dict) else container
+            if not isinstance(image, str):
+                continue
+            match = re.match(r"(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)", image.strip())
+            if match:
+                found.append((path, job_name, match.group("tag")))
+    return found
+
+
 def _from_node_lines() -> list[tuple[Path, str]]:
     """(dockerfile, image tag) for every ``FROM node:<tag>`` line in the repo."""
     return [
@@ -167,7 +213,12 @@ def test_nvmrc_exists_and_names_exactly_one_version() -> None:
     )
     lines = [line for line in NVMRC.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1, f"{NVMRC} must hold exactly one version line, got {lines!r}"
-    assert _major(lines[0]) > 0
+    assert re.fullmatch(r"\d+", lines[0].strip()), (
+        f"{NVMRC} must hold a BARE MAJOR (e.g. `22`), got {lines[0]!r}. A full "
+        "`22.x.y` would pin CI to one patch release while the Docker tag "
+        "`node:22-bookworm-slim` keeps floating to the newest 22.x — the two "
+        "would drift by construction, which is what this file exists to prevent."
+    )
 
 
 def _pinned_major() -> int:
@@ -284,6 +335,12 @@ def test_package_json_engine_floor_matches_the_pin() -> None:
         "npm which Node this package expects; without it the .nvmrc is the only "
         "signal and a local `npm ci` on the wrong major warns about nothing."
     )
+    assert re.fullmatch(r">=\s*\d+", declared.strip()), (
+        f"frontend/package.json engines.node is {declared!r}. It must be a FLOOR "
+        "of the form `>=<major>`. A ceiling or exact pin (`<=22`, `22.1.0`) reads "
+        "as agreement to the major comparison below while actually permitting a "
+        "different Node entirely."
+    )
     assert _major(declared) == _pinned_major(), (
         f"frontend/package.json engines.node is {declared!r} but "
         f"{NVMRC_WORKFLOW_PATH} pins Node {_pinned_major()}. Two version "
@@ -340,6 +397,35 @@ def test_recorded_external_node_consumers_still_exist(workflow_name: str, job_na
         f"{workflow_name}:{job_name} no longer calls an external workflow, so it "
         "is reachable by the setup-node rules above. Remove its exemption."
     )
+
+
+@pytest.mark.parametrize(
+    ("path", "job_name", "tag"),
+    _container_node_images(),
+    ids=lambda v: v.name if isinstance(v, Path) else str(v),
+)
+def test_job_container_node_images_match_the_pin(path: Path, job_name: str, tag: str) -> None:
+    """A ``container:`` node image ships the same drift as a Dockerfile FROM."""
+    assert _major(tag) == _pinned_major(), (
+        f"{path.name}:{job_name} runs in container `node:{tag}` but "
+        f"{NVMRC_WORKFLOW_PATH} pins Node {_pinned_major()}."
+    )
+
+
+def test_the_guards_own_blind_spots_are_written_down() -> None:
+    """State what this file CANNOT see, so the gap is recorded, not assumed away.
+
+    Adversarial review found ways to build the SPA on an unpinned Node that no
+    static scan here can catch. The dangerous one is dated, not hypothetical: a
+    job that runs ``npm run build`` with NO ``setup-node`` step uses the runner
+    image's preinstalled Node. ubuntu-24.04 ships 22.23.2 — which matches today
+    by luck — and ubuntu-26.04 ships 24.x, so the day ``ubuntu-latest`` rolls
+    over, such a job silently builds on 24 while .nvmrc says 22.
+
+    This test asserts nothing about the workflows. It exists so the limitation
+    is in the file a maintainer reads, rather than discovered the hard way.
+    """
+    assert _UNGUARDABLE, "the blind-spot register must not be silently emptied"
 
 
 # ──────────────────────────── the #231 regression ────────────────────────────
