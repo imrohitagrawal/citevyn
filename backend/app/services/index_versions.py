@@ -54,6 +54,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, assert_never
 
 from sqlalchemy import func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -75,6 +76,14 @@ PromotionBlockedReason = Literal[
 # ``running | passed | failed``. A ``running`` run is not evidence of
 # anything yet, so the gate skips past it to the newest run that actually
 # finished rather than treating it as a failure.
+#
+# TWO consumers share this tuple and must stay in lockstep: the promotion gate
+# (:func:`_latest_completed_run`) and the display pointer
+# (:func:`link_evaluation_run`). Sharing it is the point — the whole of #229 was
+# the display and the gate disagreeing about the same fact. If a future status
+# (say ``cancelled``) needs different treatment for one and not the other, SPLIT
+# this into two named tuples deliberately rather than editing it in place, or
+# you will move one consumer while silently moving the other.
 _COMPLETED_EVALUATION_STATUSES = (EvaluationStatus.passed, EvaluationStatus.failed)
 
 
@@ -320,6 +329,21 @@ async def link_evaluation_run(
     row = await session.get(IndexVersion, run.index_version)
     if row is None:
         return None
+    # Checked here, below the lookup, rather than beside the status guard: with
+    # no row to stamp there is nothing to damage, but with one there is.
+    # ``EvaluationRun.run_id`` is a PYTHON-side ``default=uuid.uuid4`` that
+    # SQLAlchemy applies at FLUSH, so on an unflushed run it is ``None`` — and
+    # assigning that would not fail, it would quietly overwrite a good pointer
+    # with ``NULL`` and put the index back in exactly the state #229 describes.
+    # Unreachable from :func:`evaluate_index`, which commits the ``running`` row
+    # first; guarded anyway because this function is public and exported.
+    if not sa_inspect(run).has_identity:
+        raise EvaluationRunNotLinkable(
+            f"refusing to link an unflushed evaluation run to index_version "
+            f"{run.index_version!r}: run_id is assigned at flush, so the pointer would "
+            "be written NULL and would silently clear this index's existing linkage. "
+            "Flush or commit the run first."
+        )
     row.evaluation_run_id = run.run_id
     return row
 

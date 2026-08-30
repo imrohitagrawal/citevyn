@@ -744,6 +744,49 @@ class TestEvaluationRunLinkage:
         with pytest.raises(index_service.EvaluationRunNotLinkable, match="not a terminal"):
             await index_service.link_evaluation_run(candidate_session, run=run)
 
+    async def test_the_linker_refuses_an_unflushed_run_rather_than_nulling_the_pointer(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """An unflushed run must not silently CLEAR a good pointer (#229 review).
+
+        ``EvaluationRun.run_id`` is a Python-side ``default=uuid.uuid4`` that
+        SQLAlchemy applies at FLUSH, so on a transient run it is ``None``.
+        Assigning that would not raise — it would overwrite valid evidence with
+        ``NULL`` and put the index straight back into the state this issue is
+        about. Unreachable from ``evaluate_index`` (which commits the ``running``
+        row first); guarded because the function is public and exported.
+        """
+        real = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        await candidate_session.commit()
+        # Read the id out BEFORE the rollback below: rollback expires the
+        # instance, and re-reading an expired attribute on an async session is
+        # a lazy load, which raises ``MissingGreenlet`` rather than refreshing.
+        real_run_id = real.run_id
+        # Partner to the "unchanged" assertion below: there IS a pointer here to
+        # destroy, so a guard that did nothing would be visible.
+        linked = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert linked is not None
+        assert linked.evaluation_run_id == real_run_id
+
+        unflushed = EvaluationRun(
+            suite_name=SUITE_NAME,
+            index_version=CANDIDATE,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            status=EvaluationStatus.passed,
+            metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
+            failure_summary={},
+        )
+        assert unflushed.run_id is None, "precondition: run_id is assigned at flush"
+
+        with pytest.raises(index_service.EvaluationRunNotLinkable, match="unflushed"):
+            await index_service.link_evaluation_run(candidate_session, run=unflushed)
+
+        await candidate_session.rollback()
+        after = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert after is not None
+        assert after.evaluation_run_id == real_run_id
+
     async def test_the_linker_takes_its_target_from_the_run(
         self, candidate_session: AsyncSession
     ) -> None:
