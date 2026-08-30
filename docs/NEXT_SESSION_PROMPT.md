@@ -372,9 +372,11 @@ demo. If either moves the golden numbers, STOP, write up before/after, and repor
    `index_versions.evaluation_run_id` is declared in the model, the `0001` migration and the admin
    schema, but **nothing has ever assigned it**; the gate resolves evidence the other way, via
    `evaluation_runs.index_version`. So the health display contradicts the gate, and an operator who
-   trusts it reaches for `?force=true` — the exact habit #216 removed. Fix `evaluate_index` to set
-   it; decide deliberately whether it points at the newest run or only at passing ones, and keep
-   `_latest_completed_run` authoritative for the gate.
+   trusts it reaches for `?force=true` — the exact habit #216 removed. **FIXED.**
+   `evaluate_index` now calls `index_versions.link_evaluation_run`, which stamps the **newest
+   terminal** run (passing *or* failing — a passing-only pointer would make "evaluated and failed"
+   look like "never evaluated") and derives its target from `run.index_version`, so no index can be
+   credited with another's run. `_latest_completed_run` stays authoritative for the gate.
 9. **[#231](https://github.com/imrohitagrawal/citevyn/issues/231) — CI tests the frontend on Node
    20; production ships a bundle built on Node 22. Nothing reconciles them.**
    `frontend.yml:36` and `frontend-live-e2e.yml:28` pin `setup-node` to **20**;
@@ -431,8 +433,11 @@ LIVE-OPS FACTS
   corpus as it was measured:
   `fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version v1"`
   (The machine is scale-to-zero — `curl .../health` first or `fly ssh` fails with "no started VMs".)
-- **BUT `/health/index` still reports `evaluation_run_id: null`** — see **#229**. Do not read that
-  field as "no evidence"; it is a different, never-populated column. Fixing it is in scope (E8).
+- **`/health/index` used to report `evaluation_run_id: null` regardless — FIXED (#229).** The
+  column is now written by `evaluate`, so a re-run against production populates it. **Production
+  `v1` is still `null` until the evaluator is re-run there** — the fix writes the pointer forward,
+  it does not backfill runs that already completed. Re-run the `fly ssh` command above and the
+  field appears. Non-null means EVALUATED, not PASSED.
 - `VITE_API_LIVE=true` is the Dockerfile default — no build-arg needed.
 - Uptime probe every 30 min; do not tighten it (each probe wakes the machine).
 

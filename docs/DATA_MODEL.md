@@ -230,7 +230,18 @@ Supports candidate index and rollback.
 | source_version_hash | text | Combined source hash |
 | created_at | timestamp | Created time |
 | promoted_at | timestamp | Promotion time |
-| evaluation_run_id | UUID | FK to evaluation_runs |
+| evaluation_run_id | UUID | FK to evaluation_runs — the newest TERMINAL run for this index (#229) |
+
+`evaluation_run_id` is written by `app.services.index_versions.link_evaluation_run`,
+called from `evaluate_index` when a run reaches `passed` **or** `failed`. It is a
+display convenience surfaced by `/health/index` and `GET /v1/admin/index_versions`,
+and it says *which run measured this index*, **not** *that the index passed* — read
+the run itself (`GET /v1/admin/evaluations/{run_id}`) for the verdict. Linking only
+passing runs would make "evaluated and failed" indistinguishable from "never
+evaluated", which is the defect #229 fixed. The promotion gate deliberately does
+**not** read this column; it re-derives evidence from `evaluation_runs` on every
+promote (`_latest_completed_run`), so a single mutable pointer can never become the
+authority for a security-relevant gate.
 
 ## 15. provider_calls
 
