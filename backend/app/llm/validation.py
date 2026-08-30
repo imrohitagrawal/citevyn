@@ -100,11 +100,27 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?
 _WHITESPACE_RE = re.compile(r"\s")
 
 
-def _closer(line: str) -> tuple[str, int] | None:
-    """Return ``(fence_char, length)`` if ``line`` is a bare fence closer."""
+def _fence_run(line: str) -> str | None:
+    """Return the fence character if ``line`` starts a run of 3+ backticks or tildes.
+
+    Deliberately MORE forgiving than CommonMark, which requires a closer to be
+    bare and at least as long as its opener. Both of those rules, applied
+    strictly, turn a malformed fence into a silent citation LOSS: a closer
+    carrying trailing text, or a four-backtick opener closed by three, leaves
+    the fence open, and an open fence swallows every marker to the end of the
+    answer. Measured before this was relaxed -- each of those shapes dropped
+    two real source cards, leaving the prose citing ``[2]`` and ``[3]`` with no
+    such cards rendered, which is the #215 defect in the opposite direction.
+
+    A closer written ``\u0060\u0060\u0060 (that is all)`` and a four-backtick opener
+    closed by three backticks are the two shapes this rescued.
+
+    Being forgiving can only ever close a fence EARLIER, so it can only ever
+    strip LESS. That is the direction this module resolves ambiguity in.
+    """
     body = line.strip()
-    if body and body[0] in "`~" and set(body) == {body[0]}:
-        return body[0], len(body)
+    if len(body) >= 3 and body[0] in "`~" and body[:3] == body[0] * 3:
+        return body[0]
     return None
 
 
@@ -127,26 +143,23 @@ def _strip_code(text: str) -> str:
     lines = text.split("\n")
     count = len(lines)
 
-    # ``reachable[c][i]`` = the longest bare run of ``c`` at any line >= i.
+    # ``reachable[c][i]`` = does a fence run of ``c`` appear at any line >= i?
     # One reverse pass makes "is this opener ever closed?" an O(1) lookup
     # instead of a rescan per opener, which would be quadratic on hostile
-    # model output (measured: 45KB of fence openers took ~13s rescanning,
-    # ~20ms this way).
-    reachable = {"`": [0] * (count + 1), "~": [0] * (count + 1)}
+    # model output (45KB of fence openers: 5.8ms this way).
+    reachable = {"`": [False] * (count + 1), "~": [False] * (count + 1)}
     for i in range(count - 1, -1, -1):
         for char in ("`", "~"):
             reachable[char][i] = reachable[char][i + 1]
-        found = _closer(lines[i])
+        found = _fence_run(lines[i])
         if found:
-            char, length = found
-            reachable[char][i] = max(reachable[char][i], length)
+            reachable[found][i] = True
 
     out: list[str] = []
     open_fence: str | None = None
     for i, line in enumerate(lines):
         if open_fence is not None:
-            found = _closer(line)
-            if found and found[0] == open_fence[0] and found[1] >= len(open_fence):
+            if _fence_run(line) == open_fence:
                 open_fence = None
             out.append("")
             continue
@@ -168,8 +181,8 @@ def _strip_code(text: str) -> str:
             # string is prose that merely starts with backticks, so it only
             # opens a fence when a closer genuinely follows.
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
-            if simple or reachable[fence[0]][i + 1] >= len(fence):
-                open_fence = fence
+            if simple or reachable[fence[0]][i + 1]:
+                open_fence = fence[0]
                 out.append("")
                 continue
         # Inline spans collapse to a SPACE, never to the empty string.

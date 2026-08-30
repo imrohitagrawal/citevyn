@@ -621,3 +621,53 @@ def test_prose_line_starting_with_backticks_only_opens_a_fence_if_one_closes() -
     )
     assert never_closed.valid is True
     assert never_closed.cited_indices == [1, 2, 3]
+
+
+def test_malformed_closing_fences_still_close_rather_than_eat_the_answer() -> None:
+    """A sloppy closer must not swallow every citation after it.
+
+    CommonMark says a closing fence must be bare and at least as long as its
+    opener. Applied strictly, both rules turn a malformed fence into silent
+    citation LOSS -- the answer keeps saying "[2]" and "[3]" while no such
+    cards are rendered, which is the #215 defect in the opposite direction and
+    the exact failure this module's docstring promises to resolve against.
+
+    Measured before ``_fence_run`` was made forgiving: both shapes returned
+    ``[1]``, dropping two real source cards and deflating confidence a band.
+    Goes red by requiring a bare closer (``set(body) == {body[0]}``) or by
+    requiring the closer to be at least as long as the opener.
+    """
+    trailing_text = validate_citations(
+        answer_text="Limit is 50/min [1].\n```\nx = 1\n``` (that is all)\nBackoff [2].\nSSE [3].\n",
+        evidence=_evidence(count=3),
+    )
+    assert trailing_text.valid is True
+    assert trailing_text.cited_indices == [1, 2, 3]
+
+    shorter_closer = validate_citations(
+        answer_text="Limit [1].\n````\nx = 1\n```\nBackoff [2].\nSSE [3].\n",
+        evidence=_evidence(count=3),
+    )
+    assert shorter_closer.valid is True
+    assert shorter_closer.cited_indices == [1, 2, 3]
+
+
+def test_a_backtick_pair_on_one_line_is_a_real_code_span() -> None:
+    """Two backticks on a line DO delimit a span, and that is correct.
+
+    The module comment used to claim "an unmatched lone backtick matches
+    nothing, so it cannot swallow the rest of the line". True of a LONE tick,
+    and false of a pair: ``Use ` to quote a value like [2] in the shell ` here``
+    is a genuine CommonMark code span, and every markdown renderer agrees, so
+    dropping ``[2]`` is right rather than a bug.
+
+    Pinned because it looks like the loss cases above and is not one; the
+    partner assertion is that a citation OUTSIDE the span survives, proving the
+    span is bounded rather than eating the line.
+    """
+    result = validate_citations(
+        answer_text="Use ` to quote a value like [2] in the shell ` here. See [1].",
+        evidence=_evidence(count=2),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [1]
