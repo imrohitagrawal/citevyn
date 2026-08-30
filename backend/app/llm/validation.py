@@ -100,28 +100,36 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?
 _WHITESPACE_RE = re.compile(r"\s")
 
 
-def _fence_run(line: str) -> str | None:
-    """Return the fence character if ``line`` starts a run of 3+ backticks or tildes.
+def _fence_run(line: str) -> tuple[str, int] | None:
+    """Return ``(fence_char, run_length)`` if ``line`` starts a run of 3+ ticks/tildes.
 
-    Deliberately MORE forgiving than CommonMark, which requires a closer to be
-    bare and at least as long as its opener. Both of those rules, applied
-    strictly, turn a malformed fence into a silent citation LOSS: a closer
-    carrying trailing text, or a four-backtick opener closed by three, leaves
-    the fence open, and an open fence swallows every marker to the end of the
-    answer. Measured before this was relaxed -- each of those shapes dropped
-    two real source cards, leaving the prose citing ``[2]`` and ``[3]`` with no
-    such cards rendered, which is the #215 defect in the opposite direction.
+    CommonMark requires a closing fence to be BARE and AT LEAST AS LONG as its
+    opener. Exactly one of those two rules is relaxed here, and the asymmetry
+    is deliberate.
 
-    A closer written ``\u0060\u0060\u0060 (that is all)`` and a four-backtick opener
-    closed by three backticks are the two shapes this rescued.
+    RELAXED -- trailing text. A closer written "``` (that is all)" is not a
+    closer under CommonMark, so the fence stays open and swallows every marker
+    to the end of the answer. Measured: two real source cards vanished, leaving
+    the prose citing ``[2]`` and ``[3]`` with no such cards rendered -- the #215
+    defect in the opposite direction, and silent (no refusal, no audit reason).
+    Nothing depends on a closer being bare, so allowing trailing text is a pure
+    win.
 
-    Being forgiving can only ever close a fence EARLIER, so it can only ever
-    strip LESS. That is the direction this module resolves ambiguity in.
+    KEPT -- the length rule, because it is what makes nesting possible. A
+    four-backtick fence wrapping a three-backtick one is the standard way to
+    show a code block inside a code block, and a shorter run must not close it.
+    An earlier version of this fix dropped the length rule too and broke that
+    idiom, leaking the inner block's brackets. That also settles a shape this
+    function deliberately does NOT rescue: a four-backtick opener "closed" by
+    three backticks is structurally identical to nesting, so it stays open and
+    its later markers are lost. Unfixable without breaking real nesting.
     """
     body = line.strip()
-    if len(body) >= 3 and body[0] in "`~" and body[:3] == body[0] * 3:
-        return body[0]
-    return None
+    if len(body) < 3 or body[0] not in "`~" or body[:3] != body[0] * 3:
+        return None
+    char = body[0]
+    run = len(body) - len(body.lstrip(char))
+    return char, run
 
 
 def _strip_code(text: str) -> str:
@@ -143,23 +151,25 @@ def _strip_code(text: str) -> str:
     lines = text.split("\n")
     count = len(lines)
 
-    # ``reachable[c][i]`` = does a fence run of ``c`` appear at any line >= i?
+    # ``reachable[c][i]`` = the longest fence run of ``c`` at any line >= i.
     # One reverse pass makes "is this opener ever closed?" an O(1) lookup
     # instead of a rescan per opener, which would be quadratic on hostile
     # model output (45KB of fence openers: 5.8ms this way).
-    reachable = {"`": [False] * (count + 1), "~": [False] * (count + 1)}
+    reachable = {"`": [0] * (count + 1), "~": [0] * (count + 1)}
     for i in range(count - 1, -1, -1):
         for char in ("`", "~"):
             reachable[char][i] = reachable[char][i + 1]
         found = _fence_run(lines[i])
         if found:
-            reachable[found][i] = True
+            char, run = found
+            reachable[char][i] = max(reachable[char][i], run)
 
     out: list[str] = []
-    open_fence: str | None = None
+    open_fence: tuple[str, int] | None = None
     for i, line in enumerate(lines):
         if open_fence is not None:
-            if _fence_run(line) == open_fence:
+            found = _fence_run(line)
+            if found and found[0] == open_fence[0] and found[1] >= open_fence[1]:
                 open_fence = None
             out.append("")
             continue
@@ -181,8 +191,8 @@ def _strip_code(text: str) -> str:
             # string is prose that merely starts with backticks, so it only
             # opens a fence when a closer genuinely follows.
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
-            if simple or reachable[fence[0]][i + 1]:
-                open_fence = fence[0]
+            if simple or reachable[fence[0]][i + 1] >= len(fence):
+                open_fence = (fence[0], len(fence))
                 out.append("")
                 continue
         # Inline spans collapse to a SPACE, never to the empty string.

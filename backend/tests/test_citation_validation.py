@@ -623,33 +623,55 @@ def test_prose_line_starting_with_backticks_only_opens_a_fence_if_one_closes() -
     assert never_closed.cited_indices == [1, 2, 3]
 
 
-def test_malformed_closing_fences_still_close_rather_than_eat_the_answer() -> None:
+def test_a_closer_with_trailing_text_still_closes_its_fence() -> None:
     """A sloppy closer must not swallow every citation after it.
 
-    CommonMark says a closing fence must be bare and at least as long as its
-    opener. Applied strictly, both rules turn a malformed fence into silent
-    citation LOSS -- the answer keeps saying "[2]" and "[3]" while no such
-    cards are rendered, which is the #215 defect in the opposite direction and
-    the exact failure this module's docstring promises to resolve against.
+    CommonMark requires a closing fence to be BARE. Applied strictly, a model
+    that writes ``\u0060\u0060\u0060 (that is all)`` leaves the fence open, and an open
+    fence eats every marker to the end of the answer. Measured before this was
+    relaxed: ``[1, 2, 3]`` collapsed to ``[1]`` -- two real source cards gone
+    while the prose still cited them, which is the #215 defect inverted, and
+    silent (no refusal, no audit reason).
 
-    Measured before ``_fence_run`` was made forgiving: both shapes returned
-    ``[1]``, dropping two real source cards and deflating confidence a band.
-    Goes red by requiring a bare closer (``set(body) == {body[0]}``) or by
-    requiring the closer to be at least as long as the opener.
+    Goes red by requiring a bare closer (``set(body) == {body[0]}``).
+
+    Only the BARE rule is relaxed; the length rule is kept, and the test below
+    pins why.
     """
-    trailing_text = validate_citations(
+    result = validate_citations(
         answer_text="Limit is 50/min [1].\n```\nx = 1\n``` (that is all)\nBackoff [2].\nSSE [3].\n",
         evidence=_evidence(count=3),
     )
-    assert trailing_text.valid is True
-    assert trailing_text.cited_indices == [1, 2, 3]
+    assert result.valid is True
+    assert result.cited_indices == [1, 2, 3]
 
-    shorter_closer = validate_citations(
-        answer_text="Limit [1].\n````\nx = 1\n```\nBackoff [2].\nSSE [3].\n",
-        evidence=_evidence(count=3),
+
+def test_a_shorter_run_does_not_close_a_longer_fence_so_nesting_survives() -> None:
+    """The length rule is what makes a fence-inside-a-fence possible.
+
+    Wrapping a three-backtick block in a four-backtick one is the standard way
+    to show a code block inside a code block. If a shorter run were allowed to
+    close a longer fence, the inner ``\u0060\u0060\u0060python`` line would end the outer
+    block and ``[9]`` would leak out as a citation -- and with fewer than nine
+    evidence bullets that leak becomes an out-of-range REFUSAL, discarding the
+    whole answer.
+
+    An earlier version of this fix relaxed the length rule too and did exactly
+    that. Goes red by dropping the ``found[1] >= open_fence[1]`` comparison.
+
+    The same rule is why a four-backtick opener "closed" by three backticks
+    keeps its fence open and loses the markers after it: that shape is
+    structurally identical to legitimate nesting, so it cannot be rescued
+    without breaking the idiom above. It is CommonMark-correct and left alone.
+    """
+    nested = validate_citations(
+        answer_text=(
+            "How to write a block [1]:\n````\n```python\nx[9] = 1\n```\n````\nThat is all.\n"
+        ),
+        evidence=_evidence(count=1),
     )
-    assert shorter_closer.valid is True
-    assert shorter_closer.cited_indices == [1, 2, 3]
+    assert nested.valid is True
+    assert nested.cited_indices == [1]
 
 
 def test_a_backtick_pair_on_one_line_is_a_real_code_span() -> None:
