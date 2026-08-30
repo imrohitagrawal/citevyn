@@ -33,7 +33,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
+          # key alongside this — setup-node gives `node-version` precedence, which
+          # would make the file decorative and re-open #231.
+          node-version-file: frontend/.nvmrc
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
       - name: Install

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Web UI for CiteVyn — a cited RAG assistant for AI dev tools.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
