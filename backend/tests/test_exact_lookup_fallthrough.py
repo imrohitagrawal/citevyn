@@ -325,6 +325,31 @@ async def test_uncited_retry_answer_is_rejected(session: Any) -> None:
     assert audits[0].metadata_["reason"] == "no_answer"
 
 
+async def test_retry_answer_with_gapped_citations_is_accepted(session: Any) -> None:
+    """The #208 retry re-validates, so it is a SECOND gate #215 had to clear.
+
+    ``_retry_without_exact_lookup`` calls ``validate_citations`` independently of
+    the main path. While contiguity was enforced, a retry whose answer cited
+    ``[1]`` and ``[3]`` was thrown away here too — and because the retry is
+    best-effort, the failure was invisible: the caller just kept the original
+    refusal, with no ``citation_validation_failed`` reason recorded anywhere.
+    """
+    retriever = _IntentAwareRetriever(
+        exact=[_hit(_FLAG_PASSAGE, retrieval_type=RetrievalType.exact)],
+        hybrid=[
+            _hit(_CONFIG_PASSAGE, retrieval_type=RetrievalType.hybrid),
+            _hit("Unrelated filler passage.", retrieval_type=RetrievalType.hybrid),
+            _hit("Retry after the window resets.", retrieval_type=RetrievalType.hybrid),
+        ],
+    )
+    llm = _GroundedOnlyLLM(answer_text="Settings live in a config file [1]. Retry later [3].")
+
+    response = await _ask(session, question=_FLAG_QUESTION, retriever=retriever, llm=llm)
+
+    assert response["no_answer"] is False
+    assert [c["marker"] for c in response["citations"]] == [1, 3]
+
+
 # ---------------------------------------------------------------------------
 # Flag-token stripping on the retry query (#208)
 # ---------------------------------------------------------------------------
