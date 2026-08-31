@@ -41,14 +41,31 @@ The MVP uses public official documentation only, but it should still demonstrate
 | Unsupported query answered | Hallucination |
 | CORS misconfiguration | Browser-based abuse |
 | Excessive input length | Cost and latency spike |
+| One account reads or closes another account's session/messages (IDOR) | Cross-account data leakage — see §4, ADR-0004 |
+| Account email + chat history stored under a real identity | Personal-data exposure on breach or misconfigured logging |
 
 ## 4. MVP Authentication
 
 MVP supports:
 
-1. Demo login or demo bearer token.
-2. Admin API key for ingestion, evaluation, and index promotion.
-3. Anonymous access disabled.
+1. **Real personal-account login** (ADR-0004, 2026-08-31): every request
+   resolves to exactly one opaque principal id. Anonymous visitors get a
+   durable pseudonymous principal (`anon_<uuid4hex>`) minted transparently on
+   first session creation — no login screen, no wall in front of the demo.
+   Registered users (`usr_<uuid4hex>`) authenticate with email + Argon2id
+   password hash, or GitHub OAuth, and get a Postgres-backed opaque session
+   token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Sessions and
+   messages are owned by principal id, enforced at the two loaders every
+   affected route already shares; a mismatch returns 404, never 403.
+2. The build-time demo bearer token is retained alongside the session
+   cookie as a CSRF guard (a cross-site request cannot set an `Authorization`
+   header) — it is not, on its own, an identity control.
+3. Admin API key for ingestion, evaluation, and index promotion — unrelated
+   to the login system above; the admin key has no implicit access to any
+   individual account's data.
+4. Anonymous access stays enabled by design (item 1) — this supersedes the
+   prior "anonymous access disabled" line, which described a demo-bearer-only
+   world with a single shared principal, not the current model.
 
 ## 5. MVP Authorization
 
@@ -157,6 +174,17 @@ MVP does not support:
 4. Chunk-level ACL.
 5. Private document ingestion.
 6. Compliance retention policies.
+
+> **Note (ADR-0004, 2026-08-31):** items 1-3 above are about *enterprise*
+> identity (federated SSO, role-based access control across an
+> organization, isolating one tenant's data from another's) and remain out
+> of scope. **Real single-tenant personal-account login is a different,
+> now-in-scope capability** — see §4. Two limitations specific to that login
+> system, accepted deliberately rather than silently: password reset is not
+> implemented in v1 (GitHub OAuth is the recovery path; a CLI account-delete
+> escape hatch is documented in `RUNBOOK.md`), and registration responses
+> disclose whether an email is already registered (no email-sending
+> provider exists to support an always-202 response instead).
 7. Legal hold.
 8. Customer-managed keys.
 

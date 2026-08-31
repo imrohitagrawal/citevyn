@@ -204,6 +204,12 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
   fallback (paid, different provider family). Live-verified. Follow-up: refill the judge baseline
   (§8a) via `make eval` during Phase 1.
 
+## Roadmap: real user accounts (ADR-0004)
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#270](https://github.com/imrohitagrawal/citevyn/issues/270) | Real user accounts (login): ADR-0004 implementation, PRs 0-12 | backend / frontend / auth | Owner-approved (`~/.claude/plans/i-also-want-you-hashed-marble.md`), overriding the doless recommendation. PR 1 (ownership + expiry predicate) MUST land before PR 6 (first PR minting a second real principal) or accounts introduce a live IDOR on the 4 routes that currently discard the caller's identity (`sessions.py`, `messages.py`). PR 5 (migration 0008) is a one-way door — verify in prod before PR 6. See `docs/ADR/0004-user-accounts.md` |
+
 ## Operator / non-code follow-ups (not GitHub issues)
 
 - **#227 (Node 22 → 26 base image) merged deliberately, all three pins moved
