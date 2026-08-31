@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Frontend base image Node 22 → 26 (#227).** Moved deliberately, not as a
+  routine bump: all three pins (`frontend/.nvmrc`, `package.json`
+  `engines.node`, `Dockerfile.api`'s `FROM`) together, per the #231 guard's
+  requirement, and boot-verified (`make image-smoke`: frontend build succeeds
+  under Node 26, api `/health` → 200, worker `list-sources` exit 0) rather
+  than assumed — the #34 Python base-image bump shipped non-booting once
+  already for skipping exactly this step. Corroborates the #231 measurement
+  that Node 20/22/26 produce a byte-identical bundle.
+
 ### Fixed
 - **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
   and failed open on a dual-active database (#226).** `_active_index_stamp`

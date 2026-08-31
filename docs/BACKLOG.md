@@ -206,6 +206,19 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
+- **#227 (Node 22 → 26 base image) merged deliberately, all three pins moved
+  together:** `frontend/.nvmrc`, `frontend/package.json` `engines.node`, and
+  `infra/docker/Dockerfile.api:55`'s `FROM node:26-bookworm-slim`, exactly as
+  `backend/tests/test_node_version_pin.py` requires. Boot-verified before
+  merge, not assumed: `make image-smoke` built the frontend stage under Node
+  26 (`npm ci` + `npm run build`), and both the api image (`GET /health` →
+  200) and the worker image (`list-sources` exit 0) booted clean. Full
+  backend battery (1437/17, lint, pyright) stayed green. This corroborates
+  the #231 measurement already on record — Node 20/22/26 produce a
+  byte-identical frontend bundle — so the base-image jump carries no known
+  runtime risk, unlike the #34 Python 3.14 base-image bump, which shipped
+  non-booting because nothing boot-tested it.
+
 - **v0.12.0 release-candidate pack ready:** `docs/RELEASE_CANDIDATE_v0.12.0.md`
   (this session, 2026-08-31) has the ship/no-ship summary and exact ordered
   commands for the owner to tag + `fly deploy`. No migration and no corpus
