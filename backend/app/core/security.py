@@ -49,7 +49,10 @@ def require_demo_api_key(
             message="Missing bearer token.",
         )
 
-    if credentials.credentials != settings.demo_api_key:
+    # ``secrets.compare_digest`` to avoid a timing oracle, matching
+    # ``require_admin_api_key`` below — a naive ``==``/``!=`` would let an
+    # attacker measure prefix-match time to narrow down the key.
+    if not secrets.compare_digest(credentials.credentials, settings.demo_api_key):
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.auth_required,

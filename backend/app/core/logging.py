@@ -15,6 +15,14 @@ SECRET_KEY_PARTS = (
     "password",
     "passwd",
     "private_key",
+    # ADR-0004 (login): a session cookie value is a bearer credential, and an
+    # email is personal data neither previously existed on any request path
+    # this logger saw. Redacting by key name (not by entropy) is deliberate:
+    # ``HIGH_ENTROPY_RE`` does not catch an Argon2 PHC string (it splits on
+    # ``$`` into sub-32-char segments) and a short, common email would not
+    # trip an entropy heuristic at all.
+    "cookie",
+    "email",
 )
 RAW_TEXT_KEYS = (
     "question",

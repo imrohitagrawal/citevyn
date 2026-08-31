@@ -111,9 +111,25 @@ async def _get_session_or_404(
     *,
     request_id: str,
     session_id: uuid.UUID,
+    user_id: str,
 ) -> Session:
-    """Load a session row or raise the standard 404 envelope."""
-    row = await session.get(Session, session_id)
+    """Load a session row owned by ``user_id`` or raise the standard 404 envelope.
+
+    Ownership and expiry are both folded into one predicate. A session that
+    exists but belongs to a different principal, or that has already expired
+    (including a soft-closed session, whose ``DELETE`` sets ``expires_at`` to
+    now), returns the SAME 404 as a genuine miss — never a 403, which would
+    confirm the id is real and turn this into a membership oracle over the
+    UUID space. Behaviourally a no-op today (every caller resolves to the one
+    constant ``demo_user`` principal); load-bearing the moment a second
+    principal exists (see ``docs/ADR/0004-user-accounts.md`` PR 1).
+    """
+    stmt = select(Session).where(
+        Session.session_id == session_id,
+        Session.user_id == user_id,
+        Session.expires_at > _now(),
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise error_response(
             request_id=request_id,
@@ -228,8 +244,9 @@ async def close_session(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     """Close a session by setting its ``expires_at`` to now."""
-    del user_id  # auth-only; ownership check is a Slice 8 concern
-    row = await _get_session_or_404(db, request_id=_request_id(request), session_id=session_id)
+    row = await _get_session_or_404(
+        db, request_id=_request_id(request), session_id=session_id, user_id=user_id
+    )
     row.expires_at = _now()
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -257,9 +274,10 @@ async def get_session_route(
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     """Return the session metadata plus the ordered messages list."""
-    del user_id  # auth-only; ownership check is a Slice 8 concern
     request_id = _request_id(request)
-    row = await _get_session_or_404(db, request_id=request_id, session_id=session_id)
+    row = await _get_session_or_404(
+        db, request_id=request_id, session_id=session_id, user_id=user_id
+    )
 
     stmt = (
         select(Message)

@@ -208,7 +208,7 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 | Issue | Title | Area | Notes |
 |---|---|---|---|
-| [#270](https://github.com/imrohitagrawal/citevyn/issues/270) | Real user accounts (login): ADR-0004 implementation, PRs 0-12 | backend / frontend / auth | Owner-approved (`~/.claude/plans/i-also-want-you-hashed-marble.md`), overriding the doless recommendation. PR 1 (ownership + expiry predicate) MUST land before PR 6 (first PR minting a second real principal) or accounts introduce a live IDOR on the 4 routes that currently discard the caller's identity (`sessions.py`, `messages.py`). PR 5 (migration 0008) is a one-way door — verify in prod before PR 6. See `docs/ADR/0004-user-accounts.md` |
+| [#270](https://github.com/imrohitagrawal/citevyn/issues/270) | Real user accounts (login): ADR-0004 implementation, PRs 0-12 | backend / frontend / auth | Owner-approved (`~/.claude/plans/i-also-want-you-hashed-marble.md`), overriding the doless recommendation. **PR 0 (ADR + doc amendments) and PR 1 (ownership + expiry predicate) DONE.** `_get_session_or_404`/`_require_session` now filter on `user_id` + unexpired; mismatch is 404 never 403; mutation-tested (deleting the ownership clause turned all 4 IDOR regression tests red). PR 5 (migration 0008) is still a one-way door — verify in prod before PR 6. Stopped here per the owner's ultracode brief (no further than PR 4 without check-in). See `docs/ADR/0004-user-accounts.md` |
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
