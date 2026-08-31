@@ -38,11 +38,13 @@ def test_default_retrieval_and_cache_settings() -> None:
     settings = Settings()
     assert settings.retrieval_top_k == 6
     assert settings.retrieval_max_candidates == 20
-    # v3 since #215; v2 since #169. The bump is the cache-invalidation mechanism, so
-    # this pin is load-bearing: silently reverting it would re-serve stale rows. v2 rows
-    # were written while the validator discarded gapped citations, so their citations
-    # carry no ``marker`` field — replaying them would render unnumbered cards.
-    assert settings.answer_policy_version == "v3"
+    # v6 since #226; v4/v5 since #237; v3 since #215; v2 since #169. The bump is the
+    # cache-invalidation mechanism, so this pin is load-bearing: silently reverting it
+    # would re-serve stale rows. v2 rows were written while the validator discarded
+    # gapped citations, so their citations carry no ``marker`` field — replaying them
+    # would render unnumbered cards. v5 rows may have been built with the vector arm
+    # scoring a foreign vector space, which the #226 gate now refuses.
+    assert settings.answer_policy_version == "v6"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 

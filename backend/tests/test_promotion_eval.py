@@ -21,11 +21,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core import db as db_module
 from app.core.config import get_settings
 from app.embeddings.factory import EmbedderIdentity
+from app.main import create_app
 from app.models import Base
 from app.models.enums import EvaluationStatus, IndexStatus
 from app.models.evaluation import EvaluationRun
@@ -571,3 +574,339 @@ class TestUntrustworthyCandidateIsRefused:
         """
         run = await evaluate_index(candidate_session, index_version=CANDIDATE)
         assert run.status is EvaluationStatus.passed
+
+
+# ---------------------------------------------------------------------------
+# #229 — the linkage the READ surface displays
+# ---------------------------------------------------------------------------
+
+
+async def _row_over_an_independent_connection(
+    session: AsyncSession, index_version: str
+) -> IndexVersion | None:
+    """Read an :class:`IndexVersion` over a SECOND connection to the same database.
+
+    Not ``session.get``, and not even ``rollback()``-then-``get``: the fixture
+    session is ``expire_on_commit=False``, so a pointer that was assigned in
+    Python and never committed still answers correctly out of its identity map,
+    and every assertion below would pass against a fix that writes nothing to
+    the database. A separate connection sees committed rows and nothing else,
+    which is the property production depends on — the worker process writes the
+    pointer, a different API process reads it.
+    """
+    factory = async_sessionmaker(session.bind, expire_on_commit=False, autoflush=False)
+    async with factory() as fresh:
+        return await fresh.get(IndexVersion, index_version)
+
+
+#: A suite the shipped corpus genuinely cannot satisfy (1 of 4 cases hits).
+_FAILING_SUITE = [
+    PromotionCase("ok", "How do I install Claude Code?", "claude_code"),
+    PromotionCase("bad1", "How do I install Claude Code?", "gemini_api"),
+    PromotionCase("bad2", "What is the Claude API rate limit?", "codex"),
+    PromotionCase("bad3", "Which products does CiteVyn cover?", "claude_api"),
+]
+
+
+class TestEvaluationRunLinkage:
+    """``index_versions.evaluation_run_id`` must name the newest terminal run (#229).
+
+    Declared in the model, in migration ``0001`` and in BOTH read surfaces since
+    the first commit, and assigned by nothing — so ``/health/index`` reported
+    ``null`` for an index that had just measured ``pass_rate=1.0``, and the
+    display contradicted the gate. An operator reading that as "no evidence"
+    reaches for ``?force=true``, which is the habit #216 exists to remove.
+    """
+
+    async def test_a_passing_run_is_linked_and_committed(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        before = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert before is not None
+        assert before.evaluation_run_id is None, "precondition: nothing linked yet"
+        original_status = before.status
+        original_hash = before.source_version_hash
+        original_created = before.created_at
+
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        assert run.status is EvaluationStatus.passed, run.failure_summary
+
+        after = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert after is not None
+        assert after.evaluation_run_id == run.run_id
+        # The linker must UPDATE one column, not re-materialise the row. A
+        # ``session.merge`` of a transient ``IndexVersion`` would set the
+        # pointer correctly and silently blank everything else.
+        assert after.status is original_status
+        assert after.source_version_hash == original_hash
+        assert after.created_at == original_created
+
+    async def test_a_failed_run_is_linked_too(self, candidate_session: AsyncSession) -> None:
+        """Deliberate semantics: the pointer names the newest run, not a certificate.
+
+        Linking only PASSING runs would make "evaluated and failed" look
+        identical to "never evaluated" — #229 relocated, not fixed.
+        """
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE, cases=_FAILING_SUITE)
+        # Assert the suite really failed FIRST: if it silently started passing,
+        # this test would degenerate into a duplicate of the one above and stop
+        # guarding the passed-only mutation entirely.
+        assert run.status is EvaluationStatus.failed
+        assert run.metrics["pass_rate"] == pytest.approx(0.25)
+
+        row = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert row is not None
+        assert row.evaluation_run_id == run.run_id
+
+    async def test_the_pointer_moves_to_the_newer_run(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """Newest terminal run wins — a set-once pointer would freeze stale evidence."""
+        first = await evaluate_index(
+            candidate_session, index_version=CANDIDATE, cases=_FAILING_SUITE
+        )
+        second = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        assert first.run_id != second.run_id
+
+        row = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert row is not None
+        # Exact equality with the SECOND run, not merely "changed" or "not None":
+        # a bug that pointed at some third id would satisfy both weaker checks.
+        assert row.evaluation_run_id == second.run_id
+
+    async def test_only_the_evaluated_index_is_stamped(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """A display crediting index A with index B's passing run is WORSE than null.
+
+        Two rows exist at once — the ingested candidate and an untouched active
+        index. Evaluating the candidate must stamp the candidate and nothing else.
+        """
+        candidate_session.add(
+            IndexVersion(
+                index_version="other-index",
+                status=IndexStatus.active,
+                source_version_hash="sha256:other",
+                created_at=datetime.now(UTC),
+                promoted_at=datetime.now(UTC),
+            )
+        )
+        await candidate_session.commit()
+
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE)
+
+        evaluated = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        bystander = await _row_over_an_independent_connection(candidate_session, "other-index")
+        assert evaluated is not None
+        assert bystander is not None
+        assert evaluated.evaluation_run_id == run.run_id
+        assert bystander.evaluation_run_id is None
+
+    async def test_an_interrupted_run_leaves_no_pointer(
+        self, candidate_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pointer must never resolve to a ``running`` row.
+
+        The gate skips ``running`` runs so a crashed evaluation cannot read as
+        evidence; a pointer installed before the terminal status would smuggle
+        exactly that back in through the display.
+        """
+
+        async def _explode(*args: object, **kwargs: object) -> tuple[str, ...]:
+            raise RuntimeError("embedding provider exploded mid-suite")
+
+        monkeypatch.setattr(promotion_eval, "_retrieve_sources", _explode)
+        with pytest.raises(RuntimeError, match="exploded mid-suite"):
+            await evaluate_index(candidate_session, index_version=CANDIDATE)
+
+        row = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert row is not None
+        assert row.evaluation_run_id is None
+        # Partner to the null assertion above: the thing that is NOT linked has
+        # to exist, or this test would pass just as happily with no run at all.
+        await candidate_session.rollback()
+        runs = (await candidate_session.execute(select(EvaluationRun))).scalars().all()
+        assert len(runs) == 1
+        assert runs[0].status is EvaluationStatus.running
+
+    async def test_the_linker_refuses_a_running_run(self, candidate_session: AsyncSession) -> None:
+        """The guard itself, at the boundary that owns it."""
+        run = EvaluationRun(
+            suite_name=SUITE_NAME,
+            index_version=CANDIDATE,
+            started_at=datetime.now(UTC),
+            status=EvaluationStatus.running,
+            metrics={},
+            failure_summary={},
+        )
+        candidate_session.add(run)
+        await candidate_session.flush()
+        with pytest.raises(index_service.EvaluationRunNotLinkable, match="not a terminal"):
+            await index_service.link_evaluation_run(candidate_session, run=run)
+
+    async def test_the_linker_refuses_an_unflushed_run_rather_than_nulling_the_pointer(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """An unflushed run must not silently CLEAR a good pointer (#229 review).
+
+        ``EvaluationRun.run_id`` is a Python-side ``default=uuid.uuid4`` that
+        SQLAlchemy applies at FLUSH, so on a transient run it is ``None``.
+        Assigning that would not raise — it would overwrite valid evidence with
+        ``NULL`` and put the index straight back into the state this issue is
+        about. Unreachable from ``evaluate_index`` (which commits the ``running``
+        row first); guarded because the function is public and exported.
+        """
+        real = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        await candidate_session.commit()
+        # Read the id out BEFORE the rollback below: rollback expires the
+        # instance, and re-reading an expired attribute on an async session is
+        # a lazy load, which raises ``MissingGreenlet`` rather than refreshing.
+        real_run_id = real.run_id
+        # Partner to the "unchanged" assertion below: there IS a pointer here to
+        # destroy, so a guard that did nothing would be visible.
+        linked = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert linked is not None
+        assert linked.evaluation_run_id == real_run_id
+
+        unflushed = EvaluationRun(
+            suite_name=SUITE_NAME,
+            index_version=CANDIDATE,
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            status=EvaluationStatus.passed,
+            metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
+            failure_summary={},
+        )
+        assert unflushed.run_id is None, "precondition: run_id is assigned at flush"
+
+        with pytest.raises(index_service.EvaluationRunNotLinkable, match="unflushed"):
+            await index_service.link_evaluation_run(candidate_session, run=unflushed)
+
+        await candidate_session.rollback()
+        after = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert after is not None
+        assert after.evaluation_run_id == real_run_id
+
+    async def test_the_linker_takes_its_target_from_the_run(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """The index is derived from ``run.index_version``, never supplied.
+
+        A caller cannot name the wrong index because a caller cannot name one
+        at all — the cross-index leak is impossible by construction rather than
+        by discipline.
+        """
+        candidate_session.add(
+            IndexVersion(
+                index_version="other-index",
+                status=IndexStatus.candidate,
+                source_version_hash="sha256:other",
+                created_at=datetime.now(UTC),
+                promoted_at=None,
+            )
+        )
+        run = EvaluationRun(
+            suite_name=SUITE_NAME,
+            index_version="other-index",
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            status=EvaluationStatus.passed,
+            metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
+            failure_summary={},
+        )
+        candidate_session.add(run)
+        await candidate_session.flush()
+
+        stamped = await index_service.link_evaluation_run(candidate_session, run=run)
+        assert stamped is not None
+        assert stamped.index_version == "other-index"
+        await candidate_session.commit()
+
+        other = await _row_over_an_independent_connection(candidate_session, "other-index")
+        candidate = await _row_over_an_independent_connection(candidate_session, CANDIDATE)
+        assert other is not None
+        assert candidate is not None
+        assert other.evaluation_run_id == run.run_id
+        assert candidate.evaluation_run_id is None
+
+    async def test_a_run_naming_a_vanished_index_is_a_no_op(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """No row to stamp is not an error — the run itself is still the evidence."""
+        run = EvaluationRun(
+            suite_name=SUITE_NAME,
+            index_version="never-existed",
+            started_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+            status=EvaluationStatus.passed,
+            metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
+            failure_summary={},
+        )
+        assert await index_service.link_evaluation_run(candidate_session, run=run) is None
+
+
+class TestHealthIndexReportsTheEvidence:
+    """The end-to-end reproduction from #229: evaluate, promote, read it back.
+
+    Kept as a test because of how the bug was found — a command reported
+    success and the resulting STATE contradicted it. So the assertion is on the
+    state, read back through the endpoint an operator actually opens.
+    """
+
+    async def test_health_index_shows_the_run_after_an_evaluation(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        assert run.status is EvaluationStatus.passed, run.failure_summary
+
+        # No ``force``: the gate has its evidence, which is #216's whole point.
+        await index_service.promote_version(
+            candidate_session,
+            index_version=CANDIDATE,
+            admin_user_id="admin",
+            request_id="req-229",
+        )
+        await candidate_session.commit()
+
+        app = create_app()
+
+        async def _override():
+            yield candidate_session
+
+        app.dependency_overrides[db_module.get_session] = _override
+        try:
+            with TestClient(app) as client:
+                body = client.get("/health/index").json()
+        finally:
+            app.dependency_overrides.clear()
+
+        assert body["status"] == "ready"
+        assert body["active_index"]["index_version"] == CANDIDATE
+        # The bug: this read ``None`` while the gate above promoted on evidence.
+        assert body["active_index"]["evaluation_run_id"] == str(run.run_id)
+
+    async def test_admin_index_versions_shows_the_run_after_an_evaluation(
+        self, candidate_session: AsyncSession
+    ) -> None:
+        """The second read surface, which duplicates the column read (#229)."""
+        run = await evaluate_index(candidate_session, index_version=CANDIDATE)
+        await candidate_session.commit()
+
+        app = create_app()
+
+        async def _override():
+            yield candidate_session
+
+        app.dependency_overrides[db_module.get_session] = _override
+        try:
+            with TestClient(app) as client:
+                response = client.get(
+                    "/v1/admin/index_versions",
+                    headers={"X-Admin-API-Key": get_settings().admin_api_key},
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        rows = {r["index_version"]: r for r in response.json()["versions"]}
+        assert rows[CANDIDATE]["evaluation_run_id"] == str(run.run_id)
