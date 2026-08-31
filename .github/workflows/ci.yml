@@ -60,7 +60,7 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install uv
@@ -128,7 +128,7 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - run: pip install --upgrade pip uv
@@ -182,7 +182,7 @@ jobs:
     # deploy. This job closes that gap (issue #52).
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install uv
@@ -301,7 +301,7 @@ jobs:
       CITEVYN_EVAL_JUDGE_PANEL: "1"
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Guard — skip when the answer-quality secret is absent (owner-only)
