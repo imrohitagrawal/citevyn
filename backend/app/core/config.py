@@ -269,7 +269,13 @@ class Settings(BaseSettings):
     # have to be re-run by hand against every environment, and it leaves no record in the
     # code. The version bump is declarative, applies everywhere the build is deployed, and
     # its only cost is a cold cache that refills on demand.
-    answer_policy_version: str = "v3"
+    # v3 -> v4 (#237): the citation scanner changed. Answers cached under v3 had their
+    # markers extracted by a regex that counted ``[n]`` inside code spans and fences, so
+    # a v3 row can carry a phantom card the current build would never attach. Nothing
+    # else in the key invalidates them -- the question, source hash and embedder identity
+    # are unchanged -- so without this bump the pre-fix rows replay the phantom for the
+    # 24h TTL, which is the same failure mode the v2 -> v3 bump fixed for #236.
+    answer_policy_version: str = "v4"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 
