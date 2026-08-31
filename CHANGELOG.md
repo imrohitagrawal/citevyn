@@ -7,6 +7,91 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
+  and failed open on a dual-active database (#226).** `_active_index_stamp`
+  resolved the active row by `status == active` rather than by
+  `active_index_version`, so a caller retrieving against a non-active index (the
+  #216 promotion evaluator) got the vector arm enabled against a mismatched
+  index — meaningless cosine similarity scored as real evidence. Fixed to read
+  the row named by `active_index_version` by primary key, whatever its status,
+  so doc scoping and the provenance gate can no longer disagree about which
+  index is being read. Second half: on a **dual-active** database (two rows
+  both `status == active`) the old fallback returned `None`, which the shared
+  predicate reads as "unknown provenance ⇒ allow" — the arm ran without
+  knowing whose vectors it was scoring. A distinct `IndexStampStatus.ambiguous`
+  now fails **closed** for that case only, leaving the legitimate "no stamp
+  recorded" meaning (stub-seeded/local, load-bearing for hermetic tests)
+  unchanged. Two siblings found during review and left deliberately open:
+  **#265** (zero active rows: the arms still filter on document status alone,
+  with no row for the gate to compare against) and **#264** (`/health/index`
+  reports the vector arm healthy on a dual-active DB at the exact moment the
+  read path fails closed).
+
+  > **Operator note.** `answer_policy_version` bumped **v5 → v6** — answers
+  > cached while either defect was live replay identically after the fix
+  > (nothing else in the key changes), so the cache is cold on deploy and
+  > refills on first ask. No migration.
+
+- **A malformed closing code fence silently deleted every citation after it
+  (#237 follow-up).** The #237 code-span scanner treated any closing fence
+  as valid, so a non-bare closer (e.g. a fence immediately followed by text)
+  left the fence "open" in the scanner's view — every citation marker past
+  that point was invisible to validation and dropped from the answer with no
+  refusal and no audit reason. Now closes a sloppy fence only as a last
+  resort, when no bare closer is reachable later in the text, without
+  breaking fence nesting or misreading a fenced info-string opener as a
+  closer. Measured against a labelled fuzz of 39,002 well-formed CommonMark
+  answers (ground truth assigned by construction, not inferred after the
+  fact): 0 citation losses, 0 phantoms, 0 new refusals.
+
+  > **Operator note.** `answer_policy_version` bumped **v4 → v5**.
+
+- **`_CITATION_RE` counted `[n]` inside code spans and fenced code blocks as
+  real citations (#237).** A bracketed array index or footnote marker inside
+  a code span (` `arr[9]` `) or fenced block could pass or fail citation
+  validation for reasons unrelated to the prose — including a live false
+  refusal, where a code span with three evidence bullets tripped the
+  out-of-range check and discarded a correct answer. `validate_citations` now
+  scans a code-stripped copy of the answer via `_cited_markers = findall(
+  strip_code(t)) or findall(t)` — the `or` fallback is mandatory so the strip
+  can never empty the cited set and manufacture a new refusal or a second paid
+  `exact_lookup` retry. Two invariants are pinned as a property test: the
+  cited set is always a subset of the raw scan, and it is empty iff the raw
+  scan is empty. Covers ` ``` ` and `~~~` fences (including unterminated) and
+  inline spans; deliberately does **not** cover 4-space/tab-indented blocks or
+  bracketed indices in ordinary prose — a line scanner cannot separate
+  indented code from indented prose without a block parser, and every
+  misjudgement there *deletes* a real citation, strictly worse than the
+  phantom being fixed.
+
+  > **Operator note.** `answer_policy_version` bumped **v3 → v4**.
+
+- **`/health/index` and `GET /v1/admin/index_versions` always reported
+  `evaluation_run_id: null`, even for an index with passing evaluation
+  evidence (#229).** Migration `0001`, the model, and the admin schema all
+  declared the column; nothing had ever written it. `app.services
+  .index_versions.link_evaluation_run` is now its single writer, called by
+  `evaluate_index` in the same transaction as the terminal run. It links the
+  newest **terminal** run — passing or failing — because linking only passing
+  runs would make "evaluated and failed" indistinguishable from "never
+  evaluated"; non-null means *evaluated*, not *passed*. No migration; no new
+  `/health/index` payload key. Production's `v1` index stays `null` until
+  `citevyn-worker evaluate` is re-run there post-deploy — this fix writes
+  forward, it does not backfill.
+
+- **CI tested the frontend on Node 20 while the shipped bundle was built on
+  Node 22, and nothing reconciled the two (#231).** `frontend/.nvmrc` (`22`)
+  is now the single source of truth: both workflows read it via
+  `setup-node`'s `node-version-file:`, `package.json` declares the matching
+  `engines.node` floor, and `Dockerfile.api` already built on 22. Enforced by
+  `backend/tests/test_node_version_pin.py`, which scans every `setup-node`
+  step, every Dockerfile `FROM node:` line, and the `engines` floor — running
+  in the required `test` job with no `paths:` filter, so it fires even on a
+  Dependabot PR touching only `Dockerfile.api`. Consequence: PR #227
+  (node 22→26) now goes red until `.nvmrc` moves in the same PR, not silently.
+  Measured while fixing: Node 20, 22, and 26 all produce a byte-identical
+  frontend bundle, so the drift had not yet corrupted a shipped artifact.
+
 - **Answers whose citations skip a bullet are served instead of discarded
   (#215).** `app/llm/validation.py` hard-failed whenever the cited indices had a
   gap, so a correct, grounded answer citing `[1]` and `[3]` was thrown away and
@@ -16,6 +101,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hallucinated markers are still caught by the range check above it, whose two
   boundaries are now pinned by tests (contiguity had been catching an off-by-one
   there as a side effect).
+
+### Changed
+- **License is MIT + Attribution, not plain MIT (#253).** Plain MIT let a
+  downstream redistribution drop the author's name entirely.
+- **README and social-preview sharpened for public presentation (#248).**
+  No functional change.
+- **`pr-quality.yml`'s reusable workflow repinned to `imrohitagrawal/.github@v7`
+  (#254, #255).**
 
 ### Added
 - **`citations[].marker` on the wire (#236).** Each citation now carries the
