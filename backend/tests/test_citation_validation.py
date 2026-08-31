@@ -724,3 +724,39 @@ def test_a_prose_line_starting_with_backticks_is_not_evidence_a_fence_closes() -
     )
     assert result.valid is True
     assert result.cited_indices == [1, 2, 3]
+
+
+def test_an_info_string_opener_inside_a_fence_does_not_close_it() -> None:
+    """A docs assistant SHOWING you how to open a fence must still be readable.
+
+    This is the shape that made a sloppy-closer relaxation dangerous. Every
+    line below is valid CommonMark: the inner ````` python`` sits INSIDE an open
+    fence, and a closing fence may not carry an info string, so it is content,
+    not a closer.
+
+    Treating it as a closer ended the block early, leaked ``[9]`` out of the
+    code as a citation, and let the reopened fence swallow the real ``[3]``
+    after it -- turning a correct answer into
+    ``citation_validation_failed: citation index out of range: [9]``. Discarding
+    a correct, grounded answer is the #215 defect, which is where this whole
+    line of work started.
+
+    Goes red by letting a non-bare run close a fence unconditionally, i.e. by
+    dropping the ``set(line.strip()) == {found[0]} or reachable[...] <
+    open_fence[1]`` guard. Measured on that build: ``valid=False``,
+    ``cited=[1, 2, 9]``.
+    """
+    result = validate_citations(
+        answer_text=(
+            "You wrap code in a fence [1]. The pattern looks like this [2]:\n"
+            "```\n"
+            "``` python  <- opening fence, language after the ticks\n"
+            "result = client.ask(items[9])\n"
+            "```\n"
+            "Streaming is covered separately [3].\n"
+        ),
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.reason is None
+    assert result.cited_indices == [1, 2, 3]

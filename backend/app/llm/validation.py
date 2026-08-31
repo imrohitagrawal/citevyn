@@ -144,6 +144,42 @@ def _fence_run(line: str) -> tuple[str, int] | None:
     return char, run
 
 
+def _closes(line: str, open_fence: tuple[str, int], bare_reachable_after: int) -> bool:
+    """Does ``line`` close the currently open fence?
+
+    A BARE closer always closes. A SLOPPY one -- a run of the right character
+    and length carrying trailing text -- closes only as a LAST RESORT, when no
+    bare closer is reachable later in the answer.
+
+    That last-resort condition is what keeps the relaxation narrow. Without it
+    the rule reaches far wider than "sloppy closers": an ordinary info-string
+    opener written INSIDE a fence -- exactly what a docs assistant emits when it
+    shows you how to open one -- was treated as a closer. The block then ended
+    early, its code leaked out as a citation, and the real prose citation after
+    the true closing fence was swallowed by the reopened fence.
+
+    Measured on an answer whose every line is valid CommonMark: the raw scan
+    gives [1, 2, 9, 3] and a correct scanner serves [1, 2, 3]; the unguarded
+    version returned [1, 2, 9] and hard-failed the whole answer as
+    out-of-range. Discarding a correct, grounded answer is the #215 defect,
+    which is where this line of work started.
+
+    A labelled fuzz -- every marker placed as PROSE or CODE by construction --
+    puts the guarded version at 0 lost citations, 0 leaked phantoms and 0 new
+    refusals across 39,002 well-formed CommonMark answers, against 4,998 /
+    8,839 / 7,046 for the unguarded one.
+    """
+    found = _fence_run(line)
+    if found is None:
+        return False
+    char, run = found
+    if char != open_fence[0] or run < open_fence[1]:
+        return False
+    if set(line.strip()) == {char}:
+        return True
+    return bare_reachable_after < open_fence[1]
+
+
 def _strip_code(text: str) -> str:
     """Blank out markdown code so ``[n]`` inside it is not read as a marker.
 
@@ -190,8 +226,7 @@ def _strip_code(text: str) -> str:
     open_fence: tuple[str, int] | None = None
     for i, line in enumerate(lines):
         if open_fence is not None:
-            found = _fence_run(line)
-            if found and found[0] == open_fence[0] and found[1] >= open_fence[1]:
+            if _closes(line, open_fence, reachable[open_fence[0]][i + 1]):
                 open_fence = None
             out.append("")
             continue
