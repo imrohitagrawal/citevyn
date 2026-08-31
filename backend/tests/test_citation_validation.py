@@ -621,3 +621,142 @@ def test_prose_line_starting_with_backticks_only_opens_a_fence_if_one_closes() -
     )
     assert never_closed.valid is True
     assert never_closed.cited_indices == [1, 2, 3]
+
+
+def test_a_closer_with_trailing_text_still_closes_its_fence() -> None:
+    """A sloppy closer must not swallow every citation after it.
+
+    CommonMark requires a closing fence to be BARE. Applied strictly, a model
+    that writes ``\u0060\u0060\u0060 (that is all)`` leaves the fence open, and an open
+    fence eats every marker to the end of the answer. Measured before this was
+    relaxed: ``[1, 2, 3]`` collapsed to ``[1]`` -- two real source cards gone
+    while the prose still cited them, which is the #215 defect inverted, and
+    silent (no refusal, no audit reason).
+
+    Goes red by requiring a bare closer (``set(body) == {body[0]}``).
+
+    Only the BARE rule is relaxed; the length rule is kept, and the test below
+    pins why.
+    """
+    result = validate_citations(
+        answer_text="Limit is 50/min [1].\n```\nx = 1\n``` (that is all)\nBackoff [2].\nSSE [3].\n",
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [1, 2, 3]
+
+
+def test_a_shorter_run_does_not_close_a_longer_fence_so_nesting_survives() -> None:
+    """The length rule is what makes a fence-inside-a-fence possible.
+
+    Wrapping a three-backtick block in a four-backtick one is the standard way
+    to show a code block inside a code block. If a shorter run were allowed to
+    close a longer fence, the inner ``\u0060\u0060\u0060python`` line would end the outer
+    block and ``[9]`` would leak out as a citation -- and with fewer than nine
+    evidence bullets that leak becomes an out-of-range REFUSAL, discarding the
+    whole answer.
+
+    An earlier version of this fix relaxed the length rule too and did exactly
+    that. Goes red by dropping the ``found[1] >= open_fence[1]`` comparison.
+
+    The same rule is why a four-backtick opener "closed" by three backticks
+    keeps its fence open and loses the markers after it: that shape is
+    structurally identical to legitimate nesting, so it cannot be rescued
+    without breaking the idiom above. It is CommonMark-correct and left alone.
+    """
+    nested = validate_citations(
+        answer_text=(
+            "How to write a block [1]:\n````\n```python\nx[9] = 1\n```\n````\nThat is all.\n"
+        ),
+        evidence=_evidence(count=1),
+    )
+    assert nested.valid is True
+    assert nested.cited_indices == [1]
+
+
+def test_a_backtick_pair_on_one_line_is_a_real_code_span() -> None:
+    """Two backticks on a line DO delimit a span, and that is correct.
+
+    The module comment used to claim "an unmatched lone backtick matches
+    nothing, so it cannot swallow the rest of the line". True of a LONE tick,
+    and false of a pair: ``Use ` to quote a value like [2] in the shell ` here``
+    is a genuine CommonMark code span, and every markdown renderer agrees, so
+    dropping ``[2]`` is right rather than a bug.
+
+    Pinned because it looks like the loss cases above and is not one; the
+    partner assertion is that a citation OUTSIDE the span survives, proving the
+    span is bounded rather than eating the line.
+    """
+    result = validate_citations(
+        answer_text="Use ` to quote a value like [2] in the shell ` here. See [1].",
+        evidence=_evidence(count=2),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [1]
+
+
+def test_a_prose_line_starting_with_backticks_is_not_evidence_a_fence_closes() -> None:
+    """The reachability pass must stay STRICT while the closing pass is forgiving.
+
+    The two passes pull in opposite directions and cannot share one predicate.
+    Forward, a forgiving closer ends a fence EARLIER and strips LESS. But the
+    reverse pass answers "is this opener ever closed?", and a forgiving answer
+    there OPENS fences that would otherwise have stayed shut -- stripping MORE
+    and deleting real citations.
+
+    Measured when both passes shared the relaxed test: the sentence below
+    served ``[1, 3]`` instead of ``[1, 2, 3]`` -- a real source card deleted
+    while the prose still cited it, on an answer ``main`` served intact. Goes
+    red by dropping the ``set(...) == {found[0]}`` bareness test from the
+    reachability pass.
+    """
+    result = validate_citations(
+        answer_text=(
+            "CiteVyn caps answers at 1024 tokens [1].\n"
+            "``` fences and inline spans are both stripped before counting [2].\n"
+            "See the example below:\n"
+            "```python title=example\n"
+            "client.ask()\n"
+            "``` <- end of example\n"
+            "That is the whole flow [3].\n"
+        ),
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.cited_indices == [1, 2, 3]
+
+
+def test_an_info_string_opener_inside_a_fence_does_not_close_it() -> None:
+    """A docs assistant SHOWING you how to open a fence must still be readable.
+
+    This is the shape that made a sloppy-closer relaxation dangerous. Every
+    line below is valid CommonMark: the inner ````` python`` sits INSIDE an open
+    fence, and a closing fence may not carry an info string, so it is content,
+    not a closer.
+
+    Treating it as a closer ended the block early, leaked ``[9]`` out of the
+    code as a citation, and let the reopened fence swallow the real ``[3]``
+    after it -- turning a correct answer into
+    ``citation_validation_failed: citation index out of range: [9]``. Discarding
+    a correct, grounded answer is the #215 defect, which is where this whole
+    line of work started.
+
+    Goes red by letting a non-bare run close a fence unconditionally, i.e. by
+    dropping the ``set(line.strip()) == {found[0]} or reachable[...] <
+    open_fence[1]`` guard. Measured on that build: ``valid=False``,
+    ``cited=[1, 2, 9]``.
+    """
+    result = validate_citations(
+        answer_text=(
+            "You wrap code in a fence [1]. The pattern looks like this [2]:\n"
+            "```\n"
+            "``` python  <- opening fence, language after the ticks\n"
+            "result = client.ask(items[9])\n"
+            "```\n"
+            "Streaming is covered separately [3].\n"
+        ),
+        evidence=_evidence(count=3),
+    )
+    assert result.valid is True
+    assert result.reason is None
+    assert result.cited_indices == [1, 2, 3]

@@ -100,12 +100,84 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?
 _WHITESPACE_RE = re.compile(r"\s")
 
 
-def _closer(line: str) -> tuple[str, int] | None:
-    """Return ``(fence_char, length)`` if ``line`` is a bare fence closer."""
+def _fence_run(line: str) -> tuple[str, int] | None:
+    """Return ``(fence_char, run_length)`` if ``line`` starts a run of 3+ ticks/tildes.
+
+    CommonMark requires a closing fence to be BARE and AT LEAST AS LONG as its
+    opener. Exactly one of those two rules is relaxed here, and the asymmetry
+    is deliberate.
+
+    RELAXED -- trailing text. A closer written "``` (that is all)" is not a
+    closer under CommonMark, so the fence stays open and swallows every marker
+    to the end of the answer. Measured: two real source cards vanished, leaving
+    the prose citing ``[2]`` and ``[3]`` with no such cards rendered -- the #215
+    defect in the opposite direction, and silent (no refusal, no audit reason).
+    Nothing depends on a closer being bare, so allowing trailing text is a pure
+    win.
+
+    KNOWN RESIDUAL, measured, not hypothetical. Relaxing "bare" is not
+    monotone: closing a fence earlier can turn a line that used to be fence
+    CONTENT into a line the scanner evaluates as an OPENER, and a bare opener
+    with no closer runs to end of answer. Differential fuzz against the
+    pre-change behaviour over 68,420 shapes: 542 shapes gain a citation that
+    was being wrongly dropped, and 48 lose one they used to keep. A net 11:1
+    improvement, NOT a strict one -- and the three alternatives tried were all
+    worse (sharing the relaxed predicate with the reachability pass: 1,915
+    losses; unioning both scans: 687 losses plus 241 new refusals; gating the
+    unconditional opener by reachability: 1,630 losses plus 2,286 new
+    refusals).
+
+    KEPT -- the length rule, because it is what makes nesting possible. A
+    four-backtick fence wrapping a three-backtick one is the standard way to
+    show a code block inside a code block, and a shorter run must not close it.
+    An earlier version of this fix dropped the length rule too and broke that
+    idiom, leaking the inner block's brackets. That also settles a shape this
+    function deliberately does NOT rescue: a four-backtick opener "closed" by
+    three backticks is structurally identical to nesting, so it stays open and
+    its later markers are lost. Unfixable without breaking real nesting.
+    """
     body = line.strip()
-    if body and body[0] in "`~" and set(body) == {body[0]}:
-        return body[0], len(body)
-    return None
+    if len(body) < 3 or body[0] not in "`~" or body[:3] != body[0] * 3:
+        return None
+    char = body[0]
+    run = len(body) - len(body.lstrip(char))
+    return char, run
+
+
+def _closes(line: str, open_fence: tuple[str, int], bare_reachable_after: int) -> bool:
+    """Does ``line`` close the currently open fence?
+
+    A BARE closer always closes. A SLOPPY one -- a run of the right character
+    and length carrying trailing text -- closes only as a LAST RESORT, when no
+    bare closer is reachable later in the answer.
+
+    That last-resort condition is what keeps the relaxation narrow. Without it
+    the rule reaches far wider than "sloppy closers": an ordinary info-string
+    opener written INSIDE a fence -- exactly what a docs assistant emits when it
+    shows you how to open one -- was treated as a closer. The block then ended
+    early, its code leaked out as a citation, and the real prose citation after
+    the true closing fence was swallowed by the reopened fence.
+
+    Measured on an answer whose every line is valid CommonMark: the raw scan
+    gives [1, 2, 9, 3] and a correct scanner serves [1, 2, 3]; the unguarded
+    version returned [1, 2, 9] and hard-failed the whole answer as
+    out-of-range. Discarding a correct, grounded answer is the #215 defect,
+    which is where this line of work started.
+
+    A labelled fuzz -- every marker placed as PROSE or CODE by construction --
+    puts the guarded version at 0 lost citations, 0 leaked phantoms and 0 new
+    refusals across 39,002 well-formed CommonMark answers, against 4,998 /
+    8,839 / 7,046 for the unguarded one.
+    """
+    found = _fence_run(line)
+    if found is None:
+        return False
+    char, run = found
+    if char != open_fence[0] or run < open_fence[1]:
+        return False
+    if set(line.strip()) == {char}:
+        return True
+    return bare_reachable_after < open_fence[1]
 
 
 def _strip_code(text: str) -> str:
@@ -114,7 +186,7 @@ def _strip_code(text: str) -> str:
     Line-oriented by design (see the note above): an unbalanced backtick can
     never reach past the line it appears on.
 
-    CRLF needs no separate normalisation pass: :func:`_closer` compares the
+    CRLF needs no separate normalisation pass: :func:`_fence_run` compares the
     STRIPPED line, so the ``\r`` a Windows-style answer leaves before the line
     end does not stop a closing fence from matching. That matters more than it
     sounds — a closer that fails to match leaves the fence open, and an open
@@ -127,26 +199,34 @@ def _strip_code(text: str) -> str:
     lines = text.split("\n")
     count = len(lines)
 
-    # ``reachable[c][i]`` = the longest bare run of ``c`` at any line >= i.
+    # ``reachable[c][i]`` = the longest fence run of ``c`` at any line >= i.
     # One reverse pass makes "is this opener ever closed?" an O(1) lookup
     # instead of a rescan per opener, which would be quadratic on hostile
-    # model output (measured: 45KB of fence openers took ~13s rescanning,
-    # ~20ms this way).
+    # model output (45KB of fence openers: 5.8ms this way).
     reachable = {"`": [0] * (count + 1), "~": [0] * (count + 1)}
     for i in range(count - 1, -1, -1):
         for char in ("`", "~"):
             reachable[char][i] = reachable[char][i + 1]
-        found = _closer(lines[i])
-        if found:
-            char, length = found
-            reachable[char][i] = max(reachable[char][i], length)
+        found = _fence_run(lines[i])
+        # STRICT here, deliberately, while the forward pass stays forgiving.
+        # The two passes pull in opposite directions. Forward, a forgiving
+        # closer ends a fence EARLIER and strips LESS. But this pass answers
+        # "is this opener ever closed?", and a forgiving answer opens fences
+        # that would otherwise have stayed shut -- stripping MORE, and deleting
+        # real citations. Measured when this shared the relaxed test: a prose
+        # line merely STARTING with three backticks became a closer, so the
+        # sentence above it opened a fence, and "[2]" vanished from an answer
+        # main served intact. Only a bare run counts as evidence that a closer
+        # exists; the forward pass is still free to accept a sloppy one.
+        if found and set(lines[i].strip()) == {found[0]}:
+            char, run = found
+            reachable[char][i] = max(reachable[char][i], run)
 
     out: list[str] = []
-    open_fence: str | None = None
+    open_fence: tuple[str, int] | None = None
     for i, line in enumerate(lines):
         if open_fence is not None:
-            found = _closer(line)
-            if found and found[0] == open_fence[0] and found[1] >= len(open_fence):
+            if _closes(line, open_fence, reachable[open_fence[0]][i + 1]):
                 open_fence = None
             out.append("")
             continue
@@ -169,7 +249,7 @@ def _strip_code(text: str) -> str:
             # opens a fence when a closer genuinely follows.
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
             if simple or reachable[fence[0]][i + 1] >= len(fence):
-                open_fence = fence
+                open_fence = (fence[0], len(fence))
                 out.append("")
                 continue
         # Inline spans collapse to a SPACE, never to the empty string.

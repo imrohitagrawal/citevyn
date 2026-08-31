@@ -42,7 +42,7 @@ def test_default_retrieval_and_cache_settings() -> None:
     # this pin is load-bearing: silently reverting it would re-serve stale rows. v2 rows
     # were written while the validator discarded gapped citations, so their citations
     # carry no ``marker`` field — replaying them would render unnumbered cards.
-    assert settings.answer_policy_version == "v4"
+    assert settings.answer_policy_version == "v5"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 
