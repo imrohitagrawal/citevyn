@@ -158,11 +158,32 @@ index version**, with queries always using the model that built the active index
 > cached during a mismatch persisted to TTL even after the operator fixed the config.
 > Fixed by encoding the configured embedder's `provider|model|dim` in `build_cache_key`
 > (a config-only swap now invalidates affected entries — no schema change; the stamp
-> triple only, never a secret) **and** skipping the cache *write* when the orchestrator
-> predicts the degrade (`is_index_embedder_mismatch`, resolved from the same active-index
-> row as the cache key), so a degraded answer is never frozen and every affected ask
-> re-runs retrieval and re-emits the WARN. Homes: `app/cache/answer_cache.py`,
-> `app/answer/orchestrator.py`, `app/embeddings/factory.py`.
+> triple only, never a secret) **and** skipping the cache *write* whenever the vector arm
+> degraded, so a degraded answer is never frozen and every affected ask re-runs retrieval
+> and re-emits the WARN. (The write gate originally *predicted* the degrade via
+> `is_index_embedder_mismatch`; since #70/#72 the retriever reports the actual runtime
+> reason back from `retrieve()` and the gate uses that instead — strictly better, because
+> a prediction can disagree with what retrieval really did.) Homes:
+> `app/cache/answer_cache.py`, `app/answer/orchestrator.py`, `app/embeddings/factory.py`.
+>
+> ✅ **The gate now checks the index it is actually reading (#226).** Two defects, both
+> measured, both fixed together. (1) `_active_index_stamp` resolved the stamp purely by
+> `status == active` and ignored `active_index_version` — the very value the three
+> retrieval arms put in their `Document.index_version ==` filter. So a caller retrieving
+> a NON-active index (exactly what the #216 promotion evaluator does: it measures a
+> candidate while a different index still serves) had its vector arm checked against the
+> LIVE index's stamp. A mismatched candidate scored with a bogus vector arm, passed the
+> promotion gate on the keyword arm's strength, and would have degraded permanently the
+> moment it went live. It now reads the pinned version's own row by primary key, whatever
+> that row's status. (2) On a **dual-active** database the resolver returned `None`, which
+> the predicate reads as "unknown provenance ⇒ allow" — so the arm ran with *no idea*
+> whose vectors it was scoring. `None` cannot mean both "no stamp recorded" (allow, the
+> legacy/stub-seeded case) and "cannot tell which index" (deny), so the resolver now
+> returns a distinct `IndexStampStatus.ambiguous` and the predicate **fails closed** on it.
+> The NULL-stamp allow arm is untouched — hardening *it* would take the vector arm offline
+> for the seeded demo and every pre-#51 index. `answer_policy_version` was bumped v5 → v6
+> in the same change, because answers cached from either state were built with the arm
+> running and a cache hit returns before the corrected gate can run.
 
 ## Deferred / Future Work
 

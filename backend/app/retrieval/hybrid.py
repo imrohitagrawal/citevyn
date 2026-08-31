@@ -26,7 +26,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.middleware import get_current_request_id
-from app.embeddings import EmbedderIdentity, EmbedderUnavailable, is_index_embedder_mismatch
+from app.embeddings import (
+    EmbedderIdentity,
+    EmbedderUnavailable,
+    IndexStampStatus,
+    is_index_embedder_mismatch,
+)
 from app.models import IndexStatus, IndexVersion
 from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
@@ -284,7 +289,7 @@ class HybridRetriever:
             return [], VectorDegrade.unavailable
 
     async def _vector_arm_enabled(self) -> bool:
-        """Whether the vector arm may run against the active index (Tier 3, #57).
+        """Whether the vector arm may run against the index being queried (Tier 3, #57).
 
         The stored document vectors and the query vector must come from the same
         embedding model, or cosine distance is meaningless and the LLM cites
@@ -295,38 +300,67 @@ class HybridRetriever:
         Returns ``True`` (vector arm runs) when:
 
         * enforcement is off — no ``embedder_identity`` was wired; or
-        * the active index carries no provenance stamp (legacy / stub-seeded
-          indexes: ``embedding_provider is None`` ⇒ "unknown provenance, allow",
-          which protects the seeded demo and pre-#51 indexes); or
+        * the index carries no provenance stamp (legacy / stub-seeded indexes:
+          ``embedding_provider is None`` ⇒ "unknown provenance, allow", which
+          protects the seeded demo and pre-#51 indexes); or
         * the stamp matches the configured embedder's ``(provider, model, dim)``.
 
-        Returns ``False`` (and logs a loud WARNING) when the stamp is present and
-        does *not* match — degrade rather than serve corrupted rankings. This is a
+        Returns ``False`` (and logs a loud WARNING) when either:
+
+        * the stamp is present and does *not* match; or
+        * the stamp could not be resolved to ONE index
+          (:attr:`~app.embeddings.IndexStampStatus.ambiguous`, #226) — several
+          indexes are simultaneously active and nothing can say which vector
+          space the arm would be scoring, so this fails closed rather than
+          gambling on the winner being compatible.
+
+        Either way this degrades rather than serving corrupted rankings. It is a
         read-time correctness net, not failover (that is the deferred #59): the
         request still answers from exact + keyword.
 
         The allow/degrade comparison is delegated to the pure
         :func:`app.embeddings.is_index_embedder_mismatch` predicate so there is a
-        single source of truth (#71): the orchestrator uses the same predicate to
-        predict this degrade before retrieval runs and skip caching a degraded
-        answer (#65). The ``embedder_identity is None`` enforcement-off
-        short-circuit stays here — the predicate takes a non-optional configured
-        identity and reasons only about the stamp.
+        single source of truth (#71) shared with
+        :func:`app.services.index_health.active_index_vector_health`, which reports
+        the same verdict on ``GET /health/index``. Only the *logging* branches on
+        the resolution shape here; the decision itself never does. The
+        ``embedder_identity is None`` enforcement-off short-circuit also stays here
+        — the predicate takes a non-optional configured identity and reasons only
+        about the stamp.
 
         Deliberately awaited by :meth:`retrieve` *before* the ``asyncio.gather``
         rather than from inside the vector arm: keeping this one small indexed
-        lookup (the single active-index row) off the shared ``AsyncSession`` while
-        the three retrieval arms run concurrently avoids a concurrent-use hazard,
-        at a cost that is negligible next to the embedding + LLM calls that follow.
+        lookup (a single ``index_versions`` row) off the shared ``AsyncSession``
+        while the three retrieval arms run concurrently avoids a concurrent-use
+        hazard, at a cost that is negligible next to the embedding + LLM calls
+        that follow.
         """
         if self._embedder_identity is None:
             return True
         stamp = await self._active_index_stamp()
         if not is_index_embedder_mismatch(self._embedder_identity, stamp):
             return True
-        # A True mismatch guarantees a provider-bearing stamp (the predicate
-        # returns False for a ``None`` / provider-less stamp), so the identifiers
-        # logged below are always populated.
+        if isinstance(stamp, IndexStampStatus):
+            # Ambiguous resolution (#226). There is no stamp to name, so the
+            # mismatch WARN's identifier payload cannot be filled — emit a
+            # distinct event instead. ``_active_index_stamp`` already logged
+            # ``retrieval_multiple_active_indexes`` for the *condition*; this
+            # records the *consequence*, which that WARN cannot imply on its own
+            # (with enforcement off the very same condition leaves the arm ON).
+            _logger.warning(
+                "vector_retrieval_index_provenance_ambiguous",
+                extra={
+                    "request_id": get_current_request_id(),
+                    "index_stamp_status": str(stamp),
+                    "configured_embedding_provider": self._embedder_identity.provider,
+                    "configured_embedding_model": self._embedder_identity.model,
+                    "configured_embedding_dim": self._embedder_identity.dim,
+                },
+            )
+            return False
+        # A True mismatch that is not ambiguous guarantees a provider-bearing
+        # stamp (the predicate returns False for a ``None`` / provider-less
+        # stamp), so the identifiers logged below are always populated.
         assert stamp is not None
         _logger.warning(
             "vector_retrieval_index_embedder_mismatch",
@@ -342,27 +376,65 @@ class HybridRetriever:
         )
         return False
 
-    async def _active_index_stamp(self) -> EmbedderIdentity | None:
-        """The embedding provenance stamped on the active ``IndexVersion``.
+    async def _active_index_stamp(self) -> EmbedderIdentity | IndexStampStatus | None:
+        """The embedding provenance of the index this retriever is actually reading.
 
-        Resolves the same active index the orchestrator uses for the cache key
-        (``status == active``, most-recently promoted). Returns its
-        ``(provider, model, dim)`` triple, or ``None`` when no index is active.
-        Scoping the read path to a single active version is the separate concern
-        of #58; this only reads the winning row's stamp.
+        **The stamp must describe the same index the three arms filter documents
+        on, or the Tier-3 gate is enforcing against the wrong row (#226).** So
+        when ``active_index_version`` was supplied — the value
+        :class:`~app.retrieval.exact.ExactRetriever`,
+        :class:`~app.retrieval.keyword.KeywordRetriever` and
+        :class:`~app.retrieval.vector.VectorRetriever` each put in their
+        ``Document.index_version ==`` predicate — this reads *that* row by primary
+        key, whatever its status. Resolving by ``status == active`` instead (the
+        pre-#226 behaviour) silently checked a candidate's vectors against the
+        LIVE index's stamp, so the promotion evaluator (#216), which measures a
+        candidate while a different index is still serving, ran its vector arm
+        against a possibly foreign vector space and scored it as if valid.
 
-        The ``index_version`` secondary sort is a deterministic tiebreaker so
-        that, in the (today-impossible, #58-tracked) event of two simultaneously
-        active rows with equal ``promoted_at``, this query and the orchestrator's
-        cache-key resolution (``_retrieve_active_index``, which sorts
-        identically) always pick the *same* winning row — the gate must reason
-        about the index the rest of the pipeline uses.
+        Three outcomes, deliberately distinct:
+
+        * an :class:`~app.embeddings.EmbedderIdentity` — the row's
+          ``(provider, model, dim)``, possibly all-``None`` for a legacy /
+          stub-seeded index (which the predicate then allows);
+        * ``None`` — there is no row to read. Either no index is active, or the
+          named ``active_index_version`` does not exist. The latter is
+          unobservable in practice: the arms filter documents on that same
+          missing version, so the vector arm has nothing to score either way, and
+          "no row ⇒ no stamp ⇒ unknown provenance ⇒ allow" keeps this consistent
+          with the no-active-index case rather than inventing a third rule;
+        * :attr:`~app.embeddings.IndexStampStatus.ambiguous` — the unscoped
+          fallback found MORE THAN ONE active index (#58). Which one owns the
+          documents about to be scored is genuinely unknowable, so the caller
+          fails closed (#226). Before #226 this returned ``None``, which the
+          predicate reads as "unknown provenance ⇒ allow" — so the arm ran on a
+          coin flip. ``None`` cannot carry both meanings; hence the sentinel.
+
+        The ``promoted_at`` / ``index_version`` sort on the fallback is a
+        deterministic tiebreaker kept in step with the orchestrator's cache-key
+        resolution (``_retrieve_active_index``, which sorts identically) so both
+        name the same winning row.
         """
-        # Enforce single-active-row invariant (#58) — see
-        # ``orchestrator._retrieve_active_index`` for the rationale. When
-        # the guard fires there it returns ``("", "")``; here we mirror
-        # the WARNING + ``None`` so the vector arm gates itself on
-        # provenance=None / unknown, not on the wrong embedder stamp.
+        if self._active_index_version is not None:
+            # Scoped read: the gate must reason about the SAME index the arms
+            # filter on, not whichever index happens to be live (#226).
+            scoped_stmt = select(
+                IndexVersion.embedding_provider,
+                IndexVersion.embedding_model,
+                IndexVersion.embedding_dim,
+            ).where(IndexVersion.index_version == self._active_index_version)
+            scoped_row = (await self._session.execute(scoped_stmt)).first()
+            if scoped_row is None:
+                return None
+            return EmbedderIdentity(provider=scoped_row[0], model=scoped_row[1], dim=scoped_row[2])
+
+        # Unscoped fallback: no version was pinned, so the arms filter on document
+        # STATUS alone and the governing index is whichever one is active. Enforce
+        # the single-active-row invariant (#58) — see
+        # ``orchestrator._retrieve_active_index`` for the rationale. When the guard
+        # fires there it returns ``("", "")``, which reaches us as
+        # ``active_index_version=None`` — i.e. this branch is exactly how a
+        # production dual-active request arrives here.
         count_stmt = select(func.count(IndexVersion.index_version)).where(
             IndexVersion.status == IndexStatus.active
         )
@@ -375,7 +447,7 @@ class HybridRetriever:
                     "active_count": int(active_count),
                 },
             )
-            return None
+            return IndexStampStatus.ambiguous
         stmt = (
             select(
                 IndexVersion.embedding_provider,

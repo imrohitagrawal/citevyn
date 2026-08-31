@@ -21,6 +21,7 @@ from app.embeddings import factory as emb_factory
 from app.embeddings.factory import (
     EmbedderIdentity,
     EmbeddingProviderNotConfigured,
+    IndexStampStatus,
     build_embedder,
     is_index_embedder_mismatch,
     validate_embedder_provider,
@@ -72,6 +73,40 @@ def test_mismatch_false_when_identities_equal() -> None:
 def test_mismatch_true_when_provider_bearing_stamp_differs() -> None:
     # Config on stub, index built with gemini → mismatch (the #65 scenario).
     assert is_index_embedder_mismatch(_STUB, _GEMINI) is True
+
+
+def test_mismatch_true_for_ambiguous_but_still_false_for_unknown() -> None:
+    """#226: "ambiguous" and "unknown" are different, and their answers are opposites.
+
+    Both used to arrive as ``None``, and ``None`` allows. Pinned together in one
+    test on purpose: the tempting "fix" for the fail-open is to make the ``None``
+    arm deny, which would take the vector arm offline for every legacy and
+    stub-seeded index — the seeded demo and every hermetic test included.
+
+    Turns RED if the ``IndexStampStatus`` branch is deleted or returns False.
+    Turns RED in the OTHER direction if someone folds ``None`` into that branch.
+    """
+    assert is_index_embedder_mismatch(_GEMINI, IndexStampStatus.ambiguous) is True
+    assert is_index_embedder_mismatch(_GEMINI, None) is False
+    assert (
+        is_index_embedder_mismatch(_GEMINI, EmbedderIdentity(provider=None, model=None, dim=None))
+        is False
+    )
+
+
+def test_ambiguous_sentinel_is_not_confusable_with_a_stamp() -> None:
+    """The sentinel must be a distinct type, not an identity-shaped value.
+
+    An ``EmbedderIdentity``-shaped sentinel would compare equal to a real
+    all-None stamp and would answer ``.provider``, silently re-merging the two
+    states this fix exists to separate.
+
+    Turns RED if ``IndexStampStatus.ambiguous`` is replaced by any
+    ``EmbedderIdentity`` value.
+    """
+    assert not isinstance(IndexStampStatus.ambiguous, EmbedderIdentity)
+    assert IndexStampStatus.ambiguous != EmbedderIdentity(provider=None, model=None, dim=None)
+    assert not hasattr(IndexStampStatus.ambiguous, "provider")
 
 
 @pytest.fixture(autouse=True)

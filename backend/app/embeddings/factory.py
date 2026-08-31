@@ -16,6 +16,7 @@ Mirrors :mod:`app.llm.factory`:
 
 from __future__ import annotations
 
+import enum
 import inspect
 import logging
 from typing import NamedTuple
@@ -68,25 +69,60 @@ class EmbedderIdentity(NamedTuple):
         )
 
 
-def is_index_embedder_mismatch(
-    configured: EmbedderIdentity, index_stamp: EmbedderIdentity | None
-) -> bool:
-    """Whether the configured query embedder disagrees with the active index stamp.
+class IndexStampStatus(enum.StrEnum):
+    """A non-identity outcome of resolving "which embedder built the index we query".
 
-    Mirrors the allow-semantics of the read-time Tier-3 gate
-    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`, the
-    canonical enforcement point, #57) so the orchestrator can predict the vector
-    arm degrade *before* retrieval runs and skip caching a degraded answer (#65)
-    without changing the retriever's return shape. The two must stay in agreement
-    — both resolve the same active-index stamp and compare it to
-    ``configured_embedder_identity``.
+    Exists because ``None`` was being asked to carry two incompatible meanings
+    whose safe answers are opposites (#226):
 
-    Returns ``False`` (no mismatch — the vector arm runs) when there is no active
-    index stamp, when the stamp carries no provider (legacy / stub-seeded,
-    "unknown provenance ⇒ allow"), or when the stamp equals ``configured``.
-    Returns ``True`` only when a provider-bearing stamp differs from the
-    configured identity.
+    * ``None`` — *unknown* provenance. There is no index row to read, or the row
+      carries a NULL ``embedding_provider`` (legacy / stub-seeded). Nothing claims
+      these vectors were built by anyone in particular, so the read path
+      **allows** the vector arm; denying instead would take semantic retrieval
+      offline for the seeded demo and every pre-#51 index.
+    * :attr:`ambiguous` — *ambiguous* provenance. The resolver found more than one
+      candidate index and cannot say whose vector space the arm would be scoring.
+      One of them may well be mismatched, so "allow" is a coin flip on silent
+      cosine corruption and this **fails closed**.
+
+    A distinct type rather than a magic :class:`EmbedderIdentity` value: an
+    identity-shaped sentinel is a ``NamedTuple``, so it would compare equal to any
+    real stamp with the same fields and would answer ``.provider`` lookups as
+    though it were one. This cannot be mistaken for a stamp, and it narrows
+    cleanly for the type checker.
     """
+
+    ambiguous = "ambiguous"
+
+
+def is_index_embedder_mismatch(
+    configured: EmbedderIdentity,
+    index_stamp: EmbedderIdentity | IndexStampStatus | None,
+) -> bool:
+    """Whether the configured query embedder disagrees with the index being queried.
+
+    The single source of truth for the read-time Tier-3 allow/degrade decision
+    (#71). The canonical enforcement point
+    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`, #57)
+    delegates to it, and :func:`app.services.index_health.active_index_vector_health`
+    reuses it so ``GET /health/index`` reports the same verdict the read path
+    would reach. Any second implementation of this comparison is a bug.
+
+    The three answers, in the order they are decided:
+
+    * :attr:`IndexStampStatus.ambiguous` ⇒ ``True`` (**fail closed**, #226). More
+      than one index could be the one being queried, so the provenance of the
+      vectors the arm would score is genuinely unknowable — not merely unrecorded.
+    * ``None``, or a stamp whose ``provider`` is ``None`` ⇒ ``False``
+      ("unknown provenance ⇒ allow"). Legacy and stub-seeded indexes record no
+      provider; refusing them would take the vector arm offline for the seeded
+      demo and every pre-#51 index. This arm is load-bearing — do not "harden"
+      it into a deny.
+    * otherwise ⇒ ``stamp != configured``. Only a provider-bearing stamp that
+      differs degrades the arm.
+    """
+    if isinstance(index_stamp, IndexStampStatus):
+        return True
     if index_stamp is None or index_stamp.provider is None:
         return False
     return index_stamp != configured
@@ -283,6 +319,7 @@ __all__ = [
     "ALLOWED_EMBEDDING_PROVIDERS",
     "EmbedderIdentity",
     "EmbeddingProviderNotConfigured",
+    "IndexStampStatus",
     "build_embedder",
     "configured_embedder_identity",
     "get_embedder",
