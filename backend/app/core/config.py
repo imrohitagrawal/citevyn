@@ -275,7 +275,12 @@ class Settings(BaseSettings):
     # else in the key invalidates them -- the question, source hash and embedder identity
     # are unchanged -- so without this bump the pre-fix rows replay the phantom for the
     # 24h TTL, which is the same failure mode the v2 -> v3 bump fixed for #236.
-    answer_policy_version: str = "v4"
+    # v4 -> v5 (#237): the scanner changed AGAIN. v4 rows were produced by a build
+    # whose fence scanner discarded every citation after a sloppy closing fence, so a
+    # v4 row can be MISSING a card the current build attaches -- and some v4 rows are
+    # no-answer refusals for questions this build answers. That is the opposite
+    # direction from the v3 -> v4 bump, and equally invisible to the rest of the key.
+    answer_policy_version: str = "v5"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 
