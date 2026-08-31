@@ -66,9 +66,25 @@ _ALLOWED_ANSWER_STYLES: frozenset[str] = frozenset({"short", "step_by_step"})
 # ---------------------------------------------------------------------------
 
 
-async def _require_session(db: AsyncSession, *, request_id: str, session_id: uuid.UUID) -> Session:
-    """Load a session row or raise the standard 404 envelope."""
-    row = await db.get(Session, session_id)
+async def _require_session(
+    db: AsyncSession, *, request_id: str, session_id: uuid.UUID, user_id: str
+) -> Session:
+    """Load a session row owned by ``user_id`` or raise the standard 404 envelope.
+
+    Mirrors ``app.api.routes.sessions._get_session_or_404`` — ownership and
+    expiry are one predicate, and a mismatch is indistinguishable from a
+    genuine miss (see ``docs/ADR/0004-user-accounts.md`` PR 1). The two
+    helpers are kept separate (not shared) because they live in different
+    router modules with independent ``Session`` imports; a change to one
+    must be mirrored in the other, which is exactly what the ownership
+    mutation test in ``test_session_ownership.py`` pins.
+    """
+    stmt = select(Session).where(
+        Session.session_id == session_id,
+        Session.user_id == user_id,
+        Session.expires_at > datetime.now(UTC),
+    )
+    row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         raise error_response(
             request_id=request_id,
@@ -147,7 +163,7 @@ async def post_message(
     body: Annotated[AnswerRequest, Body()],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    _user_id: Annotated[str, Depends(rate_limited_demo)],
+    user_id: Annotated[str, Depends(rate_limited_demo)],
 ) -> dict[str, Any]:
     """Ask a question and return the orchestrator's response shape."""
     request_id = _request_id(request)
@@ -160,7 +176,7 @@ async def post_message(
             ),
         )
 
-    await _require_session(db, request_id=request_id, session_id=session_id)
+    await _require_session(db, request_id=request_id, session_id=session_id, user_id=user_id)
     orchestrator = Orchestrator(settings, db)
     response = await orchestrator.ask(
         question=body.message,
@@ -194,11 +210,11 @@ async def get_message(
     session_id: Annotated[uuid.UUID, Path()],
     message_id: Annotated[uuid.UUID, Path()],
     db: Annotated[AsyncSession, Depends(get_session)],
-    _user_id: Annotated[str, Depends(rate_limited_demo)],
+    user_id: Annotated[str, Depends(rate_limited_demo)],
 ) -> dict[str, Any]:
     """Return a message and its retrieval trace."""
     request_id = _request_id(request)
-    await _require_session(db, request_id=request_id, session_id=session_id)
+    await _require_session(db, request_id=request_id, session_id=session_id, user_id=user_id)
     message = await _require_message(
         db,
         request_id=request_id,

@@ -14,6 +14,7 @@ import pytest
 from alembic.command import downgrade as alembic_downgrade
 from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine
 
 from app.models.documents import Document
@@ -204,6 +205,24 @@ def test_migrated_documents_table_matches_the_orm_model(
 
     model = {column.name for column in Document.__table__.columns}
     assert migrated == model, f"documents drift: migration={migrated} model={model}"
+
+
+def test_versions_directory_has_exactly_one_head(alembic_config: AlembicConfig) -> None:
+    """Guard against a second, divergent migration branch.
+
+    ``docs/ADR/0004-user-accounts.md`` PR 1 adds this because a branch cut
+    before PR #184 once shipped two migrations both claiming
+    ``revision="0005"`` — undetected until ``alembic upgrade head`` failed
+    with "Multiple head revisions" (see ``docs/BACKLOG.md``, #163's closed
+    entry). ADR-0004 adds migrations 0007 and 0008 in PRs 3 and 5; this test
+    protects both from repeating that incident. A real two-head state (not a
+    hypothetical) is exercised by asserting the count, not just that
+    ``head`` resolves — a single ``down_revision`` collision would still
+    resolve to *a* head via alembic's default ordering and hide the branch.
+    """
+    script = ScriptDirectory.from_config(alembic_config)
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected exactly one migration head, found: {heads}"
 
 
 def test_versions_directory_contains_initial_migration() -> None:

@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **The 4 routes nested under `/v1/sessions/{session_id}` discarded the
+  caller's identity instead of checking it (ADR-0004 PR 1).**
+  `sessions.py:231,260` and `messages.py:150,197` each took the
+  authenticated `user_id` and threw it away (`del user_id` / an unused
+  `_user_id` parameter), then loaded the session by primary key alone.
+  Harmless while every caller resolves to the single constant `demo_user`
+  principal; it would have been a live cross-account IDOR the instant a
+  second principal existed, and because the affected rows persist, every
+  session created before an ownership fix landed would have stayed
+  readable by anyone who could guess its UUID for the rest of its life.
+  `_get_session_or_404` and `_require_session` now push
+  `.where(Session.user_id == user_id, Session.expires_at > now())` into
+  the query; a mismatch returns the same 404 as a genuine miss, never
+  403 — 403 would confirm the id is real, a membership oracle over the
+  UUID space. The expiry half of the predicate is a real bug fix on its
+  own: `DELETE /v1/sessions/{id}` only ever set `expires_at` to now (the
+  schema has no separate `closed` column) and neither loader filtered on
+  it, so a "closed" conversation stayed fully readable and writable for
+  the rest of its original TTL. Also fixed in the same PR: the demo
+  bearer comparison used `!=` instead of `secrets.compare_digest`
+  (`security.py`), a timing oracle the admin key comparison already
+  avoided; `cookie` and `email` added to the log-redaction key list ahead
+  of ADR-0004's later PRs, which introduce both. A new route-inventory
+  test asserts every `{session_id}` route depends on the dependency that
+  resolves the ownership principal, so the next such route cannot repeat
+  this silently. Behaviourally a no-op today — this is PR 1 of the
+  ADR-0004 login sequence, and must land before any later PR in that
+  sequence can create a second real principal.
+
 ### Changed
 - **Frontend base image Node 22 → 26 (#227).** Moved deliberately, not as a
   routine bump: all three pins (`frontend/.nvmrc`, `package.json`

@@ -197,17 +197,16 @@ def test_delete_session_returns_204_and_expires(in_memory_client: TestClient) ->
     assert response.status_code == 204
     assert response.content == b""
 
-    # The session row still exists, but expires_at is in the past.
+    # The row still exists (DELETE only sets expires_at to now — the schema
+    # has no separate ``closed`` column), but a closed session is no longer
+    # readable OR writable: both loaders now filter on expires_at > now(),
+    # per docs/ADR/0004-user-accounts.md PR 1. Before that fix a closed
+    # session stayed fully readable for the remainder of its original TTL.
     get = in_memory_client.get(
         f"/v1/sessions/{session_id}",
         headers={"Authorization": DEMO_BEARER},
     )
-    assert get.status_code == 200
-    body = get.json()
-    assert body["session_id"] == session_id
-    # expires_at is now <= created_at (we set it to the current
-    # timestamp on close).
-    assert body["expires_at"] <= body["created_at"] or body["expires_at"] <= _now_iso()
+    assert get.status_code == 404
 
 
 def test_delete_session_returns_404_when_missing(in_memory_client: TestClient) -> None:
@@ -244,14 +243,3 @@ def test_request_id_round_trips_on_sessions_routes(in_memory_client: TestClient)
 
     assert response.headers["X-Request-ID"] == "req_sessions_test"
     assert response.json()["request_id"] == "req_sessions_test"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _now_iso() -> str:
-    from datetime import UTC, datetime
-
-    return datetime.now(UTC).isoformat()
