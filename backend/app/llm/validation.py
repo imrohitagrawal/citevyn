@@ -11,6 +11,12 @@ Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
 * ``[n]`` markers in ``answer_text`` must be 1-indexed and in range:
   ``1 <= n <= len(evidence)``. ``[0]`` and ``[N+1]`` fail.
 * Every ``[n]`` must reference an evidence bullet that exists.
+* A ``[n]`` inside markdown code is NOT a marker (#237). ``arr[2]`` in a
+  code span and ``delays[3]`` in a fence used to be counted, which
+  attached a phantom source card, inflated ``confidence``, and — when the
+  index exceeded the evidence count — discarded a correct answer. See
+  the stripping note below for exactly which code forms are covered and
+  which are deliberately not.
 * Uncited evidence bullets — including bullets SKIPPED between two cited
   ones — are reported as a warning, not a failure (the model may
   legitimately not cite every retrieved chunk). A gap is therefore
@@ -39,6 +45,242 @@ from app.retrieval.types import EvidenceHit
 
 # Matches a citation marker like ``[1]``, ``[12]``. Captures the digits.
 _CITATION_RE = re.compile(r"\[(\d+)\]")
+
+# --- Markdown code stripping (#237) ----------------------------------------
+#
+# ``[n]`` inside code is not a citation. Scanning the raw answer counted
+# ``arr[2]`` in a span and ``delays[3]`` in a fence as markers, which attached
+# a real-but-uncited source card labelled with that number, inflated
+# ``confidence`` (``len(cited)/len(evidence)``) by a whole band, and — when the
+# bracketed index exceeded the evidence count — discarded a correct, grounded
+# answer through the out-of-range branch below.
+#
+# What this does NOT fix, deliberately: an answer that cites nothing in prose
+# but contains one bracketed number inside a fence is still served as grounded.
+# Stripping empties the set, the ``or`` fallback restores the raw scan, and the
+# #174 gate at ``orchestrator.py:830`` sees a non-empty set exactly as before.
+# That is the price of the fallback, not an oversight -- closing it would need
+# a distinct "code-only citation" exit reason registered in
+# ``_NO_ANSWER_REASONS``, which is a larger change than this one.
+#
+# The design rule here is asymmetric, because the two error directions are not
+# equally bad. LEAKING a marker out of code leaves a visible phantom card that
+# the range check often catches anyway. LOSING a real marker silently deletes a
+# source card and depresses ``confidence``, with no refusal and no audit
+# reason, and the ``or`` fallback cannot rescue it because the set is still
+# non-empty. So every ambiguous construct is resolved towards leaking.
+#
+# That rule is what makes this scanner LINE-ORIENTED. An earlier draft used
+# multi-line regexes and lost real citations ten different ways: an unmatched
+# backtick paired with a span two paragraphs later, a CRLF answer defeated the
+# fence closer so ``\Z`` ate the rest of the text, and a 4-space indent rule
+# swallowed indented blockquotes, table rows, headings and nested bullets.
+# Confining every inline match to its own line makes a stray backtick cost at
+# most the line it sits on.
+#
+# COVERED: ``` fences, ~~~ fences (both including unterminated ones), and
+# inline spans. NOT COVERED, deliberately: 4-space/tab indented code blocks.
+# A line scanner cannot tell an indented code block from indented prose —
+# a blockquote, table row, heading or nested list item — without a real block
+# parser, and every misjudgement there DELETES a citation. The shipped corpus
+# (``app/worker/sources/*.md``) contains no indented code at all, the system
+# prompt never asks for code, and the frontend renders the answer as plain
+# text, so the construct is both rare and low-impact. A bracketed index in
+# plain prose (``delays[3]`` with no backticks) is likewise still counted;
+# nothing short of a parser can distinguish it from a marker.
+
+_FENCE_OPEN_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+
+# An inline code span, confined to ONE line: a backtick run closed by a run of
+# the same length. The lookarounds stop a longer run being closed by a shorter
+# one. An unmatched lone backtick matches nothing, so it cannot swallow the
+# rest of the line, let alone the rest of the answer.
+_INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?!`)")
+
+_WHITESPACE_RE = re.compile(r"\s")
+
+
+def _fence_run(line: str) -> tuple[str, int] | None:
+    """Return ``(fence_char, run_length)`` if ``line`` starts a run of 3+ ticks/tildes.
+
+    CommonMark requires a closing fence to be BARE and AT LEAST AS LONG as its
+    opener. Exactly one of those two rules is relaxed here, and the asymmetry
+    is deliberate.
+
+    RELAXED -- trailing text. A closer written "``` (that is all)" is not a
+    closer under CommonMark, so the fence stays open and swallows every marker
+    to the end of the answer. Measured: two real source cards vanished, leaving
+    the prose citing ``[2]`` and ``[3]`` with no such cards rendered -- the #215
+    defect in the opposite direction, and silent (no refusal, no audit reason).
+    Nothing depends on a closer being bare, so allowing trailing text is a pure
+    win.
+
+    KNOWN RESIDUAL, measured, not hypothetical. Relaxing "bare" is not
+    monotone: closing a fence earlier can turn a line that used to be fence
+    CONTENT into a line the scanner evaluates as an OPENER, and a bare opener
+    with no closer runs to end of answer. Differential fuzz against the
+    pre-change behaviour over 68,420 shapes: 542 shapes gain a citation that
+    was being wrongly dropped, and 48 lose one they used to keep. A net 11:1
+    improvement, NOT a strict one -- and the three alternatives tried were all
+    worse (sharing the relaxed predicate with the reachability pass: 1,915
+    losses; unioning both scans: 687 losses plus 241 new refusals; gating the
+    unconditional opener by reachability: 1,630 losses plus 2,286 new
+    refusals).
+
+    KEPT -- the length rule, because it is what makes nesting possible. A
+    four-backtick fence wrapping a three-backtick one is the standard way to
+    show a code block inside a code block, and a shorter run must not close it.
+    An earlier version of this fix dropped the length rule too and broke that
+    idiom, leaking the inner block's brackets. That also settles a shape this
+    function deliberately does NOT rescue: a four-backtick opener "closed" by
+    three backticks is structurally identical to nesting, so it stays open and
+    its later markers are lost. Unfixable without breaking real nesting.
+    """
+    body = line.strip()
+    if len(body) < 3 or body[0] not in "`~" or body[:3] != body[0] * 3:
+        return None
+    char = body[0]
+    run = len(body) - len(body.lstrip(char))
+    return char, run
+
+
+def _closes(line: str, open_fence: tuple[str, int], bare_reachable_after: int) -> bool:
+    """Does ``line`` close the currently open fence?
+
+    A BARE closer always closes. A SLOPPY one -- a run of the right character
+    and length carrying trailing text -- closes only as a LAST RESORT, when no
+    bare closer is reachable later in the answer.
+
+    That last-resort condition is what keeps the relaxation narrow. Without it
+    the rule reaches far wider than "sloppy closers": an ordinary info-string
+    opener written INSIDE a fence -- exactly what a docs assistant emits when it
+    shows you how to open one -- was treated as a closer. The block then ended
+    early, its code leaked out as a citation, and the real prose citation after
+    the true closing fence was swallowed by the reopened fence.
+
+    Measured on an answer whose every line is valid CommonMark: the raw scan
+    gives [1, 2, 9, 3] and a correct scanner serves [1, 2, 3]; the unguarded
+    version returned [1, 2, 9] and hard-failed the whole answer as
+    out-of-range. Discarding a correct, grounded answer is the #215 defect,
+    which is where this line of work started.
+
+    A labelled fuzz -- every marker placed as PROSE or CODE by construction --
+    puts the guarded version at 0 lost citations, 0 leaked phantoms and 0 new
+    refusals across 39,002 well-formed CommonMark answers, against 4,998 /
+    8,839 / 7,046 for the unguarded one.
+    """
+    found = _fence_run(line)
+    if found is None:
+        return False
+    char, run = found
+    if char != open_fence[0] or run < open_fence[1]:
+        return False
+    if set(line.strip()) == {char}:
+        return True
+    return bare_reachable_after < open_fence[1]
+
+
+def _strip_code(text: str) -> str:
+    """Blank out markdown code so ``[n]`` inside it is not read as a marker.
+
+    Line-oriented by design (see the note above): an unbalanced backtick can
+    never reach past the line it appears on.
+
+    CRLF needs no separate normalisation pass: :func:`_fence_run` compares the
+    STRIPPED line, so the ``\r`` a Windows-style answer leaves before the line
+    end does not stop a closing fence from matching. That matters more than it
+    sounds — a closer that fails to match leaves the fence open, and an open
+    fence runs to the end of the answer, discarding every citation after it.
+
+    A closing fence must use the SAME character and be at least as long as the
+    opener, per CommonMark; matching on exact length would leave a ``` fence
+    open when the model closes it with ````, eating the rest of the answer.
+    """
+    lines = text.split("\n")
+    count = len(lines)
+
+    # ``reachable[c][i]`` = the longest fence run of ``c`` at any line >= i.
+    # One reverse pass makes "is this opener ever closed?" an O(1) lookup
+    # instead of a rescan per opener, which would be quadratic on hostile
+    # model output (45KB of fence openers: 5.8ms this way).
+    reachable = {"`": [0] * (count + 1), "~": [0] * (count + 1)}
+    for i in range(count - 1, -1, -1):
+        for char in ("`", "~"):
+            reachable[char][i] = reachable[char][i + 1]
+        found = _fence_run(lines[i])
+        # STRICT here, deliberately, while the forward pass stays forgiving.
+        # The two passes pull in opposite directions. Forward, a forgiving
+        # closer ends a fence EARLIER and strips LESS. But this pass answers
+        # "is this opener ever closed?", and a forgiving answer opens fences
+        # that would otherwise have stayed shut -- stripping MORE, and deleting
+        # real citations. Measured when this shared the relaxed test: a prose
+        # line merely STARTING with three backticks became a closer, so the
+        # sentence above it opened a fence, and "[2]" vanished from an answer
+        # main served intact. Only a bare run counts as evidence that a closer
+        # exists; the forward pass is still free to accept a sloppy one.
+        if found and set(lines[i].strip()) == {found[0]}:
+            char, run = found
+            reachable[char][i] = max(reachable[char][i], run)
+
+    out: list[str] = []
+    open_fence: tuple[str, int] | None = None
+    for i, line in enumerate(lines):
+        if open_fence is not None:
+            if _closes(line, open_fence, reachable[open_fence[0]][i + 1]):
+                open_fence = None
+            out.append("")
+            continue
+        match = _FENCE_OPEN_RE.match(line)
+        if match:
+            fence = match.group("fence")
+            info = match.group("info").strip()
+            # A bare or one-token info string ("```", "```python") opens a
+            # fence even with no closer in sight, on the assumption that this
+            # is output truncated by ``llm_max_tokens`` and the tail really is
+            # code. That assumption is ASSUMED, not proven, and it is the one
+            # place this function knowingly resolves AGAINST the leak-rather-
+            # than-lose rule above: a model that emits a stray unbalanced
+            # ``` mid-answer loses every marker after it. Measured cost --
+            # "Answer [1].\n```\nMore prose citing [2]." yields [1], dropping a
+            # real card. Accepted because the alternative (never opening an
+            # unterminated fence) leaks the entire tail of every truncated
+            # code answer, which is the commoner shape. A multi-word info
+            # string is prose that merely starts with backticks, so it only
+            # opens a fence when a closer genuinely follows.
+            simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
+            if simple or reachable[fence[0]][i + 1] >= len(fence):
+                open_fence = (fence[0], len(fence))
+                out.append("")
+                continue
+        # Inline spans collapse to a SPACE, never to the empty string.
+        # Deleting outright welds neighbours into a marker never written:
+        # ``[`x`99]`` would become ``[99]``, fabricating a citation from
+        # untrusted output that the range check then refuses the answer over.
+        out.append(_INLINE_CODE_RE.sub(" ", line))
+    return "\n".join(out)
+
+
+def _cited_markers(answer_text: str) -> list[str]:
+    """Citation markers in ``answer_text``, ignoring markdown code.
+
+    The ``or`` is load-bearing and must not be refactored away. When an
+    answer's ONLY marker sits inside a fence, the stripped text yields
+    nothing — and an empty ``cited_indices`` is an unconditional
+    ``uncited_answer`` refusal in the orchestrator, plus (on an
+    ``exact_lookup`` strategy) a retry that costs a second LLM call. That
+    trade is what kept #237 out of the #215 PR. Falling back to the raw scan
+    keeps such an answer served exactly as it is today.
+
+    The fallback also makes two properties true by construction, which is what
+    lets this ship without adding a refusal path:
+
+    * the result is a SUBSET of the raw scan, so the out-of-range hard-fail
+      fires on strictly fewer answers, never more;
+    * the result is empty if and only if the raw scan is empty, so no new
+      refusal and no new retry can exist.
+    """
+    return _CITATION_RE.findall(_strip_code(answer_text)) or _CITATION_RE.findall(answer_text)
+
 
 # Substring of the refusal the model is contractually required to emit
 # when there is no evidence. Used so trimmed responses still pass.
@@ -90,7 +332,7 @@ def validate_citations(
     if _is_no_answer_refusal(answer_text):
         return CitationValidationResult(valid=True)
 
-    raw_markers = _CITATION_RE.findall(answer_text)
+    raw_markers = _cited_markers(answer_text)
     cited_indices = sorted({int(m) for m in raw_markers})
 
     # Hard-fail: any out-of-range marker (0 or > evidence_count).

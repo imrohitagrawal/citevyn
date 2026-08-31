@@ -11,7 +11,7 @@ import contextlib
 
 import pytest
 
-from app.embeddings import EmbedderIdentity
+from app.embeddings import EmbedderIdentity, IndexStampStatus
 from app.guardrails.domain import Domain
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.hybrid import HybridRetriever
@@ -381,22 +381,15 @@ async def _stamp_active_index(session, *, provider, model, dim) -> None:
 _GEMINI = EmbedderIdentity(provider="gemini", model="gemini-embedding-001", dim=1536)
 
 
-async def test_active_index_stamp_none_on_dual_active(seeded_session) -> None:
-    """Two simultaneously-active index rows -> stamp returns None + WARN.
-
-    Mirrors the orchestrator's dual-active guard (#58): the vector arm must
-    gate on provenance=unknown rather than silently read the wrong embedder
-    stamp when more than one ``IndexVersion`` is active. The orchestrator
-    twin is covered by test_admin_services; this exercises the retrieval-side
-    guard added to ``HybridRetriever._active_index_stamp``.
-    """
+async def _add_second_active_index(session) -> None:
+    """Drive the DB into the dual-active state (#58): add a second ``active`` row."""
     from datetime import UTC, datetime
 
     from app.models import IndexStatus, IndexVersion
 
     now = datetime.now(UTC)
     # ``v1`` is already active (seeded); add a second active row.
-    seeded_session.add(
+    session.add(
         IndexVersion(
             index_version="v2",
             status=IndexStatus.active,
@@ -405,12 +398,264 @@ async def test_active_index_stamp_none_on_dual_active(seeded_session) -> None:
             promoted_at=now,
         )
     )
-    await seeded_session.flush()
+    await session.flush()
+
+
+async def _add_candidate_index(session, *, provider: str, model: str, dim: int) -> None:
+    """Add a NON-active ``candidate`` index carrying its own provenance stamp."""
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    session.add(
+        IndexVersion(
+            index_version="v-cand",
+            status=IndexStatus.candidate,
+            source_version_hash="sha256:candidate",
+            created_at=datetime.now(UTC),
+            embedding_provider=provider,
+            embedding_model=model,
+            embedding_dim=dim,
+        )
+    )
+    await session.flush()
+
+
+# -- #226: the gate must read the stamp of the index it is actually querying ---
+#
+# Before #226 ``_active_index_stamp`` resolved purely by ``status == active`` and
+# never looked at ``active_index_version``, so document scoping and the Tier-3
+# provenance gate could be reasoning about two different indexes.
+
+
+async def test_vector_arm_degrades_when_scoped_candidate_stamp_mismatches(
+    seeded_session,
+) -> None:
+    """The issue's own measured repro (#226): a mismatched CANDIDATE must degrade.
+
+    A candidate stamped ``openrouter/text-embedding-3-small`` is being retrieved
+    while a different, ``gemini``-stamped index is live and the configured query
+    embedder is gemini. The arm would be scoring openrouter vectors with gemini
+    embeddings — meaningless cosine, exactly the silent failure #57 exists to
+    prevent. This is the promotion evaluator's shape (#216): it measures a
+    candidate while another index still serves.
+
+    Turns RED if ``_active_index_stamp`` goes back to resolving by
+    ``status == active`` — it then reads the LIVE index's matching gemini stamp,
+    sees no mismatch, and returns True (the behaviour on main before this fix).
+    """
+    await _stamp_active_index(
+        seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
+    )
+    await _add_candidate_index(
+        seeded_session, provider="openrouter", model="text-embedding-3-small", dim=1536
+    )
+    h = HybridRetriever(seeded_session, active_index_version="v-cand", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._active_index_stamp() == EmbedderIdentity(
+            provider="openrouter", model="text-embedding-3-small", dim=1536
+        )
+        assert await h._vector_arm_enabled() is False
+    assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_runs_when_scoped_candidate_stamp_matches(seeded_session) -> None:
+    """The other direction: version-scoping must not blanket-disable non-active indexes.
+
+    Mirror image of the test above — the CANDIDATE matches the configured
+    embedder and the LIVE index is the mismatched one. The arm must RUN. Without
+    this partner, "always return False for a non-active index" would satisfy the
+    repro test and destroy the promotion evaluator's vector arm entirely.
+
+    Turns RED if the scoped lookup is made to fail closed on any non-active
+    status, or if it still resolves by ``status == active`` (it would then read
+    the live openrouter stamp and degrade).
+    """
+    await _stamp_active_index(
+        seeded_session, provider="openrouter", model="text-embedding-3-small", dim=1536
+    )
+    await _add_candidate_index(
+        seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
+    )
+    h = HybridRetriever(seeded_session, active_index_version="v-cand", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is True
+    assert not any("mismatch" in r.getMessage() for r in records)
+
+
+async def test_active_index_stamp_scoped_by_version_ignores_a_second_active_row(
+    seeded_session,
+) -> None:
+    """A retriever pinned to its own index does not care how many others are active.
+
+    Replaces the first half of the pre-#226
+    ``test_active_index_stamp_none_on_dual_active``. That test asserted ``None``
+    here; it was pinning the fail-open. With ``active_index_version="v1"`` the
+    arms filter documents to ``v1`` alone, so the gate reads ``v1``'s own stamp
+    and the dual-active count is irrelevant — no ambiguity, no WARN.
+
+    Turns RED if the scoped branch is removed (resolution falls through to the
+    status-based lookup, which sees two active rows and returns ``ambiguous``).
+    """
+    await _stamp_active_index(
+        seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
+    )
+    await _add_second_active_index(seeded_session)
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        stamp = await h._active_index_stamp()
-    assert stamp is None
+        assert await h._active_index_stamp() == _GEMINI
+        assert await h._vector_arm_enabled() is True
+    assert not any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
+
+
+async def test_active_index_stamp_ambiguous_on_dual_active_when_unscoped(
+    seeded_session,
+) -> None:
+    """Dual-active + no pinned version -> the AMBIGUOUS sentinel, not ``None``.
+
+    Replaces the second half of the pre-#226
+    ``test_active_index_stamp_none_on_dual_active``, which pinned ``None`` and so
+    pinned the fail-open: the shared predicate reads ``None`` as "unknown
+    provenance ⇒ allow", and the vector arm ran against a coin flip. This is the
+    shape a production dual-active request really arrives in — the orchestrator's
+    own guard returns ``("", "")``, which reaches the retriever as
+    ``active_index_version=None``.
+
+    Turns RED if the ``active_count > 1`` branch returns ``None`` again (or is
+    deleted).
+    """
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._active_index_stamp() is IndexStampStatus.ambiguous
     assert any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_fails_closed_on_dual_active_when_unscoped(seeded_session) -> None:
+    """The consequence of the sentinel, at the method retrieval actually calls.
+
+    ``_vector_arm_enabled`` is the gate; ``_active_index_stamp`` is only its
+    input. This also pins that the ambiguous resolution does not crash the
+    mismatch WARN's identifier payload (the sentinel has no ``.provider``), and
+    that the fail-closed decision is separately observable.
+
+    Turns RED if ``is_index_embedder_mismatch`` stops returning True for the
+    sentinel — the arm goes back to running with unknown provenance.
+    """
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is False
+    msgs = [r.getMessage() for r in records]
+    assert any("vector_retrieval_index_provenance_ambiguous" in m for m in msgs)
+    rec = next(
+        r for r in records if "vector_retrieval_index_provenance_ambiguous" in r.getMessage()
+    )
+    assert rec.configured_embedding_provider == "gemini"
+
+
+async def test_dual_active_still_allowed_when_enforcement_is_off(seeded_session) -> None:
+    """Fail-closed is the GATE's verdict, not the resolver's.
+
+    With no ``embedder_identity`` wired, Tier-3 enforcement is off and the arm
+    runs even on a dual-active database — the pre-#226 behaviour for legacy
+    callers, unchanged. Proves the new deny is scoped to enforcement being on.
+
+    NB this is a BOUNDARY guard, not a #226-defect probe: it passes against
+    pre-fix source too (the enforcement-off short-circuit never changed). Its job
+    is to stop the new deny from creeping above that short-circuit.
+
+    Turns RED if the ambiguity check is hoisted above the
+    ``embedder_identity is None`` short-circuit in ``_vector_arm_enabled``.
+    """
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None)
+    with _capture_retrieval_logs() as records:
+        assert await h._vector_arm_enabled() is True
+    assert not any("ambiguous" in r.getMessage() for r in records)
+
+
+async def test_active_index_stamp_none_when_named_version_does_not_exist(
+    seeded_session,
+) -> None:
+    """A pinned version with no row resolves to ``None`` (allow), not ambiguous.
+
+    The three arms filter documents on that same missing version, so the vector
+    arm has nothing to score and the gate's verdict is unobservable. "No row ⇒ no
+    stamp ⇒ unknown provenance ⇒ allow" keeps this consistent with the
+    no-active-index case instead of inventing a third rule.
+
+    Turns RED if the scoped branch falls back to the status-based lookup when the
+    named row is missing — it would then read ``v1``'s stamp, which is a
+    different index entirely.
+    """
+    await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
+    h = HybridRetriever(seeded_session, active_index_version="v-nope", embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._active_index_stamp() is None
+        assert await h._vector_arm_enabled() is True
+    assert not any("mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_allowed_when_unscoped_with_zero_active_indexes(session) -> None:
+    """Pins today's ALLOW on the zero-active-rows path — the sibling left OPEN (#265).
+
+    Unscoped (``active_index_version=None``) with NO active index row and
+    enforcement ON. The resolver finds no row, returns ``None``, and the shared
+    predicate allows. That is deliberate: a fresh / un-promoted database must
+    still answer (see ``_default_retriever``), so this is NOT the dual-active
+    case and must not fail closed with it.
+
+    It is also not safe, and this test says so rather than hiding it: with zero
+    active rows the three arms drop their ``index_version`` filter and scan by
+    document STATUS alone, so an ingested-but-unpromoted index built by another
+    embedder is in scope with nothing to check it against. Fixing that needs the
+    arms and the gate to agree on a document set, which is #265, not #226.
+
+    Turns RED the moment #265 changes this verdict — which is the point: that
+    change must be a deliberate, visible edit, not a silent side effect.
+    """
+    h = HybridRetriever(session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._active_index_stamp() is None
+        assert await h._vector_arm_enabled() is True
+    assert not any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
+
+
+async def test_gate_delegates_to_shared_predicate_for_the_ambiguous_sentinel(
+    seeded_session, monkeypatch
+) -> None:
+    """#226 extension of the #71 single-source-of-truth guard.
+
+    The existing delegation test loops over ``EmbedderIdentity | None`` stamps
+    only. The ambiguous sentinel is a THIRD shape, and it must also be decided by
+    the shared predicate — not by an inline ``if stamp is ambiguous: return
+    False`` in the gate, which could drift from what
+    ``app.services.index_health`` reports on ``GET /health/index``.
+
+    Turns RED if the gate short-circuits the sentinel before calling
+    ``is_index_embedder_mismatch`` (the spy's call list stays empty).
+    """
+    import app.retrieval.hybrid as hybrid_mod
+    from app.embeddings import is_index_embedder_mismatch
+
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    resolved = await h._active_index_stamp()
+    assert resolved is IndexStampStatus.ambiguous
+
+    calls: list[tuple] = []
+
+    def _spy(configured, index_stamp, *, _calls=calls):
+        _calls.append((configured, index_stamp))
+        return is_index_embedder_mismatch(configured, index_stamp)
+
+    monkeypatch.setattr(hybrid_mod, "is_index_embedder_mismatch", _spy)
+    with _capture_retrieval_logs():
+        enabled = await h._vector_arm_enabled()
+
+    assert calls == [(_GEMINI, IndexStampStatus.ambiguous)]
+    assert enabled is False
 
 
 async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:
