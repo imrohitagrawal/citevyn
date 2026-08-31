@@ -206,6 +206,14 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 
 ## Operator / non-code follow-ups (not GitHub issues)
 
+- **v0.12.0 release-candidate pack ready:** `docs/RELEASE_CANDIDATE_v0.12.0.md`
+  (this session, 2026-08-31) has the ship/no-ship summary and exact ordered
+  commands for the owner to tag + `fly deploy`. No migration and no corpus
+  change since `v0.11.0`; `answer_cache` needs no flush (policy-version bump
+  makes stale rows unreachable by construction, verified from
+  `build_cache_key`). Tagging and deploying are owner-gated actions this
+  session does not take.
+
 - **Enable the CI answer-quality gate (owner-only):** add `CITEVYN_OPENROUTER_API_KEY` as a
   repo Actions secret (*Settings → Secrets and variables → Actions*). The `answer-quality-eval`
   CI job (PR #127) skips until it is present; adding it flips the judged MIN_MEAN_JUDGE +
