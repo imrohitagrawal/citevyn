@@ -281,16 +281,19 @@ class Settings(BaseSettings):
     # no-answer refusals for questions this build answers. That is the opposite
     # direction from the v3 -> v4 bump, and equally invisible to the rest of the key.
     # v5 -> v6 (#226): the Tier-3 vector-arm gate changed, so the same question can
-    # now produce a DIFFERENT answer. Two states that previously ran the vector arm
-    # now degrade it: a retrieval scoped to a non-active index whose own stamp
-    # mismatches, and a dual-active database (which used to resolve to "unknown
-    # provenance -> allow" and now fails closed). Answers cached under v5 from
-    # either state were built from a vector arm scoring a possibly FOREIGN vector
-    # space, and nothing else in the key invalidates them -- on a dual-active DB
-    # ``_retrieve_active_index`` returns ``("", "")``, so even ``source_version_hash``
-    # is a constant empty string across the fix. Without this bump those rows replay
-    # the pre-fix answer for the full 24h TTL, and the corrected gate never runs
-    # because a cache hit returns before retrieval.
+    # now produce a DIFFERENT answer. The reachable-through-the-cache case is the
+    # DUAL-ACTIVE one: it used to resolve to "unknown provenance -> allow" and the
+    # arm ran, and it now fails closed. A v5 row written from that state was built
+    # by a vector arm scoring a possibly FOREIGN vector space, and nothing else in
+    # the key invalidates it -- on a dual-active DB ``_retrieve_active_index``
+    # returns ``("", "")``, so even ``source_version_hash`` is a constant empty
+    # string across the fix. Without this bump those rows replay the pre-fix answer
+    # for the full 24h TTL, and the corrected gate never runs because a cache hit
+    # returns before retrieval.
+    # (#226's other half -- a retrieval scoped to a non-active index -- never
+    # reached the cache: only ``promotion_eval`` passes a candidate version, and
+    # that path never touches ``answer_cache``. It is fixed for correctness, not
+    # for cache hygiene.)
     answer_policy_version: str = "v6"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)

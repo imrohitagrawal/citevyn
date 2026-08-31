@@ -561,6 +561,10 @@ async def test_dual_active_still_allowed_when_enforcement_is_off(seeded_session)
     runs even on a dual-active database — the pre-#226 behaviour for legacy
     callers, unchanged. Proves the new deny is scoped to enforcement being on.
 
+    NB this is a BOUNDARY guard, not a #226-defect probe: it passes against
+    pre-fix source too (the enforcement-off short-circuit never changed). Its job
+    is to stop the new deny from creeping above that short-circuit.
+
     Turns RED if the ambiguity check is hoisted above the
     ``embedder_identity is None`` short-circuit in ``_vector_arm_enabled``.
     """
@@ -591,6 +595,31 @@ async def test_active_index_stamp_none_when_named_version_does_not_exist(
         assert await h._active_index_stamp() is None
         assert await h._vector_arm_enabled() is True
     assert not any("mismatch" in r.getMessage() for r in records)
+
+
+async def test_vector_arm_allowed_when_unscoped_with_zero_active_indexes(session) -> None:
+    """Pins today's ALLOW on the zero-active-rows path — the sibling left OPEN (#265).
+
+    Unscoped (``active_index_version=None``) with NO active index row and
+    enforcement ON. The resolver finds no row, returns ``None``, and the shared
+    predicate allows. That is deliberate: a fresh / un-promoted database must
+    still answer (see ``_default_retriever``), so this is NOT the dual-active
+    case and must not fail closed with it.
+
+    It is also not safe, and this test says so rather than hiding it: with zero
+    active rows the three arms drop their ``index_version`` filter and scan by
+    document STATUS alone, so an ingested-but-unpromoted index built by another
+    embedder is in scope with nothing to check it against. Fixing that needs the
+    arms and the gate to agree on a document set, which is #265, not #226.
+
+    Turns RED the moment #265 changes this verdict — which is the point: that
+    change must be a deliberate, visible edit, not a silent side effect.
+    """
+    h = HybridRetriever(session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        assert await h._active_index_stamp() is None
+        assert await h._vector_arm_enabled() is True
+    assert not any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
 
 
 async def test_gate_delegates_to_shared_predicate_for_the_ambiguous_sentinel(

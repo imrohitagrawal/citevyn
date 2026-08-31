@@ -182,8 +182,13 @@ index version**, with queries always using the model that built the active index
 > returns a distinct `IndexStampStatus.ambiguous` and the predicate **fails closed** on it.
 > The NULL-stamp allow arm is untouched — hardening *it* would take the vector arm offline
 > for the seeded demo and every pre-#51 index. `answer_policy_version` was bumped v5 → v6
-> in the same change, because answers cached from either state were built with the arm
-> running and a cache hit returns before the corrected gate can run.
+> because a v5 row written during dual-active was built with the arm running, and a cache
+> hit returns before the corrected gate can run. (Defect 1 never reached the cache — only
+> `promotion_eval` retrieves a candidate version, and that path never touches
+> `answer_cache`.) Two siblings were found and deliberately left open: `/health/index`
+> resolves its active row with no count check, so it still reports a clean verdict while
+> the read path fails closed (**#264**); and with **zero** active rows the arms scan by
+> document status while the gate has no row to compare against (**#265**).
 
 ## Deferred / Future Work
 

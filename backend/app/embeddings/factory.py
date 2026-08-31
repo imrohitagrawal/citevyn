@@ -101,12 +101,20 @@ def is_index_embedder_mismatch(
 ) -> bool:
     """Whether the configured query embedder disagrees with the index being queried.
 
-    The single source of truth for the read-time Tier-3 allow/degrade decision
-    (#71). The canonical enforcement point
+    The single source of truth for the stamp-vs-configured **comparison** (#71).
+    The canonical enforcement point
     (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`, #57)
     delegates to it, and :func:`app.services.index_health.active_index_vector_health`
-    reuses it so ``GET /health/index`` reports the same verdict the read path
-    would reach. Any second implementation of this comparison is a bug.
+    reuses it for ``GET /health/index``. Any second implementation of this
+    comparison is a bug.
+
+    Shared comparison is not the same as an identical verdict, and the two
+    callers do NOT currently agree in every state: they differ in how each
+    *resolves* which index to compare. The health route picks one ``active`` row
+    with no ordering and no count check, so it can never construct the ambiguous
+    case and reports a clean verdict on a dual-active database while the read
+    path fails closed. Tracked as #264 — do not read the reuse here as a parity
+    guarantee until that lands.
 
     The three answers, in the order they are decided:
 

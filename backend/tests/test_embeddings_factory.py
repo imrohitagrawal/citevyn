@@ -101,6 +101,10 @@ def test_ambiguous_sentinel_is_not_confusable_with_a_stamp() -> None:
     all-None stamp and would answer ``.provider``, silently re-merging the two
     states this fix exists to separate.
 
+    NB this is a TYPE guard, not a #226-defect probe: it passes against pre-fix
+    source too (it only needs the enum to exist). Its job is to stop a future
+    edit from collapsing the sentinel back into an identity-shaped value.
+
     Turns RED if ``IndexStampStatus.ambiguous`` is replaced by any
     ``EmbedderIdentity`` value.
     """
