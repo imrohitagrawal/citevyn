@@ -1527,8 +1527,8 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
     """Cite-once is unchanged: an answer that DOES ground itself keeps exactly the chunks it
     referenced — the fix must not make grounded answers stingier.
 
-    (Cites [1], not [2]: ``validate_citations`` requires markers contiguous from 1, so a
-    lone [2] is a genuine validation failure and would not exercise the grounded path.)
+    (Cites [1] for simplicity. A lone [2] would also be valid since #215 — see
+    ``test_gapped_citations_survive_with_their_original_markers`` below.)
     """
     from app.llm.types import LLMResult
 
@@ -1556,6 +1556,88 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
     # the 1-of-5 ratio rather than being waved through.
     assert len(response["citations"]) == 1
     assert response["confidence"] == Confidence.low.value
+
+
+async def test_gapped_citations_survive_with_their_original_markers(
+    session: Any,
+) -> None:
+    """An answer citing [1] and [3] is served, and each citation carries the
+    marker the model actually wrote (#215).
+
+    This is the only test in the suite that can catch an A2 regression. The
+    stub LLM client always emits exactly ``[1]``, so in every other test —
+    and in the whole eval harness — ``marker`` equals ``index + 1`` by
+    construction, and numbering by array position is indistinguishable from
+    numbering by marker. Here the model skips bullet 2, so the two differ:
+    array position would label the cards 1 and 2 while the prose says [1]
+    and [3], pointing the reader at a card that does not exist.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    gapped = AsyncMock()
+    gapped.complete.return_value = LLMResult(
+        text="Limits are per organization [1]. Retry after the window [3].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    # Hold ONE evidence list: ``_evidence`` mints fresh UUIDs per call, so the
+    # retriever and the assertions must be looking at the same objects.
+    evidence = _evidence(count=6)
+    orch = Orchestrator(_settings(), session, llm=gapped, retriever=_FakeRetriever(evidence))
+
+    response = await orch.ask(
+        question="What are the rate limits on the Claude API?",
+        request_id="gapped",
+        session_id=uuid.uuid4(),
+    )
+
+    # Served, not discarded — this is the #215 regression itself.
+    assert response["no_answer"] is False
+    citations = response["citations"]
+    assert len(citations) == 2
+    # The markers are the model's own indices, NOT 1 and 2.
+    assert [c["marker"] for c in citations] == [1, 3]
+    # And they point at the evidence the model actually cited.
+    assert [c["chunk_id"] for c in citations] == [
+        str(evidence[0].chunk_id),
+        str(evidence[2].chunk_id),
+    ]
+
+
+async def test_gapped_citation_markers_survive_the_cache_round_trip(
+    session: Any,
+) -> None:
+    """A cache HIT replays the same markers as the miss that populated it.
+
+    The cached path rebuilds citations from stored dicts rather than from
+    evidence, so it is a second, independent place the marker can be lost.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    gapped = AsyncMock()
+    gapped.complete.return_value = LLMResult(
+        text="Limits are per organization [1]. Retry after the window [3].",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    question = "What are the rate limits on the Claude API?"
+    orch = Orchestrator(
+        _settings(), session, llm=gapped, retriever=_FakeRetriever(_evidence(count=6))
+    )
+
+    miss = await orch.ask(question=question, request_id="m1", session_id=uuid.uuid4())
+    assert miss["cache_hit"] is False
+    assert [c["marker"] for c in miss["citations"]] == [1, 3]
+
+    hit = await orch.ask(question=question, request_id="m2", session_id=uuid.uuid4())
+    assert hit["cache_hit"] is True
+    assert [c["marker"] for c in hit["citations"]] == [1, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -2353,3 +2435,126 @@ async def test_offdomain_query_opening_with_greeting_still_refused(session: Any)
     assert response["no_answer"] is True
     assert response["answer"] == settings.unsupported_refusal
     assert retriever.calls[0]["product_area"] is None  # retrieved globally, found nothing
+
+
+# ---------------------------------------------------------------------------
+# 4f. A ``[n]`` inside a code block is not a citation (#237)
+# ---------------------------------------------------------------------------
+
+
+async def test_code_block_index_does_not_become_a_source_card(session: Any) -> None:
+    """``delays[3]`` in a fenced block must not attach a card numbered 3 (#237).
+
+    The end-to-end half of the fix: the unit tests pin ``cited_indices``, this
+    pins what the user actually receives. The stub LLM emits exactly ``[1]``
+    (``app/llm/stub.py``), so neither it nor the eval harness can express this
+    shape — a fake generator is the only way to reach it.
+
+    Two things go wrong without the fix, and both are asserted here:
+
+    * a REAL retrieved chunk (``evidence[2]``) is attached as an authoritative
+      source card labelled ``3``, which the reader sees next to the very
+      ``delays[3]`` subscript that produced it — the answer text is rendered
+      raw by the frontend, so the number is plainly visible;
+    * ``confidence`` is ``len(cited)/len(evidence)`` = 2/3, which clears the
+      0.66 threshold and reports ``high`` for an answer that cited one bullet
+      of three. The more code an answer contains, the more confident the
+      system claimed to be.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    fenced = AsyncMock()
+    fenced.complete.return_value = LLMResult(
+        text="Increase the backoff [1].\n\n```python\ndelays[3] = 8\n```\n",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    # Hold ONE evidence list: ``_evidence`` mints fresh UUIDs per call, so the
+    # retriever and the chunk-id assertion must see the same objects.
+    evidence = _evidence(count=3)
+    orch = Orchestrator(_settings(), session, llm=fenced, retriever=_FakeRetriever(evidence))
+
+    response = await orch.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_237_fence",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is False
+    citations = response["citations"]
+    assert [c["marker"] for c in citations] == [1]
+    assert len(citations) == 1
+    # Partner to the count above: name the chunk that must NOT be there. A
+    # mutation returning the wrong single card would pass a bare length check.
+    assert str(evidence[2].chunk_id) not in [c["chunk_id"] for c in citations]
+    assert [c["chunk_id"] for c in citations] == [str(evidence[0].chunk_id)]
+    # 1-of-3, not 2-of-3: the phantom used to push this over the 0.66 band.
+    assert response["confidence"] == Confidence.medium.value
+    # The audit trail records the corrected markers, not the inflated pair.
+    audits = (await session.execute(select(AuditEvent))).scalars().all()
+    assert audits[0].metadata_["cited_markers"] == [1]
+
+
+async def test_citation_only_inside_a_fence_costs_no_second_llm_call(
+    session: Any,
+) -> None:
+    """The ``or`` fallback saves a PAID retry, measured rather than argued.
+
+    This is the objection that kept #237 out of the #215 PR. If stripping code
+    were allowed to empty ``cited_indices``, an answer whose only marker sits
+    in a fence would refuse AND fire the #208 ``exact_lookup`` fallthrough — a
+    second ``generate()`` call, real money.
+
+    Reaching the paid path takes THREE things at once, and missing any one of
+    them makes this test prove nothing about cost:
+
+    * the question must name a product, or the domain guardrail returns
+      ``unsupported`` and the answer never reaches citation validation;
+    * it must carry a flag token, so ``classify_intent`` routes to
+      ``exact_lookup``;
+    * every evidence hit must be ``exact``-typed, because ``_strategy_for``
+      grants ``RetrievalStrategy.exact_lookup`` only then — and that strategy
+      is what gates the retry at ``orchestrator.py:818``.
+
+    On a hybrid answer an empty citation set is a FREE refusal. An earlier
+    draft of this test used a question without a product name; it produced
+    ``domain=unsupported`` and one generate call whether or not the fallback
+    was present, so it measured nothing.
+
+    Measured against a build with ``or _CITATION_RE.findall(answer_text)``
+    deleted: ``no_answer=True, strategy=none, GENERATE_CALLS=2``. With it:
+    ``no_answer=False, strategy=exact_lookup, GENERATE_CALLS=1``.
+    """
+    from app.llm.types import LLMResult
+
+    await _seed_index_version(session)
+    fenced = AsyncMock()
+    fenced.complete.return_value = LLMResult(
+        text="As shown below:\n\n```\nrefer to [1]\n```\n",
+        input_tokens=1,
+        output_tokens=1,
+        model="stub",
+        provider="stub",
+    )
+    evidence = _evidence(count=1)
+    for hit in evidence:
+        hit.retrieval_type = RetrievalType.exact
+    orch = Orchestrator(_settings(), session, llm=fenced, retriever=_FakeRetriever(evidence))
+
+    response = await orch.ask(
+        question="Is there a config file option for the Codex --model flag instead?",
+        request_id="req_237_fence_only",
+        session_id=uuid.uuid4(),
+    )
+
+    # The paid retry is only reachable on this strategy — assert we are on it,
+    # so the cost assertion below cannot pass by never having been at risk.
+    assert response["retrieval_strategy"] == RetrievalStrategy.exact_lookup.value
+    # Served exactly as it is on main — the strip must not turn it into a refusal.
+    assert response["no_answer"] is False
+    assert [c["marker"] for c in response["citations"]] == [1]
+    # And it cost ONE generation, not two.
+    assert fenced.complete.await_count == 1

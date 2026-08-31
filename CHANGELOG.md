@@ -6,7 +6,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Answers whose citations skip a bullet are served instead of discarded
+  (#215).** `app/llm/validation.py` hard-failed whenever the cited indices had a
+  gap, so a correct, grounded answer citing `[1]` and `[3]` was thrown away and
+  the user saw "I couldn't find a grounded answer" — indistinguishable from a
+  retrieval failure, which is why #215 was filed as one. Three occurrences are in
+  the production audit trail. The rule was never requested by `prompts.py`, and
+  hallucinated markers are still caught by the range check above it, whose two
+  boundaries are now pinned by tests (contiguity had been catching an off-by-one
+  there as a side effect).
+
 ### Added
+- **`citations[].marker` on the wire (#236).** Each citation now carries the
+  1-based evidence index the model actually wrote, and the frontend renders that
+  instead of the array position. Shipping the #215 fix alone would have traded a
+  false refusal for a **wrong citation**: `[1]`+`[3]` produced two citations
+  rendered as cards **1** and **2** while the prose still said `[3]`.
+  Documented in `docs/API_SPEC.md` §5.
+
+  **Operator note:** `answer_policy_version` is bumped **v2 → v3**, so the answer
+  cache is cold on deploy and refills on first ask — pre-marker rows are evicted
+  rather than replayed as unnumbered cards. `docs/RUNBOOK.md` §5.3a previously
+  offered `v3` as a rollback escape hatch; it now uses a dated, operator-scoped
+  token, because a bare `vN` can collide with a future shipped default.
+
 - **The browser UI is served from the API at `/`.** `infra/docker/Dockerfile.api`
   gained a Node stage that builds `frontend/dist` (the bundle is gitignored, so a
   host-built copy would be absent or stale in a remote `fly deploy`), and
