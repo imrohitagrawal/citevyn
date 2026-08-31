@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Web UI for CiteVyn — a cited RAG assistant for AI dev tools.",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
     "dev": "vite",
