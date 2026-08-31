@@ -16,4 +16,7 @@ concurrency:
 jobs:
   quality-gate:
     if: github.event.pull_request.draft == false
-    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@v3
+    uses: imrohitagrawal/.github/.github/workflows/reusable-pr-quality.yml@c58ba53059c2a7f7c67f0b8051886f445c220010 # v7
+    with:
+      python-directory: backend
+      node-directory: frontend

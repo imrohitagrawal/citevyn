@@ -31,7 +31,13 @@ function askResponse(over: Partial<AskResponse> = {}): AskResponse {
     message_id: "msg_1",
     answer: "Live answer.",
     citations: [
-      { source_name: "Claude Code Docs", title: "Permissions", url: "https://x", chunk_id: "c1" },
+      {
+        source_name: "Claude Code Docs",
+        title: "Permissions",
+        url: "https://x",
+        chunk_id: "c1",
+        marker: 1,
+      },
     ],
     domain: "claude_code",
     intent: "how_to",
@@ -170,7 +176,13 @@ describe("useLandingState — live send path", () => {
         answer: "CiteVyn Pro is not live yet.",
         domain: "citevyn",
         citations: [
-          { source_name: "About CiteVyn", title: "About CiteVyn", url: "/about", chunk_id: "cv1" },
+          {
+            source_name: "About CiteVyn",
+            title: "About CiteVyn",
+            url: "/about",
+            chunk_id: "cv1",
+            marker: 1,
+          },
         ],
       }),
     );

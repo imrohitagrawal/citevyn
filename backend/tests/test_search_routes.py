@@ -10,12 +10,17 @@ Tests exercise:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import db as db_module
 from app.main import create_app
+from app.models.enums import EvaluationStatus, IndexStatus
+from app.models.evaluation import EvaluationRun
+from app.models.index_versions import IndexVersion
 from tests.conftest import seed_catalog
 
 # ---------------------------------------------------------------------------
@@ -383,6 +388,75 @@ def test_health_index_reports_dead_vector_arm(app_with_seeded_session, session) 
         assert va["embedded_ratio"] == 0.0
         # The configured query embedder identity is surfaced (provider/model/dim only).
         assert set(va["configured_query_embedder"]) == {"provider", "model", "dim"}
+
+
+def test_health_index_reports_null_when_the_index_was_never_evaluated(
+    app_with_seeded_session, session
+) -> None:
+    """Never-evaluated stays ``null`` — the partner to the non-null case (#229).
+
+    ``TestHealthIndexReportsTheEvidence`` in ``test_promotion_eval.py`` proves
+    the field goes NON-null once a run exists. This proves it is still ``null``
+    when no run does, so neither assertion is the vacuous half of the pair: a
+    fix that hard-coded some id would fail here, and a fix that changed nothing
+    would fail there.
+    """
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+
+    with TestClient(app_with_seeded_session) as client:
+        body = client.get("/health/index").json()
+    assert body["active_index"]["index_version"] == "v1"
+    assert body["active_index"]["evaluation_run_id"] is None
+
+
+def test_health_index_never_credits_one_index_with_anothers_run(
+    app_with_seeded_session, session
+) -> None:
+    """Another index's passing run must NOT surface on the active index (#229).
+
+    Reporting a run that belongs to a different index version would be strictly
+    worse than the ``null`` the issue is about: ``null`` under-reports, while a
+    borrowed run id certifies something nobody measured.
+    """
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+
+    now = datetime.now(UTC)
+    other = IndexVersion(
+        index_version="v2",
+        status=IndexStatus.candidate,
+        source_version_hash="sha256:v2",
+        created_at=now,
+        promoted_at=None,
+    )
+    run = EvaluationRun(
+        suite_name="promotion",
+        index_version="v2",
+        started_at=now,
+        completed_at=now,
+        status=EvaluationStatus.passed,
+        metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
+        failure_summary={},
+    )
+    session.add_all([other, run])
+    asyncio.get_event_loop().run_until_complete(session.flush())
+    other.evaluation_run_id = run.run_id
+    asyncio.get_event_loop().run_until_complete(session.commit())
+
+    with TestClient(app_with_seeded_session) as client:
+        body = client.get("/health/index").json()
+
+    # ``v1`` is the active index and was never evaluated.
+    assert body["active_index"]["index_version"] == "v1"
+    assert body["active_index"]["evaluation_run_id"] is None
+    # ...and the run that DOES exist is genuinely linked to v2, so the null
+    # above is a real scoping result and not "no runs exist anywhere".
+    linked = asyncio.get_event_loop().run_until_complete(session.get(IndexVersion, "v2"))
+    assert linked is not None
+    assert linked.evaluation_run_id == run.run_id
 
 
 def test_search_exact_422_redacts_user_input(app_with_seeded_session) -> None:

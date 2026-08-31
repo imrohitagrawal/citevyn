@@ -122,7 +122,8 @@ step_by_step
       "source_name": "Claude Code Docs",
       "title": "Permissions",
       "url": "https://example.com/docs",
-      "chunk_id": "chunk_123"
+      "chunk_id": "chunk_123",
+      "marker": 1
     }
   ],
   "domain": "claude_code",
@@ -134,6 +135,17 @@ step_by_step
   "no_answer": false
 }
 ```
+
+**`citations[].marker`** is the 1-based evidence index the model actually wrote
+in `answer` — **not** the position of the citation in the array. The two differ
+whenever the model skips a bullet: an answer citing `[1]` and `[3]` returns two
+citations with markers `1` and `3`. Clients MUST render `marker`, because
+numbering by array position would label those cards `1` and `2` while the answer
+text still says `[3]`, pointing the reader at a card that does not exist.
+
+Markers are in range (`1 <= marker <= len(evidence)`) and strictly increasing,
+but are **not** guaranteed contiguous. Requiring contiguity used to discard the
+whole answer (#215).
 
 ### Unsupported Response
 
@@ -363,14 +375,39 @@ GET /health/dependencies
 
 ### `/health/index` Response
 
+Corrected here against the implemented route in `backend/app/api/routes/search.py`;
+the shape previously documented (bare index-name strings, `status: "healthy"`,
+`last_successful_ingestion`) has never been emitted.
+
 ```json
 {
-  "active_index": "index_v12",
-  "previous_good_index": "index_v11",
-  "last_successful_ingestion": "2026-06-07T10:05:00Z",
-  "status": "healthy"
+  "request_id": "req_010",
+  "status": "ready",
+  "active_index": {
+    "index_version": "v1",
+    "source_version_hash": "sha256:...",
+    "created_at": "2026-06-07T10:00:00Z",
+    "promoted_at": "2026-06-07T10:05:00Z",
+    "evaluation_run_id": "7f1c...-..."
+  },
+  "previous_good_index": null,
+  "vector_arm": { "status": "healthy", "healthy": true, "...": "..." },
+  "message": null
 }
 ```
+
+`status` is `pre_index` (nothing promoted yet), `ready` (an active index exists) or
+`degraded` (only a previous-good index remains). `vector_arm` is additive and does
+not change `status` — read it for the vector-arm verdict.
+
+`evaluation_run_id` names the newest **terminal** `EvaluationRun` for that index —
+the run `citevyn-worker evaluate --index-version <v>` wrote (#216, #229). It means
+the index **was evaluated**; it does **not** mean the index **passed**, because the
+pointer follows a `failed` run too (otherwise "evaluated and failed" would be
+indistinguishable from "never evaluated"). `null` means no evaluation has ever
+completed for that index. For the verdict, read the run through
+`GET /v1/admin/evaluations/{run_id}`. The promotion gate in §13 does not consult
+this field; it re-derives the measurement from `evaluation_runs` on every promote.
 
 ## 15. Error Codes
 
