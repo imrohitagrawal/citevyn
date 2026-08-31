@@ -296,6 +296,16 @@ measured at least `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` (default `0.95`).
 run, so a corrected corpus that still retrieves correctly promotes with **no**
 `force`.
 
+It also stamps the run onto the index row, so `GET /health/index` and
+`GET /v1/admin/index_versions` show `evaluation_run_id` for an index that has been
+evaluated (#229 — before that fix the column was never written, so an evaluated
+index still displayed `null` and reading that as "no evidence" sent operators
+straight to `?force=true`). **A non-null `evaluation_run_id` means the index was
+EVALUATED, not that it PASSED** — the pointer follows the newest terminal run
+either way. For the verdict, read the run: `GET /v1/admin/evaluations/{run_id}`.
+The promote endpoint remains the authority; it re-measures from the run table
+rather than trusting the pointer.
+
 If `evaluate` exits `2` the candidate measured below threshold — read
 `failure_summary` (`GET /v1/admin/evaluations?index_version=<candidate>` to find the run, then `GET /v1/admin/evaluations/{run_id}` for its `failure_summary` — the list endpoint returns counts only) and fix
 the corpus rather than reaching for `force`. `?force=true` still promotes anyway
