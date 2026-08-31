@@ -45,6 +45,7 @@ from app.core.errors import (
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIDMiddleware, get_current_request_id
 from app.core.redis_client import shutdown_redis_client
+from app.core.security_headers import apply_security_headers, configure_security_headers
 from app.embeddings import shutdown_embedder, validate_embedder_provider
 from app.llm.factory import shutdown_llm_client, validate_llm_provider
 
@@ -90,6 +91,15 @@ def create_app() -> FastAPI:
     configure_logging()
     settings = get_settings()
 
+    # Interactive API docs (Swagger UI / ReDoc) and the raw OpenAPI schema
+    # are a reconnaissance aid on a production deploy — every route, every
+    # field name, every enum value laid out for free. All three are set to
+    # None together in production (ADR-0004 PR 2); FastAPI itself only
+    # registers /docs and /redoc when openapi_url is truthy (see
+    # fastapi.applications.FastAPI.setup), so openapi_url=None alone is the
+    # load-bearing guard — docs_url/redoc_url are set for explicitness, not
+    # because either independently disables anything.
+    _is_production = settings.environment == "production"
     app = FastAPI(
         title="CiteVyn Backend",
         version="0.9.0",
@@ -101,9 +111,13 @@ def create_app() -> FastAPI:
             "client, Redis sliding-window rate limit, multi-stage "
             "Docker image, Caddy auto-TLS reverse proxy)."
         ),
+        docs_url=None if _is_production else "/docs",
+        redoc_url=None if _is_production else "/redoc",
+        openapi_url=None if _is_production else "/openapi.json",
         lifespan=_lifespan,
     )
     configure_cors(app, settings)
+    configure_security_headers(app, settings)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health_router)
     app.include_router(sessions_router)
@@ -293,6 +307,14 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     Logs the traceback via the standard logger and returns a 500
     with the standard envelope. Without this handler FastAPI
     would emit its own ``Internal Server Error`` HTML body.
+
+    Headers are stamped directly onto the response here, NOT left to
+    :class:`SecurityHeadersMiddleware`. A bare ``Exception`` handler is
+    wired into Starlette's ``ServerErrorMiddleware`` (the outermost ASGI
+    layer, added around every ``add_middleware`` registration), so this
+    response is sent without ever passing back through that middleware —
+    see ``app.core.security_headers.apply_security_headers`` for the full
+    explanation and how this was caught.
     """
     _logger.exception(
         "unhandled_exception",
@@ -305,10 +327,12 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
             message="An unexpected error occurred.",
         ),
     )
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status_code_for(APIErrorCode.internal_error),
         content=envelope.model_dump(mode="json"),
     )
+    apply_security_headers(response, hsts=get_settings().environment == "production")
+    return response
 
 
 app = create_app()

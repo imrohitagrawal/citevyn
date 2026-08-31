@@ -7,6 +7,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Security
+- **Response security headers + docs endpoints disabled in production
+  (ADR-0004 PR 2).** Every response — including `GET /` served from the
+  frontend `StaticFiles` mount, a different response path from the
+  router-generated JSON responses — now carries `X-Content-Type-Options:
+  nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy:
+  strict-origin-when-cross-origin`, and a `Content-Security-Policy` scoped
+  to `'self'` plus the two third-party origins the shipped frontend
+  actually loads (Google Fonts, Fontshare — verified against a real `npm
+  run build` output, not assumed). `Strict-Transport-Security` is added
+  only when `CITEVYN_ENVIRONMENT=production` (HSTS over local plain HTTP
+  would be a lie the browser acts on). Shipped ahead of any login code so
+  there is no window where a session cookie (ADR-0004 PR 3+) is live
+  without the headers that protect it from XSS exfiltration and
+  clickjacking. Separately, `/docs`, `/redoc`, and `/openapi.json` are now
+  `None` in production — free reconnaissance of every route and field name
+  otherwise. **Deliberately deferred from this PR:** moving `/health/index`
+  and `/health/dependencies` behind the admin key, per the original plan —
+  both are currently polled *without* the admin key by
+  `.github/workflows/uptime.yml` and `infra/docker/scripts/deploy_verify.sh`
+  (the release gate), so gating them needs coordinated secret plumbing
+  across a GitHub Actions secret and the ops script, not just a route
+  change. Tracked under #270 rather than done as a rushed cross-cutting
+  edit in this PR.
+
+  **Found by a security review of this PR and fixed before merge:** the
+  middleware alone missed one response class. Starlette wires a bare
+  `Exception` handler into `ServerErrorMiddleware` — the framework's
+  outermost ASGI layer, added around every `add_middleware` registration —
+  so a genuinely unexpected exception (not `StarletteHTTPException` /
+  `OrchestratorError` / `RequestValidationError`, the three types actually
+  registered with `ExceptionMiddleware`) produced a 500 with **none** of
+  these headers; reproduced with a route raising a bare `ValueError`. No
+  ASGI middleware added via `add_middleware` can wrap outside
+  `ServerErrorMiddleware`, so the fix stamps the headers directly onto the
+  response inside `_unhandled_exception_handler`
+  (`app.core.security_headers.apply_security_headers`, shared with the
+  middleware) rather than restructuring the middleware itself. Regression
+  test reproduces the exact gap.
+
 - **The 4 routes nested under `/v1/sessions/{session_id}` discarded the
   caller's identity instead of checking it (ADR-0004 PR 1).**
   `sessions.py:231,260` and `messages.py:150,197` each took the
