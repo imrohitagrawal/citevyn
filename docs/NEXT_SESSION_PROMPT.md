@@ -340,11 +340,11 @@ timeout and/or `min_machines_running = 1`, respecting the fly.toml comments on t
    that degrades, ranking collapses to **document order**, with `top_k=6` vs 7 chunks dropping one
    by position, not relevance. Proven: all four #215 phrasings produced an identical hermetic
    ordering. Belongs to **#156**.
-2. **#226** — `HybridRetriever._active_index_stamp` resolves provenance by `status == active`,
-   ignoring `active_index_version`, so a caller retrieving a NON-active index gets the vector arm
-   enabled against a mismatched index. Measured. Interacts with the #58 dual-active guard (which
-   today ENABLES the arm on unknown provenance) and breaks
-   `test_active_index_stamp_none_on_dual_active`.
+2. ~~**#226**~~ — **DONE.** `_active_index_stamp` now resolves by primary key when a version is
+   pinned, and dual-active returns `IndexStampStatus.ambiguous` and fails closed;
+   `test_active_index_stamp_none_on_dual_active` was deliberately replaced (it pinned the
+   fail-open). Siblings **#264** (`/health/index` not dual-active aware) and **#265** (zero active
+   rows) are open.
 
 **Both are corpus-wide ranking changes. Measure on the eval harness (`rag-eval`) — NOT the live
 demo. If either moves the golden numbers, STOP, write up before/after, and report. Owner's call.**
