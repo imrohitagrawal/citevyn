@@ -72,6 +72,13 @@ A generic chatbot may answer confidently without reliable source evidence. CiteV
 9. General web search.
 10. Slack, Teams, or browser-extension integration.
 
+> **Note (ADR-0004, 2026-08-31):** items 6 and 7 remain non-goals — no
+> enterprise SSO, RBAC, or tenant isolation ships. That is a different thing
+> from single-tenant **personal-account login** (email+password + GitHub
+> OAuth, one visitor owning their own chat history), which is now in scope
+> and shipping under ADR-0004. Anonymous access remains the frictionless
+> default; login only unlocks saved history.
+
 ## 8. Supported MVP Sources
 
 The MVP should support official documentation for:

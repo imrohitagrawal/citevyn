@@ -45,6 +45,12 @@ MVP includes:
 8. Automated freshness.
 9. General web search.
 
+> **Note (ADR-0004, 2026-08-31):** items 5 and 6 remain non-goals. Real
+> single-tenant personal-account login (accounts, email+password, GitHub
+> OAuth) is a separate, now-in-scope change under ADR-0004 — it does not add
+> SSO, RBAC, or tenant isolation. See `docs/PRD.md` §7 and
+> `docs/SECURITY_MODEL.md` §4/§14 for the amended scope.
+
 ## 5. Phased Release Plan
 
 ### Phase 0: Architecture and Planning
