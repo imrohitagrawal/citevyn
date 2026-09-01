@@ -1,6 +1,7 @@
 /**
  * Header — Sticky navigation bar.
  */
+import { AccountMenu } from "./AccountMenu";
 
 interface HeaderProps {
   themeLabel: string;
@@ -43,6 +44,7 @@ export function Header({
             <span>{themeGlyph}</span>
             {themeLabel}
           </button>
+          <AccountMenu />
           <button onClick={onAskClick} className="cta-button">
             Try the demo
           </button>
