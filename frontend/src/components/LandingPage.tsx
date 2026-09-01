@@ -61,10 +61,29 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     screen,
     live,
     toasts,
+    addToast,
     removeToast,
   } = useLandingState();
 
   const dark = theme === "dark";
+
+  // ADR-0004 PR 9: confirm the claim-on-login the backend already performs
+  // (PR 6) transparently via the session cookie -- no client-side refetch
+  // is needed for the CURRENT tab, since the session_id never changes,
+  // only its owner. This toast is the one thing that genuinely needed
+  // wiring: the auth module has no visibility into chat state, so it
+  // cannot know on its own whether there was anything to save.
+  const handleAuthenticated = (hadChatHistory: boolean) => {
+    addToast(
+      hadChatHistory
+        ? {
+            kind: "success",
+            title: "Signed in",
+            message: "Your conversation is saved to your account.",
+          }
+        : { kind: "success", title: "Signed in", message: "Welcome to CiteVyn." },
+    );
+  };
 
   return (
     <>
@@ -76,6 +95,8 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onThemeToggle={() => onThemeChange(dark ? "light" : "dark")}
             onAskClick={() => enterChat(null)}
             onNavClick={goSection}
+            hasChatHistory={state.messages.length > 0}
+            onAuthenticated={handleAuthenticated}
           />
 
           {/* Landing View */}
@@ -156,6 +177,8 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onThemeToggle={() => onThemeChange(dark ? "light" : "dark")}
             onAskClick={() => enterChat(null)}
             onNavClick={goSection}
+            hasChatHistory={state.messages.length > 0}
+            onAuthenticated={handleAuthenticated}
           />
           <ChatView
             messages={chatView}

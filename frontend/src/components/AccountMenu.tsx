@@ -12,7 +12,20 @@ import { useAuth } from "../hooks/useAuth";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 
-export function AccountMenu() {
+interface AccountMenuProps {
+  /**
+   * Whether the current tab already has chat messages (ADR-0004 PR 9) —
+   * threaded down from LandingPage so a successful sign-in can confirm
+   * "your conversation is saved" specifically when there was one to
+   * save. Optional so existing call sites/tests need no change; treated
+   * as `false` when omitted.
+   */
+  hasChatHistory?: boolean;
+  /** Fires once, right after a successful sign-in/register. */
+  onAuthenticated?: (hadChatHistory: boolean) => void;
+}
+
+export function AccountMenu({ hasChatHistory = false, onAuthenticated }: AccountMenuProps) {
   const { status, user, signOut } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -106,7 +119,11 @@ export function AccountMenu() {
       </button>
       {modalOpen && (
         <Suspense fallback={null}>
-          <AuthModal triggerRef={triggerRef} onClose={() => setModalOpen(false)} />
+          <AuthModal
+            triggerRef={triggerRef}
+            onClose={() => setModalOpen(false)}
+            onAuthenticated={() => onAuthenticated?.(hasChatHistory)}
+          />
         </Suspense>
       )}
     </>
