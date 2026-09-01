@@ -986,6 +986,7 @@ export function useLandingState() {
     screen: state.screen,
     live,
     toasts,
+    addToast,
     removeToast,
   };
 }

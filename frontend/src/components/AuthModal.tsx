@@ -37,11 +37,20 @@ interface AuthModalProps {
   /** Element to restore focus to on close — the button that opened the modal. */
   triggerRef: React.RefObject<HTMLElement | null>;
   onClose: () => void;
+  /**
+   * Called right before ``onClose`` on a SUCCESSFUL sign-in/register only
+   * (never on close-without-submitting). ADR-0004 PR 9: lets the caller
+   * (LandingPage, which owns the toast host and the current chat's
+   * message count) confirm "your conversation is saved" — this component
+   * has no access to that state itself, by design (auth and chat state
+   * are deliberately independent modules).
+   */
+  onAuthenticated?: () => void;
 }
 
 type Mode = "login" | "register";
 
-export function AuthModal({ triggerRef, onClose }: AuthModalProps) {
+export function AuthModal({ triggerRef, onClose, onAuthenticated }: AuthModalProps) {
   const { signIn, signUp } = useAuth();
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
@@ -117,6 +126,7 @@ export function AuthModal({ triggerRef, onClose }: AuthModalProps) {
       } else {
         await signUp(email, password);
       }
+      onAuthenticated?.();
       onClose();
     } catch (err) {
       setError(

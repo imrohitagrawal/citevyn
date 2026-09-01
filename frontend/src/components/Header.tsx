@@ -9,6 +9,10 @@ interface HeaderProps {
   onThemeToggle: () => void;
   onAskClick: () => void;
   onNavClick: (e: React.MouseEvent, id: string) => void;
+  /** ADR-0004 PR 9: does the current tab already have chat messages? */
+  hasChatHistory?: boolean;
+  /** Fires once, right after a successful sign-in/register. */
+  onAuthenticated?: (hadChatHistory: boolean) => void;
 }
 
 export function Header({
@@ -17,6 +21,8 @@ export function Header({
   onThemeToggle,
   onAskClick,
   onNavClick,
+  hasChatHistory,
+  onAuthenticated,
 }: HeaderProps) {
   return (
     <header className="header">
@@ -44,7 +50,7 @@ export function Header({
             <span>{themeGlyph}</span>
             {themeLabel}
           </button>
-          <AccountMenu />
+          <AccountMenu hasChatHistory={hasChatHistory} onAuthenticated={onAuthenticated} />
           <button onClick={onAskClick} className="cta-button">
             Try the demo
           </button>
