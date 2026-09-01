@@ -289,6 +289,12 @@ export interface AuthUserResponse {
   user_id: string;
   email: string | null;
   anonymous: boolean;
+  /**
+   * ADR-0004 PR 13: OAuth providers ("github" | "google") linked to this
+   * account. Always present -- the backend computes it on register, login
+   * AND me, so no `providers?:` escape hatch is needed here.
+   */
+  providers: string[];
 }
 
 // ---------------------------------------------------------------------------

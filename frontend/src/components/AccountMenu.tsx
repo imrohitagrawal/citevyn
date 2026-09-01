@@ -12,6 +12,7 @@ import { useAuth } from "../hooks/useAuth";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 const HistoryDrawer = lazy(() => import("./HistoryDrawer"));
+const ConnectedAccountsDrawer = lazy(() => import("./ConnectedAccountsDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -37,6 +38,7 @@ export function AccountMenu({
   const [modalOpen, setModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [connectedOpen, setConnectedOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -99,6 +101,22 @@ export function AccountMenu({
             >
               History
             </button>
+            {/*
+              ADR-0004 PR 13: a NON-navigating menuitem that only opens a lazy
+              drawer -- the actual "Connect" buttons (real navigations) live
+              inside that drawer, outside this role="menu" context.
+            */}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                setConnectedOpen(true);
+              }}
+              style={menuItemStyle}
+            >
+              Connected accounts
+            </button>
             <button
               type="button"
               role="menuitem"
@@ -121,6 +139,15 @@ export function AccountMenu({
                 setHistoryOpen(false);
                 onResumeSession?.(sessionId);
               }}
+            />
+          </Suspense>
+        )}
+        {connectedOpen && (
+          <Suspense fallback={null}>
+            <ConnectedAccountsDrawer
+              triggerRef={triggerRef}
+              onClose={() => setConnectedOpen(false)}
+              providers={user.providers}
             />
           </Suspense>
         )}

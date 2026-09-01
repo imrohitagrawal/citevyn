@@ -34,6 +34,23 @@ interface LandingPageProps {
   onThemeChange: (theme: "light" | "dark") => void;
 }
 
+/** Query params THIS app attaches on the OAuth login / account-linking return trips. */
+const OWN_QUERY_PARAMS = ["auth", "connect", "reason", "provider"] as const;
+
+const PROVIDER_LABELS: Record<string, string | undefined> = { github: "GitHub", google: "Google" };
+
+function connectErrorMessage(reason: string | null, label: string | undefined): string {
+  if (reason === "already_linked") {
+    return label
+      ? `${label} is already connected to a different CiteVyn account.`
+      : "That account is already connected to a different CiteVyn account.";
+  }
+  if (reason === "session") {
+    return "Your sign-in is too old to connect an account. Sign out, sign in again, then retry.";
+  }
+  return label ? `Couldn't connect ${label}. Try again.` : "Couldn't connect the account. Try again.";
+}
+
 export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   const {
     state,
@@ -78,6 +95,14 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   // (fired on this same mount, via useAuth) already picks up the new
   // cookie with no special-casing here, since the cookie is set
   // server-side before the redirect lands.
+  //
+  // ADR-0004 PR 13 adds a second family of self-attached params for the
+  // account-linking round trip (?connect=ok|error&reason=...&provider=...).
+  // Each family is checked and toasted INDEPENDENTLY (not one if/else-if
+  // chain), and the cleanup removes only this app's OWN keys, reconstructing
+  // the URL around anything else -- the original replaceState(pathname)
+  // stripped the whole query string, which would have silently dropped an
+  // unrelated param (a UTM tag, a future deep link) sharing this code path.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const authResult = params.get("auth");
@@ -86,8 +111,31 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     } else if (authResult === "error") {
       addToast({ kind: "error", title: "Sign-in failed", message: "Sign-in failed. Try again." });
     }
-    if (authResult !== null) {
-      window.history.replaceState(null, "", window.location.pathname);
+
+    const connectResult = params.get("connect");
+    if (connectResult === "ok" || connectResult === "error") {
+      // `provider` is attacker-controllable via the URL bar; it is only ever
+      // used as a lookup key into this fixed map, never rendered raw.
+      const label = PROVIDER_LABELS[params.get("provider") ?? ""];
+      if (connectResult === "ok") {
+        addToast({
+          kind: "success",
+          title: "Connected",
+          message: label ? `${label} is now connected to your account.` : "Account connected.",
+        });
+      } else {
+        addToast({ kind: "error", title: "Couldn't connect", message: connectErrorMessage(params.get("reason"), label) });
+      }
+    }
+
+    if (authResult !== null || connectResult !== null) {
+      for (const key of OWN_QUERY_PARAMS) params.delete(key);
+      const rest = params.toString();
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`,
+      );
     }
     // Runs once on mount only -- addToast is stable (useCallback in
     // useToast) and re-running this on every re-render would re-fire the

@@ -792,3 +792,724 @@ async def test_resolve_or_create_identity_handles_a_genuine_concurrent_insert_ra
         assert len(users) == 1, "the loser's User row must not be left behind either"
 
     await engine.dispose()
+
+
+# ===========================================================================
+# Account linking: GET .../{provider}/connect/start + callback dispatch
+# (ADR-0004 PR 13). Each test names the exact change that turns it red.
+# ===========================================================================
+
+_COOKIE = "citevyn_session"
+
+
+def _register(client: TestClient, email: str) -> str:
+    response = client.post(
+        "/v1/auth/register",
+        json={"email": email, "password": "correct horse battery"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code == 201, response.text
+    assert _COOKIE in client.cookies
+    return response.json()["user_id"]
+
+
+def _connect_start(client: TestClient, provider: str) -> httpx.Response:
+    # A real top-level navigation: no Authorization header, ever.
+    return client.get(f"/v1/auth/oauth/{provider}/connect/start", follow_redirects=False)
+
+
+def _me(client: TestClient) -> httpx.Response:
+    return client.get("/v1/auth/me", headers={"Authorization": DEMO_BEARER})
+
+
+def _age_current_session(client: TestClient, *, seconds: int) -> None:
+    """Back-date the client's CURRENT AuthSession.created_at by ``seconds``."""
+    from app.models import AuthSession
+
+    auth_session_id = uuid.UUID(hex=client.cookies[_COOKIE].partition(".")[0])
+
+    async def _run() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            row = await session.get(AuthSession, auth_session_id)
+            assert row is not None
+            row.created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=seconds)
+            await session.commit()
+
+    asyncio.run(_run())
+
+
+def _set_nonce_intent(state: str, intent: str) -> None:
+    async def _run() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            row = await session.get(OAuthNonce, uuid.UUID(hex=state))
+            assert row is not None
+            row.return_intent = intent
+            await session.commit()
+
+    asyncio.run(_run())
+
+
+def _auth_failed_metadatas() -> list[dict]:
+    return [e.metadata_ for e in _query_all(AuditEvent) if e.action == AuditAction.auth_failed]
+
+
+def _link_identity_to(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    *,
+    account_id: str,
+    email: str,
+) -> httpx.Response:
+    """Run a full connect round trip for the signed-in ``client``."""
+    _patch_provider(monkeypatch, provider, account_id=account_id, email=email)
+    start = _connect_start(client, provider)
+    assert start.status_code == 302, start.text
+    assert start.headers["location"].startswith("https://"), start.headers["location"]
+    return _callback(client, provider, state=_state_from_start_response(start))
+
+
+# --- connect/start preconditions ------------------------------------------
+
+
+def test_connect_start_requires_a_real_signed_in_account(oauth_client: TestClient) -> None:
+    """RED if the `usr_` prefix check in oauth_connect_start is removed: an
+    anonymous visitor would be handed a connect nonce."""
+    oauth_client.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert _COOKIE in oauth_client.cookies  # a genuine (anonymous) session exists
+    response = _connect_start(oauth_client, "github")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?connect=error&reason=session&provider=github"
+    assert _query_all(OAuthNonce) == [], "no nonce may be minted for a rejected connect"
+
+
+def test_connect_start_with_no_session_at_all_fails_closed(oauth_client: TestClient) -> None:
+    """RED if oauth_connect_start switches to ensure_auth_session (which
+    mints): a rejected request must leave ZERO rows behind and set no cookie."""
+    from app.models import AuthSession
+
+    response = _connect_start(oauth_client, "github")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?connect=error&reason=session&provider=github"
+    assert "set-cookie" not in response.headers
+    assert _query_all(AuthSession) == []
+    assert _query_all(User) == []
+    assert _query_all(OAuthNonce) == []
+
+
+def test_connect_start_rejects_a_stale_session(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """The stolen-cookie gate. RED if `_session_is_fresh` is dropped from
+    oauth_connect_start, or if its comparison flips direction."""
+    _register(oauth_client, "stale@example.com")
+    _age_current_session(oauth_client, seconds=21 * 60)
+
+    response = _connect_start(oauth_client, "github")
+    assert response.headers["location"] == "/?connect=error&reason=session&provider=github"
+    assert _query_all(OAuthNonce) == []
+
+    # Still signed in -- the gate rejects linking, it does not log anyone out.
+    assert _me(oauth_client).status_code == 200
+
+    # Just inside the default window is accepted.
+    _age_current_session(oauth_client, seconds=19 * 60)
+    fresh = _connect_start(oauth_client, "github")
+    assert fresh.headers["location"].startswith("https://github.com/login/oauth/authorize")
+
+    # And the window is the setting, not a hardcoded number.
+    monkeypatch.setenv("CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS", "60")
+    get_settings.cache_clear()
+    narrowed = _connect_start(oauth_client, "github")
+    assert narrowed.headers["location"] == "/?connect=error&reason=session&provider=github"
+    monkeypatch.delenv("CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS", raising=False)
+    get_settings.cache_clear()
+
+
+def test_connect_start_404s_for_unknown_or_unconfigured_provider(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """RED if oauth_connect_start stops calling _require_provider.
+
+    Empty-string overrides rather than delenv: a developer's local
+    ``backend/.env`` with real Google keys would otherwise silently
+    re-configure the provider the moment the env var is removed
+    (pydantic-settings falls back to the env file) and turn this into a 302.
+    """
+    _register(oauth_client, "prov@example.com")
+    assert _connect_start(oauth_client, "facebook").status_code == 404
+    monkeypatch.setenv("CITEVYN_GOOGLE_OAUTH_CLIENT_ID", "")
+    monkeypatch.setenv("CITEVYN_GOOGLE_OAUTH_CLIENT_SECRET", "")
+    get_settings.cache_clear()
+    assert _connect_start(oauth_client, "google").status_code == 404
+
+
+def test_connect_start_mints_a_connect_intent_nonce_bound_to_the_callers_session(
+    oauth_client: TestClient,
+) -> None:
+    """RED if _start_oauth_flow is called with return_intent="login" from the
+    connect route, or bound to anything but the caller's existing session."""
+    _register(oauth_client, "intent@example.com")
+    my_session_id = uuid.UUID(hex=oauth_client.cookies[_COOKIE].partition(".")[0])
+    response = _connect_start(oauth_client, "google")
+    assert response.status_code == 302
+    rows = _query_all(OAuthNonce)
+    assert len(rows) == 1
+    assert rows[0].return_intent == "connect"
+    assert rows[0].auth_session_id == my_session_id
+    assert "set-cookie" not in response.headers, "connect/start must never mint or rotate"
+
+
+# --- callback: connect intent ----------------------------------------------
+
+
+def test_connect_callback_links_new_identity_without_rotating_the_session(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Happy path. RED if _handle_connect_intent calls claim_and_login (cookie
+    would rotate) or if _link_identity fails to insert the row."""
+    user_id = _register(oauth_client, "link@example.com")
+    cookie_before = oauth_client.cookies[_COOKIE]
+
+    response = _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="gh@example.com",
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?connect=ok&provider=github"
+    assert "set-cookie" not in response.headers
+    assert oauth_client.cookies[_COOKIE] == cookie_before, (
+        "the session cookie must be byte-identical"
+    )
+
+    identities = _query_all(UserIdentity)
+    assert len(identities) == 1
+    assert identities[0].provider == "github"
+    assert identities[0].provider_account_id == str(_GITHUB_ACCOUNT_ID)
+    assert identities[0].user_id == user_id
+
+    me = _me(oauth_client)
+    assert me.status_code == 200
+    assert me.json()["user_id"] == user_id
+    assert me.json()["providers"] == ["github"]
+    # users.email is untouched by the provider's (different) email.
+    assert me.json()["email"] == "link@example.com"
+
+    success = [
+        e for e in _query_all(AuditEvent) if e.metadata_.get("event") == "oauth_connect_github"
+    ]
+    assert len(success) == 1
+    assert success[0].action == AuditAction.login
+    assert success[0].user_id == user_id
+    assert success[0].metadata_ == {
+        "event": "oauth_connect_github",
+        "provider": "github",
+        "result": "linked",
+    }
+
+
+def test_connect_callback_is_idempotent_for_the_same_account(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """RED if _link_identity's "found + same target" branch returns
+    LINKED_ELSEWHERE, or tries a second insert (unique-constraint 500)."""
+    user_id = _register(oauth_client, "twice@example.com")
+    first = _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="gh@example.com",
+    )
+    assert first.headers["location"] == "/?connect=ok&provider=github"
+    second = _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="gh@example.com",
+    )
+    assert second.headers["location"] == "/?connect=ok&provider=github"
+
+    identities = _query_all(UserIdentity)
+    assert len(identities) == 1
+    assert identities[0].user_id == user_id
+    results = [
+        e.metadata_["result"]
+        for e in _query_all(AuditEvent)
+        if e.metadata_.get("event") == "oauth_connect_github"
+    ]
+    assert results == ["linked", "already_linked_same"]
+
+
+def test_connect_callback_rejects_identity_already_linked_to_a_different_account(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """THE core security case. RED if _link_identity's "found + different
+    target" branch reassigns the row (UPDATE user_id) or returns success."""
+    # Account A: created by a plain OAuth LOGIN in its own browser.
+    browser_a = TestClient(create_app())
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="a@example.com"
+    )
+    start_a = _start(browser_a, "github")
+    assert (
+        _callback(browser_a, "github", state=_state_from_start_response(start_a)).headers[
+            "location"
+        ]
+        == "/?auth=ok"
+    )
+    account_a = _query_all(UserIdentity)[0].user_id
+
+    # Account B: a password account in a different browser, tries to connect
+    # the SAME GitHub identity.
+    account_b = _register(oauth_client, "b@example.com")
+    cookie_b = oauth_client.cookies[_COOKIE]
+    response = _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="a@example.com",
+    )
+    assert response.headers["location"] == "/?connect=error&reason=already_linked&provider=github"
+
+    identities = _query_all(UserIdentity)
+    assert len(identities) == 1
+    assert identities[0].user_id == account_a, "the identity must NOT move to account B"
+    assert _me(oauth_client).json()["providers"] == []
+
+    # B stays signed in, cookie untouched -- a rejected link is not a logout.
+    assert oauth_client.cookies[_COOKIE] == cookie_b
+    assert _me(oauth_client).json()["user_id"] == account_b
+
+    # Audited against the ACTING user (B), without naming A anywhere.
+    conflicts = [
+        e for e in _query_all(AuditEvent) if e.metadata_.get("event") == "oauth_connect_conflict"
+    ]
+    assert len(conflicts) == 1
+    assert conflicts[0].action == AuditAction.auth_failed
+    assert conflicts[0].user_id == account_b
+    assert conflicts[0].metadata_ == {"event": "oauth_connect_conflict", "provider": "github"}
+    assert account_a not in repr(conflicts[0].metadata_)
+
+
+def test_connect_callback_rejects_if_signed_out_between_start_and_callback(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """The session is revoked server-side (e.g. from another device) while
+    the provider consent screen is open; the browser still holds the now-dead
+    cookie. RED if the callback's session binding or _resolve_connect_target's
+    re-verification is removed."""
+    from app.models import AuthSession
+
+    _register(oauth_client, "revoked@example.com")
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="gh@example.com"
+    )
+    start = _connect_start(oauth_client, "github")
+    state = _state_from_start_response(start)
+
+    async def _revoke() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            for row in (await session.execute(select(AuthSession))).scalars().all():
+                await session.delete(row)
+            await session.commit()
+
+    asyncio.run(_revoke())
+
+    response = _callback(oauth_client, "github", state=state)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?auth=error"
+    assert _query_all(UserIdentity) == []
+    assert "set-cookie" not in response.headers
+
+
+async def test_resolve_connect_target_fails_closed_for_dead_or_anonymous_sessions(tmp_path) -> None:
+    """Unit-level proof of the re-verification the route test above can only
+    reach indirectly. RED if the `usr_` prefix check or the expiry check in
+    resolve_principal_by_auth_session_id / _resolve_connect_target is removed."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    import app.api.routes.oauth as oauth_module
+    from app.models import AuthSession
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'target.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+
+    def _nonce(session_id: uuid.UUID | None) -> OAuthNonce:
+        return OAuthNonce(
+            nonce_id=uuid.uuid4(),
+            provider="github",
+            code_verifier="v",
+            auth_session_id=session_id,
+            return_intent="connect",
+            created_at=now,
+            expires_at=now,
+        )
+
+    async with factory() as db:
+        registered = User(user_id="usr_live", role=UserRole.demo_user, created_at=now)
+        anonymous = User(user_id="anon_x", role=UserRole.demo_user, created_at=now)
+        db.add_all([registered, anonymous])
+        await db.flush()
+        live = AuthSession(
+            auth_session_id=uuid.uuid4(),
+            secret_hash="h",
+            user_id="usr_live",
+            created_at=now,
+            expires_at=now + timedelta(days=1),
+        )
+        expired = AuthSession(
+            auth_session_id=uuid.uuid4(),
+            secret_hash="h",
+            user_id="usr_live",
+            created_at=now,
+            expires_at=now - timedelta(seconds=1),
+        )
+        anon = AuthSession(
+            auth_session_id=uuid.uuid4(),
+            secret_hash="h",
+            user_id="anon_x",
+            created_at=now,
+            expires_at=now + timedelta(days=1),
+        )
+        db.add_all([live, expired, anon])
+        await db.commit()
+
+        assert (
+            await oauth_module._resolve_connect_target(db, _nonce(live.auth_session_id))
+            == "usr_live"
+        )
+        assert (
+            await oauth_module._resolve_connect_target(db, _nonce(expired.auth_session_id)) is None
+        )
+        assert await oauth_module._resolve_connect_target(db, _nonce(anon.auth_session_id)) is None
+        assert await oauth_module._resolve_connect_target(db, _nonce(uuid.uuid4())) is None
+        assert await oauth_module._resolve_connect_target(db, _nonce(None)) is None
+    await engine.dispose()
+
+
+def test_connect_callback_never_creates_a_new_user(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """RED if _handle_connect_intent ever falls into _resolve_or_create_identity
+    (which creates a User) -- checked on the happy path AND both rejections."""
+    browser_a = TestClient(create_app())
+    _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="a@example.com")
+    start_a = _start(browser_a, "google")
+    _callback(browser_a, "google", state=_state_from_start_response(start_a))
+
+    _register(oauth_client, "counter@example.com")
+    users_before = len(_query_all(User))
+
+    # 1. happy path (github, unlinked)
+    ok = _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="x@example.com",
+    )
+    assert ok.headers["location"] == "/?connect=ok&provider=github"
+    # 2. conflict (google id already owned by browser_a's account)
+    conflict = _link_identity_to(
+        oauth_client, monkeypatch, "google", account_id=_GOOGLE_SUB, email="a@example.com"
+    )
+    assert conflict.headers["location"] == "/?connect=error&reason=already_linked&provider=google"
+    # 3. no-session at callback (nonce re-labelled connect from an anonymous browser)
+    anon = TestClient(create_app())
+    _patch_provider(monkeypatch, "github", account_id="999", email="anon@example.com")
+    start_anon = _start(anon, "github")
+    state_anon = _state_from_start_response(start_anon)
+    _set_nonce_intent(state_anon, "connect")
+    no_session = _callback(anon, "github", state=state_anon)
+    assert no_session.headers["location"] == "/?connect=error&reason=session&provider=github"
+
+    assert len(_query_all(User)) == users_before + 1, (
+        "exactly one extra row is allowed: the anonymous principal `start` "
+        "minted for the third browser -- never a usr_ account from a connect"
+    )
+    assert [u for u in _query_all(User) if u.user_id.startswith("usr_")].__len__() == 2
+
+
+def test_connect_start_and_callback_use_navigation_rate_limiting_not_the_demo_bearer(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Regression for PR 12's CRITICAL_BLOCKER class, applied to the new route:
+    a real navigation carries no Authorization header. RED if
+    oauth_connect_start's dependency is switched to rate_limited_demo."""
+    _register(oauth_client, "nav@example.com")
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="gh@example.com"
+    )
+    start = oauth_client.get("/v1/auth/oauth/github/connect/start", follow_redirects=False)
+    assert start.status_code == 302
+    assert start.headers["location"].startswith("https://github.com/login/oauth/authorize")
+    callback = oauth_client.get(
+        "/v1/auth/oauth/github/callback",
+        params={"code": "auth-code-1", "state": _state_from_start_response(start)},
+        follow_redirects=False,
+    )
+    assert callback.headers["location"] == "/?connect=ok&provider=github"
+
+    # And the per-visitor limiter DOES apply: the route is not unlimited.
+    import app.core.rate_limit as rate_limit
+
+    monkeypatch.setenv("CITEVYN_RATE_LIMIT_DEMO_USER_REGISTERED_PER_HOUR", "1")
+    get_settings.cache_clear()
+    rate_limit.reset_limiter()
+    assert _connect_start(oauth_client, "github").status_code == 302
+    assert _connect_start(oauth_client, "github").status_code == 429
+    monkeypatch.delenv("CITEVYN_RATE_LIMIT_DEMO_USER_REGISTERED_PER_HOUR", raising=False)
+    get_settings.cache_clear()
+    rate_limit.reset_limiter()
+
+
+async def test_connect_concurrent_race_toward_different_target_accounts(tmp_path) -> None:
+    """The round-1/round-2 security fix's own regression test. Two connects
+    for the same external identity race toward DIFFERENT accounts; the loser
+    hits the unique constraint. RED if _link_identity's IntegrityError branch
+    returns success without comparing winner.user_id to its own target
+    (the way the LOGIN path's analogous branch legitimately does)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    import app.api.routes.oauth as oauth_module
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'link_race.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    now = datetime.now(UTC)
+
+    async with factory() as seed:
+        seed.add_all(
+            [
+                User(user_id="usr_target", role=UserRole.demo_user, created_at=now),
+                User(user_id="usr_other", role=UserRole.demo_user, created_at=now),
+            ]
+        )
+        await seed.commit()
+
+    identity = oauth_module._Identity(
+        provider_account_id="race-777", email=None, email_verified=False
+    )
+
+    async def _run_with_competitor(competitor_user_id: str) -> oauth_module.LinkResult:
+        fired: list[str] = []
+
+        async def _competing_insert() -> None:
+            async with factory() as competitor:
+                competitor.add(
+                    UserIdentity(
+                        identity_id=uuid.uuid4(),
+                        provider="github",
+                        provider_account_id="race-777",
+                        user_id=competitor_user_id,
+                        created_at=now,
+                    )
+                )
+                await competitor.commit()
+            fired.append(competitor_user_id)
+
+        async with factory() as session:
+            original_execute = session.execute
+
+            async def _execute_with_injected_race(stmt, *args, **kwargs):
+                result = await original_execute(stmt, *args, **kwargs)
+                if not fired and "user_identities" in str(stmt).lower():
+                    await _competing_insert()  # between "not found" and our insert
+                return result
+
+            session.execute = _execute_with_injected_race  # type: ignore[method-assign]
+            result = await oauth_module._link_identity(session, "github", identity, "usr_target")
+        assert fired, "the injected race never fired -- this test would be vacuous"
+        return result
+
+    # Loser vs a DIFFERENT account: must be rejected, never a false LINKED.
+    assert await _run_with_competitor("usr_other") is oauth_module.LinkResult.LINKED_ELSEWHERE
+    async with factory() as verify:
+        rows = (await verify.execute(select(UserIdentity))).scalars().all()
+        assert len(rows) == 1 and rows[0].user_id == "usr_other"
+        for row in rows:
+            await verify.delete(row)
+        await verify.commit()
+
+    # Loser vs the SAME account (a double-click): idempotent success.
+    assert await _run_with_competitor("usr_target") is oauth_module.LinkResult.ALREADY_LINKED_SAME
+    async with factory() as verify:
+        rows = (await verify.execute(select(UserIdentity))).scalars().all()
+        assert len(rows) == 1 and rows[0].user_id == "usr_target"
+    await engine.dispose()
+
+
+def test_login_intent_is_completely_unaffected(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """The login tail moved into _handle_login_intent must behave exactly as
+    before: intent "login" nonce, cookie ROTATES, a new usr_ account + identity
+    is created, /?auth=ok. RED if the dispatch routes a login nonce to the
+    connect handler."""
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="login@example.com"
+    )
+    start = _start(oauth_client, "github")
+    assert _query_all(OAuthNonce)[0].return_intent == "login"
+    cookie_before = oauth_client.cookies[_COOKIE]
+    response = _callback(oauth_client, "github", state=_state_from_start_response(start))
+    assert response.headers["location"] == "/?auth=ok"
+    assert oauth_client.cookies[_COOKIE] != cookie_before, "login must rotate the cookie"
+    assert len([u for u in _query_all(User) if u.user_id.startswith("usr_")]) == 1
+    assert len(_query_all(UserIdentity)) == 1
+    me = _me(oauth_client)
+    assert me.json()["email"] == "login@example.com"
+    assert me.json()["providers"] == ["github"]
+
+
+def test_connect_nonce_cannot_complete_as_login_and_vice_versa(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Proves return_intent is ENFORCED at callback, not merely stored. RED if
+    the dispatch defaults to the login path for anything but "connect"
+    (an unknown intent must fail closed), or ignores the field entirely."""
+    # (a) A login-minted nonce from an ANONYMOUS browser, re-labelled "connect":
+    #     the connect path must refuse (no usr_ session) and must NOT create
+    #     the account the login path would have.
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="x@example.com"
+    )
+    start = _start(oauth_client, "github")
+    state = _state_from_start_response(start)
+    _set_nonce_intent(state, "connect")
+    response = _callback(oauth_client, "github", state=state)
+    assert response.headers["location"] == "/?connect=error&reason=session&provider=github"
+    assert _query_all(UserIdentity) == []
+    assert [u for u in _query_all(User) if u.user_id.startswith("usr_")] == []
+    assert {"event": "oauth_connect_no_session", "provider": "github"} in _auth_failed_metadatas()
+
+    # (b) An unrecognised intent fails closed -- it does not fall through to login.
+    start2 = _start(oauth_client, "github")
+    state2 = _state_from_start_response(start2)
+    _set_nonce_intent(state2, "bogus")
+    response2 = _callback(oauth_client, "github", state=state2)
+    assert response2.headers["location"] == "/?auth=error"
+    assert _query_all(UserIdentity) == []
+    assert [u for u in _query_all(User) if u.user_id.startswith("usr_")] == []
+
+
+def test_connect_provider_failure_after_claim_redirects_to_the_connect_error(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """A provider error mid-connect must not be reported as a failed SIGN-IN.
+    RED if the intent-aware failure_location switch after the claim is removed."""
+    import app.api.routes.oauth as oauth_module
+
+    _register(oauth_client, "perr@example.com")
+    cookie_before = oauth_client.cookies[_COOKIE]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    start = _connect_start(oauth_client, "github")
+    response = _callback(oauth_client, "github", state=_state_from_start_response(start))
+    assert response.headers["location"] == "/?connect=error&reason=provider&provider=github"
+    assert {"event": "oauth_provider_error", "provider": "github"} in _auth_failed_metadatas()
+    assert oauth_client.cookies[_COOKIE] == cookie_before
+    assert _me(oauth_client).status_code == 200
+
+
+def test_auth_me_lists_linked_providers(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Zero / one / two providers, and the SAME field on register + login.
+    RED if `providers` is added only to `me` (register/login would omit it)
+    or if the query filters on the wrong column."""
+    register = oauth_client.post(
+        "/v1/auth/register",
+        json={"email": "list@example.com", "password": "correct horse battery"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert register.json()["providers"] == []
+    assert _me(oauth_client).json()["providers"] == []
+
+    _link_identity_to(
+        oauth_client, monkeypatch, "google", account_id=_GOOGLE_SUB, email="g@example.com"
+    )
+    assert _me(oauth_client).json()["providers"] == ["google"]
+
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="gh@example.com",
+    )
+    assert _me(oauth_client).json()["providers"] == ["github", "google"]  # sorted
+
+    # A password login on a fresh browser reports the same list.
+    login = TestClient(create_app()).post(
+        "/v1/auth/login",
+        json={"email": "list@example.com", "password": "correct horse battery"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert login.status_code == 200
+    assert login.json()["providers"] == ["github", "google"]
+
+    # Another account's links never bleed into this one's list.
+    other = TestClient(create_app())
+    _register(other, "other@example.com")
+    assert _me(other).json()["providers"] == []
+
+
+def test_connect_failure_audit_event_records_the_metadata_event_string(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Asserts the exact metadata dicts, not just that SOME auth_failed row
+    exists. RED if any connect failure's event string is misspelled or the
+    provider key is dropped."""
+    # conflict
+    browser_a = TestClient(create_app())
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="a@example.com"
+    )
+    start_a = _start(browser_a, "github")
+    _callback(browser_a, "github", state=_state_from_start_response(start_a))
+    account_b = _register(oauth_client, "b@example.com")
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="a@example.com",
+    )
+    failed = [e for e in _query_all(AuditEvent) if e.action == AuditAction.auth_failed]
+    assert [(e.user_id, e.metadata_) for e in failed] == [
+        (account_b, {"event": "oauth_connect_conflict", "provider": "github"})
+    ]
+
+    # no session at callback
+    anon = TestClient(create_app())
+    _patch_provider(monkeypatch, "google", account_id="424242", email="anon@example.com")
+    start_anon = _start(anon, "google")
+    state_anon = _state_from_start_response(start_anon)
+    _set_nonce_intent(state_anon, "connect")
+    _callback(anon, "google", state=state_anon)
+    failed = [e for e in _query_all(AuditEvent) if e.action == AuditAction.auth_failed]
+    assert failed[-1].user_id is None
+    assert failed[-1].metadata_ == {"event": "oauth_connect_no_session", "provider": "google"}

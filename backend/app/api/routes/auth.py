@@ -35,7 +35,7 @@ from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.passwords import hash_password, verify_password_or_dummy
 from app.core.rate_limit import enforce_auth_login_rate_limit, rate_limited_demo
-from app.models import AuditAction, User, UserRole
+from app.models import AuditAction, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -91,12 +91,36 @@ def _normalize_email(request_id: str, raw: str) -> str:
     return email
 
 
-def _auth_user_payload(request_id: str, user: User) -> dict[str, Any]:
+async def _linked_providers(db: AsyncSession, user_id: str) -> list[str]:
+    """Provider names (``"github"``/``"google"``) linked to ``user_id``, sorted.
+
+    ADR-0004 PR 13: one cheap FK-indexed query, only ever run once a real
+    principal has been resolved. Sorted so the wire shape is deterministic.
+    """
+    rows = (
+        await db.execute(
+            select(UserIdentity.provider)
+            .where(UserIdentity.user_id == user_id)
+            .order_by(UserIdentity.provider)
+        )
+    ).scalars()
+    return list(rows)
+
+
+async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> dict[str, Any]:
+    """The one body shape ``register``, ``login`` and ``me`` all return.
+
+    Computes ``providers`` here (not only in ``me``) so the frontend's
+    shared ``AuthUserResponse`` type can treat it as always present rather
+    than optional -- a freshly registered account genuinely has none, and
+    a password login may already have some.
+    """
     return {
         "request_id": request_id,
         "user_id": user.user_id,
         "email": user.email,
         "anonymous": user.email is None,
+        "providers": await _linked_providers(db, user.user_id),
     }
 
 
@@ -175,7 +199,7 @@ async def register(
         metadata={"event": "register"},
     )
     await db.commit()
-    return _auth_user_payload(request_id, new_user)
+    return await _auth_user_payload(db, request_id, new_user)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +254,7 @@ async def login(
         metadata={"event": "login"},
     )
     await db.commit()
-    return _auth_user_payload(request_id, user)
+    return await _auth_user_payload(db, request_id, user)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +320,7 @@ async def me(
         )
     user = await db.get(User, principal_id)
     assert user is not None, "a live AuthSession must reference an existing user (FK CASCADE)"
-    return _auth_user_payload(request_id, user)
+    return await _auth_user_payload(db, request_id, user)
 
 
 __all__ = ["router"]
