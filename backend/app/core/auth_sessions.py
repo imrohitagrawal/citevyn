@@ -221,7 +221,23 @@ async def claim_and_login(
     old_row = await _lookup_auth_session(db, cookie_value) if cookie_value else None
 
     if old_row is not None:
-        if old_row.user_id != user_id:
+        # Claim ONLY from an anonymous prior principal. Without this check, a
+        # browser that already holds a valid cookie for a real registered
+        # account (someone forgot to log out, a shared/kiosk machine) would
+        # have ITS sessions silently reassigned the moment a second account
+        # logs in on the same browser — a real cross-account data leak, not
+        # a hypothetical one (caught by adversarial review of this PR).
+        # Anonymous principals are the only ones this function is meant to
+        # fold in, and `anon_` is the one identifying mark they carry.
+        # Claim ONLY from an anonymous prior principal. Without this check, a
+        # browser that already holds a valid cookie for a real registered
+        # account (someone forgot to log out, a shared/kiosk machine) would
+        # have ITS sessions silently reassigned the moment a second account
+        # logs in on the same browser — a real cross-account data leak, not
+        # a hypothetical one (caught by adversarial review of this PR).
+        # Anonymous principals are the only ones this function is meant to
+        # fold in, and `anon_` is the one identifying mark they carry.
+        if old_row.user_id != user_id and old_row.user_id.startswith("anon_"):
             await db.execute(
                 update(Session).where(Session.user_id == old_row.user_id).values(user_id=user_id)
             )

@@ -27,6 +27,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_sessions import claim_and_login, revoke_current_session, try_resolve_principal
@@ -136,7 +137,20 @@ async def register(
         password_hash=password_hash,
     )
     db.add(new_user)
-    await db.flush()  # claim_and_login's UPDATE needs this FK target to exist
+    try:
+        await db.flush()  # claim_and_login's UPDATE needs this FK target to exist
+    except IntegrityError as exc:
+        # Two concurrent registrations for the same email both pass the
+        # existence check above before either commits — the loser hits
+        # ix_users_email here instead. Surface the SAME 422 the sequential
+        # case returns rather than letting it fall through to a generic 500
+        # (found by adversarial review of this PR).
+        await db.rollback()
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.validation_error,
+            message="This email is already registered.",
+        ) from exc
 
     await claim_and_login(request, response, db, settings, user_id=new_user.user_id)
     await record_audit_event(

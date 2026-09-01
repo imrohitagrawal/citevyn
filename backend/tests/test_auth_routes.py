@@ -231,6 +231,39 @@ def test_login_claims_the_anonymous_sessions_history(in_memory_app: None) -> Non
     assert fetched.status_code == 200, "the pre-login session must still be reachable"
 
 
+def test_logging_into_a_second_account_does_not_claim_the_first_accounts_sessions(
+    in_memory_app: None,
+) -> None:
+    """CRITICAL regression (found by adversarial review of this PR): claim-on-login
+    must claim ONLY an anonymous prior principal's history. Without that check, a
+    browser that already holds a valid cookie for a real registered account (forgot
+    to log out; a shared/kiosk machine) would have ITS sessions silently reassigned
+    the instant a second account logs in on the same browser — cross-account data
+    disclosure with no credential theft or URL-guessing required at all.
+    """
+    client = _client()
+    _register(client, "alice@example.com", "correct horse battery")
+    session_a = client.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    ).json()["session_id"]
+
+    # Still holding Alice's cookie — no logout — log into a second, unrelated account.
+    _register(_client(), "bob@example.com", "correct horse battery")  # bob exists
+    login_as_bob = _login(client, "bob@example.com", "correct horse battery")
+    assert login_as_bob.status_code == 200
+    assert login_as_bob.json()["email"] == "bob@example.com"
+
+    # Bob must NOT be able to read Alice's pre-existing session.
+    as_bob = client.get(f"/v1/sessions/{session_a}", headers={"Authorization": DEMO_BEARER})
+    assert as_bob.status_code == 404
+
+    # And Alice must still own it herself.
+    alice_client = _client()
+    _login(alice_client, "alice@example.com", "correct horse battery")
+    as_alice = alice_client.get(f"/v1/sessions/{session_a}", headers={"Authorization": DEMO_BEARER})
+    assert as_alice.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # the real two-account IDOR test
 # ---------------------------------------------------------------------------
