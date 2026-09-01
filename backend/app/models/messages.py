@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import GUID, Base, StrEnumType
@@ -37,6 +37,14 @@ class Message(Base):
     domain: Mapped[str | None] = mapped_column(String(64), nullable=True)
     intent: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The exact wire-shaped citations (marker included) shown for THIS
+    # message, captured at write time (migration 0009, ADR-0004 PR 10).
+    # NULL for user messages and any assistant reply with none (a
+    # no-answer/unsupported refusal). Deliberately NOT reconstructed from
+    # `retrieved_evidence` on read — a cache-hit answer persists zero
+    # evidence rows, so that reconstruction would silently show no sources
+    # for any historical message that happened to be served from cache.
+    citations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped[Session] = relationship(
         back_populates="messages",

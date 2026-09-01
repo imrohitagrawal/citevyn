@@ -11,6 +11,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth";
 
 const AuthModal = lazy(() => import("./AuthModal"));
+const HistoryDrawer = lazy(() => import("./HistoryDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -23,12 +24,19 @@ interface AccountMenuProps {
   hasChatHistory?: boolean;
   /** Fires once, right after a successful sign-in/register. */
   onAuthenticated?: (hadChatHistory: boolean) => void;
+  /** ADR-0004 PR 10: the caller picked a past session from the drawer. */
+  onResumeSession?: (sessionId: string) => void;
 }
 
-export function AccountMenu({ hasChatHistory = false, onAuthenticated }: AccountMenuProps) {
+export function AccountMenu({
+  hasChatHistory = false,
+  onAuthenticated,
+  onResumeSession,
+}: AccountMenuProps) {
   const { status, user, signOut } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +63,7 @@ export function AccountMenu({ hasChatHistory = false, onAuthenticated }: Account
     return (
       <div ref={menuRef} style={{ position: "relative" }}>
         <button
+          ref={triggerRef}
           type="button"
           onClick={() => setMenuOpen((v) => !v)}
           aria-haspopup="menu"
@@ -84,24 +93,36 @@ export function AccountMenu({ hasChatHistory = false, onAuthenticated }: Account
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
+                setHistoryOpen(true);
+              }}
+              style={menuItemStyle}
+            >
+              History
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
                 void signOut();
               }}
-              style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                background: "transparent",
-                border: "none",
-                cursor: "pointer",
-                padding: "8px 10px",
-                borderRadius: "6px",
-                color: "var(--ink, #111)",
-                font: "inherit",
-              }}
+              style={menuItemStyle}
             >
               Sign out
             </button>
           </div>
+        )}
+        {historyOpen && (
+          <Suspense fallback={null}>
+            <HistoryDrawer
+              triggerRef={triggerRef}
+              onClose={() => setHistoryOpen(false)}
+              onResume={(sessionId) => {
+                setHistoryOpen(false);
+                onResumeSession?.(sessionId);
+              }}
+            />
+          </Suspense>
         )}
       </div>
     );
@@ -129,3 +150,16 @@ export function AccountMenu({ hasChatHistory = false, onAuthenticated }: Account
     </>
   );
 }
+
+const menuItemStyle: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  background: "transparent",
+  border: "none",
+  cursor: "pointer",
+  padding: "8px 10px",
+  borderRadius: "6px",
+  color: "var(--ink, #111)",
+  font: "inherit",
+};

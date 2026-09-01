@@ -63,6 +63,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     toasts,
     addToast,
     removeToast,
+    resumeSession,
   } = useLandingState();
 
   const dark = theme === "dark";
@@ -97,6 +98,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onNavClick={goSection}
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
+            onResumeSession={resumeSession}
           />
 
           {/* Landing View */}
@@ -179,6 +181,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onNavClick={goSection}
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
+            onResumeSession={resumeSession}
           />
           <ChatView
             messages={chatView}

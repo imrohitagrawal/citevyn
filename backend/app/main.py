@@ -32,6 +32,7 @@ from app.answer.orchestrator import OrchestratorError
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
+from app.api.routes.me import router as me_router
 from app.api.routes.messages import router as messages_router
 from app.api.routes.search import router as search_router
 from app.api.routes.sessions import router as sessions_router
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(me_router)
     app.include_router(sessions_router)
     app.include_router(messages_router)
     app.include_router(search_router)

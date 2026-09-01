@@ -25,7 +25,7 @@ import enum
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from sqlalchemy import func, select
@@ -1455,6 +1455,18 @@ class Orchestrator:
             )
         await self._session.flush()
 
+        # ADR-0004 PR 10 exposed a latent ordering bug: GET /v1/sessions/{id}
+        # (the first thing to ever read back a full message history in
+        # order) sorts by `created_at ASC, message_id ASC` -- and reusing
+        # `now` for both rows made the secondary sort key (a random UUID)
+        # decide the order, which can and does put the assistant's reply
+        # BEFORE the user's question. Neither the live streaming chat (which
+        # never re-fetches this endpoint) nor any earlier PR ever exercised
+        # this read path end-to-end, so it stayed invisible until history
+        # resume did. A strictly-later timestamp, not just "a fresh one" (a
+        # fast test/stub run can complete within the same clock tick),
+        # is what actually guarantees the ORDER BY sees them in turn order.
+        assistant_now = max(_utcnow(), now + timedelta(microseconds=1))
         assistant_msg = Message(
             session_id=session_id,
             role=MessageRole.assistant,
@@ -1462,7 +1474,13 @@ class Orchestrator:
             normalized_query=normalized,
             domain=domain.value,
             intent=intent.value,
-            created_at=now,
+            created_at=assistant_now,
+            # Persisted verbatim, not reconstructed from retrieved_evidence on
+            # read (ADR-0004 PR 10, migration 0009) -- this is the same list
+            # every response path already resolved (including a cache hit's
+            # `cached.citations`), so storing it here is what makes history
+            # resume show the same source cards the live answer did.
+            citations=[dict(c) for c in citations] if citations else None,
         )
         self._session.add(assistant_msg)
         await self._session.flush()

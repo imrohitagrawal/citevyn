@@ -227,6 +227,49 @@ export interface HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Session history (ADR-0004 PR 10)
+// ---------------------------------------------------------------------------
+
+/** One row of ``GET /v1/me/sessions``. */
+export interface SessionSummary {
+  session_id: SessionId;
+  created_at: string;
+  expires_at: string;
+  current_product_area: string | null;
+  message_count: number;
+}
+
+export interface ListMySessionsResponse {
+  request_id: RequestId;
+  sessions: SessionSummary[];
+}
+
+/** One row of ``GET /v1/sessions/{id}``'s ``messages`` array. */
+export interface StoredMessage {
+  message_id: MessageId;
+  role: "user" | "assistant";
+  content: string;
+  normalized_query: string | null;
+  domain: string | null;
+  intent: string | null;
+  created_at: string | null;
+  /** [] for a user message or an assistant reply with none (migration 0009). */
+  citations: Citation[];
+}
+
+export interface GetSessionResponse {
+  request_id: RequestId;
+  session_id: SessionId;
+  user_id: string;
+  channel: string;
+  summary: string | null;
+  current_product_area: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  messages: StoredMessage[];
+}
+
+// ---------------------------------------------------------------------------
 // Auth (ADR-0004 PR 6 backend, PR 8 frontend)
 // ---------------------------------------------------------------------------
 

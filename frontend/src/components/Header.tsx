@@ -13,6 +13,8 @@ interface HeaderProps {
   hasChatHistory?: boolean;
   /** Fires once, right after a successful sign-in/register. */
   onAuthenticated?: (hadChatHistory: boolean) => void;
+  /** ADR-0004 PR 10: the caller picked a past session from the history drawer. */
+  onResumeSession?: (sessionId: string) => void;
 }
 
 export function Header({
@@ -23,6 +25,7 @@ export function Header({
   onNavClick,
   hasChatHistory,
   onAuthenticated,
+  onResumeSession,
 }: HeaderProps) {
   return (
     <header className="header">
@@ -50,7 +53,11 @@ export function Header({
             <span>{themeGlyph}</span>
             {themeLabel}
           </button>
-          <AccountMenu hasChatHistory={hasChatHistory} onAuthenticated={onAuthenticated} />
+          <AccountMenu
+            hasChatHistory={hasChatHistory}
+            onAuthenticated={onAuthenticated}
+            onResumeSession={onResumeSession}
+          />
           <button onClick={onAskClick} className="cta-button">
             Try the demo
           </button>

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, exactSearch, askQuestion, getHealth } from "./api";
+import { createSession, exactSearch, askQuestion, getHealth, getSession, listMySessions } from "./api";
 import { ApiClientError } from "./types";
 
 /**
@@ -200,5 +200,37 @@ describe("errorCode() over the REAL wire body (#167)", () => {
     } catch (err) {
       expect((err as ApiClientError).errorCode()).toBeNull();
     }
+  });
+});
+
+describe("session history (ADR-0004 PR 10)", () => {
+  it("listMySessions hits GET /v1/me/sessions", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ request_id: "r", sessions: [] }),
+    );
+    await listMySessions();
+    const { url, init } = lastCall();
+    expect(url).toContain("/v1/me/sessions");
+    expect(init.method ?? "GET").toBe("GET");
+  });
+
+  it("getSession hits GET /v1/sessions/{id}", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({
+        request_id: "r",
+        session_id: "sess_1",
+        user_id: "usr_a",
+        channel: "chat",
+        summary: null,
+        current_product_area: null,
+        created_at: null,
+        expires_at: null,
+        messages: [],
+      }),
+    );
+    const resp = await getSession("sess_1");
+    const { url } = lastCall();
+    expect(url).toContain("/v1/sessions/sess_1");
+    expect(resp.session_id).toBe("sess_1");
   });
 });

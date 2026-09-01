@@ -95,6 +95,11 @@ def _message_payload(message: Message) -> dict[str, Any]:
         "domain": message.domain,
         "intent": message.intent,
         "created_at": message.created_at.isoformat() if message.created_at else None,
+        # ADR-0004 PR 10: the exact citations shown for this message,
+        # persisted at write time (migration 0009). [] for a user message
+        # or any assistant reply with none, never reconstructed from
+        # retrieved_evidence -- see the migration docstring for why.
+        "citations": message.citations or [],
     }
 
 

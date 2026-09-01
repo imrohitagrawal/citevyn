@@ -1,23 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useLandingState } from "./useLandingState";
-import { askQuestion, createSession, isLiveMode } from "../lib/api";
+import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { ApiClientError } from "../lib/types";
-import type { AskResponse, CreateSessionResponse } from "../lib/types";
+import type { AskResponse, CreateSessionResponse, GetSessionResponse } from "../lib/types";
 
-// The hook talks to the backend through these three functions; mock the
-// whole module so no real network happens and ``isLiveMode`` is
-// controllable per test. ``citationsToSources`` (a pure adapter) and
-// ``useToast`` stay real so the wiring is exercised end-to-end.
+// The hook talks to the backend through these functions; mock the whole
+// module so no real network happens and ``isLiveMode`` is controllable per
+// test. ``citationsToSources`` (a pure adapter) and ``useToast`` stay real
+// so the wiring is exercised end-to-end.
 vi.mock("../lib/api", () => ({
   isLiveMode: vi.fn(() => true),
   createSession: vi.fn(),
   askQuestion: vi.fn(),
+  getSession: vi.fn(),
 }));
 
 const mockIsLive = vi.mocked(isLiveMode);
 const mockCreateSession = vi.mocked(createSession);
 const mockAskQuestion = vi.mocked(askQuestion);
+const mockGetSession = vi.mocked(getSession);
 
 const session: CreateSessionResponse = {
   request_id: "req_1",
@@ -66,6 +68,7 @@ beforeEach(() => {
   mockIsLive.mockReset();
   mockCreateSession.mockReset();
   mockAskQuestion.mockReset();
+  mockGetSession.mockReset();
   mockIsLive.mockReturnValue(true);
   mockCreateSession.mockResolvedValue(session);
   mockAskQuestion.mockResolvedValue(askResponse());
@@ -499,5 +502,99 @@ describe("useLandingState — demo fallback", () => {
     mockIsLive.mockReturnValue(false);
     const { result } = renderHook(() => useLandingState());
     expect(result.current.live).toBe(false);
+  });
+});
+
+describe("useLandingState — resumeSession (ADR-0004 PR 10)", () => {
+  function getSessionResponse(over: Partial<GetSessionResponse> = {}): GetSessionResponse {
+    return {
+      request_id: "req_3",
+      session_id: "sess-old",
+      user_id: "usr_a",
+      channel: "chat",
+      summary: null,
+      current_product_area: "claude_code",
+      created_at: "2026-09-01T00:00:00Z",
+      expires_at: "2026-09-08T00:00:00Z",
+      messages: [
+        {
+          message_id: "m1",
+          role: "user",
+          content: "What is Claude Code?",
+          normalized_query: null,
+          domain: null,
+          intent: null,
+          created_at: null,
+          citations: [],
+        },
+        {
+          message_id: "m2",
+          role: "assistant",
+          content: "Claude Code is a CLI tool.",
+          normalized_query: null,
+          domain: "claude_code",
+          intent: "faq",
+          created_at: null,
+          citations: [
+            { source_name: "docs", title: "Overview", url: "https://x", chunk_id: "c1", marker: 1 },
+          ],
+        },
+      ],
+      ...over,
+    };
+  }
+
+  it("replaces the transcript wholesale and switches to the chat screen", async () => {
+    mockGetSession.mockResolvedValue(getSessionResponse());
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => {
+      result.current.dispatch({
+        type: "ADD_MESSAGE",
+        message: { id: 999, role: "user", text: "stale message that must be replaced" },
+      });
+    });
+    expect(result.current.state.messages).toHaveLength(1);
+
+    await act(async () => {
+      await result.current.resumeSession("sess-old");
+    });
+
+    expect(result.current.state.messages).toHaveLength(2);
+    expect(result.current.state.messages[0]).toMatchObject({ role: "user", text: "What is Claude Code?" });
+    expect(result.current.state.messages[1]).toMatchObject({
+      role: "bot",
+      text: "Claude Code is a CLI tool.",
+    });
+    expect(result.current.state.messages[1].sources?.[0]?.title).toBe("Overview");
+    expect(result.current.screen).toBe("chat");
+  });
+
+  it("pins the resumed session id so the NEXT question continues it, not a fresh session", async () => {
+    mockGetSession.mockResolvedValue(getSessionResponse({ session_id: "sess-continue" }));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      await result.current.resumeSession("sess-continue");
+    });
+    act(() => result.current.send("a follow-up question"));
+    await settle();
+
+    // createSession must NOT have been called -- ensureSession() only
+    // mints a new one when sessionIdRef.current is still null.
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockAskQuestion).toHaveBeenCalledWith("sess-continue", "a follow-up question");
+  });
+
+  it("a fetch failure surfaces a toast and does not change the current screen", async () => {
+    mockGetSession.mockRejectedValue(new ApiClientError("boom", 500, "boom"));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      await result.current.resumeSession("sess-broken");
+    });
+
+    expect(result.current.screen).toBe("landing");
+    expect(result.current.toasts.length).toBeGreaterThan(0);
   });
 });

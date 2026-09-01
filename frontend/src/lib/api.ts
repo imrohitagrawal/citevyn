@@ -21,7 +21,9 @@ import type {
   CreateSessionResponse,
   ExactSearchRequest,
   ExactSearchResponse,
+  GetSessionResponse,
   HealthResponse,
+  ListMySessionsResponse,
 } from "./types";
 import { ApiClientError } from "./types";
 
@@ -312,4 +314,18 @@ export async function getCurrentUser(): Promise<AuthUserResponse | null> {
     if (err instanceof ApiClientError && err.status === 401) return null;
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Session history (ADR-0004 PR 10)
+// ---------------------------------------------------------------------------
+
+/** The caller's own sessions, newest first. Works for an anonymous visitor too. */
+export async function listMySessions(): Promise<ListMySessionsResponse> {
+  return apiFetch<ListMySessionsResponse>("/v1/me/sessions");
+}
+
+/** Fetch a session with its messages (and their citations) for resume. */
+export async function getSession(sessionId: string): Promise<GetSessionResponse> {
+  return apiFetch<GetSessionResponse>(`/v1/sessions/${sessionId}`);
 }
