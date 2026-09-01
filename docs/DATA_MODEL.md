@@ -284,6 +284,33 @@ Design decisions:
 Numeric, not float: these values are summed across thousands of rows and compared
 against a dollar threshold, and 6 decimal places resolve a single cheap call.
 
+## 15a. auth_sessions (ADR-0004 PR 3)
+
+Backs the persistent per-visitor cookie identity described in
+`docs/ADR/0004-user-accounts.md`. Every request resolves to exactly one
+principal — anonymous today, a real logged-in user once ADR-0004 PR 6 ships
+— and this table is what the cookie is checked against.
+
+| Field | Type | Notes |
+|---|---|---|
+| auth_session_id | UUID | Primary key; also the public "id" half of the cookie value |
+| secret_hash | text(64) | SHA-256 hex digest of the cookie's secret half — never the secret itself |
+| user_id | text(128) | FK -> `users.user_id`, `ON DELETE CASCADE` |
+| created_at | timestamp | |
+| expires_at | timestamp | `auth_session_ttl_seconds` from creation (default 180 days) |
+
+Design decisions:
+
+1. Only `secret_hash` is stored. The cookie carries `<auth_session_id>.<secret>`;
+   a leaked database row (or backup, or careless log line) is not enough to
+   forge a session, because recovering the secret from its digest is
+   infeasible.
+2. `ON DELETE CASCADE`, not `RESTRICT` — an auth session is a credential FOR a
+   user, not an independent record, so it must not block deleting the user it
+   authenticates. Contrast `sessions.user_id`, which ADR-0004 PR 5 moves the
+   other way (RESTRICT -> CASCADE) for the same underlying reason: user
+   deletion must actually be possible.
+
 ## 16. Indexing Recommendations
 
 1. Index `documents.source_name`.

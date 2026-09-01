@@ -101,6 +101,29 @@ def test_empty_allowlist_installs_no_cors() -> None:
     assert "access-control-allow-origin" not in response.headers
 
 
+def test_allow_credentials_stays_false(settings: Settings) -> None:
+    """Pins ``allow_credentials=False`` (ADR-0004 PR 3 risk register).
+
+    A session cookie now exists (``app.core.auth_sessions``). CORS with
+    ``allow_credentials=True`` PLUS an allowlisted origin is what lets a
+    cross-origin page's fetch include that cookie — the combination this
+    demo does not want, since the frontend is same-origin in production by
+    design (``infra/docker/Dockerfile.api`` serves both from one origin) and
+    only a local Vite dev server needs cross-origin cookies at all, which is
+    a frontend-tooling concern for a later PR, not a silent flip here. The
+    plan named this as the most likely thing a developer "fixes" by
+    accident the first time they hit a CORS error locally.
+    """
+    response = _client(_build_app(settings)).options(
+        "/ping",
+        headers={
+            "Origin": "https://allowed.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert response.headers.get("access-control-allow-credentials") != "true"
+
+
 def test_admin_key_header_is_in_preflight_allowlist() -> None:
     """The admin key header is allowlisted in preflights.
 

@@ -19,6 +19,12 @@ All three endpoints require a valid bearer token via
 :func:`app.core.security.require_demo_api_key`. Auth failures raise the
 standard envelope from :func:`app.core.errors.error_response`, which the
 route does not need to intercept.
+
+Ownership is checked against a separate, per-visitor **principal**
+(:func:`app.core.auth_sessions.resolve_principal`, ADR-0004 PR 3) resolved
+from a cookie, not the bearer token — the bearer proves "legitimate demo
+client", the cookie proves "same visitor as last time". A caller with no
+cookie yet gets one minted transparently on its first request.
 """
 
 from __future__ import annotations
@@ -32,11 +38,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
-from app.core.rate_limit import rate_limited_demo
-from app.models import Message, Session, User, UserRole
+from app.models import Message, Session
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
@@ -139,25 +145,6 @@ async def _get_session_or_404(
     return row
 
 
-async def _ensure_user(session: AsyncSession, *, user_id: str) -> None:
-    """Upsert a :class:`User` row so the FK on :class:`Session` resolves.
-
-    The MVP authenticates a single ``demo_user`` identity; the admin
-    path is separate and never creates sessions through this route.
-    """
-    existing = await session.get(User, user_id)
-    if existing is not None:
-        return
-    session.add(
-        User(
-            user_id=user_id,
-            role=UserRole.demo_user,
-            created_at=_now(),
-        )
-    )
-    await session.flush()
-
-
 # ---------------------------------------------------------------------------
 # POST /v1/sessions
 # ---------------------------------------------------------------------------
@@ -176,16 +163,19 @@ async def _ensure_user(session: AsyncSession, *, user_id: str) -> None:
 async def create_session(
     request: Request,
     response: Response,
-    user_id: Annotated[str, Depends(rate_limited_demo)],
+    principal_id: Annotated[str, Depends(resolve_principal)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
     body: CreateSessionRequest,
 ) -> dict[str, Any]:
-    """Create a session row owned by the authenticated caller.
+    """Create a session row owned by the caller's resolved principal.
 
-    The MVP pins every session to the authenticated ``demo_user``;
-    ``body.user_id`` is accepted for spec compliance but ignored.
-    Only the ``chat`` channel is supported.
+    ``principal_id`` (ADR-0004 PR 3) is either the caller's existing cookie
+    identity or a freshly minted anonymous one — ``resolve_principal``
+    already persisted the owning ``User`` row in either case, so no FK
+    upsert is needed here. ``body.user_id`` is accepted for spec
+    compliance but ignored, so a misconfigured client cannot impersonate
+    another caller. Only the ``chat`` channel is supported.
     """
     request_id = _request_id(request)
     if body.channel != "chat":
@@ -198,11 +188,10 @@ async def create_session(
             message="Only the 'chat' channel is supported in MVP.",
         )
 
-    await _ensure_user(db, user_id=user_id)
     expires_at = _now() + timedelta(seconds=settings.index_session_ttl_seconds)
     new_session = Session(
         session_id=uuid.uuid4(),
-        user_id=user_id,
+        user_id=principal_id,
         channel=body.channel,
         summary=None,
         current_product_area=None,
@@ -240,12 +229,12 @@ async def create_session(
 async def close_session(
     request: Request,
     session_id: Annotated[uuid.UUID, Path()],
-    user_id: Annotated[str, Depends(rate_limited_demo)],
+    principal_id: Annotated[str, Depends(resolve_principal)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
     """Close a session by setting its ``expires_at`` to now."""
     row = await _get_session_or_404(
-        db, request_id=_request_id(request), session_id=session_id, user_id=user_id
+        db, request_id=_request_id(request), session_id=session_id, user_id=principal_id
     )
     row.expires_at = _now()
     await db.commit()
@@ -270,13 +259,13 @@ async def close_session(
 async def get_session_route(
     request: Request,
     session_id: Annotated[uuid.UUID, Path()],
-    user_id: Annotated[str, Depends(rate_limited_demo)],
+    principal_id: Annotated[str, Depends(resolve_principal)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
     """Return the session metadata plus the ordered messages list."""
     request_id = _request_id(request)
     row = await _get_session_or_404(
-        db, request_id=request_id, session_id=session_id, user_id=user_id
+        db, request_id=request_id, session_id=session_id, user_id=principal_id
     )
 
     stmt = (

@@ -12,7 +12,10 @@ Implements the two endpoints defined in ``docs/API_SPEC.md`` §5:
   single message for citation hydration on the client.
 
 Both endpoints require a valid bearer token via
-:func:`app.core.security.require_demo_api_key`.
+:func:`app.core.security.require_demo_api_key`. Ownership is checked
+against a separate, per-visitor principal resolved from a cookie
+(:func:`app.core.auth_sessions.resolve_principal`, ADR-0004 PR 3) — see
+``app.api.routes.sessions`` for the full rationale.
 """
 
 from __future__ import annotations
@@ -27,10 +30,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.orchestrator import Orchestrator
+from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
-from app.core.rate_limit import rate_limited_demo
 from app.models import Message, Session
 
 router = APIRouter(prefix="/v1/sessions", tags=["messages"])
@@ -163,7 +166,7 @@ async def post_message(
     body: Annotated[AnswerRequest, Body()],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    user_id: Annotated[str, Depends(rate_limited_demo)],
+    principal_id: Annotated[str, Depends(resolve_principal)],
 ) -> dict[str, Any]:
     """Ask a question and return the orchestrator's response shape."""
     request_id = _request_id(request)
@@ -176,7 +179,7 @@ async def post_message(
             ),
         )
 
-    await _require_session(db, request_id=request_id, session_id=session_id, user_id=user_id)
+    await _require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
     orchestrator = Orchestrator(settings, db)
     response = await orchestrator.ask(
         question=body.message,
@@ -210,11 +213,11 @@ async def get_message(
     session_id: Annotated[uuid.UUID, Path()],
     message_id: Annotated[uuid.UUID, Path()],
     db: Annotated[AsyncSession, Depends(get_session)],
-    user_id: Annotated[str, Depends(rate_limited_demo)],
+    principal_id: Annotated[str, Depends(resolve_principal)],
 ) -> dict[str, Any]:
     """Return a message and its retrieval trace."""
     request_id = _request_id(request)
-    await _require_session(db, request_id=request_id, session_id=session_id, user_id=user_id)
+    await _require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
     message = await _require_message(
         db,
         request_id=request_id,
