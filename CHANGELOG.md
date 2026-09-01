@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Persistent per-visitor cookie identity (ADR-0004 PR 3).** Every request
+  to a session/message route now resolves to a real per-visitor principal
+  instead of the shared constant `demo_user`. A first-time visitor gets an
+  anonymous principal (`anon_<uuid4hex>`) minted transparently — no login
+  screen — and a cookie (`<auth_session_id>.<secret>`, new `auth_sessions`
+  table via migration `0007`, storing only `sha256(secret)`) that resolves
+  back to the same principal on later requests. This is what makes the
+  ADR-0004 PR 1 ownership predicate actually differentiate visitors instead
+  of being a no-op: two anonymous visitors cannot read or close each
+  other's sessions. Deliberately separate from the demo bearer's AUDIT
+  identity, which stays the constant `DEMO_USER_ID` — the bearer proves
+  "legitimate demo client", the cookie proves "same visitor as last time";
+  conflating them would mean a bearer-key rotation silently reassigns every
+  session's owner. `__Host-` cookie prefix + `Secure` in production only
+  (both cookies over plain HTTP are dropped by the browser); `HttpOnly`,
+  `SameSite=Lax`, no `Domain=` always. `CORS allow_credentials=False` is
+  now pinned by a regression test — the plan flagged this as the most
+  likely accidental flip once cookies exist to fix a local CORS error.
+
 ### Security
 - **Response security headers + docs endpoints disabled in production
   (ADR-0004 PR 2).** Every response — including `GET /` served from the

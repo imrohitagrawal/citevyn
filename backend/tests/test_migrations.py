@@ -38,6 +38,7 @@ EXPECTED_TABLES = {
     "evaluation_runs",
     "audit_events",
     "provider_calls",
+    "auth_sessions",
 }
 
 
@@ -129,7 +130,46 @@ def test_migration_0005_downgrade_drops_provider_calls(
     assert "ix_provider_calls_occurred_at" not in names
     # Everything else must survive: an over-broad downgrade that took out the
     # pre-existing schema would still pass the two assertions above.
-    assert (EXPECTED_TABLES - {"provider_calls"}) <= names
+    # auth_sessions is ALSO excluded here: head is 0007 now, so downgrading
+    # to 0004 rolls back 0007 too, not just 0005.
+    assert (EXPECTED_TABLES - {"provider_calls", "auth_sessions"}) <= names
+
+
+def test_migration_0007_auth_sessions_round_trips(alembic_config: AlembicConfig) -> None:
+    """0007 (``auth_sessions``, ADR-0004 PR 3) upgrades and downgrades cleanly.
+
+    Additive-only, same shape as 0005's ``provider_calls``: a new table with
+    one FK to the pre-existing ``users`` table, no changes to any existing
+    table. The FK itself is exercised by ``test_auth_sessions.py`` against a
+    live app; this test is scoped to the DDL round trip.
+    """
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        }
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(auth_sessions)").all()
+        }
+    assert "auth_sessions" in tables
+    assert columns == {"auth_session_id", "secret_hash", "user_id", "created_at", "expires_at"}
+
+    alembic_downgrade(alembic_config, "0006")
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        }
+    assert "auth_sessions" not in tables
+    # Everything else must survive: an over-broad downgrade that took out the
+    # pre-existing schema would still pass the assertion above.
+    assert (EXPECTED_TABLES - {"auth_sessions"}) <= tables
 
 
 def test_documents_identity_checksum_rename_round_trips(

@@ -142,7 +142,11 @@ def test_get_session_returns_metadata_and_messages(in_memory_client: TestClient)
     assert response.status_code == 200
     body = response.json()
     assert body["session_id"] == session_id
-    assert body["user_id"] == "demo_user"
+    # Owned by a per-visitor anonymous principal (ADR-0004 PR 3), not the
+    # constant "demo_user" — the TestClient's cookie jar carries the
+    # Set-Cookie from the POST above back on this GET, so both requests
+    # resolve to the same minted principal.
+    assert body["user_id"].startswith("anon_")
     assert body["channel"] == "chat"
     assert body["messages"] == []  # no messages yet
     assert body["request_id"].startswith("req_")

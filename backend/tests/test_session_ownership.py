@@ -177,20 +177,24 @@ def test_a_closed_session_is_unreadable_even_by_its_owner(in_memory_client: Test
 # ---------------------------------------------------------------------------
 
 
-def test_every_session_scoped_route_resolves_ownership_via_rate_limited_demo() -> None:
+def test_every_session_scoped_route_resolves_ownership_via_resolve_principal() -> None:
     """Every route whose path contains ``{session_id}`` must depend on
-    ``rate_limited_demo`` (the dependency that authenticates the caller and
-    resolves the principal id used by the ownership predicate).
+    ``resolve_principal`` (the dependency that resolves the per-visitor
+    cookie identity the ownership predicate checks against, ADR-0004 PR 3).
 
     Nothing like this test existed before ADR-0004 PR 1 — a `grep` for
     ``app.routes`` in this suite previously returned nothing — which is
     precisely how ``del user_id`` propagated to four routes across two
     files unnoticed. A future route that nests under ``/sessions/{session_id}``
-    but forgets to depend on ``rate_limited_demo`` (and therefore cannot
+    but forgets to depend on ``resolve_principal`` (and therefore cannot
     enforce ownership) fails this test immediately, rather than shipping a
-    silent IDOR that only a targeted regression test would catch.
+    silent IDOR that only a targeted regression test would catch. Checks for
+    ``resolve_principal`` directly, not the ``rate_limited_demo`` it wraps —
+    PR 3 made ``rate_limited_demo`` a nested (not direct) dependency of these
+    routes, so a direct-dependency check on it would now fail even though
+    ownership is still correctly enforced.
     """
-    from app.core.rate_limit import rate_limited_demo
+    from app.core.auth_sessions import resolve_principal
 
     app = create_app()
     # FastAPI >=0.140 wraps each ``include_router`` call in an internal
@@ -215,10 +219,10 @@ def test_every_session_scoped_route_resolves_ownership_via_rate_limited_demo() -
         dependant = getattr(route, "dependant", None)
         assert dependant is not None, f"{route.path} has no dependant to inspect"
         callables = {dep.call for dep in dependant.dependencies}
-        if rate_limited_demo not in callables:
+        if resolve_principal not in callables:
             missing.append(f"{route.methods} {route.path}")
 
     assert not missing, (
-        "route(s) under {session_id} do not depend on rate_limited_demo, so they "
+        "route(s) under {session_id} do not depend on resolve_principal, so they "
         f"cannot enforce the ownership predicate: {missing}"
     )

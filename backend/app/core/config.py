@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     index_session_ttl_seconds: int = Field(default=60 * 60 * 24, ge=1)
     pg_test_url: str | None = None
 
+    # --- Auth session cookie (ADR-0004 PR 3) ---
+    # 180 days: long enough that a returning anonymous visitor keeps their
+    # pseudonymous identity (and, once ADR-0004 PR 6 ships, stays logged in)
+    # across normal browsing gaps, short enough that a stolen/abandoned
+    # cookie does not grant access forever.
+    auth_session_ttl_seconds: int = Field(default=60 * 60 * 24 * 180, ge=1)
+
     # --- LLM (Slice 4+) ---
     llm_provider: str = "stub"  # "stub" | "anthropic" | "gemini" | "router"
     # Model for the anthropic + stub providers only. gemini/router read their
