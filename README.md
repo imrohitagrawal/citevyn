@@ -245,6 +245,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/auth/logout`      | demo   | Revoke the current session cookie             |
 | `GET  /v1/auth/me`          | demo   | Current identity (401 if no valid session)    |
 | `GET  /v1/auth/oauth/{provider}/start` | demo | Begin GitHub/Google OAuth login (redirect) |
+| `GET  /v1/auth/oauth/{provider}/connect/start` | demo | Connect GitHub/Google to the signed-in account (redirect; fresh session required) |
 | `GET  /v1/auth/oauth/{provider}/callback` | demo | Complete OAuth login (redirect)         |
 | `GET  /v1/me/sessions`      | demo   | List the caller's own chat sessions, newest first |
 | `POST /v1/sessions`         | demo   | Open a chat session                           |
