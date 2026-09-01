@@ -97,6 +97,19 @@ file_name
 slash_command
 ```
 
+## 5a. users
+
+Every request resolves to exactly one principal (`docs/ADR/0004-user-accounts.md`),
+anonymous or registered, and this is that principal's row.
+
+| Field | Type | Notes |
+|---|---|---|
+| user_id | text(128) | Primary key. `anon_<uuid4hex>` (anonymous, PR 3) or `usr_<uuid4hex>` (registered, PR 6) — never the email |
+| role | text | Authorization tier (`demo_user`/`admin`), unrelated to anonymous vs. registered |
+| created_at | timestamp | |
+| email | text(255), nullable | Unique when set. `NULL` for anonymous principals; SQL uniqueness does not compare `NULL` to itself, so any number of anonymous rows coexist (ADR-0004 PR 5) |
+| password_hash | text(255), nullable | Argon2id PHC string (`app.core.passwords`). `NULL` for anonymous principals and, later, OAuth-only accounts (PR 12) |
+
 ## 6. sessions
 
 Stores bounded conversation sessions.
@@ -104,7 +117,7 @@ Stores bounded conversation sessions.
 | Field | Type | Notes |
 |---|---|---|
 | session_id | UUID | Primary key |
-| user_id | text | Demo user ID |
+| user_id | text(128) | FK -> `users.user_id`, `ON DELETE CASCADE` (RESTRICT before ADR-0004 PR 5 — see §5a) |
 | channel | text | chat |
 | summary | text | Bounded session summary |
 | current_product_area | text | Last resolved product area |

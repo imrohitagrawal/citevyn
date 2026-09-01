@@ -25,9 +25,13 @@ class Session(Base):
     __tablename__ = "sessions"
 
     session_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    # CASCADE, not RESTRICT (migration 0008, ADR-0004 PR 5): deleting a user
+    # deletes their sessions rather than raising IntegrityError forever.
+    # audit_events.user_id stays SET NULL by deliberate asymmetry — see the
+    # migration docstring.
     user_id: Mapped[str] = mapped_column(
         String(128),
-        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="chat")
