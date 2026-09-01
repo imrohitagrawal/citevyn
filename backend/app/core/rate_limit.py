@@ -76,6 +76,12 @@ if TYPE_CHECKING:
 # re-created the #203 lockout.
 _DEFAULT_GLOBAL_PER_WINDOW = 600
 
+# Fallback for the credential-stuffing bucket (ADR-0004 PR 6) when a caller
+# constructs a limiter directly without naming one. Production passes
+# ``settings.rate_limit_auth_login_per_hour``.
+_DEFAULT_AUTH_LOGIN_PER_WINDOW = 10
+_AUTH_LOGIN_ROLE = "auth_login"
+
 
 class _LimiterLike(Protocol):
     """Minimum surface the rate-limit policy needs from a limiter."""
@@ -119,6 +125,7 @@ class RateLimiter:
         demo_user_per_window: int,
         admin_per_window: int,
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
+        auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -126,6 +133,8 @@ class RateLimiter:
             raise ValueError("per-window limits must be >= 1")
         if global_per_window < 1:
             raise ValueError("global_per_window must be >= 1")
+        if auth_login_per_window < 1:
+            raise ValueError("auth_login_per_window must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
@@ -136,6 +145,9 @@ class RateLimiter:
             # apply the 30/hour DEMO limit to the shared bucket and re-create the
             # global lockout this change exists to remove.
             "global": global_per_window,
+            # Credential-stuffing guard (ADR-0004 PR 6), keyed per target email
+            # rather than per client — see ``auth_login_rate_key``.
+            _AUTH_LOGIN_ROLE: auth_login_per_window,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -249,6 +261,7 @@ class RedisRateLimiter:
         admin_per_window: int,
         key_prefix: str,
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
+        auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -256,6 +269,8 @@ class RedisRateLimiter:
             raise ValueError("per-window limits must be >= 1")
         if global_per_window < 1:
             raise ValueError("global_per_window must be >= 1")
+        if auth_login_per_window < 1:
+            raise ValueError("auth_login_per_window must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -269,6 +284,9 @@ class RedisRateLimiter:
             # apply the 30/hour DEMO limit to the shared bucket and re-create the
             # global lockout this change exists to remove.
             "global": global_per_window,
+            # Credential-stuffing guard (ADR-0004 PR 6), keyed per target email
+            # rather than per client — see ``auth_login_rate_key``.
+            _AUTH_LOGIN_ROLE: auth_login_per_window,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -377,12 +395,14 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             admin_per_window=settings.rate_limit_admin_per_hour,
             key_prefix=settings.redis_key_prefix,
             global_per_window=_effective_global_limit(settings),
+            auth_login_per_window=settings.rate_limit_auth_login_per_hour,
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
         demo_user_per_window=settings.rate_limit_demo_user_per_hour,
         admin_per_window=settings.rate_limit_admin_per_hour,
         global_per_window=_effective_global_limit(settings),
+        auth_login_per_window=settings.rate_limit_auth_login_per_hour,
     )
 
 
@@ -429,6 +449,7 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         and limiter.limit_for(role="demo_user") == settings.rate_limit_demo_user_per_hour
         and limiter.limit_for(role="admin") == settings.rate_limit_admin_per_hour
         and limiter.limit_for(role=_GLOBAL_ROLE) == _effective_global_limit(settings)
+        and limiter.limit_for(role=_AUTH_LOGIN_ROLE) == settings.rate_limit_auth_login_per_hour
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -596,10 +617,45 @@ async def rate_limited_admin(
     return user_id
 
 
+# ---------------------------------------------------------------------------
+# Credential-stuffing guard for POST /v1/auth/login and /register (ADR-0004 PR 6)
+# ---------------------------------------------------------------------------
+#
+# Keyed per TARGET EMAIL, not per client. The IP-keyed ``rate_limited_demo``
+# dependency already runs ahead of these routes (they use it too, for the
+# demo bearer + per-visitor volume limit), but IP-keying alone lets an
+# attacker spread one password guess across many source addresses against
+# the SAME account — exactly what the plan's "429 after N from 200 distinct
+# IPs" verification exercises. Hashing the email mirrors ``client_rate_key``:
+# an email is personal data and must not sit in Redis/logs in the clear.
+
+
+def auth_login_rate_key(email: str, settings: Settings) -> str:
+    """Return the credential-stuffing bucket key for a (normalised) email."""
+    salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
+    digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
+    return f"authlogin_{digest[:32]}"
+
+
+async def enforce_auth_login_rate_limit(email: str, settings: Settings) -> None:
+    """Apply the credential-stuffing guard for a login/register attempt.
+
+    Call this with the SAME normalised email whether or not the account
+    exists — the bucket doubles as an existence-probe guard: an attacker
+    enumerating emails by watching for 401 vs 422 is still capped by this
+    limiter regardless of which branch the route takes afterward.
+    """
+    await enforce_rate_limit(
+        user_id=auth_login_rate_key(email, settings), role=_AUTH_LOGIN_ROLE, settings=settings
+    )
+
+
 __all__ = [
     "RateLimiter",
     "RedisRateLimiter",
+    "auth_login_rate_key",
     "client_rate_key",
+    "enforce_auth_login_rate_limit",
     "enforce_rate_limit",
     "get_limiter",
     "rate_limited_admin",

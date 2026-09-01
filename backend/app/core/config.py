@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     # is the only control that caps spend.
     rate_limit_global_per_hour: int = Field(default=600, ge=0)
 
+    # Credential-stuffing guard for ``POST /v1/auth/login`` (ADR-0004 PR 6). Keyed
+    # per TARGET EMAIL (salted hash, same idiom as the IP key above), not per
+    # client — a distributed attacker trying one password across 200 source IPs
+    # against the SAME account must still be stopped, and an IP-keyed limiter lets
+    # exactly that through. Deliberately much lower than the general demo limit:
+    # this bucket exists to slow credential stuffing, not to serve ordinary
+    # traffic. ``register`` uses the same bucket (keyed on the email being
+    # claimed) so a registration-spam loop against one address is bounded too.
+    rate_limit_auth_login_per_hour: int = Field(default=10, ge=1)
+
     redis_url: str | None = None
 
     # --- Persistence (Slice 2+) ---

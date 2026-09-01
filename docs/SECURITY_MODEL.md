@@ -84,6 +84,10 @@ Recommended defaults:
 demo_user: 30 queries/hour
 admin: 100 queries/hour
 anonymous: disabled
+auth_login: 10 attempts/hour, keyed per TARGET EMAIL (not per client) —
+  ADR-0004 PR 6, POST /v1/auth/{register,login} — a credential-stuffing
+  guard: an attacker spreading guesses across many source IPs against one
+  account is still capped, unlike the IP-keyed limiters above.
 ```
 
 ## 7. Source Domain Allowlist
