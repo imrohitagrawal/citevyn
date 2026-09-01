@@ -38,9 +38,13 @@ const PROVIDERS = [
 export function ConnectedAccountsDrawer({ triggerRef, onClose, providers }: ConnectedAccountsDrawerProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Same restore-focus-on-unmount + Escape-to-close contract as
-  // HistoryDrawer/AuthModal; no form fields, so no Tab trap.
+  // Move focus INTO the dialog on open (the menuitem that opened it has just
+  // been unmounted with the menu, so focus would otherwise fall to <body> and
+  // the next Tab would land on the page behind the backdrop -- review
+  // finding), and restore it to the trigger on unmount. Same contract as
+  // AuthModal; no form fields, so no Tab trap.
   useEffect(() => {
+    dialogRef.current?.focus();
     const trigger = triggerRef.current;
     return () => {
       trigger?.focus();
@@ -78,6 +82,7 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, providers }: Conn
         role="dialog"
         aria-modal="true"
         aria-label="Connected accounts"
+        tabIndex={-1}
         style={{
           background: "var(--surface, #fff)",
           color: "var(--ink, #111)",

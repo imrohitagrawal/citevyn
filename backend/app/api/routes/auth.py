@@ -92,15 +92,19 @@ def _normalize_email(request_id: str, raw: str) -> str:
 
 
 async def _linked_providers(db: AsyncSession, user_id: str) -> list[str]:
-    """Provider names (``"github"``/``"google"``) linked to ``user_id``, sorted.
+    """Provider names (``"github"``/``"google"``) linked to ``user_id``, sorted, distinct.
 
     ADR-0004 PR 13: one cheap FK-indexed query, only ever run once a real
-    principal has been resolved. Sorted so the wire shape is deterministic.
+    principal has been resolved. Sorted so the wire shape is deterministic;
+    DISTINCT because nothing stops one account from linking two different
+    GitHub accounts (the unique constraint is on the external identity, not
+    on ``(user_id, provider)``) and the wire field is a set of providers.
     """
     rows = (
         await db.execute(
             select(UserIdentity.provider)
             .where(UserIdentity.user_id == user_id)
+            .distinct()
             .order_by(UserIdentity.provider)
         )
     ).scalars()

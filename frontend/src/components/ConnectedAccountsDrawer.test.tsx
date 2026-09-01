@@ -72,13 +72,19 @@ describe("ConnectedAccountsDrawer", () => {
     expect(screen.getAllByText("Connected ✓")).toHaveLength(2);
   });
 
-  it("Escape closes and focus returns to the trigger on unmount", async () => {
+  it("takes focus on open, Escape closes, and focus returns to the trigger on unmount", async () => {
+    // RED if the mount effect stops calling dialogRef.current?.focus() (focus
+    // would stay on the trigger, making the restore assertion vacuous -- the
+    // review caught exactly that in an earlier version of this test), or if
+    // the unmount cleanup stops calling trigger?.focus().
     const user = userEvent.setup();
     const { trigger, onClose, unmount } = renderDrawer([]);
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    expect(trigger).not.toHaveFocus();
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledTimes(1);
     unmount();
-    expect(document.activeElement).toBe(trigger);
+    expect(trigger).toHaveFocus();
   });
 
   it("clicking the backdrop closes; clicking inside the dialog does not", async () => {

@@ -93,6 +93,7 @@ export function AccountMenu({
             <button
               type="button"
               role="menuitem"
+              aria-haspopup="dialog"
               onClick={() => {
                 setMenuOpen(false);
                 setHistoryOpen(true);
@@ -109,6 +110,7 @@ export function AccountMenu({
             <button
               type="button"
               role="menuitem"
+              aria-haspopup="dialog"
               onClick={() => {
                 setMenuOpen(false);
                 setConnectedOpen(true);

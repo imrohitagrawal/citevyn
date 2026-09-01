@@ -8,6 +8,16 @@ against ``users.email`` — because auto-linking by email would let anyone who
 controls a matching email on a third-party provider take over an existing
 password account. See ``app.api.routes.oauth`` for the resolution order this
 table exists to make structural.
+
+Rows are created by OAuth **login** (a brand-new ``User`` + this row) and by
+account **linking** (ADR-0004 PR 13: this row only, pointing at an existing
+``usr_`` account -- see ``app.api.routes.oauth._link_identity``, which never
+reassigns a row from one user to another). **Disconnect invariant** (ADR-0004
+"Deliberate trade-offs"): deleting a row must leave the account with at least
+one access method -- ``users.password_hash`` set OR another row here -- so a
+future "disconnect" feature must refuse to remove the last one. Nothing yet
+constrains one row per ``(user_id, provider)``; whether that should hold is
+an open design question recorded in the ADR.
 """
 
 from __future__ import annotations

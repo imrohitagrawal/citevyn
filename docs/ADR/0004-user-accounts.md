@@ -164,6 +164,13 @@ since a cross-site form POST cannot set an `Authorization` header.
   against its *own* target rather than reporting success because a row now
   exists. Linking writes one `user_identities` row and nothing else: no
   `users` row, no change to `users.email`, no session rotation.
+- **One identity per provider per account is not yet enforced.** The unique
+  constraint is on the external identity `(provider, provider_account_id)`
+  only, so one account can link two different GitHub accounts; `/me` reports
+  `providers` as a de-duplicated set. Whether to add a
+  `(user_id, provider)` constraint (and a matching `LinkResult`) is an open
+  question to settle **before** a disconnect feature, whose
+  delete-by-`(user_id, provider)` would otherwise be ambiguous.
 - **Disconnect invariant — recorded now, built later.** A future "disconnect
   a provider" feature **must** keep every account with at least one access
   method: `password_hash` set **or** at least one remaining `user_identities`

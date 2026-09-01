@@ -215,6 +215,19 @@ describe("account-linking return-trip toast (ADR-0004 PR 13)", () => {
     expect(document.body.textContent).not.toContain("alert(1)");
   });
 
+  it.each(["constructor", "__proto__", "toString"])(
+    "?provider=%s does not resolve through Object.prototype (review finding A1)",
+    async (key) => {
+      // RED if PROVIDER_LABELS goes back to a plain object literal: the
+      // inherited member is truthy and its source text ends up in the toast.
+      setSearch(`?connect=ok&provider=${key}`);
+      render(<LandingPage theme="light" onThemeChange={() => {}} />);
+      expect(await screen.findByText("Account connected.")).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("native code");
+      cleanup();
+    },
+  );
+
   it("auth and connect params are toasted independently, not as one if/else chain", async () => {
     // RED if a shared chain drops one signal when both are present.
     setSearch("?auth=ok&connect=ok&provider=github");

@@ -5,7 +5,7 @@ me" against a JSON request body) because this is a meaningfully different
 shape: external HTTP calls, redirects, no JSON body — same one-file-one-
 router pattern ``me.py`` (PR 10) established.
 
-Both routes are provider-parameterized, not duplicated per provider. The
+All three routes are provider-parameterized, not duplicated per provider. The
 ``provider`` path segment is validated against :data:`_PROVIDERS` and any
 other value 404s — this codebase's existing "unknown → quiet 404, not
 informative" convention (the ownership-mismatch-is-404 rule from PR 1).
@@ -112,6 +112,11 @@ half, written down here because they transfer to any stack:
   a second time — one source of truth for "which session started this".
 * **Fresh session required at start.** A stolen cookie must not be able to
   plant a permanent backdoor identity at any point in a 180-day session.
+* **Failures before the claim cannot know the intent.** A bad/replayed
+  ``state``, or a starting session revoked/rotated mid-flow, fails the
+  session-bound claim itself and redirects to ``/?auth=error`` for both
+  flows -- deliberately: pre-reading the nonce to learn its intent would
+  reopen the unconditional-read hazard the claim design exists to close.
 * **Disconnect invariant (for the future "disconnect" feature, not built
   here):** an account must always retain >= 1 access method —
   ``password_hash`` set OR >= 1 remaining ``UserIdentity`` row. Do not allow
@@ -820,8 +825,12 @@ async def _claim_nonce(
 
 @router.get(
     "/oauth/{provider}/callback",
-    summary="Complete an OAuth login (GitHub or Google).",
-    description="Always redirects (/?auth=ok or /?auth=error) — never a JSON response.",
+    summary="Complete an OAuth login or account link (GitHub or Google).",
+    description=(
+        "Always redirects, never a JSON response: /?auth=ok|error for a login "
+        "nonce, /?connect=ok|error&reason=...&provider=... for a connect nonce "
+        "(docs/API_SPEC.md §4b)."
+    ),
 )
 async def oauth_callback(
     request: Request,

@@ -1041,12 +1041,12 @@ def test_connect_callback_is_idempotent_for_the_same_account(
     identities = _query_all(UserIdentity)
     assert len(identities) == 1
     assert identities[0].user_id == user_id
-    results = [
+    results = sorted(
         e.metadata_["result"]
         for e in _query_all(AuditEvent)
         if e.metadata_.get("event") == "oauth_connect_github"
-    ]
-    assert results == ["linked", "already_linked_same"]
+    )
+    assert results == ["already_linked_same", "linked"]  # order-independent
 
 
 def test_connect_callback_rejects_identity_already_linked_to_a_different_account(
@@ -1106,8 +1106,14 @@ def test_connect_callback_rejects_if_signed_out_between_start_and_callback(
 ) -> None:
     """The session is revoked server-side (e.g. from another device) while
     the provider consent screen is open; the browser still holds the now-dead
-    cookie. RED if the callback's session binding or _resolve_connect_target's
-    re-verification is removed."""
+    cookie. The callback cannot even claim the nonce (its session-bound
+    WHERE clause no longer matches), so the intent is unknowable and the
+    redirect is the login-shaped /?auth=error -- documented in API_SPEC §4b.
+    RED if the callback's session binding is removed. (The post-claim
+    re-verification in _resolve_connect_target is covered by the unit test
+    below and by test_connect_nonce_cannot_complete_as_login_and_vice_versa,
+    not by this route test -- a review skeptic proved this test stays GREEN
+    with that check deleted.)"""
     from app.models import AuthSession
 
     _register(oauth_client, "revoked@example.com")
@@ -1510,9 +1516,12 @@ def test_connect_failure_audit_event_records_the_metadata_event_string(
     state_anon = _state_from_start_response(start_anon)
     _set_nonce_intent(state_anon, "connect")
     _callback(anon, "google", state=state_anon)
-    failed = [e for e in _query_all(AuditEvent) if e.action == AuditAction.auth_failed]
-    assert failed[-1].user_id is None
-    assert failed[-1].metadata_ == {"event": "oauth_connect_no_session", "provider": "google"}
+    no_session = [
+        e for e in _query_all(AuditEvent) if e.metadata_.get("event") == "oauth_connect_no_session"
+    ]
+    assert [(e.user_id, e.metadata_) for e in no_session] == [
+        (None, {"event": "oauth_connect_no_session", "provider": "google"})
+    ]
 
 
 def test_connect_denial_redirects_to_the_connect_error_and_consumes_the_nonce(
@@ -1583,3 +1592,17 @@ def test_denial_from_a_different_browser_does_not_burn_the_victims_nonce(
     )
     victim = _callback(oauth_client, "github", state=state)
     assert victim.headers["location"] == "/?connect=ok&provider=github"
+
+
+def test_auth_me_providers_is_a_set_even_with_two_identities_of_one_provider(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Review finding A3: nothing constrains one row per (user_id, provider),
+    so two different GitHub accounts can be linked to one CiteVyn account.
+    The wire field is a set of providers. RED if .distinct() is dropped from
+    _linked_providers."""
+    _register(oauth_client, "twogh@example.com")
+    _link_identity_to(oauth_client, monkeypatch, "github", account_id="111", email="a@example.com")
+    _link_identity_to(oauth_client, monkeypatch, "github", account_id="222", email="b@example.com")
+    assert len(_query_all(UserIdentity)) == 2
+    assert _me(oauth_client).json()["providers"] == ["github"]

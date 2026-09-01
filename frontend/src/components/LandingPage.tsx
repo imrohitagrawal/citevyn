@@ -37,7 +37,10 @@ interface LandingPageProps {
 /** Query params THIS app attaches on the OAuth login / account-linking return trips. */
 const OWN_QUERY_PARAMS = ["auth", "connect", "reason", "provider"] as const;
 
-const PROVIDER_LABELS: Record<string, string | undefined> = { github: "GitHub", google: "Google" };
+const PROVIDER_LABELS: ReadonlyMap<string, string> = new Map([
+  ["github", "GitHub"],
+  ["google", "Google"],
+]);
 
 function connectErrorMessage(reason: string | null, label: string | undefined): string {
   if (reason === "already_linked") {
@@ -118,8 +121,10 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     const connectResult = params.get("connect");
     if (connectResult === "ok" || connectResult === "error") {
       // `provider` is attacker-controllable via the URL bar; it is only ever
-      // used as a lookup key into this fixed map, never rendered raw.
-      const label = PROVIDER_LABELS[params.get("provider") ?? ""];
+      // used as a key into a Map (NOT a plain object -- `?provider=constructor`
+      // would otherwise walk Object.prototype and render a function body),
+      // never rendered raw.
+      const label = PROVIDER_LABELS.get(params.get("provider") ?? "");
       if (connectResult === "ok") {
         addToast({
           kind: "success",

@@ -40,10 +40,10 @@ class OAuthNonce(Base):
         ForeignKey("auth_sessions.auth_session_id", ondelete="CASCADE"),
         nullable=True,
     )
-    # Always "login" in this PR. The field exists so a future "connect a
-    # provider to an already-signed-in account" flow doesn't need a schema
-    # change -- deferred, not designed away (see the plan's account-linking
-    # scope note).
+    # "login" (oauth_start, PR 12) or "connect" (oauth_connect_start, ADR-0004
+    # PR 13). Compared EXACTLY at callback; an unknown value fails closed.
+    # A plain String(16), not an enum, so adding a third intent still needs
+    # no migration -- which is exactly why PR 13 needed none.
     return_intent: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

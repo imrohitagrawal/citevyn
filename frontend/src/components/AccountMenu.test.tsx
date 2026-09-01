@@ -75,6 +75,7 @@ describe("AccountMenu signed-in dropdown", () => {
     render(<AccountMenu />);
     await user.click(await screen.findByRole("button", { name: "a@example.com" }));
     const item = screen.getByRole("menuitem", { name: "Connected accounts" });
+    expect(item).toHaveAttribute("aria-haspopup", "dialog");
     // Between History and Sign out, per the plan.
     const names = screen.getAllByRole("menuitem").map((el) => el.textContent);
     expect(names).toEqual(["History", "Connected accounts", "Sign out"]);

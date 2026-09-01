@@ -186,9 +186,14 @@ claimed nonce's `return_intent`:
 | `login` | any failure (bad/expired/replayed state, provider error, consent denied) | `/?auth=error` |
 | `connect` | identity newly linked, or already linked to this same account | `/?connect=ok&provider={provider}` |
 | `connect` | identity already linked to a **different** account — never reassigned | `/?connect=error&reason=already_linked&provider={provider}` |
-| `connect` | the starting session is no longer a live registered account | `/?connect=error&reason=session&provider={provider}` |
+| `connect` | the claimed nonce's session is no longer a live registered account (defense in depth — a session that dies during the provider round trip) | `/?connect=error&reason=session&provider={provider}` |
+| `connect` | the nonce expired (5-minute TTL) before the callback | `/?connect=error&reason=provider&provider={provider}` (event `oauth_expired`) |
 | `connect` | provider error after the nonce was claimed | `/?connect=error&reason=provider&provider={provider}` |
 | `connect` | the user declined the provider's consent screen | `/?connect=error&reason=denied&provider={provider}` |
+
+Failures **before** the nonce is claimed — a missing, malformed or replayed
+`state`, or a starting session that was revoked or rotated in the meantime —
+cannot know the intent and redirect to `/?auth=error` for both flows.
 
 A declined consent (`?error=…`) consumes the caller's own nonce (same
 session-bound conditional claim) and routes by its intent; a `state` that is
