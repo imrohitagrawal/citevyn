@@ -102,9 +102,13 @@ export function onUnauthorized(listener: () => void): () => void {
 export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal; skipUnauthorizedInterceptor?: boolean } = {},
 ): Promise<T> {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: externalSignal } = options;
+  const {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    signal: externalSignal,
+    skipUnauthorizedInterceptor = false,
+  } = options;
 
   // Compose an AbortController that fires on either caller-cancel
   // or timeout. We intentionally do not cancel on success — the
@@ -188,12 +192,22 @@ export async function apiFetch<T>(
       typeof body === "object" && body !== null && "error" in body && body.error
         ? (body.error.message ?? `Request failed with status ${response.status}.`)
         : `Request failed with status ${response.status}.`;
-    if (response.status === 401) {
+    if (response.status === 401 && !skipUnauthorizedInterceptor) {
       // ADR-0004 PR 8's "401 interceptor": notify whoever is listening
       // (authStore) that the caller's session is no longer valid, so the
       // UI drops to signed-out state even when the 401 arrived from a
       // call authStore didn't itself make (e.g. a stale AccountMenu action
       // that raced a session expiry). A no-op until something subscribes.
+      //
+      // getCurrentUser() opts OUT via skipUnauthorizedInterceptor: a 401
+      // from GET /v1/auth/me is not "the session expired mid-action", it
+      // is the NORMAL shape of "not authenticated", and authStore's own
+      // bootstrapAuth() already interprets it correctly — including
+      // discarding a stale response race-caught in review (a slow /me
+      // 401 landing after a fast login() already set signed-in). Without
+      // this the global interceptor would apply its own unconditional
+      // downgrade before bootstrapAuth's request-ordering guard ever gets
+      // a chance to run.
       for (const listener of unauthorizedListeners) listener();
     }
     throw new ApiClientError(message, response.status, body as never);
@@ -289,7 +303,11 @@ export async function logout(): Promise<void> {
  */
 export async function getCurrentUser(): Promise<AuthUserResponse | null> {
   try {
-    return await apiFetch<AuthUserResponse>("/v1/auth/me");
+    return await apiFetch<AuthUserResponse>(
+      "/v1/auth/me",
+      {},
+      { skipUnauthorizedInterceptor: true },
+    );
   } catch (err) {
     if (err instanceof ApiClientError && err.status === 401) return null;
     throw err;

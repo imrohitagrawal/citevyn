@@ -55,6 +55,19 @@ function stateFor(user: AuthUserResponse): AuthState {
 
 let bootstrapped = false;
 
+// Guards against a real race a review caught: bootstrapAuth() fires on
+// mount and hits GET /v1/auth/me with whatever cookie existed at that
+// moment. If the user submits the login form before that request
+// resolves, login() can finish FIRST (setting signed-in), and the slow
+// bootstrap response — reflecting the pre-login cookie — would then land
+// and silently stomp signed-in back to anonymous. Every identity-
+// resolving call bumps this token; bootstrapAuth() (the only PASSIVE,
+// background one) discards its result if a newer call has since started.
+// login/register/logout are explicit user actions and always apply their
+// own result — they only need to bump the token so a slower, already
+// in-flight bootstrap becomes stale relative to them.
+let latestIdentityToken = 0;
+
 /**
  * Resolve the caller's current identity. Idempotent and safe to call from
  * every ``useAuth()`` consumer's mount effect (``LandingPage``,
@@ -65,9 +78,11 @@ let bootstrapped = false;
 export async function bootstrapAuth(): Promise<void> {
   if (bootstrapped) return;
   bootstrapped = true;
+  const token = ++latestIdentityToken;
   setState({ status: "loading", user: state.user });
   try {
     const user = await getCurrentUser();
+    if (token !== latestIdentityToken) return; // superseded by login/register/logout
     setState(user ? stateFor(user) : { status: "anonymous", user: null });
   } catch {
     // getCurrentUser() already normalizes a clean 401 to null; this catches
@@ -77,21 +92,25 @@ export async function bootstrapAuth(): Promise<void> {
     // blank placeholder permanently, and an unswallowed rejection here
     // would be an unhandled promise rejection (this runs from a fire-
     // and-forget `void bootstrapAuth()` in useAuth's mount effect).
+    if (token !== latestIdentityToken) return;
     setState({ status: "anonymous", user: null });
   }
 }
 
 export async function login(email: string, password: string): Promise<void> {
+  latestIdentityToken++;
   const user = await apiLogin({ email, password });
   setState(stateFor(user));
 }
 
 export async function register(email: string, password: string): Promise<void> {
+  latestIdentityToken++;
   const user = await apiRegister({ email, password });
   setState(stateFor(user));
 }
 
 export async function logout(): Promise<void> {
+  latestIdentityToken++;
   try {
     await apiLogout();
   } catch {
@@ -114,8 +133,12 @@ export { ApiClientError };
 // The 401 interceptor (api.ts) fires for ANY endpoint, not just this
 // store's own calls -- e.g. a stale AccountMenu action racing a session
 // expiry. Registered once at module load, which runs exactly once per
-// page (ES modules are singletons), so there is no double-subscription
-// to guard against.
+// PRODUCTION page load (ES modules are singletons there). Under Vite
+// HMR in dev, a hot-reload of this file DOES re-run this line against
+// api.ts's still-live listener Set, adding a second subscriber -- but
+// the resulting duplicate setState({status:"anonymous"}) call is
+// idempotent (subscribeAuth's listeners just re-render), so it is a
+// harmless dev-only quirk, not a guard this code needs to add.
 onUnauthorized(() => {
   if (state.status === "signed-in" || state.status === "unknown") {
     setState({ status: "anonymous", user: null });

@@ -102,6 +102,40 @@ describe("logout", () => {
   });
 });
 
+describe("bootstrapAuth vs login race", () => {
+  it("a slow bootstrap response arriving AFTER a fast login does not revert signed-in state", async () => {
+    // Reproduces the race a review caught: bootstrapAuth() fires on mount
+    // and hits GET /v1/auth/me with whatever cookie existed at that
+    // moment. If login() finishes first, the slow bootstrap response --
+    // reflecting the PRE-login cookie -- must not silently stomp the
+    // signed-in state it set.
+    let resolveBootstrapFetch!: (value: Response) => void;
+    const bootstrapPromise = new Promise<Response>((resolve) => {
+      resolveBootstrapFetch = resolve;
+    });
+    vi.mocked(fetch).mockReturnValueOnce(bootstrapPromise);
+
+    const bootstrapCall = bootstrapAuth(); // does not resolve yet
+
+    const loggedInUser = {
+      request_id: "req_1",
+      user_id: "usr_e",
+      email: "e@example.com",
+      anonymous: false,
+    };
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(loggedInUser));
+    await login("e@example.com", "correct horse battery");
+    expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: loggedInUser });
+
+    // NOW the slow bootstrap response lands, reflecting the stale
+    // pre-login (anonymous) cookie.
+    resolveBootstrapFetch(jsonResponse(ANON_401, 401));
+    await bootstrapCall;
+
+    expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: loggedInUser });
+  });
+});
+
 describe("subscribeAuth", () => {
   it("notifies listeners on state change", async () => {
     const listener = vi.fn();
