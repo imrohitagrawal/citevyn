@@ -191,6 +191,15 @@ describe("account-linking return-trip toast (ADR-0004 PR 13)", () => {
     expect(await screen.findByText(/Sign out, sign in again, then retry/)).toBeInTheDocument();
   });
 
+  it("?connect=error&reason=denied says the connection was cancelled, not that sign-in failed", async () => {
+    // Found live: cancelling the provider's consent mid-connect must not
+    // read as a failed sign-in to a user who is still signed in.
+    setSearch("?connect=error&reason=denied&provider=github");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Connection cancelled. Nothing was changed.")).toBeInTheDocument();
+    expect(screen.queryByText("Sign-in failed. Try again.")).not.toBeInTheDocument();
+  });
+
   it("?connect=error with an unknown reason falls back to a generic retry message", async () => {
     setSearch("?connect=error&reason=provider&provider=github");
     render(<LandingPage theme="light" onThemeChange={() => {}} />);

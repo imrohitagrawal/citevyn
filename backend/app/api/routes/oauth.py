@@ -782,6 +782,37 @@ async def _handle_connect_intent(
     return RedirectResponse(f"/?connect=ok&provider={provider}", status_code=status.HTTP_302_FOUND)
 
 
+async def _claim_nonce(
+    db: AsyncSession, state: str | None, provider: str, auth_session_id: uuid.UUID | None
+) -> OAuthNonce | None:
+    """Atomically consume the nonce ``state`` names -- only if every predicate matches.
+
+    The single-use + session-binding mechanism the module docstring
+    describes: one ``DELETE ... WHERE nonce_id AND provider AND
+    auth_session_id ... RETURNING``. A malformed ``state``, or no current
+    session, matches nothing and deletes nothing. Returns the claimed row
+    (already deleted, captured in Python) or ``None``. Commits.
+    """
+    if not state or auth_session_id is None:
+        return None
+    try:
+        nonce_id = uuid.UUID(hex=state)
+    except ValueError:
+        return None
+    claimed = await db.execute(
+        delete(OAuthNonce)
+        .where(
+            OAuthNonce.nonce_id == nonce_id,
+            OAuthNonce.provider == provider,
+            OAuthNonce.auth_session_id == auth_session_id,
+        )
+        .returning(OAuthNonce)
+    )
+    nonce = claimed.scalar_one_or_none()
+    await db.commit()
+    return nonce
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/auth/oauth/{provider}/callback
 # ---------------------------------------------------------------------------
@@ -820,10 +851,37 @@ async def oauth_callback(
         await db.commit()
         return RedirectResponse(location or failure_location, status_code=status.HTTP_302_FOUND)
 
+    # Session binding is resolved up front and baked directly into every
+    # claim's WHERE clause (see below) -- not checked afterward on whatever
+    # got returned. A caller with no valid session at all can never be the
+    # browser that started the flow, so the claims below fail closed without
+    # even being attempted (also sidesteps a SQL NULL-comparison footgun:
+    # comparing a bind of Python None to auth_session_id would compile to
+    # "IS NULL", which could wrongly match a nonce whose own
+    # auth_session_id happens to be NULL).
+    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
+
     # 1. Provider declined consent — audited (the "oauth_denied" event this
-    #    codebase's own audit-metadata contract names) but otherwise no
-    #    state/nonce/identity work is touched.
+    #    codebase's own audit-metadata contract names). No identity work is
+    #    touched, but the nonce IS consumed if -- and only if -- it is ours
+    #    (same session-bound conditional claim as the success path, so an
+    #    attacker replaying a victim's state with error=access_denied still
+    #    deletes nothing): a declined state can never complete, and the
+    #    claimed row's intent is what tells a CONNECT attempt apart from a
+    #    LOGIN one. Without this, cancelling "Connect GitHub" reported
+    #    "Sign-in failed" to a user who is still signed in (found live).
+    #    Still checked BEFORE provider validation, per PR 12's ordering: an
+    #    unknown provider + error= gets the same /?auth=error as before.
     if request.query_params.get("error"):
+        denied = await _claim_nonce(
+            db, request.query_params.get("state"), provider, current_auth_session_id
+        )
+        if denied is not None and denied.return_intent == _INTENT_CONNECT:
+            return await _fail(
+                "oauth_denied",
+                user_id=await _resolve_connect_target(db, denied),
+                location=_connect_error_location(provider, "denied"),
+            )
         return await _fail("oauth_denied")
 
     # 2. Defense in depth — the callback URL is guessable/bookmarkable even
@@ -836,20 +894,6 @@ async def oauth_callback(
     if not state or not code:
         return await _fail("oauth_state_invalid")
 
-    try:
-        nonce_id = uuid.UUID(hex=state)
-    except ValueError:
-        return await _fail("oauth_state_invalid")
-
-    # Session binding is resolved BEFORE the claim and baked directly into
-    # its WHERE clause (see below) -- not checked afterward on whatever got
-    # returned. A caller with no valid session at all can never be the
-    # browser that started the flow, so this fails closed without even
-    # attempting a claim (also sidesteps a SQL NULL-comparison footgun:
-    # comparing a bind of Python None to auth_session_id would compile to
-    # "IS NULL", which could wrongly match a nonce whose own
-    # auth_session_id happens to be NULL).
-    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
     if current_auth_session_id is None:
         return await _fail("oauth_state_invalid")
 
@@ -874,17 +918,7 @@ async def oauth_callback(
     #      is harmless, and a SQL-side comparison against a bind time
     #      would risk the same naive/aware datetime mismatch
     #      `_to_naive_utc` exists to paper over on the Python side.
-    claimed = await db.execute(
-        delete(OAuthNonce)
-        .where(
-            OAuthNonce.nonce_id == nonce_id,
-            OAuthNonce.provider == provider,
-            OAuthNonce.auth_session_id == current_auth_session_id,
-        )
-        .returning(OAuthNonce)
-    )
-    nonce = claimed.scalar_one_or_none()
-    await db.commit()
+    nonce = await _claim_nonce(db, state, provider, current_auth_session_id)
 
     if nonce is None:
         return await _fail("oauth_state_invalid")

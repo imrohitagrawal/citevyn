@@ -188,6 +188,11 @@ claimed nonce's `return_intent`:
 | `connect` | identity already linked to a **different** account — never reassigned | `/?connect=error&reason=already_linked&provider={provider}` |
 | `connect` | the starting session is no longer a live registered account | `/?connect=error&reason=session&provider={provider}` |
 | `connect` | provider error after the nonce was claimed | `/?connect=error&reason=provider&provider={provider}` |
+| `connect` | the user declined the provider's consent screen | `/?connect=error&reason=denied&provider={provider}` |
+
+A declined consent (`?error=…`) consumes the caller's own nonce (same
+session-bound conditional claim) and routes by its intent; a `state` that is
+not the caller's own is left untouched, so it cannot be burned by a third party.
 
 Linking writes exactly one `user_identities` row: it never creates a `users`
 row, never changes `users.email`, and never rotates the caller's session

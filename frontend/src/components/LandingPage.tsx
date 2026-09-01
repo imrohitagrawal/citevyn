@@ -45,6 +45,9 @@ function connectErrorMessage(reason: string | null, label: string | undefined): 
       ? `${label} is already connected to a different CiteVyn account.`
       : "That account is already connected to a different CiteVyn account.";
   }
+  if (reason === "denied") {
+    return "Connection cancelled. Nothing was changed.";
+  }
   if (reason === "session") {
     return "Your sign-in is too old to connect an account. Sign out, sign in again, then retry.";
   }

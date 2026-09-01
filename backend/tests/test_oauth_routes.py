@@ -1513,3 +1513,73 @@ def test_connect_failure_audit_event_records_the_metadata_event_string(
     failed = [e for e in _query_all(AuditEvent) if e.action == AuditAction.auth_failed]
     assert failed[-1].user_id is None
     assert failed[-1].metadata_ == {"event": "oauth_connect_no_session", "provider": "google"}
+
+
+def test_connect_denial_redirects_to_the_connect_error_and_consumes_the_nonce(
+    oauth_client: TestClient,
+) -> None:
+    """Found live: cancelling the provider's consent screen mid-CONNECT showed
+    "Sign-in failed" to a still-signed-in user. RED if the denial branch stops
+    claiming the nonce / routing by its intent."""
+    user_id = _register(oauth_client, "deny@example.com")
+    start = _connect_start(oauth_client, "github")
+    state = _state_from_start_response(start)
+    assert len(_query_all(OAuthNonce)) == 1
+
+    response = oauth_client.get(
+        "/v1/auth/oauth/github/callback",
+        params={"error": "access_denied", "state": state},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/?connect=error&reason=denied&provider=github"
+    assert _query_all(OAuthNonce) == [], "a declined nonce can never complete -- consume it"
+    assert _query_all(UserIdentity) == []
+    assert _me(oauth_client).status_code == 200, "still signed in"
+    denied = [e for e in _query_all(AuditEvent) if e.metadata_.get("event") == "oauth_denied"]
+    assert [(e.user_id, e.metadata_) for e in denied] == [
+        (user_id, {"event": "oauth_denied", "provider": "github"})
+    ]
+
+
+def test_login_denial_is_unchanged_and_also_consumes_its_own_nonce(
+    oauth_client: TestClient,
+) -> None:
+    start = _start(oauth_client, "github")
+    state = _state_from_start_response(start)
+    response = oauth_client.get(
+        "/v1/auth/oauth/github/callback",
+        params={"error": "access_denied", "state": state},
+        headers={"Authorization": DEMO_BEARER},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/?auth=error"
+    assert _query_all(OAuthNonce) == []
+
+
+def test_denial_from_a_different_browser_does_not_burn_the_victims_nonce(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """The griefing guard from PR 12, applied to the new denial-time claim:
+    an attacker replaying a victim's state with error=access_denied must
+    delete NOTHING. RED if the denial claim drops the auth_session_id
+    predicate."""
+    _register(oauth_client, "victim@example.com")
+    start = _connect_start(oauth_client, "github")
+    state = _state_from_start_response(start)
+
+    attacker = TestClient(create_app())
+    attacker.post("/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER})
+    response = attacker.get(
+        "/v1/auth/oauth/github/callback",
+        params={"error": "access_denied", "state": state},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/?auth=error"
+    assert len(_query_all(OAuthNonce)) == 1, "the victim's nonce must survive"
+
+    # ...and the victim can still complete their connect afterward.
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="v@example.com"
+    )
+    victim = _callback(oauth_client, "github", state=state)
+    assert victim.headers["location"] == "/?connect=ok&provider=github"
