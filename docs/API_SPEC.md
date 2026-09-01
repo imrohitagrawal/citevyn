@@ -141,11 +141,14 @@ not silently replaced.
 
 ## 4b. OAuth login + account linking (ADR-0004 PR 12 / PR 13)
 
-These are **browser navigations**, not API calls: no demo bearer, no JSON.
-They are rate-limited per visitor like every other public route
-(`rate_limited_oauth_navigation`), and always answer with a redirect. The
+These are **browser navigations**, not API calls: no demo bearer, no JSON
+body. They are rate-limited per visitor like every other public route
+(`rate_limited_oauth_navigation`) and answer with a redirect. The
 `{provider}` segment is `github` or `google`; anything else, or a provider
-without credentials configured, is a quiet `404`.
+without credentials configured, is a quiet `404` — with one exception:
+`callback` handles a provider-declined `?error=` **before** validating the
+provider, so an unknown provider plus `?error=` redirects like any other
+declined login (`/?auth=error`) rather than 404ing.
 
 ```http
 GET /v1/auth/oauth/{provider}/start
@@ -191,9 +194,12 @@ claimed nonce's `return_intent`:
 | `connect` | provider error after the nonce was claimed | `/?connect=error&reason=provider&provider={provider}` |
 | `connect` | the user declined the provider's consent screen | `/?connect=error&reason=denied&provider={provider}` |
 
-Failures **before** the nonce is claimed — a missing, malformed or replayed
-`state`, or a starting session that was revoked or rotated in the meantime —
-cannot know the intent and redirect to `/?auth=error` for both flows.
+Failures **before** the nonce is claimed — a missing `code`, a missing,
+malformed or replayed `state`, or a starting session that was revoked or
+rotated in the meantime — cannot know the intent and redirect to
+`/?auth=error` for both flows (nonce left intact where it exists). An
+unrecognised `return_intent` on a claimed nonce also fails closed to
+`/?auth=error`.
 
 A declined consent (`?error=…`) consumes the caller's own nonce (same
 session-bound conditional claim) and routes by its intent; a `state` that is

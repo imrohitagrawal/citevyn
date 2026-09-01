@@ -1,4 +1,4 @@
-"""OAuth login routes: GitHub + Google (ADR-0004 PR 12).
+"""OAuth login + account-linking routes: GitHub + Google (ADR-0004 PR 12 / PR 13).
 
 Separate from ``auth.py`` (which frames itself as "register, login, logout,
 me" against a JSON request body) because this is a meaningfully different
@@ -14,10 +14,13 @@ declined consent) is checked and redirected on BEFORE the provider is
 validated, per the plan's own explicit step ordering — an unknown/bogus
 provider combined with ``error=access_denied`` gets the same ``/?auth=error``
 redirect an unknown provider without ``error=`` would 404 on. This leaks
-nothing an attacker doesn't already have (the response is byte-for-byte
-identical regardless of whether the provider is real, unconfigured, or
-nonexistent, and the two configured provider names are already public in
-the frontend bundle) — confirmed by adversarial review, not assumed.
+nothing an attacker doesn't already have: for a caller with no matching
+nonce the response is byte-for-byte identical regardless of whether the
+provider is real, unconfigured, or nonexistent, and the two configured
+provider names are already public in the frontend bundle — confirmed by
+adversarial review, not assumed. (PR 13: a caller holding their OWN
+connect nonce for a real provider is redirected to the connect-shaped
+error instead — that tells them only which flow they themselves started.)
 
 State / PKCE mechanism
 -----------------------
@@ -467,8 +470,9 @@ async def oauth_start(
 
 
 def _connect_error_location(provider: str, reason: str) -> str:
-    # ``provider`` is only ever a validated _PROVIDERS key by the time this
-    # is called, never raw path input -- so it is safe to echo into the URL.
+    # ``provider`` is only ever a validated _PROVIDERS key (or a claimed
+    # nonce's own ``provider`` column, which _start_oauth_flow writes only
+    # after validation) -- never raw path input -- so it is safe to echo.
     return f"/?connect=error&reason={reason}&provider={provider}"
 
 
@@ -886,10 +890,14 @@ async def oauth_callback(
             db, request.query_params.get("state"), provider, current_auth_session_id
         )
         if denied is not None and denied.return_intent == _INTENT_CONNECT:
+            # denied.provider, not the raw path segment: only _start_oauth_flow
+            # writes that column, and only after _require_provider, so this
+            # keeps _connect_error_location's "validated provider only"
+            # property structural rather than transitive (review round 2).
             return await _fail(
                 "oauth_denied",
                 user_id=await _resolve_connect_target(db, denied),
-                location=_connect_error_location(provider, "denied"),
+                location=_connect_error_location(denied.provider, "denied"),
             )
         return await _fail("oauth_denied")
 
