@@ -136,8 +136,13 @@ def _issue_cookie(
 
 async def _create_auth_session(
     db: AsyncSession, settings: Settings, response: Response, *, user_id: str
-) -> None:
-    """Persist a fresh :class:`AuthSession` row for ``user_id`` and set its cookie."""
+) -> uuid.UUID:
+    """Persist a fresh :class:`AuthSession` row for ``user_id`` and set its cookie.
+
+    Returns the new row's id — most callers don't need it (the cookie is
+    the client-facing artifact), but :func:`ensure_auth_session` (ADR-0004
+    PR 12) does, to bind an OAuth nonce to it.
+    """
     auth_session_id = uuid.uuid4()
     secret = secrets.token_hex(32)  # 32 random bytes, hex-encoded (64 chars)
     now = _now()
@@ -152,9 +157,12 @@ async def _create_auth_session(
     )
     await db.flush()
     _issue_cookie(response, settings, auth_session_id=auth_session_id, secret=secret)
+    return auth_session_id
 
 
-async def _mint_principal(db: AsyncSession, settings: Settings, response: Response) -> str:
+async def _mint_principal(
+    db: AsyncSession, settings: Settings, response: Response
+) -> tuple[str, uuid.UUID]:
     """Create a new anonymous principal, persist its auth session, and set the cookie.
 
     Every write here is a ``flush``, not a ``commit`` — the route's own
@@ -166,11 +174,15 @@ async def _mint_principal(db: AsyncSession, settings: Settings, response: Respon
     that cookie fails to resolve it (``_lookup_principal`` returns ``None``)
     and transparently mints a replacement. No orphaned, unusable identity
     can be "stuck" client-side.
+
+    Returns ``(principal_id, auth_session_id)`` — most callers only need the
+    principal id, but :func:`ensure_auth_session` (ADR-0004 PR 12) needs the
+    session id too.
     """
     principal_id = f"anon_{uuid.uuid4().hex}"
     db.add(User(user_id=principal_id, role=UserRole.demo_user, created_at=_now()))
-    await _create_auth_session(db, settings, response, user_id=principal_id)
-    return principal_id
+    auth_session_id = await _create_auth_session(db, settings, response, user_id=principal_id)
+    return principal_id, auth_session_id
 
 
 async def try_resolve_principal(
@@ -188,6 +200,47 @@ async def try_resolve_principal(
     if not cookie_value:
         return None
     return await _lookup_principal(db, cookie_value)
+
+
+async def try_resolve_auth_session_id(
+    request: Request, db: AsyncSession, settings: Settings
+) -> uuid.UUID | None:
+    """Resolve the caller's CURRENT ``AuthSession`` id from its cookie, or ``None``.
+
+    Used by ``GET /v1/auth/oauth/{provider}/callback`` (ADR-0004 PR 12) to
+    check that the browser completing the flow is the SAME one that started
+    it: the nonce row's stored ``auth_session_id`` must equal this value, not
+    merely exist. Deliberately returns the session id rather than the
+    principal id — :func:`try_resolve_principal` answers "who is this", this
+    answers "which browser session is this", and the two differ the moment
+    two tabs share one cookie but only one of them started the OAuth flow.
+    """
+    cookie_value = request.cookies.get(_cookie_name(settings))
+    if not cookie_value:
+        return None
+    row = await _lookup_auth_session(db, cookie_value)
+    return row.auth_session_id if row is not None else None
+
+
+async def ensure_auth_session(
+    request: Request, response: Response, db: AsyncSession, settings: Settings
+) -> uuid.UUID:
+    """Return the caller's ``AuthSession`` id, minting an anonymous one if needed.
+
+    Used by ``GET /v1/auth/oauth/{provider}/start`` (ADR-0004 PR 12): the
+    OAuth nonce needs an ``auth_session_id`` to bind to before any redirect
+    happens. Mirrors :func:`resolve_principal`'s transparent-mint behavior
+    (reuse the current cookie if it resolves; mint a fresh anonymous
+    principal otherwise) but returns the session id, which is what the
+    nonce actually needs — not the principal id.
+    """
+    cookie_value = request.cookies.get(_cookie_name(settings))
+    if cookie_value:
+        row = await _lookup_auth_session(db, cookie_value)
+        if row is not None:
+            return row.auth_session_id
+    _, auth_session_id = await _mint_principal(db, settings, response)
+    return auth_session_id
 
 
 async def claim_and_login(
@@ -288,12 +341,15 @@ async def resolve_principal(
         principal_id = await _lookup_principal(db, cookie_value)
         if principal_id is not None:
             return principal_id
-    return await _mint_principal(db, settings, response)
+    principal_id, _ = await _mint_principal(db, settings, response)
+    return principal_id
 
 
 __all__ = [
     "claim_and_login",
+    "ensure_auth_session",
     "resolve_principal",
     "revoke_current_session",
+    "try_resolve_auth_session_id",
     "try_resolve_principal",
 ]

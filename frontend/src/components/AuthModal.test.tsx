@@ -9,6 +9,7 @@ import { __testOnly } from "../lib/authStore";
 // AuthModal renders through useAuth -> authStore -> api.ts. Mock the wire
 // layer only; authStore and useAuth run for real, same as authStore.test.ts.
 vi.mock("../lib/api", () => ({
+  API_BASE_URL: "",
   getCurrentUser: vi.fn(() => Promise.resolve(null)),
   login: vi.fn(),
   register: vi.fn(),
@@ -156,5 +157,47 @@ describe("AuthModal form", () => {
     await user.click(within(dialog).getByText("Need an account? Register"));
     expect(within(dialog).getByRole("heading", { name: "Create an account" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Create account" })).toBeInTheDocument();
+  });
+});
+
+describe("AuthModal OAuth buttons (ADR-0004 PR 12)", () => {
+  const originalLocation = window.location;
+
+  beforeEach(async () => {
+    // @ts-expect-error -- jsdom's window.location is not directly assignable
+    delete window.location;
+    // @ts-expect-error -- a minimal stand-in is enough; only .href is read
+    window.location = { ...originalLocation, href: "" };
+    const { login } = await import("../lib/api");
+    vi.mocked(login).mockClear();
+  });
+
+  afterEach(() => {
+    // @ts-expect-error -- restoring jsdom's original window.location
+    window.location = originalLocation;
+  });
+
+  it("clicking 'Continue with GitHub' is a real navigation, not an apiFetch call", async () => {
+    const { login } = await import("../lib/api");
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+
+    await user.click(within(dialog).getByRole("button", { name: "Continue with GitHub" }));
+
+    expect(window.location.href).toMatch(/\/v1\/auth\/oauth\/github\/start$/);
+    expect(login).not.toHaveBeenCalled();
+  });
+
+  it("clicking 'Continue with Google' is a real navigation, not an apiFetch call", async () => {
+    const { login } = await import("../lib/api");
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+
+    await user.click(within(dialog).getByRole("button", { name: "Continue with Google" }));
+
+    expect(window.location.href).toMatch(/\/v1\/auth\/oauth\/google\/start$/);
+    expect(login).not.toHaveBeenCalled();
   });
 });

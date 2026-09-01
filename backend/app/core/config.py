@@ -144,6 +144,24 @@ class Settings(BaseSettings):
     index_session_ttl_seconds: int = Field(default=60 * 60 * 24, ge=1)
     pg_test_url: str | None = None
 
+    # --- OAuth login: GitHub + Google (ADR-0004 PR 12) ---
+    # Flat fields, matching the gemini_api_key/openrouter_api_key idiom above --
+    # no nested OAuthConfig object, no precedent for nesting anywhere in this
+    # class. "Available" is always bool(client_id and client_secret), computed
+    # at the call site -- never a parallel _enabled flag.
+    github_oauth_client_id: str | None = None
+    github_oauth_client_secret: str | None = None
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    # The exact-match redirect-URI requirement means the backend must send a
+    # fixed, config-derived https://<host>/v1/auth/oauth/{provider}/callback to
+    # the provider -- NEVER derived from request.base_url/Host at request time
+    # (a request through a proxy/CDN could present a spoofed Host; deriving the
+    # redirect URI from client-influenced input is exactly the open-redirect
+    # risk the exact-match requirement exists to close). Falls back to
+    # http://localhost:8000 when unset, for local dev.
+    oauth_redirect_base_url: str | None = None
+
     # --- Auth session cookie (ADR-0004 PR 3) ---
     # 180 days: long enough that a returning anonymous visitor keeps their
     # pseudonymous identity (and, once ADR-0004 PR 6 ships, stays logged in)
@@ -516,6 +534,42 @@ class Settings(BaseSettings):
                     else "shorter than the 16-character minimum"
                 )
                 + " and is not allowed."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_half_configured_oauth_providers(self) -> "Settings":
+        # A half-configured provider (client_id set, secret missing, or vice
+        # versa) is a config bug in ANY environment, not just prod --
+        # unconditional, unlike the production-only guards above. A caller
+        # would otherwise 404 or fail mysteriously depending on which half
+        # `bool(client_id and client_secret)` happens to have.
+        for label, client_id, client_secret in (
+            ("GITHUB", self.github_oauth_client_id, self.github_oauth_client_secret),
+            ("GOOGLE", self.google_oauth_client_id, self.google_oauth_client_secret),
+        ):
+            if bool(client_id) != bool(client_secret):
+                raise ValueError(
+                    f"CITEVYN_{label}_OAUTH_CLIENT_ID and CITEVYN_{label}_OAUTH_CLIENT_SECRET "
+                    "must be set together, or both left unset."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _require_oauth_redirect_base_url_in_production(self) -> "Settings":
+        # A missing/wrong base URL is otherwise a silent-until-someone-
+        # clicks-the-button failure: `start` would send a redirect_uri the
+        # provider was never registered with, and the provider rejects the
+        # whole flow with no code path in this app to explain why.
+        oauth_configured = bool(self.github_oauth_client_id or self.google_oauth_client_id)
+        if (
+            self.environment == "production"
+            and oauth_configured
+            and not self.oauth_redirect_base_url
+        ):
+            raise ValueError(
+                "CITEVYN_OAUTH_REDIRECT_BASE_URL must be set when an OAuth provider "
+                "is configured and CITEVYN_ENVIRONMENT='production'."
             )
         return self
 

@@ -87,3 +87,55 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
     expect(screen.queryByText("Your conversation is saved to your account.")).not.toBeInTheDocument();
   });
 });
+
+describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
+  const originalLocation = window.location;
+
+  afterEach(() => {
+    // @ts-expect-error -- restoring jsdom's original window.location
+    window.location = originalLocation;
+  });
+
+  function setSearch(search: string) {
+    // @ts-expect-error -- jsdom's window.location is not directly assignable
+    delete window.location;
+    // @ts-expect-error -- a minimal stand-in is enough; only .search/.pathname are read
+    window.location = { ...originalLocation, search, pathname: "/" };
+  }
+
+  it("shows a welcome toast for ?auth=ok and strips the param", async () => {
+    setSearch("?auth=ok");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/");
+  });
+
+  it("shows a failure toast for ?auth=error and strips the param", async () => {
+    setSearch("?auth=error");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    expect(await screen.findByText("Sign-in failed. Try again.")).toBeInTheDocument();
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/");
+  });
+
+  it("a second mount (simulating a refresh) does not re-fire the toast once the param is gone", async () => {
+    setSearch(""); // the param has already been stripped by the first mount
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(screen.queryByText("Welcome to CiteVyn.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in failed. Try again.")).not.toBeInTheDocument();
+  });
+
+  it("does nothing when there is no auth param at all", async () => {
+    setSearch("?foo=bar");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(screen.queryByText("Welcome to CiteVyn.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sign-in failed. Try again.")).not.toBeInTheDocument();
+    expect(replaceSpy).not.toHaveBeenCalled();
+  });
+});
