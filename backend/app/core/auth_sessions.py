@@ -178,9 +178,22 @@ async def _mint_principal(
     Returns ``(principal_id, auth_session_id)`` — most callers only need the
     principal id, but :func:`ensure_auth_session` (ADR-0004 PR 12) needs the
     session id too.
+
+    **Pre-existing bug fixed here:** the ``User`` row must be flushed on its
+    own, BEFORE ``_create_auth_session`` adds the ``AuthSession`` row that
+    references it. Without an explicit ORM ``relationship()`` between the
+    two mapped classes (this codebase only declares the raw FK column),
+    SQLAlchemy does not reliably order a single combined flush's INSERT
+    statements by that FK dependency — on real Postgres this let the
+    ``AuthSession`` insert run before the ``User`` insert and fail with a
+    foreign-key violation on EVERY first-time anonymous visitor. Invisible
+    to the hermetic SQLite test suite because SQLite foreign-key enforcement
+    is off for this app's engine (no ``PRAGMA foreign_keys=ON`` anywhere in
+    ``app.core.db``) — found only by live-testing against real Postgres.
     """
     principal_id = f"anon_{uuid.uuid4().hex}"
     db.add(User(user_id=principal_id, role=UserRole.demo_user, created_at=_now()))
+    await db.flush()
     auth_session_id = await _create_auth_session(db, settings, response, user_id=principal_id)
     return principal_id, auth_session_id
 
