@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useRef, useReducer } from "react";
 import { matchKB, matchCitevynMeta, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
+import { getAuthSnapshot } from "../lib/authStore";
 import { ApiClientError, type StoredMessage, type Suggestion } from "../lib/types";
 import { useToast } from "./useToast";
 
@@ -497,6 +498,13 @@ export function useLandingState() {
         // This is CiteVyn's own request throttle (not a provider quota), so it
         // clears on its own — "wait a moment" is the right, non-technical guidance.
         message = "You're sending requests a little too quickly — please wait a moment and try again.";
+        // A signed-in caller is already on the higher tier (ADR-0004 PR 11) —
+        // pitching them to sign in again would be wrong, so only an anonymous
+        // visitor sees the upsell. Read via getAuthSnapshot() (no subscription)
+        // per the deliberate auth/chat-state separation from PR 9.
+        if (getAuthSnapshot().status !== "signed-in") {
+          message += " Sign in for a higher limit.";
+        }
       } else if (apiErr?.errorCode() === "rate_limiter_unavailable") {
         // The throttle's backing store (Redis) is down and the server rejects
         // fail-closed (#167). This is NOT the answer service failing, so the
