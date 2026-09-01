@@ -16,6 +16,7 @@ dependencies = [
     "redis>=8.0.1",
     "sqlalchemy[asyncio]>=2.0.52",
     "uvicorn[standard]>=0.52.3",
+    "argon2-cffi>=25.1.0",
 ]
 
 [dependency-groups]
