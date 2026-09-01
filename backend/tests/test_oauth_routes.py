@@ -26,7 +26,16 @@ from app.core import db as db_module
 from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
-from app.models import AuditAction, AuditEvent, Base, OAuthNonce, Session, User, UserIdentity
+from app.models import (
+    AuditAction,
+    AuditEvent,
+    Base,
+    OAuthNonce,
+    Session,
+    User,
+    UserIdentity,
+    UserRole,
+)
 
 DEMO_BEARER = "Bearer local-demo-key"
 
@@ -272,14 +281,21 @@ def test_callback_rejects_state_from_a_different_provider(
     monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
 ) -> None:
     """A naive check that only asks 'does any valid nonce exist' would miss
-    this -- the row exists and is unexpired, but was minted for github."""
+    this -- the row exists and is unexpired, but was minted for github.
+
+    The nonce is atomically CLAIMED (deleted) before its fields are even
+    checked -- see oauth.py's module docstring on why this is a DELETE...
+    RETURNING, not a SELECT-then-delete -- so a mismatched-provider attempt
+    still consumes the row rather than leaving it retryable."""
     start = _start(oauth_client, "github")
     state = _state_from_start_response(start)
     _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="a@example.com")
     response = _callback(oauth_client, "google", state=state)
     assert response.headers["location"] == "/?auth=error"
-    # The nonce must survive an invalid attempt, not be silently consumed.
-    assert len(_query_all(OAuthNonce)) == 1
+    assert len(_query_all(OAuthNonce)) == 0
+    # And the consumed nonce cannot be retried against the correct provider either.
+    replay = _callback(oauth_client, "github", state=state)
+    assert replay.headers["location"] == "/?auth=error"
 
 
 def test_callback_rejects_state_bound_to_a_different_browser_session(
@@ -365,7 +381,12 @@ def test_callback_sends_the_pkce_code_verifier_in_the_token_exchange(
     assert f"code_verifier={sent_verifier}" in body
 
 
-def test_provider_denial_redirects_without_touching_the_database(oauth_client: TestClient) -> None:
+def test_provider_denial_redirects_and_is_audited_but_creates_no_user(
+    oauth_client: TestClient,
+) -> None:
+    """No nonce/identity/user work happens on denial -- only the audit
+    write, whose 'oauth_denied' event name this project's own audit-
+    metadata contract (the plan's §6) already reserves for exactly this."""
     response = oauth_client.get(
         "/v1/auth/oauth/github/callback",
         params={"error": "access_denied"},
@@ -373,7 +394,10 @@ def test_provider_denial_redirects_without_touching_the_database(oauth_client: T
         follow_redirects=False,
     )
     assert response.headers["location"] == "/?auth=error"
-    assert _query_all(AuditEvent) == []
+    events = _query_all(AuditEvent)
+    assert len(events) == 1
+    assert events[0].action == AuditAction.auth_failed
+    assert events[0].metadata_ == {"event": "oauth_denied", "provider": "github"}
     assert _query_all(User) == []
 
 
@@ -561,3 +585,147 @@ def test_callback_404s_for_unknown_provider(oauth_client: TestClient) -> None:
         headers={"Authorization": DEMO_BEARER},
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# a REAL browser navigation carries no Authorization header -- regression
+# for the CRITICAL_BLOCKER an adversarial review round found: both routes
+# depended on the same demo-bearer dependency as the JSON auth routes,
+# which no top-level navigation (window.location.href, or the provider's
+# own 302 back to /callback) can ever attach.
+# ---------------------------------------------------------------------------
+
+
+def test_start_works_with_no_authorization_header_at_all(oauth_client: TestClient) -> None:
+    response = oauth_client.get("/v1/auth/oauth/github/start", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"].startswith("https://github.com/login/oauth/authorize")
+
+
+def test_callback_works_with_no_authorization_header_at_all(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="nobearer@example.com"
+    )
+    start = oauth_client.get("/v1/auth/oauth/github/start", follow_redirects=False)
+    state = _state_from_start_response(start)
+    response = oauth_client.get(
+        "/v1/auth/oauth/github/callback",
+        params={"code": "auth-code-1", "state": state},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/?auth=ok"
+
+
+# ---------------------------------------------------------------------------
+# malformed provider payload -> graceful redirect + audit, never a raw 500
+# ---------------------------------------------------------------------------
+
+
+def test_userinfo_missing_the_provider_account_id_field_redirects_not_500(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "gh-token-abc"})
+        if url.startswith("https://api.github.com/user"):
+            # Missing "id" entirely -- a malformed/unexpected provider payload.
+            return httpx.Response(200, json={"login": "octocat"})
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    start = _start(oauth_client, "github")
+    response = _callback(oauth_client, "github", state=_state_from_start_response(start))
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?auth=error"
+    events = _query_all(AuditEvent)
+    assert any(e.metadata_.get("event") == "oauth_provider_error" for e in events)
+
+
+def test_token_response_is_not_a_json_object_redirects_not_500(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            # A bare JSON array instead of the expected object.
+            return httpx.Response(200, json=["not", "an", "object"])
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    start = _start(oauth_client, "github")
+    response = _callback(oauth_client, "github", state=_state_from_start_response(start))
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?auth=error"
+
+
+# ---------------------------------------------------------------------------
+# concurrent first-time logins for the SAME external identity
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_first_time_identity_creation_resolves_to_the_winner_not_500(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Simulates the losing side of a race: a UserIdentity for this exact
+    (provider, provider_account_id) is seeded DIRECTLY (bypassing the
+    'not found' check this request already passed) right before the
+    request's own insert, forcing the real uq_user_identities_provider_account
+    constraint to fire. Must resolve to the pre-existing (winning) identity's
+    user, not surface a raw IntegrityError/500."""
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="racer@example.com"
+    )
+    start = _start(oauth_client, "github")
+    state = _state_from_start_response(start)
+
+    async def _seed_winner() -> str:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            winner = User(
+                user_id=f"usr_{uuid.uuid4().hex}",
+                role=UserRole.demo_user,
+                created_at=datetime.now(UTC),
+                email=None,
+                password_hash=None,
+            )
+            session.add(winner)
+            await session.flush()
+            session.add(
+                UserIdentity(
+                    identity_id=uuid.uuid4(),
+                    provider="github",
+                    provider_account_id=str(_GITHUB_ACCOUNT_ID),
+                    user_id=winner.user_id,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+            return winner.user_id
+
+    winner_user_id = asyncio.run(_seed_winner())
+
+    response = _callback(oauth_client, "github", state=state)
+    assert response.headers["location"] == "/?auth=ok"
+
+    identities = _query_all(UserIdentity)
+    assert len(identities) == 1, (
+        "the race must not leave two identities for the same external account"
+    )
+    assert identities[0].user_id == winner_user_id
+    registered = [u for u in _query_all(User) if u.user_id.startswith("usr_")]
+    assert len(registered) == 1, "the loser's User row must not be left behind either"

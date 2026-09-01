@@ -20,16 +20,22 @@ including brand-new signups with no fallback path, on a Redis outage. A DB
 row also gets transactional consistency with the ``AuthSession``/``User``
 writes at callback time for free.
 
-Validation at callback, in full, before any side effect (the CSRF
-requirement is explicit that state is checked before any write):
+Validation at callback: the row is claimed via an ATOMIC ``DELETE ...
+RETURNING`` before any of its fields are checked, not a plain ``SELECT``
+followed by a separate delete — two near-simultaneous callbacks racing the
+same ``state`` would otherwise both read a live row and both pass validation
+before either commit landed. Only one concurrent claim can ever get a
+non-``None`` row back; the loser fails closed exactly like a forged state.
+The claimed row (or ``None``) is then checked, in full, before any other
+side effect:
 
-1. ``state`` resolves to a live, unexpired ``oauth_nonces`` row.
-2. The row's ``provider`` matches the URL path's provider.
-3. The row's ``auth_session_id`` equals the CURRENT request's cookie-
-   resolved ``auth_session_id`` — the concrete meaning of "state bound to
-   session": the browser that started the flow must be the one completing
-   it, not merely someone who observed the ``state`` value.
-4. The row is deleted immediately on success (single-use).
+1. A row was actually claimed (``state`` resolved to a live row at all).
+2. It was unexpired at claim time.
+3. Its ``provider`` matches the URL path's provider.
+4. Its ``auth_session_id`` equals the CURRENT request's cookie-resolved
+   ``auth_session_id`` — the concrete meaning of "state bound to session":
+   the browser that started the flow must be the one completing it, not
+   merely someone who observed the ``state`` value.
 
 Identity resolution — the core security logic
 -----------------------------------------------
@@ -57,7 +63,8 @@ from typing import Annotated, Any, cast
 import httpx
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_sessions import (
@@ -69,7 +76,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.oauth_http import OAuthProviderError, get_json, post_form
-from app.core.rate_limit import rate_limited_demo
+from app.core.rate_limit import rate_limited_oauth_navigation
 from app.models import AuditAction, OAuthNonce, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
 
@@ -162,7 +169,10 @@ async def _fetch_identity(
             provider="GitHub",
             error_event="github_userinfo_error",
         )
-        provider_account_id = str(user["id"])
+        raw_id = user.get("id")
+        if raw_id is None:
+            raise OAuthProviderError("GitHub userinfo response missing id")
+        provider_account_id = str(raw_id)
         email = user.get("email")
         email_verified = bool(email)
         if not email:
@@ -198,8 +208,11 @@ async def _fetch_identity(
         provider="Google",
         error_event="google_userinfo_error",
     )
+    raw_sub = userinfo.get("sub")
+    if raw_sub is None:
+        raise OAuthProviderError("Google userinfo response missing sub")
     return _Identity(
-        provider_account_id=str(userinfo["sub"]),
+        provider_account_id=str(raw_sub),
         email=userinfo.get("email"),
         email_verified=bool(userinfo.get("email_verified")),
     )
@@ -264,7 +277,7 @@ async def oauth_start(
     provider: str,
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
+    _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
 ) -> RedirectResponse:
     if provider not in _PROVIDERS:
         raise _not_found(request)
@@ -328,11 +341,24 @@ async def oauth_callback(
     provider: str,
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
-    _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
+    _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
 ) -> RedirectResponse:
-    # 1. Provider declined consent — redirect immediately, no DB read/write.
-    if request.query_params.get("error"):
+    async def _fail(event: str) -> RedirectResponse:
+        await record_audit_event(
+            db,
+            action=AuditAction.auth_failed,
+            user_id=None,
+            role=None,
+            metadata={"event": event, "provider": provider},
+        )
+        await db.commit()
         return RedirectResponse("/?auth=error", status_code=status.HTTP_302_FOUND)
+
+    # 1. Provider declined consent — audited (the "oauth_denied" event this
+    #    codebase's own audit-metadata contract names) but otherwise no
+    #    state/nonce/identity work is touched.
+    if request.query_params.get("error"):
+        return await _fail("oauth_denied")
 
     # 2. Defense in depth — the callback URL is guessable/bookmarkable even
     #    if `start` never ran for this provider.
@@ -346,17 +372,6 @@ async def oauth_callback(
     state = request.query_params.get("state")
     code = request.query_params.get("code")
 
-    async def _fail(event: str) -> RedirectResponse:
-        await record_audit_event(
-            db,
-            action=AuditAction.auth_failed,
-            user_id=None,
-            role=None,
-            metadata={"event": event, "provider": provider},
-        )
-        await db.commit()
-        return RedirectResponse("/?auth=error", status_code=status.HTTP_302_FOUND)
-
     if not state or not code:
         return await _fail("oauth_state_invalid")
 
@@ -365,7 +380,19 @@ async def oauth_callback(
     except ValueError:
         return await _fail("oauth_state_invalid")
 
-    nonce = await db.get(OAuthNonce, nonce_id)
+    # Atomic claim-by-delete: this is what makes "single-use" airtight under
+    # concurrency (two near-simultaneous callbacks racing the same state) --
+    # only ONE of two concurrent DELETE...RETURNING statements against the
+    # same primary key can ever get a non-None row back; the loser's claim
+    # finds nothing and fails closed below, rather than both racing a
+    # separate SELECT-then-delete and both passing validation before either
+    # commit lands.
+    claimed = await db.execute(
+        delete(OAuthNonce).where(OAuthNonce.nonce_id == nonce_id).returning(OAuthNonce)
+    )
+    nonce = claimed.scalar_one_or_none()
+    await db.commit()
+
     if nonce is None:
         return await _fail("oauth_state_invalid")
     if _to_naive_utc(nonce.expires_at) <= _to_naive_utc(_now()):
@@ -376,11 +403,6 @@ async def oauth_callback(
     current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
     if nonce.auth_session_id is None or nonce.auth_session_id != current_auth_session_id:
         return await _fail("oauth_state_invalid")
-
-    # Single-use: delete + commit BEFORE the token exchange, so a failure
-    # past this point can never be retried with the same state.
-    await db.delete(nonce)
-    await db.commit()
 
     config = _PROVIDERS[provider]
     try:
@@ -406,8 +428,13 @@ async def oauth_callback(
             if not isinstance(access_token, str) or not access_token:
                 raise OAuthProviderError(f"{provider} token response missing access_token")
             identity = await _fetch_identity(provider, client, access_token, timeout_seconds=15.0)
-    except OAuthProviderError:
-        return RedirectResponse("/?auth=error", status_code=status.HTTP_302_FOUND)
+    except (OAuthProviderError, AttributeError, TypeError, KeyError):
+        # Covers both a clean OAuthProviderError (timeout, non-2xx, non-JSON
+        # -- see app.core.oauth_http) and a malformed-but-200 payload (a
+        # non-dict body, an expected field missing) that would otherwise
+        # surface as an unhandled 500 instead of the documented "always
+        # redirects, never JSON" contract and leave no audit trail.
+        return await _fail("oauth_provider_error")
 
     # 8. Identity resolution — the core security logic, strict order.
     existing = (
@@ -450,17 +477,42 @@ async def oauth_callback(
             password_hash=None,
         )
         db.add(new_user)
-        await db.flush()
-        db.add(
-            UserIdentity(
-                identity_id=uuid.uuid4(),
-                provider=provider,
-                provider_account_id=identity.provider_account_id,
-                user_id=new_user.user_id,
-                created_at=_now(),
+        try:
+            await db.flush()  # UserIdentity's FK target must exist first
+            db.add(
+                UserIdentity(
+                    identity_id=uuid.uuid4(),
+                    provider=provider,
+                    provider_account_id=identity.provider_account_id,
+                    user_id=new_user.user_id,
+                    created_at=_now(),
+                )
             )
-        )
-        resolved_user_id = new_user.user_id
+            await db.flush()
+        except IntegrityError:
+            # Two concurrent first-time logins for the SAME external
+            # identity both pass the "not found" check above before either
+            # commits -- the loser hits uq_user_identities_provider_account
+            # here instead. Roll back this attempt and resolve to the
+            # WINNING identity rather than surfacing a raw 500 (mirrors
+            # register()'s own handling of the analogous concurrent-
+            # duplicate-email race in app.api.routes.auth).
+            await db.rollback()
+            winner = (
+                await db.execute(
+                    select(UserIdentity).where(
+                        UserIdentity.provider == provider,
+                        UserIdentity.provider_account_id == identity.provider_account_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if winner is None:
+                # Unreachable in practice (the IntegrityError means some row
+                # now satisfies this key) -- fail closed rather than guess.
+                return await _fail("oauth_provider_error")
+            resolved_user_id = winner.user_id
+        else:
+            resolved_user_id = new_user.user_id
 
     # Same placeholder-then-mutate approach as `start`: claim_and_login needs
     # a Response to set the login cookie on, and it must be the SAME object

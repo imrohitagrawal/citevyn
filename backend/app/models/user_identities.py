@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base
@@ -23,6 +23,17 @@ from app.models.base import GUID, Base
 
 class UserIdentity(Base):
     __tablename__ = "user_identities"
+    # Declared at the ORM level too (not just migration 0010's inline
+    # constraint) so the hermetic SQLite test suite -- which creates its
+    # schema from this metadata via Base.metadata.create_all, not alembic --
+    # actually enforces the same uniqueness Postgres does. Without this, the
+    # concurrent-first-time-login race in app.api.routes.oauth's
+    # IntegrityError handling would be untestable outside a live Postgres.
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_account_id", name="uq_user_identities_provider_account"
+        ),
+    )
 
     identity_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     # Plain string values "github" / "google" -- NOT a DB enum. See the
