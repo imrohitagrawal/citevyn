@@ -7,6 +7,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Password hashing module, no routes yet (ADR-0004 PR 4).**
+  `app.core.passwords` wraps `argon2-cffi` (Argon2id, OWASP baseline
+  `m=19456 KiB, t=2, p=1` — `p=1` because the production machine is Fly's
+  single-vCPU `shared-cpu-1x`). Tuning the parameters alone does not bound
+  worst-case memory: at Fly's connection `hard_limit=40`, even 19 MiB
+  concurrent hashes would exceed the 512 MB machine, so a module-level
+  `asyncio.Semaphore(2)` (mirroring `app.cost.admission`'s idiom) is the
+  actual control, acquired before dispatching the CPU-bound hash to a
+  thread. `verify_password_or_dummy` verifies against a hardcoded dummy
+  Argon2id hash (same parameters, so the same real CPU cost) when the
+  caller has no real hash for an account — otherwise "unknown email" would
+  return near-instantly while "wrong password" pays the full hash cost, a
+  free account-enumeration oracle over response latency. Security-reviewed
+  (subagent): parameters confirmed against OWASP's current baseline, no
+  distinguishing signal found between the dummy and real verify paths, no
+  findings. New dependency `argon2-cffi` (not `passlib`, unmaintained
+  since 2020) — explained in `docs/ADR/0004-user-accounts.md`.
+
 - **Persistent per-visitor cookie identity (ADR-0004 PR 3).** Every request
   to a session/message route now resolves to a real per-visitor principal
   instead of the shared constant `demo_user`. A first-time visitor gets an
