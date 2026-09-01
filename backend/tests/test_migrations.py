@@ -7,6 +7,7 @@ server. The set of tables created must match ``docs/DATA_MODEL.md``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -260,6 +261,67 @@ def test_migration_0008_users_identity_columns_round_trips(
     ):
         connection.exec_driver_sql("PRAGMA foreign_keys = ON")
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
+
+
+def test_migration_0009_message_citations_round_trips(alembic_config: AlembicConfig) -> None:
+    """0009 (``messages.citations``, ADR-0004 PR 10) round-trips.
+
+    Additive-only: one new nullable column, no changes to any existing
+    table. Proves the column actually carries a JSON list through a real
+    insert/read (SQLite's JSON type is TEXT-backed; a broken type mapping
+    would surface here as a string instead of a list), then that the
+    downgrade drops it cleanly and everything else survives.
+    """
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    with engine.connect() as connection:
+        columns = {
+            row[1]: row for row in connection.exec_driver_sql("PRAGMA table_info(messages)").all()
+        }
+    assert "citations" in columns
+    assert columns["citations"][3] == 0, "citations must be nullable"
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at) "
+            "VALUES ('usr_cit', 'demo_user', CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO sessions (session_id, user_id, channel, created_at, expires_at) "
+            "VALUES ('33333333-3333-3333-3333-333333333333', 'usr_cit', 'chat', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO messages (message_id, session_id, role, content, created_at, citations) "
+            "VALUES ('44444444-4444-4444-4444-444444444444', "
+            "'33333333-3333-3333-3333-333333333333', 'assistant', 'answer', "
+            'CURRENT_TIMESTAMP, \'[{"source_name": "claude_code", "title": "T", '
+            '"url": "https://x", "chunk_id": "c1", "marker": 1}]\')'
+        )
+
+    with engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT citations FROM messages WHERE message_id = "
+            "'44444444-4444-4444-4444-444444444444'"
+        ).one()
+    stored = json.loads(row[0])
+    assert stored == [
+        {
+            "source_name": "claude_code",
+            "title": "T",
+            "url": "https://x",
+            "chunk_id": "c1",
+            "marker": 1,
+        }
+    ]
+
+    alembic_downgrade(alembic_config, "0008")
+    with engine.connect() as connection:
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(messages)").all()
+        }
+    assert "citations" not in columns
 
 
 def test_documents_identity_checksum_rename_round_trips(

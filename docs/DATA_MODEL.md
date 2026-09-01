@@ -138,6 +138,7 @@ Stores user and assistant messages.
 | domain | text | Product/domain classification (or `unsupported`, or neutral `general` on a greeting) |
 | intent | text | faq, exact_lookup, how_to, etc. |
 | created_at | timestamp | Created time |
+| citations | JSON, nullable | ADR-0004 PR 10 (migration 0009). The exact wire-shaped citations (marker included) shown for this message, persisted at write time. `NULL` for a user message or an assistant reply with none. Deliberately NOT reconstructed from `retrieved_evidence` on read — a cache-hit answer persists zero evidence rows for its message, so that reconstruction would silently show no sources for a resumed cache-hit message |
 
 ## 8. retrieved_evidence
 

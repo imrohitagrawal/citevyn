@@ -7,9 +7,9 @@
 
 import React, { useCallback, useEffect, useRef, useReducer } from "react";
 import { matchKB, matchCitevynMeta, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
-import { askQuestion, createSession, isLiveMode } from "../lib/api";
+import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
-import { ApiClientError, type Suggestion } from "../lib/types";
+import { ApiClientError, type StoredMessage, type Suggestion } from "../lib/types";
 import { useToast } from "./useToast";
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,8 @@ type Action =
     }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" }
   | { type: "SET_PENDING"; value: boolean }
-  | { type: "BUMP_SEND_TICK" };
+  | { type: "BUMP_SEND_TICK" }
+  | { type: "RESUME_SESSION"; messages: ChatMessage[] };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
 
@@ -144,6 +145,10 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, demo: { ...state.demo, ...action.demo } };
     case "ADD_MESSAGE":
       return { ...state, messages: [...state.messages, action.message] };
+    case "RESUME_SESSION":
+      // Wholesale replace, not append: resuming a DIFFERENT session must
+      // not leave the previous one's bubbles mixed in above it.
+      return { ...state, messages: action.messages };
     case "UPDATE_MESSAGE":
       return {
         ...state,
@@ -313,6 +318,13 @@ export function useLandingState() {
   // one session rather than opening two.
   const sessionIdRef = useRef<string | null>(null);
   const sessionPromiseRef = useRef<Promise<string> | null>(null);
+  // Guards resumeSession() against a race a review caught: reopening the
+  // history drawer and picking a DIFFERENT session before an earlier
+  // getSession() call resolves would otherwise let whichever response
+  // arrives last win, not whichever click happened last. Bumped at the
+  // START of every resumeSession() call; a call only applies its result
+  // if it is still the most recent one by the time its fetch resolves.
+  const resumeEpochRef = useRef(0);
 
   // Normalized questions whose last live attempt FAILED. The dedup guard
   // suppresses re-asking a question that was answered, but a transport
@@ -754,6 +766,40 @@ export function useLandingState() {
     [send],
   );
 
+  /**
+   * Resume a past session from the history drawer (ADR-0004 PR 10).
+   *
+   * Fetches the FULL message list (each carrying its own persisted
+   * citations, migration 0009 — not re-derived client-side) and replaces
+   * the current transcript wholesale. Pins `sessionIdRef` to the resumed
+   * id so the NEXT question the user asks continues this conversation
+   * rather than lazily minting a new session the way `ensureSession`
+   * would on a bare `null` ref.
+   */
+  const resumeSession = useCallback(
+    async (sessionId: string) => {
+      const epoch = ++resumeEpochRef.current;
+      try {
+        const resp = await getSession(sessionId);
+        if (epoch !== resumeEpochRef.current) return; // superseded by a newer resume
+        sessionIdRef.current = resp.session_id;
+        const messages = resp.messages.map((m: StoredMessage) => ({
+          id: nextMessageId(),
+          role: m.role === "user" ? ("user" as const) : ("bot" as const),
+          text: m.content,
+          sources: citationsToSources(m.citations),
+        }));
+        dispatch({ type: "RESUME_SESSION", messages });
+        dispatch({ type: "SET_SCREEN", screen: "chat" });
+        window.scrollTo({ top: 0 });
+      } catch (err) {
+        if (epoch !== resumeEpochRef.current) return;
+        handleApiError(err);
+      }
+    },
+    [nextMessageId, handleApiError],
+  );
+
   const backToLanding = useCallback(() => {
     dispatch({ type: "SET_SCREEN", screen: "landing" });
     // A stale pending=true from a still-in-flight sendLive would survive
@@ -988,5 +1034,6 @@ export function useLandingState() {
     toasts,
     addToast,
     removeToast,
+    resumeSession,
   };
 }

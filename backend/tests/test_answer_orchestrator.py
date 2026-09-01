@@ -1639,6 +1639,34 @@ async def test_gapped_citation_markers_survive_the_cache_round_trip(
     assert hit["cache_hit"] is True
     assert [c["marker"] for c in hit["citations"]] == [1, 3]
 
+    # ADR-0004 PR 10 (migration 0009): the cache-hit message must have its
+    # OWN persisted `citations` column populated -- a cache hit writes ZERO
+    # `retrieved_evidence` rows (see the migration docstring), so a resumed
+    # session reading citations from that table instead would silently show
+    # none for this exact message.
+    hit_message = (
+        await session.execute(
+            select(Message).where(Message.message_id == uuid.UUID(hit["message_id"]))
+        )
+    ).scalar_one()
+    assert hit_message.citations is not None
+    assert [c["marker"] for c in hit_message.citations] == [1, 3]
+
+    hit_evidence_rows = (
+        (
+            await session.execute(
+                select(RetrievedEvidence).where(
+                    RetrievedEvidence.message_id == hit_message.message_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert list(hit_evidence_rows) == [], (
+        "cache hits persist zero evidence rows — the whole reason for this column"
+    )
+
 
 # ---------------------------------------------------------------------------
 # 5. Citation validation failure

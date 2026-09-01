@@ -154,6 +154,44 @@ POST /v1/sessions
 }
 ```
 
+## 5a. Session History (ADR-0004 PR 10)
+
+```http
+GET /v1/me/sessions
+```
+
+Lists the caller's own sessions, newest first, capped at 50. Works for an
+anonymous visitor too — it lists whatever exists under the current cookie;
+signing in is what makes that history durable across visits, not a
+requirement to see it in the current tab.
+
+```json
+{
+  "request_id": "req_001",
+  "sessions": [
+    {
+      "session_id": "sess_001",
+      "created_at": "2026-06-07T12:00:00Z",
+      "expires_at": "2026-06-14T12:00:00Z",
+      "current_product_area": "claude_code",
+      "message_count": 4
+    }
+  ]
+}
+```
+
+```http
+GET /v1/sessions/{session_id}
+```
+
+Already existed (Slice 7); as of migration 0009 each message in the
+`messages` array carries its own `citations` — the exact wire-shaped
+citations (marker included) the live answer had, persisted at write time,
+not reconstructed from `retrieved_evidence` on read (a cache-hit answer
+persists zero evidence rows, so that reconstruction would silently show no
+sources for a resumed cache-hit message). `[]` for a user message or an
+assistant reply with none (e.g. a no-answer refusal).
+
 ## 6. Ask Question
 
 ```http
