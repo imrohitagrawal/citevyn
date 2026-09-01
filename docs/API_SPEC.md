@@ -63,6 +63,72 @@ Error responses:
 }
 ```
 
+## 4a. Auth (ADR-0004 PR 6)
+
+Every request already resolves to a per-visitor principal via a session
+cookie (`docs/ADR/0004-user-accounts.md` PR 3), anonymous by default. These
+four routes let a visitor turn that into a registered account. All four
+still require the demo bearer (§3) — it doubles as a CSRF guard.
+
+```http
+POST /v1/auth/register
+```
+
+```json
+{ "email": "user@example.com", "password": "at least 8 characters" }
+```
+
+201 on success, with the same body shape as `GET /v1/auth/me` below and a
+rotated `Set-Cookie`. 422 `validation_error` if the email is already
+registered — a deliberate email-existence leak, recorded in the ADR (the
+always-202 alternative needs an email provider this project does not have).
+
+Registering (and logging in, below) **claims** any `sessions` rows owned by
+the caller's prior anonymous principal — chat history started before
+signup survives it — and **rotates the session cookie**: the old cookie's
+`AuthSession` row is deleted, not superseded, so reusing the old value
+against `GET /v1/auth/me` afterward is a 401, not the pre-login identity.
+
+```http
+POST /v1/auth/login
+```
+
+```json
+{ "email": "user@example.com", "password": "..." }
+```
+
+200 on success (same body + claim + rotation as register above). 401
+`auth_required` for either a wrong password or an unknown email — the two
+cases are made to look identical in both status code and response latency
+(`app.core.passwords.verify_password_or_dummy`), or the difference would be
+a free account-enumeration oracle.
+
+`register`/`login` are additionally rate-limited per TARGET EMAIL (not per
+client) to bound credential stuffing — a distributed attacker spreading one
+password guess across many source IPs against a single account is still
+capped.
+
+```http
+POST /v1/auth/logout
+```
+
+204, always — idempotent, works with no session too. Revokes the current
+`AuthSession` row and clears the cookie.
+
+```http
+GET /v1/auth/me
+```
+
+```json
+{ "request_id": "req_001", "user_id": "usr_...", "email": "user@example.com", "anonymous": false }
+```
+
+401 `auth_required` if there is no valid session cookie. Unlike the
+session/message routes (which mint a fresh anonymous principal
+transparently on a missing/invalid cookie), this route does NOT mint — it
+answers "who is this, if anyone", so a stale cookie must be visibly 401,
+not silently replaced.
+
 ## 5. Create Session
 
 ```http
