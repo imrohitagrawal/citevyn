@@ -597,4 +597,46 @@ describe("useLandingState — resumeSession (ADR-0004 PR 10)", () => {
     expect(result.current.screen).toBe("landing");
     expect(result.current.toasts.length).toBeGreaterThan(0);
   });
+
+  it("a slow resume that resolves AFTER a newer one does not overwrite the newer transcript (review-caught race)", async () => {
+    let resolveFirst!: (v: ReturnType<typeof getSessionResponse>) => void;
+    const firstPromise = new Promise<ReturnType<typeof getSessionResponse>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    mockGetSession.mockReturnValueOnce(firstPromise);
+    const { result } = renderHook(() => useLandingState());
+
+    const firstCall = result.current.resumeSession("sess-old"); // does not resolve yet
+
+    const secondResponse = getSessionResponse({
+      session_id: "sess-new",
+      messages: [
+        {
+          message_id: "n1",
+          role: "user",
+          content: "the newer conversation",
+          normalized_query: null,
+          domain: null,
+          intent: null,
+          created_at: null,
+          citations: [],
+        },
+      ],
+    });
+    mockGetSession.mockResolvedValueOnce(secondResponse);
+    await act(async () => {
+      await result.current.resumeSession("sess-new");
+    });
+    expect(result.current.state.messages).toHaveLength(1);
+    expect(result.current.state.messages[0].text).toBe("the newer conversation");
+
+    // NOW the slow, superseded first call resolves -- it must be a no-op.
+    await act(async () => {
+      resolveFirst(getSessionResponse({ session_id: "sess-old" }));
+      await firstCall;
+    });
+
+    expect(result.current.state.messages).toHaveLength(1);
+    expect(result.current.state.messages[0].text).toBe("the newer conversation");
+  });
 });

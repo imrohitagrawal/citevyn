@@ -318,6 +318,13 @@ export function useLandingState() {
   // one session rather than opening two.
   const sessionIdRef = useRef<string | null>(null);
   const sessionPromiseRef = useRef<Promise<string> | null>(null);
+  // Guards resumeSession() against a race a review caught: reopening the
+  // history drawer and picking a DIFFERENT session before an earlier
+  // getSession() call resolves would otherwise let whichever response
+  // arrives last win, not whichever click happened last. Bumped at the
+  // START of every resumeSession() call; a call only applies its result
+  // if it is still the most recent one by the time its fetch resolves.
+  const resumeEpochRef = useRef(0);
 
   // Normalized questions whose last live attempt FAILED. The dedup guard
   // suppresses re-asking a question that was answered, but a transport
@@ -771,8 +778,10 @@ export function useLandingState() {
    */
   const resumeSession = useCallback(
     async (sessionId: string) => {
+      const epoch = ++resumeEpochRef.current;
       try {
         const resp = await getSession(sessionId);
+        if (epoch !== resumeEpochRef.current) return; // superseded by a newer resume
         sessionIdRef.current = resp.session_id;
         const messages = resp.messages.map((m: StoredMessage) => ({
           id: nextMessageId(),
@@ -784,6 +793,7 @@ export function useLandingState() {
         dispatch({ type: "SET_SCREEN", screen: "chat" });
         window.scrollTo({ top: 0 });
       } catch (err) {
+        if (epoch !== resumeEpochRef.current) return;
         handleApiError(err);
       }
     },
