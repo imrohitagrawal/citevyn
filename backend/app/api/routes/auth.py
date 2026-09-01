@@ -19,7 +19,6 @@ password guess across many source addresses against a single account.
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -41,12 +40,6 @@ from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
-# Deliberately permissive (not RFC 5322): this only screens obviously
-# malformed input before it reaches the DB / hasher. There is no email
-# provider in v1 (ADR-0004), so nothing downstream depends on stricter
-# validation, and a false rejection here is worse than a false acceptance.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
 _PASSWORD_MIN_LENGTH = 8
 _PASSWORD_MAX_LENGTH = 128
 
@@ -65,10 +58,31 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_LENGTH)
 
 
+def _looks_like_email(value: str) -> bool:
+    """Deliberately permissive (not RFC 5322), and deliberately NOT a regex.
+
+    A CodeQL scan flagged the original ``^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$`` as a
+    polynomial-time regex on attacker-controlled input (the adjacent
+    ``[^@\\s]+`` character classes both admit ``.``, so the engine can try
+    many ways to split the string around the literal ``\\.``). Plain string
+    ops below are O(n) with no backtracking, and check exactly the same
+    three properties: one ``@``, a non-empty local part, and a ``.`` inside
+    the domain part. There is no email provider in v1 (ADR-0004), so
+    nothing downstream depends on stricter validation, and a false
+    rejection here is worse than a false acceptance.
+    """
+    if any(c.isspace() for c in value):
+        return False
+    local, sep, domain = value.partition("@")
+    if not sep or not local or not domain or "@" in domain:
+        return False
+    return "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
 def _normalize_email(request_id: str, raw: str) -> str:
     """Lowercase/strip ``raw`` and reject anything that doesn't look like an email."""
     email = raw.strip().lower()
-    if not _EMAIL_RE.match(email):
+    if not _looks_like_email(email):
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.validation_error,

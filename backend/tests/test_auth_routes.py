@@ -99,8 +99,20 @@ def test_register_normalizes_email_case_and_whitespace(in_memory_app: None) -> N
     assert response.json()["email"] == "alice@example.com"
 
 
-def test_register_rejects_malformed_email(in_memory_app: None) -> None:
-    response = _register(_client(), "not-an-email", "correct horse battery")
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "not-an-email",
+        "two@@example.com",
+        "no-domain@",
+        "@no-local.com",
+        "trailing-dot@example.",
+        "leading-dot@.example.com",
+        "has space@example.com",
+    ],
+)
+def test_register_rejects_malformed_email(in_memory_app: None, malformed: str) -> None:
+    response = _register(_client(), malformed, "correct horse battery")
     assert response.status_code == 422
 
 
