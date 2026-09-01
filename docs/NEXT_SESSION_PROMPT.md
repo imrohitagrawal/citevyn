@@ -2,103 +2,117 @@
 
 ---
 
-ultracode — autonomous continuation for CiteVyn. Work through PRs 5–12 of the ADR-0004
-login plan to completion, in order, without checking in between individual PRs — but
-follow the pause points named explicitly below.
+Fresh-context continuation for CiteVyn's ADR-0004 login sequence. Implement **PR 13 (account
+linking)** in this session, as its own branch, its own full build+review+merge cycle. **Do not
+start PR 14 (magic-link + Resend) in this same session** — that's explicitly the session after
+this one, once PR 13 is merged and verified live.
 
 Repo: `/Users/rohitagrawal/Projects/citevyn`. Before planning anything, read `AGENTS.md`,
-`code_review.md`, `docs/BACKLOG.md`, `docs/ADR/0004-user-accounts.md`, the full owner-approved
-plan at `~/.claude/plans/i-also-want-you-hashed-marble.md`, and `gh issue view 270` for the
-live PR checklist. Re-verify every fact below against the repo yourself before acting on it —
-this block is a snapshot, not a source of truth.
+`code_review.md`, `docs/BACKLOG.md`, `docs/ADR/0004-user-accounts.md`, and the full plan at
+`~/.claude/plans/can-you-please-do-abundant-wilkinson.md` (its **first** major section is PR 13;
+its second is PR 14 — read both for context, but build only the first this session). Re-verify
+every fact below against the repo yourself before acting on it — this block is a snapshot, not a
+source of truth.
 
-## Where things stand — verified 2026-09-01, main = 262c95c
+## Where things stand — verified 2026-09-02, main should include PR 12 once merged
 
-- **PRs 0–4 of the ADR-0004 login sequence are merged**: ADR + doc amendments (#271),
-  session/message ownership + expiry IDOR fix (#272), security-response-headers + prod
-  docs-disable (#274), persistent per-visitor cookie identity + migration `0007` (#275),
-  Argon2id password-hashing module with no routes yet (#276). Every one of those PRs was
-  mutation-tested and independently security-reviewed by a subagent before merge; #274 and
-  #276 each had at least one real subagent-caught issue fixed before merge — expect the same
-  discipline to keep finding things, not to be a formality.
-- **Backend baseline on `main`: 1471 passed / 17 skipped**, run from the repo root on
-  `provider=stub`. Re-run it yourself before trusting this number.
-- **Nothing is deployed.** `v0.12.0` is still untagged (`docs/RELEASE_CANDIDATE_v0.12.0.md`,
-  itself still owner-gated) — the live Fly deployment is whatever predates even the Wave 0–2
-  work in this doc. That matters for sequencing below: there is no live production account
-  data at risk *today*, but the one-way-door caution in the ADR is about what happens once
-  this ships and real accounts exist, not about the current stale deploy. Confirm deploy
-  status yourself (`fly status`, or ask the owner) rather than assuming either way.
-- **10 open issues remain**, none are bugs: #270 (this umbrella tracker), #273 (deferred
-  health-route-behind-admin, needs coordinated secret plumbing — do not fold this into PR 5–12
-  work, it is out of scope for the login sequence), plus the pre-existing V1/V2 feature
-  backlog. Re-run `gh issue list --state open` — do not trust this count.
-- **Pre-existing worktrees/branches** under `.claude/worktrees/` and a few local branches with
-  `[origin/...: gone]` are leftovers from *prior* sessions, not this one. Leave them — only
-  clean up branches/worktrees your own session created and merged.
+- **PR 12 (GitHub + Google OAuth login) is open as PR #287**, branch
+  `feat/oauth-login-adr0004-pr12`, commits `cb81411`/`6de26c4`/`5eede2e`/`09e36f1`. It went
+  through 3 rounds of adversarial review (an ultracode multi-agent workflow + independent Codex
+  review) that found and fixed 2 real bugs, was live-verified against real GitHub and Google OAuth
+  apps with direct DB checks, and passed a `release-readiness-review` SHIP verdict with no
+  blockers. **First action this session: confirm PR #287 is merged.** If not yet merged, merge it
+  (it's already reviewed and approved-in-substance — don't re-review from scratch, just confirm CI
+  is green and merge), then pull `main` before branching for PR 13.
+- **Backend test baseline** (re-verify yourself, don't trust this number): 1531 passed / 18
+  skipped / 6 failed on the OAuth branch — all 6 are known pre-existing, unrelated to OAuth (3
+  pre-existing before PR 12 even started, 3 caused only by a local `backend/.env` file with real
+  OAuth test credentials polluting `Settings()` construction in `test_oauth_config.py` — not a
+  real failure if your `backend/.env` doesn't have OAuth keys in it, or if you temporarily move it
+  aside to check).
+- **A real, pre-existing production bug was found and fixed inside the PR 12 branch** (not
+  introduced by it — verified against a clean `main` checkout in a throwaway worktree):
+  `_mint_principal()` didn't reliably order its combined `User`+`AuthSession` flush on Postgres,
+  causing `ForeignKeyViolation` for every first-time anonymous visitor. Fixed with an explicit
+  `db.flush()` between the two `db.add()` calls, commit `09e36f1`. Nothing further needed here —
+  just be aware this fix exists and don't reintroduce the bug in PR 13's own session-handling code.
+- **GitHub issue #286** tracks a known, deliberately-deferred testing-infrastructure gap: SQLite
+  (the hermetic test dialect) never enforces FK constraints anywhere in this codebase, which is why
+  the bug above was invisible to 1,500+ passing tests. Quantified at 140 additional test failures
+  if FK enforcement is turned on globally — mostly (not confirmed entirely) unrealistic test
+  fixtures rather than confirmed additional bugs. **Owner decision: shipped OAuth first, tracked
+  the rest — do not attempt to fix #286 in this session**, it's out of scope for PR 13.
+- **The reusability guidance from PR 13's planning phase should already be in this repo's
+  `AGENTS.md`** (a new "Building a feature likely needed across future projects" section) and in
+  `imrohitagrawal/repo-template`'s `AGENTS.md`. Confirm both landed; if either didn't, that's a
+  loose end from the PR 12 session to close before or alongside PR 13, not a PR 13 blocker.
 
 ## Your authority
 
-**May do without asking:** branch, open PRs, run the full local battery, merge your own PRs to
-`main` once verified — for PRs 5, 6, 7, 8, 9, 10, and 11.
+**May do without asking:** branch from `main`, implement, run the full local battery, open the PR
+for PR 13, merge once verified — same authority as prior PRs in this sequence.
 
-**Pause and report back before starting PR 12** (GitHub OAuth): it adds a third-party
-credential flow (`state`/PKCE, redirect-URI validation, a `user_identities` table) that is
-worth a design sanity-check with the owner before implementation, not just before merge.
+**Must not do without the owner:** `fly deploy`; push a version tag; any paid API call or real
+provider key beyond the two OAuth apps already configured; force-push; `git clean -fdx`;
+`git stash -u`; delete any branch you did not create this session; touch `imrohitagrawal/repo-template`
+again unless the check above finds it genuinely missing the AGENTS.md section.
 
-**Must not do without the owner, same as every prior wave:** `fly deploy` (classifier-blocked
-by design); push a version tag; any paid API call or real provider key (stay on
-`provider=stub`); force-push; `git clean -fdx`; `git stash -u`; delete any branch you did not
-create this session.
+## What PR 13 actually is — read the plan file for the real detail, this is just the shape
 
-## PR-by-PR notes (see the ADR and plan for full detail — this is sequencing guidance, not a spec)
+Lets a signed-in user with a password account **connect** a GitHub/Google identity to their
+*existing* account (distinct from PR 12, which only supports OAuth as a way to log in or create a
+brand-new account). This is the ADR's own promised password-recovery mitigation, made to actually
+work. The plan (already through 2 rounds of adversarial review — read the "Review record" section
+for the reasoning, don't re-litigate it) covers:
 
-- **PR 5** (migration `0008`, `users` identity columns, `sessions.user_id` FK
-  RESTRICT→CASCADE): additive/reversible on its own — nullable columns, no data yet. Prove the
-  round trip the same way `0007`'s test does (`test_migrations.py`), against both SQLite and
-  the real-Postgres CI job. The danger this migration sets up is not in PR 5 itself; it is that
-  **after PR 6 populates real accounts, `downgrade 0008` destroys them** — record that caution
-  in the PR body so it is visible to whoever reads it later, not just in the ADR.
-- **PR 6** (`/v1/auth/{register,login,logout,me}`, claim-on-login, auth rate limiters,
-  `AuditAction.login` emission): the first PR that can create a REAL second principal. This is
-  where the PR 1 ownership predicate and the PR 3 cookie resolver earn their keep — write the
-  actual two-real-account IDOR test the plan calls for (account B cannot read account A's
-  session), not just the anonymous-principal version PR 3 already has. Use `verify_password_or_dummy`
-  from PR 4 on the login path, not `verify_password` directly, or the timing-oracle work from PR 4
-  was wasted. This PR is large enough to warrant the Workflow tool for its review phase (T3 on the
-  AGENTS.md blast-radius table: security-review + adversarial verify-per-finding, closing with
-  release-readiness-review) — you have Workflow available and should use it here rather than a
-  single sequential pass.
-- **PR 7** (frontend honest copy): ships value alone even if the rest slips — low risk, can go
-  out ahead of or independent of 8–11 if that's convenient.
-- **PR 8–9** (frontend authStore/useAuth/AuthModal, session claim wired client-side): needs a
-  real browser check via the `webapp-testing` or `claude-in-chrome` tooling, not just Playwright
-  assertions — the plan calls for focus-trap/Escape/focus-restoration behavior that is easy to
-  get structurally right and behaviorally wrong.
-- **PR 10** (`GET /v1/me/sessions` + history drawer): needs citation hydration fixed first
-  (`_message_payload` returns no citations despite its docstring, per the plan) — check whether
-  that's still true before assuming it's done.
-- **PR 11** (per-user rate tiers): small, high value-to-effort — the plan estimates ~10 lines.
+- Two start routes (`oauth_start` unchanged, new `connect/start`), a session-freshness gate
+  (**owner-confirmed required**: reject `connect` unless the caller's session was created within
+  the last ~20 minutes — this bounds a stolen-cookie's exploitable window from up to 180 days down
+  to the first 20 minutes after a real login).
+- `oauth_callback` dispatches to `_handle_login_intent` (pure extraction, zero behavior change)
+  or `_handle_connect_intent` (new) based on the nonce's `return_intent`.
+- `_link_identity` with an explicit `LinkResult` enum (`LINKED` / `ALREADY_LINKED_SAME` /
+  `LINKED_ELSEWHERE`) — **never** silently reassigns an identity already linked to a different
+  account, including under a concurrent-insert race (this was round 1's most significant security
+  finding — read it before touching the race-handling code).
+- `GET /v1/auth/me` gains `providers: list[str]`.
+- Frontend: a new lazy `ConnectedAccountsDrawer.tsx` (mirroring `HistoryDrawer.tsx`), reached via
+  a third `AccountMenu.tsx` menuitem — **not** inline buttons in the existing dropdown (the
+  original plan draft had this backwards; `AccountMenu.tsx` is eagerly bundled, a lazy drawer costs
+  less against the ~62.5 kB soft bundle budget).
+- Fixes the pre-existing `LandingPage.tsx` `replaceState` bug (strips the whole query string, not
+  just this app's own params) while this code is already being touched.
+- 14 backend test scenarios listed in the plan, effort estimate ~19.5 hours.
 
-## How to work — same discipline as PRs 0–4, do not relax it
+## How to work — same discipline as PRs 0–12, do not relax it
 
 - **Verify → implement → document. No claim without a check.**
-- **Run pytest from the repo root:** `env -u CITEVYN_DATABASE_URL uv run --project backend pytest backend/tests -q`. Lint from `backend/`: `ruff check . && ruff format --check . && pyright`.
-- **Size review by blast radius** (AGENTS.md table). PR 6 and PR 12 are T3; PR 7/11 are more like T1–T2.
-- **Cap routine review at two rounds.** Only reproduced CRITICAL_BLOCKER/REQUIRED_CONTRACT findings block.
-- **Mutation-test every guard you add**, and `grep` to confirm the mutation actually landed before trusting a red result — `ruff format` silently un-applies some hand-edited mutations.
-- **Every test ships with one line naming the exact change that turns it red.**
-- **The merge gate:** before merging anything touching the answer pipeline, ask in the PR body whether it changes what gets cached — this sequence mostly doesn't touch the answer pipeline, but PR 10 (citation hydration) might.
-- **Run an independent subagent security review on every PR that touches auth, cookies, passwords, or migrations** — that's most of PRs 5, 6, 8, 9, 12. Do not skip it because the last four came back clean; PR 2's review found a real gap, PR 6 is bigger than any of PRs 1–4.
-- **Serialize merges.** Every PR edits `docs/BACKLOG.md`'s #270 row — parallel merges conflict by construction.
-- **$0.** Stay on `provider=stub`. The judged eval self-skips without a key — that is correct, do not "fix" it.
+- **Run pytest from `backend/`:** `uv run pytest -q`. Lint: `ruff check . && ruff format --check . && pyright`. Frontend: `npm test`, `npx tsc --noEmit`.
+- **Blast radius: T3** (same tier as PR 12 — auth/security-relevant). Full T2 fan-out +
+  `security-review` + adversarial verify, closing with `release-readiness-review` before merge.
+  Use the Workflow tool for the review phase, same as PR 12.
+- **Cap routine review at two rounds.** Only reproduced CRITICAL_BLOCKER/REQUIRED_CONTRACT
+  findings block. The planning phase already found and resolved the two most severe issues
+  (concurrent-race false-success, stolen-cookie permanent-backdoor) — expect the *implementation*
+  review to still find something real in the actual code, the way PR 12's did twice; don't treat
+  the planning review as a substitute.
+- **Mutation-test every guard you add** — revert the fix, confirm the test fails for the right
+  reason, restore. Every test ships with one line naming the exact change that turns it red.
+- **Manual verification against real GitHub/Google OAuth apps** (already configured from PR 12),
+  confirmed via direct DB queries (`user_identities`, not just the UI) — not just mocked tests.
+- **Update `docs/API_SPEC.md`'s `GET /v1/auth/me` response shape** — every prior PR in this
+  sequence updated it; this one should too (this also closes the non-blocking doc gap flagged in
+  PR 12's release-readiness-review).
+- **$0.** Stay on `provider=stub` for anything LLM-related; OAuth calls against the real
+  GitHub/Google apps are free.
 
 ## Definition of done
 
-Merged **and** verified. Green on a branch is not done. Never close #270 or its checklist items
-whose fix sits on an unmerged branch. Keep `docs/BACKLOG.md` and `gh issue view 270`'s checklist
-in sync with reality in the same change that merges each PR.
+Merged **and** verified. Green on a branch is not done. Update `docs/BACKLOG.md` in the same
+change that merges. Once PR 13 is merged and verified, **stop** — do not start PR 14
+(magic-link + Resend) in this session; that's a separate fresh-context session, per the owner's
+explicit request to keep these as sequential, isolated builds.
 
-Finish with: **Done / Verified myself / Cleanup / Pending / Next action** — separating what
-*you* ran (with output) from what a subagent reported, and stating explicitly what is merged
-versus what is actually running in production (still nothing, until the owner deploys).
+Finish with: **Done / Verified myself / Cleanup / Pending / Next action** — separating what *you*
+ran (with output) from what a subagent reported, and stating explicitly what is merged versus what
+is actually running in production.
