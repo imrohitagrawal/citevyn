@@ -1,11 +1,11 @@
-"""OAuth login routes: GitHub + Google (ADR-0004 PR 12).
+"""OAuth login + account-linking routes: GitHub + Google (ADR-0004 PR 12 / PR 13).
 
 Separate from ``auth.py`` (which frames itself as "register, login, logout,
 me" against a JSON request body) because this is a meaningfully different
 shape: external HTTP calls, redirects, no JSON body — same one-file-one-
 router pattern ``me.py`` (PR 10) established.
 
-Both routes are provider-parameterized, not duplicated per provider. The
+All three routes are provider-parameterized, not duplicated per provider. The
 ``provider`` path segment is validated against :data:`_PROVIDERS` and any
 other value 404s — this codebase's existing "unknown → quiet 404, not
 informative" convention (the ownership-mismatch-is-404 rule from PR 1).
@@ -14,10 +14,13 @@ declined consent) is checked and redirected on BEFORE the provider is
 validated, per the plan's own explicit step ordering — an unknown/bogus
 provider combined with ``error=access_denied`` gets the same ``/?auth=error``
 redirect an unknown provider without ``error=`` would 404 on. This leaks
-nothing an attacker doesn't already have (the response is byte-for-byte
-identical regardless of whether the provider is real, unconfigured, or
-nonexistent, and the two configured provider names are already public in
-the frontend bundle) — confirmed by adversarial review, not assumed.
+nothing an attacker doesn't already have: for a caller with no matching
+nonce the response is byte-for-byte identical regardless of whether the
+provider is real, unconfigured, or nonexistent, and the two configured
+provider names are already public in the frontend bundle — confirmed by
+adversarial review, not assumed. (PR 13: a caller holding their OWN
+connect nonce for a real provider is redirected to the connect-shaped
+error instead — that tells them only which flow they themselves started.)
 
 State / PKCE mechanism
 -----------------------
@@ -71,14 +74,66 @@ decision (see the PR 12 plan), this is unconditional: there is no
 PR — that would let anyone who controls a matching email on GitHub/Google
 take over an existing password account, without ever proving they know its
 password.
+
+Account linking ("connect") — ADR-0004 PR 13
+---------------------------------------------
+
+The same two providers, but attached to an EXISTING signed-in account
+instead of resolving who logs in. This is the working form of the
+password-recovery mitigation the ADR promised ("GitHub OAuth is the
+recovery path"): a password account that has connected GitHub/Google can
+still get in after forgetting its password.
+
+``GET .../{provider}/connect/start`` is a second start route, not a query
+param on ``start``: it has a different precondition (a signed-in, real
+``usr_`` account whose session is FRESH — see
+``Settings.oauth_connect_max_session_age_seconds``) and never mints an
+anonymous session. Both start routes share :func:`_start_oauth_flow`; the
+only difference between the two nonce rows they write is
+``return_intent`` (``"login"`` / ``"connect"``) — a plain string column,
+which is exactly why this feature needed no migration.
+
+``callback`` runs the SAME claim/expiry/token-exchange/userinfo prefix for
+both intents, then dispatches on the claimed nonce's ``return_intent`` to
+:func:`_handle_login_intent` (a pure extraction of the PR 12 tail) or
+:func:`_handle_connect_intent`. The security invariants of the connect
+half, written down here because they transfer to any stack:
+
+* **Never reassign.** An external identity already linked to a DIFFERENT
+  account is rejected (:attr:`LinkResult.LINKED_ELSEWHERE`), never moved —
+  including under a concurrent-insert race, where the loser must compare
+  the winning row's ``user_id`` against ITS OWN intended target rather than
+  report success just because a row now exists.
+* **Never create a User, never touch users.email.** Linking writes exactly
+  one ``UserIdentity`` row; a target account's email is not overwritten by
+  the provider's.
+* **Never rotate the caller's session.** The signed-in cookie must stay
+  byte-identical across the round trip — ``claim_and_login`` is not called
+  on this path.
+* **The target is the claimed nonce's own session**, resolved via
+  :func:`resolve_principal_by_auth_session_id`, not the request cookie read
+  a second time — one source of truth for "which session started this".
+* **Fresh session required at start.** A stolen cookie must not be able to
+  plant a permanent backdoor identity at any point in a 180-day session.
+* **Failures before the claim cannot know the intent.** A bad/replayed
+  ``state``, or a starting session revoked/rotated mid-flow, fails the
+  session-bound claim itself and redirects to ``/?auth=error`` for both
+  flows -- deliberately: pre-reading the nonce to learn its intent would
+  reopen the unconditional-read hazard the claim design exists to close.
+* **Disconnect invariant (for the future "disconnect" feature, not built
+  here):** an account must always retain >= 1 access method —
+  ``password_hash`` set OR >= 1 remaining ``UserIdentity`` row. Do not allow
+  removing the last one.
 """
 
 from __future__ import annotations
 
 import base64
+import enum
 import hashlib
 import secrets
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
@@ -93,6 +148,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth_sessions import (
     claim_and_login,
     ensure_auth_session,
+    resolve_principal_by_auth_session_id,
+    try_resolve_auth_session,
     try_resolve_auth_session_id,
 )
 from app.core.config import Settings, get_settings
@@ -100,7 +157,7 @@ from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.oauth_http import OAuthProviderError, get_json, post_form
 from app.core.rate_limit import rate_limited_oauth_navigation
-from app.models import AuditAction, OAuthNonce, User, UserIdentity, UserRole
+from app.models import AuditAction, AuthSession, OAuthNonce, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -109,6 +166,32 @@ router = APIRouter(prefix="/v1/auth", tags=["auth"])
 # back) normally takes seconds; 5 minutes covers a slow consent screen
 # without leaving a meaningfully long forgery window.
 _NONCE_TTL_SECONDS = 300
+
+# ``OAuthNonce.return_intent`` values. Plain strings (the column is an
+# unchecked String(16)), compared exactly at callback -- a nonce minted for
+# one intent must never complete as the other.
+_INTENT_LOGIN = "login"
+_INTENT_CONNECT = "connect"
+
+_REGISTERED_PREFIX = "usr_"
+
+
+class LinkResult(enum.StrEnum):
+    """Outcome of :func:`_link_identity` -- explicit, not string/exception signalling.
+
+    ``LINKED`` and ``ALREADY_LINKED_SAME`` are both success from the user's
+    point of view (the identity now points at their account); only
+    ``LINKED_ELSEWHERE`` is a rejection. Kept as three values rather than a
+    bool so the audit trail can tell "newly linked" from "was already
+    linked" without the route re-deriving it.
+    """
+
+    LINKED = "linked"
+    ALREADY_LINKED_SAME = "already_linked_same"
+    LINKED_ELSEWHERE = "linked_elsewhere"
+
+
+_FailFn = Callable[..., Awaitable[RedirectResponse]]
 
 
 def _request_id(request: Request) -> str:
@@ -286,39 +369,46 @@ def _to_naive_utc(value: datetime) -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/auth/oauth/{provider}/start
+# GET /v1/auth/oauth/{provider}/start  and  .../{provider}/connect/start
 # ---------------------------------------------------------------------------
 
 
-@router.get(
-    "/oauth/{provider}/start",
-    summary="Begin an OAuth login (GitHub or Google).",
-    description="Redirects to the provider's consent screen. Not an API call — a real navigation.",
-)
-async def oauth_start(
-    request: Request,
-    provider: str,
-    settings: Annotated[Settings, Depends(get_settings)],
-    db: Annotated[AsyncSession, Depends(get_session)],
-    _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
-) -> RedirectResponse:
+def _require_provider(request: Request, provider: str, settings: Settings) -> tuple[str, str]:
+    """Validate the path's provider and return its ``(client_id, client_secret)``.
+
+    The ONE place both start routes (and the callback) check "is this a
+    known, configured provider" -- an unknown or unconfigured provider 404s
+    quietly, per this codebase's convention. Shared so the two start routes
+    cannot drift on this check.
+    """
     if provider not in _PROVIDERS:
         raise _not_found(request)
     credentials = _provider_credentials(provider, settings)
     if credentials is None:
         raise _not_found(request)
-    client_id, _client_secret = credentials
+    return credentials
 
-    # Constructed with a placeholder URL and mutated below, so the Set-Cookie
-    # header ensure_auth_session() writes lands directly on the response
-    # actually returned — FastAPI does NOT merge headers from the
-    # dependency-injected `response` parameter onto a Response subclass a
-    # handler returns explicitly (only the returned object's own headers are
-    # used), so those two must be the same object rather than two that need
-    # reconciling after the fact.
-    redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
-    auth_session_id = await ensure_auth_session(request, redirect, db, settings)
 
+async def _start_oauth_flow(
+    redirect: RedirectResponse,
+    provider: str,
+    settings: Settings,
+    db: AsyncSession,
+    *,
+    client_id: str,
+    return_intent: str,
+    auth_session_id: uuid.UUID,
+) -> RedirectResponse:
+    """Persist a nonce bound to ``auth_session_id`` and point ``redirect`` at the provider.
+
+    Shared by :func:`oauth_start` (``return_intent="login"``) and
+    :func:`oauth_connect_start` (``"connect"``). ``redirect`` is passed in
+    (constructed by the caller with a placeholder URL) rather than created
+    here so a caller that has already set a cookie on it -- ``oauth_start``
+    via ``ensure_auth_session`` -- returns that same object; FastAPI does
+    NOT merge headers from a dependency-injected ``response`` onto a
+    Response subclass a handler returns explicitly.
+    """
     code_verifier = _new_code_verifier()
     now = _now()
     nonce = OAuthNonce(
@@ -326,12 +416,12 @@ async def oauth_start(
         provider=provider,
         code_verifier=code_verifier,
         auth_session_id=auth_session_id,
-        return_intent="login",
+        return_intent=return_intent,
         created_at=now,
         expires_at=now + timedelta(seconds=_NONCE_TTL_SECONDS),
     )
     db.add(nonce)
-    # Durable before the redirect — nothing will retry this write.
+    # Durable before the redirect -- nothing will retry this write.
     await db.commit()
 
     config = _PROVIDERS[provider]
@@ -347,6 +437,104 @@ async def oauth_start(
     authorize_url = httpx.URL(config.authorize_url, params=params)
     redirect.headers["location"] = str(authorize_url)
     return redirect
+
+
+@router.get(
+    "/oauth/{provider}/start",
+    summary="Begin an OAuth login (GitHub or Google).",
+    description="Redirects to the provider's consent screen. Not an API call — a real navigation.",
+)
+async def oauth_start(
+    request: Request,
+    provider: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
+) -> RedirectResponse:
+    client_id, _client_secret = _require_provider(request, provider, settings)
+
+    # Constructed with a placeholder URL and mutated by _start_oauth_flow, so
+    # the Set-Cookie header ensure_auth_session() writes lands directly on
+    # the response actually returned (see _start_oauth_flow's docstring).
+    redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
+    auth_session_id = await ensure_auth_session(request, redirect, db, settings)
+    return await _start_oauth_flow(
+        redirect,
+        provider,
+        settings,
+        db,
+        client_id=client_id,
+        return_intent=_INTENT_LOGIN,
+        auth_session_id=auth_session_id,
+    )
+
+
+def _connect_error_location(provider: str, reason: str) -> str:
+    # ``provider`` is only ever a validated _PROVIDERS key (or a claimed
+    # nonce's own ``provider`` column, which _start_oauth_flow writes only
+    # after validation) -- never raw path input -- so it is safe to echo.
+    return f"/?connect=error&reason={reason}&provider={provider}"
+
+
+def _session_is_fresh(session: AuthSession, settings: Settings) -> bool:
+    """The stolen-cookie gate: was this session CREATED recently enough to link from?
+
+    ``created_at`` is set once at login/register/OAuth login and never
+    refreshed, so "fresh" means "a real credential check happened within
+    the window", not "recently active". See the setting's own comment in
+    ``app.core.config`` for the threat this bounds.
+    """
+    age = _to_naive_utc(_now()) - _to_naive_utc(session.created_at)
+    return age <= timedelta(seconds=settings.oauth_connect_max_session_age_seconds)
+
+
+@router.get(
+    "/oauth/{provider}/connect/start",
+    summary="Connect a GitHub or Google identity to the signed-in account (ADR-0004 PR 13).",
+    description=(
+        "Redirects to the provider's consent screen. Requires a signed-in, "
+        "registered account whose session is fresh (created within "
+        "oauth_connect_max_session_age_seconds); otherwise redirects to "
+        "/?connect=error&reason=session. Not an API call — a real navigation."
+    ),
+)
+async def oauth_connect_start(
+    request: Request,
+    provider: str,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
+) -> RedirectResponse:
+    client_id, _client_secret = _require_provider(request, provider, settings)
+
+    # Never mints: a request that is about to be rejected must not leave an
+    # anonymous session behind, and the nonce must bind to the caller's
+    # ACTUAL existing session (the one whose owner is the link target).
+    # Anonymous / no session / stale session all collapse to one redirect:
+    # the browser already knows whether it is signed in, so there is
+    # nothing to leak, and a bare 404 JSON body would be a dead end for a
+    # real user on a top-level navigation (the redirect lets the frontend
+    # say "sign in again, then retry").
+    session = await try_resolve_auth_session(request, db, settings)
+    if (
+        session is None
+        or not session.user_id.startswith(_REGISTERED_PREFIX)
+        or not _session_is_fresh(session, settings)
+    ):
+        return RedirectResponse(
+            _connect_error_location(provider, "session"), status_code=status.HTTP_302_FOUND
+        )
+
+    redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
+    return await _start_oauth_flow(
+        redirect,
+        provider,
+        settings,
+        db,
+        client_id=client_id,
+        return_intent=_INTENT_CONNECT,
+        auth_session_id=session.auth_session_id,
+    )
 
 
 async def _resolve_or_create_identity(
@@ -443,6 +631,197 @@ async def _resolve_or_create_identity(
         return new_user.user_id
 
 
+async def _link_identity(
+    db: AsyncSession, provider: str, identity: _Identity, target_user_id: str
+) -> LinkResult:
+    """Attach ``identity`` to ``target_user_id``; never reassign, never create a User.
+
+    Writes at most ONE ``UserIdentity`` row. Never inserts/updates ``User``
+    (the target already exists) and never touches ``users.email`` -- the
+    provider's email is irrelevant to linking, so the email-uniqueness
+    concern the login path has to dodge simply does not arise here.
+
+    The race branch is the security-relevant part: two concurrent connects
+    for the SAME external identity toward DIFFERENT accounts both pass the
+    "not found" lookup, one insert wins ``uq_user_identities_provider_account``
+    and the other raises ``IntegrityError``. The loser must NOT be told it
+    succeeded merely because a row now exists (that is what the login
+    path's analogous branch does, correctly for login, where "some account
+    now owns this identity, log it in" is the right answer). It re-reads the
+    winner and compares ``winner.user_id`` against its OWN target -- same
+    account -> idempotent success, different account -> rejected.
+
+    Future "disconnect" invariant (documented, not built): removing an
+    identity must leave the account with >= 1 access method (``password_hash``
+    set OR another ``UserIdentity`` row). Do not silently design this away.
+    """
+    existing = (
+        await db.execute(
+            select(UserIdentity).where(
+                UserIdentity.provider == provider,
+                UserIdentity.provider_account_id == identity.provider_account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.user_id == target_user_id:
+            return LinkResult.ALREADY_LINKED_SAME
+        return LinkResult.LINKED_ELSEWHERE
+
+    db.add(
+        UserIdentity(
+            identity_id=uuid.uuid4(),
+            provider=provider,
+            provider_account_id=identity.provider_account_id,
+            user_id=target_user_id,
+            created_at=_now(),
+        )
+    )
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(UserIdentity).where(
+                    UserIdentity.provider == provider,
+                    UserIdentity.provider_account_id == identity.provider_account_id,
+                )
+            )
+        ).scalar_one_or_none()
+        # winner is None is unreachable in practice (the IntegrityError means
+        # some row now satisfies this key) -- fail CLOSED (rejected), never
+        # open, if it somehow happens.
+        if winner is not None and winner.user_id == target_user_id:
+            return LinkResult.ALREADY_LINKED_SAME
+        return LinkResult.LINKED_ELSEWHERE
+    return LinkResult.LINKED
+
+
+async def _resolve_connect_target(db: AsyncSession, nonce: OAuthNonce) -> str | None:
+    """The account a claimed CONNECT nonce links into, or ``None`` to fail closed.
+
+    Resolved from the claimed nonce's own ``auth_session_id`` (captured in
+    Python before the row was deleted), NOT by re-reading the request cookie:
+    the claim's WHERE clause already proved cookie == nonce binding, so this
+    is the single source of truth. Re-verified as a real ``usr_`` account
+    because the session could have been revoked/rotated between ``start``
+    and ``callback`` (on Postgres the nonce would CASCADE away with it, but
+    that is a schema property, not something this code should lean on).
+    """
+    if nonce.auth_session_id is None:
+        return None
+    principal_id = await resolve_principal_by_auth_session_id(db, nonce.auth_session_id)
+    if principal_id is None or not principal_id.startswith(_REGISTERED_PREFIX):
+        return None
+    return principal_id
+
+
+async def _handle_login_intent(
+    request: Request,
+    db: AsyncSession,
+    settings: Settings,
+    provider: str,
+    identity: _Identity,
+    fail: _FailFn,
+) -> RedirectResponse:
+    """The PR 12 login tail, extracted verbatim: resolve/create, claim+login, audit."""
+    resolved_user_id = await _resolve_or_create_identity(db, provider, identity)
+    if resolved_user_id is None:
+        return await fail("oauth_provider_error")
+
+    # Same placeholder-then-mutate approach as `start`: claim_and_login needs
+    # a Response to set the login cookie on, and it must be the SAME object
+    # ultimately returned (see _start_oauth_flow's docstring).
+    redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
+    await claim_and_login(request, redirect, db, settings, user_id=resolved_user_id)
+    await record_audit_event(
+        db,
+        action=AuditAction.login,
+        user_id=resolved_user_id,
+        role=UserRole.demo_user,
+        metadata={"event": f"oauth_{provider}"},
+    )
+    await db.commit()
+
+    redirect.headers["location"] = "/?auth=ok"
+    return redirect
+
+
+async def _handle_connect_intent(
+    db: AsyncSession,
+    provider: str,
+    identity: _Identity,
+    nonce: OAuthNonce,
+    fail: _FailFn,
+) -> RedirectResponse:
+    """Link ``identity`` to the account that started this flow. No cookie changes."""
+    target_user_id = await _resolve_connect_target(db, nonce)
+    if target_user_id is None:
+        return await fail(
+            "oauth_connect_no_session", location=_connect_error_location(provider, "session")
+        )
+
+    result = await _link_identity(db, provider, identity, target_user_id)
+    if result is LinkResult.LINKED_ELSEWHERE:
+        # Deliberately does NOT record the other account's user_id -- the
+        # audit row is attributed to the acting user, and naming the other
+        # account would leak cross-account information into the trail.
+        return await fail(
+            "oauth_connect_conflict",
+            user_id=target_user_id,
+            location=_connect_error_location(provider, "already_linked"),
+        )
+
+    # Deliberately NOT claim_and_login: the caller is already signed in as
+    # the target, their cookie must not rotate, and claim-on-login's
+    # "fold in a prior anon_ principal" logic can never apply here.
+    await record_audit_event(
+        db,
+        action=AuditAction.login,
+        user_id=target_user_id,
+        role=UserRole.demo_user,
+        metadata={
+            "event": f"oauth_connect_{provider}",
+            "provider": provider,
+            "result": result.value,
+        },
+    )
+    await db.commit()
+    return RedirectResponse(f"/?connect=ok&provider={provider}", status_code=status.HTTP_302_FOUND)
+
+
+async def _claim_nonce(
+    db: AsyncSession, state: str | None, provider: str, auth_session_id: uuid.UUID | None
+) -> OAuthNonce | None:
+    """Atomically consume the nonce ``state`` names -- only if every predicate matches.
+
+    The single-use + session-binding mechanism the module docstring
+    describes: one ``DELETE ... WHERE nonce_id AND provider AND
+    auth_session_id ... RETURNING``. A malformed ``state``, or no current
+    session, matches nothing and deletes nothing. Returns the claimed row
+    (already deleted, captured in Python) or ``None``. Commits.
+    """
+    if not state or auth_session_id is None:
+        return None
+    try:
+        nonce_id = uuid.UUID(hex=state)
+    except ValueError:
+        return None
+    claimed = await db.execute(
+        delete(OAuthNonce)
+        .where(
+            OAuthNonce.nonce_id == nonce_id,
+            OAuthNonce.provider == provider,
+            OAuthNonce.auth_session_id == auth_session_id,
+        )
+        .returning(OAuthNonce)
+    )
+    nonce = claimed.scalar_one_or_none()
+    await db.commit()
+    return nonce
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/auth/oauth/{provider}/callback
 # ---------------------------------------------------------------------------
@@ -450,8 +829,12 @@ async def _resolve_or_create_identity(
 
 @router.get(
     "/oauth/{provider}/callback",
-    summary="Complete an OAuth login (GitHub or Google).",
-    description="Always redirects (/?auth=ok or /?auth=error) — never a JSON response.",
+    summary="Complete an OAuth login or account link (GitHub or Google).",
+    description=(
+        "Always redirects, never a JSON response: /?auth=ok|error for a login "
+        "nonce, /?connect=ok|error&reason=...&provider=... for a connect nonce "
+        "(docs/API_SPEC.md §4b)."
+    ),
 )
 async def oauth_callback(
     request: Request,
@@ -460,31 +843,67 @@ async def oauth_callback(
     db: Annotated[AsyncSession, Depends(get_session)],
     _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
 ) -> RedirectResponse:
-    async def _fail(event: str) -> RedirectResponse:
+    # Where a failure sends the browser. "/?auth=error" until the nonce is
+    # claimed (nobody knows the intent before that); a claimed CONNECT nonce
+    # switches it so a failed link is not reported as a failed sign-in.
+    failure_location = "/?auth=error"
+
+    async def _fail(
+        event: str, *, user_id: str | None = None, location: str | None = None
+    ) -> RedirectResponse:
+        # ``user_id`` is None for login failures (nobody's identity is known
+        # yet) but SET for connect failures, where the acting account is
+        # known and losing that attribution would weaken the audit trail.
         await record_audit_event(
             db,
             action=AuditAction.auth_failed,
-            user_id=None,
+            user_id=user_id,
             role=None,
             metadata={"event": event, "provider": provider},
         )
         await db.commit()
-        return RedirectResponse("/?auth=error", status_code=status.HTTP_302_FOUND)
+        return RedirectResponse(location or failure_location, status_code=status.HTTP_302_FOUND)
+
+    # Session binding is resolved up front and baked directly into every
+    # claim's WHERE clause (see below) -- not checked afterward on whatever
+    # got returned. A caller with no valid session at all can never be the
+    # browser that started the flow, so the claims below fail closed without
+    # even being attempted (also sidesteps a SQL NULL-comparison footgun:
+    # comparing a bind of Python None to auth_session_id would compile to
+    # "IS NULL", which could wrongly match a nonce whose own
+    # auth_session_id happens to be NULL).
+    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
 
     # 1. Provider declined consent — audited (the "oauth_denied" event this
-    #    codebase's own audit-metadata contract names) but otherwise no
-    #    state/nonce/identity work is touched.
+    #    codebase's own audit-metadata contract names). No identity work is
+    #    touched, but the nonce IS consumed if -- and only if -- it is ours
+    #    (same session-bound conditional claim as the success path, so an
+    #    attacker replaying a victim's state with error=access_denied still
+    #    deletes nothing): a declined state can never complete, and the
+    #    claimed row's intent is what tells a CONNECT attempt apart from a
+    #    LOGIN one. Without this, cancelling "Connect GitHub" reported
+    #    "Sign-in failed" to a user who is still signed in (found live).
+    #    Still checked BEFORE provider validation, per PR 12's ordering: an
+    #    unknown provider + error= gets the same /?auth=error as before.
     if request.query_params.get("error"):
+        denied = await _claim_nonce(
+            db, request.query_params.get("state"), provider, current_auth_session_id
+        )
+        if denied is not None and denied.return_intent == _INTENT_CONNECT:
+            # denied.provider, not the raw path segment: only _start_oauth_flow
+            # writes that column, and only after _require_provider, so this
+            # keeps _connect_error_location's "validated provider only"
+            # property structural rather than transitive (review round 2).
+            return await _fail(
+                "oauth_denied",
+                user_id=await _resolve_connect_target(db, denied),
+                location=_connect_error_location(denied.provider, "denied"),
+            )
         return await _fail("oauth_denied")
 
     # 2. Defense in depth — the callback URL is guessable/bookmarkable even
     #    if `start` never ran for this provider.
-    if provider not in _PROVIDERS:
-        raise _not_found(request)
-    credentials = _provider_credentials(provider, settings)
-    if credentials is None:
-        raise _not_found(request)
-    client_id, client_secret = credentials
+    client_id, client_secret = _require_provider(request, provider, settings)
 
     state = request.query_params.get("state")
     code = request.query_params.get("code")
@@ -492,20 +911,6 @@ async def oauth_callback(
     if not state or not code:
         return await _fail("oauth_state_invalid")
 
-    try:
-        nonce_id = uuid.UUID(hex=state)
-    except ValueError:
-        return await _fail("oauth_state_invalid")
-
-    # Session binding is resolved BEFORE the claim and baked directly into
-    # its WHERE clause (see below) -- not checked afterward on whatever got
-    # returned. A caller with no valid session at all can never be the
-    # browser that started the flow, so this fails closed without even
-    # attempting a claim (also sidesteps a SQL NULL-comparison footgun:
-    # comparing a bind of Python None to auth_session_id would compile to
-    # "IS NULL", which could wrongly match a nonce whose own
-    # auth_session_id happens to be NULL).
-    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
     if current_auth_session_id is None:
         return await _fail("oauth_state_invalid")
 
@@ -530,20 +935,12 @@ async def oauth_callback(
     #      is harmless, and a SQL-side comparison against a bind time
     #      would risk the same naive/aware datetime mismatch
     #      `_to_naive_utc` exists to paper over on the Python side.
-    claimed = await db.execute(
-        delete(OAuthNonce)
-        .where(
-            OAuthNonce.nonce_id == nonce_id,
-            OAuthNonce.provider == provider,
-            OAuthNonce.auth_session_id == current_auth_session_id,
-        )
-        .returning(OAuthNonce)
-    )
-    nonce = claimed.scalar_one_or_none()
-    await db.commit()
+    nonce = await _claim_nonce(db, state, provider, current_auth_session_id)
 
     if nonce is None:
         return await _fail("oauth_state_invalid")
+    if nonce.return_intent == _INTENT_CONNECT:
+        failure_location = _connect_error_location(provider, "provider")
     if _to_naive_utc(nonce.expires_at) <= _to_naive_utc(_now()):
         return await _fail("oauth_expired")
 
@@ -579,27 +976,16 @@ async def oauth_callback(
         # redirects, never JSON" contract and leave no audit trail.
         return await _fail("oauth_provider_error")
 
-    # 8. Identity resolution — the core security logic, strict order.
-    resolved_user_id = await _resolve_or_create_identity(db, provider, identity)
-    if resolved_user_id is None:
-        return await _fail("oauth_provider_error")
-
-    # Same placeholder-then-mutate approach as `start`: claim_and_login needs
-    # a Response to set the login cookie on, and it must be the SAME object
-    # ultimately returned (see the comment in `start`).
-    redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
-    await claim_and_login(request, redirect, db, settings, user_id=resolved_user_id)
-    await record_audit_event(
-        db,
-        action=AuditAction.login,
-        user_id=resolved_user_id,
-        role=UserRole.demo_user,
-        metadata={"event": f"oauth_{provider}"},
-    )
-    await db.commit()
-
-    redirect.headers["location"] = "/?auth=ok"
-    return redirect
+    # 8. Dispatch on the CLAIMED nonce's intent -- an exact string compare,
+    #    so a nonce minted for one intent can never complete as the other.
+    #    Everything above this line is byte-for-byte shared by both.
+    if nonce.return_intent == _INTENT_CONNECT:
+        return await _handle_connect_intent(db, provider, identity, nonce, _fail)
+    if nonce.return_intent == _INTENT_LOGIN:
+        return await _handle_login_intent(request, db, settings, provider, identity, _fail)
+    # An unrecognised intent (a future value this code does not know) fails
+    # closed rather than defaulting to login.
+    return await _fail("oauth_state_invalid")
 
 
-__all__ = ["router"]
+__all__ = ["LinkResult", "router"]

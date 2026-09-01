@@ -56,6 +56,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       user_id: "usr_a",
       email: "claim@example.com",
       anonymous: false,
+      providers: [],
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -77,6 +78,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       user_id: "usr_b",
       email: "claim@example.com",
       anonymous: false,
+      providers: [],
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -96,11 +98,11 @@ describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
     window.location = originalLocation;
   });
 
-  function setSearch(search: string) {
+  function setSearch(search: string, hash = "") {
     // @ts-expect-error -- jsdom's window.location is not directly assignable
     delete window.location;
-    // @ts-expect-error -- a minimal stand-in is enough; only .search/.pathname are read
-    window.location = { ...originalLocation, search, pathname: "/" };
+    // @ts-expect-error -- a minimal stand-in is enough; only .search/.pathname/.hash are read
+    window.location = { ...originalLocation, search, pathname: "/", hash };
   }
 
   it("shows a welcome toast for ?auth=ok and strips the param", async () => {
@@ -137,5 +139,108 @@ describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
     expect(screen.queryByText("Welcome to CiteVyn.")).not.toBeInTheDocument();
     expect(screen.queryByText("Sign-in failed. Try again.")).not.toBeInTheDocument();
     expect(replaceSpy).not.toHaveBeenCalled();
+  });
+
+  // ADR-0004 PR 13: the replaceState fix. RED if the cleanup goes back to
+  // replaceState(null, "", pathname) -- utm_source would be lost.
+  it("strips only its own params: an unrelated query param and the hash survive the cleanup", async () => {
+    setSearch("?utm_source=newsletter&auth=ok&campaign=x", "#faq");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/?utm_source=newsletter&campaign=x#faq");
+  });
+});
+
+describe("account-linking return-trip toast (ADR-0004 PR 13)", () => {
+  const originalLocation = window.location;
+
+  afterEach(() => {
+    // @ts-expect-error -- restoring jsdom's original window.location
+    window.location = originalLocation;
+  });
+
+  function setSearch(search: string) {
+    // @ts-expect-error -- jsdom's window.location is not directly assignable
+    delete window.location;
+    // @ts-expect-error -- a minimal stand-in is enough
+    window.location = { ...originalLocation, search, pathname: "/", hash: "" };
+  }
+
+  it("?connect=ok&provider=github toasts success naming the provider and cleans all three params", async () => {
+    // RED if the connect family is not read at all, or if `provider`/`reason`
+    // are left behind in the URL.
+    setSearch("?connect=ok&provider=github");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("GitHub is now connected to your account.")).toBeInTheDocument();
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/");
+  });
+
+  it("?connect=error&reason=already_linked explains the identity belongs to another account", async () => {
+    setSearch("?connect=error&reason=already_linked&provider=google");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(
+      await screen.findByText("Google is already connected to a different CiteVyn account."),
+    ).toBeInTheDocument();
+  });
+
+  it("?connect=error&reason=session tells the user to sign in again", async () => {
+    setSearch("?connect=error&reason=session&provider=github");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText(/Sign out, sign in again, then retry/)).toBeInTheDocument();
+  });
+
+  it("?connect=error&reason=denied says the connection was cancelled, not that sign-in failed", async () => {
+    // Found live: cancelling the provider's consent mid-connect must not
+    // read as a failed sign-in to a user who is still signed in.
+    setSearch("?connect=error&reason=denied&provider=github");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Connection cancelled. Nothing was changed.")).toBeInTheDocument();
+    expect(screen.queryByText("Sign-in failed. Try again.")).not.toBeInTheDocument();
+  });
+
+  it("?connect=error with an unknown reason falls back to a generic retry message", async () => {
+    setSearch("?connect=error&reason=provider&provider=github");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Couldn't connect GitHub. Try again.")).toBeInTheDocument();
+  });
+
+  it("an unrecognised provider value is never rendered raw", async () => {
+    // `provider` is attacker-controllable via the URL bar.
+    setSearch("?connect=ok&provider=%3Cscript%3Ealert(1)%3C%2Fscript%3E");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Account connected.")).toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain("<script>alert(1)");
+    expect(document.body.textContent).not.toContain("alert(1)");
+  });
+
+  it.each(["constructor", "__proto__", "toString"])(
+    "?provider=%s does not resolve through Object.prototype (review finding A1)",
+    async (key) => {
+      // RED if PROVIDER_LABELS goes back to a plain object literal: the
+      // inherited member is truthy and its source text ends up in the toast.
+      setSearch(`?connect=ok&provider=${key}`);
+      render(<LandingPage theme="light" onThemeChange={() => {}} />);
+      expect(await screen.findByText("Account connected.")).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("native code");
+      cleanup();
+    },
+  );
+
+  it("auth and connect params are toasted independently, not as one if/else chain", async () => {
+    // RED if a shared chain drops one signal when both are present.
+    setSearch("?auth=ok&connect=ok&provider=github");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(await screen.findByText("GitHub is now connected to your account.")).toBeInTheDocument();
+  });
+
+  it("an unrelated query param survives the connect cleanup", async () => {
+    setSearch("?utm_source=x&connect=ok&provider=github");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    await screen.findByText("GitHub is now connected to your account.");
+    expect(replaceSpy).toHaveBeenCalledWith(null, "", "/?utm_source=x");
   });
 });

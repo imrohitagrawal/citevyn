@@ -120,14 +120,97 @@ GET /v1/auth/me
 ```
 
 ```json
-{ "request_id": "req_001", "user_id": "usr_...", "email": "user@example.com", "anonymous": false }
+{
+  "request_id": "req_001",
+  "user_id": "usr_...",
+  "email": "user@example.com",
+  "anonymous": false,
+  "providers": ["github"]
+}
 ```
+
+`providers` (ADR-0004 PR 13) lists the OAuth providers (`"github"`,
+`"google"`) linked to this account, sorted, always present — `[]` when none.
+`register` and `login` return the same body shape, `providers` included.
 
 401 `auth_required` if there is no valid session cookie. Unlike the
 session/message routes (which mint a fresh anonymous principal
 transparently on a missing/invalid cookie), this route does NOT mint — it
 answers "who is this, if anyone", so a stale cookie must be visibly 401,
 not silently replaced.
+
+## 4b. OAuth login + account linking (ADR-0004 PR 12 / PR 13)
+
+These are **browser navigations**, not API calls: no demo bearer, no JSON
+body. They are rate-limited per visitor like every other public route
+(`rate_limited_oauth_navigation`) and answer with a redirect. The
+`{provider}` segment is `github` or `google`; anything else, or a provider
+without credentials configured, is a quiet `404` — with one exception:
+`callback` handles a provider-declined `?error=` **before** validating the
+provider, so an unknown provider plus `?error=` redirects like any other
+declined login (`/?auth=error`) rather than 404ing.
+
+```http
+GET /v1/auth/oauth/{provider}/start
+```
+
+Begins an OAuth **login**. Mints an anonymous session if the caller has none
+(so the state nonce has a session to bind to), persists a single-use,
+session-bound PKCE nonce (`oauth_nonces`, 5-minute TTL, `return_intent =
+"login"`) and `302`s to the provider's consent screen.
+
+```http
+GET /v1/auth/oauth/{provider}/connect/start
+```
+
+Begins **account linking** (PR 13): attaches the provider identity to the
+account the caller is *already* signed in as. Requires a registered
+(`usr_`-prefixed) session that was **created within
+`CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`** (default 20 minutes — a
+stolen cookie must not be able to plant a permanent backdoor identity late
+in a 180-day session). Never mints a session. Anonymous / no session / stale
+session → `302 /?connect=error&reason=session&provider={provider}` and no
+nonce is written. Otherwise identical to `start` with `return_intent =
+"connect"`.
+
+```http
+GET /v1/auth/oauth/{provider}/callback?code=...&state=...
+```
+
+The provider's redirect target for **both** flows. Atomically claims the
+nonce (`DELETE … WHERE nonce_id AND provider AND auth_session_id … RETURNING`
+— the completing browser must be the one that started the flow), exchanges
+the code (PKCE), fetches the provider identity, then dispatches on the
+claimed nonce's `return_intent`:
+
+| intent | outcome | redirect |
+|---|---|---|
+| `login` | identity found → that account logs in; not found → a **new** account (never matched by email) | `/?auth=ok` |
+| `login` | any failure (bad/expired/replayed state, provider error, consent denied) | `/?auth=error` |
+| `connect` | identity newly linked, or already linked to this same account | `/?connect=ok&provider={provider}` |
+| `connect` | identity already linked to a **different** account — never reassigned | `/?connect=error&reason=already_linked&provider={provider}` |
+| `connect` | the claimed nonce's session is no longer a live registered account (defense in depth — a session that dies during the provider round trip) | `/?connect=error&reason=session&provider={provider}` |
+| `connect` | the nonce expired (5-minute TTL) before the callback | `/?connect=error&reason=provider&provider={provider}` (event `oauth_expired`) |
+| `connect` | provider error after the nonce was claimed | `/?connect=error&reason=provider&provider={provider}` |
+| `connect` | the user declined the provider's consent screen | `/?connect=error&reason=denied&provider={provider}` |
+
+Failures **before** the nonce is claimed — a missing `code`, a missing,
+malformed or replayed `state`, or a starting session that was revoked or
+rotated in the meantime — cannot know the intent and redirect to
+`/?auth=error` for both flows (nonce left intact where it exists). An
+unrecognised `return_intent` on a claimed nonce also fails closed to
+`/?auth=error`.
+
+A declined consent (`?error=…`) consumes the caller's own nonce (same
+session-bound conditional claim) and routes by its intent; a `state` that is
+not the caller's own is left untouched, so it cannot be burned by a third party.
+
+Linking writes exactly one `user_identities` row: it never creates a `users`
+row, never changes `users.email`, and never rotates the caller's session
+cookie. Every failure is audited as `auth_failed` with `metadata.event` one of
+`oauth_state_invalid`, `oauth_expired`, `oauth_denied`, `oauth_provider_error`,
+`oauth_connect_conflict`, `oauth_connect_no_session`; successes are `login`
+events with `metadata.event` = `oauth_{provider}` / `oauth_connect_{provider}`.
 
 ## 5. Create Session
 

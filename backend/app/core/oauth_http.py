@@ -37,7 +37,8 @@ class OAuthProviderError(RuntimeError):
     """Raised when an OAuth provider call fails (transport, timeout, or non-2xx).
 
     The caller (``app.api.routes.oauth``) treats this uniformly as "the
-    provider is unavailable" and redirects to ``/?auth=error`` -- the
+    provider is unavailable" and redirects to the flow's error page
+    (``/?auth=error``, or ``/?connect=error`` for an account link) -- the
     message here is safe to log but is never placed in an HTTP response.
     """
 

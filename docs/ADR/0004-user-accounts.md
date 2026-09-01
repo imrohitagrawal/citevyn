@@ -145,6 +145,37 @@ since a cross-site form POST cannot set an `Authorization` header.
 - **Pro does not become real.** "Saved history" moves down into Free, where
   login actually delivers it; Pro is marked `planned` and its CTA becomes
   "Notify me" rather than a non-functional checkout.
+- **Account linking requires a fresh session, not step-up re-auth (PR 13).**
+  `GET /v1/auth/oauth/{provider}/connect/start` is refused unless the
+  caller's `AuthSession` was *created* within
+  `oauth_connect_max_session_age_seconds` (default 20 minutes). Why: a
+  session's `created_at` never refreshes and sessions live 180 days, so
+  without this a stolen cookie could link the thief's own GitHub/Google
+  identity to the victim's account at any point in that window — turning a
+  temporary compromise into a permanent backdoor that survives logout and a
+  later password change. The gate costs no new auth primitive. **Residual,
+  accepted:** a cookie stolen *inside* the freshness window, right after a
+  genuine login, is not caught; closing that needs true step-up
+  re-authentication scoped to the connect action, which is out of scope.
+- **Linking never reassigns, never creates, never rotates (PR 13).** An
+  external identity already linked to a different account is rejected
+  (`LinkResult.LINKED_ELSEWHERE`), never moved — including under a
+  concurrent-insert race, where the loser compares the winning row's owner
+  against its *own* target rather than reporting success because a row now
+  exists. Linking writes one `user_identities` row and nothing else: no
+  `users` row, no change to `users.email`, no session rotation.
+- **One identity per provider per account is not yet enforced.** The unique
+  constraint is on the external identity `(provider, provider_account_id)`
+  only, so one account can link two different GitHub accounts; `/me` reports
+  `providers` as a de-duplicated set. Whether to add a
+  `(user_id, provider)` constraint (and a matching `LinkResult`) is an open
+  question to settle **before** a disconnect feature, whose
+  delete-by-`(user_id, provider)` would otherwise be ambiguous.
+- **Disconnect invariant — recorded now, built later.** A future "disconnect
+  a provider" feature **must** keep every account with at least one access
+  method: `password_hash` set **or** at least one remaining `user_identities`
+  row. Removing the last one without first requiring a password to be set
+  must be refused. Not built in PR 13; must not be silently designed away.
 
 ## PR sequence
 
@@ -167,6 +198,7 @@ must land before PR 6 (the first PR that can create a second principal).
 | 10 | `GET /v1/me/sessions` + history drawer + resume (needs citation hydration) |
 | 11 | Per-user rate tiers (authenticated key on `user_id`, anonymous keeps IP HMAC) |
 | 12 | GitHub OAuth (`user_identities` table) |
+| 13 | Account linking: connect GitHub/Google to an existing signed-in account (`connect/start`, freshness gate, `providers` on `/me`) — the working form of the recovery path above |
 
 PR 5 is a one-way door: after PR 6 creates real accounts, `downgrade 0008`
 destroys them. PR 5 must be verified in production before PR 6 ships.

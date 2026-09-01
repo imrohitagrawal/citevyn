@@ -161,6 +161,18 @@ class Settings(BaseSettings):
     # risk the exact-match requirement exists to close). Falls back to
     # http://localhost:8000 when unset, for local dev.
     oauth_redirect_base_url: str | None = None
+    # ADR-0004 PR 13 (account linking): `GET .../oauth/{provider}/connect/start`
+    # is refused unless the caller's AuthSession was CREATED within this many
+    # seconds. A session row's created_at never refreshes and sessions live
+    # up to auth_session_ttl_seconds (180 days), so without this gate a stolen
+    # cookie could link the thief's own GitHub/Google identity to the victim's
+    # account at any point in those 180 days -- turning a temporary session
+    # compromise into a permanent backdoor that survives logout and a later
+    # password change. 20 minutes bounds that to "right after a genuine
+    # login", forcing a fresh credential check before linking, with no new
+    # auth primitive. Residual (recorded in the ADR): a cookie stolen INSIDE
+    # this window is not caught; closing that needs true step-up re-auth.
+    oauth_connect_max_session_age_seconds: int = Field(default=20 * 60, ge=1)
 
     # --- Auth session cookie (ADR-0004 PR 3) ---
     # 180 days: long enough that a returning anonymous visitor keeps their

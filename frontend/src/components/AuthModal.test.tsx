@@ -117,6 +117,7 @@ describe("AuthModal form", () => {
       user_id: "usr_a",
       email: "a@example.com",
       anonymous: false,
+      providers: [],
     });
     const user = userEvent.setup();
     const onClose = vi.fn();

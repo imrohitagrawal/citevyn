@@ -53,7 +53,8 @@ MVP supports:
    durable pseudonymous principal (`anon_<uuid4hex>`) minted transparently on
    first session creation — no login screen, no wall in front of the demo.
    Registered users (`usr_<uuid4hex>`) authenticate with email + Argon2id
-   password hash, or GitHub OAuth, and get a Postgres-backed opaque session
+   password hash, or GitHub/Google OAuth (as the login method, or linked to
+   a password account afterwards via `connect/start`), and get a Postgres-backed opaque session
    token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Sessions and
    messages are owned by principal id, enforced at the two loaders every
    affected route already shares; a mismatch returns 404, never 403.
@@ -185,7 +186,11 @@ MVP does not support:
 > of scope. **Real single-tenant personal-account login is a different,
 > now-in-scope capability** — see §4. Two limitations specific to that login
 > system, accepted deliberately rather than silently: password reset is not
-> implemented in v1 (GitHub OAuth is the recovery path; a CLI account-delete
+> implemented in v1 (GitHub/Google OAuth is the recovery path — either as the
+> login method, or linked to a password account afterwards via
+> `connect/start`, which requires a session created within
+> `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`, default 20 minutes; the
+> inside-window residual is recorded in ADR-0004; a CLI account-delete
 > escape hatch is documented in `RUNBOOK.md`), and registration responses
 > disclose whether an email is already registered (no email-sending
 > provider exists to support an always-202 response instead).

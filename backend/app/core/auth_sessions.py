@@ -215,6 +215,23 @@ async def try_resolve_principal(
     return await _lookup_principal(db, cookie_value)
 
 
+async def try_resolve_auth_session(
+    request: Request, db: AsyncSession, settings: Settings
+) -> AuthSession | None:
+    """Resolve the caller's CURRENT live ``AuthSession`` row from its cookie, or ``None``.
+
+    Used by ``GET /v1/auth/oauth/{provider}/connect/start`` (ADR-0004 PR 13),
+    which needs three facts about the caller in one lookup — the session id
+    (to bind the nonce to), the principal (must be a real ``usr_`` account)
+    and ``created_at`` (the session-freshness gate) — without minting
+    anything for a request that is about to be rejected. Never mints.
+    """
+    cookie_value = request.cookies.get(_cookie_name(settings))
+    if not cookie_value:
+        return None
+    return await _lookup_auth_session(db, cookie_value)
+
+
 async def try_resolve_auth_session_id(
     request: Request, db: AsyncSession, settings: Settings
 ) -> uuid.UUID | None:
@@ -228,11 +245,30 @@ async def try_resolve_auth_session_id(
     answers "which browser session is this", and the two differ the moment
     two tabs share one cookie but only one of them started the OAuth flow.
     """
-    cookie_value = request.cookies.get(_cookie_name(settings))
-    if not cookie_value:
-        return None
-    row = await _lookup_auth_session(db, cookie_value)
+    row = await try_resolve_auth_session(request, db, settings)
     return row.auth_session_id if row is not None else None
+
+
+async def resolve_principal_by_auth_session_id(
+    db: AsyncSession, auth_session_id: uuid.UUID
+) -> str | None:
+    """Map a known ``AuthSession`` id to its principal id, or ``None`` if not live.
+
+    Used by the account-linking callback (ADR-0004 PR 13): the target account
+    for a "connect" is the owner of the session the CLAIMED nonce was bound
+    to — resolved here from the nonce's own ``auth_session_id`` rather than
+    by re-reading the request cookie a second time, so there is exactly one
+    source of truth for "which session started this flow". No secret is
+    checked here (the caller already proved possession of the cookie by
+    claiming the nonce, whose WHERE clause bound it to this session id);
+    a deleted or expired row still fails closed to ``None``.
+    """
+    row = await db.get(AuthSession, auth_session_id)
+    if row is None:
+        return None
+    if _to_naive_utc(row.expires_at) <= _to_naive_utc(_now()):
+        return None
+    return row.user_id
 
 
 async def ensure_auth_session(
@@ -362,7 +398,9 @@ __all__ = [
     "claim_and_login",
     "ensure_auth_session",
     "resolve_principal",
+    "resolve_principal_by_auth_session_id",
     "revoke_current_session",
+    "try_resolve_auth_session",
     "try_resolve_auth_session_id",
     "try_resolve_principal",
 ]
