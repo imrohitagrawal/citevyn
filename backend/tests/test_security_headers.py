@@ -53,21 +53,45 @@ def _production_settings(**overrides: object) -> Settings:
     )
 
 
+def _parse_csp(csp: str) -> dict[str, set[str]]:
+    """Split a ``Content-Security-Policy`` header into ``{directive: {tokens}}``.
+
+    Parsed into exact tokens rather than checked with `substring in csp` —
+    CodeQL's ``py/incomplete-url-substring-sanitization`` flags the latter
+    pattern (an origin string could appear as a substring at an arbitrary,
+    unintended position), and parsing into directive tokens is also a
+    strictly stronger assertion: it proves the origin is actually a value of
+    the *specific* directive, not merely present somewhere in the header.
+    """
+    directives: dict[str, set[str]] = {}
+    for part in csp.split(";"):
+        tokens = part.strip().split()
+        if not tokens:
+            continue
+        directives[tokens[0]] = set(tokens[1:])
+    return directives
+
+
 def _assert_common_headers(headers: dict[str, str]) -> None:
     for name, value in _EXPECTED_STATIC_HEADERS.items():
         assert headers[name] == value, f"{name}: expected {value!r}, got {headers.get(name)!r}"
-    csp = headers["content-security-policy"]
-    assert "default-src 'self'" in csp
-    assert "script-src 'self'" in csp
-    assert "'unsafe-inline'" not in csp
-    assert "'unsafe-eval'" not in csp
-    assert "frame-ancestors 'none'" in csp
+    directives = _parse_csp(headers["content-security-policy"])
+    assert directives["default-src"] == {"'self'"}
+    assert directives["script-src"] == {"'self'"}
+    assert directives["frame-ancestors"] == {"'none'"}
     # The two third-party origins the shipped frontend actually loads
     # (frontend/index.html): Google Fonts + Fontshare stylesheets, and the
     # font files those stylesheets reference.
-    assert "https://fonts.googleapis.com" in csp
-    assert "https://api.fontshare.com" in csp
-    assert "https://fonts.gstatic.com" in csp
+    assert directives["style-src"] == {
+        "'self'",
+        "https://fonts.googleapis.com",
+        "https://api.fontshare.com",
+    }
+    assert directives["font-src"] == {
+        "'self'",
+        "https://fonts.gstatic.com",
+        "https://api.fontshare.com",
+    }
 
 
 # ---------------------------------------------------------------------------
