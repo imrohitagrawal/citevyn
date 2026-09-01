@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useLandingState } from "./useLandingState";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
+import { getAuthSnapshot } from "../lib/authStore";
 import { ApiClientError } from "../lib/types";
 import type { AskResponse, CreateSessionResponse, GetSessionResponse } from "../lib/types";
 
@@ -16,10 +17,15 @@ vi.mock("../lib/api", () => ({
   getSession: vi.fn(),
 }));
 
+vi.mock("../lib/authStore", () => ({
+  getAuthSnapshot: vi.fn(() => ({ status: "anonymous", user: null })),
+}));
+
 const mockIsLive = vi.mocked(isLiveMode);
 const mockCreateSession = vi.mocked(createSession);
 const mockAskQuestion = vi.mocked(askQuestion);
 const mockGetSession = vi.mocked(getSession);
+const mockGetAuthSnapshot = vi.mocked(getAuthSnapshot);
 
 const session: CreateSessionResponse = {
   request_id: "req_1",
@@ -290,6 +296,43 @@ describe("useLandingState — live error path", () => {
       kind: "warning",
       title: "Too many requests",
     });
+  });
+
+  it("appends the sign-in upsell to a rate-limit message for an anonymous visitor (ADR-0004 PR 11)", async () => {
+    mockGetAuthSnapshot.mockReturnValue({ status: "anonymous", user: null });
+    mockAskQuestion.mockRejectedValue(
+      new ApiClientError("Slow down.", 429, {
+        request_id: "r",
+        status: "error",
+        error: { code: "rate_limited", message: "Slow down." },
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("A question that will be throttled"));
+    await settle();
+
+    expect(result.current.state.messages[1].text).toContain("Sign in for a higher limit.");
+  });
+
+  it("does not pitch sign-in to an already-signed-in caller on a rate limit (ADR-0004 PR 11)", async () => {
+    mockGetAuthSnapshot.mockReturnValue({
+      status: "signed-in",
+      user: { request_id: "r", user_id: "usr_1", email: "a@example.com", anonymous: false },
+    });
+    mockAskQuestion.mockRejectedValue(
+      new ApiClientError("Slow down.", 429, {
+        request_id: "r",
+        status: "error",
+        error: { code: "rate_limited", message: "Slow down." },
+      }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("A question that will be throttled"));
+    await settle();
+
+    expect(result.current.state.messages[1].text).not.toContain("Sign in for a higher limit.");
   });
 
   it("gives a limiter outage its own copy — not answer-service copy, not a refusal (#167)", async () => {

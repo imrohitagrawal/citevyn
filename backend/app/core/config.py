@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # development; production deploys MUST set ``CITEVYN_REDIS_URL``.
     rate_limit_enabled: bool = True
     rate_limit_demo_user_per_hour: int = Field(default=30, ge=1)
+    # ADR-0004 PR 11: a signed-in caller gets a higher limit, keyed on their
+    # own user_id rather than an IP-derived key -- makes the pricing page's
+    # "sign in for a higher limit" pitch structurally true, not copy alone.
+    rate_limit_demo_user_registered_per_hour: int = Field(default=100, ge=1)
     rate_limit_admin_per_hour: int = Field(default=100, ge=1)
     rate_limit_window_seconds: int = Field(default=3600, ge=1)
 

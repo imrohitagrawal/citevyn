@@ -54,8 +54,10 @@ from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Annotated, Protocol
 
 from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
 from app.core.security import require_admin_api_key, require_demo_api_key
@@ -81,6 +83,12 @@ _DEFAULT_GLOBAL_PER_WINDOW = 600
 # ``settings.rate_limit_auth_login_per_hour``.
 _DEFAULT_AUTH_LOGIN_PER_WINDOW = 10
 _AUTH_LOGIN_ROLE = "auth_login"
+
+# Fallback for the signed-in-caller bucket (ADR-0004 PR 11) when a caller
+# constructs a limiter directly without naming one. Production passes
+# ``settings.rate_limit_demo_user_registered_per_hour``.
+_DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW = 100
+_DEMO_USER_REGISTERED_ROLE = "demo_user_registered"
 
 
 class _LimiterLike(Protocol):
@@ -126,6 +134,7 @@ class RateLimiter:
         admin_per_window: int,
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
+        demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -135,6 +144,8 @@ class RateLimiter:
             raise ValueError("global_per_window must be >= 1")
         if auth_login_per_window < 1:
             raise ValueError("auth_login_per_window must be >= 1")
+        if demo_user_registered_per_window < 1:
+            raise ValueError("demo_user_registered_per_window must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
@@ -148,6 +159,9 @@ class RateLimiter:
             # Credential-stuffing guard (ADR-0004 PR 6), keyed per target email
             # rather than per client — see ``auth_login_rate_key``.
             _AUTH_LOGIN_ROLE: auth_login_per_window,
+            # Signed-in caller bucket (ADR-0004 PR 11), keyed per user_id
+            # rather than per IP — see ``rate_limited_demo``.
+            _DEMO_USER_REGISTERED_ROLE: demo_user_registered_per_window,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -176,7 +190,7 @@ class RateLimiter:
             while bucket and bucket[0] <= cutoff:
                 bucket.popleft()
             if len(bucket) >= limit:
-                raise _too_many_requests()
+                raise _too_many_requests(role=role)
             bucket.append(now)
 
     def reset(self) -> None:
@@ -262,6 +276,7 @@ class RedisRateLimiter:
         key_prefix: str,
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
+        demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -271,6 +286,8 @@ class RedisRateLimiter:
             raise ValueError("global_per_window must be >= 1")
         if auth_login_per_window < 1:
             raise ValueError("auth_login_per_window must be >= 1")
+        if demo_user_registered_per_window < 1:
+            raise ValueError("demo_user_registered_per_window must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -287,6 +304,9 @@ class RedisRateLimiter:
             # Credential-stuffing guard (ADR-0004 PR 6), keyed per target email
             # rather than per client — see ``auth_login_rate_key``.
             _AUTH_LOGIN_ROLE: auth_login_per_window,
+            # Signed-in caller bucket (ADR-0004 PR 11), keyed per user_id
+            # rather than per IP — see ``rate_limited_demo``.
+            _DEMO_USER_REGISTERED_ROLE: demo_user_registered_per_window,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -357,7 +377,7 @@ class RedisRateLimiter:
                 message="Rate limiter is temporarily unavailable.",
             ) from exc
         if not int(allowed):
-            raise _too_many_requests()
+            raise _too_many_requests(role=role)
 
 
 # ---------------------------------------------------------------------------
@@ -365,16 +385,27 @@ class RedisRateLimiter:
 # ---------------------------------------------------------------------------
 
 
-def _too_many_requests() -> Exception:
-    """Build a 429 :class:`HTTPException` carrying the standard error envelope."""
+def _too_many_requests(*, role: str = "demo_user") -> Exception:
+    """Build a 429 :class:`HTTPException` carrying the standard error envelope.
+
+    ADR-0004 PR 11: an anonymous caller (``role == "demo_user"``) gets an
+    upsell appended — makes the pricing page's "sign in for a higher
+    limit" pitch visible at the exact moment it is relevant, not just
+    written on a page the caller may never scroll to. A caller already on
+    the higher, signed-in tier (or the ``auth_login``/``admin``/``global``
+    buckets, none of which this upsell applies to) gets the plain message.
+    """
     request_id = get_current_request_id()
+    message = (
+        "Rate limit exceeded. The demo allows a small number of "
+        "queries per hour per user; try again later."
+    )
+    if role == "demo_user":
+        message += " Sign in for a higher limit."
     return error_response(
         request_id=request_id,
         code=APIErrorCode.rate_limited,
-        message=(
-            "Rate limit exceeded. The demo allows a small number of "
-            "queries per hour per user; try again later."
-        ),
+        message=message,
     )
 
 
@@ -396,6 +427,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             key_prefix=settings.redis_key_prefix,
             global_per_window=_effective_global_limit(settings),
             auth_login_per_window=settings.rate_limit_auth_login_per_hour,
+            demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
@@ -403,6 +435,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
         admin_per_window=settings.rate_limit_admin_per_hour,
         global_per_window=_effective_global_limit(settings),
         auth_login_per_window=settings.rate_limit_auth_login_per_hour,
+        demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
     )
 
 
@@ -450,6 +483,8 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         and limiter.limit_for(role="admin") == settings.rate_limit_admin_per_hour
         and limiter.limit_for(role=_GLOBAL_ROLE) == _effective_global_limit(settings)
         and limiter.limit_for(role=_AUTH_LOGIN_ROLE) == settings.rate_limit_auth_login_per_hour
+        and limiter.limit_for(role=_DEMO_USER_REGISTERED_ROLE)
+        == settings.rate_limit_demo_user_registered_per_hour
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -588,17 +623,41 @@ async def rate_limited_demo(
     request: Request,
     user_id: Annotated[str, Depends(require_demo_api_key)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
 ) -> str:
     """Demo-user auth + per-visitor rate limit. Returns the demo user id.
 
     Returns ``user_id`` unchanged so every route signature and all downstream
-    attribution stay exactly as they were; only the limiter's key differs.
+    attribution stay exactly as they were; only the limiter's key (and, for
+    a signed-in caller, the limit itself) differs.
+
+    ADR-0004 PR 11: a signed-in caller is keyed on their own ``user_id``
+    (stable across IPs/devices) at a HIGHER limit, instead of the IP-derived
+    key every anonymous caller shares. The cookie is peeked directly via
+    ``try_resolve_principal`` rather than going through
+    ``resolve_principal`` — the latter itself depends on this function (it
+    rate-limits before it will mint an anonymous principal), so calling it
+    here would be a cycle. A local import (not top-of-module) avoids the
+    equivalent cycle at the Python import level: ``auth_sessions.py``
+    already imports ``rate_limited_demo`` from this module.
     """
-    await enforce_rate_limit(
-        user_id=client_rate_key(request, settings),
-        role="demo_user",
-        settings=settings,
-    )
+    from app.core.auth_sessions import try_resolve_principal
+
+    # A positive allowlist, not a denylist on "anon_" -- an unrecognized future
+    # principal shape (a new prefix, a malformed id) must fall back to the
+    # LOWER anonymous tier, not silently earn the higher one. Mirrors the same
+    # fail-closed reasoning in ``auth_sessions.py``'s claim-on-login check.
+    registered_id = await try_resolve_principal(request, db, settings)
+    if registered_id is not None and registered_id.startswith("usr_"):
+        await enforce_rate_limit(
+            user_id=registered_id, role="demo_user_registered", settings=settings
+        )
+    else:
+        await enforce_rate_limit(
+            user_id=client_rate_key(request, settings),
+            role="demo_user",
+            settings=settings,
+        )
     # Backstop across all visitors. Per-visitor limiting alone leaves a
     # distributed source unbounded; this caps total request volume. Checked
     # AFTER the per-visitor limit so an individual flood is attributed to that
