@@ -172,6 +172,96 @@ def test_migration_0007_auth_sessions_round_trips(alembic_config: AlembicConfig)
     assert (EXPECTED_TABLES - {"auth_sessions"}) <= tables
 
 
+def test_migration_0008_users_identity_columns_round_trips(
+    alembic_config: AlembicConfig,
+) -> None:
+    """0008 (users identity columns + sessions FK CASCADE, ADR-0004 PR 5) round-trips.
+
+    Two things are proven, not just asserted structurally:
+
+    1. ``email``/``password_hash`` exist on ``users``, are nullable (so the
+       anonymous principal's row still inserts with neither set), and
+       ``email`` is unique.
+    2. ``sessions.user_id`` really is ``ON DELETE CASCADE`` now, not just
+       declared as such: deleting a user row is exercised end-to-end and the
+       user's session is gone afterward. A migration that changed the FK
+       name but left ``ondelete="RESTRICT"`` would pass a column-inventory
+       check and fail only here, when the delete raises ``IntegrityError``
+       instead of cascading.
+
+    Downgrade is exercised the same way: after downgrading to 0007, the
+    identity columns are gone and the FK reverts to RESTRICT (deleting a
+    user with a session raises again).
+    """
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    with engine.connect() as connection:
+        columns = {
+            row[1]: row for row in connection.exec_driver_sql("PRAGMA table_info(users)").all()
+        }
+    assert "email" in columns and "password_hash" in columns
+    # PRAGMA table_info's notnull column (index 3) is 0 for nullable.
+    assert columns["email"][3] == 0
+    assert columns["password_hash"][3] == 0
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+            "VALUES ('usr_a', 'demo_user', CURRENT_TIMESTAMP, 'a@example.com', 'hash-a')"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+            "VALUES ('usr_b', 'demo_user', CURRENT_TIMESTAMP, NULL, NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO sessions (session_id, user_id, channel, created_at, expires_at) "
+            "VALUES ('11111111-1111-1111-1111-111111111111', 'usr_a', 'chat', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+
+    # Duplicate email is rejected; a second NULL email (usr_b, above) is not.
+    with (
+        engine.begin() as connection,
+        pytest.raises(Exception, match="UNIQUE"),
+    ):
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+            "VALUES ('usr_dupe', 'demo_user', CURRENT_TIMESTAMP, 'a@example.com', 'hash-dupe')"
+        )
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_a'")
+
+    with engine.connect() as connection:
+        remaining = connection.exec_driver_sql(
+            "SELECT session_id FROM sessions WHERE user_id = 'usr_a'"
+        ).all()
+    assert remaining == [], "sessions.user_id must be ON DELETE CASCADE after 0008"
+
+    alembic_downgrade(alembic_config, "0007")
+    with engine.connect() as connection:
+        columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(users)").all()}
+    assert "email" not in columns
+    assert "password_hash" not in columns
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql(
+            "INSERT INTO sessions (session_id, user_id, channel, created_at, expires_at) "
+            "VALUES ('22222222-2222-2222-2222-222222222222', 'usr_b', 'chat', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    with (
+        engine.begin() as connection,
+        pytest.raises(Exception, match="FOREIGN KEY constraint failed|IntegrityError"),
+    ):
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
+
+
 def test_documents_identity_checksum_rename_round_trips(
     alembic_config: AlembicConfig,
 ) -> None:
