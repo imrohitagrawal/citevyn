@@ -475,21 +475,25 @@ const tierDefs: Array<{
       "Citations on every factual answer",
       "Out-of-scope refusal guardrail",
       "Bounded follow-up sessions",
+      // Login unlocks this — free, optional, no wall in front of the demo.
+      // Moved out of Pro (ADR-0004): it was sold as a paid feature that was
+      // unbuildable without accounts, on the same page as "NO ACCOUNT NEEDED".
+      "Saved history when you sign in (optional, free)",
     ],
   },
   {
     name: "Pro",
     price: "$12",
     unit: "/month",
-    desc: "For developers who live in the docs.",
-    cta: "Get Pro",
+    desc: "For developers who live in the docs. Planned — not billed yet.",
+    cta: "Notify me",
     featured: true,
     action: "getPro",
     features: [
       "Everything in Demo",
       "Higher rate limits & faster models",
       "Exact lookup for flags, commands & config keys",
-      "Saved history & shareable answers",
+      "Shareable answers",
       "Usage & cost insights",
     ],
   },
@@ -604,6 +608,10 @@ const faqDefs = [
   {
     q: "How fresh is the documentation?",
     a: "CiteVyn serves from the last known-good version of the docs, so a failed update never corrupts what's live. Automatic scheduled refresh is an Enterprise feature.",
+  },
+  {
+    q: "Do I need an account?",
+    a: "No. CiteVyn works fully with no signup. Sign in — optional and free — if you want your chat history to survive a page refresh instead of resetting.",
   },
 ];
 
