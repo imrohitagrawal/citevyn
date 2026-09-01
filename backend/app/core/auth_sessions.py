@@ -228,15 +228,9 @@ async def claim_and_login(
         # logs in on the same browser — a real cross-account data leak, not
         # a hypothetical one (caught by adversarial review of this PR).
         # Anonymous principals are the only ones this function is meant to
-        # fold in, and `anon_` is the one identifying mark they carry.
-        # Claim ONLY from an anonymous prior principal. Without this check, a
-        # browser that already holds a valid cookie for a real registered
-        # account (someone forgot to log out, a shared/kiosk machine) would
-        # have ITS sessions silently reassigned the moment a second account
-        # logs in on the same browser — a real cross-account data leak, not
-        # a hypothetical one (caught by adversarial review of this PR).
-        # Anonymous principals are the only ones this function is meant to
-        # fold in, and `anon_` is the one identifying mark they carry.
+        # fold in, and `anon_` is the one identifying mark they carry. This
+        # is a positive allowlist, not a denylist against `usr_` — a future
+        # prefix (e.g. PR 12's OAuth-linked accounts) fails closed here too.
         if old_row.user_id != user_id and old_row.user_id.startswith("anon_"):
             await db.execute(
                 update(Session).where(Session.user_id == old_row.user_id).values(user_id=user_id)
