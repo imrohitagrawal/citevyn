@@ -5,6 +5,7 @@
  * Replaces the old multi-style architecture with a single unified page.
  */
 
+import { useEffect } from "react";
 import { useLandingState } from "../hooks/useLandingState";
 import { KB } from "../data/knowledgeBase";
 import { Header } from "./Header";
@@ -67,6 +68,31 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   } = useLandingState();
 
   const dark = theme === "dark";
+
+  // ADR-0004 PR 12: the OAuth return trip is a hard navigation (the backend
+  // redirects here with ?auth=ok or ?auth=error after the provider round
+  // trip), so there is no client-side promise to await -- this reads the
+  // query param the backend attaches instead. Confirmed: the frontend's
+  // FIRST use of URLSearchParams/History API anywhere, kept minimal and
+  // contained on purpose. bootstrapAuth()'s normal GET /v1/auth/me call
+  // (fired on this same mount, via useAuth) already picks up the new
+  // cookie with no special-casing here, since the cookie is set
+  // server-side before the redirect lands.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const authResult = params.get("auth");
+    if (authResult === "ok") {
+      addToast({ kind: "success", title: "Signed in", message: "Welcome to CiteVyn." });
+    } else if (authResult === "error") {
+      addToast({ kind: "error", title: "Sign-in failed", message: "Sign-in failed. Try again." });
+    }
+    if (authResult !== null) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+    // Runs once on mount only -- addToast is stable (useCallback in
+    // useToast) and re-running this on every re-render would re-fire the
+    // toast on unrelated state changes.
+  }, [addToast]);
 
   // ADR-0004 PR 9: confirm the claim-on-login the backend already performs
   // (PR 6) transparently via the session cookie -- no client-side refetch

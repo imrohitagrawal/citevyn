@@ -461,3 +461,45 @@ async def test_vector_retriever_returns_ranked_hits_on_postgres(pg_schema: str) 
         assert scores[0] > scores[-1]
     finally:
         await engine.dispose()
+
+
+async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_postgres(
+    pg_schema: str,
+) -> None:
+    """Regression for a real bug found live-testing ADR-0004 PR 12: on
+    Postgres, ``_mint_principal`` added a new ``User`` and a new
+    ``AuthSession`` (referencing that user by FK) to the same session and
+    flushed them TOGETHER in one ``db.flush()`` call. Without an explicit
+    ORM ``relationship()`` between the two mapped classes (only the raw FK
+    column is declared), SQLAlchemy did not reliably order that combined
+    flush's INSERT statements, so ``auth_sessions`` could be inserted before
+    its own ``users`` row existed -- a ``ForeignKeyViolation`` on every
+    first-time anonymous visitor.
+
+    This was INVISIBLE to the hermetic SQLite suite (1500+ passing tests)
+    because SQLite foreign-key enforcement is off for this app's engine (no
+    ``PRAGMA foreign_keys=ON`` anywhere in ``app.core.db``) -- only a live
+    Postgres run ever exercised the real constraint. Fixed by flushing the
+    ``User`` row on its own before adding the ``AuthSession`` row.
+    """
+    from fastapi import Response
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.auth_sessions import _mint_principal
+    from app.core.config import Settings
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    settings = Settings()
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with maker() as session:
+            response = Response()
+            principal_id, auth_session_id = await _mint_principal(session, settings, response)
+            await session.commit()  # the real assertion: this must not raise ForeignKeyViolation
+
+        assert principal_id.startswith("anon_")
+        assert auth_session_id is not None
+    finally:
+        await engine.dispose()

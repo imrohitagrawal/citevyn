@@ -619,27 +619,25 @@ def client_rate_key(request: Request | None, settings: Settings) -> str:
     return f"demo_{digest[:32]}"
 
 
-async def rate_limited_demo(
-    request: Request,
-    user_id: Annotated[str, Depends(require_demo_api_key)],
-    settings: Annotated[Settings, Depends(get_settings)],
-    db: Annotated[AsyncSession, Depends(get_session)],
-) -> str:
-    """Demo-user auth + per-visitor rate limit. Returns the demo user id.
+async def _apply_per_visitor_rate_limit(
+    request: Request, settings: Settings, db: AsyncSession
+) -> None:
+    """Per-visitor (+ global backstop) rate limiting, shared by every public entry point.
 
-    Returns ``user_id`` unchanged so every route signature and all downstream
-    attribution stay exactly as they were; only the limiter's key (and, for
-    a signed-in caller, the limit itself) differs.
+    Factored out of :func:`rate_limited_demo` so
+    :func:`rate_limited_oauth_navigation` (ADR-0004 PR 12) can apply the SAME
+    per-visitor limiting to a route that cannot require the demo bearer (see
+    that function's docstring for why) without duplicating this logic.
 
     ADR-0004 PR 11: a signed-in caller is keyed on their own ``user_id``
     (stable across IPs/devices) at a HIGHER limit, instead of the IP-derived
     key every anonymous caller shares. The cookie is peeked directly via
     ``try_resolve_principal`` rather than going through
-    ``resolve_principal`` — the latter itself depends on this function (it
-    rate-limits before it will mint an anonymous principal), so calling it
-    here would be a cycle. A local import (not top-of-module) avoids the
-    equivalent cycle at the Python import level: ``auth_sessions.py``
-    already imports ``rate_limited_demo`` from this module.
+    ``resolve_principal`` — the latter itself depends on this function's
+    caller (it rate-limits before it will mint an anonymous principal), so
+    calling it here would be a cycle. A local import (not top-of-module)
+    avoids the equivalent cycle at the Python import level:
+    ``auth_sessions.py`` already imports from this module.
     """
     from app.core.auth_sessions import try_resolve_principal
 
@@ -664,7 +662,46 @@ async def rate_limited_demo(
     # visitor rather than burning the shared allowance.
     if settings.rate_limit_global_per_hour > 0:
         await enforce_rate_limit(user_id=_GLOBAL_BUCKET_KEY, role=_GLOBAL_ROLE, settings=settings)
+
+
+async def rate_limited_demo(
+    request: Request,
+    user_id: Annotated[str, Depends(require_demo_api_key)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> str:
+    """Demo-user auth + per-visitor rate limit. Returns the demo user id.
+
+    Returns ``user_id`` unchanged so every route signature and all downstream
+    attribution stay exactly as they were; only the limiter's key (and, for
+    a signed-in caller, the limit itself) differs.
+    """
+    await _apply_per_visitor_rate_limit(request, settings, db)
     return user_id
+
+
+async def rate_limited_oauth_navigation(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """Per-visitor rate limit for the OAuth routes, WITHOUT the demo bearer (ADR-0004 PR 12).
+
+    ``GET /v1/auth/oauth/{provider}/start`` is reached by a real top-level
+    browser navigation (``window.location.href = ...`` in ``AuthModal.tsx``),
+    and ``.../callback`` is reached by the PROVIDER's own redirect — neither
+    request can carry a custom ``Authorization`` header, so both routes
+    CANNOT use :func:`rate_limited_demo` (which requires one via
+    ``require_demo_api_key``). Using it anyway means every real click 401s
+    before the handler body ever runs — the whole feature is unreachable
+    outside a test suite that hand-injects the header.
+    ``rate_limited_demo``'s CSRF-guard role for the demo bearer (documented
+    in ``app.api.routes.auth``'s module docstring: "a cross-site form POST
+    cannot set an Authorization header") does not apply here either — these
+    are ``GET`` requests, and the OAuth flow's own state/PKCE mechanism is
+    the CSRF guard for THIS flow, not the demo bearer.
+    """
+    await _apply_per_visitor_rate_limit(request, settings, db)
 
 
 async def rate_limited_admin(
@@ -719,5 +756,6 @@ __all__ = [
     "get_limiter",
     "rate_limited_admin",
     "rate_limited_demo",
+    "rate_limited_oauth_navigation",
     "reset_limiter",
 ]
