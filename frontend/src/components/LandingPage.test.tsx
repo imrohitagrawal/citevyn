@@ -11,6 +11,13 @@ vi.mock("../lib/api", () => ({
   isLiveMode: vi.fn(() => false),
   createSession: vi.fn(),
   askQuestion: vi.fn(),
+  // Header renders AccountMenu -> useAuth -> authStore, which imports these
+  // even on the offline landing demo path (ADR-0004 PR 8).
+  getCurrentUser: vi.fn(() => Promise.resolve(null)),
+  login: vi.fn(),
+  register: vi.fn(),
+  logout: vi.fn(),
+  onUnauthorized: vi.fn(() => () => {}),
 }));
 
 beforeEach(() => {

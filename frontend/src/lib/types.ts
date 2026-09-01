@@ -227,6 +227,28 @@ export interface HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Auth (ADR-0004 PR 6 backend, PR 8 frontend)
+// ---------------------------------------------------------------------------
+
+/** Body of ``POST /v1/auth/register`` and ``POST /v1/auth/login``. */
+export interface AuthCredentials {
+  email: string;
+  password: string;
+}
+
+/**
+ * Response of register/login/``GET /v1/auth/me``. ``anonymous`` is true
+ * for a visitor with no registered account — that principal still has a
+ * ``user_id`` (an ``anon_<uuid4hex>``), but no ``email``.
+ */
+export interface AuthUserResponse {
+  request_id: RequestId;
+  user_id: string;
+  email: string | null;
+  anonymous: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

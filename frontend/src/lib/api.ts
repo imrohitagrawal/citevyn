@@ -15,6 +15,8 @@
 
 import type {
   AskResponse,
+  AuthCredentials,
+  AuthUserResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   ExactSearchRequest,
@@ -73,6 +75,24 @@ export function isLiveMode(): boolean {
  */
 const DEFAULT_TIMEOUT_MS = 20_000;
 
+// ---------------------------------------------------------------------------
+// 401 interceptor (ADR-0004 PR 8)
+// ---------------------------------------------------------------------------
+
+const unauthorizedListeners = new Set<() => void>();
+
+/**
+ * Subscribe to every 401 response ``apiFetch`` sees, from any caller.
+ * Returns an unsubscribe function. ``authStore`` is the only current
+ * subscriber (it drops to signed-out state), but the hook lives here —
+ * not in authStore — because it must fire for a 401 from ANY endpoint,
+ * not only the auth routes authStore itself calls.
+ */
+export function onUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
+}
+
 /**
  * ``fetch`` wrapper that handles auth, JSON, timeouts, and the
  * standard error envelope. Most modules should use the typed
@@ -113,7 +133,19 @@ export async function apiFetch<T>(
 
   let response: Response;
   try {
-    response = await fetch(url, { ...init, headers, signal: controller.signal });
+    // Required for the ADR-0004 session cookie to travel: fetch's default
+    // credentials mode ("same-origin") already covers same-origin deploys
+    // (prod's StaticFiles mount, Vite's dev proxy), but "include" is what
+    // the ADR specifies and it degrades gracefully to the same behavior —
+    // explicit rather than relying on a default that a future cross-origin
+    // deploy (a separately-hosted frontend pointed at VITE_API_BASE_URL)
+    // would silently break.
+    response = await fetch(url, {
+      ...init,
+      headers,
+      signal: controller.signal,
+      credentials: "include",
+    });
   } catch (err) {
     window.clearTimeout(timeoutId);
     if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
@@ -156,6 +188,14 @@ export async function apiFetch<T>(
       typeof body === "object" && body !== null && "error" in body && body.error
         ? (body.error.message ?? `Request failed with status ${response.status}.`)
         : `Request failed with status ${response.status}.`;
+    if (response.status === 401) {
+      // ADR-0004 PR 8's "401 interceptor": notify whoever is listening
+      // (authStore) that the caller's session is no longer valid, so the
+      // UI drops to signed-out state even when the 401 arrived from a
+      // call authStore didn't itself make (e.g. a stale AccountMenu action
+      // that raced a session expiry). A no-op until something subscribes.
+      for (const listener of unauthorizedListeners) listener();
+    }
     throw new ApiClientError(message, response.status, body as never);
   }
 
@@ -218,4 +258,40 @@ export async function exactSearch(body: ExactSearchRequest): Promise<ExactSearch
 /** Liveness probe — used by the About view. */
 export async function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
+}
+
+// ---------------------------------------------------------------------------
+// Auth (ADR-0004 PR 8)
+// ---------------------------------------------------------------------------
+
+export async function register(credentials: AuthCredentials): Promise<AuthUserResponse> {
+  return apiFetch<AuthUserResponse>("/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify(credentials),
+  });
+}
+
+export async function login(credentials: AuthCredentials): Promise<AuthUserResponse> {
+  return apiFetch<AuthUserResponse>("/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(credentials),
+  });
+}
+
+export async function logout(): Promise<void> {
+  await apiFetch<null>("/v1/auth/logout", { method: "POST" });
+}
+
+/**
+ * Current identity, or ``null`` if there is no valid session — a 401 here
+ * is the expected "not signed in" shape, not an error to surface, so it is
+ * caught and normalized rather than left for the caller to special-case.
+ */
+export async function getCurrentUser(): Promise<AuthUserResponse | null> {
+  try {
+    return await apiFetch<AuthUserResponse>("/v1/auth/me");
+  } catch (err) {
+    if (err instanceof ApiClientError && err.status === 401) return null;
+    throw err;
+  }
 }
