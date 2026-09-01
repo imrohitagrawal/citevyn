@@ -10,13 +10,20 @@ does not know instead of guessing. This page is the canonical description of
 CiteVyn the product, written so questions about CiteVyn itself are answered from
 the index like any other question.
 
+## Accounts and saved history
+
+Signing in is optional and free. CiteVyn works fully with no account at all;
+signing in adds one thing — your chat history survives a page refresh instead
+of resetting. There is no email verification and no password reset yet; a
+signed-in account is a convenience, not a requirement.
+
 ## CiteVyn Pro and membership
 
 CiteVyn Pro is not live yet. CiteVyn is currently an MVP demo and everything
-here is free to try. Pro is planned to add higher rate limits, exact lookups,
-saved history, and shareable answers. For now there is no paid tier and no
-billing — you can ask anything about Claude, Claude Code, Codex, or Gemini at no
-cost.
+here is free to try, with or without an account. Pro is planned to add higher
+rate limits, exact lookups, and shareable answers. For now there is no paid
+tier and no billing — you can ask anything about Claude, Claude Code, Codex,
+or Gemini at no cost.
 
 ## Coverage
 

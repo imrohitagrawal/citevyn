@@ -198,9 +198,10 @@ _CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
         "source_url": "/about",
         "chunk_heading": "CiteVyn Pro and membership",
         "chunk_text": (
-            "CiteVyn Pro is not live yet. CiteVyn is an MVP demo and "
-            "everything is free to try. Pro is planned to add higher rate "
-            "limits, exact lookups, saved history, and shareable answers."
+            "CiteVyn Pro is not live yet. CiteVyn is currently an MVP demo "
+            "and everything here is free to try, with or without an "
+            "account. Pro is planned to add higher rate limits, exact "
+            "lookups, and shareable answers."
         ),
     },
     {
