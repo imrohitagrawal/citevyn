@@ -283,38 +283,73 @@ def test_callback_rejects_state_from_a_different_provider(
     """A naive check that only asks 'does any valid nonce exist' would miss
     this -- the row exists and is unexpired, but was minted for github.
 
-    The nonce is atomically CLAIMED (deleted) before its fields are even
-    checked -- see oauth.py's module docstring on why this is a DELETE...
-    RETURNING, not a SELECT-then-delete -- so a mismatched-provider attempt
-    still consumes the row rather than leaving it retryable."""
+    The atomic claim's WHERE clause includes `provider`, so a mismatched-
+    provider attempt matches nothing and deletes nothing -- the nonce
+    survives for the correct provider to still use (an earlier version of
+    this fix deleted unconditionally on nonce_id alone and validated
+    provider/session afterward, which let a wrong-provider OR wrong-session
+    attempt permanently burn a legitimate nonce; see oauth.py's module
+    docstring)."""
     start = _start(oauth_client, "github")
     state = _state_from_start_response(start)
     _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="a@example.com")
     response = _callback(oauth_client, "google", state=state)
     assert response.headers["location"] == "/?auth=error"
-    assert len(_query_all(OAuthNonce)) == 0
-    # And the consumed nonce cannot be retried against the correct provider either.
-    replay = _callback(oauth_client, "github", state=state)
-    assert replay.headers["location"] == "/?auth=error"
+    assert len(_query_all(OAuthNonce)) == 1
+
+    # And the correct provider can still complete the flow afterward.
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="real@example.com"
+    )
+    retry = _callback(oauth_client, "github", state=state)
+    assert retry.headers["location"] == "/?auth=ok"
 
 
 def test_callback_rejects_state_bound_to_a_different_browser_session(
-    oauth_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
 ) -> None:
     """Simulates a stolen/replayed state value observed by a second browser
     that never went through `start` itself -- only checking 'nonce exists
-    and is unexpired' would miss the session-binding property."""
+    and is unexpired' would miss the session-binding property.
+
+    Regression for a denial-of-login griefing attack an adversarial review
+    round caught in an earlier version of this fix: the atomic claim's
+    WHERE clause includes the CURRENT request's own auth_session_id, so an
+    attacker's non-matching claim deletes NOTHING -- it must not be able to
+    burn the real victim's nonce merely by observing the state value. The
+    real assertion here is not just that the attacker's own attempt fails,
+    but that the LEGITIMATE browser can still complete the flow afterward.
+    """
     start = _start(oauth_client, "github")
     state = _state_from_start_response(start)
 
     attacker = TestClient(create_app())  # a distinct cookie jar == a distinct browser
-    response = attacker.get(
+    # The attacker has their OWN genuine (but different) session -- not no
+    # cookie at all, which a separate, earlier guard already rejects before
+    # the atomic claim runs. Minting one first is what makes this test
+    # actually exercise the claim's auth_session_id predicate specifically.
+    attacker.post("/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER})
+    assert "citevyn_session" in attacker.cookies
+
+    attacker_response = attacker.get(
         "/v1/auth/oauth/github/callback",
         params={"code": "auth-code-1", "state": state},
         headers={"Authorization": DEMO_BEARER},
         follow_redirects=False,
     )
-    assert response.headers["location"] == "/?auth=error"
+    assert attacker_response.headers["location"] == "/?auth=error"
+    assert len(_query_all(OAuthNonce)) == 1, (
+        "the attacker's failed claim must not consume the victim's nonce"
+    )
+
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="victim@example.com"
+    )
+    victim_response = _callback(oauth_client, "github", state=state)
+    assert victim_response.headers["location"] == "/?auth=ok", (
+        "the legitimate browser must still be able to complete the flow "
+        "after an attacker's failed attempt on the same state"
+    )
 
 
 def test_callback_rejects_an_expired_nonce(oauth_client: TestClient) -> None:
@@ -678,24 +713,35 @@ def test_token_response_is_not_a_json_object_redirects_not_500(
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_first_time_identity_creation_resolves_to_the_winner_not_500(
-    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+async def test_resolve_or_create_identity_handles_a_genuine_concurrent_insert_race(
+    tmp_path,
 ) -> None:
-    """Simulates the losing side of a race: a UserIdentity for this exact
-    (provider, provider_account_id) is seeded DIRECTLY (bypassing the
-    'not found' check this request already passed) right before the
-    request's own insert, forcing the real uq_user_identities_provider_account
-    constraint to fire. Must resolve to the pre-existing (winning) identity's
-    user, not surface a raw IntegrityError/500."""
-    _patch_provider(
-        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="racer@example.com"
-    )
-    start = _start(oauth_client, "github")
-    state = _state_from_start_response(start)
+    """Directly exercises ``_resolve_or_create_identity``'s ``IntegrityError``
+    branch by injecting a COMPETING commit between the "not found" lookup
+    and this call's own insert -- a real interleaving, not two sequential
+    calls. (An earlier version of this test seeded the winner BEFORE
+    calling the route at all, so the request's own "not found" SELECT
+    already found it and the IntegrityError branch was never reached --
+    caught by adversarial review; this version proves the actual claimed
+    defect.)
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    async def _seed_winner() -> str:
-        factory = get_sessionmaker()
-        async with factory() as session:
+    import app.api.routes.oauth as oauth_module
+
+    db_file = tmp_path / "identity_race.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+
+    identity = oauth_module._Identity(
+        provider_account_id="race-123", email=None, email_verified=False
+    )
+    winner_holder: dict[str, str] = {}
+
+    async def _seed_competing_winner() -> None:
+        async with factory() as competitor:
             winner = User(
                 user_id=f"usr_{uuid.uuid4().hex}",
                 role=UserRole.demo_user,
@@ -703,29 +749,46 @@ def test_concurrent_first_time_identity_creation_resolves_to_the_winner_not_500(
                 email=None,
                 password_hash=None,
             )
-            session.add(winner)
-            await session.flush()
-            session.add(
+            competitor.add(winner)
+            await competitor.flush()
+            competitor.add(
                 UserIdentity(
                     identity_id=uuid.uuid4(),
                     provider="github",
-                    provider_account_id=str(_GITHUB_ACCOUNT_ID),
+                    provider_account_id="race-123",
                     user_id=winner.user_id,
                     created_at=datetime.now(UTC),
                 )
             )
-            await session.commit()
-            return winner.user_id
+            await competitor.commit()
+        winner_holder["user_id"] = winner.user_id
 
-    winner_user_id = asyncio.run(_seed_winner())
+    async with factory() as session:
+        original_execute = session.execute
 
-    response = _callback(oauth_client, "github", state=state)
-    assert response.headers["location"] == "/?auth=ok"
+        async def _execute_with_injected_race(stmt, *args, **kwargs):
+            result = await original_execute(stmt, *args, **kwargs)
+            # Fires exactly once: right after the "not found" UserIdentity
+            # lookup returns empty, before this session's own insert.
+            if not winner_holder and "user_identities" in str(stmt).lower():
+                await _seed_competing_winner()
+            return result
 
-    identities = _query_all(UserIdentity)
-    assert len(identities) == 1, (
-        "the race must not leave two identities for the same external account"
-    )
-    assert identities[0].user_id == winner_user_id
-    registered = [u for u in _query_all(User) if u.user_id.startswith("usr_")]
-    assert len(registered) == 1, "the loser's User row must not be left behind either"
+        session.execute = _execute_with_injected_race  # type: ignore[method-assign]
+
+        resolved_user_id = await oauth_module._resolve_or_create_identity(
+            session, "github", identity
+        )
+
+    assert winner_holder, "the injected race never fired -- this test would be vacuous"
+    assert resolved_user_id == winner_holder["user_id"]
+
+    async with factory() as verify:
+        identities = (await verify.execute(select(UserIdentity))).scalars().all()
+        assert len(identities) == 1, (
+            "the race must not leave two identities for the same external account"
+        )
+        users = (await verify.execute(select(User))).scalars().all()
+        assert len(users) == 1, "the loser's User row must not be left behind either"
+
+    await engine.dispose()

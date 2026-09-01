@@ -9,6 +9,15 @@ Both routes are provider-parameterized, not duplicated per provider. The
 ``provider`` path segment is validated against :data:`_PROVIDERS` and any
 other value 404s — this codebase's existing "unknown → quiet 404, not
 informative" convention (the ownership-mismatch-is-404 rule from PR 1).
+**One deliberate exception:** ``callback``'s ``error=`` branch (the provider
+declined consent) is checked and redirected on BEFORE the provider is
+validated, per the plan's own explicit step ordering — an unknown/bogus
+provider combined with ``error=access_denied`` gets the same ``/?auth=error``
+redirect an unknown provider without ``error=`` would 404 on. This leaks
+nothing an attacker doesn't already have (the response is byte-for-byte
+identical regardless of whether the provider is real, unconfigured, or
+nonexistent, and the two configured provider names are already public in
+the frontend bundle) — confirmed by adversarial review, not assumed.
 
 State / PKCE mechanism
 -----------------------
@@ -20,22 +29,36 @@ including brand-new signups with no fallback path, on a Redis outage. A DB
 row also gets transactional consistency with the ``AuthSession``/``User``
 writes at callback time for free.
 
-Validation at callback: the row is claimed via an ATOMIC ``DELETE ...
-RETURNING`` before any of its fields are checked, not a plain ``SELECT``
-followed by a separate delete — two near-simultaneous callbacks racing the
-same ``state`` would otherwise both read a live row and both pass validation
-before either commit landed. Only one concurrent claim can ever get a
-non-``None`` row back; the loser fails closed exactly like a forged state.
-The claimed row (or ``None``) is then checked, in full, before any other
-side effect:
+Validation at callback: the row is claimed via a single ATOMIC, CONDITIONAL
+``DELETE ... WHERE nonce_id = ? AND provider = ? AND auth_session_id = ? ...
+RETURNING`` — not a plain ``SELECT`` followed by a separate, unconditional
+delete, and not an unconditional delete-by-id validated afterward either.
+Both of those alternatives are broken in their own way:
 
-1. A row was actually claimed (``state`` resolved to a live row at all).
-2. It was unexpired at claim time.
-3. Its ``provider`` matches the URL path's provider.
-4. Its ``auth_session_id`` equals the CURRENT request's cookie-resolved
-   ``auth_session_id`` — the concrete meaning of "state bound to session":
-   the browser that started the flow must be the one completing it, not
-   merely someone who observed the ``state`` value.
+* An unconditional ``SELECT`` then delete lets two near-simultaneous
+  callbacks racing the same ``state`` both read a live row and both pass
+  validation before either commit lands (double-consumption).
+* An unconditional ``DELETE ... WHERE nonce_id = ?`` (claim first, validate
+  the returned fields after) closes that race, but consumes the nonce even
+  when the CLAIMANT fails validation — so an attacker who merely observed a
+  real victim's ``state`` value (no session compromise needed) can submit it
+  and permanently burn the victim's nonce before the victim's own browser
+  completes the flow. This is a denial-of-login griefing attack, not a
+  benign race, and was caught by adversarial review of an earlier version
+  of this fix.
+
+Baking ``provider`` and the CURRENT request's cookie-resolved
+``auth_session_id`` directly into the ``WHERE`` clause closes both: only a
+claim whose predicates ALL match can ever delete anything, so (a) at most
+one of several concurrent matching claims succeeds, and (b) a non-matching
+claim (wrong provider, wrong/no session) deletes nothing and leaves the
+nonce intact for whoever DOES hold the matching session to retry — the
+concrete meaning of "state bound to session": the browser that started the
+flow must be the one completing it, not merely someone who observed the
+``state`` value. Expiry is checked separately, in Python, on the claimed
+row (using the same naive/aware normalization every other timestamp
+comparison in this codebase uses) — deliberately not a ``WHERE`` predicate,
+since consuming an already-dead nonce on a failed claim is harmless.
 
 Identity resolution — the core security logic
 -----------------------------------------------
@@ -326,6 +349,100 @@ async def oauth_start(
     return redirect
 
 
+async def _resolve_or_create_identity(
+    db: AsyncSession, provider: str, identity: _Identity
+) -> str | None:
+    """Resolve ``identity`` to a ``user_id``, creating a new account if needed.
+
+    The core security logic, strict order: look up ``UserIdentity`` by
+    ``(provider, provider_account_id)`` ONLY. Found → that row's ``user_id``
+    logs in. Not found → **do not search by email TO RESOLVE who logs in**
+    — a new ``User``/``UserIdentity`` pair is created unconditionally, no
+    "link to an existing account" branch in this PR (the account-takeover
+    guard: matching the provider's email against ``users.email`` would let
+    anyone who controls a matching email on GitHub/Google take over an
+    existing password account without ever proving they know its password).
+
+    Returns ``None`` only in the practically-unreachable case described
+    below, where the caller should fail closed rather than guess.
+
+    A separate function (not inlined in :func:`oauth_callback`) so a test
+    can exercise the concurrent-identity-creation race below by injecting a
+    competing insert between the "not found" lookup and this function's own
+    insert, without needing real thread/process-level concurrency.
+    """
+    existing = (
+        await db.execute(
+            select(UserIdentity).where(
+                UserIdentity.provider == provider,
+                UserIdentity.provider_account_id == identity.provider_account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing.user_id
+
+    # ``users.email`` is separately UNIQUE (migration 0008's
+    # ix_users_email) for an unrelated reason (login-by-email lookup), and
+    # that constraint doesn't know about OAuth's "never link" policy — it
+    # would reject this INSERT outright if the provider's email already
+    # belongs to a different (e.g. password) account. The lookup below
+    # exists ONLY to avoid crashing on that constraint; it never changes
+    # WHICH user_id this request logs in as, so it does not reopen the
+    # account-takeover hole the identity lookup above already closed.
+    email_for_new_user = identity.email if identity.email_verified else None
+    if email_for_new_user is not None:
+        email_taken = (
+            await db.execute(select(User.user_id).where(User.email == email_for_new_user))
+        ).scalar_one_or_none()
+        if email_taken is not None:
+            email_for_new_user = None
+
+    new_user = User(
+        user_id=f"usr_{uuid.uuid4().hex}",
+        role=UserRole.demo_user,
+        created_at=_now(),
+        email=email_for_new_user,
+        password_hash=None,
+    )
+    db.add(new_user)
+    try:
+        await db.flush()  # UserIdentity's FK target must exist first
+        db.add(
+            UserIdentity(
+                identity_id=uuid.uuid4(),
+                provider=provider,
+                provider_account_id=identity.provider_account_id,
+                user_id=new_user.user_id,
+                created_at=_now(),
+            )
+        )
+        await db.flush()
+    except IntegrityError:
+        # Two concurrent first-time logins for the SAME external identity
+        # both pass the "not found" check above before either commits --
+        # the loser hits uq_user_identities_provider_account here instead.
+        # Roll back this attempt and resolve to the WINNING identity rather
+        # than surfacing a raw 500 (mirrors register()'s own handling of
+        # the analogous concurrent-duplicate-email race in
+        # app.api.routes.auth).
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(UserIdentity).where(
+                    UserIdentity.provider == provider,
+                    UserIdentity.provider_account_id == identity.provider_account_id,
+                )
+            )
+        ).scalar_one_or_none()
+        # winner is None is unreachable in practice (the IntegrityError
+        # means some row now satisfies this key) -- fail closed rather
+        # than guess.
+        return winner.user_id if winner is not None else None
+    else:
+        return new_user.user_id
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/auth/oauth/{provider}/callback
 # ---------------------------------------------------------------------------
@@ -380,15 +497,47 @@ async def oauth_callback(
     except ValueError:
         return await _fail("oauth_state_invalid")
 
-    # Atomic claim-by-delete: this is what makes "single-use" airtight under
-    # concurrency (two near-simultaneous callbacks racing the same state) --
-    # only ONE of two concurrent DELETE...RETURNING statements against the
-    # same primary key can ever get a non-None row back; the loser's claim
-    # finds nothing and fails closed below, rather than both racing a
-    # separate SELECT-then-delete and both passing validation before either
-    # commit lands.
+    # Session binding is resolved BEFORE the claim and baked directly into
+    # its WHERE clause (see below) -- not checked afterward on whatever got
+    # returned. A caller with no valid session at all can never be the
+    # browser that started the flow, so this fails closed without even
+    # attempting a claim (also sidesteps a SQL NULL-comparison footgun:
+    # comparing a bind of Python None to auth_session_id would compile to
+    # "IS NULL", which could wrongly match a nonce whose own
+    # auth_session_id happens to be NULL).
+    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
+    if current_auth_session_id is None:
+        return await _fail("oauth_state_invalid")
+
+    # Atomic, CONDITIONAL claim-by-delete: nonce_id, provider, AND session
+    # binding are all baked into one DELETE...RETURNING's WHERE clause,
+    # which is what makes single-use airtight under concurrency without
+    # also being griefable. Two hazards, closed together:
+    #   1. Two near-simultaneous callbacks with the SAME state (and the
+    #      SAME session) racing each other -- only one concurrent DELETE
+    #      matching every predicate can ever return a row; the loser's
+    #      claim matches nothing and fails closed.
+    #   2. An attacker who has observed/leaked a real victim's `state`
+    #      value but is not the browser that started the flow -- their
+    #      claim's WHERE clause does not match (wrong auth_session_id), so
+    #      it deletes NOTHING, leaving the nonce intact for the legitimate
+    #      browser to still complete the flow. An earlier version of this
+    #      fix deleted unconditionally on `nonce_id` alone and validated
+    #      the fields afterward, which closed hazard 1 but reopened this
+    #      as a denial-of-login griefing attack -- caught by adversarial
+    #      review. Expiry is deliberately NOT one of the WHERE predicates
+    #      (see below): consuming an already-dead nonce on a failed claim
+    #      is harmless, and a SQL-side comparison against a bind time
+    #      would risk the same naive/aware datetime mismatch
+    #      `_to_naive_utc` exists to paper over on the Python side.
     claimed = await db.execute(
-        delete(OAuthNonce).where(OAuthNonce.nonce_id == nonce_id).returning(OAuthNonce)
+        delete(OAuthNonce)
+        .where(
+            OAuthNonce.nonce_id == nonce_id,
+            OAuthNonce.provider == provider,
+            OAuthNonce.auth_session_id == current_auth_session_id,
+        )
+        .returning(OAuthNonce)
     )
     nonce = claimed.scalar_one_or_none()
     await db.commit()
@@ -397,12 +546,6 @@ async def oauth_callback(
         return await _fail("oauth_state_invalid")
     if _to_naive_utc(nonce.expires_at) <= _to_naive_utc(_now()):
         return await _fail("oauth_expired")
-    if nonce.provider != provider:
-        return await _fail("oauth_state_invalid")
-
-    current_auth_session_id = await try_resolve_auth_session_id(request, db, settings)
-    if nonce.auth_session_id is None or nonce.auth_session_id != current_auth_session_id:
-        return await _fail("oauth_state_invalid")
 
     config = _PROVIDERS[provider]
     try:
@@ -437,82 +580,9 @@ async def oauth_callback(
         return await _fail("oauth_provider_error")
 
     # 8. Identity resolution — the core security logic, strict order.
-    existing = (
-        await db.execute(
-            select(UserIdentity).where(
-                UserIdentity.provider == provider,
-                UserIdentity.provider_account_id == identity.provider_account_id,
-            )
-        )
-    ).scalar_one_or_none()
-
-    if existing is not None:
-        resolved_user_id = existing.user_id
-    else:
-        # Not found: do NOT search by email TO RESOLVE who logs in — a new
-        # User + UserIdentity is created unconditionally, no "link to
-        # existing account" branch in this PR (the account-takeover guard).
-        #
-        # ``users.email`` is separately UNIQUE (migration 0008's
-        # ix_users_email) for an unrelated reason (login-by-email lookup),
-        # and that constraint doesn't know about OAuth's "never link"
-        # policy — it would reject this INSERT outright if the provider's
-        # email already belongs to a different (e.g. password) account. The
-        # lookup below exists ONLY to avoid crashing on that constraint; it
-        # never changes WHICH user_id this request logs in as, so it does
-        # not reopen the account-takeover hole the identity lookup above
-        # already closed.
-        email_for_new_user = identity.email if identity.email_verified else None
-        if email_for_new_user is not None:
-            email_taken = (
-                await db.execute(select(User.user_id).where(User.email == email_for_new_user))
-            ).scalar_one_or_none()
-            if email_taken is not None:
-                email_for_new_user = None
-        new_user = User(
-            user_id=f"usr_{uuid.uuid4().hex}",
-            role=UserRole.demo_user,
-            created_at=_now(),
-            email=email_for_new_user,
-            password_hash=None,
-        )
-        db.add(new_user)
-        try:
-            await db.flush()  # UserIdentity's FK target must exist first
-            db.add(
-                UserIdentity(
-                    identity_id=uuid.uuid4(),
-                    provider=provider,
-                    provider_account_id=identity.provider_account_id,
-                    user_id=new_user.user_id,
-                    created_at=_now(),
-                )
-            )
-            await db.flush()
-        except IntegrityError:
-            # Two concurrent first-time logins for the SAME external
-            # identity both pass the "not found" check above before either
-            # commits -- the loser hits uq_user_identities_provider_account
-            # here instead. Roll back this attempt and resolve to the
-            # WINNING identity rather than surfacing a raw 500 (mirrors
-            # register()'s own handling of the analogous concurrent-
-            # duplicate-email race in app.api.routes.auth).
-            await db.rollback()
-            winner = (
-                await db.execute(
-                    select(UserIdentity).where(
-                        UserIdentity.provider == provider,
-                        UserIdentity.provider_account_id == identity.provider_account_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if winner is None:
-                # Unreachable in practice (the IntegrityError means some row
-                # now satisfies this key) -- fail closed rather than guess.
-                return await _fail("oauth_provider_error")
-            resolved_user_id = winner.user_id
-        else:
-            resolved_user_id = new_user.user_id
+    resolved_user_id = await _resolve_or_create_identity(db, provider, identity)
+    if resolved_user_id is None:
+        return await _fail("oauth_provider_error")
 
     # Same placeholder-then-mutate approach as `start`: claim_and_login needs
     # a Response to set the login cookie on, and it must be the SAME object
