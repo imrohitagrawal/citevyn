@@ -47,10 +47,18 @@ Security invariants, written down because they transfer to any stack
   THEIR OWN account and auto-post its token from a hostile page, logging
   the victim's browser into the attacker's account (login CSRF) -- every
   question the victim then asks lands in the attacker's history. A present
-  ``Origin`` must equal the configured ``magic_link_base_url`` origin; a
-  present ``Sec-Fetch-Site`` must be ``same-origin``/``none``. A request
-  with neither header (a non-browser client) is allowed: it already holds
-  the credential and gains nothing.
+  ``Sec-Fetch-Site`` must be ``same-origin``/``none``; a present ``Origin``
+  must equal the configured ``magic_link_base_url`` origin, except that the
+  literal ``Origin: null`` is accepted only when ``Sec-Fetch-Site`` has
+  vouched. A request with neither header (a non-browser client) is
+  allowed: it already holds the credential and gains nothing. **Found
+  live, invisible to the hermetic tests:** a real Chromium form POST from
+  a page whose referrer policy is ``no-referrer`` carries ``Origin: null``
+  (the Fetch spec nulls the serialized origin under that policy) while
+  ``Sec-Fetch-Site: same-origin`` is still sent -- the first version of
+  this check read ``Origin`` first and rejected every genuine click. Hence
+  both the ordering above and the interstitial's ``same-origin`` (not
+  ``no-referrer``) referrer policy.
 * **No session binding on the token**, unlike ``oauth_nonces`` -- deliberately.
   A magic link is cross-device by design (request on the laptop, open on
   the phone); the token alone is sufficient, the way the session cookie's
@@ -324,15 +332,18 @@ def _render_interstitial(token: str | None) -> str:
 
     Unstyled on purpose: the app-wide CSP (``app.core.security_headers``)
     allows no inline styles, and a stylesheet mount just for this page is
-    not worth having. The ``<meta name="referrer">`` keeps the URL (which
-    carries the credential) out of the Referer header of any link followed
-    from this page; the response also carries ``Cache-Control: no-store``.
+    not worth having. The ``<meta name="referrer" content="same-origin">``
+    keeps the URL (which carries the credential) out of the Referer header
+    of anything cross-origin, while -- unlike ``no-referrer`` -- leaving the
+    form POST's ``Origin`` header intact (see the module docstring: under
+    ``no-referrer`` Chromium sends ``Origin: null``). The response also
+    carries ``Cache-Control: no-store``.
     """
     head = (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<meta name="referrer" content="no-referrer">'
+        '<meta name="referrer" content="same-origin">'
         "<title>Sign in to CiteVyn</title></head><body><main>"
     )
     tail = "</main></body></html>\n"
@@ -401,13 +412,25 @@ def _expected_origin(settings: Settings) -> str:
 
 
 def _origin_allowed(request: Request, settings: Settings) -> bool:
-    """The login-CSRF guard described in the module docstring."""
+    """The login-CSRF guard described in the module docstring.
+
+    Both headers are browser-controlled (forbidden request headers), so a
+    hostile page cannot forge either. ``Sec-Fetch-Site`` is checked first
+    because it is independent of the page's referrer policy; ``Origin`` is
+    the fallback for browsers that predate it, and the two must agree when
+    both are present. ``Origin: null`` -- what Chromium sends for a
+    same-origin POST under a ``no-referrer`` policy, and also what a
+    sandboxed or cross-site frame sends -- is trusted only when
+    ``Sec-Fetch-Site`` has already vouched for the request.
+    """
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site.strip().lower() not in ("same-origin", "none"):
+        return False
     origin = request.headers.get("origin")
     if origin is not None:
+        if origin.strip().lower() == "null":
+            return fetch_site is not None
         return origin.rstrip("/").lower() == _expected_origin(settings)
-    fetch_site = request.headers.get("sec-fetch-site")
-    if fetch_site is not None:
-        return fetch_site.lower() in ("same-origin", "none")
     return True
 
 

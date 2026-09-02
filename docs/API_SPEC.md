@@ -282,12 +282,16 @@ The token is consumed by one atomic `DELETE … WHERE token_id AND secret_hash
 … RETURNING`: a replay finds no row, and a wrong secret deletes nothing (a
 guess cannot burn the real user's link). Expiry is checked on the claimed
 row. Not bound to the requesting browser's session — magic links are
-cross-device by design. A present `Origin` header must match
-`CITEVYN_MAGIC_LINK_BASE_URL`'s origin and a present `Sec-Fetch-Site` must
-be `same-origin`/`none`, or the request is refused before anything is
+cross-device by design. A present `Sec-Fetch-Site` must be
+`same-origin`/`none`, and a present `Origin` must match
+`CITEVYN_MAGIC_LINK_BASE_URL`'s origin (the literal `Origin: null` — what
+Chromium sends under some referrer policies — is accepted only when
+`Sec-Fetch-Site` vouched), or the request is refused before anything is
 consumed (a login-CSRF guard: without it a hostile page could log a
 victim's browser into the attacker's account by auto-posting the
-attacker's own token).
+attacker's own token). uvicorn's access log redacts the `token=` value of
+the confirm URL (`app.core.logging.RedactQueryCredentialsFilter`), so the
+credential never reaches the server log.
 
 ```http
 POST /v1/auth/me/password

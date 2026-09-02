@@ -381,7 +381,10 @@ def test_confirm_get_does_not_consume_the_token(magic_app: Path) -> None:
     assert "http-equiv" not in body.lower()
     assert "onload" not in body.lower()
     assert page.headers["cache-control"] == "no-store"
-    assert '<meta name="referrer" content="no-referrer">' in body
+    # same-origin, NOT no-referrer: under no-referrer Chromium nulls the
+    # form POST's Origin header (found live) -- see the module docstring.
+    assert '<meta name="referrer" content="same-origin">' in body
+    assert "no-referrer" not in body
 
     # The real user's click still works afterwards.
     assert _confirm_post(_client(), token).headers["location"] == "/?auth=ok"
@@ -535,6 +538,33 @@ def test_confirm_post_from_a_cross_site_origin_is_rejected_without_consuming(
         _client(), token, Origin="http://localhost:8000", **{"Sec-Fetch-Site": "same-origin"}
     )
     assert ok.headers["location"] == "/?auth=ok"
+
+
+def test_confirm_post_accepts_chromiums_null_origin_when_sec_fetch_site_vouches(
+    magic_app: Path,
+) -> None:
+    """The live-found regression: a real Chromium form POST from the interstitial
+    arrived with ``Origin: null`` + ``Sec-Fetch-Site: same-origin`` and the first
+    version of the guard (Origin checked first) rejected every genuine click.
+    RED if ``_origin_allowed`` reads ``Origin`` before ``Sec-Fetch-Site`` or
+    refuses the literal ``null`` when Sec-Fetch-Site has vouched. The two
+    headers must still AGREE: a mismatched real Origin next to a same-origin
+    Sec-Fetch-Site is refused.
+    """
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    token = _latest_token(magic_app)
+
+    contradictory = _confirm_post(
+        _client(), token, Origin="https://evil.example", **{"Sec-Fetch-Site": "same-origin"}
+    )
+    assert contradictory.headers["location"] == "/?auth=error"
+    assert len(_query_all(MagicLinkToken)) == 1
+
+    browser = _client()
+    ok = _confirm_post(browser, token, Origin="null", **{"Sec-Fetch-Site": "same-origin"})
+    assert ok.headers["location"] == "/?auth=ok"
+    assert _me(browser).status_code == 200
 
 
 def test_confirm_post_claims_the_anonymous_sessions_history(magic_app: Path) -> None:
