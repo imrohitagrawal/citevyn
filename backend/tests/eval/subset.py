@@ -40,7 +40,7 @@ Only the judge's own 1–5 *mean* (``MIN_MEAN_JUDGE``) is a genuine average that
 degrades gracefully under sampling. Everything else on the judged run is
 all-or-nothing, which is why the priority pool is large.
 
-**Consequence, stated plainly:** on the current golden set that pool is 42 of 58
+**Consequence, stated plainly:** on the current golden set that pool is 43 of 60
 cases, so the maximum saving from bounding is ~28%, not the ~65% a naive read of
 ``--judge-subset 20`` suggests. That is why CI does **not** use this to sample
 every PR (it bounds judged-run *frequency* instead — see ``docs/COST_CONTROLS.md``

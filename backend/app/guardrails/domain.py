@@ -249,6 +249,98 @@ def canonicalize_product_name(question: str) -> str:
     return _CITEVYN_RE.sub(CANONICAL_PRODUCT_NAME, question)
 
 
+# --- Self-referential questions (#300) --------------------------------------
+#
+# A question addressed to the assistant in the SECOND PERSON ("who are you?",
+# "what can you do?") is a question about CiteVyn — but it never says the word
+# "CiteVyn", so :func:`classify_domain` routes it ``unsupported`` and the user
+# gets the generic refusal while the indexed About-CiteVyn source sits there
+# able to answer it. A RECOGNITION gap, exactly like the dictation aliases
+# above, and fixed the same way: rewrite the query so the existing CiteVyn
+# retrieval path picks it up.
+#
+# Why a regex is the right tool here (unlike "site win", #84, which needed a
+# classifier): this is a CLOSED list of fixed phrasings, and every one of them
+# is matched against the WHOLE message. There is no ambiguity to resolve — the
+# anchors do all the work.
+#
+# The end anchor is load-bearing. "what do you know about the Claude API rate
+# limits?" opens with a listed phrasing but carries a substantive tail, so it
+# must NOT be rewritten (it already routes to ``claude_api`` correctly). Only
+# trailing whitespace and punctuation may follow the phrase, which is the same
+# rule ``_GREETING_RE`` uses for a bare greeting and for the same reason: a
+# prefix match would swallow real questions. In particular the issue's named
+# negative, "who are the Codex maintainers?", fails the anchor and keeps its
+# ``codex`` routing.
+#
+# Each phrasing maps to the canonical CiteVyn question that best matches the
+# section of the About-CiteVyn source it is really asking for. Retrieval AND
+# generation both see the canonical form, so the answer reads as an answer to
+# the question rather than to a fragment; the ORIGINAL utterance is still what
+# gets persisted as the user's message, so the transcript shows what they typed.
+_SELF_REFERENCE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        (
+            r"who\s+are\s+you",
+            r"who(?:\s+|')re\s+you",
+            r"what\s+are\s+you",
+            r"who\s+am\s+i\s+(?:talking|speaking|chatting)\s+(?:to|with)",
+            r"what(?:'s|\s+is)\s+your\s+name",
+            r"tell\s+me\s+about\s+yourself",
+            r"introduce\s+yourself",
+        ),
+        "What is CiteVyn?",
+    ),
+    (
+        (
+            r"what\s+can\s+you\s+do",
+            r"what\s+do\s+you\s+do",
+            r"what\s+are\s+you\s+for",
+            r"how\s+can\s+you\s+help(?:\s+me)?",
+            r"what\s+can\s+you\s+help\s+(?:me\s+)?with",
+            r"help",
+        ),
+        "What can CiteVyn do?",
+    ),
+    (
+        (
+            r"what\s+do\s+you\s+know(?:\s+about)?",
+            r"what\s+do\s+you\s+cover",
+            r"what\s+topics?\s+do\s+you\s+cover",
+            r"what\s+can\s+you\s+answer",
+            r"what\s+can\s+i\s+ask(?:\s+you)?",
+            r"what\s+sources?\s+do\s+you\s+use",
+        ),
+        "What does CiteVyn cover?",
+    ),
+)
+
+_SELF_REFERENCE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(r"^\s*(?:" + "|".join(phrasings) + r")\s*[?.!]*\s*$", re.IGNORECASE), canonical)
+    for phrasings, canonical in _SELF_REFERENCE_RULES
+)
+
+
+def canonicalize_self_reference(question: str) -> str:
+    """Rewrite a self-referential question into the CiteVyn question it means.
+
+    "who are you?" becomes "What is CiteVyn?"; "what do you cover?" becomes
+    "What does CiteVyn cover?". Anything not on the closed list above — including
+    a listed phrasing that carries a substantive tail ("what can you do with the
+    Gemini API?") — is returned VERBATIM, so every question that routes correctly
+    today keeps routing exactly as it did.
+
+    Pure and deterministic. Call it on the ROUTING/RETRIEVAL query only; the
+    user's original utterance is what gets persisted.
+    """
+    if not question or not question.strip():
+        return question
+    for pattern, canonical in _SELF_REFERENCE_PATTERNS:
+        if pattern.match(question):
+            return canonical
+    return question
+
+
 def classify_domain(question: str) -> Domain:
     """Return the resolved domain for ``question``.
 

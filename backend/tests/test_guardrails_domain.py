@@ -14,6 +14,7 @@ from app.guardrails.domain import (
     ALLOWED_DOMAINS,
     Domain,
     canonicalize_product_name,
+    canonicalize_self_reference,
     classify_domain,
     classify_domains,
     is_unsupported,
@@ -523,3 +524,123 @@ def test_frontend_offline_mirror_agrees_on_the_shared_corpus(
     runners, so a rewrite on either side that changes an answer fails on the other.
     """
     assert bool(_CITEVYN_RE.search(question)) is expected, why
+
+
+# ---------------------------------------------------------------------------
+# Self-referential questions (#300)
+# ---------------------------------------------------------------------------
+#
+# RED before the fix: every question below classified ``unsupported`` and was
+# refused with "NO SOURCE — REFUSED" even though the indexed About-CiteVyn source
+# answers it. Reverting ``canonicalize_self_reference`` to ``return question``
+# turns every ``test_self_reference_*_is_rewritten`` case red.
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("who are you?", "What is CiteVyn?"),
+        ("Who are you", "What is CiteVyn?"),
+        ("WHO ARE YOU?!", "What is CiteVyn?"),
+        ("who're you?", "What is CiteVyn?"),
+        ("what are you?", "What is CiteVyn?"),
+        ("who am I talking to?", "What is CiteVyn?"),
+        ("who am i speaking with", "What is CiteVyn?"),
+        ("what's your name?", "What is CiteVyn?"),
+        ("what is your name", "What is CiteVyn?"),
+        ("tell me about yourself", "What is CiteVyn?"),
+        ("introduce yourself.", "What is CiteVyn?"),
+        ("what can you do?", "What can CiteVyn do?"),
+        ("what do you do?", "What can CiteVyn do?"),
+        ("what are you for?", "What can CiteVyn do?"),
+        ("how can you help me?", "What can CiteVyn do?"),
+        ("how can you help?", "What can CiteVyn do?"),
+        ("what can you help me with?", "What can CiteVyn do?"),
+        ("help", "What can CiteVyn do?"),
+        ("help?", "What can CiteVyn do?"),
+        ("  help  ", "What can CiteVyn do?"),
+        ("what do you know?", "What does CiteVyn cover?"),
+        ("what do you know about?", "What does CiteVyn cover?"),
+        ("what do you cover?", "What does CiteVyn cover?"),
+        ("what topics do you cover?", "What does CiteVyn cover?"),
+        ("what can you answer?", "What does CiteVyn cover?"),
+        ("what can I ask you?", "What does CiteVyn cover?"),
+        ("what can i ask?", "What does CiteVyn cover?"),
+        ("what sources do you use?", "What does CiteVyn cover?"),
+    ],
+)
+def test_self_reference_is_rewritten_to_the_citevyn_question_it_means(
+    question: str, expected: str
+) -> None:
+    """A listed self-referential phrasing becomes the CiteVyn question it means."""
+    assert canonicalize_self_reference(question) == expected
+
+
+@pytest.mark.parametrize(
+    "question,why",
+    [
+        (
+            "who are the Codex maintainers?",
+            "the issue's named negative: a real Codex question opening with 'who are'",
+        ),
+        (
+            "what can you do with the Gemini API?",
+            "a listed phrasing with a substantive tail is a real product question",
+        ),
+        (
+            "what do you know about the Claude API rate limits?",
+            "same, and it already routes to claude_api correctly",
+        ),
+        ("help me install Claude Code", "'help' as a verb with an object, not a bare cry"),
+        ("help with codex login", "same"),
+        ("what are you doing about the codex outage", "tail past the phrase"),
+        ("who are you going to bill for this?", "tail past the phrase"),
+        ("what is CiteVyn?", "already routes to citevyn — must not be rewritten"),
+        ("what do you cover in the enterprise plan", "tail past the phrase"),
+        ("", "empty input"),
+        ("   ", "whitespace-only input"),
+        ("what is Claude Code?", "an ordinary product question"),
+        ("selfhelp", "'help' only as a substring, not the whole message"),
+        ("help help", "not a listed phrasing"),
+    ],
+)
+def test_self_reference_leaves_everything_else_verbatim(question: str, why: str) -> None:
+    """Anything off the closed list — including a listed phrasing carrying a
+    substantive tail — is returned byte-for-byte, so today's routing is unchanged."""
+    assert canonicalize_self_reference(question) == question, why
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "who are you?",
+        "what can you do?",
+        "what do you cover?",
+        "help",
+        "tell me about yourself",
+    ],
+)
+def test_self_referential_questions_reach_the_citevyn_domain_after_rewrite(
+    question: str,
+) -> None:
+    """The whole point of the rewrite: these route to ``citevyn``, not ``unsupported``.
+
+    Without ``canonicalize_self_reference`` every one of them is ``unsupported``
+    (that is the #300 bug), so this test is red on the unfixed tree.
+    """
+    assert classify_domain(question) is Domain.unsupported  # the raw utterance still is
+    assert classify_domain(canonicalize_self_reference(question)) is Domain.citevyn
+
+
+def test_self_reference_rewrite_is_idempotent() -> None:
+    """Re-running the rewrite on its own output is a no-op (the canonical forms
+    name CiteVyn, so they are off the list by construction)."""
+    for question in ("who are you?", "what can you do?", "what do you cover?", "help"):
+        once = canonicalize_self_reference(question)
+        assert canonicalize_self_reference(once) == once
+
+
+def test_self_reference_negative_matches_the_codex_maintainers_case_end_to_end() -> None:
+    """The issue's explicit negative keeps its ``codex`` routing through the rewrite."""
+    question = "who are the Codex maintainers?"
+    assert classify_domain(canonicalize_self_reference(question)) is Domain.codex

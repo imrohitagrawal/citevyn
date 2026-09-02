@@ -239,7 +239,7 @@ at the local default.
 CI runs `--postgres`, where the live vector arm lets far more cases reach the LLM and
 real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
 
-* ~63 orchestrator asks (58 cases + 5 replayed `followup` history turns) + ~116
+* ~65 orchestrator asks (60 cases + 5 replayed `followup` history turns) + ~116
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60

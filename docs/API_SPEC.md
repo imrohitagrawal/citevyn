@@ -538,6 +538,41 @@ carries the neutral `domain: "general"`; a `CiteVyn`-addressed greeting
 }
 ```
 
+### Self-Referential Questions
+
+A question addressed to the assistant in the second person ("who are you?",
+"what can you do?", "what do you cover?", a bare "help") is a question **about
+CiteVyn**, but it never says the word — so it used to route `domain:
+"unsupported"` and come back as the off-domain refusal while the indexed
+"About CiteVyn" source could answer it (#300).
+
+The orchestrator now rewrites a small, **closed, whole-message-anchored** list of
+such phrasings to the CiteVyn question each one means, before routing:
+
+| Phrasing (whole message) | Rewritten to |
+|---|---|
+| "who are you", "what are you", "what's your name", "tell me about yourself", … | `What is CiteVyn?` |
+| "what can you do", "what do you do", "how can you help", "help" | `What can CiteVyn do?` |
+| "what do you know", "what do you cover", "what can I ask you", … | `What does CiteVyn cover?` |
+
+The response is then an ordinary grounded, cited answer with `domain:
+"citevyn"` and `unsupported: false` — there is no new field, intent, or domain
+value on the wire.
+
+Two properties are load-bearing and tested:
+
+* **Whole-message anchoring.** Only trailing whitespace and punctuation may
+  follow the phrase. A listed phrasing carrying a substantive tail is a real
+  product question and keeps its own routing — "who are the Codex maintainers?"
+  stays `codex`, "what can you do with the Gemini API?" stays `gemini_api`.
+* **The user's utterance is not rewritten.** The rewrite applies to the
+  retrieval/generation query only; `GET /v1/sessions/{id}/messages` still
+  replays exactly what the user typed.
+
+The rewrite runs **before** conversation memory, so a self-referential question
+asked mid-session is answered about CiteVyn rather than inheriting the previous
+turn's topic.
+
 ## 7. Exact Lookup
 
 ```http

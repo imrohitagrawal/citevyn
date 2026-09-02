@@ -1246,6 +1246,170 @@ async def test_alias_canonicalization_does_not_trigger_the_condenser(session: An
     assert retriever.calls[-1]["product_area"] == "citevyn"
 
 
+# ---------------------------------------------------------------------------
+# 4e. Self-referential questions reach the About-CiteVyn path (#300)
+# ---------------------------------------------------------------------------
+#
+# "who are you?" is a question ABOUT CiteVyn that never says the word, so it
+# routed ``unsupported`` and the owner got "NO SOURCE — REFUSED" in production
+# while the indexed About-CiteVyn source could answer it. The pure rewrite is
+# unit-tested in test_guardrails_domain.py; these cover the WIRING, which those
+# tests cannot see — they stay green even if ``ask`` stops calling the rewrite.
+
+
+@pytest.mark.parametrize(
+    "question,expected_query",
+    [
+        ("who are you?", "What is CiteVyn?"),
+        ("what can you do?", "What can CiteVyn do?"),
+        ("what do you cover?", "What does CiteVyn cover?"),
+        ("help", "What can CiteVyn do?"),
+    ],
+)
+async def test_self_referential_question_retrieves_from_the_citevyn_area(
+    session: Any, question: str, expected_query: str
+) -> None:
+    """The retriever is handed the canonical CiteVyn question and the citevyn area.
+
+    Deleting the ``canonicalize_self_reference`` call site in ``ask`` fails HERE.
+    """
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(question=question, request_id="selfref_1", session_id=uuid.uuid4())
+
+    assert retriever.calls[-1]["question"] == expected_query
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+    assert response["domain"] == "citevyn"
+    # The #300 symptom was the off-domain refusal. It must be gone.
+    assert response["unsupported"] is False
+
+
+async def test_self_referential_question_is_not_refused_off_domain(session: Any) -> None:
+    """End-to-end shape of the bug report: "who are you?" answers with citations
+    instead of the unsupported refusal."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(
+        question="who are you?", request_id="selfref_2", session_id=uuid.uuid4()
+    )
+
+    assert response["unsupported"] is False
+    assert response["no_answer"] is False
+    assert response["intent"] != Intent.unsupported.value
+    assert response["citations"], "the About-CiteVyn evidence must be cited"
+
+
+async def test_self_reference_rewrite_reaches_the_generator(session: Any) -> None:
+    """Generation sees the canonical question, not the bare "who are you?" — otherwise
+    the LLM is asked a question the evidence it was handed does not answer."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm_spy = AsyncMock(wraps=StubLLMClient())
+    orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
+
+    await orch.ask(question="who are you?", request_id="selfref_3", session_id=uuid.uuid4())
+
+    prompt = llm_spy.complete.await_args.kwargs["user"]
+    assert "CiteVyn" in prompt
+    assert "who are you" not in prompt.lower()
+
+
+async def test_self_reference_rewrite_does_not_rewrite_the_persisted_message(
+    session: Any,
+) -> None:
+    """The transcript must show what the user actually typed."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="who are you?", request_id="selfref_4", session_id=uuid.uuid4())
+
+    user_msgs = (
+        (await session.execute(select(Message).where(Message.role == MessageRole.user)))
+        .scalars()
+        .all()
+    )
+    assert [m.content for m in user_msgs] == ["who are you?"]
+
+
+async def test_codex_maintainers_question_still_routes_to_codex(session: Any) -> None:
+    """The issue's named negative. "who are the Codex maintainers?" opens with a listed
+    phrasing but is a real Codex question — it must not be hijacked to CiteVyn."""
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(
+        question="who are the Codex maintainers?",
+        request_id="selfref_5",
+        session_id=uuid.uuid4(),
+    )
+
+    assert retriever.calls[-1]["question"] == "who are the Codex maintainers?"
+    assert retriever.calls[-1]["product_area"] == "codex"
+
+
+async def test_self_reference_does_not_inherit_the_prior_turn_topic(session: Any) -> None:
+    """Ordering guard: the rewrite runs BEFORE conversation memory.
+
+    Asked mid-session, "who are you?" must still be about CiteVyn — not concatenated
+    with the previous product question. Moving the call site below
+    ``build_contextual_query`` is what this catches.
+    """
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="selfref_6a", session_id=sid)
+    await orch.ask(question="who are you?", request_id="selfref_6b", session_id=sid)
+
+    assert retriever.calls[-1]["question"] == "What is CiteVyn?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_self_reference_rewrite_does_not_trigger_the_condenser(session: Any) -> None:
+    """Merge-interaction guard (#300 x #169), the same trap alias canonicalization hit.
+
+    ``needs_condense`` keys off "the deterministic MEMORY rewrite fired". The #300
+    rewrite also mutates ``retrieval_query``, so comparing against the RAW question
+    would fire the LLM condenser on a question with nothing to resolve — burning a
+    round-trip and letting the condenser overwrite the canonical CiteVyn question.
+    """
+    await _seed_index_version(session)
+    settings = _settings(llm_provider="router")
+    retriever = _FakeRetriever(_evidence(count=2))
+    llm = _CondensingLLM()
+    sid = uuid.uuid4()
+    orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
+
+    await orch.ask(question="What is Codex CLI?", request_id="selfref_7a", session_id=sid)
+    await orch.ask(question="who are you?", request_id="selfref_7b", session_id=sid)
+
+    assert llm.condense_prompts == [], "condenser fired on a question with nothing to resolve"
+    assert retriever.calls[-1]["question"] == "What is CiteVyn?"
+
+
+async def test_greeting_still_wins_over_the_self_reference_rewrite(session: Any) -> None:
+    """Precedence guard: a bare "hi" is a greeting, not a self-referential question.
+
+    The greeting short-circuit runs first and returns before the rewrite is reached,
+    so a greeting must still cost no retrieval and no LLM call.
+    """
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    response = await orch.ask(question="hello", request_id="selfref_8", session_id=uuid.uuid4())
+
+    assert response["intent"] == "greeting"
+    assert retriever.calls == []
+
+
 class _IntentLLM:
     """LLM double whose intent verdict the test controls. Records every call."""
 

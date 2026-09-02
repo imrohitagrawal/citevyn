@@ -325,7 +325,7 @@ def test_a_bound_above_the_priority_pool_still_covers_every_kind() -> None:
     """Once there IS a fill budget, the stratified fill must reach every kind."""
     cases = load_cases(GOLDEN_PATH)
     selected, dropped = select_judge_subset(cases, limit=50)
-    assert dropped, "limit 50 should still be a bounded run over 58 cases"
+    assert dropped, "limit 50 should still be a bounded run over 60 cases"
     assert {c.kind for c in selected} == {c.kind for c in cases}
 
 
@@ -333,13 +333,13 @@ def test_the_documented_saving_ceiling_is_still_true() -> None:
     """The docs justify NOT sampling in CI with a measured number; pin it.
 
     ``docs/COST_CONTROLS.md`` §6 and ``subset.py``'s docstring both state that the
-    priority pool is 42 of 58 cases, so bounding can save at most ~28%. If the
+    priority pool is 43 of 60 cases, so bounding can save at most ~28%. If the
     golden set grows such that sampling becomes worthwhile again, this fails and
     the decision gets revisited deliberately rather than by drift.
     """
     cases = load_cases(GOLDEN_PATH)
     pool = [c for c in cases if is_priority(c)]
-    assert (len(pool), len(cases)) == (42, 58), (
+    assert (len(pool), len(cases)) == (43, 60), (
         f"priority pool is now {len(pool)}/{len(cases)}; update the ~28%-ceiling "
         "claim in docs/COST_CONTROLS.md §6 and tests/eval/subset.py, and re-decide "
         "whether CI should sample cases after all"

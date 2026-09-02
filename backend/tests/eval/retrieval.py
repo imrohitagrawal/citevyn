@@ -38,6 +38,7 @@ from app.embeddings.factory import build_embedder, configured_embedder_identity
 from app.embeddings.protocol import Embedder
 from app.guardrails.domain import (
     canonicalize_product_name,
+    canonicalize_self_reference,
     classify_domain,
     classify_domains,
     is_unsupported,
@@ -436,13 +437,18 @@ async def _retrieve_sources(
     rewrite with :func:`build_contextual_query`. ``use_memory=False`` forces the raw
     single-turn query (the permanent raw-miss control).
     """
-    query = case.question
+    # Mirror the orchestrator's self-reference canonicalization (#300), in the SAME
+    # position: BEFORE the memory rewrite. Omitting it here would make the eval measure
+    # a DIFFERENT system than production — the self-referential cases would score raw
+    # "who are you?" retrieval and the gate would stay green if ``ask`` dropped the
+    # rewrite. Keep this in step with ``Orchestrator.ask``.
+    query = canonicalize_self_reference(case.question)
     if use_memory and case.history and settings.conversation_memory:
         session_id = await _seed_followup_history(session, case)
         priors = await recent_user_questions(
             session, session_id, limit=settings.memory_recent_turns
         )
-        query = build_contextual_query(case.question, priors)
+        query = build_contextual_query(query, priors)
     # Mirror the orchestrator's alias canonicalization (#84 item 1). This harness
     # re-implements the query pipeline, so any step it omits makes the eval measure a
     # DIFFERENT system than production: without this line the citevyn alias cases would

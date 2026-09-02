@@ -55,6 +55,7 @@ from app.guardrails.domain import (
     Domain,
     canonicalize_ambiguous_alias,
     canonicalize_product_name,
+    canonicalize_self_reference,
     classify_domain,
     classify_domains,
     contains_ambiguous_citevyn_alias,
@@ -434,21 +435,38 @@ class Orchestrator:
         # every single-turn path is byte-for-byte unchanged. Everything downstream
         # classifies + retrieves + answers from ``retrieval_query`` (the resolved
         # topic), while the ORIGINAL ``question`` stays the persisted user utterance.
-        retrieval_query = question
+        # Self-referential questions (#300). A question addressed to the assistant in
+        # the second person ("who are you?", "what can you do?") is a question ABOUT
+        # CiteVyn, but it never says the word — so it routed ``unsupported`` and was
+        # refused while the indexed About-CiteVyn source could answer it. The closed,
+        # whole-message-anchored list in the guardrail rewrites it to the CiteVyn
+        # question it means; everything else is returned verbatim, so this line is a
+        # no-op for every question that routes correctly today.
+        #
+        # It runs BEFORE conversation memory on purpose. A self-referential question is
+        # self-contained — it must never inherit the prior turn's topic — and once
+        # rewritten it names CiteVyn, so ``build_contextual_query``'s first gate returns
+        # it unchanged anyway. Running it after memory would let "what is this?"-shaped
+        # anaphora be concatenated with a prior product question first.
+        routed_question = canonicalize_self_reference(question)
+
+        retrieval_query = routed_question
         prior_questions: list[str] = []
         if self._settings.conversation_memory:
             prior_questions = await recent_user_questions(
                 self._session, session_id, limit=self._settings.memory_recent_turns
             )
-            retrieval_query = build_contextual_query(question, prior_questions)
+            retrieval_query = build_contextual_query(routed_question, prior_questions)
 
         # Whether the deterministic MEMORY rewrite fired, captured HERE — before
         # canonicalization also starts mutating ``retrieval_query``. The condense gate
         # below keys off this, and it used to test ``retrieval_query != question``
         # directly; once alias canonicalization landed, that comparison silently started
         # meaning "memory rewrote it OR it contained an alias", firing the LLM condenser
-        # on self-contained aliased questions that have nothing to resolve.
-        memory_rewrote = retrieval_query != question
+        # on self-contained aliased questions that have nothing to resolve. Compared
+        # against ``routed_question`` (not the raw ``question``) for the same reason: the
+        # #300 self-reference rewrite must not be mistaken for a memory rewrite either.
+        memory_rewrote = retrieval_query != routed_question
 
         # Speech-to-text mangles the product name ("sitewin", "site win"), and the
         # guardrail now recognizes those aliases — but recognition alone still refuses
