@@ -324,7 +324,7 @@ async def logout(
     "/me/password",
     summary="Set or change the signed-in account's password.",
     description=(
-        "First-time set (an OAuth-only or magic-link-only account) needs only "
+        "First-time set (an OAuth-created account that never set one) needs only "
         "new_password; a change needs current_password too -- decided by the "
         "server from the stored account, never from the request body. Every "
         "success revokes the account's other sessions (docs/API_SPEC.md §4c)."

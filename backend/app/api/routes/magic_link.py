@@ -180,20 +180,21 @@ def _link_base_url(settings: Settings) -> str:
 
 def _build_message(*, to_addr: str, link: str, ttl_seconds: int) -> EmailMessage:
     minutes = max(1, ttl_seconds // 60)
+    plural = "s" if minutes != 1 else ""
     subject = "Your CiteVyn sign-in link"
     text = (
         "Sign in to CiteVyn\n"
         "\n"
         f"Open this link to sign in: {link}\n"
         "\n"
-        f"It works once and expires in {minutes} minutes. If you didn't ask for it, "
+        f"It works once and expires in {minutes} minute{plural}. If you didn't ask for it, "
         "ignore this email -- nothing happens unless the link is used.\n"
     )
     safe_link = html.escape(link, quote=True)
     body_html = (
         "<p>Sign in to CiteVyn</p>"
         f'<p><a href="{safe_link}">Open this link to sign in</a></p>'
-        f"<p>It works once and expires in {minutes} minutes. If you didn't ask for it, "
+        f"<p>It works once and expires in {minutes} minute{plural}. If you didn't ask for it, "
         "ignore this email &mdash; nothing happens unless the link is used.</p>"
     )
     return EmailMessage(to_addr=to_addr, subject=subject, text=text, html=body_html)
@@ -353,10 +354,11 @@ def _render_interstitial(token: str | None, *, ttl_seconds: int) -> str:
     )
     tail = "</main></body></html>\n"
     minutes = max(1, ttl_seconds // 60)
+    plural = "s" if minutes != 1 else ""
     if token is None:
         body = (
             "<h1>This sign-in link is invalid or has expired</h1>"
-            f"<p>Links work once and expire {minutes} minutes after they are sent. "
+            f"<p>Links work once and expire {minutes} minute{plural} after they are sent. "
             "Request a new one from the sign-in dialog.</p>"
             '<p><a href="/">Back to CiteVyn</a></p>'
         )

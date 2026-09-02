@@ -143,6 +143,7 @@ production subset lives in
 | `CITEVYN_RESEND_API_KEY`         | for magic links | Resend API key; without it magic-link login is off in production (local dev writes emails to a file outbox instead) |
 | `CITEVYN_EMAIL_FROM`             | with the key    | `From:` address on a domain the Resend account has verified |
 | `CITEVYN_MAGIC_LINK_BASE_URL`    | prod, with key  | Public origin the emailed link points at, e.g. `https://citevyn.stackclimb.com` (never derived from the request) |
+| `CITEVYN_MAGIC_LINK_TTL_SECONDS` | optional        | Sign-in link lifetime in seconds (default 600, minimum 60); quoted in the email and confirm page |
 | `CITEVYN_EMAIL_OUTBOX_DIR`       | local only      | Where the dev file outbox writes emails (default: `citevyn_email_outbox` under the system temp dir); refused in production |
 
 **Never commit a real `.env`.** The repo `.gitignore` rejects

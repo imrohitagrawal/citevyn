@@ -181,7 +181,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         // Deliberately generic: the server never says whether the address is
         // registered, so neither can this copy.
         setNotice(
-          "If that email has an account, a sign-in link is on its way. It works once and expires in 10 minutes.",
+          "If that email has an account, a sign-in link is on its way. It works once and expires soon — check your inbox now.",
         );
         return;
       } else {

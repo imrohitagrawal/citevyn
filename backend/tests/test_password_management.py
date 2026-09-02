@@ -228,9 +228,17 @@ def test_change_password_rejects_wrong_current_password(password_app: None) -> N
     global sign-out interceptor for a caller who IS authenticated -- and that
     a failed attempt revokes NOTHING (the other device stays signed in)."""
     client = _client()
-    _register(client)
+    user_id = _register(client).json()["user_id"]
     other_device = _client()
     assert _login(other_device).status_code == 200
+    assert (
+        client.post(
+            "/v1/auth/magic-link/request",
+            json={"email": EMAIL},
+            headers={"Authorization": DEMO_BEARER},
+        ).status_code
+        == 202
+    )
     hash_before = _password_hash()
 
     response = _update(client, current_password="not the password", new_password=NEW)
@@ -238,6 +246,7 @@ def test_change_password_rejects_wrong_current_password(password_app: None) -> N
     assert _password_hash() == hash_before
     assert _me(client).status_code == 200, "a wrong guess must not log the caller out"
     assert _me(other_device).status_code == 200, "a wrong guess must not revoke other sessions"
+    assert _pending_token_count(user_id) == 1, "a wrong guess must not delete pending links"
     assert any(
         action == "auth_failed" and meta.get("event") == "password_current_mismatch"
         for action, meta in _audit_events()

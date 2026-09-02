@@ -176,7 +176,7 @@ since a cross-site form POST cannot set an `Authorization` header.
     the sending domain must be verified in Resend (SPF/DKIM/DMARC on
     `stackclimb.com`) before this works in production — until then the
     request route 404s and the UI says email sign-in is unavailable; the
-    10-minute link is a full-session bearer credential, so anyone who can
+    link (10 minutes by default) is a full-session bearer credential, so anyone who can
     read the recipient's inbox in that window can sign in (that is the
     nature of magic links, and the same bound every email-based recovery
     flow has); links are deliberately NOT bound to the requesting browser,

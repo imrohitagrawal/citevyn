@@ -56,7 +56,8 @@ MVP supports:
    password hash, GitHub/Google OAuth (as the login method, or linked to
    a password account afterwards via `connect/start`), or a one-time emailed
    sign-in link (ADR-0004 PR 14: `magic_link_tokens`, SHA-256 of the secret
-   stored, 10-minute expiry, consumed only by a real `POST` from the confirm
+   stored, short-lived (`CITEVYN_MAGIC_LINK_TTL_SECONDS`, default 10
+   minutes), consumed only by a real `POST` from the confirm
    page so mail scanners cannot burn it), and get a Postgres-backed opaque session
    token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. A signed-in user
    can set or change a password (`POST /v1/auth/me/password`); the server

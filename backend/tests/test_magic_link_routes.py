@@ -522,7 +522,9 @@ def test_confirm_post_fails_closed_when_the_user_row_is_gone(magic_app: Path) ->
     """Defense in depth (step 4 of the claim): the FK cascade normally takes
     the token with the user, but SQLite's FK enforcement is off here (#286),
     which conveniently models the delete/claim race. RED if the missing-user
-    guard is removed: ``claim_and_login`` would then 500 on the FK."""
+    guard is removed: on Postgres ``claim_and_login`` would 500 on the FK; on
+    this SQLite harness it would mint a ghost session for a deleted user
+    (302 ``/?auth=ok``) -- either way not the ``/?auth=error`` asserted here."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
