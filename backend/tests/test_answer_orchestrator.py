@@ -1361,14 +1361,13 @@ async def test_self_reference_does_not_inherit_the_prior_turn_topic(session: Any
     ``build_contextual_query`` instead of the rewritten one, which drops the
     rewrite entirely and sends "who are you?" to retrieval verbatim.
 
-    What it does NOT catch, stated honestly because a review found the original
-    claim here overstated: merely MOVING the call site below
-    ``build_contextual_query`` leaves this green. No phrasing on the closed list
-    contains an anaphor or an elliptical opener, so ``is_anaphoric_followup`` is
-    False for every one of them and the memory rewrite is already a no-op on
-    them today. The before-memory ordering is therefore DEFENSIVE — it is what
-    keeps the property true if a future phrasing ("what is this?", "how about
-    you?") ever does carry an anaphor — not a property this test can prove.
+    What it does NOT catch: merely MOVING the call site below
+    ``build_contextual_query`` leaves THIS test green, because "who are you?"
+    carries no anaphor and no elliptical opener, so the memory rewrite is a
+    no-op on it. The reorder is caught by
+    ``test_self_reference_survives_an_elliptical_opener_mid_session`` instead —
+    "so ..." IS an elliptical opener, so that one flips to the prior turn's
+    product domain when the ordering is wrong.
     """
     await _seed_index_version(session)
     retriever = _FakeRetriever(_evidence(count=2))
@@ -1380,6 +1379,44 @@ async def test_self_reference_does_not_inherit_the_prior_turn_topic(session: Any
 
     assert retriever.calls[-1]["question"] == "What is CiteVyn?"
     assert retriever.calls[-1]["product_area"] == "citevyn"
+
+
+async def test_self_reference_survives_an_elliptical_opener_mid_session(
+    session: Any,
+) -> None:
+    """THE ordering guard: "so ..." is an elliptical opener, so order decides the answer.
+
+    The self-reference opener set includes "so". ``_ELLIPSIS_RE`` in
+    ``app/answer/memory.py`` independently lists "so" as an elliptical continuation
+    marker, so ``is_anaphoric_followup("so what do you cover?")`` is True — the two
+    closed lists were written for different purposes and happen to overlap on exactly
+    this token.
+
+    That overlap makes the before-memory ordering LOAD-BEARING rather than defensive.
+    Run ``canonicalize_self_reference`` first (as ``ask`` does) and the question is
+    rewritten to "What does CiteVyn cover?" and routes ``citevyn``. Run
+    ``build_contextual_query`` first and the same question is concatenated with the
+    prior product turn into "What is Claude Code? so what do you cover?", which no
+    longer matches the self-reference list at all and routes ``claude_code`` — #300's
+    wrong-topic symptom, reintroduced.
+
+    Moving the ``canonicalize_self_reference`` call below the memory block turns this
+    test red. (Its sibling, ...does_not_inherit_the_prior_turn_topic, does NOT catch
+    that reorder — "who are you?" carries no anaphor — which is why this case exists.)
+    """
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(_evidence(count=2))
+    sid = uuid.uuid4()
+    orch = Orchestrator(_settings(), session, retriever=retriever)
+
+    await orch.ask(question="What is Claude Code?", request_id="selfref_9a", session_id=sid)
+    response = await orch.ask(
+        question="so what do you cover?", request_id="selfref_9b", session_id=sid
+    )
+
+    assert retriever.calls[-1]["question"] == "What does CiteVyn cover?"
+    assert retriever.calls[-1]["product_area"] == "citevyn"
+    assert response["domain"] == "citevyn"
 
 
 async def test_self_reference_rewrite_does_not_trigger_the_condenser(session: Any) -> None:

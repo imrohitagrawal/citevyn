@@ -443,15 +443,17 @@ class Orchestrator:
         # question it means; everything else is returned verbatim, so this line is a
         # no-op for every question that routes correctly today.
         #
-        # It runs BEFORE conversation memory on purpose, though the ordering is
-        # DEFENSIVE rather than load-bearing today: no phrasing on the closed list
-        # carries an anaphor or an elliptical opener, so ``build_contextual_query`` is
-        # already a no-op on every one of them, and running it after memory would
-        # currently produce the same result. The ordering is what keeps that true if a
-        # future addition ("what is this?", "how about you?") DOES carry an anaphor —
-        # such a phrasing would otherwise be concatenated with the prior product
-        # question and answered about the wrong topic. Once rewritten the query names
-        # CiteVyn, so memory's first gate returns it unchanged either way.
+        # It runs BEFORE conversation memory, and that ordering is LOAD-BEARING — not
+        # merely defensive. The opener set includes "so", which ``_ELLIPSIS_RE`` in
+        # app/answer/memory.py independently lists as an elliptical continuation, so
+        # ``is_anaphoric_followup("so what do you cover?")`` is True. Run memory FIRST
+        # and that question is concatenated with the prior product turn
+        # ("What is Claude Code? so what do you cover?"), which no longer matches the
+        # self-reference list and routes ``claude_code`` — #300's wrong-topic symptom,
+        # reintroduced. Verified: current order -> citevyn, reversed -> claude_code.
+        # ``test_self_reference_survives_an_elliptical_opener_mid_session`` is the guard.
+        # Once rewritten the query names CiteVyn, so memory's first gate then returns it
+        # unchanged.
         routed_question = canonicalize_self_reference(question)
 
         retrieval_query = routed_question

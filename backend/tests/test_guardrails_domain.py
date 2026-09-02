@@ -689,17 +689,37 @@ def test_self_reference_tail_does_not_backtrack_quadratically() -> None:
     synchronously inside ``Orchestrator.ask`` before any await, so that stalls
     every other in-flight request on the machine, not just the sender's.
 
-    Asserted as a RATIO against the same input at half the length rather than a
-    wall-clock budget, so the test is not flaky on a loaded or slow machine:
-    linear scaling doubles (~2x), the quadratic shape quadruples (~4x). The
-    threshold sits between them. Restoring ``\\s*[?.!]*\\s*$`` turns this red.
+    Asserted as a RATIO between two input sizes rather than a wall-clock budget,
+    so a slow or loaded machine cannot fail it on speed alone. The sizes are 4x
+    apart, so linear scaling predicts ~4x and quadratic ~16x; the threshold sits
+    at 8, an even multiplicative margin from both. A review of the first version
+    of this test measured 3.09 and 6.33 on a contended machine against a 3.0
+    threshold set for a 2x gap — too tight to be trustworthy, hence the wider gap.
+
+    Restoring ``\\s*[?.!]*\\s*$`` turns this red, and so does the plausible
+    half-fix ``[\\s,.!?]*\\s*$``.
     """
     import time
+
+    stem = "what can you help me with"
+    # PARTNER ASSERTION (the project's rule: a check that counts nothing needs a
+    # partner proving the thing counted exists). Without this the test degrades
+    # SILENTLY to a ratio of ~1.00 the moment ``stem`` stops matching the
+    # phrasing list — the regex would bail immediately at both sizes and the
+    # ratio assertion would pass while measuring nothing at all.
+    assert canonicalize_self_reference(stem) == "What can CiteVyn do?", (
+        "the timing probe's stem must still be a LISTED phrasing, or this test "
+        "measures the fast reject path and passes vacuously"
+    )
+    assert canonicalize_self_reference(stem + " " * 8 + "x") == stem + " " * 8 + "x", (
+        "the probe must FAIL to match once the tail is unsatisfiable — that failure "
+        "is the path that backtracks"
+    )
 
     def elapsed(n: int) -> float:
         # A listed phrasing, then a whitespace run, then a character that makes
         # the ``$`` anchor fail — the worst case for a backtracking tail.
-        probe = "what can you help me with" + " " * n + "x"
+        probe = stem + " " * n + "x"
         best = float("inf")
         for _ in range(5):  # best-of-5 damps scheduler noise
             start = time.perf_counter()
@@ -707,12 +727,14 @@ def test_self_reference_tail_does_not_backtrack_quadratically() -> None:
             best = min(best, time.perf_counter() - start)
         return best
 
-    small = elapsed(2000)
-    large = elapsed(4000)
+    small = elapsed(1000)
+    large = elapsed(4000)  # 4x the input
     # Guard against a divide-by-zero on a machine fast enough to floor `small`.
-    assert large / max(small, 1e-9) < 3.0, (
-        f"self-reference tail scales super-linearly ({small:.6f}s -> {large:.6f}s); "
-        "the tail must be ONE character class, e.g. [\\s,.!?]*$"
+    ratio = large / max(small, 1e-9)
+    assert ratio < 8.0, (
+        f"self-reference tail scales super-linearly: 1000 chars {small:.6f}s -> "
+        f"4000 chars {large:.6f}s (ratio {ratio:.1f}x, linear would be ~4x). "
+        "The tail must be ONE character class, e.g. [\\s,.!?]*$"
     )
 
 
