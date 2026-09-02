@@ -337,7 +337,14 @@ describe("AuthModal set-password mode (ADR-0004 PR 14)", () => {
     expect(updatePassword).toHaveBeenCalledWith("new passphrase 12345", undefined);
     expect(await within(dialog).findByRole("status")).toHaveTextContent(/Password saved/);
     expect(onClose).not.toHaveBeenCalled();
-    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    // The success screen keeps focus INSIDE the still-open dialog (the form
+    // that held focus unmounted) and does not re-title itself "Change
+    // password" now that has_password is true -- both review findings.
+    const done = within(dialog).getByRole("button", { name: "Done" });
+    expect(done).toHaveFocus();
+    expect(within(dialog).getByRole("heading", { name: "Password saved" })).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Enter your current password/)).not.toBeInTheDocument();
+    await user.click(done);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

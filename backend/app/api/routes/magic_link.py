@@ -2,10 +2,15 @@
 
 A third way in, next to password (``auth.py``) and OAuth (``oauth.py``): the
 user asks for a link by email, and the link logs them in. It is also the
-working password-recovery path -- a forgotten password is solved by
-requesting a link, then setting a new password from the account menu
-(``POST /v1/auth/me/password``), so there is deliberately NO separate
-reset-via-email flow with its own token type to secure.
+password-recovery path -- a user who cannot log in with a password can
+still get in by requesting a link, and an account that has NO password
+(OAuth-created, or one that never set one) can then set one from the
+account menu (``POST /v1/auth/me/password``). There is deliberately NO
+separate reset-via-email flow with its own token type to secure. **Known
+limit (#293):** an account that still HAS a password must give it
+to change it -- the link recovers access, not the forgotten password
+itself; the same-session step-up that would close that needs a schema
+change and an owner decision.
 
 Same one-file-one-router pattern as ``oauth.py``/``me.py``. The pure pieces
 live in seams with no app coupling -- ``app.core.token_secrets`` (the
@@ -81,7 +86,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -327,7 +332,7 @@ def _parse_token(value: str) -> tuple[uuid.UUID, str] | None:
     return token_id, secret
 
 
-def _render_interstitial(token: str | None) -> str:
+def _render_interstitial(token: str | None, *, ttl_seconds: int) -> str:
     """The plain-HTML confirm page. ``token`` is ``None`` for an invalid/expired link.
 
     Unstyled on purpose: the app-wide CSP (``app.core.security_headers``)
@@ -347,10 +352,11 @@ def _render_interstitial(token: str | None) -> str:
         "<title>Sign in to CiteVyn</title></head><body><main>"
     )
     tail = "</main></body></html>\n"
+    minutes = max(1, ttl_seconds // 60)
     if token is None:
         body = (
             "<h1>This sign-in link is invalid or has expired</h1>"
-            "<p>Links work once and expire 10 minutes after they are sent. "
+            f"<p>Links work once and expire {minutes} minutes after they are sent. "
             "Request a new one from the sign-in dialog.</p>"
             '<p><a href="/">Back to CiteVyn</a></p>'
         )
@@ -382,9 +388,13 @@ async def magic_link_confirm_page(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
     _rate_limit: Annotated[None, Depends(rate_limited_oauth_navigation)],
-    token: Annotated[str, Query(max_length=_TOKEN_MAX_LENGTH)] = "",
+    token: str = "",
 ) -> HTMLResponse:
-    del request, settings  # the per-visitor limiter already consumed both; nothing else is read
+    del request  # the per-visitor limiter already consumed it; nothing else is read
+    # No ``Query(max_length=...)``: a validation failure there would answer a
+    # JSON 422 envelope instead of this page. ``_parse_token`` bounds the
+    # length itself and an over-long value renders the error page like any
+    # other bad link.
     parsed = _parse_token(token)
     valid = False
     if parsed is not None:
@@ -396,7 +406,7 @@ async def magic_link_confirm_page(
             and _to_naive_utc(row.expires_at) > _to_naive_utc(_now())
         )
     return HTMLResponse(
-        _render_interstitial(token if valid else None),
+        _render_interstitial(token if valid else None, ttl_seconds=settings.magic_link_ttl_seconds),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -453,8 +463,9 @@ async def _claim_token(db: AsyncSession, token_id: uuid.UUID, secret: str) -> Ma
     wrong guess delete nothing (no griefing of the real user's link), the
     same predicate-baking ``oauth.py``'s ``_claim_nonce`` does with the
     session binding. Commits, so the claim is durable before any login work
-    happens. The digest is re-checked in constant time on the returned row
-    as belt-and-braces.
+    happens. There is deliberately no second comparison of the secret on
+    the returned row: the row can only come back if the digest matched, so
+    a re-check would be dead code pretending to be defence in depth.
     """
     claimed = await db.execute(
         delete(MagicLinkToken)
@@ -466,8 +477,6 @@ async def _claim_token(db: AsyncSession, token_id: uuid.UUID, secret: str) -> Ma
     )
     row = claimed.scalar_one_or_none()
     await db.commit()
-    if row is not None and not verify_token(secret, row.secret_hash):
-        return None
     return row
 
 
@@ -475,8 +484,9 @@ async def _claim_token(db: AsyncSession, token_id: uuid.UUID, secret: str) -> Ma
     "/confirm",
     summary="Redeem an emailed sign-in link (form POST from the confirm page).",
     description=(
-        "Always redirects, never JSON: /?auth=ok on success, /?auth=error "
-        "otherwise. Single-use; 10-minute expiry (docs/API_SPEC.md §4c)."
+        "Redirects: /?auth=ok on success, /?auth=error otherwise (the only "
+        "JSON answer is a 429 from the per-visitor limiter). Single-use; "
+        "expiry per CITEVYN_MAGIC_LINK_TTL_SECONDS (docs/API_SPEC.md §4c)."
     ),
 )
 async def magic_link_confirm(

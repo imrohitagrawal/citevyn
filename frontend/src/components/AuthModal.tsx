@@ -83,6 +83,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const doneButtonRef = useRef<HTMLButtonElement>(null);
   const titleId = "auth-modal-title";
 
   // Whether the account already has a password decides the SHAPE of the
@@ -109,6 +110,14 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   useEffect(() => {
     firstFieldRef.current?.focus();
   }, [mode]);
+
+  // The success screen replaces the whole form (and whatever field held
+  // focus) with the notice + Done button; without this, focus falls to
+  // <body> inside a still-open aria-modal dialog and the next Tab leaves it
+  // (review finding, reproduced under jsdom).
+  useEffect(() => {
+    if (done) doneButtonRef.current?.focus();
+  }, [done]);
 
   // Escape-to-close and the Tab focus trap. One listener, not two: both
   // are keydown handlers scoped to the same dialog, and splitting them
@@ -196,8 +205,12 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     }
   };
 
-  const title =
-    mode === "login"
+  // Frozen once saved: has_password flips to true in the store the moment
+  // the request succeeds, which would otherwise re-title this screen
+  // "Change password" under a "Password saved" notice.
+  const title = done
+    ? "Password saved"
+    : mode === "login"
       ? "Sign in"
       : mode === "register"
         ? "Create an account"
@@ -291,7 +304,9 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
           </button>
         </div>
 
-        <p style={{ color: "var(--muted, #666)", fontSize: "14px", marginTop: "8px" }}>{intro}</p>
+        {!done && (
+          <p style={{ color: "var(--muted, #666)", fontSize: "14px", marginTop: "8px" }}>{intro}</p>
+        )}
 
         {showsAlternatives && (
           <>
@@ -354,7 +369,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
                 {notice}
               </p>
             )}
-            <button type="button" onClick={onClose} style={{ ...submitStyle, marginTop: "16px" }}>
+            <button ref={doneButtonRef} type="button" onClick={onClose} style={{ ...submitStyle, marginTop: "16px" }}>
               Done
             </button>
           </>

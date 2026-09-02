@@ -10,6 +10,7 @@ envelope.
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app.core import rate_limit
 
@@ -264,3 +265,39 @@ async def test_healthy_redis_never_yields_the_outage_code(fake_redis) -> None:
     detail = exc_info.value.detail
     assert isinstance(detail, dict)
     assert detail["error"]["code"] == APIErrorCode.rate_limited.value
+
+
+async def test_redis_limiter_has_its_own_magic_link_bucket(fake_redis) -> None:
+    """ADR-0004 PR 14 on the PRODUCTION limiter: RED if ``_MAGIC_LINK_ROLE`` is
+    dropped from ``RedisRateLimiter._limits`` (``limit_for`` would silently
+    fall back to the 30/hour demo limit) or if the magic-link and auth-login
+    roles share a bucket key."""
+    from app.core.config import Settings
+
+    limiter = rate_limit.RedisRateLimiter(
+        client=fake_redis,
+        window_seconds=60,
+        demo_user_per_window=30,
+        admin_per_window=10,
+        key_prefix="citevyn:rl:test",
+        magic_link_per_window=2,
+    )
+    assert limiter.limit_for(role="magic_link") == 2
+    await limiter.check(user_id="magiclink_abc", role="magic_link")
+    await limiter.check(user_id="magiclink_abc", role="magic_link")
+    with pytest.raises(HTTPException) as excinfo:
+        await limiter.check(user_id="magiclink_abc", role="magic_link")
+    assert excinfo.value.status_code == 429
+    # A different bucket key (the auth_login role uses its own prefix) is untouched.
+    await limiter.check(user_id="authlogin_abc", role="auth_login")
+
+    matching = Settings(
+        redis_url="redis://localhost:6379/0",
+        rate_limit_window_seconds=60,
+        rate_limit_demo_user_per_hour=30,
+        rate_limit_admin_per_hour=10,
+        rate_limit_magic_link_per_hour=2,
+    )
+    assert rate_limit._settings_match(limiter, matching)
+    changed = matching.model_copy(update={"rate_limit_magic_link_per_hour": 3})
+    assert not rate_limit._settings_match(limiter, changed)

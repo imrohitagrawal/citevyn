@@ -416,12 +416,17 @@ def _too_many_requests(*, role: str = "demo_user") -> Exception:
     buckets, none of which this upsell applies to) gets the plain message.
     """
     request_id = get_current_request_id()
-    message = (
-        "Rate limit exceeded. The demo allows a small number of "
-        "queries per hour per user; try again later."
-    )
-    if role == "demo_user":
-        message += " Sign in for a higher limit."
+    if role == _MAGIC_LINK_ROLE:
+        # Surfaced verbatim in the sign-in dialog: "queries per hour" would
+        # mislead someone who only asked for a link (review finding).
+        message = "Too many sign-in links requested for this address. Try again later."
+    else:
+        message = (
+            "Rate limit exceeded. The demo allows a small number of "
+            "queries per hour per user; try again later."
+        )
+        if role == "demo_user":
+            message += " Sign in for a higher limit."
     return error_response(
         request_id=request_id,
         code=APIErrorCode.rate_limited,
@@ -749,11 +754,20 @@ async def rate_limited_admin(
 # an email is personal data and must not sit in Redis/logs in the clear.
 
 
-def auth_login_rate_key(email: str, settings: Settings) -> str:
-    """Return the credential-stuffing bucket key for a (normalised) email."""
+def _email_bucket_key(prefix: str, email: str, settings: Settings) -> str:
+    """Salted-HMAC bucket key for a (normalised) email, one per bucket ``prefix``.
+
+    Shared by the ``auth_login`` and ``magic_link`` buckets so the two can
+    never drift in how they hash an address; the prefix keeps them separate.
+    """
     salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
     digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
-    return f"authlogin_{digest[:32]}"
+    return f"{prefix}_{digest[:32]}"
+
+
+def auth_login_rate_key(email: str, settings: Settings) -> str:
+    """Return the credential-stuffing bucket key for a (normalised) email."""
+    return _email_bucket_key("authlogin", email, settings)
 
 
 async def enforce_auth_login_rate_limit(email: str, settings: Settings) -> None:
@@ -784,9 +798,7 @@ async def enforce_auth_login_rate_limit(email: str, settings: Settings) -> None:
 
 def magic_link_rate_key(email: str, settings: Settings) -> str:
     """Return the magic-link bucket key for a (normalised) email."""
-    salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
-    digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
-    return f"magiclink_{digest[:32]}"
+    return _email_bucket_key("magiclink", email, settings)
 
 
 async def enforce_magic_link_rate_limit(email: str, settings: Settings) -> None:

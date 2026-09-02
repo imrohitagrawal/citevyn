@@ -20,7 +20,7 @@ from app.core import db as db_module
 from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
-from app.models import AuditEvent, AuthSession, Base, User
+from app.models import AuditEvent, AuthSession, Base, MagicLinkToken, User
 
 DEMO_BEARER = "Bearer local-demo-key"
 EMAIL = "pw@example.com"
@@ -35,6 +35,9 @@ def password_app(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[None, N
     db_module.reset_engine()
     get_settings.cache_clear()
     monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'pw.db'}")
+    monkeypatch.setenv("CITEVYN_EMAIL_OUTBOX_DIR", str(tmp_path / "outbox"))
+    monkeypatch.setenv("CITEVYN_RESEND_API_KEY", "")
+    monkeypatch.setenv("CITEVYN_EMAIL_FROM", "")
     get_settings.cache_clear()
     rate_limit.reset_limiter()
     engine = db_module.get_engine()
@@ -50,7 +53,13 @@ def password_app(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[None, N
         get_settings.cache_clear()
         db_module.reset_engine()
         rate_limit.reset_limiter()
-        monkeypatch.delenv("CITEVYN_DATABASE_URL", raising=False)
+        for var in (
+            "CITEVYN_DATABASE_URL",
+            "CITEVYN_EMAIL_OUTBOX_DIR",
+            "CITEVYN_RESEND_API_KEY",
+            "CITEVYN_EMAIL_FROM",
+        ):
+            monkeypatch.delenv(var, raising=False)
 
 
 def _client() -> TestClient:
@@ -216,15 +225,19 @@ def test_change_password_requires_current_password_even_if_omitted_from_body(
 def test_change_password_rejects_wrong_current_password(password_app: None) -> None:
     """Plan test 12. RED if ``verify_password`` is skipped or its result ignored.
     Also pins the status: 422, NOT 401 -- a 401 would trip the frontend's
-    global sign-out interceptor for a caller who IS authenticated."""
+    global sign-out interceptor for a caller who IS authenticated -- and that
+    a failed attempt revokes NOTHING (the other device stays signed in)."""
     client = _client()
     _register(client)
+    other_device = _client()
+    assert _login(other_device).status_code == 200
     hash_before = _password_hash()
 
     response = _update(client, current_password="not the password", new_password=NEW)
     assert response.status_code == 422, response.text
     assert _password_hash() == hash_before
     assert _me(client).status_code == 200, "a wrong guess must not log the caller out"
+    assert _me(other_device).status_code == 200, "a wrong guess must not revoke other sessions"
     assert any(
         action == "auth_failed" and meta.get("event") == "password_current_mismatch"
         for action, meta in _audit_events()
@@ -271,6 +284,36 @@ def test_password_change_revokes_other_sessions(password_app: None) -> None:
         if meta.get("event") == "password_changed"
     ]
     assert revoked == [2]
+
+
+def _pending_token_count(user_id: str) -> int:
+    async def _go() -> int:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    select(MagicLinkToken).where(MagicLinkToken.user_id == user_id)
+                )
+            ).scalars()
+            return len(list(rows))
+
+    return _run(_go())
+
+
+def test_password_change_deletes_pending_magic_link_tokens(password_app: None) -> None:
+    """A still-unread sign-in link is a live credential too: RED if
+    ``update_password`` stops deleting the user's pending tokens (review
+    finding -- sessions were revoked but a pending link stayed redeemable)."""
+    client = _client()
+    user_id = _register(client).json()["user_id"]
+    requested = client.post(
+        "/v1/auth/magic-link/request", json={"email": EMAIL}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert requested.status_code == 202
+    assert _pending_token_count(user_id) == 1
+
+    assert _update(client, current_password=OLD, new_password=NEW).status_code == 200
+    assert _pending_token_count(user_id) == 0
 
 
 def test_first_time_set_also_revokes_other_sessions(password_app: None) -> None:

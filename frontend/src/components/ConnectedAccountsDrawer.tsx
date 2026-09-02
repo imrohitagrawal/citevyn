@@ -135,7 +135,7 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
 
         <p style={{ color: "var(--muted, #666)", fontSize: "14px", marginTop: "8px" }}>
           Keep more than one way to sign in — a password, GitHub or Google — so losing
-          one never locks you out. You can also email yourself a sign-in link any time.
+          one never locks you out.
         </p>
 
         <ul style={{ listStyle: "none", padding: 0, margin: "16px 0 0", display: "flex", flexDirection: "column", gap: "8px" }}>

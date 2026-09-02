@@ -578,7 +578,17 @@ async def _resolve_or_create_identity(
     # exists ONLY to avoid crashing on that constraint; it never changes
     # WHICH user_id this request logs in as, so it does not reopen the
     # account-takeover hole the identity lookup above already closed.
-    email_for_new_user = identity.email if identity.email_verified else None
+    # Lower-cased + stripped, the same normalisation ``auth.py``'s register/
+    # login/magic-link routes apply to typed addresses, so an account created
+    # here is later findable by email. Stored verbatim before ADR-0004 PR 14,
+    # which silently made a provider email with any uppercase character
+    # unreachable by magic link and password login (review finding). Not
+    # ``normalize_email``: a provider address that fails that permissive
+    # check must not abort a login, it just goes unstored like an
+    # unverified one.
+    email_for_new_user = (
+        identity.email.strip().lower() if identity.email_verified and identity.email else None
+    )
     if email_for_new_user is not None:
         email_taken = (
             await db.execute(select(User.user_id).where(User.email == email_for_new_user))

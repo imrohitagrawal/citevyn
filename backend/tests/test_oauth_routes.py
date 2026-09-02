@@ -469,6 +469,25 @@ def test_first_time_login_creates_a_new_user_and_identity(
     assert registered[0].password_hash is None
 
 
+def test_first_time_login_stores_the_provider_email_lower_cased(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Pre-existing bug surfaced by ADR-0004 PR 14's review: the provider's
+    email was stored verbatim, while every typed-address route (register,
+    login, magic-link request) lower-cases before an exact, case-sensitive
+    match -- so a GitHub/Google account with any uppercase in its email could
+    never receive a magic link or log in with a later-set password. RED if
+    the normalisation at account creation is removed."""
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="Jane.Doe@Example.com "
+    )
+    state = _state_from_start_response(_start(oauth_client, "github"))
+    assert _callback(oauth_client, "github", state=state).headers["location"] == "/?auth=ok"
+    registered = [u for u in _query_all(User) if u.user_id.startswith("usr_")]
+    assert len(registered) == 1
+    assert registered[0].email == "jane.doe@example.com"
+
+
 def test_returning_identity_resolves_to_the_same_user_on_second_login(
     monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
 ) -> None:

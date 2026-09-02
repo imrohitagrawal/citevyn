@@ -204,9 +204,11 @@ def test_client_selection_prefers_resend_then_outbox_then_none(tmp_path: Path) -
     assert _build_email_client(Settings(**_production())) is None
 
 
-def test_the_magic_link_limit_is_wired_through_both_limiters_and_settings_match() -> None:
-    """RED if ``_MAGIC_LINK_ROLE`` is dropped from a limiter's ``_limits`` or from
-    ``_settings_match`` (a config change would then never rebuild the limiter)."""
+def test_the_magic_link_limit_is_wired_through_the_in_process_limiter_and_settings_match() -> None:
+    """RED if ``_MAGIC_LINK_ROLE`` is dropped from the in-process limiter's
+    ``_limits`` or from ``_settings_match`` (a config change would then never
+    rebuild the limiter). The Redis limiter is covered in
+    ``test_redis_rate_limit.py``."""
     from app.core.rate_limit import RateLimiter, _settings_match, get_limiter, reset_limiter
 
     reset_limiter()

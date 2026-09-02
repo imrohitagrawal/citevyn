@@ -144,10 +144,17 @@ since a cross-site form POST cannot set an `Authorization` header.
     sign-in link" exists, a separate unauthenticated reset flow is a second
     token type with its own timing-oracle, rate-limit and scanner-safety
     surface for a case the first mechanism already covers. Recovery is
-    therefore: request a link → sign in → set a new password from the
+    therefore: request a link → sign in → set a password from the
     account menu (`POST /v1/auth/me/password`, authenticated, no email
     token). A one-time, dismissible nudge after a passwordless sign-in
-    points at that action; it is never forced at that moment.
+    points at that action; it is never forced at that moment. **Known
+    limit, found by review:** that last step is complete only for an
+    account with *no* password — an account that still has one must
+    supply it to change it (the requirement is decided from the stored
+    hash, never from the body, and a magic-link login does not relax it).
+    The link recovers *access*; replacing a forgotten password needs a
+    same-session step-up (a session-provenance stamp on `auth_sessions`,
+    a schema change) — tracked in #293 for an owner decision.
   - **The CVE-class risks the original decision named are addressed by
     construction, not by hope:** `request` is always-202 with equal-cost
     branches (statement-count parity, mirroring `verify_password_or_dummy`);
@@ -173,7 +180,10 @@ since a cross-site form POST cannot set an `Authorization` header.
     read the recipient's inbox in that window can sign in (that is the
     nature of magic links, and the same bound every email-based recovery
     flow has); links are deliberately NOT bound to the requesting browser,
-    so cross-device use works and there is no session-binding defence.
+    so cross-device use works and there is no session-binding defence;
+    the per-address `magic_link` rate bucket that bounds email-bombing
+    also lets anyone spend a victim's allowance for the window with no
+    credentials (5/hour by default) — accepted, follow-up #294.
 - **Registration leaks email existence** (a 422 "already registered" on
   signup). The always-202 alternative needs an email provider this ADR
   deliberately does not add. Accepted and recorded here and in §3.2 below,

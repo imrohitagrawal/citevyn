@@ -197,7 +197,9 @@ MVP does not support:
 > now-in-scope capability** — see §4. Two limitations specific to that login
 > system, accepted deliberately rather than silently: there is no
 > reset-password-by-email flow — recovery is "email me a sign-in link"
-> (ADR-0004 PR 14), then set a new password while signed in; GitHub/Google
+> (ADR-0004 PR 14), then set a password while signed in — complete for an
+> account without one; an account that still has a password must supply it
+> to change it (same-session step-up tracked in #293); GitHub/Google
 > linking (`connect/start`, which requires a session created within
 > `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`, default 20 minutes; the
 > inside-window residual is recorded in ADR-0004) remains the other backup,

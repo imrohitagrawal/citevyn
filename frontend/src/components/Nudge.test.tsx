@@ -1,9 +1,9 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PASSWORD_NUDGE_DISMISSED_KEY, PasswordNudge } from "./Nudge";
-import { __testOnly } from "../lib/authStore";
+import { __testOnly, getAuthSnapshot } from "../lib/authStore";
 
 /**
  * ADR-0004 PR 14. Each test names the change that turns it red.
@@ -69,12 +69,16 @@ describe("PasswordNudge", () => {
 
   it("renders nothing once the user has a password", async () => {
     // RED if the has_password check is dropped -- the nudge would nag forever.
+    // useAuth's mount effect re-bootstraps identity (status -> "loading"),
+    // so the assertion must wait for the store to SETTLE on signed-in; an
+    // early assertion would pass vacuously while status is still loading
+    // (review finding: the first version of this test did exactly that).
     const { getCurrentUser } = await import("../lib/api");
     const withPassword = { ...PASSWORDLESS, has_password: true };
     vi.mocked(getCurrentUser).mockResolvedValue(withPassword);
     __testOnly.setState({ status: "signed-in", user: withPassword });
     render(<PasswordNudge />);
-    await Promise.resolve();
+    await waitFor(() => expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: withPassword }));
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
@@ -83,7 +87,7 @@ describe("PasswordNudge", () => {
     vi.mocked(getCurrentUser).mockResolvedValue(null);
     __testOnly.setState({ status: "anonymous", user: null });
     render(<PasswordNudge />);
-    await Promise.resolve();
+    await waitFor(() => expect(getAuthSnapshot().status).toBe("anonymous"));
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 

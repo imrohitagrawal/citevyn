@@ -133,7 +133,8 @@ GET /v1/auth/me
 `providers` (ADR-0004 PR 13) lists the OAuth providers (`"github"`,
 `"google"`) linked to this account, sorted, always present — `[]` when none.
 `has_password` (ADR-0004 PR 14) is whether the account has a password set —
-`false` for an account created by OAuth or magic link that never set one.
+`false` for an OAuth-created account that never set one (a magic link never
+creates an account).
 `register`, `login` and `me/password` return the same body shape, both
 fields included.
 
@@ -218,12 +219,16 @@ events with `metadata.event` = `oauth_{provider}` / `oauth_connect_{provider}`.
 
 ## 4c. Magic-link login + set/change password (ADR-0004 PR 14)
 
-A third way in, and the password-recovery path: a forgotten password is
-solved by requesting a sign-in link, then setting a new password from the
-account menu. There is deliberately **no** separate "reset password by
-email" flow — it would be a second token type with its own timing-oracle,
+A third way in, and the password-recovery path: a user who cannot log in
+with a password requests a sign-in link and is signed in; an account with
+**no** password (OAuth-created, or one that never set one) can then set one
+from the account menu. There is deliberately **no** separate "reset password
+by email" flow — it would be a second token type with its own timing-oracle,
 rate-limit and scanner-safety surface, for a case the magic link already
-covers (the trade-off is recorded in the ADR).
+covers (the trade-off is recorded in the ADR). **Known limit:** an account
+that still *has* a password must supply it to change it — the link recovers
+access, not the forgotten password itself; the same-session step-up that
+would close that is tracked in #293.
 
 ```http
 POST /v1/auth/magic-link/request
@@ -242,15 +247,19 @@ branches), so neither status nor latency is an account-enumeration oracle.
 A registered address receives one email with a link to `GET …/confirm`;
 issuing a new link deletes the user's prior unexpired ones, so only the
 newest email is ever redeemable. Links expire after
-`CITEVYN_MAGIC_LINK_TTL_SECONDS` (default 600). 422 `validation_error` for
-a malformed address. `404` when no email provider is configured (no
+`CITEVYN_MAGIC_LINK_TTL_SECONDS` (default 600; the email and the confirm
+page quote that value in minutes). 422 `validation_error` for a malformed
+address. `404` when no email provider is configured (no
 `CITEVYN_RESEND_API_KEY` in production; locally the file outbox is used).
 
 Rate-limited per TARGET EMAIL in a **dedicated** bucket
 (`CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR`, default 5) — never the
 `auth_login` bucket, or flooding link requests at a victim's address would
 lock them out of password login with no credentials at all. Applied on both
-branches, so it is also the email-bombing ceiling per address.
+branches, so it is also the email-bombing ceiling per address — and, the
+flip side, anyone can spend a victim's allowance for the window (recorded as
+an accepted trade-off in the ADR, follow-up #294). Its 429
+message is specific ("Too many sign-in links requested for this address").
 
 ```http
 GET /v1/auth/magic-link/confirm?token=<token_id>.<secret>
@@ -263,9 +272,11 @@ script, no meta-refresh; the app CSP forbids inline script anyway). This is
 what makes the link survive corporate mail scanners and link prefetchers,
 which GET every URL in an inbound email before the human opens it. An
 invalid or expired token renders a "this link is invalid or has expired"
-page with no form. `Cache-Control: no-store`; the page sets
-`<meta name="referrer" content="no-referrer">` so the credential-bearing URL
-never leaks as a Referer.
+page with no form (also for an over-long or otherwise unparseable `token`
+— never a JSON 422). `Cache-Control: no-store`; the page sets
+`<meta name="referrer" content="same-origin">` so the credential-bearing URL
+never leaks as a cross-origin Referer while the form POST's `Origin` header
+stays intact (`no-referrer` would make Chromium send `Origin: null`).
 
 ```http
 POST /v1/auth/magic-link/confirm
@@ -274,8 +285,9 @@ Content-Type: application/x-www-form-urlencoded
 token=<token_id>.<secret>
 ```
 
-The claim, submitted by the button on the page above. Always redirects:
-`302 /?auth=ok` on success (the same landing the OAuth login uses, with a
+The claim, submitted by the button on the page above. Redirects (the only
+JSON answer either confirm route gives is a `429` from the per-visitor
+limiter): `302 /?auth=ok` on success (the same landing the OAuth login uses, with a
 rotated `Set-Cookie` and the same claim-on-login of the browser's prior
 anonymous history as every other login path), `302 /?auth=error` otherwise.
 The token is consumed by one atomic `DELETE … WHERE token_id AND secret_hash
@@ -315,11 +327,12 @@ field:** if the account already has a password, a missing
 password.") and a wrong one is a 422 ("Current password is incorrect." —
 not a 401, since the caller *is* authenticated and a 401 would sign them
 out client-side); if it has none, the field is ignored. On success, 200
-with the `me` body shape (`has_password: true`) and **every other live
+with the `me` body shape (`has_password: true`), **every other live
 session for the account is revoked** — the caller's own session stays —
-uniformly for a first-time set and a change: the credential surface
-changed, so everywhere else must re-authenticate. Passwords are 8–128
-characters, as at registration.
+and any still-pending magic-link token is deleted, uniformly for a
+first-time set and a change: the credential surface changed, so everywhere
+else must re-authenticate. Passwords are 8–128 characters, as at
+registration.
 
 Audit trail: successes are `login` events with `metadata.event` one of
 `magic_link_requested`, `magic_link`, `password_set`, `password_changed`

@@ -270,11 +270,10 @@ def test_request_uses_its_own_rate_limit_bucket_not_auth_login(
     client = _client()
 
     # Exhaust the magic-link bucket for the victim...
-    assert [_request_link(client, "victim@example.com").status_code for _ in range(3)] == [
-        202,
-        202,
-        429,
-    ]
+    responses = [_request_link(client, "victim@example.com") for _ in range(3)]
+    assert [r.status_code for r in responses] == [202, 202, 429]
+    # ...with a message about sign-in links, not "queries" (it is shown in the dialog).
+    assert "sign-in links" in responses[2].json()["error"]["message"]
     # ...and password login for that same email is untouched: its own bucket
     # still starts empty (3 allowed, the 4th is the limiter, not the password).
     assert [_login(client, "victim@example.com", "wrong").status_code for _ in range(4)] == [
@@ -391,13 +390,55 @@ def test_confirm_get_does_not_consume_the_token(magic_app: Path) -> None:
 
 
 def test_confirm_get_renders_the_error_page_for_a_bad_or_expired_link(magic_app: Path) -> None:
-    """RED if the invalid branch still renders a form (it would POST garbage)
-    or 500s on a malformed token."""
-    for token in ("", "garbage", "not-a-uuid.abc", f"{'0' * 32}.{'f' * 64}"):
+    """RED if the invalid branch still renders a form (it would POST garbage),
+    500s on a malformed token, answers a JSON 422 for an over-long token (a
+    ``Query(max_length=...)`` would), or lets a wrong secret / an expired row
+    through the read-only check."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    real = _latest_token(magic_app)
+    token_id, _, _secret = real.partition(".")
+    wrong_secret = f"{token_id}.{'0' * 64}"
+    over_long = f"{token_id}.{'f' * 300}"
+    for token in (
+        "",
+        "garbage",
+        "not-a-uuid.abc",
+        f"{'0' * 32}.{'f' * 64}",
+        wrong_secret,
+        over_long,
+    ):
         page = _confirm_get(_client(), token)
         assert page.status_code == 200, token
-        assert "invalid or has expired" in page.text
-        assert "<form" not in page.text
+        assert page.headers["content-type"].startswith("text/html"), token
+        assert "invalid or has expired" in page.text, token
+        assert "<form" not in page.text, token
+
+    async def _expire() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            await session.execute(
+                update(MagicLinkToken).values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+
+    _run(_expire())
+    page = _confirm_get(_client(), real)
+    assert "invalid or has expired" in page.text
+    assert "<form" not in page.text
+    assert len(_query_all(MagicLinkToken)) == 1, "the read-only GET never consumes, even expired"
+
+
+def test_confirm_page_and_email_quote_the_configured_ttl(
+    magic_app_factory: Callable[..., Path],
+) -> None:
+    """RED if the interstitial or the email hard-code "10 minutes" while
+    ``CITEVYN_MAGIC_LINK_TTL_SECONDS`` says otherwise (review finding)."""
+    outbox = magic_app_factory(CITEVYN_MAGIC_LINK_TTL_SECONDS="120")
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    assert "expires in 2 minutes" in next(outbox.iterdir()).read_text(encoding="utf-8")
+    assert "expire 2 minutes" in _confirm_get(_client(), "garbage").text
 
 
 # ---------------------------------------------------------------------------
@@ -429,8 +470,10 @@ def test_confirm_post_atomically_claims_and_logs_in(magic_app: Path) -> None:
 
 
 def test_confirm_post_reused_token_fails_closed(magic_app: Path) -> None:
-    """Plan test 7. RED if the claim is a SELECT-then-DELETE that a replay can
-    slip through, or if failure sets a cookie."""
+    """Plan test 7. RED if a consumed token still redeems (the row is not
+    deleted on success) or if failure sets a cookie. A SEQUENTIAL replay
+    cannot tell an atomic claim from a SELECT-then-DELETE -- that shape is
+    pinned by ``test_confirm_post_claims_with_one_conditional_delete`` below."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
@@ -443,6 +486,75 @@ def test_confirm_post_reused_token_fails_closed(magic_app: Path) -> None:
     assert "set-cookie" not in response.headers
     assert _me(replay).status_code == 401
     assert ("auth_failed", "magic_link_invalid") in _audit_events()
+
+
+def test_confirm_post_claims_with_one_conditional_delete(magic_app: Path) -> None:
+    """The atomic-claim SHAPE, white-box (a sequential test cannot see a race):
+    during a successful POST exactly one statement touches
+    ``magic_link_tokens`` -- a DELETE ... RETURNING whose WHERE names both
+    ``token_id`` and ``secret_hash`` -- and no SELECT on the table precedes
+    it. RED if the claim becomes SELECT-then-DELETE (two statements) or drops
+    a predicate."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    token = _latest_token(magic_app)
+    engine = db_module.get_engine()
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        assert _confirm_post(_client(), token).headers["location"] == "/?auth=ok"
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    touching = [s for s in statements if "magic_link_tokens" in s]
+    assert len(touching) == 1, touching
+    claim = touching[0].upper()
+    assert claim.startswith("DELETE FROM MAGIC_LINK_TOKENS")
+    assert "RETURNING" in claim
+    assert "TOKEN_ID" in claim and "SECRET_HASH" in claim
+
+
+def test_confirm_post_fails_closed_when_the_user_row_is_gone(magic_app: Path) -> None:
+    """Defense in depth (step 4 of the claim): the FK cascade normally takes
+    the token with the user, but SQLite's FK enforcement is off here (#286),
+    which conveniently models the delete/claim race. RED if the missing-user
+    guard is removed: ``claim_and_login`` would then 500 on the FK."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    token = _latest_token(magic_app)
+
+    async def _delete_user() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            user = (
+                await session.execute(select(User).where(User.email == "real@example.com"))
+            ).scalar_one()
+            await session.delete(user)
+            await session.commit()
+
+    _run(_delete_user())
+    assert len(_query_all(MagicLinkToken)) == 1, "precondition: the token row outlived the user"
+    response = _confirm_post(_client(), token)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/?auth=error"
+
+
+def test_confirm_post_accepts_each_same_origin_signal_on_its_own(magic_app: Path) -> None:
+    """The accepting half of the origin matrix: a matching ``Origin`` alone (an
+    older browser with no Sec-Fetch-Site) and ``Sec-Fetch-Site: none`` alone
+    (a typed/bookmarked navigation) both pass. RED if the guard demands both
+    headers or treats ``none`` as cross-site."""
+    _register(_client(), "real@example.com")
+    for headers in ({"Origin": "http://localhost:8000"}, {"Sec-Fetch-Site": "none"}):
+        _request_link(_client(), "real@example.com")
+        browser = _client()
+        ok = _confirm_post(browser, _latest_token(magic_app), **headers)
+        assert ok.headers["location"] == "/?auth=ok", headers
+        assert _me(browser).status_code == 200, headers
 
 
 def test_confirm_post_expired_token_fails_closed(magic_app: Path) -> None:

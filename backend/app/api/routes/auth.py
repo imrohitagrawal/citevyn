@@ -25,7 +25,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +41,7 @@ from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.passwords import hash_password, verify_password, verify_password_or_dummy
 from app.core.rate_limit import enforce_auth_login_rate_limit, rate_limited_demo
-from app.models import AuditAction, User, UserIdentity, UserRole
+from app.models import AuditAction, MagicLinkToken, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
@@ -351,7 +351,9 @@ async def update_password(
 
     Every success revokes the account's OTHER live sessions
     (``revoke_other_sessions``) -- the credential surface changed, force
-    re-auth everywhere else -- uniformly for first-time set and change.
+    re-auth everywhere else -- uniformly for first-time set and change, and
+    deletes any still-pending magic-link token for the same reason (an
+    unread link is a live credential too; review finding).
 
     Brute-forcing ``current_password`` through this route is bounded by the
     signed-in demo tier (``rate_limited_demo``, 100/hour per user by default)
@@ -397,6 +399,7 @@ async def update_password(
     revoked = await revoke_other_sessions(
         db, user_id=user.user_id, keep_auth_session_id=current.auth_session_id
     )
+    await db.execute(delete(MagicLinkToken).where(MagicLinkToken.user_id == user.user_id))
     await record_audit_event(
         db,
         action=AuditAction.login,
