@@ -5,7 +5,7 @@
  * Replaces the old multi-style architecture with a single unified page.
  */
 
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useLandingState } from "../hooks/useLandingState";
 import { KB } from "../data/knowledgeBase";
 import { Header } from "./Header";
@@ -24,6 +24,10 @@ import {
 } from "./landing-sections";
 import { ChatView } from "./ChatView";
 import { ToastHost } from "./ToastHost";
+
+// ADR-0004 PR 14: mounted only on the ?auth=ok return trip, and lazy, so the
+// eager bundle carries just this line and the mount condition below.
+const PasswordNudge = lazy(() => import("./Nudge"));
 
 // ---------------------------------------------------------------------------
 // Component
@@ -91,6 +95,11 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   } = useLandingState();
 
   const dark = theme === "dark";
+  // Captured ONCE, before the effect below strips the app's own query keys
+  // (a lazy initializer, so it survives the replaceState). A magic-link or
+  // OAuth login both land on ?auth=ok; whether to actually show the nudge is
+  // PasswordNudge's own decision once the identity has resolved.
+  const [passwordlessReturn] = useState(() => new URLSearchParams(window.location.search).get("auth") === "ok");
 
   // ADR-0004 PR 12: the OAuth return trip is a hard navigation (the backend
   // redirects here with ?auth=ok or ?auth=error after the provider round
@@ -283,6 +292,11 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
       )}
 
       <ToastHost toasts={toasts} onDismiss={removeToast} />
+      {passwordlessReturn && (
+        <Suspense fallback={null}>
+          <PasswordNudge />
+        </Suspense>
+      )}
     </>
   );
 }

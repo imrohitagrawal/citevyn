@@ -11,6 +11,7 @@ const SIGNED_IN_USER = {
   email: "a@example.com",
   anonymous: false,
   providers: [],
+  has_password: true,
 };
 
 vi.mock("../lib/api", () => ({
@@ -68,20 +69,20 @@ describe("AccountMenu signed-in dropdown", () => {
   });
 
   // ADR-0004 PR 13
-  it("'Connected accounts' is a non-navigating menuitem that closes the menu and opens the drawer", async () => {
+  it("'Sign-in methods' is a non-navigating menuitem that closes the menu and opens the drawer", async () => {
     // RED if the menuitem is removed, or if it navigates instead of opening
     // the lazy drawer (the dialog would never appear).
     const user = userEvent.setup();
     render(<AccountMenu />);
     await user.click(await screen.findByRole("button", { name: "a@example.com" }));
-    const item = screen.getByRole("menuitem", { name: "Connected accounts" });
+    const item = screen.getByRole("menuitem", { name: "Sign-in methods" });
     expect(item).toHaveAttribute("aria-haspopup", "dialog");
     // Between History and Sign out, per the plan.
     const names = screen.getAllByRole("menuitem").map((el) => el.textContent);
-    expect(names).toEqual(["History", "Connected accounts", "Sign out"]);
+    expect(names).toEqual(["History", "Sign-in methods", "Sign out"]);
     await user.click(item);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(await screen.findByRole("dialog", { name: "Connected accounts" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Sign-in methods" })).toBeInTheDocument();
     // The actual Connect buttons live INSIDE the drawer, outside role="menu".
     expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeInTheDocument();
   });
@@ -95,21 +96,21 @@ describe("AccountMenu signed-in dropdown", () => {
     const user = userEvent.setup();
     render(<AccountMenu />);
     await user.click(await screen.findByRole("button", { name: "a@example.com" }));
-    await user.click(screen.getByRole("menuitem", { name: "Connected accounts" }));
-    await screen.findByRole("dialog", { name: "Connected accounts" });
+    await user.click(screen.getByRole("menuitem", { name: "Sign-in methods" }));
+    await screen.findByRole("dialog", { name: "Sign-in methods" });
     expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connect Google" })).not.toBeInTheDocument();
   });
 });
 
 describe("AccountMenu anonymous state (ADR-0004 PR 13)", () => {
-  it("never renders the 'Connected accounts' menuitem or any Connect button when signed out", async () => {
+  it("never renders the 'Sign-in methods' menuitem or any Connect button when signed out", async () => {
     const { getCurrentUser } = await import("../lib/api");
     vi.mocked(getCurrentUser).mockResolvedValueOnce(null);
     __testOnly.setState({ status: "anonymous", user: null });
     render(<AccountMenu />);
     expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Connected accounts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Sign-in methods" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Connect (GitHub|Google)$/ })).not.toBeInTheDocument();
   });
 });

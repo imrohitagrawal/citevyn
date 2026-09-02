@@ -295,6 +295,20 @@ export interface AuthUserResponse {
    * AND me, so no `providers?:` escape hatch is needed here.
    */
   providers: string[];
+  /**
+   * ADR-0004 PR 14: whether the account has a password set. Always present
+   * (computed on register, login AND me). Drives the set-vs-change shape of
+   * the password form and the one-time "set a password" nudge after a
+   * passwordless (magic-link / OAuth) sign-in.
+   */
+  has_password: boolean;
+}
+
+/** Body for ``POST /v1/auth/me/password`` (ADR-0004 PR 14). */
+export interface PasswordUpdateRequest {
+  /** Required by the SERVER when the account already has a password. */
+  current_password?: string;
+  new_password: string;
 }
 
 // ---------------------------------------------------------------------------

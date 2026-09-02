@@ -298,6 +298,9 @@ export async function logout(): Promise<void> {
   await apiFetch<null>("/v1/auth/logout", { method: "POST" });
 }
 
+// ADR-0004 PR 14's magic-link / password calls live in ``lib/authActions.ts``,
+// imported only by the lazy AuthModal, so they ride its chunk (bundle budget).
+
 /**
  * Current identity, or ``null`` if there is no valid session — a 401 here
  * is the expected "not signed in" shape, not an error to surface, so it is

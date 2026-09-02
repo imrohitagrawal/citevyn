@@ -105,7 +105,9 @@ export function AccountMenu({
             {/*
               ADR-0004 PR 13: a NON-navigating menuitem that only opens a lazy
               drawer -- the actual "Connect" buttons (real navigations) live
-              inside that drawer, outside this role="menu" context.
+              inside that drawer, outside this role="menu" context. PR 14
+              added the password entry point to the same drawer, hence the
+              broader label.
             */}
             <button
               type="button"
@@ -117,7 +119,7 @@ export function AccountMenu({
               }}
               style={menuItemStyle}
             >
-              Connected accounts
+              Sign-in methods
             </button>
             <button
               type="button"
@@ -149,7 +151,7 @@ export function AccountMenu({
             <ConnectedAccountsDrawer
               triggerRef={triggerRef}
               onClose={() => setConnectedOpen(false)}
-              providers={user.providers}
+              user={user}
             />
           </Suspense>
         )}

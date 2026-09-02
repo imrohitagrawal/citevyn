@@ -28,6 +28,7 @@ from app.models.evaluation import EvaluationCase, EvaluationRun
 from app.models.exact_terms import ExactTerm
 from app.models.index_versions import IndexVersion
 from app.models.ingestion_jobs import IngestionJob
+from app.models.magic_link_tokens import MagicLinkToken
 from app.models.messages import Message
 from app.models.oauth_nonces import OAuthNonce
 from app.models.provider_calls import ProviderCall
@@ -57,6 +58,7 @@ __all__ = [
     "IngestionJob",
     "JobStage",
     "JobStatus",
+    "MagicLinkToken",
     "Message",
     "MessageRole",
     "OAuthNonce",

@@ -53,9 +53,15 @@ MVP supports:
    durable pseudonymous principal (`anon_<uuid4hex>`) minted transparently on
    first session creation — no login screen, no wall in front of the demo.
    Registered users (`usr_<uuid4hex>`) authenticate with email + Argon2id
-   password hash, or GitHub/Google OAuth (as the login method, or linked to
-   a password account afterwards via `connect/start`), and get a Postgres-backed opaque session
-   token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. Sessions and
+   password hash, GitHub/Google OAuth (as the login method, or linked to
+   a password account afterwards via `connect/start`), or a one-time emailed
+   sign-in link (ADR-0004 PR 14: `magic_link_tokens`, SHA-256 of the secret
+   stored, 10-minute expiry, consumed only by a real `POST` from the confirm
+   page so mail scanners cannot burn it), and get a Postgres-backed opaque session
+   token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. A signed-in user
+   can set or change a password (`POST /v1/auth/me/password`); the server
+   decides from the stored hash whether the current password is required,
+   and every set/change revokes the account's other sessions. Sessions and
    messages are owned by principal id, enforced at the two loaders every
    affected route already shares; a mismatch returns 404, never 403.
 2. The build-time demo bearer token is retained alongside the session
@@ -89,6 +95,10 @@ auth_login: 10 attempts/hour, keyed per TARGET EMAIL (not per client) —
   ADR-0004 PR 6, POST /v1/auth/{register,login} — a credential-stuffing
   guard: an attacker spreading guesses across many source IPs against one
   account is still capped, unlike the IP-keyed limiters above.
+magic_link: 5 requests/hour, keyed per TARGET EMAIL, a SEPARATE bucket —
+  ADR-0004 PR 14, POST /v1/auth/magic-link/request — never shared with
+  auth_login (a flood of link requests must not lock the victim out of
+  password login); doubles as the per-address email-bombing ceiling.
 ```
 
 ## 7. Source Domain Allowlist
@@ -159,7 +169,7 @@ max_answer_tokens: configured per model
 
 Audit these actions:
 
-1. Login.
+1. Login (password, OAuth, magic link; also link requested, password set/changed).
 2. Ask question.
 3. Unsupported query.
 4. Rate limit triggered.
@@ -185,15 +195,19 @@ MVP does not support:
 > organization, isolating one tenant's data from another's) and remain out
 > of scope. **Real single-tenant personal-account login is a different,
 > now-in-scope capability** — see §4. Two limitations specific to that login
-> system, accepted deliberately rather than silently: password reset is not
-> implemented in v1 (GitHub/Google OAuth is the recovery path — either as the
-> login method, or linked to a password account afterwards via
-> `connect/start`, which requires a session created within
+> system, accepted deliberately rather than silently: there is no
+> reset-password-by-email flow — recovery is "email me a sign-in link"
+> (ADR-0004 PR 14), then set a new password while signed in; GitHub/Google
+> linking (`connect/start`, which requires a session created within
 > `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`, default 20 minutes; the
-> inside-window residual is recorded in ADR-0004; a CLI account-delete
-> escape hatch is documented in `RUNBOOK.md`), and registration responses
-> disclose whether an email is already registered (no email-sending
-> provider exists to support an always-202 response instead).
+> inside-window residual is recorded in ADR-0004) remains the other backup,
+> and a CLI account-delete escape hatch is documented in `RUNBOOK.md`. Magic
+> links only work once the sending domain is verified with the email
+> provider (`CITEVYN_RESEND_API_KEY`); until then the request route 404s.
+> And registration responses still disclose whether an email is already
+> registered — the email provider now exists, but moving registration to
+> an always-202 verify-by-email flow is a separate change, not silently
+> implied by this one.
 7. Legal hold.
 8. Customer-managed keys.
 

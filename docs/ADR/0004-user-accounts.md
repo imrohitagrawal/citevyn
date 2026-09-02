@@ -132,12 +132,48 @@ since a cross-site form POST cannot set an `Authorization` header.
 
 ## Deliberate trade-offs, recorded not hidden
 
-- **Password reset is out of v1.** Not a cost problem — the blocker is a new
-  external email dependency with no SPF/DKIM/DMARC on `stackclimb.com`, and
-  password-reset flows being one of the richest sources of real auth CVEs.
-  GitHub OAuth is the recovery path instead. Users are told at registration
-  that there is no recovery yet; a CLI account-delete escape hatch is
-  documented in `RUNBOOK.md`.
+- **Password reset is out of v1** — *superseded by PR 14, recorded here
+  rather than rewritten.* The original reasoning: not a cost problem — the
+  blocker was a new external email dependency with no SPF/DKIM/DMARC on
+  `stackclimb.com`, and password-reset flows being one of the richest
+  sources of real auth CVEs. GitHub OAuth was the recovery path instead,
+  and PR 13 made that path actually work (linking). The owner then hit the
+  gap as a real user — recovery only works if you pre-linked a provider —
+  and **PR 14 reopens this trade-off deliberately (2026-09-02):**
+  - **Magic-link login, not a reset-by-email flow.** Once "email me a
+    sign-in link" exists, a separate unauthenticated reset flow is a second
+    token type with its own timing-oracle, rate-limit and scanner-safety
+    surface for a case the first mechanism already covers. Recovery is
+    therefore: request a link → sign in → set a new password from the
+    account menu (`POST /v1/auth/me/password`, authenticated, no email
+    token). A one-time, dismissible nudge after a passwordless sign-in
+    points at that action; it is never forced at that moment.
+  - **The CVE-class risks the original decision named are addressed by
+    construction, not by hope:** `request` is always-202 with equal-cost
+    branches (statement-count parity, mirroring `verify_password_or_dummy`);
+    `GET confirm` renders a form and consumes nothing (mail scanners
+    prefetch every link); only a real `POST` claims, atomically and
+    conditionally on both `token_id` and `secret_hash` (a guess cannot burn
+    the real link); a dedicated rate bucket, never `auth_login` (a flood
+    must not lock the victim out of password login); the link origin comes
+    from config (`CITEVYN_MAGIC_LINK_BASE_URL`), never the `Host` header
+    (reset-link poisoning); a present `Origin`/`Sec-Fetch-Site` on the
+    claim must be same-origin (login CSRF); any password set/change revokes
+    the account's other sessions; whether `current_password` is required is
+    decided from the stored `password_hash`, never from body-field presence
+    (a hijacked session must not be able to set a password with zero proof
+    of the old one).
+  - **The email dependency is real now:** Resend, behind a `Protocol`
+    seam (`app.core.email_client`), with a dev-only file outbox so the
+    flow is verifiable with no provider account. **Residuals, accepted:**
+    the sending domain must be verified in Resend (SPF/DKIM/DMARC on
+    `stackclimb.com`) before this works in production — until then the
+    request route 404s and the UI says email sign-in is unavailable; the
+    10-minute link is a full-session bearer credential, so anyone who can
+    read the recipient's inbox in that window can sign in (that is the
+    nature of magic links, and the same bound every email-based recovery
+    flow has); links are deliberately NOT bound to the requesting browser,
+    so cross-device use works and there is no session-binding defence.
 - **Registration leaks email existence** (a 422 "already registered" on
   signup). The always-202 alternative needs an email provider this ADR
   deliberately does not add. Accepted and recorded here and in §3.2 below,
@@ -199,6 +235,7 @@ must land before PR 6 (the first PR that can create a second principal).
 | 11 | Per-user rate tiers (authenticated key on `user_id`, anonymous keeps IP HMAC) |
 | 12 | GitHub OAuth (`user_identities` table) |
 | 13 | Account linking: connect GitHub/Google to an existing signed-in account (`connect/start`, freshness gate, `providers` on `/me`) — the working form of the recovery path above |
+| 14 | Magic-link login (`magic_link_tokens`, migration 0012; `POST …/magic-link/request` always-202 equal-cost, `GET …/confirm` interstitial, `POST …/confirm` atomic claim) + Resend email seam + authenticated `POST /v1/auth/me/password` (server-decided `current_password`, revokes other sessions) + `has_password` on `/me` — the recovery path that needs no pre-linked provider |
 
 PR 5 is a one-way door: after PR 6 creates real accounts, `downgrade 0008`
 destroys them. PR 5 must be verified in production before PR 6 ships.

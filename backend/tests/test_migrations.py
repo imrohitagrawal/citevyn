@@ -263,6 +263,74 @@ def test_migration_0008_users_identity_columns_round_trips(
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
 
 
+def test_migration_0012_magic_link_tokens_round_trips(alembic_config: AlembicConfig) -> None:
+    """0012 (``magic_link_tokens``, ADR-0004 PR 14) upgrades and downgrades cleanly.
+
+    Additive-only, same shape as 0011's ``oauth_nonces``. Beyond the DDL
+    round trip, two things are PROVEN rather than read off the DDL:
+
+    1. the ``user_id`` index exists (every link request deletes by user);
+    2. ``user_id`` really is ``ON DELETE CASCADE``: a user is deleted with a
+       live token and the token is gone afterwards. A migration that wrote
+       ``RESTRICT`` would pass a column inventory and fail only here.
+       (SQLite with ``PRAGMA foreign_keys = ON`` -- the Postgres proof is in
+       ``test_pg_integration.py``, see #286.)
+    """
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        }
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(magic_link_tokens)").all()
+        }
+        indexes = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA index_list(magic_link_tokens)").all()
+        }
+    assert "magic_link_tokens" in tables
+    assert columns == {"token_id", "secret_hash", "user_id", "created_at", "expires_at"}
+    assert "ix_magic_link_tokens_user_id" in indexes
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+            "VALUES ('usr_ml', 'demo_user', CURRENT_TIMESTAMP, 'ml@example.com', NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO magic_link_tokens "
+            "(token_id, secret_hash, user_id, created_at, expires_at) "
+            "VALUES ('33333333-3333-3333-3333-333333333333', 'h', 'usr_ml', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+        connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_ml'")
+    with engine.connect() as connection:
+        remaining = connection.exec_driver_sql(
+            "SELECT token_id FROM magic_link_tokens WHERE user_id = 'usr_ml'"
+        ).all()
+    assert remaining == [], "magic_link_tokens.user_id must be ON DELETE CASCADE"
+
+    alembic_downgrade(alembic_config, "0011")
+    with engine.connect() as connection:
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        }
+    assert "magic_link_tokens" not in tables
+    assert "oauth_nonces" in tables
+    assert tables >= EXPECTED_TABLES
+
+
 def test_migration_0009_message_citations_round_trips(alembic_config: AlembicConfig) -> None:
     """0009 (``messages.citations``, ADR-0004 PR 10) round-trips.
 

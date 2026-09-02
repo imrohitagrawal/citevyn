@@ -140,6 +140,10 @@ production subset lives in
 | `CITEVYN_LLM_API_KEY`            | if `anthropic`  | Live answer generation                            |
 | `CITEVYN_LLM_MODEL`              | if `anthropic`  | Model id, e.g. `claude-opus-4-8`                  |
 | `CITEVYN_RATE_LIMIT_*`           | optional        | Sliding-window knobs; defaults are production-safe|
+| `CITEVYN_RESEND_API_KEY`         | for magic links | Resend API key; without it magic-link login is off in production (local dev writes emails to a file outbox instead) |
+| `CITEVYN_EMAIL_FROM`             | with the key    | `From:` address on a domain the Resend account has verified |
+| `CITEVYN_MAGIC_LINK_BASE_URL`    | prod, with key  | Public origin the emailed link points at, e.g. `https://citevyn.stackclimb.com` (never derived from the request) |
+| `CITEVYN_EMAIL_OUTBOX_DIR`       | local only      | Where the dev file outbox writes emails (default: `citevyn_email_outbox` under the system temp dir); refused in production |
 
 **Never commit a real `.env`.** The repo `.gitignore` rejects
 `.env*` except `.env.example`.
@@ -247,6 +251,10 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /v1/auth/oauth/{provider}/start` | demo | Begin GitHub/Google OAuth login (redirect) |
 | `GET  /v1/auth/oauth/{provider}/connect/start` | demo | Connect GitHub/Google to the signed-in account (redirect; fresh session required) |
 | `GET  /v1/auth/oauth/{provider}/callback` | demo | Complete OAuth login or account link (redirect) |
+| `POST /v1/auth/magic-link/request` | demo | Email a one-time sign-in link (always 202) |
+| `GET  /v1/auth/magic-link/confirm` | none | Confirm page for an emailed link (read-only; never consumes) |
+| `POST /v1/auth/magic-link/confirm` | none | Redeem the link (form POST from that page; redirect) |
+| `POST /v1/auth/me/password` | demo | Set or change the signed-in account's password (revokes other sessions) |
 | `GET  /v1/me/sessions`      | demo   | List the caller's own chat sessions, newest first |
 | `POST /v1/sessions`         | demo   | Open a chat session                           |
 | `GET  /v1/sessions/{session_id}` | demo | Fetch a session                            |

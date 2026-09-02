@@ -174,6 +174,42 @@ class Settings(BaseSettings):
     # this window is not caught; closing that needs true step-up re-auth.
     oauth_connect_max_session_age_seconds: int = Field(default=20 * 60, ge=1)
 
+    # --- Magic-link login + transactional email (ADR-0004 PR 14) ---
+    # Resend is the only delivery provider wired today (``app.core.email_client``
+    # keeps the seam so a second one is a class, not a rewrite). "Configured"
+    # is ``bool(resend_api_key)``, computed at the call site -- never a
+    # parallel ``_enabled`` flag, same idiom as the OAuth credentials above.
+    resend_api_key: str | None = None
+    # The From: header ("CiteVyn <login@example.com>"). Must be on a domain the
+    # Resend account has verified (SPF/DKIM/DMARC), so there is deliberately
+    # no default -- a wrong default would fail silently at the provider.
+    email_from: str | None = None
+    # Dev-only delivery path: when no ``resend_api_key`` is set and
+    # ``environment != "production"``, each email is written to a file under
+    # this directory instead of sent (defaults to a ``citevyn_email_outbox``
+    # folder under the system temp dir). Refused in production by
+    # ``_reject_email_outbox_in_production`` -- an outbox there would mean
+    # magic links silently go nowhere.
+    email_outbox_dir: str | None = None
+    # Absolute origin the emailed link points at, e.g.
+    # https://citevyn.stackclimb.com. Same reasoning as
+    # ``oauth_redirect_base_url``: NEVER derived from request.base_url/Host at
+    # request time (a spoofed Host would put an attacker's origin into a
+    # victim's email -- the textbook password-reset-poisoning CVE). Also the
+    # origin the confirm POST's ``Origin`` header must match. Falls back to
+    # http://localhost:8000 for local dev.
+    magic_link_base_url: str | None = None
+    # 10 minutes: long enough to survive real email delivery latency, short
+    # enough to bound the window -- and shorter than a password-reset link
+    # would want, since a magic link grants a full session immediately.
+    magic_link_ttl_seconds: int = Field(default=600, ge=60)
+    # Per TARGET EMAIL, a DEDICATED bucket -- never the ``auth_login`` one.
+    # Sharing it would let an attacker lock a victim out of their own
+    # password login by flooding link requests at their address with zero
+    # credentials. Low on purpose: every hit under the cap is one email
+    # sent to that address, so this is also the email-bombing ceiling.
+    rate_limit_magic_link_per_hour: int = Field(default=5, ge=1)
+
     # --- Auth session cookie (ADR-0004 PR 3) ---
     # 180 days: long enough that a returning anonymous visitor keeps their
     # pseudonymous identity (and, once ADR-0004 PR 6 ships, stays logged in)
@@ -582,6 +618,43 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CITEVYN_OAUTH_REDIRECT_BASE_URL must be set when an OAuth provider "
                 "is configured and CITEVYN_ENVIRONMENT='production'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_email_from_with_resend_key(self) -> "Settings":
+        # A key without a sender is a config bug in ANY environment (the
+        # provider rejects every send with no From:), so this is unconditional
+        # like the half-configured-OAuth guard above.
+        if bool(self.resend_api_key) and not self.email_from:
+            raise ValueError("CITEVYN_EMAIL_FROM must be set when CITEVYN_RESEND_API_KEY is set.")
+        return self
+
+    @model_validator(mode="after")
+    def _require_magic_link_base_url_in_production(self) -> "Settings":
+        # Mirrors ``_require_oauth_redirect_base_url_in_production``: without
+        # it every emailed link would point at localhost.
+        if (
+            self.environment == "production"
+            and bool(self.resend_api_key)
+            and not self.magic_link_base_url
+        ):
+            raise ValueError(
+                "CITEVYN_MAGIC_LINK_BASE_URL must be set when CITEVYN_RESEND_API_KEY "
+                "is set and CITEVYN_ENVIRONMENT='production'."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_email_outbox_in_production(self) -> "Settings":
+        # The file outbox is a local-development delivery path. In production
+        # it would write every sign-in link to the machine's disk and deliver
+        # nothing -- a silent outage of the feature, not a degraded mode.
+        if self.environment == "production" and self.email_outbox_dir:
+            raise ValueError(
+                "CITEVYN_EMAIL_OUTBOX_DIR is a development-only delivery path and is not "
+                "allowed when CITEVYN_ENVIRONMENT='production'. Set CITEVYN_RESEND_API_KEY "
+                "instead, or leave both unset to disable magic-link login."
             )
         return self
 

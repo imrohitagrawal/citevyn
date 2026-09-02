@@ -187,6 +187,14 @@ fly secrets set \
   CITEVYN_GEMINI_API_KEY=...      # LLM *and* embeddings both read this key
 ```
 
+Optional, for magic-link login (ADR-0004 PR 14) — all three together, once
+the sending domain is verified in Resend (SPF/DKIM/DMARC records from its
+dashboard pasted into DNS): `CITEVYN_RESEND_API_KEY`, `CITEVYN_EMAIL_FROM`
+(an address on that verified domain) and `CITEVYN_MAGIC_LINK_BASE_URL`
+(`https://citevyn.stackclimb.com`). Without them the request route 404s and
+the UI reports email sign-in as unavailable; nothing else changes. (The OAuth
+variables are tracked separately in #289.)
+
 Notes on the list:
 
 - **`CITEVYN_DEMO_API_KEY` and `CITEVYN_ADMIN_API_KEY` are not optional.**

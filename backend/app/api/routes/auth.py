@@ -29,11 +29,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth_sessions import claim_and_login, revoke_current_session, try_resolve_principal
+from app.core.auth_sessions import (
+    claim_and_login,
+    revoke_current_session,
+    revoke_other_sessions,
+    try_resolve_auth_session,
+    try_resolve_principal,
+)
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
-from app.core.passwords import hash_password, verify_password_or_dummy
+from app.core.passwords import hash_password, verify_password, verify_password_or_dummy
 from app.core.rate_limit import enforce_auth_login_rate_limit, rate_limited_demo
 from app.models import AuditAction, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
@@ -58,6 +64,18 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_LENGTH)
 
 
+class PasswordUpdateRequest(BaseModel):
+    """Body for ``POST /v1/auth/me/password`` (ADR-0004 PR 14).
+
+    ``current_password`` is optional AT THE SCHEMA LEVEL only. Whether it is
+    REQUIRED is decided by the route from the server-loaded account -- see
+    :func:`update_password` -- never from whether this field was sent.
+    """
+
+    current_password: str | None = Field(default=None, max_length=_PASSWORD_MAX_LENGTH)
+    new_password: str = Field(min_length=_PASSWORD_MIN_LENGTH, max_length=_PASSWORD_MAX_LENGTH)
+
+
 def _looks_like_email(value: str) -> bool:
     """Deliberately permissive (not RFC 5322), and deliberately NOT a regex.
 
@@ -79,7 +97,7 @@ def _looks_like_email(value: str) -> bool:
     return "." in domain and not domain.startswith(".") and not domain.endswith(".")
 
 
-def _normalize_email(request_id: str, raw: str) -> str:
+def normalize_email(request_id: str, raw: str) -> str:
     """Lowercase/strip ``raw`` and reject anything that doesn't look like an email."""
     email = raw.strip().lower()
     if not _looks_like_email(email):
@@ -118,6 +136,10 @@ async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> d
     shared ``AuthUserResponse`` type can treat it as always present rather
     than optional -- a freshly registered account genuinely has none, and
     a password login may already have some.
+
+    ``has_password`` (ADR-0004 PR 14) is the same ``password_hash is not
+    None`` predicate ``update_password`` keys its current-password
+    requirement off, computed in one place so the two can never drift.
     """
     return {
         "request_id": request_id,
@@ -125,6 +147,7 @@ async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> d
         "email": user.email,
         "anonymous": user.email is None,
         "providers": await _linked_providers(db, user.user_id),
+        "has_password": user.password_hash is not None,
     }
 
 
@@ -159,7 +182,7 @@ async def register(
     loop against one address is bounded regardless of which branch it hits.
     """
     request_id = _request_id(request)
-    email = _normalize_email(request_id, body.email)
+    email = normalize_email(request_id, body.email)
     await enforce_auth_login_rate_limit(email, settings)
 
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
@@ -236,7 +259,7 @@ async def login(
     the lookup, so it bounds the dummy-hash path too.
     """
     request_id = _request_id(request)
-    email = _normalize_email(request_id, body.email)
+    email = normalize_email(request_id, body.email)
     await enforce_auth_login_rate_limit(email, settings)
 
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
@@ -293,6 +316,102 @@ async def logout(
 
 
 # ---------------------------------------------------------------------------
+# POST /v1/auth/me/password
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/me/password",
+    summary="Set or change the signed-in account's password.",
+    description=(
+        "First-time set (an OAuth-only or magic-link-only account) needs only "
+        "new_password; a change needs current_password too -- decided by the "
+        "server from the stored account, never from the request body. Every "
+        "success revokes the account's other sessions (docs/API_SPEC.md §4c)."
+    ),
+)
+async def update_password(
+    request: Request,
+    body: PasswordUpdateRequest,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
+) -> dict[str, Any]:
+    """Set (first time) or change (thereafter) the caller's password.
+
+    **Whether ``current_password`` is required is decided ONLY from the
+    server-loaded ``user.password_hash``, never from body-field presence.**
+    Branching on "did the client send the field" would let anyone holding a
+    hijacked, already-authenticated session set a new password with zero
+    proof of the old one (the planning review's second CRITICAL finding).
+    If the account has a password: a missing ``current_password`` is a 422,
+    a wrong one is a 422 (not 401 -- the caller IS authenticated, and a 401
+    would trip the frontend's global sign-out interceptor). If it has none,
+    ``current_password`` is ignored entirely.
+
+    Every success revokes the account's OTHER live sessions
+    (``revoke_other_sessions``) -- the credential surface changed, force
+    re-auth everywhere else -- uniformly for first-time set and change.
+
+    Brute-forcing ``current_password`` through this route is bounded by the
+    signed-in demo tier (``rate_limited_demo``, 100/hour per user by default)
+    plus Argon2's cost; it deliberately does not touch the ``auth_login``
+    bucket, which would let a hijacked session lock the real owner out of
+    password login for an hour.
+    """
+    request_id = _request_id(request)
+    current = await try_resolve_auth_session(request, db, settings)
+    if current is None or not current.user_id.startswith("usr_"):
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.auth_required,
+            message="Sign in to set a password.",
+        )
+    user = await db.get(User, current.user_id)
+    assert user is not None, "a live AuthSession must reference an existing user (FK CASCADE)"
+
+    had_password = user.password_hash is not None
+    if user.password_hash is not None:
+        if not body.current_password:
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.validation_error,
+                message="Enter your current password.",
+            )
+        if not await verify_password(body.current_password, user.password_hash):
+            await record_audit_event(
+                db,
+                action=AuditAction.auth_failed,
+                user_id=user.user_id,
+                role=UserRole.demo_user,
+                metadata={"event": "password_current_mismatch"},
+            )
+            await db.commit()
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.validation_error,
+                message="Current password is incorrect.",
+            )
+
+    user.password_hash = await hash_password(body.new_password)
+    revoked = await revoke_other_sessions(
+        db, user_id=user.user_id, keep_auth_session_id=current.auth_session_id
+    )
+    await record_audit_event(
+        db,
+        action=AuditAction.login,
+        user_id=user.user_id,
+        role=UserRole.demo_user,
+        metadata={
+            "event": "password_changed" if had_password else "password_set",
+            "sessions_revoked": revoked,
+        },
+    )
+    await db.commit()
+    return await _auth_user_payload(db, request_id, user)
+
+
+# ---------------------------------------------------------------------------
 # GET /v1/auth/me
 # ---------------------------------------------------------------------------
 
@@ -327,4 +446,4 @@ async def me(
     return await _auth_user_payload(db, request_id, user)
 
 
-__all__ = ["router"]
+__all__ = ["normalize_email", "router"]
