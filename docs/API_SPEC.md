@@ -360,7 +360,10 @@ registration.
 
 Audit trail: successes are `login` events with `metadata.event` one of
 `magic_link_requested`, `magic_link`, `password_set`, `password_changed`
-(the last two also carry `sessions_revoked`); failures are `auth_failed`
+(the last two also carry `sessions_revoked`, and `step_up: "magic_link"`
+when the waiver was used; `magic_link`/`password_*` carry
+`notice_suppressed: true` when the per-address notice ceiling dropped the
+email); failures are `auth_failed`
 with `magic_link_unknown_email`, `magic_link_invalid`, `magic_link_expired`,
 `magic_link_origin_rejected`, `password_current_mismatch`. No email address
 is ever written to audit metadata.

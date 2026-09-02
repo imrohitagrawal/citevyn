@@ -48,6 +48,7 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import logging
 import time
 import uuid
 from collections import defaultdict, deque
@@ -81,6 +82,8 @@ _DEFAULT_GLOBAL_PER_WINDOW = 600
 # Fallback for the credential-stuffing bucket (ADR-0004 PR 6) when a caller
 # constructs a limiter directly without naming one. Production passes
 # ``settings.rate_limit_auth_login_per_hour``.
+_logger = logging.getLogger("citevyn.rate_limit")
+
 _DEFAULT_AUTH_LOGIN_PER_WINDOW = 10
 _AUTH_LOGIN_ROLE = "auth_login"
 
@@ -444,6 +447,8 @@ def _too_many_requests(*, role: str = "demo_user") -> Exception:
         # Surfaced verbatim in the sign-in dialog: "queries per hour" would
         # mislead someone who only asked for a link (review finding).
         message = "Too many sign-in links requested for this address. Try again later."
+    elif role == _PASSWORD_CHANGE_ROLE:
+        message = "Too many password changes. Try again later."
     else:
         message = (
             "Rate limit exceeded. The demo allows a small number of "
@@ -861,7 +866,15 @@ async def email_notice_allowed(email: str, settings: Settings) -> bool:
             role=_EMAIL_NOTICE_ROLE,
             settings=settings,
         )
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            # A limiter outage (503 rate_limiter_unavailable) is not "too
+            # many": the notice is still skipped -- the action already
+            # committed and must not fail now -- but never silently.
+            _logger.warning(
+                "email_notice_skipped_limiter_unavailable",
+                extra={"request_id": get_current_request_id(), "status_code": exc.status_code},
+            )
         return False
     return True
 

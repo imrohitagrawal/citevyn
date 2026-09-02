@@ -395,10 +395,13 @@ async def update_password(
     unread link is a live credential too; review finding).
 
     Brute-forcing ``current_password`` through this route is bounded by the
-    signed-in demo tier (``rate_limited_demo``, 100/hour per user by default)
-    plus Argon2's cost; it deliberately does not touch the ``auth_login``
-    bucket, which would let a hijacked session lock the real owner out of
-    password login for an hour.
+    per-user ``password_change`` cap (``rate_limit_password_change_per_hour``,
+    default 3 -- a wrong guess spends a slot too) plus Argon2's cost; it
+    deliberately does not touch the ``auth_login`` bucket, which would let a
+    hijacked session lock the real owner out of password login for an hour.
+    A session-only intruder CAN spend the three slots and force the owner
+    onto the magic-link path for one window; the stepped-up recovery set is
+    exempt from the cap, so the owner always has a way through.
     """
     request_id = _request_id(request)
     current = await try_resolve_auth_session(request, db, settings)
@@ -447,12 +450,22 @@ async def update_password(
     await db.execute(delete(MagicLinkToken).where(MagicLinkToken.user_id == user.user_id))
     # One shot: a second change on this session needs the (new) current password.
     current.magic_link_verified_at = None
+    # Guardrail 2 (#293): the inbox owner learns of every set/change, so a
+    # hijacked session's password change is a race they can win. The NOTICE
+    # is throttled per address (never the change): registration does not
+    # verify addresses, so an unthrottled notice would be a mail cannon. A
+    # suppressed notice is recorded on the audit row (review finding).
+    client = build_email_client(settings)
+    can_notify = client is not None and bool(user.email)
+    notify = can_notify and await email_notice_allowed(user.email or "", settings)
     metadata: dict[str, Any] = {
         "event": "password_changed" if had_password else "password_set",
         "sessions_revoked": revoked,
     }
     if stepped_up:
         metadata["step_up"] = "magic_link"
+    if can_notify and not notify:
+        metadata["notice_suppressed"] = True
     await record_audit_event(
         db,
         action=AuditAction.login,
@@ -462,12 +475,7 @@ async def update_password(
     )
     await db.commit()
 
-    # Guardrail 2 (#293): the inbox owner learns of every set/change, so a
-    # hijacked session's password change is a race they can win. The NOTICE
-    # is throttled per address (never the change): registration does not
-    # verify addresses, so an unthrottled notice would be a mail cannon.
-    client = build_email_client(settings)
-    if client is not None and user.email and await email_notice_allowed(user.email, settings):
+    if notify and client is not None and user.email:
         background_tasks.add_task(
             deliver,
             client,

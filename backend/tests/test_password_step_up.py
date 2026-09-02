@@ -384,7 +384,65 @@ def test_current_password_changes_are_capped_per_user_but_the_recovery_set_is_ex
         if r.status_code == 200:
             current = new
     assert statuses == [200, 200, 200, 429], statuses
+    assert "password changes" in r.json()["error"]["message"]
     # Bucket full for this user: the owner's recovery via a fresh link still lands.
     owner = _sign_in_with_link(step_up_app)
     assert _update(owner, new_password=NEW).status_code == 200
     assert _login(_client(), NEW).status_code == 200
+
+
+def test_notice_bucket_is_separate_from_the_link_request_bucket(
+    step_up_factory: Callable[..., Path],
+) -> None:
+    """A thief holding a stolen link must not be able to silence the sign-in
+    notice by draining the link-REQUEST bucket first. RED if the notice key
+    shares the ``magiclink`` prefix (both skeptics found no test for this)."""
+    outbox = step_up_factory(CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR="2")
+    _register(_client())
+    thief = _client()
+    # Two requests: the first mints the link the thief "stole", the second
+    # exhausts the request bucket for the address.
+    for _ in range(2):
+        assert (
+            thief.post(
+                "/v1/auth/magic-link/request",
+                json={"email": EMAIL},
+                headers={"Authorization": DEMO_BEARER},
+            ).status_code
+            == 202
+        )
+    assert (
+        thief.post(
+            "/v1/auth/magic-link/request",
+            json={"email": EMAIL},
+            headers={"Authorization": DEMO_BEARER},
+        ).status_code
+        == 429
+    )
+    r = thief.post(
+        "/v1/auth/magic-link/confirm",
+        content=f"token={_latest_token(outbox)}",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/?auth=ok"
+    assert _subjects(outbox).count("New sign-in to CiteVyn") == 1
+    assert _audit_metadata("magic_link") == [{"event": "magic_link"}]
+
+
+def test_a_suppressed_notice_is_recorded_on_the_audit_row(
+    step_up_factory: Callable[..., Path],
+) -> None:
+    """When the per-address ceiling drops a notice, operators can still see
+    it happened. RED if ``notice_suppressed`` is not written."""
+    step_up_factory(
+        CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR="1",
+        CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR="100",
+    )
+    client = _client()
+    _register(client)
+    first = _update(client, current_password=OLD, new_password=NEW)
+    second = _update(client, current_password=NEW, new_password="third passphrase 3")
+    assert first.status_code == second.status_code == 200
+    rows = _audit_metadata("password_changed")
+    assert [r.get("notice_suppressed") for r in rows] == [None, True]

@@ -109,7 +109,11 @@ email_notice: same value as magic_link, keyed per ADDRESS, its own bucket —
   can receive (registration never verifies addresses); a denied notice is
   simply not sent, the underlying action still succeeds.
 password_change: 3/hour per USER — ADR-0004 PR 15 — caps changes that
-  supply the current password; the stepped-up recovery set is exempt.
+  supply the current password; the stepped-up recovery set is exempt. A
+  session-only intruder can spend the slots and force the owner onto the
+  magic-link path for one window — accepted, since that path revokes the
+  intruder. A notice dropped by the email_notice ceiling is recorded as
+  `notice_suppressed: true` on the audit row.
 ```
 
 ## 7. Source Domain Allowlist

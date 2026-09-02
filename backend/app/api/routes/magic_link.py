@@ -471,20 +471,26 @@ async def magic_link_confirm(
     await claim_and_login(
         request, redirect, db, settings, user_id=user.user_id, magic_link_verified_at=now
     )
+    # Guardrail 2 (#293): tell the inbox owner a link was redeemed, so a
+    # stolen link is visible and the owner can request a new link and set a
+    # password (which revokes this session). Throttled per address like
+    # every notice; a suppressed one is recorded on the audit row.
+    client = _build_email_client(settings)
+    can_notify = client is not None and bool(user.email)
+    notify = can_notify and await email_notice_allowed(user.email or "", settings)
+    login_metadata: dict[str, Any] = {"event": "magic_link"}
+    if can_notify and not notify:
+        login_metadata["notice_suppressed"] = True
     await record_audit_event(
         db,
         action=AuditAction.login,
         user_id=user.user_id,
         role=UserRole.demo_user,
-        metadata={"event": "magic_link"},
+        metadata=login_metadata,
     )
     await db.commit()
     redirect.headers["location"] = "/?auth=ok"
-    # Guardrail 2 (#293): tell the inbox owner a link was redeemed, so a
-    # stolen link is visible and the owner can request a new link and set a
-    # password (which revokes this session). Sent after the response.
-    client = _build_email_client(settings)
-    if client is not None and user.email and await email_notice_allowed(user.email, settings):
+    if notify and client is not None and user.email:
         redirect.background = BackgroundTask(
             deliver,
             client,
