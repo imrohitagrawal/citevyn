@@ -318,7 +318,7 @@ describe("useLandingState — live error path", () => {
   it("does not pitch sign-in to an already-signed-in caller on a rate limit (ADR-0004 PR 11)", async () => {
     mockGetAuthSnapshot.mockReturnValue({
       status: "signed-in",
-      user: { request_id: "r", user_id: "usr_1", email: "a@example.com", anonymous: false, providers: [], has_password: true },
+      user: { request_id: "r", user_id: "usr_1", email: "a@example.com", anonymous: false, providers: [], has_password: true, password_step_up: false },
     });
     mockAskQuestion.mockRejectedValue(
       new ApiClientError("Slow down.", 429, {

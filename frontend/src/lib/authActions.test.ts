@@ -23,6 +23,7 @@ const USER = {
   anonymous: false,
   providers: [],
   has_password: true,
+password_step_up: false,
 };
 
 beforeEach(() => {
@@ -57,7 +58,7 @@ describe("authActions", () => {
     // RED if applyIdentity is not called: has_password in the store would
     // stay stale and the nudge / drawer would keep offering "Set a password".
     const { apiFetch } = await import("./api");
-    __testOnly.setState({ status: "signed-in", user: { ...USER, has_password: false } });
+    __testOnly.setState({ status: "signed-in", user: { ...USER, has_password: false, password_step_up: false } });
     vi.mocked(apiFetch).mockResolvedValueOnce(USER);
     await updatePassword("new passphrase 12345", "old passphrase");
     expect(apiFetch).toHaveBeenCalledWith("/v1/auth/me/password", {

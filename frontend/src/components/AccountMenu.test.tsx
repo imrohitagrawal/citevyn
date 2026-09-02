@@ -12,6 +12,7 @@ const SIGNED_IN_USER = {
   anonymous: false,
   providers: [],
   has_password: true,
+password_step_up: false,
 };
 
 vi.mock("../lib/api", () => ({

@@ -143,6 +143,8 @@ production subset lives in
 | `CITEVYN_RESEND_API_KEY`         | for magic links | Resend API key; without it magic-link login is off in production (local dev writes emails to a file outbox instead) |
 | `CITEVYN_EMAIL_FROM`             | with the key    | `From:` address on a domain the Resend account has verified |
 | `CITEVYN_MAGIC_LINK_BASE_URL`    | prod, with key  | Public origin the emailed link points at, e.g. `https://citevyn.stackclimb.com` (never derived from the request) |
+| `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS` | optional | How long after redeeming a magic link that same session may set a new password without the old one (default 600, minimum 60, one shot) |
+| `CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR` | optional | Per-user cap on password changes that supply the current password (default 3; the stepped-up recovery set is exempt) |
 | `CITEVYN_MAGIC_LINK_TTL_SECONDS` | optional        | Sign-in link lifetime in seconds (default 600, minimum 60); quoted in the email and confirm page |
 | `CITEVYN_EMAIL_OUTBOX_DIR`       | local only      | Where the dev file outbox writes emails (default: `citevyn_email_outbox` under the system temp dir); refused in production |
 

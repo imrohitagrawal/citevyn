@@ -126,7 +126,8 @@ GET /v1/auth/me
   "email": "user@example.com",
   "anonymous": false,
   "providers": ["github"],
-  "has_password": true
+  "has_password": true,
+  "password_step_up": false
 }
 ```
 
@@ -135,8 +136,12 @@ GET /v1/auth/me
 `has_password` (ADR-0004 PR 14) is whether the account has a password set —
 `false` for an OAuth-created account that never set one (a magic link never
 creates an account).
-`register`, `login` and `me/password` return the same body shape, both
-fields included.
+`password_step_up` (ADR-0004 PR 15, #293) is whether the **caller's own
+session** may currently set a new password without the current one: `true`
+only for a few minutes after that session redeemed a magic link, and
+cleared on use. `register`, `login` and `me/password` return the same body
+shape, all three fields included (`password_step_up` is `false` on a fresh
+register/login response).
 
 401 `auth_required` if there is no valid session cookie. Unlike the
 session/message routes (which mint a fresh anonymous principal
@@ -225,10 +230,10 @@ with a password requests a sign-in link and is signed in; an account with
 from the account menu. There is deliberately **no** separate "reset password
 by email" flow — it would be a second token type with its own timing-oracle,
 rate-limit and scanner-safety surface, for a case the magic link already
-covers (the trade-off is recorded in the ADR). **Known limit:** an account
-that still *has* a password must supply it to change it — the link recovers
-access, not the forgotten password itself; the same-session step-up that
-would close that is tracked in #293.
+covers (the trade-off is recorded in the ADR). An account that still *has*
+a password can replace it **without the old one only from the session that
+just redeemed the link**, within `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS`
+(default 600) and once — the same-session step-up from #293 (PR 15).
 
 ```http
 POST /v1/auth/magic-link/request
@@ -290,6 +295,12 @@ JSON answer either confirm route gives is a `429` from the per-visitor
 limiter): `302 /?auth=ok` on success (the same landing the OAuth login uses, with a
 rotated `Set-Cookie` and the same claim-on-login of the browser's prior
 anonymous history as every other login path), `302 /?auth=error` otherwise.
+The new session is stamped `magic_link_verified_at` (the server-held fact
+behind `password_step_up`), and the account is emailed a "New sign-in to
+CiteVyn" notice with the recovery instruction (when a provider is
+configured; the same per-address notice ceiling applies) — a stolen link becomes
+visible to the inbox owner, who can request a link and set a password,
+which revokes the intruder's session.
 The token is consumed by one atomic `DELETE … WHERE token_id AND secret_hash
 … RETURNING`: a replay finds no row, and a wrong secret deletes nothing (a
 guess cannot burn the real user's link). Expiry is checked on the claimed
@@ -326,7 +337,20 @@ field:** if the account already has a password, a missing
 `current_password` is a 422 `validation_error` ("Enter your current
 password.") and a wrong one is a 422 ("Current password is incorrect." —
 not a 401, since the caller *is* authenticated and a 401 would sign them
-out client-side); if it has none, the field is ignored. On success, 200
+out client-side); if it has none, the field is ignored. **Step-up
+(#293):** the requirement is waived when the caller's *own* session row
+carries a `magic_link_verified_at` stamp younger than
+`CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS` — a second server-held fact, still
+never the body; another live session of the same account, an older stamp,
+or any other login method gets the normal 422. The stamp is cleared on use
+(one shot), and the audit row carries `step_up: "magic_link"`. Every
+successful set/change also emails the account ("Your CiteVyn password was
+set/changed") with the recovery instruction — when an email provider is
+configured, and at most `CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR` notices
+per address per hour (the change itself is never throttled by that).
+Changes that supply `current_password` are capped per user at
+`CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR` (default 3; 429
+`rate_limited`); the stepped-up set is exempt. On success, 200
 with the `me` body shape (`has_password: true`), **every other live
 session for the account is revoked** — the caller's own session stays —
 and any still-pending magic-link token is deleted, uniformly for a
@@ -336,7 +360,10 @@ registration.
 
 Audit trail: successes are `login` events with `metadata.event` one of
 `magic_link_requested`, `magic_link`, `password_set`, `password_changed`
-(the last two also carry `sessions_revoked`); failures are `auth_failed`
+(the last two also carry `sessions_revoked`, and `step_up: "magic_link"`
+when the waiver was used; `magic_link`/`password_*` carry
+`notice_suppressed: true` when the per-address notice ceiling dropped the
+email); failures are `auth_failed`
 with `magic_link_unknown_email`, `magic_link_invalid`, `magic_link_expired`,
 `magic_link_origin_rejected`, `password_current_mismatch`. No email address
 is ever written to audit metadata.

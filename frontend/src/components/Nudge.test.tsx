@@ -15,6 +15,7 @@ const PASSWORDLESS = {
   anonymous: false,
   providers: ["google"],
   has_password: false,
+password_step_up: false,
 };
 
 vi.mock("../lib/api", () => ({
@@ -74,7 +75,7 @@ describe("PasswordNudge", () => {
     // early assertion would pass vacuously while status is still loading
     // (review finding: the first version of this test did exactly that).
     const { getCurrentUser } = await import("../lib/api");
-    const withPassword = { ...PASSWORDLESS, has_password: true };
+    const withPassword = { ...PASSWORDLESS, has_password: true, password_step_up: false };
     vi.mocked(getCurrentUser).mockResolvedValue(withPassword);
     __testOnly.setState({ status: "signed-in", user: withPassword });
     render(<PasswordNudge />);
@@ -114,5 +115,59 @@ describe("PasswordNudge", () => {
     expect(within(dialog).getByRole("heading", { name: "Set a password" })).toBeInTheDocument();
     expect(within(dialog).getByLabelText("New password")).toBeInTheDocument();
     expect(within(dialog).queryByLabelText("Email")).not.toBeInTheDocument();
+  });
+});
+
+describe("PasswordNudge after a magic-link sign-in (ADR-0004 PR 15, #293)", () => {
+  it("offers 'Forgot your password?' when the account has a password but the session is stepped up", async () => {
+    // RED if the card keys on has_password alone: the forgotten-password user
+    // would never learn about the one-shot path.
+    const { getCurrentUser } = await import("../lib/api");
+    const stepUp = { ...PASSWORDLESS, has_password: true, password_step_up: true };
+    vi.mocked(getCurrentUser).mockResolvedValue(stepUp);
+    __testOnly.setState({ status: "signed-in", user: stepUp });
+    render(<PasswordNudge />);
+    const card = await screen.findByRole("status");
+    expect(card).toHaveTextContent("Forgot your password?");
+    expect(card).toHaveTextContent(/without the old one/);
+  });
+
+  it("stays hidden for a password account whose session is NOT stepped up", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const plain = { ...PASSWORDLESS, has_password: true, password_step_up: false };
+    vi.mocked(getCurrentUser).mockResolvedValue(plain);
+    __testOnly.setState({ status: "signed-in", user: plain });
+    render(<PasswordNudge />);
+    await waitFor(() => expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: plain }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Forgot your password?' even when an old 'Add a password?' dismissal is stored", async () => {
+    // RED if the persisted dismissal also suppresses the recovery card
+    // (review finding: the owner's only recovery path would vanish forever).
+    window.localStorage.setItem(PASSWORD_NUDGE_DISMISSED_KEY, "1");
+    const { getCurrentUser } = await import("../lib/api");
+    const stepUp = { ...PASSWORDLESS, has_password: true, password_step_up: true };
+    vi.mocked(getCurrentUser).mockResolvedValue(stepUp);
+    __testOnly.setState({ status: "signed-in", user: stepUp });
+    const user = userEvent.setup();
+    render(<PasswordNudge />);
+    const card = await screen.findByRole("status");
+    expect(card).toHaveTextContent("Forgot your password?");
+    // "Not now" on this variant hides it for the page load without touching storage.
+    await user.click(within(card).getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(PASSWORD_NUDGE_DISMISSED_KEY)).toBe("1");
+  });
+
+  it("shows the plain 'Add a password?' copy for a passwordless account on a link session", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const passwordlessStepUp = { ...PASSWORDLESS, has_password: false, password_step_up: true };
+    vi.mocked(getCurrentUser).mockResolvedValue(passwordlessStepUp);
+    __testOnly.setState({ status: "signed-in", user: passwordlessStepUp });
+    render(<PasswordNudge />);
+    const card = await screen.findByRole("status");
+    expect(card).toHaveTextContent("Add a password?");
+    expect(card).not.toHaveTextContent("Forgot");
   });
 });

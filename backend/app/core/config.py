@@ -209,6 +209,16 @@ class Settings(BaseSettings):
     # credentials. Low on purpose: every hit under the cap is one email
     # sent to that address, so this is also the email-bombing ceiling.
     rate_limit_magic_link_per_hour: int = Field(default=5, ge=1)
+    # ADR-0004 PR 15 (#293): how long after redeeming a magic link the SAME
+    # session may set a new password without the current one (one shot).
+    # Short: the window is the whole exposure a stolen link adds beyond the
+    # session itself, and the owner is emailed on every use.
+    password_step_up_window_seconds: int = Field(default=600, ge=60)
+    # ADR-0004 PR 15 review: per-USER cap on current-password-supplied
+    # changes (the stepped-up recovery set is exempt). Bounds an intruder
+    # who learned the password camping the account by revoking the owner's
+    # sessions in a loop. Notices per ADDRESS share the magic-link limit.
+    rate_limit_password_change_per_hour: int = Field(default=3, ge=1)
 
     # --- Auth session cookie (ADR-0004 PR 3) ---
     # 180 days: long enough that a returning anonymous visitor keeps their

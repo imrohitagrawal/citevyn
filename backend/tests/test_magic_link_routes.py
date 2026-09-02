@@ -41,6 +41,7 @@ _ENV_KEYS = (
     "CITEVYN_RATE_LIMIT_GLOBAL_PER_HOUR",
     "CITEVYN_RATE_LIMIT_AUTH_LOGIN_PER_HOUR",
     "CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR",
+    "CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR",
     "CITEVYN_RATE_LIMIT_KEY_SALT",
 )
 
@@ -131,9 +132,22 @@ def _outbox_tokens(outbox: Path) -> list[str]:
     tokens: list[str] = []
     for path in sorted(outbox.iterdir()):
         match = _TOKEN_RE.search(path.read_text(encoding="utf-8"))
-        assert match is not None, path.read_text(encoding="utf-8")
+        if match is None:
+            continue  # a sign-in / password notice (ADR-0004 PR 15), not a link
         tokens.append(match.group(1))
     return tokens
+
+
+def _outbox_subjects(outbox: Path) -> list[str]:
+    if not outbox.exists():
+        return []
+    subjects: list[str] = []
+    for path in sorted(outbox.iterdir()):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("Subject: "):
+                subjects.append(line.removeprefix("Subject: "))
+                break
+    return subjects
 
 
 def _latest_token(outbox: Path) -> str:
@@ -243,12 +257,14 @@ def test_request_runs_the_same_statement_count_whether_or_not_the_email_exists(
 
 
 def test_request_never_emails_an_unregistered_address(magic_app: Path) -> None:
-    """RED if the no-match branch registers the real send task."""
+    """RED if the no-match branch registers the real send task -- asserted on
+    the WHOLE outbox (any email, not just link-shaped ones), since PR 15
+    made ``_outbox_tokens`` skip notices."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "nobody@example.com")
-    assert _outbox_tokens(magic_app) == []
+    assert _outbox_subjects(magic_app) == []
     _request_link(_client(), "real@example.com")
-    assert len(_outbox_tokens(magic_app)) == 1
+    assert _outbox_subjects(magic_app) == ["Your CiteVyn sign-in link"]
 
 
 def test_request_uses_its_own_rate_limit_bucket_not_auth_login(
@@ -467,6 +483,21 @@ def test_confirm_post_atomically_claims_and_logs_in(magic_app: Path) -> None:
     assert _query_all(MagicLinkToken) == []
     assert _password_hash("real@example.com") == hash_before
     assert ("login", "magic_link") in _audit_events()
+
+
+def test_confirm_post_emails_a_sign_in_notice_to_the_account(magic_app: Path) -> None:
+    """Guardrail 2 of #293 (ADR-0004 PR 15): a redeemed link is announced to
+    the inbox owner, with the recovery instruction, after the redirect. RED if
+    the ``redirect.background`` task is dropped."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).headers["location"] == "/?auth=ok"
+    subjects = _outbox_subjects(magic_app)
+    assert subjects == ["Your CiteVyn sign-in link", "New sign-in to CiteVyn"], subjects
+    notice = sorted(magic_app.iterdir())[-1].read_text(encoding="utf-8")
+    assert "To: real@example.com" in notice
+    assert "Email me a sign-in link" in notice and "set a new password" in notice
+    assert _TOKEN_RE.search(notice) is None, "the notice must never carry a token"
 
 
 def test_confirm_post_reused_token_fails_closed(magic_app: Path) -> None:

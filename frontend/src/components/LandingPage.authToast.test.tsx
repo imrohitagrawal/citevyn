@@ -58,6 +58,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       anonymous: false,
       providers: [],
       has_password: true,
+    password_step_up: false,
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -81,6 +82,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       anonymous: false,
       providers: [],
       has_password: true,
+    password_step_up: false,
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -118,6 +120,7 @@ describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
       anonymous: false,
       providers: [],
       has_password: false,
+    password_step_up: false,
     };
     vi.mocked(getCurrentUser).mockResolvedValue(passwordless);
     __testOnly.setState({ status: "signed-in", user: passwordless });
@@ -137,6 +140,7 @@ describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
       anonymous: false,
       providers: [],
       has_password: true,
+    password_step_up: false,
     };
     vi.mocked(getCurrentUser).mockResolvedValue(withPassword);
     __testOnly.setState({ status: "signed-in", user: withPassword });

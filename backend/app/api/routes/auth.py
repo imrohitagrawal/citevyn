@@ -23,7 +23,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -33,16 +33,27 @@ from app.core.auth_sessions import (
     claim_and_login,
     revoke_current_session,
     revoke_other_sessions,
+    step_up_active,
     try_resolve_auth_session,
-    try_resolve_principal,
 )
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.passwords import hash_password, verify_password, verify_password_or_dummy
-from app.core.rate_limit import enforce_auth_login_rate_limit, rate_limited_demo
-from app.models import AuditAction, MagicLinkToken, User, UserIdentity, UserRole
+from app.core.rate_limit import (
+    email_notice_allowed,
+    enforce_auth_login_rate_limit,
+    enforce_password_change_rate_limit,
+    rate_limited_demo,
+)
+from app.models import AuditAction, AuthSession, MagicLinkToken, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
+from app.services.notifications import (
+    build_email_client,
+    deliver,
+    password_changed_message,
+    site_base_url,
+)
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
@@ -129,7 +140,14 @@ async def _linked_providers(db: AsyncSession, user_id: str) -> list[str]:
     return list(rows)
 
 
-async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> dict[str, Any]:
+async def _auth_user_payload(
+    db: AsyncSession,
+    request_id: str,
+    user: User,
+    *,
+    session: AuthSession | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
     """The one body shape ``register``, ``login`` and ``me`` all return.
 
     Computes ``providers`` here (not only in ``me``) so the frontend's
@@ -140,7 +158,15 @@ async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> d
     ``has_password`` (ADR-0004 PR 14) is the same ``password_hash is not
     None`` predicate ``update_password`` keys its current-password
     requirement off, computed in one place so the two can never drift.
+
+    ``password_step_up`` (ADR-0004 PR 15, #293) is whether the CALLER'S
+    session may currently set a new password without the current one --
+    ``step_up_active`` on the caller's own row, the same predicate
+    ``update_password`` uses. Callers that have no session in hand (a fresh
+    register/login response, whose brand-new session carries no stamp)
+    report ``false``.
     """
+    step_up = session is not None and settings is not None and step_up_active(session, settings)
     return {
         "request_id": request_id,
         "user_id": user.user_id,
@@ -148,6 +174,7 @@ async def _auth_user_payload(db: AsyncSession, request_id: str, user: User) -> d
         "anonymous": user.email is None,
         "providers": await _linked_providers(db, user.user_id),
         "has_password": user.password_hash is not None,
+        "password_step_up": step_up,
     }
 
 
@@ -326,13 +353,16 @@ async def logout(
     description=(
         "First-time set (an OAuth-created account that never set one) needs only "
         "new_password; a change needs current_password too -- decided by the "
-        "server from the stored account, never from the request body. Every "
-        "success revokes the account's other sessions (docs/API_SPEC.md §4c)."
+        "server from the stored account, never from the request body -- unless "
+        "the caller's own session redeemed a magic link within the step-up "
+        "window (one shot). Every success revokes the account's other sessions "
+        "and emails the account (docs/API_SPEC.md §4c)."
     ),
 )
 async def update_password(
     request: Request,
     body: PasswordUpdateRequest,
+    background_tasks: BackgroundTasks,
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
     _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
@@ -349,6 +379,15 @@ async def update_password(
     would trip the frontend's global sign-out interceptor). If it has none,
     ``current_password`` is ignored entirely.
 
+    **Step-up (ADR-0004 PR 15, #293):** the current-password requirement is
+    waived when -- and only when -- the CALLER'S OWN session row carries a
+    ``magic_link_verified_at`` stamp younger than
+    ``password_step_up_window_seconds``. That is a second server-held fact
+    (the row the cookie resolves to), still never the body: another live
+    session of the same account, a stamp older than the window, or any
+    other login method gets the normal 422. The stamp is cleared on use, so
+    the waiver is one shot. Guardrail 2: every set/change emails the account.
+
     Every success revokes the account's OTHER live sessions
     (``revoke_other_sessions``) -- the credential surface changed, force
     re-auth everywhere else -- uniformly for first-time set and change, and
@@ -356,10 +395,13 @@ async def update_password(
     unread link is a live credential too; review finding).
 
     Brute-forcing ``current_password`` through this route is bounded by the
-    signed-in demo tier (``rate_limited_demo``, 100/hour per user by default)
-    plus Argon2's cost; it deliberately does not touch the ``auth_login``
-    bucket, which would let a hijacked session lock the real owner out of
-    password login for an hour.
+    per-user ``password_change`` cap (``rate_limit_password_change_per_hour``,
+    default 3 -- a wrong guess spends a slot too) plus Argon2's cost; it
+    deliberately does not touch the ``auth_login`` bucket, which would let a
+    hijacked session lock the real owner out of password login for an hour.
+    A session-only intruder CAN spend the three slots and force the owner
+    onto the magic-link path for one window; the stepped-up recovery set is
+    exempt from the cap, so the owner always has a way through.
     """
     request_id = _request_id(request)
     current = await try_resolve_auth_session(request, db, settings)
@@ -373,7 +415,13 @@ async def update_password(
     assert user is not None, "a live AuthSession must reference an existing user (FK CASCADE)"
 
     had_password = user.password_hash is not None
-    if user.password_hash is not None:
+    stepped_up = had_password and step_up_active(current, settings)
+    if user.password_hash is not None and not stepped_up:
+        # Per-user cap on changes that supply the current password (review
+        # finding: an intruder who learned it must not be able to loop
+        # changes, each revoking the owner's sessions). Checked BEFORE the
+        # verify so a wrong guess spends a slot too.
+        await enforce_password_change_rate_limit(user.user_id, settings)
         if not body.current_password:
             raise error_response(
                 request_id=request_id,
@@ -400,18 +448,46 @@ async def update_password(
         db, user_id=user.user_id, keep_auth_session_id=current.auth_session_id
     )
     await db.execute(delete(MagicLinkToken).where(MagicLinkToken.user_id == user.user_id))
+    # One shot: a second change on this session needs the (new) current password.
+    current.magic_link_verified_at = None
+    # Guardrail 2 (#293): the inbox owner learns of every set/change, so a
+    # hijacked session's password change is a race they can win. The NOTICE
+    # is throttled per address (never the change): registration does not
+    # verify addresses, so an unthrottled notice would be a mail cannon. A
+    # suppressed notice is recorded on the audit row (review finding).
+    client = build_email_client(settings)
+    can_notify = client is not None and bool(user.email)
+    notify = can_notify and await email_notice_allowed(user.email or "", settings)
+    metadata: dict[str, Any] = {
+        "event": "password_changed" if had_password else "password_set",
+        "sessions_revoked": revoked,
+    }
+    if stepped_up:
+        metadata["step_up"] = "magic_link"
+    if can_notify and not notify:
+        metadata["notice_suppressed"] = True
     await record_audit_event(
         db,
         action=AuditAction.login,
         user_id=user.user_id,
         role=UserRole.demo_user,
-        metadata={
-            "event": "password_changed" if had_password else "password_set",
-            "sessions_revoked": revoked,
-        },
+        metadata=metadata,
     )
     await db.commit()
-    return await _auth_user_payload(db, request_id, user)
+
+    if notify and client is not None and user.email:
+        background_tasks.add_task(
+            deliver,
+            client,
+            password_changed_message(
+                to_addr=user.email,
+                at=datetime.now(UTC),
+                first_time=not had_password,
+                base_url=site_base_url(settings),
+            ),
+            request_id,
+        )
+    return await _auth_user_payload(db, request_id, user, session=current, settings=settings)
 
 
 # ---------------------------------------------------------------------------
@@ -437,16 +513,16 @@ async def me(
     _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
 ) -> dict[str, Any]:
     request_id = _request_id(request)
-    principal_id = await try_resolve_principal(request, db, settings)
-    if principal_id is None:
+    current = await try_resolve_auth_session(request, db, settings)
+    if current is None:
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.auth_required,
             message="Not authenticated.",
         )
-    user = await db.get(User, principal_id)
+    user = await db.get(User, current.user_id)
     assert user is not None, "a live AuthSession must reference an existing user (FK CASCADE)"
-    return await _auth_user_payload(db, request_id, user)
+    return await _auth_user_payload(db, request_id, user, session=current, settings=settings)
 
 
 __all__ = ["normalize_email", "router"]

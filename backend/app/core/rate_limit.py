@@ -48,12 +48,13 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+import logging
 import time
 import uuid
 from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Annotated, Protocol
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -81,6 +82,8 @@ _DEFAULT_GLOBAL_PER_WINDOW = 600
 # Fallback for the credential-stuffing bucket (ADR-0004 PR 6) when a caller
 # constructs a limiter directly without naming one. Production passes
 # ``settings.rate_limit_auth_login_per_hour``.
+_logger = logging.getLogger("citevyn.rate_limit")
+
 _DEFAULT_AUTH_LOGIN_PER_WINDOW = 10
 _AUTH_LOGIN_ROLE = "auth_login"
 
@@ -89,6 +92,16 @@ _AUTH_LOGIN_ROLE = "auth_login"
 # ``settings.rate_limit_magic_link_per_hour``.
 _DEFAULT_MAGIC_LINK_PER_WINDOW = 5
 _MAGIC_LINK_ROLE = "magic_link"
+
+# ADR-0004 PR 15 review findings. ``email_notice``: how many sign-in /
+# password-change notices one ADDRESS may receive per window -- shares the
+# magic-link limit VALUE (it is the same "email-bombing ceiling per
+# address") but not its bucket, so draining one cannot silence the other.
+# ``password_change``: how many current-password-supplied changes one USER
+# may make per window; a stepped-up recovery set is exempt (see auth.py).
+_EMAIL_NOTICE_ROLE = "email_notice"
+_DEFAULT_PASSWORD_CHANGE_PER_WINDOW = 3
+_PASSWORD_CHANGE_ROLE = "password_change"
 
 # Fallback for the signed-in-caller bucket (ADR-0004 PR 11) when a caller
 # constructs a limiter directly without naming one. Production passes
@@ -142,6 +155,7 @@ class RateLimiter:
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
         magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
+        password_change_per_window: int = _DEFAULT_PASSWORD_CHANGE_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -155,6 +169,8 @@ class RateLimiter:
             raise ValueError("demo_user_registered_per_window must be >= 1")
         if magic_link_per_window < 1:
             raise ValueError("magic_link_per_window must be >= 1")
+        if password_change_per_window < 1:
+            raise ValueError("password_change_per_window must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
@@ -175,6 +191,10 @@ class RateLimiter:
             # email like ``auth_login`` but DELIBERATELY a separate bucket --
             # see ``enforce_magic_link_rate_limit``.
             _MAGIC_LINK_ROLE: magic_link_per_window,
+            # Per-ADDRESS notice ceiling (same value, separate bucket) and the
+            # per-USER cap on current-password-supplied changes (PR 15).
+            _EMAIL_NOTICE_ROLE: magic_link_per_window,
+            _PASSWORD_CHANGE_ROLE: password_change_per_window,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -291,6 +311,7 @@ class RedisRateLimiter:
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
         magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
+        password_change_per_window: int = _DEFAULT_PASSWORD_CHANGE_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -304,6 +325,8 @@ class RedisRateLimiter:
             raise ValueError("demo_user_registered_per_window must be >= 1")
         if magic_link_per_window < 1:
             raise ValueError("magic_link_per_window must be >= 1")
+        if password_change_per_window < 1:
+            raise ValueError("password_change_per_window must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -327,6 +350,10 @@ class RedisRateLimiter:
             # email like ``auth_login`` but DELIBERATELY a separate bucket --
             # see ``enforce_magic_link_rate_limit``.
             _MAGIC_LINK_ROLE: magic_link_per_window,
+            # Per-ADDRESS notice ceiling (same value, separate bucket) and the
+            # per-USER cap on current-password-supplied changes (PR 15).
+            _EMAIL_NOTICE_ROLE: magic_link_per_window,
+            _PASSWORD_CHANGE_ROLE: password_change_per_window,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -420,6 +447,8 @@ def _too_many_requests(*, role: str = "demo_user") -> Exception:
         # Surfaced verbatim in the sign-in dialog: "queries per hour" would
         # mislead someone who only asked for a link (review finding).
         message = "Too many sign-in links requested for this address. Try again later."
+    elif role == _PASSWORD_CHANGE_ROLE:
+        message = "Too many password changes. Try again later."
     else:
         message = (
             "Rate limit exceeded. The demo allows a small number of "
@@ -454,6 +483,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             auth_login_per_window=settings.rate_limit_auth_login_per_hour,
             demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
             magic_link_per_window=settings.rate_limit_magic_link_per_hour,
+            password_change_per_window=settings.rate_limit_password_change_per_hour,
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
@@ -463,6 +493,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
         auth_login_per_window=settings.rate_limit_auth_login_per_hour,
         demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
         magic_link_per_window=settings.rate_limit_magic_link_per_hour,
+        password_change_per_window=settings.rate_limit_password_change_per_hour,
     )
 
 
@@ -513,6 +544,8 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         and limiter.limit_for(role=_DEMO_USER_REGISTERED_ROLE)
         == settings.rate_limit_demo_user_registered_per_hour
         and limiter.limit_for(role=_MAGIC_LINK_ROLE) == settings.rate_limit_magic_link_per_hour
+        and limiter.limit_for(role=_PASSWORD_CHANGE_ROLE)
+        == settings.rate_limit_password_change_per_hour
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -814,13 +847,64 @@ async def enforce_magic_link_rate_limit(email: str, settings: Settings) -> None:
     )
 
 
+async def email_notice_allowed(email: str, settings: Settings) -> bool:
+    """Whether one more sign-in / password-change notice may go to ``email`` now.
+
+    ADR-0004 PR 15 review finding: registration never verifies an address
+    and sends no mail, so without this an attacker could register a
+    victim's address and turn ``POST /v1/auth/me/password`` into a mail
+    cannon at the signed-in tier (100/hour) -- 20x the documented
+    per-address ceiling. The notice is throttled, NEVER the change itself:
+    a denied notice returns ``False`` and the caller simply does not send.
+    Its own bucket (prefix ``notify``), not the magic-link request bucket:
+    a thief holding a stolen link must not be able to pre-drain the
+    request bucket and thereby silence the sign-in notice.
+    """
+    try:
+        await enforce_rate_limit(
+            user_id=_email_bucket_key("notify", email, settings),
+            role=_EMAIL_NOTICE_ROLE,
+            settings=settings,
+        )
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            # A limiter outage (503 rate_limiter_unavailable) is not "too
+            # many": the notice is still skipped -- the action already
+            # committed and must not fail now -- but never silently.
+            _logger.warning(
+                "email_notice_skipped_limiter_unavailable",
+                extra={"request_id": get_current_request_id(), "status_code": exc.status_code},
+            )
+        return False
+    return True
+
+
+async def enforce_password_change_rate_limit(user_id: str, settings: Settings) -> None:
+    """Cap current-password-supplied changes per USER (ADR-0004 PR 15 review).
+
+    Without it an intruder who once used the stepped-up recovery set knows
+    the current password and can loop changes at the signed-in tier, each
+    one revoking the owner's fresh session and deleting their pending link
+    -- camping the account faster than the owner can recover it. Applied
+    ONLY to changes that supplied ``current_password``; the stepped-up set
+    is exempt because it is the owner's recovery move (already bounded by
+    link redemptions per address) and must not be blockable by an intruder
+    filling this bucket.
+    """
+    await enforce_rate_limit(
+        user_id=f"pwchange_{user_id}", role=_PASSWORD_CHANGE_ROLE, settings=settings
+    )
+
+
 __all__ = [
     "RateLimiter",
     "RedisRateLimiter",
     "auth_login_rate_key",
     "client_rate_key",
+    "email_notice_allowed",
     "enforce_auth_login_rate_limit",
     "enforce_magic_link_rate_limit",
+    "enforce_password_change_rate_limit",
     "enforce_rate_limit",
     "get_limiter",
     "magic_link_rate_key",

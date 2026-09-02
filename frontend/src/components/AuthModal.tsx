@@ -91,6 +91,14 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // same decision from its own stored row and ignores/requires the field
   // accordingly -- this is display logic, not the authorization decision.
   const hasPassword = user?.has_password === true;
+  // ADR-0004 PR 15 (#293): a fresh magic-link session may replace a forgotten
+  // password without the old one. The server decides (and may say no if the
+  // window has passed since /me was fetched); ``needCurrent`` flips on when
+  // it answers with the current-password message (keyed on the message, not
+  // on any 422 -- a too-short password must not reveal the field) so the
+  // field appears instead of a dead end.
+  const [needCurrent, setNeedCurrent] = useState(false);
+  const stepUp = user?.password_step_up === true && !needCurrent;
 
   // Restore focus to the trigger on close. The cleanup function runs on
   // unmount (Escape, backdrop click, or a successful submit all unmount
@@ -109,7 +117,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // the next Tab lands on the page behind the backdrop, outside the trap.
   useEffect(() => {
     firstFieldRef.current?.focus();
-  }, [mode]);
+  }, [mode, needCurrent]);
 
   // The success screen replaces the whole form (and whatever field held
   // focus) with the notice + Done button; without this, focus falls to
@@ -185,7 +193,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         );
         return;
       } else {
-        await updatePassword(password, hasPassword ? currentPassword : undefined);
+        await updatePassword(password, hasPassword && !stepUp ? currentPassword : undefined);
         setNotice("Password saved. Any other devices were signed out.");
         setDone(true);
         return;
@@ -193,6 +201,17 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
       onAuthenticated?.();
       onClose();
     } catch (err) {
+      if (
+        err instanceof ApiClientError &&
+        mode === "set-password" &&
+        stepUp &&
+        err.status === 422 &&
+        /current password/i.test(err.message)
+      ) {
+        // The step-up window closed between /me and this submit: reveal the
+        // current-password field rather than showing an error with no way out.
+        setNeedCurrent(true);
+      }
       setError(
         err instanceof ApiClientError
           ? err.status === 404 && mode === "magic-link"
@@ -216,17 +235,21 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         ? "Create an account"
         : mode === "magic-link"
           ? "Email me a sign-in link"
-          : hasPassword
+          : hasPassword && !stepUp
             ? "Change password"
-            : "Set a password";
+            : hasPassword
+              ? "Set a new password"
+              : "Set a password";
 
   const intro =
     mode === "magic-link"
       ? "We'll email you a link that signs you in — no password needed."
       : mode === "set-password"
-        ? hasPassword
+        ? hasPassword && !stepUp
           ? "Enter your current password, then choose a new one. Other devices will be signed out."
-          : "Add a password as a backup way to sign in. You'll stay signed in here; other devices will be signed out."
+          : hasPassword
+            ? "You just signed in with an email link, so you can choose a new password without the old one. Other devices will be signed out."
+            : "Add a password as a backup way to sign in. You'll stay signed in here; other devices will be signed out."
         : "Optional and free. Keeps your chat history across visits — the demo works fully without this.";
 
   const submitLabel =
@@ -240,7 +263,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
 
   const showsEmail = mode !== "set-password";
   const showsPassword = mode !== "magic-link";
-  const showsCurrentPassword = mode === "set-password" && hasPassword;
+  const showsCurrentPassword = mode === "set-password" && hasPassword && !stepUp;
   const showsAlternatives = mode === "login" || mode === "register";
 
   return createPortal(
@@ -411,7 +434,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
               <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "13px" }}>
                 {mode === "set-password" ? "New password" : "Password"}
                 <input
-                  ref={mode === "set-password" && !hasPassword ? firstFieldRef : undefined}
+                  ref={mode === "set-password" && !showsCurrentPassword ? firstFieldRef : undefined}
                   type="password"
                   required
                   minLength={mode === "login" ? undefined : PASSWORD_MIN_LENGTH}

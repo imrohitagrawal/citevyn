@@ -151,10 +151,18 @@ since a cross-site form POST cannot set an `Authorization` header.
     limit, found by review:** that last step is complete only for an
     account with *no* password — an account that still has one must
     supply it to change it (the requirement is decided from the stored
-    hash, never from the body, and a magic-link login does not relax it).
-    The link recovers *access*; replacing a forgotten password needs a
-    same-session step-up (a session-provenance stamp on `auth_sessions`,
-    a schema change) — tracked in #293 for an owner decision.
+    hash, never from the body). **Closed by PR 15 (#293, owner-approved
+    2026-09-02):** the magic-link claim stamps its new session
+    (`auth_sessions.magic_link_verified_at`, migration 0013) and the
+    password route waives the current password only for *that* session,
+    within 10 minutes, once — a second server-held fact, never the body,
+    never another session of the same account. Guardrail 2: every
+    magic-link sign-in and every password set/change emails the account
+    with the recovery instruction, so a stolen link or a hijacked session
+    is a race the inbox owner can see and win (request a link, set a
+    password, which revokes every other session). What a stolen link
+    yields is therefore unchanged in kind — it already granted a full
+    session — and symmetric: the inbox owner always regains exclusivity.
   - **The CVE-class risks the original decision named are addressed by
     construction, not by hope:** `request` is always-202 with equal-cost
     branches (statement-count parity, mirroring `verify_password_or_dummy`);
@@ -246,6 +254,7 @@ must land before PR 6 (the first PR that can create a second principal).
 | 12 | GitHub OAuth (`user_identities` table) |
 | 13 | Account linking: connect GitHub/Google to an existing signed-in account (`connect/start`, freshness gate, `providers` on `/me`) — the working form of the recovery path above |
 | 14 | Magic-link login (`magic_link_tokens`, migration 0012; `POST …/magic-link/request` always-202 equal-cost, `GET …/confirm` interstitial, `POST …/confirm` atomic claim) + Resend email seam + authenticated `POST /v1/auth/me/password` (server-decided `current_password`, revokes other sessions) + `has_password` on `/me` — the recovery path that needs no pre-linked provider |
+| 15 | Same-session password step-up after a magic-link sign-in (`auth_sessions.magic_link_verified_at`, migration 0013; `password_step_up` on `/me`; one shot, 10-minute window) + sign-in and password-change notification emails — closes #293 |
 
 PR 5 is a one-way door: after PR 6 creates real accounts, `downgrade 0008`
 destroys them. PR 5 must be verified in production before PR 6 ships.

@@ -136,13 +136,19 @@ def _issue_cookie(
 
 
 async def _create_auth_session(
-    db: AsyncSession, settings: Settings, response: Response, *, user_id: str
+    db: AsyncSession,
+    settings: Settings,
+    response: Response,
+    *,
+    user_id: str,
+    magic_link_verified_at: datetime | None = None,
 ) -> uuid.UUID:
     """Persist a fresh :class:`AuthSession` row for ``user_id`` and set its cookie.
 
     Returns the new row's id — most callers don't need it (the cookie is
     the client-facing artifact), but :func:`ensure_auth_session` (ADR-0004
-    PR 12) does, to bind an OAuth nonce to it.
+    PR 12) does, to bind an OAuth nonce to it. ``magic_link_verified_at``
+    (ADR-0004 PR 15) is stamped only by the magic-link claim.
     """
     auth_session_id = uuid.uuid4()
     secret = secrets.token_hex(32)  # 32 random bytes, hex-encoded (64 chars)
@@ -154,6 +160,7 @@ async def _create_auth_session(
             user_id=user_id,
             created_at=now,
             expires_at=now + timedelta(seconds=settings.auth_session_ttl_seconds),
+            magic_link_verified_at=magic_link_verified_at,
         )
     )
     await db.flush()
@@ -294,7 +301,13 @@ async def ensure_auth_session(
 
 
 async def claim_and_login(
-    request: Request, response: Response, db: AsyncSession, settings: Settings, *, user_id: str
+    request: Request,
+    response: Response,
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    user_id: str,
+    magic_link_verified_at: datetime | None = None,
 ) -> None:
     """Rotate the caller onto ``user_id`` and claim their prior anonymous history.
 
@@ -319,6 +332,10 @@ async def claim_and_login(
     place rather than deleted: it owns no more sessions after the claim, so
     leaving it is inert, and deleting it would be one more write on the hot
     login path for no behavioural difference.
+
+    ``magic_link_verified_at`` (ADR-0004 PR 15, #293) is passed ONLY by the
+    magic-link confirm route and lands on the new session row; every other
+    caller leaves it ``None``.
     """
     cookie_value = request.cookies.get(_cookie_name(settings))
     old_row = await _lookup_auth_session(db, cookie_value) if cookie_value else None
@@ -340,7 +357,9 @@ async def claim_and_login(
             )
         await db.delete(old_row)
 
-    await _create_auth_session(db, settings, response, user_id=user_id)
+    await _create_auth_session(
+        db, settings, response, user_id=user_id, magic_link_verified_at=magic_link_verified_at
+    )
 
 
 async def revoke_current_session(
@@ -361,6 +380,21 @@ async def revoke_current_session(
     principal_id = row.user_id
     await db.delete(row)
     return principal_id
+
+
+def step_up_active(session: AuthSession, settings: Settings) -> bool:
+    """Whether ``session`` may set a password without the current one (ADR-0004 PR 15).
+
+    True only while the session's own ``magic_link_verified_at`` stamp is
+    younger than ``password_step_up_window_seconds``. Decided from the
+    server-loaded row alone -- the request body cannot assert it -- and the
+    caller clears the stamp after one use.
+    """
+    stamped = session.magic_link_verified_at
+    if stamped is None:
+        return False
+    age = _to_naive_utc(_now()) - _to_naive_utc(stamped)
+    return timedelta(0) <= age <= timedelta(seconds=settings.password_step_up_window_seconds)
 
 
 async def revoke_other_sessions(
@@ -428,6 +462,7 @@ __all__ = [
     "resolve_principal_by_auth_session_id",
     "revoke_current_session",
     "revoke_other_sessions",
+    "step_up_active",
     "try_resolve_auth_session",
     "try_resolve_auth_session_id",
     "try_resolve_principal",

@@ -20,6 +20,12 @@
  * "Set one" opens ``AuthModal`` in ``set-password`` mode from a real
  * clicked button, which satisfies the modal's ``triggerRef`` contract.
  *
+ * ADR-0004 PR 15 (#293): the card also shows, with different copy, when the
+ * account HAS a password but this session just redeemed a magic link
+ * (``password_step_up``) -- that is the forgotten-password user, and the
+ * card is how they find the one-shot "set a new password without the old
+ * one" path before the window closes.
+ *
  * The FILE is named ``Nudge`` rather than ``PasswordNudge`` on purpose: the
  * lazy chunk's file name is one of the very few strings this feature adds
  * to the eager bundle, which sits within bytes of its 63.5 kB gzip ceiling
@@ -45,16 +51,28 @@ function readDismissed(): boolean {
 export function PasswordNudge() {
   const { status, user } = useAuth();
   const [dismissed, setDismissed] = useState(readDismissed);
+  const [hiddenThisLoad, setHiddenThisLoad] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const setButtonRef = useRef<HTMLButtonElement>(null);
 
   // Stay mounted while the modal is open even once has_password flips to
   // true (the modal is our child; unmounting it mid-"Password saved" would
   // yank the confirmation away). It disappears on the modal's close.
-  const applies = status === "signed-in" && user !== null && !user.has_password;
-  if (!modalOpen && (dismissed || !applies)) return null;
+  const stepUp = status === "signed-in" && user !== null && user.has_password && user.password_step_up;
+  const applies = status === "signed-in" && user !== null && (!user.has_password || stepUp);
+  // The persisted "Not now" belongs to the optional "Add a password?" nag
+  // only. The "Forgot your password?" variant is time-limited and is THE
+  // recovery path (#293), so an old dismissal must never hide it (review
+  // finding); it can still be dismissed for this page load.
+  const suppressed = stepUp ? false : dismissed;
+  if (!modalOpen && (suppressed || !applies)) return null;
 
+  if (!modalOpen && hiddenThisLoad) return null;
   const dismiss = () => {
+    if (stepUp) {
+      setHiddenThisLoad(true);
+      return;
+    }
     try {
       window.localStorage.setItem(PASSWORD_NUDGE_DISMISSED_KEY, "1");
     } catch {
@@ -83,8 +101,12 @@ export function PasswordNudge() {
         lineHeight: 1.45,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: "2px" }}>Add a password?</div>
-      <div style={{ opacity: 0.85 }}>Set a password as a backup way to sign in.</div>
+      <div style={{ fontWeight: 600, marginBottom: "2px" }}>{stepUp ? "Forgot your password?" : "Add a password?"}</div>
+      <div style={{ opacity: 0.85 }}>
+        {stepUp
+          ? "You just signed in with an email link, so you can set a new password now without the old one."
+          : "Set a password as a backup way to sign in."}
+      </div>
       <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
         <button ref={setButtonRef} type="button" onClick={() => setModalOpen(true)} style={primaryStyle}>
           Set one
