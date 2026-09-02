@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,41 +31,58 @@ NEW = "brand new passphrase"
 _TOKEN_RE = re.compile(r"/v1/auth/magic-link/confirm\?token=([0-9a-f]{32}\.[0-9a-f]{64})")
 
 
+_ENV_KEYS = (
+    "CITEVYN_DATABASE_URL",
+    "CITEVYN_EMAIL_OUTBOX_DIR",
+    "CITEVYN_RESEND_API_KEY",
+    "CITEVYN_EMAIL_FROM",
+    "CITEVYN_MAGIC_LINK_BASE_URL",
+    "CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR",
+    "CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR",
+)
+
+
 @pytest.fixture
-def step_up_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Path, None, None]:
+def step_up_factory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[Callable[..., Path], None, None]:
     import app.core.rate_limit as rate_limit
 
-    db_module.reset_engine()
-    get_settings.cache_clear()
-    outbox = tmp_path / "outbox"
-    monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'su.db'}")
-    monkeypatch.setenv("CITEVYN_EMAIL_OUTBOX_DIR", str(outbox))
-    monkeypatch.setenv("CITEVYN_RESEND_API_KEY", "")
-    monkeypatch.setenv("CITEVYN_EMAIL_FROM", "")
-    monkeypatch.setenv("CITEVYN_MAGIC_LINK_BASE_URL", "")
-    get_settings.cache_clear()
-    rate_limit.reset_limiter()
-    engine = db_module.get_engine()
+    def _build(**env: str) -> Path:
+        db_module.reset_engine()
+        get_settings.cache_clear()
+        outbox = tmp_path / "outbox"
+        monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'su.db'}")
+        monkeypatch.setenv("CITEVYN_EMAIL_OUTBOX_DIR", str(outbox))
+        monkeypatch.setenv("CITEVYN_RESEND_API_KEY", "")
+        monkeypatch.setenv("CITEVYN_EMAIL_FROM", "")
+        monkeypatch.setenv("CITEVYN_MAGIC_LINK_BASE_URL", "")
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        get_settings.cache_clear()
+        rate_limit.reset_limiter()
+        engine = db_module.get_engine()
 
-    async def _init_schema() -> None:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        async def _init_schema() -> None:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
 
-    asyncio.run(_init_schema())
+        asyncio.run(_init_schema())
+        return outbox
+
     try:
-        yield outbox
+        yield _build
     finally:
         get_settings.cache_clear()
         db_module.reset_engine()
         rate_limit.reset_limiter()
-        for var in (
-            "CITEVYN_DATABASE_URL",
-            "CITEVYN_EMAIL_OUTBOX_DIR",
-            "CITEVYN_RESEND_API_KEY",
-            "CITEVYN_EMAIL_FROM",
-            "CITEVYN_MAGIC_LINK_BASE_URL",
-        ):
+        for var in _ENV_KEYS:
             monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture
+def step_up_app(step_up_factory: Callable[..., Path]) -> Path:
+    return step_up_factory()
 
 
 def _client() -> TestClient:
@@ -281,3 +298,93 @@ def test_password_set_and_change_email_the_account(step_up_app: Path) -> None:
     assert "To: stepup@example.com" in notice
     assert "Email me a sign-in link" in notice
     assert _TOKEN_RE.search(notice) is None
+
+
+def _null_password() -> None:
+    async def _go() -> None:
+        factory = get_sessionmaker()
+        async with factory() as session:
+            await session.execute(
+                update(User).where(User.email == EMAIL).values(password_hash=None)
+            )
+            await session.commit()
+
+    _run(_go())
+
+
+def test_passwordless_account_on_a_link_session_does_a_plain_first_time_set(
+    step_up_app: Path,
+) -> None:
+    """An OAuth-created (passwordless) account that signed in by link: the
+    set is a first-time set (``password_set``, no ``step_up`` key) even though
+    the session is stamped. RED if the audit metadata or ``has_password``
+    conflate the two paths."""
+    _register(_client())
+    _null_password()
+    browser = _sign_in_with_link(step_up_app)
+    me = _me(browser).json()
+    assert me["has_password"] is False and me["password_step_up"] is True
+    assert _update(browser, new_password=NEW).status_code == 200
+    assert _audit_metadata("password_set") == [{"event": "password_set", "sessions_revoked": 1}]
+    assert _audit_metadata("password_changed") == []
+    assert _subjects(step_up_app)[-1] == "Your CiteVyn password was set"
+
+
+def test_stamp_does_not_survive_a_session_rotation(step_up_app: Path) -> None:
+    """A password login on the stepped-up browser rotates the session
+    (``claim_and_login`` deletes the old row) and the NEW row carries no
+    stamp. RED if the stamp were copied across the rotation."""
+    _register(_client())
+    browser = _sign_in_with_link(step_up_app)
+    assert _me(browser).json()["password_step_up"] is True
+    assert _login(browser, OLD).status_code == 200
+    assert _me(browser).json()["password_step_up"] is False
+    assert _update(browser, new_password=NEW).status_code == 422
+
+
+def test_password_change_notices_are_capped_per_address_but_changes_are_not(
+    step_up_factory: Callable[..., Path],
+) -> None:
+    """The mail-cannon finding: registration never verifies an address, so an
+    attacker who registers a victim's email must not be able to send it
+    unlimited "password changed" notices. The NOTICE is throttled at the
+    per-address magic-link limit; the change itself is not. RED if
+    ``email_notice_allowed`` is bypassed."""
+    outbox = step_up_factory(
+        CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR="2",
+        CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR="100",
+    )
+    client = _client()
+    _register(client)
+    current = OLD
+    statuses = []
+    for i in range(4):
+        new = f"rotated passphrase {i}"
+        statuses.append(_update(client, current_password=current, new_password=new).status_code)
+        current = new
+    assert statuses == [200, 200, 200, 200]
+    assert _subjects(outbox).count("Your CiteVyn password was changed") == 2
+
+
+def test_current_password_changes_are_capped_per_user_but_the_recovery_set_is_exempt(
+    step_up_app: Path,
+) -> None:
+    """The camping finding: an intruder who learned the password cannot loop
+    changes (each revoking the owner's sessions) beyond the per-user cap,
+    while the owner's stepped-up recovery set still works with that bucket
+    full. RED if the cap is removed or applied to the stepped-up set."""
+    client = _client()
+    _register(client)
+    current = OLD
+    statuses = []
+    for i in range(4):
+        new = f"camped passphrase {i}"
+        r = _update(client, current_password=current, new_password=new)
+        statuses.append(r.status_code)
+        if r.status_code == 200:
+            current = new
+    assert statuses == [200, 200, 200, 429], statuses
+    # Bucket full for this user: the owner's recovery via a fresh link still lands.
+    owner = _sign_in_with_link(step_up_app)
+    assert _update(owner, new_password=NEW).status_code == 200
+    assert _login(_client(), NEW).status_code == 200

@@ -31,7 +31,7 @@ from app.core.email_client import (
     ResendEmailClient,
 )
 
-_logger = logging.getLogger("citevyn.magic_link")
+_logger = logging.getLogger("citevyn.notifications")
 
 # Local-dev fallback for the emailed link's origin -- same default the OAuth
 # redirect URI uses (``app.api.routes.oauth._redirect_uri``).
@@ -139,7 +139,7 @@ async def deliver(client: EmailClient, message: EmailMessage, request_id: str) -
         # The reason is the provider's status line ("resend returned 422"),
         # never its body (logged separately, capped) and never the address.
         _logger.warning(
-            f"magic_link_email_failed: {exc}",
+            f"notification_email_failed ({message.subject}): {exc}",
             extra={"request_id": request_id, "reason": str(exc)},
         )
 

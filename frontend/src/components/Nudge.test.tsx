@@ -141,4 +141,33 @@ describe("PasswordNudge after a magic-link sign-in (ADR-0004 PR 15, #293)", () =
     await waitFor(() => expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: plain }));
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
+
+  it("shows 'Forgot your password?' even when an old 'Add a password?' dismissal is stored", async () => {
+    // RED if the persisted dismissal also suppresses the recovery card
+    // (review finding: the owner's only recovery path would vanish forever).
+    window.localStorage.setItem(PASSWORD_NUDGE_DISMISSED_KEY, "1");
+    const { getCurrentUser } = await import("../lib/api");
+    const stepUp = { ...PASSWORDLESS, has_password: true, password_step_up: true };
+    vi.mocked(getCurrentUser).mockResolvedValue(stepUp);
+    __testOnly.setState({ status: "signed-in", user: stepUp });
+    const user = userEvent.setup();
+    render(<PasswordNudge />);
+    const card = await screen.findByRole("status");
+    expect(card).toHaveTextContent("Forgot your password?");
+    // "Not now" on this variant hides it for the page load without touching storage.
+    await user.click(within(card).getByRole("button", { name: "Not now" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(window.localStorage.getItem(PASSWORD_NUDGE_DISMISSED_KEY)).toBe("1");
+  });
+
+  it("shows the plain 'Add a password?' copy for a passwordless account on a link session", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const passwordlessStepUp = { ...PASSWORDLESS, has_password: false, password_step_up: true };
+    vi.mocked(getCurrentUser).mockResolvedValue(passwordlessStepUp);
+    __testOnly.setState({ status: "signed-in", user: passwordlessStepUp });
+    render(<PasswordNudge />);
+    const card = await screen.findByRole("status");
+    expect(card).toHaveTextContent("Add a password?");
+    expect(card).not.toHaveTextContent("Forgot");
+  });
 });

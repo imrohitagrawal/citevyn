@@ -94,8 +94,9 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // ADR-0004 PR 15 (#293): a fresh magic-link session may replace a forgotten
   // password without the old one. The server decides (and may say no if the
   // window has passed since /me was fetched); ``needCurrent`` flips on when
-  // it answers "Enter your current password." so the field appears instead
-  // of a dead end.
+  // it answers with the current-password message (keyed on the message, not
+  // on any 422 -- a too-short password must not reveal the field) so the
+  // field appears instead of a dead end.
   const [needCurrent, setNeedCurrent] = useState(false);
   const stepUp = user?.password_step_up === true && !needCurrent;
 
@@ -204,7 +205,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         err instanceof ApiClientError &&
         mode === "set-password" &&
         stepUp &&
-        err.status === 422
+        err.status === 422 &&
+        /current password/i.test(err.message)
       ) {
         // The step-up window closed between /me and this submit: reveal the
         // current-password field rather than showing an error with no way out.

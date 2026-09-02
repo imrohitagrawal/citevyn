@@ -97,6 +97,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.rate_limit import (
+    email_notice_allowed,
     enforce_magic_link_rate_limit,
     rate_limited_demo,
     rate_limited_oauth_navigation,
@@ -483,7 +484,7 @@ async def magic_link_confirm(
     # stolen link is visible and the owner can request a new link and set a
     # password (which revokes this session). Sent after the response.
     client = _build_email_client(settings)
-    if client is not None and user.email:
+    if client is not None and user.email and await email_notice_allowed(user.email, settings):
         redirect.background = BackgroundTask(
             deliver,
             client,

@@ -40,7 +40,12 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.passwords import hash_password, verify_password, verify_password_or_dummy
-from app.core.rate_limit import enforce_auth_login_rate_limit, rate_limited_demo
+from app.core.rate_limit import (
+    email_notice_allowed,
+    enforce_auth_login_rate_limit,
+    enforce_password_change_rate_limit,
+    rate_limited_demo,
+)
 from app.models import AuditAction, AuthSession, MagicLinkToken, User, UserIdentity, UserRole
 from app.services.audit import record_audit_event
 from app.services.notifications import (
@@ -409,6 +414,11 @@ async def update_password(
     had_password = user.password_hash is not None
     stepped_up = had_password and step_up_active(current, settings)
     if user.password_hash is not None and not stepped_up:
+        # Per-user cap on changes that supply the current password (review
+        # finding: an intruder who learned it must not be able to loop
+        # changes, each revoking the owner's sessions). Checked BEFORE the
+        # verify so a wrong guess spends a slot too.
+        await enforce_password_change_rate_limit(user.user_id, settings)
         if not body.current_password:
             raise error_response(
                 request_id=request_id,
@@ -453,9 +463,11 @@ async def update_password(
     await db.commit()
 
     # Guardrail 2 (#293): the inbox owner learns of every set/change, so a
-    # hijacked session's password change is a race they can win.
+    # hijacked session's password change is a race they can win. The NOTICE
+    # is throttled per address (never the change): registration does not
+    # verify addresses, so an unthrottled notice would be a mail cannon.
     client = build_email_client(settings)
-    if client is not None and user.email:
+    if client is not None and user.email and await email_notice_allowed(user.email, settings):
         background_tasks.add_task(
             deliver,
             client,

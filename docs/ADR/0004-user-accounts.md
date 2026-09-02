@@ -253,13 +253,13 @@ must land before PR 6 (the first PR that can create a second principal).
 | 11 | Per-user rate tiers (authenticated key on `user_id`, anonymous keeps IP HMAC) |
 | 12 | GitHub OAuth (`user_identities` table) |
 | 13 | Account linking: connect GitHub/Google to an existing signed-in account (`connect/start`, freshness gate, `providers` on `/me`) — the working form of the recovery path above |
-| 15 | Same-session password step-up after a magic-link sign-in (`auth_sessions.magic_link_verified_at`, migration 0013; `password_step_up` on `/me`; one shot, 10-minute window) + sign-in and password-change notification emails — closes #293 |
 | 14 | Magic-link login (`magic_link_tokens`, migration 0012; `POST …/magic-link/request` always-202 equal-cost, `GET …/confirm` interstitial, `POST …/confirm` atomic claim) + Resend email seam + authenticated `POST /v1/auth/me/password` (server-decided `current_password`, revokes other sessions) + `has_password` on `/me` — the recovery path that needs no pre-linked provider |
 
 PR 5 is a one-way door: after PR 6 creates real accounts, `downgrade 0008`
 destroys them. PR 5 must be verified in production before PR 6 ships.
 Feedback attribution (#154) and share permalinks are genuinely unlocked by
-this work but stay out of its scope.
+this work but stay out | 15 | Same-session password step-up after a magic-link sign-in (`auth_sessions.magic_link_verified_at`, migration 0013; `password_step_up` on `/me`; one shot, 10-minute window) + sign-in and password-change notification emails — closes #293 |
+of its scope.
 
 ## Consequences
 

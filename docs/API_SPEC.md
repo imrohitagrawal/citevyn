@@ -297,7 +297,8 @@ rotated `Set-Cookie` and the same claim-on-login of the browser's prior
 anonymous history as every other login path), `302 /?auth=error` otherwise.
 The new session is stamped `magic_link_verified_at` (the server-held fact
 behind `password_step_up`), and the account is emailed a "New sign-in to
-CiteVyn" notice with the recovery instruction — a stolen link becomes
+CiteVyn" notice with the recovery instruction (when a provider is
+configured; the same per-address notice ceiling applies) — a stolen link becomes
 visible to the inbox owner, who can request a link and set a password,
 which revokes the intruder's session.
 The token is consumed by one atomic `DELETE … WHERE token_id AND secret_hash
@@ -344,7 +345,12 @@ never the body; another live session of the same account, an older stamp,
 or any other login method gets the normal 422. The stamp is cleared on use
 (one shot), and the audit row carries `step_up: "magic_link"`. Every
 successful set/change also emails the account ("Your CiteVyn password was
-set/changed") with the recovery instruction. On success, 200
+set/changed") with the recovery instruction — when an email provider is
+configured, and at most `CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR` notices
+per address per hour (the change itself is never throttled by that).
+Changes that supply `current_password` are capped per user at
+`CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR` (default 3; 429
+`rate_limited`); the stepped-up set is exempt. On success, 200
 with the `me` body shape (`has_password: true`), **every other live
 session for the account is revoked** — the caller's own session stays —
 and any still-pending magic-link token is deleted, uniformly for a

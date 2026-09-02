@@ -41,6 +41,7 @@ _ENV_KEYS = (
     "CITEVYN_RATE_LIMIT_GLOBAL_PER_HOUR",
     "CITEVYN_RATE_LIMIT_AUTH_LOGIN_PER_HOUR",
     "CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR",
+    "CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR",
     "CITEVYN_RATE_LIMIT_KEY_SALT",
 )
 
@@ -256,12 +257,14 @@ def test_request_runs_the_same_statement_count_whether_or_not_the_email_exists(
 
 
 def test_request_never_emails_an_unregistered_address(magic_app: Path) -> None:
-    """RED if the no-match branch registers the real send task."""
+    """RED if the no-match branch registers the real send task -- asserted on
+    the WHOLE outbox (any email, not just link-shaped ones), since PR 15
+    made ``_outbox_tokens`` skip notices."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "nobody@example.com")
-    assert _outbox_tokens(magic_app) == []
+    assert _outbox_subjects(magic_app) == []
     _request_link(_client(), "real@example.com")
-    assert len(_outbox_tokens(magic_app)) == 1
+    assert _outbox_subjects(magic_app) == ["Your CiteVyn sign-in link"]
 
 
 def test_request_uses_its_own_rate_limit_bucket_not_auth_login(

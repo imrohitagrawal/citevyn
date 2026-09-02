@@ -452,4 +452,24 @@ describe("AuthModal magic-link step-up (ADR-0004 PR 15, #293)", () => {
     expect(current).toHaveFocus();
     expect(within(dialog).getByRole("heading", { name: "Change password" })).toBeInTheDocument();
   });
+
+  it("keeps the current-password field hidden on an unrelated 422 while stepped up", async () => {
+    // RED if the fallback keys on the status alone: a too-short-password 422
+    // would wrongly demand a current password the user cannot supply.
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(getCurrentUser).mockResolvedValue(STEP_UP);
+    vi.mocked(updatePassword).mockRejectedValueOnce(
+      new ApiClientError("Validation error.", 422, "Validation error."),
+    );
+    const user = userEvent.setup();
+    renderStepUp();
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("New password"), "brand new passphrase");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Validation error.");
+    expect(within(dialog).queryByLabelText("Current password")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("heading", { name: "Set a new password" })).toBeInTheDocument();
+  });
 });

@@ -51,6 +51,7 @@ function readDismissed(): boolean {
 export function PasswordNudge() {
   const { status, user } = useAuth();
   const [dismissed, setDismissed] = useState(readDismissed);
+  const [hiddenThisLoad, setHiddenThisLoad] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const setButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -59,9 +60,19 @@ export function PasswordNudge() {
   // yank the confirmation away). It disappears on the modal's close.
   const stepUp = status === "signed-in" && user !== null && user.has_password && user.password_step_up;
   const applies = status === "signed-in" && user !== null && (!user.has_password || stepUp);
-  if (!modalOpen && (dismissed || !applies)) return null;
+  // The persisted "Not now" belongs to the optional "Add a password?" nag
+  // only. The "Forgot your password?" variant is time-limited and is THE
+  // recovery path (#293), so an old dismissal must never hide it (review
+  // finding); it can still be dismissed for this page load.
+  const suppressed = stepUp ? false : dismissed;
+  if (!modalOpen && (suppressed || !applies)) return null;
 
+  if (!modalOpen && hiddenThisLoad) return null;
   const dismiss = () => {
+    if (stepUp) {
+      setHiddenThisLoad(true);
+      return;
+    }
     try {
       window.localStorage.setItem(PASSWORD_NUDGE_DISMISSED_KEY, "1");
     } catch {

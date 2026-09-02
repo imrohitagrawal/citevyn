@@ -312,6 +312,7 @@ principal — anonymous today, a real logged-in user once ADR-0004 PR 6 ships
 | user_id | text(128) | FK -> `users.user_id`, `ON DELETE CASCADE` |
 | created_at | timestamp | |
 | expires_at | timestamp | `auth_session_ttl_seconds` from creation (default 180 days) |
+| magic_link_verified_at | timestamp, nullable | ADR-0004 PR 15 (#293): set only when the session was minted by a redeemed magic link; lets that session set a password without the current one for `password_step_up_window_seconds`, once (cleared on use) |
 
 Design decisions:
 

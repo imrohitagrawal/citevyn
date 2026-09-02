@@ -61,8 +61,12 @@ MVP supports:
    page so mail scanners cannot burn it), and get a Postgres-backed opaque session
    token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie. A signed-in user
    can set or change a password (`POST /v1/auth/me/password`); the server
-   decides from the stored hash whether the current password is required,
-   and every set/change revokes the account's other sessions. Sessions and
+   decides from the stored hash whether the current password is required
+   (waived only for the caller's own session that just redeemed a magic
+   link, within `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS`, once — ADR-0004
+   PR 15), every set/change revokes the account's other sessions and emails
+   the account, and current-password-supplied changes are capped per user
+   (`CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR`). Sessions and
    messages are owned by principal id, enforced at the two loaders every
    affected route already shares; a mismatch returns 404, never 403.
 2. The build-time demo bearer token is retained alongside the session
@@ -100,6 +104,12 @@ magic_link: 5 requests/hour, keyed per TARGET EMAIL, a SEPARATE bucket —
   ADR-0004 PR 14, POST /v1/auth/magic-link/request — never shared with
   auth_login (a flood of link requests must not lock the victim out of
   password login); doubles as the per-address email-bombing ceiling.
+email_notice: same value as magic_link, keyed per ADDRESS, its own bucket —
+  ADR-0004 PR 15 — caps the sign-in / password-changed notices one address
+  can receive (registration never verifies addresses); a denied notice is
+  simply not sent, the underlying action still succeeds.
+password_change: 3/hour per USER — ADR-0004 PR 15 — caps changes that
+  supply the current password; the stepped-up recovery set is exempt.
 ```
 
 ## 7. Source Domain Allowlist
@@ -200,7 +210,8 @@ MVP does not support:
 > reset-password-by-email flow — recovery is "email me a sign-in link"
 > (ADR-0004 PR 14), then set a password while signed in — for an account
 > that still has one, without the old password only from the session that
-> just redeemed the link, within 10 minutes, once (ADR-0004 PR 15, #293);
+> just redeemed the link, within `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS`
+> (default 10 minutes), once (ADR-0004 PR 15, #293);
 > every magic-link sign-in and password change is emailed to the account so
 > a stolen link is visible to its owner; GitHub/Google
 > linking (`connect/start`, which requires a session created within
