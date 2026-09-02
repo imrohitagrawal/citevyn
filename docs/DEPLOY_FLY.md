@@ -227,8 +227,25 @@ fly secrets list
 ### 4.1 Deploy
 
 ```bash
-fly deploy --build-arg VERSION=$(git describe --tags --always)
+fly deploy --app citevyn \
+  --build-arg VERSION=$(git describe --tags --always) \
+  --build-arg VITE_API_DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
 ```
+
+> **`VITE_API_DEMO_KEY` is not optional.** The frontend is built inside the
+> image and the demo bearer is baked into the bundle at build time
+> (`infra/docker/Dockerfile.api`, `ARG VITE_API_DEMO_KEY=local-demo-key`).
+> Without this argument the bundle carries the public default, production
+> rejects every browser call with 401 "Invalid bearer token", and the site
+> is down while `/health` stays green. This happened on 2026-09-02 (release
+> v6, fixed by v7) — see #296. The command above reads the value from the
+> running machine so it never touches your shell history; never paste the
+> key into a chat or a file. **Verify after every deploy:**
+>
+> ```bash
+> J=$(curl -s https://citevyn.stackclimb.com/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1)
+> curl -s "https://citevyn.stackclimb.com/$J" | grep -c local-demo-key   # must print 0
+> ```
 
 What happens, in order:
 
