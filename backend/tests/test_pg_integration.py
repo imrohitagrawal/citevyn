@@ -550,3 +550,52 @@ def test_magic_link_tokens_cascade_on_user_delete_on_postgres(
         assert present == 0
     finally:
         engine.dispose()
+
+
+def test_auth_sessions_magic_link_verified_at_round_trips_on_postgres(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """ADR-0004 PR 15 (#293) on the real engine: the column is a nullable
+    timestamptz at head and the batch downgrade drops it without touching
+    the rows. RED if 0013 is non-nullable or the downgrade fails."""
+    alembic_upgrade(alembic_pg_config, "head")
+    engine = create_engine(_pg_url_with_schema(pg_schema))
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT data_type, is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'auth_sessions' "
+                    "AND column_name = 'magic_link_verified_at'"
+                ),
+                {"schema": pg_schema},
+            ).first()
+        assert row is not None
+        assert row[0] == "timestamp with time zone" and row[1] == "YES"
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+                    "VALUES ('usr_su', 'demo_user', now(), 'su@example.com', NULL)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO auth_sessions (auth_session_id, secret_hash, user_id, "
+                    "created_at, expires_at, magic_link_verified_at) "
+                    "VALUES (gen_random_uuid(), 'h', 'usr_su', now(), now(), now())"
+                )
+            )
+        alembic_downgrade(alembic_pg_config, "0012")
+        with engine.connect() as conn:
+            gone = conn.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.columns WHERE table_schema = :schema "
+                    "AND table_name = 'auth_sessions' AND column_name = 'magic_link_verified_at'"
+                ),
+                {"schema": pg_schema},
+            ).scalar_one()
+            kept = conn.execute(text("SELECT count(*) FROM auth_sessions")).scalar_one()
+        assert gone == 0 and kept == 1
+    finally:
+        engine.dispose()

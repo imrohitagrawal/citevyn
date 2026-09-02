@@ -126,6 +126,7 @@ describe("AuthModal form", () => {
       anonymous: false,
       providers: [],
       has_password: true,
+    password_step_up: false,
     });
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -297,8 +298,9 @@ describe("AuthModal set-password mode (ADR-0004 PR 14)", () => {
     anonymous: false,
     providers: ["github"],
     has_password: false,
+  password_step_up: false,
   };
-  const WITH_PASSWORD = { ...PASSWORDLESS, has_password: true };
+  const WITH_PASSWORD = { ...PASSWORDLESS, has_password: true, password_step_up: false };
 
   function renderSetPassword(user: typeof PASSWORDLESS, onClose = vi.fn()) {
     __testOnly.setState({ status: "signed-in", user });
@@ -385,5 +387,69 @@ describe("AuthModal set-password mode (ADR-0004 PR 14)", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Current password is incorrect.");
     expect(within(dialog).queryByRole("button", { name: "Done" })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe("AuthModal magic-link step-up (ADR-0004 PR 15, #293)", () => {
+  const STEP_UP = {
+    request_id: "req_1",
+    user_id: "usr_a",
+    email: "a@example.com",
+    anonymous: false,
+    providers: [],
+    has_password: true,
+    password_step_up: true,
+  };
+
+  function renderStepUp(onClose = vi.fn()) {
+    __testOnly.setState({ status: "signed-in", user: STEP_UP });
+    const trigger = document.createElement("button");
+    trigger.setAttribute("data-test-trigger", "");
+    document.body.appendChild(trigger);
+    const triggerRef = createRef<HTMLElement>();
+    // @ts-expect-error -- assigning to a ref's .current outside React for the test fixture
+    triggerRef.current = trigger;
+    render(<AuthModal triggerRef={triggerRef} onClose={onClose} initialMode="set-password" />);
+    return { onClose };
+  }
+
+  it("drops the current-password field for a fresh magic-link session and sends only the new one", async () => {
+    // RED if the form shape ignores password_step_up: the forgotten-password
+    // user would face a required field they cannot fill.
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    vi.mocked(getCurrentUser).mockResolvedValue(STEP_UP);
+    vi.mocked(updatePassword).mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderStepUp();
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Set a new password" })).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Current password")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/without the old one/)).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("New password"), "brand new passphrase");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+    expect(updatePassword).toHaveBeenCalledWith("brand new passphrase", undefined);
+  });
+
+  it("reveals the current-password field when the server says the window has closed", async () => {
+    // RED if the 422 fallback is dropped: a stale /me would leave the user
+    // with an error and no field to type into.
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(getCurrentUser).mockResolvedValue(STEP_UP);
+    vi.mocked(updatePassword).mockRejectedValueOnce(
+      new ApiClientError("Enter your current password.", 422, "Enter your current password."),
+    );
+    const user = userEvent.setup();
+    renderStepUp();
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("New password"), "brand new passphrase");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Enter your current password.");
+    const current = within(dialog).getByLabelText("Current password");
+    expect(current).toBeInTheDocument();
+    expect(current).toHaveFocus();
+    expect(within(dialog).getByRole("heading", { name: "Change password" })).toBeInTheDocument();
   });
 });

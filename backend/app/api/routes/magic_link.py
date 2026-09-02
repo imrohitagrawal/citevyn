@@ -6,11 +6,12 @@ password-recovery path -- a user who cannot log in with a password can
 still get in by requesting a link, and an account that has NO password
 (OAuth-created, or one that never set one) can then set one from the
 account menu (``POST /v1/auth/me/password``). There is deliberately NO
-separate reset-via-email flow with its own token type to secure. **Known
-limit (#293):** an account that still HAS a password must give it
-to change it -- the link recovers access, not the forgotten password
-itself; the same-session step-up that would close that needs a schema
-change and an owner decision.
+separate reset-via-email flow with its own token type to secure. An
+account that still HAS a password may replace it without the old one only
+from the session that just redeemed the link, within
+``password_step_up_window_seconds``, once (ADR-0004 PR 15, #293): the
+claim stamps ``AuthSession.magic_link_verified_at`` and ``auth.py``'s
+``update_password`` reads that stamp from the caller's own row.
 
 Same one-file-one-router pattern as ``oauth.py``/``me.py``. The pure pieces
 live in seams with no app coupling -- ``app.core.token_secrets`` (the
@@ -77,12 +78,9 @@ Security invariants, written down because they transfer to any stack
 from __future__ import annotations
 
 import html
-import logging
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -91,18 +89,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
 
 from app.api.routes.auth import normalize_email
 from app.core.auth_sessions import claim_and_login
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
-from app.core.email_client import (
-    EmailClient,
-    EmailDeliveryError,
-    EmailMessage,
-    FileOutboxEmailClient,
-    ResendEmailClient,
-)
 from app.core.errors import APIErrorCode, error_response
 from app.core.rate_limit import (
     enforce_magic_link_rate_limit,
@@ -112,14 +104,19 @@ from app.core.rate_limit import (
 from app.core.token_secrets import generate_token, hash_token, verify_token
 from app.models import AuditAction, MagicLinkToken, User, UserRole
 from app.services.audit import record_audit_event
+from app.services.notifications import (
+    build_email_client as _build_email_client,
+)
+from app.services.notifications import (
+    deliver,
+    deliver_nothing,
+    magic_link_message,
+    magic_link_signin_message,
+    site_base_url,
+)
 
 router = APIRouter(prefix="/v1/auth/magic-link", tags=["auth"])
 
-_logger = logging.getLogger("citevyn.magic_link")
-
-# Local-dev fallback for the emailed link's origin -- same default the OAuth
-# redirect URI uses (``app.api.routes.oauth._redirect_uri``).
-_LOCAL_BASE_URL = "http://localhost:8000"
 _CONFIRM_PATH = "/v1/auth/magic-link/confirm"
 
 # A user_id that can never exist (``usr_``/``anon_`` prefixes are the only
@@ -144,76 +141,6 @@ def _to_naive_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value
     return value.astimezone(UTC).replace(tzinfo=None)
-
-
-# ---------------------------------------------------------------------------
-# Delivery
-# ---------------------------------------------------------------------------
-
-
-def _build_email_client(settings: Settings) -> EmailClient | None:
-    """Pick the delivery backend, or ``None`` when the feature is unavailable.
-
-    A configured ``resend_api_key`` wins everywhere. Otherwise the file
-    outbox is used outside production only (a ``Settings`` validator refuses
-    it IN production), and production without a provider returns ``None``
-    -- the request route then 404s, the same "not configured -> quiet 404"
-    convention an unconfigured OAuth provider follows.
-    """
-    if settings.resend_api_key:
-        return ResendEmailClient(
-            api_key=settings.resend_api_key, from_addr=settings.email_from or ""
-        )
-    if settings.environment != "production":
-        directory = (
-            Path(settings.email_outbox_dir)
-            if settings.email_outbox_dir
-            else Path(tempfile.gettempdir()) / "citevyn_email_outbox"
-        )
-        return FileOutboxEmailClient(directory)
-    return None
-
-
-def _link_base_url(settings: Settings) -> str:
-    return (settings.magic_link_base_url or _LOCAL_BASE_URL).rstrip("/")
-
-
-def _build_message(*, to_addr: str, link: str, ttl_seconds: int) -> EmailMessage:
-    minutes = max(1, ttl_seconds // 60)
-    plural = "s" if minutes != 1 else ""
-    subject = "Your CiteVyn sign-in link"
-    text = (
-        "Sign in to CiteVyn\n"
-        "\n"
-        f"Open this link to sign in: {link}\n"
-        "\n"
-        f"It works once and expires in {minutes} minute{plural}. If you didn't ask for it, "
-        "ignore this email -- nothing happens unless the link is used.\n"
-    )
-    safe_link = html.escape(link, quote=True)
-    body_html = (
-        "<p>Sign in to CiteVyn</p>"
-        f'<p><a href="{safe_link}">Open this link to sign in</a></p>'
-        f"<p>It works once and expires in {minutes} minute{plural}. If you didn't ask for it, "
-        "ignore this email &mdash; nothing happens unless the link is used.</p>"
-    )
-    return EmailMessage(to_addr=to_addr, subject=subject, text=text, html=body_html)
-
-
-async def _deliver(client: EmailClient, message: EmailMessage, request_id: str) -> None:
-    """Background send. Failures are logged (no body, no address), never raised."""
-    try:
-        await client.send(message)
-    except EmailDeliveryError as exc:
-        _logger.warning(
-            "magic_link_email_failed",
-            extra={"request_id": request_id, "reason": str(exc)},
-        )
-
-
-async def _deliver_nothing() -> None:
-    """The no-match branch's background task -- explicit, so both branches register one."""
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +191,7 @@ async def magic_link_request(
     target_user_id = user.user_id if user is not None else _NO_SUCH_USER_ID
     await db.execute(delete(MagicLinkToken).where(MagicLinkToken.user_id == target_user_id))
 
-    deliver: Callable[[], Awaitable[None]]
+    send: Callable[[], Awaitable[None]]
     if user is not None:
         db.add(
             MagicLinkToken(
@@ -284,17 +211,17 @@ async def magic_link_request(
             role=UserRole.demo_user,
             metadata={"event": "magic_link_requested"},
         )
-        link = f"{_link_base_url(settings)}{_CONFIRM_PATH}?token={token_id.hex}.{secret}"
+        link = f"{site_base_url(settings)}{_CONFIRM_PATH}?token={token_id.hex}.{secret}"
         # Send to the STORED address, not the raw input -- the stored one is
         # the canonical form the account was registered with.
-        message = _build_message(
+        message = magic_link_message(
             to_addr=user.email or email, link=link, ttl_seconds=settings.magic_link_ttl_seconds
         )
 
         async def _send() -> None:
-            await _deliver(client, message, request_id)
+            await deliver(client, message, request_id)
 
-        deliver = _send
+        send = _send
     else:
         # The discarded write: one more statement, the same round trip the
         # match branch spends on its token INSERT, deleting a row that can
@@ -307,10 +234,10 @@ async def magic_link_request(
             role=None,
             metadata={"event": "magic_link_unknown_email"},
         )
-        deliver = _deliver_nothing
+        send = deliver_nothing
 
     await db.commit()
-    background_tasks.add_task(deliver)
+    background_tasks.add_task(send)
     return {"request_id": request_id, "status": "accepted"}
 
 
@@ -419,7 +346,7 @@ async def magic_link_confirm_page(
 
 
 def _expected_origin(settings: Settings) -> str:
-    parts = urlsplit(_link_base_url(settings))
+    parts = urlsplit(site_base_url(settings))
     return f"{parts.scheme}://{parts.netloc}".lower()
 
 
@@ -534,9 +461,15 @@ async def magic_link_confirm(
         return await _fail("magic_link_invalid")
 
     # 5. The SAME login tail every other path uses (placeholder-then-mutate,
-    #    as oauth.py's _handle_login_intent explains).
+    #    as oauth.py's _handle_login_intent explains) -- plus the
+    #    ``magic_link_verified_at`` stamp on the new session (ADR-0004 PR 15,
+    #    #293): the server-held fact that lets THIS session set a new
+    #    password without the old one for a few minutes.
+    now = _now()
     redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
-    await claim_and_login(request, redirect, db, settings, user_id=user.user_id)
+    await claim_and_login(
+        request, redirect, db, settings, user_id=user.user_id, magic_link_verified_at=now
+    )
     await record_audit_event(
         db,
         action=AuditAction.login,
@@ -546,6 +479,17 @@ async def magic_link_confirm(
     )
     await db.commit()
     redirect.headers["location"] = "/?auth=ok"
+    # Guardrail 2 (#293): tell the inbox owner a link was redeemed, so a
+    # stolen link is visible and the owner can request a new link and set a
+    # password (which revokes this session). Sent after the response.
+    client = _build_email_client(settings)
+    if client is not None and user.email:
+        redirect.background = BackgroundTask(
+            deliver,
+            client,
+            magic_link_signin_message(to_addr=user.email, at=now, base_url=site_base_url(settings)),
+            str(request.state.request_id),
+        )
     return redirect
 
 

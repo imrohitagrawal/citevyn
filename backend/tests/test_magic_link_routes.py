@@ -131,9 +131,22 @@ def _outbox_tokens(outbox: Path) -> list[str]:
     tokens: list[str] = []
     for path in sorted(outbox.iterdir()):
         match = _TOKEN_RE.search(path.read_text(encoding="utf-8"))
-        assert match is not None, path.read_text(encoding="utf-8")
+        if match is None:
+            continue  # a sign-in / password notice (ADR-0004 PR 15), not a link
         tokens.append(match.group(1))
     return tokens
+
+
+def _outbox_subjects(outbox: Path) -> list[str]:
+    if not outbox.exists():
+        return []
+    subjects: list[str] = []
+    for path in sorted(outbox.iterdir()):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("Subject: "):
+                subjects.append(line.removeprefix("Subject: "))
+                break
+    return subjects
 
 
 def _latest_token(outbox: Path) -> str:
@@ -467,6 +480,21 @@ def test_confirm_post_atomically_claims_and_logs_in(magic_app: Path) -> None:
     assert _query_all(MagicLinkToken) == []
     assert _password_hash("real@example.com") == hash_before
     assert ("login", "magic_link") in _audit_events()
+
+
+def test_confirm_post_emails_a_sign_in_notice_to_the_account(magic_app: Path) -> None:
+    """Guardrail 2 of #293 (ADR-0004 PR 15): a redeemed link is announced to
+    the inbox owner, with the recovery instruction, after the redirect. RED if
+    the ``redirect.background`` task is dropped."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).headers["location"] == "/?auth=ok"
+    subjects = _outbox_subjects(magic_app)
+    assert subjects == ["Your CiteVyn sign-in link", "New sign-in to CiteVyn"], subjects
+    notice = sorted(magic_app.iterdir())[-1].read_text(encoding="utf-8")
+    assert "To: real@example.com" in notice
+    assert "Email me a sign-in link" in notice and "set a new password" in notice
+    assert _TOKEN_RE.search(notice) is None, "the notice must never carry a token"
 
 
 def test_confirm_post_reused_token_fails_closed(magic_app: Path) -> None:

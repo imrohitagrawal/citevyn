@@ -157,7 +157,9 @@ def test_migration_0007_auth_sessions_round_trips(alembic_config: AlembicConfig)
             row[1] for row in connection.exec_driver_sql("PRAGMA table_info(auth_sessions)").all()
         }
     assert "auth_sessions" in tables
-    assert columns == {"auth_session_id", "secret_hash", "user_id", "created_at", "expires_at"}
+    # 0007's columns must all be present at head; later migrations (0013)
+    # add to this table, so this is a subset check, not equality.
+    assert {"auth_session_id", "secret_hash", "user_id", "created_at", "expires_at"} <= columns
 
     alembic_downgrade(alembic_config, "0006")
     with engine.connect() as connection:
@@ -261,6 +263,48 @@ def test_migration_0008_users_identity_columns_round_trips(
     ):
         connection.exec_driver_sql("PRAGMA foreign_keys = ON")
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
+
+
+def test_migration_0013_magic_link_verified_at_round_trips(alembic_config: AlembicConfig) -> None:
+    """0013 (``auth_sessions.magic_link_verified_at``, ADR-0004 PR 15 / #293)
+    adds one nullable column and the downgrade removes it -- in batch mode,
+    so SQLite can drop a column the way Postgres does. RED if the column is
+    missing at head, non-nullable (every password/OAuth/anonymous session
+    inserts NULL), or survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        columns = {
+            row[1]: row
+            for row in connection.exec_driver_sql("PRAGMA table_info(auth_sessions)").all()
+        }
+    assert "magic_link_verified_at" in columns
+    assert columns["magic_link_verified_at"][3] == 0, "must be nullable"
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+            "VALUES ('usr_su', 'demo_user', CURRENT_TIMESTAMP, 'su@example.com', NULL)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO auth_sessions (auth_session_id, secret_hash, user_id, created_at, "
+            "expires_at) VALUES ('44444444-4444-4444-4444-444444444444', 'h', 'usr_su', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    with engine.connect() as connection:
+        stamped = connection.exec_driver_sql(
+            "SELECT magic_link_verified_at FROM auth_sessions WHERE user_id = 'usr_su'"
+        ).scalar_one()
+    assert stamped is None, "a session inserted without the stamp reads back NULL"
+
+    alembic_downgrade(alembic_config, "0012")
+    with engine.connect() as connection:
+        columns_after = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(auth_sessions)").all()
+        }
+        rows = connection.exec_driver_sql("SELECT count(*) FROM auth_sessions").scalar_one()
+    assert "magic_link_verified_at" not in columns_after
+    assert rows == 1, "batch downgrade must preserve existing rows"
 
 
 def test_migration_0012_magic_link_tokens_round_trips(alembic_config: AlembicConfig) -> None:

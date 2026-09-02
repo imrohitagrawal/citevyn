@@ -43,6 +43,14 @@ class AuthSession(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # ADR-0004 PR 15 (#293): set ONLY when this session was minted by a
+    # redeemed magic link; NULL for password/OAuth/anonymous sessions.
+    # ``POST /v1/auth/me/password`` may skip the current-password check while
+    # this is younger than ``password_step_up_window_seconds`` and clears it
+    # on use. A server-held fact about the session, never a body field.
+    magic_link_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 __all__ = ["AuthSession"]

@@ -302,6 +302,13 @@ export interface AuthUserResponse {
    * passwordless (magic-link / OAuth) sign-in.
    */
   has_password: boolean;
+  /**
+   * ADR-0004 PR 15 (#293): whether THIS session may set a new password
+   * without the current one -- true for a few minutes after redeeming a
+   * magic link, one shot. Decided by the server from its own session row;
+   * the client only uses it to decide which fields to show.
+   */
+  password_step_up: boolean;
 }
 
 /** Body for ``POST /v1/auth/me/password`` (ADR-0004 PR 14). */
