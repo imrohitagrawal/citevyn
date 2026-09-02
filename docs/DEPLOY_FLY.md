@@ -240,7 +240,11 @@ fly deploy --app citevyn \
 > is down while `/health` stays green. This happened on 2026-09-02 (release
 > v6, fixed by v7) — see #296. The command above reads the value from the
 > running machine so it never touches your shell history; never paste the
-> key into a chat or a file. **Verify after every deploy:**
+> key into a chat or a file. **The machine scales to zero:** hit
+> `curl -s https://citevyn.stackclimb.com/health` first, or `fly ssh console`
+> has nothing to connect to and the substitution is empty (guard against
+> that — an empty `VITE_API_DEMO_KEY` build argument ships the default key
+> again). **Verify after every deploy:**
 >
 > ```bash
 > J=$(curl -s https://citevyn.stackclimb.com/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1)
