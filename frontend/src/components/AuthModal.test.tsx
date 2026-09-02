@@ -17,6 +17,13 @@ vi.mock("../lib/api", () => ({
   onUnauthorized: vi.fn(() => () => {}),
 }));
 
+// ADR-0004 PR 14: the modal's magic-link / password calls (their own lazy-only
+// module -- see lib/authActions.ts). Mocked at the same layer as the api.
+vi.mock("../lib/authActions", () => ({
+  requestMagicLink: vi.fn(),
+  updatePassword: vi.fn(),
+}));
+
 beforeEach(() => {
   __testOnly.setState(__testOnly.initialState);
   __testOnly.resetBootstrapped();
@@ -118,6 +125,7 @@ describe("AuthModal form", () => {
       email: "a@example.com",
       anonymous: false,
       providers: [],
+      has_password: true,
     });
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -200,5 +208,182 @@ describe("AuthModal OAuth buttons (ADR-0004 PR 12)", () => {
 
     expect(window.location.href).toMatch(/\/v1\/auth\/oauth\/google\/start$/);
     expect(login).not.toHaveBeenCalled();
+  });
+});
+
+describe("AuthModal magic-link mode (ADR-0004 PR 14)", () => {
+  it("'Email me a sign-in link' switches to an email-only form and focuses the email field", async () => {
+    // RED if the button is removed, if the password field survives the
+    // switch, or if the mode-switch effect stops re-focusing the first
+    // field (focus would fall to <body>, outside the trap).
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+
+    expect(within(dialog).getByRole("heading", { name: "Email me a sign-in link" })).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Password")).not.toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Email")).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "Send link" })).toBeInTheDocument();
+  });
+
+  it("submitting requests a link, shows a role=status notice (not an alert) and keeps the dialog open", async () => {
+    // RED if the notice is rendered with role="alert", if the modal closes
+    // on success (the user still needs to read "check your email"), or if
+    // the email is sent through login() instead of requestMagicLink().
+    const { login } = await import("../lib/api");
+    const { requestMagicLink } = await import("../lib/authActions");
+    vi.mocked(requestMagicLink).mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    renderModal(onClose);
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+    await user.type(within(dialog).getByLabelText("Email"), "link@example.com");
+    await user.click(within(dialog).getByRole("button", { name: "Send link" }));
+
+    expect(requestMagicLink).toHaveBeenCalledWith("link@example.com");
+    expect(login).not.toHaveBeenCalled();
+    const status = await within(dialog).findByRole("status");
+    expect(status).toHaveTextContent(/sign-in link is on its way/);
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a 404 (no email provider configured) shows a specific inline error", async () => {
+    // RED if the 404 branch is dropped -- the raw "Not found." would be
+    // meaningless to a user.
+    const { requestMagicLink } = await import("../lib/authActions");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(requestMagicLink).mockRejectedValueOnce(new ApiClientError("Not found.", 404, "Not found."));
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+    await user.type(within(dialog).getByLabelText("Email"), "link@example.com");
+    await user.click(within(dialog).getByRole("button", { name: "Send link" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Email sign-in isn't available right now.");
+  });
+
+  it("'Back to sign in' returns to the password form", async () => {
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+    await user.click(within(dialog).getByText("Back to sign in"));
+    expect(within(dialog).getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Password")).toBeInTheDocument();
+  });
+
+  it("password fields carry the backend's 128-character ceiling", async () => {
+    // RED if maxLength is dropped: the browser would accept what the server
+    // rejects with a 422.
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByLabelText("Password")).toHaveAttribute("maxlength", "128");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    expect(within(dialog).getByLabelText("Password")).toHaveAttribute("maxlength", "128");
+    expect(within(dialog).getByLabelText("Password")).toHaveAttribute("minlength", "8");
+  });
+});
+
+describe("AuthModal set-password mode (ADR-0004 PR 14)", () => {
+  const PASSWORDLESS = {
+    request_id: "req_1",
+    user_id: "usr_a",
+    email: "a@example.com",
+    anonymous: false,
+    providers: ["github"],
+    has_password: false,
+  };
+  const WITH_PASSWORD = { ...PASSWORDLESS, has_password: true };
+
+  function renderSetPassword(user: typeof PASSWORDLESS, onClose = vi.fn()) {
+    __testOnly.setState({ status: "signed-in", user });
+    const trigger = document.createElement("button");
+    trigger.setAttribute("data-test-trigger", "");
+    document.body.appendChild(trigger);
+    const triggerRef = createRef<HTMLElement>();
+    // @ts-expect-error -- assigning to a ref's .current outside React for the test fixture
+    triggerRef.current = trigger;
+    render(<AuthModal triggerRef={triggerRef} onClose={onClose} initialMode="set-password" />);
+    return { onClose };
+  }
+
+  it("a passwordless account gets a 'Set a password' form with only a new-password field", async () => {
+    // RED if the form shape is derived from anything but user.has_password.
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    vi.mocked(getCurrentUser).mockResolvedValue(PASSWORDLESS);
+    vi.mocked(updatePassword).mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    const { onClose } = renderSetPassword(PASSWORDLESS);
+    const dialog = screen.getByRole("dialog");
+
+    expect(within(dialog).getByRole("heading", { name: "Set a password" })).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Current password")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Email")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Continue with GitHub" })).not.toBeInTheDocument();
+    const field = within(dialog).getByLabelText("New password");
+    expect(field).toHaveFocus();
+    expect(field).toHaveAttribute("maxlength", "128");
+
+    await user.type(field, "new passphrase 12345");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+
+    // No current password at all for a first-time set.
+    expect(updatePassword).toHaveBeenCalledWith("new passphrase 12345", undefined);
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(/Password saved/);
+    expect(onClose).not.toHaveBeenCalled();
+    // The success screen keeps focus INSIDE the still-open dialog (the form
+    // that held focus unmounted) and does not re-title itself "Change
+    // password" now that has_password is true -- both review findings.
+    const done = within(dialog).getByRole("button", { name: "Done" });
+    expect(done).toHaveFocus();
+    expect(within(dialog).getByRole("heading", { name: "Password saved" })).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Enter your current password/)).not.toBeInTheDocument();
+    await user.click(done);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("an account with a password gets a 'Change password' form that sends both fields", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    vi.mocked(getCurrentUser).mockResolvedValue(WITH_PASSWORD);
+    vi.mocked(updatePassword).mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderSetPassword(WITH_PASSWORD);
+    const dialog = screen.getByRole("dialog");
+
+    expect(within(dialog).getByRole("heading", { name: "Change password" })).toBeInTheDocument();
+    const current = within(dialog).getByLabelText("Current password");
+    expect(current).toHaveFocus();
+    await user.type(current, "old passphrase");
+    await user.type(within(dialog).getByLabelText("New password"), "new passphrase 12345");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+
+    expect(updatePassword).toHaveBeenCalledWith("new passphrase 12345", "old passphrase");
+  });
+
+  it("a rejected current password shows the server's message inline and keeps the dialog open", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const { updatePassword } = await import("../lib/authActions");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(getCurrentUser).mockResolvedValue(WITH_PASSWORD);
+    vi.mocked(updatePassword).mockRejectedValueOnce(
+      new ApiClientError("Current password is incorrect.", 422, "Current password is incorrect."),
+    );
+    const user = userEvent.setup();
+    const { onClose } = renderSetPassword(WITH_PASSWORD);
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Current password"), "wrong");
+    await user.type(within(dialog).getByLabelText("New password"), "new passphrase 12345");
+    await user.click(within(dialog).getByRole("button", { name: "Save password" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Current password is incorrect.");
+    expect(within(dialog).queryByRole("button", { name: "Done" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

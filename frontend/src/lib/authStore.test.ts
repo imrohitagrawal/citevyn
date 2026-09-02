@@ -37,7 +37,7 @@ describe("bootstrapAuth", () => {
   });
 
   it("resolves to signed-in for a registered user", async () => {
-    const user = { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [] };
+    const user = { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [], has_password: true };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(user));
     await bootstrapAuth();
     expect(getAuthSnapshot()).toEqual({ status: "signed-in", user });
@@ -65,14 +65,14 @@ describe("bootstrapAuth", () => {
 
 describe("login/register", () => {
   it("login sets signed-in state", async () => {
-    const user = { request_id: "req_1", user_id: "usr_b", email: "b@example.com", anonymous: false, providers: [] };
+    const user = { request_id: "req_1", user_id: "usr_b", email: "b@example.com", anonymous: false, providers: [], has_password: true };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(user));
     await login("b@example.com", "correct horse battery");
     expect(getAuthSnapshot()).toEqual({ status: "signed-in", user });
   });
 
   it("register sets signed-in state", async () => {
-    const user = { request_id: "req_1", user_id: "usr_c", email: "c@example.com", anonymous: false, providers: [] };
+    const user = { request_id: "req_1", user_id: "usr_c", email: "c@example.com", anonymous: false, providers: [], has_password: true };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(user, 201));
     await register("c@example.com", "correct horse battery");
     expect(getAuthSnapshot()).toEqual({ status: "signed-in", user });
@@ -95,7 +95,7 @@ describe("login/register", () => {
 
 describe("logout", () => {
   it("drops to anonymous even if the network call fails", async () => {
-    __testOnly.setState({ status: "signed-in", user: { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [] } });
+    __testOnly.setState({ status: "signed-in", user: { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [], has_password: true } });
     vi.mocked(fetch).mockRejectedValueOnce(new TypeError("network down"));
     await logout();
     expect(getAuthSnapshot()).toEqual({ status: "anonymous", user: null });
@@ -123,6 +123,7 @@ describe("bootstrapAuth vs login race", () => {
       email: "e@example.com",
       anonymous: false,
       providers: [],
+      has_password: true,
     };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(loggedInUser));
     await login("e@example.com", "correct horse battery");
@@ -141,7 +142,7 @@ describe("subscribeAuth", () => {
   it("notifies listeners on state change", async () => {
     const listener = vi.fn();
     const unsubscribe = subscribeAuth(listener);
-    const user = { request_id: "req_1", user_id: "usr_d", email: "d@example.com", anonymous: false, providers: [] };
+    const user = { request_id: "req_1", user_id: "usr_d", email: "d@example.com", anonymous: false, providers: [], has_password: true };
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(user));
     await login("d@example.com", "correct horse battery");
     expect(listener).toHaveBeenCalled();
@@ -153,7 +154,7 @@ describe("401 interceptor", () => {
   it("drops signed-in state to anonymous when ANY apiFetch call 401s", async () => {
     __testOnly.setState({
       status: "signed-in",
-      user: { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [] },
+      user: { request_id: "req_1", user_id: "usr_a", email: "a@example.com", anonymous: false, providers: [], has_password: true },
     });
     // authStore subscribes to api.ts's real onUnauthorized registry at
     // module load (not mocked here) — importing authStore above already

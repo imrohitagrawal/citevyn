@@ -84,6 +84,12 @@ _DEFAULT_GLOBAL_PER_WINDOW = 600
 _DEFAULT_AUTH_LOGIN_PER_WINDOW = 10
 _AUTH_LOGIN_ROLE = "auth_login"
 
+# Fallback for the magic-link bucket (ADR-0004 PR 14) when a caller constructs
+# a limiter directly without naming one. Production passes
+# ``settings.rate_limit_magic_link_per_hour``.
+_DEFAULT_MAGIC_LINK_PER_WINDOW = 5
+_MAGIC_LINK_ROLE = "magic_link"
+
 # Fallback for the signed-in-caller bucket (ADR-0004 PR 11) when a caller
 # constructs a limiter directly without naming one. Production passes
 # ``settings.rate_limit_demo_user_registered_per_hour``.
@@ -135,6 +141,7 @@ class RateLimiter:
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
+        magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -146,6 +153,8 @@ class RateLimiter:
             raise ValueError("auth_login_per_window must be >= 1")
         if demo_user_registered_per_window < 1:
             raise ValueError("demo_user_registered_per_window must be >= 1")
+        if magic_link_per_window < 1:
+            raise ValueError("magic_link_per_window must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
@@ -162,6 +171,10 @@ class RateLimiter:
             # Signed-in caller bucket (ADR-0004 PR 11), keyed per user_id
             # rather than per IP — see ``rate_limited_demo``.
             _DEMO_USER_REGISTERED_ROLE: demo_user_registered_per_window,
+            # Magic-link request bucket (ADR-0004 PR 14), keyed per target
+            # email like ``auth_login`` but DELIBERATELY a separate bucket --
+            # see ``enforce_magic_link_rate_limit``.
+            _MAGIC_LINK_ROLE: magic_link_per_window,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -277,6 +290,7 @@ class RedisRateLimiter:
         global_per_window: int = _DEFAULT_GLOBAL_PER_WINDOW,
         auth_login_per_window: int = _DEFAULT_AUTH_LOGIN_PER_WINDOW,
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
+        magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -288,6 +302,8 @@ class RedisRateLimiter:
             raise ValueError("auth_login_per_window must be >= 1")
         if demo_user_registered_per_window < 1:
             raise ValueError("demo_user_registered_per_window must be >= 1")
+        if magic_link_per_window < 1:
+            raise ValueError("magic_link_per_window must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -307,6 +323,10 @@ class RedisRateLimiter:
             # Signed-in caller bucket (ADR-0004 PR 11), keyed per user_id
             # rather than per IP — see ``rate_limited_demo``.
             _DEMO_USER_REGISTERED_ROLE: demo_user_registered_per_window,
+            # Magic-link request bucket (ADR-0004 PR 14), keyed per target
+            # email like ``auth_login`` but DELIBERATELY a separate bucket --
+            # see ``enforce_magic_link_rate_limit``.
+            _MAGIC_LINK_ROLE: magic_link_per_window,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -396,12 +416,17 @@ def _too_many_requests(*, role: str = "demo_user") -> Exception:
     buckets, none of which this upsell applies to) gets the plain message.
     """
     request_id = get_current_request_id()
-    message = (
-        "Rate limit exceeded. The demo allows a small number of "
-        "queries per hour per user; try again later."
-    )
-    if role == "demo_user":
-        message += " Sign in for a higher limit."
+    if role == _MAGIC_LINK_ROLE:
+        # Surfaced verbatim in the sign-in dialog: "queries per hour" would
+        # mislead someone who only asked for a link (review finding).
+        message = "Too many sign-in links requested for this address. Try again later."
+    else:
+        message = (
+            "Rate limit exceeded. The demo allows a small number of "
+            "queries per hour per user; try again later."
+        )
+        if role == "demo_user":
+            message += " Sign in for a higher limit."
     return error_response(
         request_id=request_id,
         code=APIErrorCode.rate_limited,
@@ -428,6 +453,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             global_per_window=_effective_global_limit(settings),
             auth_login_per_window=settings.rate_limit_auth_login_per_hour,
             demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
+            magic_link_per_window=settings.rate_limit_magic_link_per_hour,
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
@@ -436,6 +462,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
         global_per_window=_effective_global_limit(settings),
         auth_login_per_window=settings.rate_limit_auth_login_per_hour,
         demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
+        magic_link_per_window=settings.rate_limit_magic_link_per_hour,
     )
 
 
@@ -485,6 +512,7 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         and limiter.limit_for(role=_AUTH_LOGIN_ROLE) == settings.rate_limit_auth_login_per_hour
         and limiter.limit_for(role=_DEMO_USER_REGISTERED_ROLE)
         == settings.rate_limit_demo_user_registered_per_hour
+        and limiter.limit_for(role=_MAGIC_LINK_ROLE) == settings.rate_limit_magic_link_per_hour
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -726,11 +754,20 @@ async def rate_limited_admin(
 # an email is personal data and must not sit in Redis/logs in the clear.
 
 
-def auth_login_rate_key(email: str, settings: Settings) -> str:
-    """Return the credential-stuffing bucket key for a (normalised) email."""
+def _email_bucket_key(prefix: str, email: str, settings: Settings) -> str:
+    """Salted-HMAC bucket key for a (normalised) email, one per bucket ``prefix``.
+
+    Shared by the ``auth_login`` and ``magic_link`` buckets so the two can
+    never drift in how they hash an address; the prefix keeps them separate.
+    """
     salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
     digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
-    return f"authlogin_{digest[:32]}"
+    return f"{prefix}_{digest[:32]}"
+
+
+def auth_login_rate_key(email: str, settings: Settings) -> str:
+    """Return the credential-stuffing bucket key for a (normalised) email."""
+    return _email_bucket_key("authlogin", email, settings)
 
 
 async def enforce_auth_login_rate_limit(email: str, settings: Settings) -> None:
@@ -746,14 +783,47 @@ async def enforce_auth_login_rate_limit(email: str, settings: Settings) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Magic-link request guard for POST /v1/auth/magic-link/request (ADR-0004 PR 14)
+# ---------------------------------------------------------------------------
+#
+# A mechanical copy of the ``auth_login`` trio above with its OWN role and key
+# prefix. It must NOT share ``auth_login``'s bucket: that route consumes the
+# bucket on every attempt regardless of outcome, so an attacker flooding link
+# requests at a victim's address would lock the victim out of password login
+# with zero credentials. Kept separate, a flood only exhausts the victim's
+# magic-link allowance -- and each hit under the cap is one real email to that
+# address, which is why the default is low.
+
+
+def magic_link_rate_key(email: str, settings: Settings) -> str:
+    """Return the magic-link bucket key for a (normalised) email."""
+    return _email_bucket_key("magiclink", email, settings)
+
+
+async def enforce_magic_link_rate_limit(email: str, settings: Settings) -> None:
+    """Apply the magic-link guard for one request.
+
+    Call this with the SAME normalised email whether or not the account
+    exists -- applied uniformly it doubles as an existence-probe guard;
+    applied only on the match branch it would silently rate-limit real
+    accounts alone, which is itself an enumeration signal.
+    """
+    await enforce_rate_limit(
+        user_id=magic_link_rate_key(email, settings), role=_MAGIC_LINK_ROLE, settings=settings
+    )
+
+
 __all__ = [
     "RateLimiter",
     "RedisRateLimiter",
     "auth_login_rate_key",
     "client_rate_key",
     "enforce_auth_login_rate_limit",
+    "enforce_magic_link_rate_limit",
     "enforce_rate_limit",
     "get_limiter",
+    "magic_link_rate_key",
     "rate_limited_admin",
     "rate_limited_demo",
     "rate_limited_oauth_navigation",

@@ -97,16 +97,24 @@ export async function bootstrapAuth(): Promise<void> {
   }
 }
 
-export async function login(email: string, password: string): Promise<void> {
+/**
+ * Apply the identity an explicit user action is about to receive from the
+ * server. The token bump happens synchronously, BEFORE awaiting, so a
+ * bootstrap already in flight is stale relative to this action whichever
+ * order the two responses land in. Shared by login/register and (ADR-0004
+ * PR 14) ``lib/authActions.updatePassword``.
+ */
+export async function applyIdentityFrom(request: Promise<AuthUserResponse>): Promise<void> {
   latestIdentityToken++;
-  const user = await apiLogin({ email, password });
-  setState(stateFor(user));
+  setState(stateFor(await request));
 }
 
-export async function register(email: string, password: string): Promise<void> {
-  latestIdentityToken++;
-  const user = await apiRegister({ email, password });
-  setState(stateFor(user));
+export function login(email: string, password: string): Promise<void> {
+  return applyIdentityFrom(apiLogin({ email, password }));
+}
+
+export function register(email: string, password: string): Promise<void> {
+  return applyIdentityFrom(apiRegister({ email, password }));
 }
 
 export async function logout(): Promise<void> {

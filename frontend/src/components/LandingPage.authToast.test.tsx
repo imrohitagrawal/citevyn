@@ -57,6 +57,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       email: "claim@example.com",
       anonymous: false,
       providers: [],
+      has_password: true,
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -79,6 +80,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       email: "claim@example.com",
       anonymous: false,
       providers: [],
+      has_password: true,
     });
     const user = userEvent.setup();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
@@ -104,6 +106,47 @@ describe("OAuth return-trip toast (ADR-0004 PR 12)", () => {
     // @ts-expect-error -- a minimal stand-in is enough; only .search/.pathname/.hash are read
     window.location = { ...originalLocation, search, pathname: "/", hash };
   }
+
+  it("mounts the set-a-password nudge on ?auth=ok for a passwordless account (ADR-0004 PR 14)", async () => {
+    // RED if LandingPage stops mounting PasswordNudge on the auth=ok return
+    // trip, or if the nudge ignores has_password.
+    const { getCurrentUser } = await import("../lib/api");
+    const passwordless = {
+      request_id: "req_1",
+      user_id: "usr_ml",
+      email: "ml@example.com",
+      anonymous: false,
+      providers: [],
+      has_password: false,
+    };
+    vi.mocked(getCurrentUser).mockResolvedValue(passwordless);
+    __testOnly.setState({ status: "signed-in", user: passwordless });
+    setSearch("?auth=ok");
+
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    expect(await screen.findByText("Set a password as a backup way to sign in.")).toBeInTheDocument();
+  });
+
+  it("does not nudge an account that already has a password", async () => {
+    const { getCurrentUser } = await import("../lib/api");
+    const withPassword = {
+      request_id: "req_1",
+      user_id: "usr_pw",
+      email: "pw@example.com",
+      anonymous: false,
+      providers: [],
+      has_password: true,
+    };
+    vi.mocked(getCurrentUser).mockResolvedValue(withPassword);
+    __testOnly.setState({ status: "signed-in", user: withPassword });
+    setSearch("?auth=ok");
+
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(screen.queryByText("Set a password as a backup way to sign in.")).not.toBeInTheDocument();
+  });
 
   it("shows a welcome toast for ?auth=ok and strips the param", async () => {
     setSearch("?auth=ok");

@@ -38,10 +38,11 @@ import hashlib
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, Request, Response
-from sqlalchemy import update
+from sqlalchemy import delete, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -362,6 +363,32 @@ async def revoke_current_session(
     return principal_id
 
 
+async def revoke_other_sessions(
+    db: AsyncSession, *, user_id: str, keep_auth_session_id: uuid.UUID
+) -> int:
+    """Delete every live ``AuthSession`` for ``user_id`` except ``keep_auth_session_id``.
+
+    Used by ``POST /v1/auth/me/password`` (ADR-0004 PR 14): the account's
+    credential surface just changed, so every OTHER device is forced to
+    re-authenticate. Applied uniformly to a first-time set and a change --
+    the first-time case is exactly the moment a hijacked session could plant
+    a durable backdoor credential, the same shape as PR 13's stolen-cookie
+    finding -- and the caller's own session is kept so the user is not
+    logged out by their own action. Returns the number of rows deleted
+    (audit metadata). Flushes nothing itself; the caller commits.
+    """
+    result = cast(
+        CursorResult[Any],
+        await db.execute(
+            delete(AuthSession).where(
+                AuthSession.user_id == user_id,
+                AuthSession.auth_session_id != keep_auth_session_id,
+            )
+        ),
+    )
+    return int(result.rowcount or 0)
+
+
 async def resolve_principal(
     request: Request,
     response: Response,
@@ -400,6 +427,7 @@ __all__ = [
     "resolve_principal",
     "resolve_principal_by_auth_session_id",
     "revoke_current_session",
+    "revoke_other_sessions",
     "try_resolve_auth_session",
     "try_resolve_auth_session_id",
     "try_resolve_principal",

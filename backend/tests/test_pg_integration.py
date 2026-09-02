@@ -503,3 +503,50 @@ async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_po
         assert auth_session_id is not None
     finally:
         await engine.dispose()
+
+
+def test_magic_link_tokens_cascade_on_user_delete_on_postgres(
+    alembic_pg_config: AlembicConfig, pg_schema: str
+) -> None:
+    """ADR-0004 PR 14, on the engine that actually enforces the FK (#286):
+    deleting a user takes its pending sign-in links with it, and the
+    downgrade drops the table cleanly. RED if 0012 writes ``RESTRICT`` (the
+    delete raises) or if the downgrade leaves the table behind.
+    """
+    alembic_upgrade(alembic_pg_config, "head")
+    engine = create_engine(_pg_url_with_schema(pg_schema))
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (user_id, role, created_at, email, password_hash) "
+                    "VALUES ('usr_ml', 'demo_user', now(), 'ml@example.com', NULL)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO magic_link_tokens "
+                    "(token_id, secret_hash, user_id, created_at, expires_at) "
+                    "VALUES (gen_random_uuid(), 'h', 'usr_ml', now(), now())"
+                )
+            )
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM users WHERE user_id = 'usr_ml'"))
+        with engine.connect() as conn:
+            remaining = conn.execute(
+                text("SELECT count(*) FROM magic_link_tokens WHERE user_id = 'usr_ml'")
+            ).scalar_one()
+        assert remaining == 0
+
+        alembic_downgrade(alembic_pg_config, "0011")
+        with engine.connect() as conn:
+            present = conn.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema = :schema AND table_name = 'magic_link_tokens'"
+                ),
+                {"schema": pg_schema},
+            ).scalar_one()
+        assert present == 0
+    finally:
+        engine.dispose()

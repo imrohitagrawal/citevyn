@@ -29,6 +29,9 @@ export function useAuth() {
   const signIn = useCallback((email: string, password: string) => login(email, password), []);
   const signUp = useCallback((email: string, password: string) => register(email, password), []);
   const signOut = useCallback(() => logout(), []);
+  // ADR-0004 PR 14's magic-link / set-password actions are deliberately NOT
+  // exposed here: this hook is in the eager bundle, and their only caller
+  // (the lazy AuthModal) imports them straight from authStore / api.
 
   return {
     status: state.status,
