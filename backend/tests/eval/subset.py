@@ -3,7 +3,7 @@
 The judged half of the eval harness is the project's single largest recurring
 spend line: every case drives one real orchestrator answer (plus, for a
 ``followup`` case, one answer per replayed history turn) and then
-``CITEVYN_EVAL_JUDGE_PANEL + 1`` judge calls. Across the 58-case golden set that
+``CITEVYN_EVAL_JUDGE_PANEL + 1`` judge calls. Across the 60-case golden set that
 is ~200 paid model calls **per CI run**, and the judged job runs on every pull
 request. With zero users, CI *is* the spend.
 

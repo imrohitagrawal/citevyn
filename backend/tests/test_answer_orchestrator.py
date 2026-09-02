@@ -1354,11 +1354,21 @@ async def test_codex_maintainers_question_still_routes_to_codex(session: Any) ->
 
 
 async def test_self_reference_does_not_inherit_the_prior_turn_topic(session: Any) -> None:
-    """Ordering guard: the rewrite runs BEFORE conversation memory.
+    """A mid-session self-referential question is still about CiteVyn.
 
-    Asked mid-session, "who are you?" must still be about CiteVyn — not concatenated
-    with the previous product question. Moving the call site below
-    ``build_contextual_query`` is what this catches.
+    What this DOES catch (mutation-confirmed): any change that lets the memory
+    step clobber the rewrite — e.g. passing the raw ``question`` to
+    ``build_contextual_query`` instead of the rewritten one, which drops the
+    rewrite entirely and sends "who are you?" to retrieval verbatim.
+
+    What it does NOT catch, stated honestly because a review found the original
+    claim here overstated: merely MOVING the call site below
+    ``build_contextual_query`` leaves this green. No phrasing on the closed list
+    contains an anaphor or an elliptical opener, so ``is_anaphoric_followup`` is
+    False for every one of them and the memory rewrite is already a no-op on
+    them today. The before-memory ordering is therefore DEFENSIVE — it is what
+    keeps the property true if a future phrasing ("what is this?", "how about
+    you?") ever does carry an anaphor — not a property this test can prove.
     """
     await _seed_index_version(session)
     retriever = _FakeRetriever(_evidence(count=2))

@@ -543,6 +543,33 @@ def test_frontend_offline_mirror_agrees_on_the_shared_corpus(
         ("Who are you", "What is CiteVyn?"),
         ("WHO ARE YOU?!", "What is CiteVyn?"),
         ("who're you?", "What is CiteVyn?"),
+        # Every remaining alternative of the regex, so none is reachable-but-unasserted:
+        # deleting any one of them must turn a case below red (review finding).
+        ("who re you", "What is CiteVyn?"),  # the \\s+ branch of who(?:\\s+|')re
+        ("who am i chatting with", "What is CiteVyn?"),  # the "chatting" branch
+        ("who am i talking with?", "What is CiteVyn?"),
+        ("who am i speaking to?", "What is CiteVyn?"),
+        ("what can you help with?", "What can CiteVyn do?"),  # optional "me"
+        ("what topic do you cover?", "What does CiteVyn cover?"),  # singular topics?
+        ("what source do you use?", "What does CiteVyn cover?"),  # singular sources?
+        # Dictation and phone keyboards emit a curly apostrophe; the owner dictates,
+        # so this is the COMMON spelling, not an exotic one.
+        ("what\u2019s your name?", "What is CiteVyn?"),
+        ("who\u2019re you", "What is CiteVyn?"),
+        ("what\u02bcs your name", "What is CiteVyn?"),
+        # A closed set of discourse openers. Without these #300's own symptom survives
+        # for the commonest natural phrasing: "hey, who are you?" is NOT a bare greeting
+        # (_GREETING_RE requires the message to end after the greeting), so before this
+        # it fell straight through to the refusal the issue was filed about.
+        ("hey, who are you?", "What is CiteVyn?"),
+        ("hi, what can you do?", "What can CiteVyn do?"),
+        ("so what do you cover?", "What does CiteVyn cover?"),
+        ("ok what are you?", "What is CiteVyn?"),
+        ("well, help", "What can CiteVyn do?"),
+        # Trailing punctuation the single-character-class tail accepts.
+        ("who are you,", "What is CiteVyn?"),
+        ("who are you...", "What is CiteVyn?"),
+        ("what can you do?!", "What can CiteVyn do?"),
         ("what are you?", "What is CiteVyn?"),
         ("who am I talking to?", "What is CiteVyn?"),
         ("who am i speaking with", "What is CiteVyn?"),
@@ -600,6 +627,10 @@ def test_self_reference_is_rewritten_to_the_citevyn_question_it_means(
         ("", "empty input"),
         ("   ", "whitespace-only input"),
         ("what is Claude Code?", "an ordinary product question"),
+        ("so what is Claude Code?", "an opener must not smuggle a product question through"),
+        ("hey, what can you do with the Gemini API?", "opener + listed phrase + product tail"),
+        ("hello, who are the Codex maintainers?", "opener does not weaken the end anchor"),
+        ("hey there, help me install codex", "opener + help as a verb with an object"),
         ("selfhelp", "'help' only as a substring, not the whole message"),
         ("help help", "not a listed phrasing"),
     ],
@@ -644,3 +675,57 @@ def test_self_reference_negative_matches_the_codex_maintainers_case_end_to_end()
     """The issue's explicit negative keeps its ``codex`` routing through the rewrite."""
     question = "who are the Codex maintainers?"
     assert classify_domain(canonicalize_self_reference(question)) is Domain.codex
+
+
+def test_self_reference_tail_does_not_backtrack_quadratically() -> None:
+    """The anchor tail must stay a single character class, not nested quantifiers.
+
+    The first version spelled it ``\\s*[?.!]*\\s*$`` — two ``\\s*`` around a
+    quantifier that can match empty. A listed phrasing followed by a long
+    whitespace run that cannot satisfy ``$`` makes the engine re-split the run
+    O(n) ways and rescan O(n) each time: 63 ms of BLOCKED EVENT LOOP for one
+    4000-char message (the API's own cap, ``AnswerRequest.message``) against
+    ~0.5 us for a real question. ``canonicalize_self_reference`` runs
+    synchronously inside ``Orchestrator.ask`` before any await, so that stalls
+    every other in-flight request on the machine, not just the sender's.
+
+    Asserted as a RATIO against the same input at half the length rather than a
+    wall-clock budget, so the test is not flaky on a loaded or slow machine:
+    linear scaling doubles (~2x), the quadratic shape quadruples (~4x). The
+    threshold sits between them. Restoring ``\\s*[?.!]*\\s*$`` turns this red.
+    """
+    import time
+
+    def elapsed(n: int) -> float:
+        # A listed phrasing, then a whitespace run, then a character that makes
+        # the ``$`` anchor fail — the worst case for a backtracking tail.
+        probe = "what can you help me with" + " " * n + "x"
+        best = float("inf")
+        for _ in range(5):  # best-of-5 damps scheduler noise
+            start = time.perf_counter()
+            canonicalize_self_reference(probe)
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    small = elapsed(2000)
+    large = elapsed(4000)
+    # Guard against a divide-by-zero on a machine fast enough to floor `small`.
+    assert large / max(small, 1e-9) < 3.0, (
+        f"self-reference tail scales super-linearly ({small:.6f}s -> {large:.6f}s); "
+        "the tail must be ONE character class, e.g. [\\s,.!?]*$"
+    )
+
+
+def test_self_reference_opener_cannot_smuggle_a_product_question() -> None:
+    """The discourse opener widens the START of the match, never the END.
+
+    Adding an opener is only safe because the message stays anchored at both
+    ends. If the end anchor were ever dropped, "hey, what can you do with the
+    Gemini API?" would be rewritten to a CiteVyn question and answered from the
+    wrong source — a confidently-wrong, confidently-cited answer, the exact
+    failure mode the #84 alias work spent three rounds avoiding.
+    """
+    for opener in ("hi", "hey", "hello", "ok", "okay", "so", "well", "um"):
+        hijacked = f"{opener}, what can you do with the Gemini API?"
+        assert canonicalize_self_reference(hijacked) == hijacked
+        assert classify_domain(canonicalize_self_reference(hijacked)) is Domain.gemini_api

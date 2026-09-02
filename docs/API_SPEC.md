@@ -552,7 +552,7 @@ such phrasings to the CiteVyn question each one means, before routing:
 | Phrasing (whole message) | Rewritten to |
 |---|---|
 | "who are you", "what are you", "what's your name", "tell me about yourself", … | `What is CiteVyn?` |
-| "what can you do", "what do you do", "how can you help", "help" | `What can CiteVyn do?` |
+| "what can you do", "what do you do", "what are you for", "how can you help", "help", … | `What can CiteVyn do?` |
 | "what do you know", "what do you cover", "what can I ask you", … | `What does CiteVyn cover?` |
 
 The response is then an ordinary grounded, cited answer with `domain:
@@ -561,12 +561,16 @@ value on the wire.
 
 Two properties are load-bearing and tested:
 
-* **Whole-message anchoring.** Only trailing whitespace and punctuation may
-  follow the phrase. A listed phrasing carrying a substantive tail is a real
-  product question and keeps its own routing — "who are the Codex maintainers?"
-  stays `codex`, "what can you do with the Gemini API?" stays `gemini_api`.
+* **Whole-message anchoring.** The phrase may be preceded only by a closed set
+  of discourse openers (`hi`, `hey`, `hello`, `ok`, `okay`, `so`, `well`, `um`)
+  and followed only by whitespace and sentence punctuation (`, . ! ?`). A listed
+  phrasing carrying a substantive tail is a real product question and keeps its
+  own routing — "who are the Codex maintainers?" stays `codex`, and
+  "hey, what can you do with the Gemini API?" stays `gemini_api`. Apostrophes in
+  `what's` / `who're` match the straight, curly and modifier forms alike, because
+  dictation and phone keyboards emit the curly one.
 * **The user's utterance is not rewritten.** The rewrite applies to the
-  retrieval/generation query only; `GET /v1/sessions/{id}/messages` still
+  retrieval/generation query only; `GET /v1/sessions/{session_id}` still
   replays exactly what the user typed.
 
 The rewrite runs **before** conversation memory, so a self-referential question

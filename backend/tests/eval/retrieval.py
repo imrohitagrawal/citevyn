@@ -438,10 +438,18 @@ async def _retrieve_sources(
     single-turn query (the permanent raw-miss control).
     """
     # Mirror the orchestrator's self-reference canonicalization (#300), in the SAME
-    # position: BEFORE the memory rewrite. Omitting it here would make the eval measure
-    # a DIFFERENT system than production — the self-referential cases would score raw
-    # "who are you?" retrieval and the gate would stay green if ``ask`` dropped the
-    # rewrite. Keep this in step with ``Orchestrator.ask``.
+    # position: BEFORE the memory rewrite. Two separate points, kept separate because
+    # an earlier draft of this comment ran them together and said something false:
+    #
+    # 1. Omitting this line makes the eval measure a DIFFERENT system than production:
+    #    the self-referential cases would score raw "who are you?" retrieval, which
+    #    retrieves nothing, so the gate goes RED (verified — literal hit-rate 0.938).
+    # 2. Separately, this harness RE-IMPLEMENTS the query pipeline rather than calling
+    #    ``Orchestrator.ask``, so the gate can NEVER by itself catch ``ask`` dropping
+    #    the rewrite — its own copy would keep passing. The orchestrator wiring tests
+    #    in test_answer_orchestrator.py are what cover that.
+    #
+    # Keep this in step with ``Orchestrator.ask``.
     query = canonicalize_self_reference(case.question)
     if use_memory and case.history and settings.conversation_memory:
         session_id = await _seed_followup_history(session, case)

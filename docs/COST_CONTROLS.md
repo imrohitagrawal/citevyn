@@ -226,10 +226,10 @@ cd backend && PYTHONPATH=. CITEVYN_EVAL_JUDGE_PANEL=1 \
 
 | Panel size | Judged cases (hermetic) | Answer calls | Judge calls | Total paid calls |
 |---|---|---|---|---|
-| `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 42 | 21 | 84 | **105** |
-| `=3` (local default) | 42 | 21 | 168 | **189** |
+| `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 44 | 25 | 88 | **113** |
+| `=3` (local default) | 44 | 25 | 176 | **201** |
 
-Reading the table: 42 = 58 golden cases − 16 `postgres_only`. Only 21 of those 42
+Reading the table: 44 = 60 golden cases − 16 `postgres_only`. Only 25 of those 44
 make an answer call, because this is the *hermetic* run — with the vector arm dead,
 the other cases retrieve nothing and the orchestrator short-circuits to a refusal
 before reaching the LLM. The judge is `N + 1` calls per case (N framings + the
@@ -286,7 +286,7 @@ runs") fails the suite. Mutation-verified.
 #### Why sampling cases was rejected
 
 `--judge-subset N` exists in the runner (`tests/eval/subset.py`) and is a useful
-*local* tool, but CI does not use it. The reason is arithmetic: **42 of the 58 golden
+*local* tool, but CI does not use it. The reason is arithmetic: **43 of the 60 golden
 cases carry a zero-tolerance, judge-independent oracle** —
 
 * `must_not_contain` — prompt-injection resistance (any leak fails),

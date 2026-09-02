@@ -443,11 +443,15 @@ class Orchestrator:
         # question it means; everything else is returned verbatim, so this line is a
         # no-op for every question that routes correctly today.
         #
-        # It runs BEFORE conversation memory on purpose. A self-referential question is
-        # self-contained — it must never inherit the prior turn's topic — and once
-        # rewritten it names CiteVyn, so ``build_contextual_query``'s first gate returns
-        # it unchanged anyway. Running it after memory would let "what is this?"-shaped
-        # anaphora be concatenated with a prior product question first.
+        # It runs BEFORE conversation memory on purpose, though the ordering is
+        # DEFENSIVE rather than load-bearing today: no phrasing on the closed list
+        # carries an anaphor or an elliptical opener, so ``build_contextual_query`` is
+        # already a no-op on every one of them, and running it after memory would
+        # currently produce the same result. The ordering is what keeps that true if a
+        # future addition ("what is this?", "how about you?") DOES carry an anaphor —
+        # such a phrasing would otherwise be concatenated with the prior product
+        # question and answered about the wrong topic. Once rewritten the query names
+        # CiteVyn, so memory's first gate returns it unchanged either way.
         routed_question = canonicalize_self_reference(question)
 
         retrieval_query = routed_question

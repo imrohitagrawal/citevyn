@@ -267,25 +267,44 @@ def canonicalize_product_name(question: str) -> str:
 # The end anchor is load-bearing. "what do you know about the Claude API rate
 # limits?" opens with a listed phrasing but carries a substantive tail, so it
 # must NOT be rewritten (it already routes to ``claude_api`` correctly). Only
-# trailing whitespace and punctuation may follow the phrase, which is the same
-# rule ``_GREETING_RE`` uses for a bare greeting and for the same reason: a
-# prefix match would swallow real questions. In particular the issue's named
-# negative, "who are the Codex maintainers?", fails the anchor and keeps its
-# ``codex`` routing.
+# whitespace and sentence-final punctuation may follow the phrase -- the tail is
+# the character class ``[\s,.!?]*``, byte-for-byte the one ``_GREETING_RE`` uses
+# for a bare greeting, for the same reason (a prefix match would swallow real
+# questions) and in the same SHAPE. The shape matters independently: the first
+# version of this pattern spelled the tail ``\s*[?.!]*\s*$``, two ``\s*`` around
+# a quantifier that can match empty, which backtracks QUADRATICALLY -- 63 ms of
+# blocked event loop for one 4000-char message (the API's cap) against ~0.5 us
+# for a real question. A single character class cannot backtrack at all.
+# In particular the issue's named negative, "who are the Codex maintainers?",
+# fails the anchor and keeps its ``codex`` routing.
 #
 # Each phrasing maps to the canonical CiteVyn question that best matches the
 # section of the About-CiteVyn source it is really asking for. Retrieval AND
 # generation both see the canonical form, so the answer reads as an answer to
 # the question rather than to a fragment; the ORIGINAL utterance is still what
 # gets persisted as the user's message, so the transcript shows what they typed.
+# Dictation and mobile keyboards emit a CURLY apostrophe (U+2019), and some
+# transcribers a modifier letter apostrophe (U+02BC). "what’s your name" must
+# behave exactly like "what's your name" — this project exists because the owner
+# dictates questions, so the smart-quote form is the COMMON case, not the exotic one.
+_APOS = r"['\u2019\u02bc]"
+
+# An optional, closed set of discourse openers. Without it #300's own symptom
+# survives for the commonest natural phrasings — "hey, who are you?" is not a bare
+# greeting (``_GREETING_RE`` requires the message to END after the greeting), so it
+# fell through to the refusal the issue was filed about. Each opener must be followed
+# by whitespace or a comma, and the whole message is still anchored at both ends, so
+# "so what can you do with the Gemini API?" keeps its ``gemini_api`` routing.
+_SELF_REFERENCE_OPENER = r"(?:(?:hi|hey|hello|ok|okay|so|well|um)\b[\s,]+)?"
+
 _SELF_REFERENCE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (
         (
             r"who\s+are\s+you",
-            r"who(?:\s+|')re\s+you",
+            r"who(?:\s+|" + _APOS + r")re\s+you",
             r"what\s+are\s+you",
             r"who\s+am\s+i\s+(?:talking|speaking|chatting)\s+(?:to|with)",
-            r"what(?:'s|\s+is)\s+your\s+name",
+            r"what(?:" + _APOS + r"s|\s+is)\s+your\s+name",
             r"tell\s+me\s+about\s+yourself",
             r"introduce\s+yourself",
         ),
@@ -316,7 +335,13 @@ _SELF_REFERENCE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 _SELF_REFERENCE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
-    (re.compile(r"^\s*(?:" + "|".join(phrasings) + r")\s*[?.!]*\s*$", re.IGNORECASE), canonical)
+    (
+        re.compile(
+            r"^\s*" + _SELF_REFERENCE_OPENER + r"(?:" + "|".join(phrasings) + r")[\s,.!?]*$",
+            re.IGNORECASE,
+        ),
+        canonical,
+    )
     for phrasings, canonical in _SELF_REFERENCE_RULES
 )
 
