@@ -129,6 +129,7 @@ jobs:
           test "$ci_total" -eq "$((all_total - all_visual))" || {
             echo "::error::CI selects $ci_total but the default suite minus its $all_visual visual tests is $((all_total - all_visual)) — the exclusion is dropping something else too";
             exit 1; }
+          echo "CI_TOTAL=$ci_total" >> "$GITHUB_ENV"
       # `--reporter` REPLACES the config's reporters rather than adding to them
       # (playwright/lib/runner/index.js: `result.reporter = [...configOverrides.reporter]`),
       # so `html` MUST be listed here or the upload step below silently collects
@@ -141,7 +142,7 @@ jobs:
       # mode this whole issue is about. `--list` counts SKIPPED tests, and
       # Playwright exits 0 when every test skips -- so a `test.skip(true, ...)` at
       # the top of a few spec files leaves the selection guard reading 124 while
-      # the run executes nothing and reports green. Not hypothetical here: four
+      # the run executes nothing and reports green. Not hypothetical here: three
       # tests already self-skip in demo mode (`if (!isLive)`).
       #
       # So assert EXECUTION, from the run's own JSON stats, not selection.
@@ -153,12 +154,26 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, sys
+          import json, os, sys
           stats = json.load(open("/tmp/demo-results.json"))["stats"]
-          print("stats:", stats)
-          if stats["expected"] < 100:
-              print(f"::error::only {stats['expected']} tests actually PASSED "
-                    f"({stats['skipped']} skipped) — the suite ran but asserted almost nothing")
+          selected = int(os.environ["CI_TOTAL"])
+          print("stats:", stats, "selected:", selected)
+          # Account for EVERY selected test. `expected >= N` was still a magic
+          # number one step down: with N=100 and 124 selected, 21 tests could be
+          # turned into `test.skip` and the job would stay green -- this issue's
+          # thesis verbatim. `--list` cannot see it either, because it COUNTS
+          # skipped tests. A full account has no threshold to rot.
+          if stats["expected"] + stats["skipped"] + stats["unexpected"] + stats["flaky"] != selected:
+              print(f"::error::selected {selected} tests but the run accounts for "
+                    f"{stats['expected']}+{stats['skipped']}+{stats['unexpected']}+{stats['flaky']}")
+              sys.exit(1)
+          # Exactly three tests self-skip in demo mode -- the `if (!isLive)` guards in
+          # behavior.spec.ts:466 and answer-format.spec.ts:61,158. Pinning the number
+          # means a NEW skip has to be justified here rather than quietly reducing
+          # what this job asserts.
+          if stats["skipped"] != 3:
+              print(f"::error::{stats['skipped']} skipped, expected exactly 3 "
+                    f"(the `if (!isLive)` guards) — a new skip silently shrinks this job")
               sys.exit(1)
           if stats["unexpected"]:
               print(f"::error::{stats['unexpected']} unexpected failures")
@@ -177,3 +192,7 @@ jobs:
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
+          # The dead-artifact bug went unnoticed precisely because the default here
+          # is `warn`. Fail instead: a debugging artifact that collects nothing is
+          # worth knowing about on the first run, not the tenth.
+          if-no-files-found: error

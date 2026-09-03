@@ -71,6 +71,10 @@ export function ChatView({
   // below). It blocks only the RE-ARMING of the latch, never its disarming, so a
   // reader who scrolls away mid-flash still takes control.
   const highlightHoldRef = useRef(false);
+  // The scroll position WE last pinned to, so the passive effect below can tell
+  // "the content grew under a reader who is still at the bottom" from "the reader
+  // moved the list". `null` until the first pin.
+  const lastPinnedTopRef = useRef<number | null>(null);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -114,9 +118,41 @@ export function ChatView({
   useEffect(() => {
     const list = chatListRef.current;
     if (!list) return;
-    if (stickRef.current) {
-      list.scrollTop = list.scrollHeight;
+    if (!stickRef.current) return;
+    // The latch is disarmed by the SCROLL EVENT, and the browser dispatches that
+    // event asynchronously. If a streamed chunk commits in the window between the
+    // reader's scroll and its event, the latch is still armed here -- so pinning
+    // would erase the scroll, and the event would then read "at bottom" (because
+    // the pin just put it there) and RE-ARM. The reader's scroll vanishes without
+    // a trace. That is a real defect, not a test artifact: it failed the demo
+    // Playwright suite on the first CI run that ever executed it (#311), with
+    // distanceFromBottom 0 where 40 was expected.
+    //
+    // So do not trust the latch alone -- check the DOM. If the list is not where
+    // WE last left it, someone else moved it, and that is authoritative and
+    // synchronous. Content growing below does NOT move scrollTop, so an actual
+    // reader-at-the-bottom still follows the stream.
+    // A plain `scrollTop !== pinned` comparison is WRONG, and measuring in a real
+    // browser is what showed it: when streamed content SHRINKS (a pending bubble
+    // replaced by the settled one -- observed scrollHeight 492 -> 462), the browser
+    // clamps scrollTop down on its own (30 -> 0). That is not the reader moving the
+    // list, and treating it as such disarmed the latch mid-stream and broke
+    // stick-to-bottom outright.
+    //
+    // Clamping only ever lowers scrollTop TO the new maximum, so the two are
+    // separable: anything at or above `min(pinned, maxTop)` is either untouched or
+    // clamped, while a reader scrolling up lands strictly below it.
+    const pinned = lastPinnedTopRef.current;
+    const maxTop = list.scrollHeight - list.clientHeight;
+    if (pinned !== null && list.scrollTop < Math.min(pinned, maxTop) - 1) {
+      stickRef.current = false;
+      return;
     }
+    list.scrollTop = list.scrollHeight;
+    // Read BACK rather than reusing scrollHeight: the browser clamps to
+    // scrollHeight - clientHeight, and comparing against the unclamped value
+    // would make every subsequent chunk look like a reader scroll.
+    lastPinnedTopRef.current = list.scrollTop;
   }, [messages]);
 
   // An EXPLICIT send always brings the new question into view, even from a scrolled-up

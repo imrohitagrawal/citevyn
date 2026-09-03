@@ -136,7 +136,13 @@ beforeEach(() => {
     },
     set(this: Element, v: number) {
       if (this.id === "chat-list") ops.push(`scrollTop=${v}`);
-      (this as unknown as { __st?: number }).__st = v;
+      // Clamp on WRITE and record the clamped value, exactly as a browser does:
+      // `scrollTop = scrollHeight` lands at `scrollHeight - clientHeight`. `ops`
+      // still records the value as ASSIGNED, so existing expectations of
+      // "scrollTop=5000" (the intent) are unchanged. Without this the read-back
+      // is unrealistic and the pin effect's own bookkeeping cannot be tested.
+      const max = Math.max(0, this.scrollHeight - this.clientHeight);
+      (this as unknown as { __st?: number }).__st = Math.min(Math.max(0, v), max);
     },
   });
   restoreScrollTop = () => {
@@ -451,5 +457,53 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
   it("focuses the composer on mount so the chat is ready to type", () => {
     renderChat();
     expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about Claude/i));
+  });
+
+  // Found by the demo Playwright suite the FIRST time it ever ran in CI (#311),
+  // which is the entire argument for having that job. On a slow runner it failed
+  // with distanceFromBottom === 0: the reader's 40px scroll-up was silently undone.
+  //
+  // The disarm lives in the `scroll` EVENT listener, and the browser dispatches
+  // that event asynchronously. If a streamed chunk commits in the window between
+  // the scroll and its event, the passive `[messages]` effect still sees an armed
+  // latch and pins to the bottom -- and then the scroll event arrives, reads "at
+  // bottom" (because the pin just put it there) and RE-ARMS. The reader's scroll
+  // is erased with no trace, which is exactly the #122 behaviour that latch exists
+  // to provide.
+  //
+  // This test reproduces that ordering deterministically: move the list WITHOUT
+  // dispatching a scroll event, then deliver a chunk. It fails on the pre-fix code
+  // with `scrollTop=5000`.
+  it("does not pin to the bottom when the reader has scrolled away but the scroll event has not fired yet", () => {
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat();
+    const list = document.getElementById("chat-list") as unknown as { __st?: number };
+    // Arm the latch the way arriving at the bottom does (5000 - 400 = 4600 -> distance 0).
+    list.__st = 4600;
+    document.getElementById("chat-list")!.dispatchEvent(new Event("scroll"));
+    ops.length = 0;
+
+    // The reader scrolls up 40px. The position changes; the EVENT has not run yet.
+    list.__st = 4560;
+
+    // A streamed chunk lands in that window.
+    rerender(chat({ messages: [...MESSAGES] }));
+
+    expect(ops.filter((o) => o.startsWith("scrollTop="))).toEqual([]);
+  });
+
+  it("still follows the stream while the reader IS at the bottom", () => {
+    // Partner for the test above: proves the fix did not simply disable
+    // stick-to-bottom, which would make that assertion pass vacuously.
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat();
+    const list = document.getElementById("chat-list") as unknown as { __st?: number };
+    list.__st = 4600;
+    document.getElementById("chat-list")!.dispatchEvent(new Event("scroll"));
+    ops.length = 0;
+
+    rerender(chat({ messages: [...MESSAGES] }));
+
+    expect(ops).toContain("scrollTop=5000");
   });
 });
