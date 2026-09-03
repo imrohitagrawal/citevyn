@@ -708,6 +708,26 @@ describe("useLandingState — landing hands over to the chat (#302)", () => {
     await settle();
   });
 
+  it("never carries over an existing chat draft", async () => {
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "half-written chat question" },
+      } as React.ChangeEvent<HTMLInputElement>);
+      result.current.onHeroInput({
+        target: { value: "hero text" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+    act(() => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    // The draft survives, and the hero text is left where it was rather than
+    // silently thrown away.
+    expect(result.current.state.chatInput).toBe("half-written chat question");
+    expect(result.current.state.heroInput).toBe("hero text");
+    await settle();
+  });
+
   it("a hero SUBMIT carries nothing across — its text became the question", async () => {
     const { result } = renderHook(() => useLandingState());
     act(() => {

@@ -756,7 +756,12 @@ export function useLandingState() {
       // detected here: ``askHero`` dispatches the clear and calls straight in, so
       // this callback still closes over the pre-clear ``state.heroInput`` and
       // would copy the question the user just asked back into the composer.
-      const carried = opts?.carryHeroText === false ? "" : state.heroInput.trim();
+      // Never at the cost of an existing draft: the reader could have typed in the
+      // chat composer, gone back to the landing page via a nav link (which does not
+      // clear the hero box), typed there too, and come back. Carrying then would
+      // silently destroy the chat draft, so the hero text stays put instead.
+      const carried =
+        opts?.carryHeroText === false || state.chatInput ? "" : state.heroInput.trim();
       if (carried) {
         dispatch({ type: "SET_CHAT_INPUT", value: state.heroInput });
         dispatch({ type: "SET_HERO_INPUT", value: "" });
@@ -765,7 +770,7 @@ export function useLandingState() {
         setTimeout(() => send(q), 60);
       }
     },
-    [send, state.heroInput],
+    [send, state.heroInput, state.chatInput],
   );
 
   /**
