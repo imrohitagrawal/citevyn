@@ -24,6 +24,13 @@ dev = [
     "fakeredis[lua]>=2.37.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24.0",
+    # MEASUREMENT, not a gate (#308). Coverage tells you which lines no test even
+    # EXECUTES — a strictly weaker signal than mutation testing, and this repo has
+    # the scar to prove it: a line in `promotion_eval.py` measured 97% covered AND
+    # was executed by the suite, yet deleting it left all 42 promotion tests green.
+    # Where the two disagree, mutation wins. See `make coverage` and #308 for the
+    # conditions under which this would become blocking.
+    "pytest-cov>=6.0.0",
     # Declared for tests/test_ci_workflow_conditions.py, which parses the GitHub
     # workflow YAML. It was already installed transitively via uvicorn[standard];
     # naming it here means a future uvicorn extras change cannot silently break

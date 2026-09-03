@@ -347,6 +347,7 @@ stack answers; there is no second hand-written catalog to keep in sync
 ```bash
 make demo          # one-shot stack bring-up
 make test          # backend suite, no DB needed
+make coverage      # same suite + a line-coverage report (measurement, NOT a gate)
 make smoke         # compose stack up, assert /health, tear down
 make verify        # lint + typecheck + test (the pre-merge gate)
 make db-down       # tear down the stack (keeps volumes)

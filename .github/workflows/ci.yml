@@ -75,7 +75,32 @@ jobs:
         # Default run skips the `postgres` integration tests because
         # CITEVYN_PG_TEST_URL is unset. The `postgres` marker is
         # opt-in and gated by an env var, so this is hermetic.
-        run: uv run pytest -m "not postgres" -v
+        #
+        # Coverage is measured here rather than in a separate job so the number
+        # describes the suite that actually gates merges — a second invocation
+        # would measure a different program. It is a REPORT: there is deliberately
+        # NO `--cov-fail-under`, so coverage can never fail this job (#308).
+        run: >-
+          uv run pytest -m "not postgres" -v
+          --cov=app --cov-report=term-missing:skip-covered
+          --cov-report=xml:artifacts/coverage.xml
+      # WHAT WOULD MAKE THIS BLOCKING, stated here rather than left to drift
+      # (AGENTS.md: "a gate shipped advisory states, in the same commit, what
+      # makes it blocking"):
+      #   * only once a baseline is recorded and stable across THREE consecutive
+      #     `main` runs, and
+      #   * then as "no DECREASE against that baseline" — never an absolute floor.
+      # An absolute target invites tests written to raise a number rather than to
+      # catch a defect, which is precisely the failure #308 was filed over: a line
+      # in promotion_eval.py measured 97% covered, was executed by the suite, and
+      # still left all 42 promotion tests green when deleted.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-coverage
+          path: backend/artifacts/coverage.xml
+          retention-days: 14
 
   postgres-migrations:
     name: alembic + postgres integration tests
