@@ -563,13 +563,35 @@ test.describe("Chat", () => {
     await input.fill("Which Claude models are available in the API?");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".typing-cursor", { timeout: 5000 });
+    // Wait for the list to actually be scrollable by more than the amount we are about
+    // to scroll. `.typing-cursor` appears the instant streaming STARTS, when only a few
+    // words have rendered — on a fast machine the list already overflows by ~174px, but
+    // on a slow CI runner it can be under 40px, so `scrollBy(-40)` clamps short and the
+    // final distance lands below the 20px threshold. That is a race in the TEST, not a
+    // regression in the app, and it made this spec flaky on the first CI run that ever
+    // executed it (#311). Waiting on the precondition removes the timing dependence
+    // without weakening anything: on buggy code the list still gets re-pinned to the
+    // bottom and `distanceFromBottom` still collapses to ~0.
+    await page.waitForFunction(
+      () => {
+        const l = document.getElementById("chat-list");
+        return !!l && l.scrollHeight - l.clientHeight > 100;
+      },
+      { timeout: 5000 },
+    );
     // Scroll up a SMALL amount — well inside the old 120px slack band — so the old
     // slack-band autoscroll would reliably re-pin on the next chunk, while the new 8px
     // latch reliably disarms and holds. (A larger scroll could clear the old band on its
     // own and pass even on the buggy code.)
-    await page.evaluate(() => {
-      document.getElementById("chat-list")!.scrollBy(0, -40);
+    const scrolled = await page.evaluate(() => {
+      const l = document.getElementById("chat-list")!;
+      const before = l.scrollTop;
+      l.scrollBy(0, -40);
+      return before - l.scrollTop;
     });
+    // Partner assertion: if the scroll were a no-op the test could only fail for the
+    // wrong reason, so pin that it actually moved the full amount.
+    expect(scrolled).toBe(40);
     // Over the next ~700ms of streaming, the view must NOT be yanked back to the bottom
     // (content grows below the held viewport, so the distance only ever increases).
     await page.waitForTimeout(700);

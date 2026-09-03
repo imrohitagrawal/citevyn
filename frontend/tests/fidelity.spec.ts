@@ -329,9 +329,16 @@ for (const theme of THEMES) {
       // an interpolated value that matches neither token.
       const borderColor = async () =>
         box.evaluate((el) => getComputedStyle(el).borderColor);
-      expect(await page.evaluate(() => document.activeElement?.className)).toContain("chat-input");
+      await expect
+        .poll(() => page.evaluate(() => document.activeElement?.className ?? ""))
+        .toContain("chat-input");
       await expect.poll(borderColor).toBe(T.ink);
-      await page.locator(".chat-header").click(); // move focus off the composer
+      // Blur directly rather than clicking `.chat-header` dead space. Playwright's
+      // hit-target check accepts a DESCENDANT, so at a narrower viewport — where
+      // `.back-button` and `.demo-badge` meet in the middle — that click would
+      // dispatch to the back button and navigate away, and the assertion below
+      // would then be measuring the landing page. This is geometry-independent.
+      await page.locator(".chat-input").evaluate((el: HTMLElement) => el.blur());
       await expect.poll(borderColor).toBe(T.border2);
 
       // Input fills the box (not squished by an inline hint) and its placeholder is themed & visible.

@@ -283,9 +283,9 @@ smoke: ## End-to-end smoke (db-up + migrate + seed + uvicorn + curl + stop)
 	bash scripts/smoke.sh
 
 e2e: ## End-to-end test (chat UI happy-path: render + ask + citation)
-	@echo "e2e: running the chat-UI smoke (curl-based) since the Playwright harness"
-	@echo "e2e: lands in Slice 11. The smoke here is: API healthy + 1 grounded ask."
-	@echo "e2e: To upgrade to Playwright, see docs/adr/0004-frontend-ci.md."
+	@echo "e2e: this is the curl-based chat-UI smoke: API healthy + 1 grounded ask."
+	@echo "e2e: The Playwright suites are SEPARATE and run in CI (see .github/workflows/"
+	@echo "e2e: frontend.yml and frontend-live-e2e.yml); locally: cd frontend && npm run test:ui."
 	bash scripts/smoke.sh
 
 clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + coverage + smoke artefacts
