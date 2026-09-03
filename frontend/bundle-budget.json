@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "The eager (index-*.js) chunk's gzip ceiling, in BYTES. This file is the single",
+    "source of truth: it used to be prose in a docs/BACKLOG.md row, raised and",
+    "recorded by the same person, with no mechanical check in either direction.",
+    "It was raised twice in two PRs before anyone could notice.",
+    "",
+    "MEASURE THE SHIPPING BUILD. The bundle must be built with VITE_API_LIVE=true",
+    "(what infra/docker/Dockerfile.api sets). A build without it is ~860 B LARGER",
+    "and is not what ships — that discrepancy already made one reviewer report a",
+    "wrong figure. scripts/check-bundle-size.mjs asserts the mode rather than",
+    "trusting the caller.",
+    "",
+    "Raising this number is a deliberate act: say why in the PR body, and expect to",
+    "justify it, which is the whole point of it living somewhere a diff can see."
+  ],
+  "eagerChunkGzipMaxBytes": 66000
+}

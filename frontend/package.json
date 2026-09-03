@@ -20,7 +20,8 @@
     "test:ui": "playwright test landing.spec.ts fidelity.spec.ts behavior.spec.ts",
     "test:visual": "playwright test visual.spec.ts",
     "test:visual:update": "playwright test visual.spec.ts --update-snapshots",
-    "lint:css": "stylelint \"src/styles/landing.css\""
+    "lint:css": "stylelint \"src/styles/landing.css\"",
+    "check:bundle": "node scripts/check-bundle-size.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
