@@ -566,6 +566,14 @@ def test_frontend_offline_mirror_agrees_on_the_shared_corpus(
         ("so what do you cover?", "What does CiteVyn cover?"),
         ("ok what are you?", "What is CiteVyn?"),
         ("well, help", "What can CiteVyn do?"),
+        # Every opener needs a POSITIVE assertion, not just the negative loop in
+        # test_self_reference_opener_cannot_smuggle_a_product_question — that one
+        # asserts the phrase is left UNCHANGED, so it stays green if an opener is
+        # dropped from the regex entirely. A coverage review caught okay/um/hello
+        # sitting in the pattern with nothing asserting they work.
+        ("hello, what are you?", "What is CiteVyn?"),
+        ("okay, what do you know?", "What does CiteVyn cover?"),
+        ("um, who are you?", "What is CiteVyn?"),
         # Trailing punctuation the single-character-class tail accepts.
         ("who are you,", "What is CiteVyn?"),
         ("who are you...", "What is CiteVyn?"),

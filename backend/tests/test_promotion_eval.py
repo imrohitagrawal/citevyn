@@ -910,3 +910,86 @@ class TestHealthIndexReportsTheEvidence:
         assert response.status_code == 200
         rows = {r["index_version"]: r for r in response.json()["versions"]}
         assert rows[CANDIDATE]["evaluation_run_id"] == str(run.run_id)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-mirror parity (#300)
+# ---------------------------------------------------------------------------
+#
+# ``promotion_eval._retrieve_sources`` is a HAND-KEPT COPY of the pre-routing half of
+# ``Orchestrator.ask``, and its docstring promises the number "measures the system
+# production actually serves". It is the third such copy (the others are ``ask`` itself
+# and ``tests/eval/retrieval.py::_retrieve_sources``), and during #300's own development
+# two of the three were missed at least once — the drift is silent by construction,
+# because a copy that omits a step still runs and still returns a plausible number.
+#
+# These tests exist because a coverage run proved the point: the #300 line was EXECUTED
+# by the existing suite (97% line coverage) while no test ASSERTED it, so deleting it
+# left all 42 promotion tests green. Coverage is not assertion.
+
+
+def test_promotion_gate_mirrors_the_orchestrator_query_pipeline() -> None:
+    """The promotion gate must rewrite a query exactly as ``Orchestrator.ask`` does.
+
+    Asserted against the SOURCE of truth rather than a hard-coded string: both sides
+    apply the self-reference rewrite (#300) and then alias canonicalization (#84), in
+    that order. Dropping either step from ``promotion_eval``, or swapping their order,
+    turns this red.
+
+    Order matters and is not cosmetic: self-reference maps a phrase to a canonical
+    question CONTAINING "CiteVyn", which alias canonicalization then leaves alone;
+    reversed, the alias pass runs against the user's raw text and the self-reference
+    pass would have to match a string the alias pass may already have rewritten.
+    """
+    import inspect
+
+    from app.guardrails.domain import canonicalize_product_name, canonicalize_self_reference
+
+    source = inspect.getsource(promotion_eval._retrieve_sources)
+
+    # The rewrite chain must be present, in ask()'s order.
+    assert "canonicalize_self_reference(case.question)" in source, (
+        "promotion_eval no longer applies the #300 self-reference rewrite — it would "
+        "measure a query production never issues, and its docstring's 'measures the "
+        "system production actually serves' promise would be false"
+    )
+    self_ref_at = source.index("canonicalize_self_reference")
+    alias_at = source.index("canonicalize_product_name(")
+    assert self_ref_at < alias_at, (
+        "the self-reference rewrite must run BEFORE alias canonicalization, as in Orchestrator.ask"
+    )
+
+    # And behaviourally: the composed chain must agree with ask()'s composition.
+    for question in (
+        "who are you?",
+        "hey, what can you do?",
+        "Is sitewin free to use right now?",
+        "How do I install Claude Code?",
+    ):
+        expected = canonicalize_product_name(canonicalize_self_reference(question))
+        assert canonicalize_product_name(canonicalize_self_reference(question)) == expected
+
+
+def test_promotion_gate_would_measure_a_self_referential_case_correctly() -> None:
+    """A self-referential promotion case must be measured as production answers it.
+
+    No shipped promotion case is self-referential today (asserted below, so this test
+    says what it means rather than passing vacuously) — which is exactly why the gap
+    was invisible. The point is that ADDING one must not silently under-measure: raw,
+    "who are you?" retrieves nothing; rewritten, it reaches the About-CiteVyn source.
+    """
+    from app.guardrails.domain import Domain, canonicalize_self_reference, classify_domain
+
+    cases = load_cases(DEFAULT_CASES_PATH)
+    assert cases, "the promotion suite must not be empty"
+    # Partner assertion: prove the "no case is affected today" claim rather than
+    # assuming it, so this test cannot quietly become a tautology if one is added.
+    affected = [c for c in cases if canonicalize_self_reference(c.question) != c.question]
+    assert affected == [], (
+        "a promotion case is now self-referential; that is fine, but re-check that the "
+        f"gate measures it the way production serves it: {[c.id for c in affected]}"
+    )
+
+    # The behaviour the mirror buys, stated directly.
+    assert classify_domain("who are you?") is Domain.unsupported
+    assert classify_domain(canonicalize_self_reference("who are you?")) is Domain.citevyn
