@@ -3,7 +3,7 @@
  * sample answers in demo mode.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 /** A doc URL is a safe link only when it is http(s) or a site-relative path; anything
  *  else (e.g. a ``javascript:`` scheme) renders as inert text, not a clickable link. */
@@ -63,6 +63,7 @@ export function ChatView({
   sendTick = 0,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLInputElement>(null);
   // Stick-to-bottom LATCH. Armed (true) means "keep pinning to the bottom as new
   // content streams in"; the first time the user scrolls UP it disarms, so streaming
   // chunks stop yanking them back down. It re-arms only when they return to the true
@@ -70,6 +71,10 @@ export function ChatView({
   // streamed token whenever the user was within 120px of the bottom, so an upward
   // scroll of a few px was instantly reversed by the next chunk — the jitter (#122).
   const stickRef = useRef(true);
+  // True while a duplicate-question highlight owns the list (see the layout effect
+  // below). It blocks only the RE-ARMING of the latch, never its disarming, so a
+  // reader who scrolls away mid-flash still takes control.
+  const highlightHoldRef = useRef(false);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -80,7 +85,14 @@ export function ChatView({
     if (!list) return;
     const onScroll = () => {
       const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
-      stickRef.current = distanceFromBottom <= 8;
+      const atBottom = distanceFromBottom <= 8;
+      // A SMOOTH scroll away from the bottom starts AT the bottom, so its first
+      // frames still read "at bottom" and would re-arm the latch we just disarmed
+      // to run them — after which the passive effect pins straight back down and
+      // cancels the animation. That loop is what left a landing re-ask stranded at
+      // the newest message instead of the answer it asked for (#302).
+      if (atBottom && highlightHoldRef.current) return;
+      stickRef.current = atBottom;
     };
     list.addEventListener("scroll", onScroll, { passive: true });
     return () => list.removeEventListener("scroll", onScroll);
@@ -106,6 +118,72 @@ export function ChatView({
     stickRef.current = true;
     list.scrollTop = list.scrollHeight;
   }, [sendTick]);
+
+  // The bubble a duplicate-question highlight points at. Derived as a STRING so
+  // this drives the effect below: ``messages`` is a fresh array identity on every
+  // render of the landing hook, so depending on the array itself would re-issue
+  // the scroll ~40x/second and restart the smooth animation on every frame.
+  const highlightedDomId =
+    highlightedIndex >= 0 ? messages[highlightedIndex]?.domId : undefined;
+
+  // A duplicate-question highlight OWNS the scroll while it is active (#302).
+  //
+  // This used to be done imperatively from the landing hook, which reached into
+  // the DOM by id and returned silently when the bubble was not there yet. The
+  // landing entry points switch screen and submit in one gesture, so that lookup
+  // raced this component's mount. Reacting to the highlight instead means the
+  // scroll happens wherever the mount lands, and a LAYOUT effect places the list
+  // before paint rather than showing the wrong position for a frame.
+  //
+  // Disarming the stick-to-bottom latch is the load-bearing half. Without it the
+  // passive effect above re-pins the list to the bottom on the very next render
+  // — and the landing hero's demo animation re-renders continuously — so the
+  // reader was dragged straight back down off the answer they asked to see.
+  useLayoutEffect(() => {
+    if (!highlightedDomId) return;
+    const el = document.getElementById(highlightedDomId);
+    if (!el) return;
+    stickRef.current = false;
+    highlightHoldRef.current = true;
+    const list = chatListRef.current;
+    // No list (or a zero-height one mid-remount): fall back to the browser's own
+    // scrolling so the bubble is at least brought into view.
+    if (!list || list.clientHeight === 0) {
+      el.scrollIntoView({ block: "start", behavior: "smooth" });
+      return () => {
+        highlightHoldRef.current = false;
+      };
+    }
+    // The element's top in the list's UNSCROLLED coordinate system — the correct
+    // ``scrollTop`` to pin it to the list's visible top. It goes negative when the
+    // bubble is above the current viewport, so clamp: a question buried earlier in
+    // the conversation must rise to the top, not fail to scroll at all.
+    const desiredTop =
+      el.getBoundingClientRect().top -
+      list.getBoundingClientRect().top +
+      list.scrollTop -
+      12;
+    list.scrollTo({ top: Math.max(0, desiredTop), behavior: "smooth" });
+    // Released when the highlight clears (or moves to another bubble), by which
+    // time the smooth scroll has settled and the reader is parked on their answer.
+    //
+    // HYGIENE, NOT A GUARDED BEHAVIOUR: no test goes red if this release is
+    // deleted, and that was verified by mutation rather than assumed. Holding the
+    // flag forever only blocks the latch from RE-arming at the bottom, and every
+    // explicit send re-arms it directly via ``sendTick`` — so within one mount
+    // there is no reachable case that tells the two apart. It stays because a flag
+    // this effect sets is this effect's to release.
+    return () => {
+      highlightHoldRef.current = false;
+    };
+  }, [highlightedDomId]);
+
+  // Entering the chat hands the conversation over to the composer: once a
+  // conversation exists the landing sections are no longer a second place to
+  // ask, so the chat opens ready to type (#302).
+  useEffect(() => {
+    composerRef.current?.focus();
+  }, []);
 
   return (
     <main data-screen-label="Chat">
@@ -245,6 +323,7 @@ export function ChatView({
         <div className="composer-box">
           <span className="composer-prompt">›</span>
           <input
+            ref={composerRef}
             type="text"
             value={chatInput}
             onChange={onChatInput}
