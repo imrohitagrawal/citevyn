@@ -40,14 +40,40 @@ describe("isSafeHref — schemes that must never become a link", () => {
     ["data html", "data:text/html,<script>alert(1)</script>"],
     ["vbscript", "vbscript:msgbox(1)"],
     ["file", "file:///etc/passwd"],
-    // blob: is the case the origin check alone does NOT catch — `new URL(
-    // "blob:https://localhost/x").origin` is "https://localhost", i.e. the page's
-    // own origin — and navigating to a blob can execute script in it. This is why
-    // the scheme test exists rather than leaning on the origin comparison.
-    ["blob on this origin", "blob:https://localhost/0000-1111"],
+    // Built from the CURRENT origin so it cannot pass for the wrong reason: a
+    // hardcoded host would differ from the test base and be caught by the ORIGIN
+    // check instead. Navigating to a blob can execute script in its origin.
+    // (Which guard refuses it is documented in the source: the shape guard gets
+    // there first, and the scheme check is a deliberate unreachable backstop.)
+    ["blob on this exact origin", `blob:${globalThis.location?.origin ?? "https://localhost"}/0000-1111`],
     ["empty", ""],
   ])("refuses %s", (_l, url) => {
     expect(isSafeHref(url)).toBe(false);
+  });
+});
+
+describe("isSafeHref — schemeless URLs that look like a host", () => {
+  // `docs.claude.com/x` has no scheme, so it resolves against THIS origin and
+  // navigates to a same-origin 404 while reading as an external doc link. Every
+  // url in `knowledgeBase.ts` is this shape.
+  it.each([
+    ["bare host + path", "docs.claude.com/en/docs/claude-code/overview"],
+    ["bare host", "example.com"],
+    ["fragment only", "#section"],
+    ["query only", "?q=1"],
+    ["relative word", "about"],
+  ])("refuses %s", (_l, url) => {
+    expect(isSafeHref(url)).toBe(false);
+  });
+});
+
+describe("isSafeHref — surrounding whitespace", () => {
+  it("accepts a legitimate URL padded with whitespace", () => {
+    expect(isSafeHref("  https://docs.claude.com/x  ")).toBe(true);
+  });
+
+  it("still refuses a dangerous scheme padded with whitespace", () => {
+    expect(isSafeHref("  javascript:alert(1)  ")).toBe(false);
   });
 });
 

@@ -23,20 +23,35 @@
  * An unsafe URL is not an error: the caller renders inert text instead, so a
  * bad corpus row degrades to something unclickable rather than a trap.
  */
-export function isSafeHref(url: string): boolean {
+export function isSafeHref(raw: string): boolean {
+  const url = raw.trim();
   if (!url) return false;
+  const absolute = /^https?:\/\//i.test(url);
+  // A URL must be one of exactly two shapes: an explicit http(s) address, or a
+  // path rooted at "/". Anything else is schemeless — `docs.claude.com/x` reads
+  // as a host but resolves against THIS origin, producing a same-origin 404
+  // dressed as a documentation link. (Every url in `knowledgeBase.ts` is that
+  // shape, so a parser that silently accepted them would turn each demo citation
+  // into a broken link the moment demo answers gained markers.)
+  if (!absolute && !url.startsWith("/")) return false;
   const base =
     typeof window !== "undefined" && window.location
       ? window.location.href
       : "https://localhost/";
   try {
     const parsed = new URL(url, base);
+    // BACKSTOP, currently unreachable — and said plainly rather than left to look
+    // like coverage. The shape guard above already refuses everything schemeless,
+    // so every URL reaching here resolves to http(s) (verified by enumeration:
+    // blob:/javascript:/data:/file:/vbscript: all fail the shape guard first, and
+    // a "/"-rooted URL inherits the page's own scheme). It stays because it is
+    // the only thing that would still refuse `javascript:` if the shape guard
+    // were ever relaxed, and no test can distinguish it while that guard holds.
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
     if (parsed.username || parsed.password) return false;
-    // Only a URL written as an explicit http(s) address may leave this origin.
-    if (!/^https?:\/\//i.test(url) && parsed.origin !== new URL(base).origin) {
-      return false;
-    }
+    // A path-rooted URL must stay on this origin: "//evil.com" and "/\evil.com"
+    // both start with "/" but resolve off-site.
+    if (!absolute && parsed.origin !== new URL(base).origin) return false;
     return true;
   } catch {
     return false;

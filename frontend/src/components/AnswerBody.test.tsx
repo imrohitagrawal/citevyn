@@ -96,6 +96,42 @@ describe("AnswerBody — citation chips", () => {
     expect(container.querySelectorAll(".source-card.is-active")).toHaveLength(0);
   });
 
+  it("does not let a mouse leaving a card wipe a focused chip's highlight", () => {
+    // One shared `activeKey` made the two inputs clobber each other (reproduced
+    // in Chromium, Firefox and WebKit): moving the mouse off a card cleared the
+    // ring of a chip that was still focused.
+    const { container } = render(<AnswerBody text="A [1] B [2]." sources={sources} />);
+    const card = container.querySelectorAll(".source-card")[0];
+    const chip = container.querySelector('.citation-chip[data-marker="1"]')!;
+    fireEvent.mouseEnter(card);
+    fireEvent.focus(chip);
+    fireEvent.mouseLeave(card);
+    // The chip still has focus, so its card must still be highlighted.
+    expect(container.querySelectorAll(".source-card.is-active")).toHaveLength(1);
+  });
+
+  it("does not let a chip losing focus wipe a card the mouse is still on", () => {
+    const { container } = render(<AnswerBody text="A [1] B [2]." sources={sources} />);
+    const chip = container.querySelector('.citation-chip[data-marker="1"]')!;
+    const otherCard = container.querySelectorAll(".source-card")[1];
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(otherCard);
+    fireEvent.blur(chip);
+    // The mouse is still on card 2, so it stays highlighted.
+    const active = container.querySelectorAll(".source-card.is-active");
+    expect(active).toHaveLength(1);
+    expect(active[0].querySelector(".source-title")?.textContent).toBe("Install");
+  });
+
+  it("prefers the focused chip over a hovered card when both are live", () => {
+    const { container } = render(<AnswerBody text="A [1] B [2]." sources={sources} />);
+    fireEvent.mouseEnter(container.querySelectorAll(".source-card")[1]);
+    fireEvent.focus(container.querySelector('.citation-chip[data-marker="1"]')!);
+    const active = container.querySelectorAll(".source-card.is-active");
+    expect(active).toHaveLength(1);
+    expect(active[0].querySelector(".source-title")?.textContent).toBe("About CiteVyn");
+  });
+
   it("gives an inert chip no aria-label, and leaves its brackets readable", () => {
     // ARIA 1.2 prohibits aria-label on role=generic; a reader that drops it would
     // otherwise announce a bare "2" instead of "[2]".

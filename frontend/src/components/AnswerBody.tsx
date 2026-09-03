@@ -52,7 +52,7 @@ function renderSpans(
   spans: Span[],
   groupFor: (marker: string) => SourceGroup | undefined,
   activeKey: string | null,
-  onChipClick: (key: string | null) => void,
+  onChipFocus: (key: string | null) => void,
   keyPrefix: string,
 ) {
   return spans.map((span, i) => {
@@ -61,7 +61,7 @@ function renderSpans(
       // Recurse: markers and code inside bold keep working.
       return (
         <strong key={k}>
-          {renderSpans(span.spans, groupFor, activeKey, onChipClick, `${k}b`)}
+          {renderSpans(span.spans, groupFor, activeKey, onChipFocus, `${k}b`)}
         </strong>
       );
     }
@@ -95,11 +95,13 @@ function renderSpans(
           rel="noopener noreferrer"
           aria-label={`Source ${span.value}: ${group.title}`}
           data-marker={span.value}
-          onClick={() => onChipClick(group.key)}
-          // Keyboard parity for the chip -> card tie. Without this, tabbing to a
-          // chip highlights nothing and the affordance is mouse-only.
-          onFocus={() => onChipClick(group.key)}
-          onBlur={() => onChipClick(null)}
+          // Keyboard parity for the chip -> card tie. Without `onFocus`, tabbing
+          // to a chip highlights nothing and the affordance is mouse-only.
+          // `onClick` is kept because WebKit does not always focus an anchor on
+          // click.
+          onClick={() => onChipFocus(group.key)}
+          onFocus={() => onChipFocus(group.key)}
+          onBlur={() => onChipFocus(null)}
         >
           {inner}
         </a>
@@ -149,9 +151,15 @@ interface AnswerBodyProps {
 }
 
 export function AnswerBody({ text, streaming, sources, showLegend = false }: AnswerBodyProps) {
-  // Which document is currently highlighted. Clicking a chip sets it; hovering a
-  // card sets it — one piece of state drives both directions of the tie.
-  const [activeKey, setActiveKey] = useState<string | null>(null);
+  // Which document is highlighted, tracked per INPUT rather than as one shared
+  // value. With a single `activeKey` the two inputs clobber each other in both
+  // directions (reproduced in Chromium, Firefox and WebKit): moving the mouse off
+  // a card wiped the focus ring of a chip that was still focused, and tabbing
+  // away cleared a card the mouse was still hovering. Keyboard wins when both
+  // are live, because focus is the more deliberate signal.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const activeKey = focusedKey ?? hoveredKey;
 
   const groups = groupSources(sources);
   const byMarker = new Map<string, SourceGroup>();
@@ -168,13 +176,13 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
             <ul key={bi} className="answer-list">
               {block.items.map((item, ii) => (
                 <li key={ii}>
-                  {renderSpans(item, groupFor, activeKey, setActiveKey, `${bi}-${ii}`)}
+                  {renderSpans(item, groupFor, activeKey, setFocusedKey, `${bi}-${ii}`)}
                 </li>
               ))}
             </ul>
           ) : (
             <span key={bi} className="answer-para">
-              {renderSpans(block.spans, groupFor, activeKey, setActiveKey, `${bi}`)}
+              {renderSpans(block.spans, groupFor, activeKey, setFocusedKey, `${bi}`)}
             </span>
           ),
         )}
@@ -191,8 +199,8 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
             <div
               key={g.key}
               className={"source-card" + (activeKey === g.key ? " is-active" : "")}
-              onMouseEnter={() => setActiveKey(g.key)}
-              onMouseLeave={() => setActiveKey(null)}
+              onMouseEnter={() => setHoveredKey(g.key)}
+              onMouseLeave={() => setHoveredKey(null)}
             >
               <span className="source-number">{g.markers.join(", ")}</span>
               <div className="source-info">
