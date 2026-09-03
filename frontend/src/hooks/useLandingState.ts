@@ -149,7 +149,11 @@ function reducer(state: AppState, action: Action): AppState {
     case "RESUME_SESSION":
       // Wholesale replace, not append: resuming a DIFFERENT session must
       // not leave the previous one's bubbles mixed in above it.
-      return { ...state, messages: action.messages };
+      //
+      // ``highlight`` is an INDEX into the list being replaced, so it must go too:
+      // resuming within the 2s flash window otherwise pulses an unrelated bubble of
+      // the new transcript and scrolls the reader into the middle of it (#302 review).
+      return { ...state, messages: action.messages, highlight: -1 };
     case "UPDATE_MESSAGE":
       return {
         ...state,
@@ -173,7 +177,10 @@ function reducer(state: AppState, action: Action): AppState {
         ),
       };
     case "SET_SCREEN":
-      return { ...state, screen: action.screen };
+      // A highlight is a transient "here is your existing answer" tied to the
+      // CURRENT ChatView mount. Leaving or entering the chat screen makes it stale,
+      // and a stale one scrolls the next mount to an unrelated message (#302 review).
+      return { ...state, screen: action.screen, highlight: -1 };
     case "SET_PENDING":
       return { ...state, pending: action.value };
     case "BUMP_SEND_TICK":
@@ -284,6 +291,7 @@ interface TimerRefs {
   placeholderTimer: Timer | null;
   heroPause: Timer | null;
   nudgeTimeout: Timer | null;
+  highlightRestart: Timer | null;
   highlightTimeout: Timer | null;
 }
 
@@ -295,6 +303,7 @@ export function useLandingState() {
     placeholderTimer: null,
     heroPause: null,
     nudgeTimeout: null,
+    highlightRestart: null,
     highlightTimeout: null,
   });
 
@@ -705,56 +714,44 @@ export function useLandingState() {
     [nextMessageId],
   );
 
+  /** Cancel an in-flight duplicate-question flash. The reducer clears ``highlight``
+   *  on SET_SCREEN / RESUME_SESSION, but the flash also arms a 10ms restart timer —
+   *  if that survives, it sets the highlight straight back on a list that no longer
+   *  has that message, and the next ChatView mount scrolls to it (#302 review). */
+  const stopFlash = useCallback(() => {
+    timers.current.highlightRestart?.stop();
+    timers.current.highlightTimeout?.stop();
+  }, []);
+
   const flashExisting = useCallback(
     (index: number) => {
-      // The duplicate is a user question at `index`. That is the anchor the
-      // user wants re-confirmed, so:
-      //   1. Scroll the user question into view (top of the chat list, with
-      //      a small top inset for breathing room).
-      //   2. Pulse ONLY the user bubble — the user said "I asked this
-      //      before", they want to see THE QUESTION, not relive the
-      //      answer. The answer below it is visible automatically once we
-      //      scroll into view.
+      // The duplicate is a user question at `index`. That is the anchor the user
+      // wants re-confirmed, so we pulse ONLY the user bubble — the user said "I
+      // asked this before", they want to see THE QUESTION, not relive the answer.
+      // The answer below it is visible automatically once the bubble is in view.
       //
-      // The scroll math: the previous implementation used
-      // ``(el.getBoundingClientRect().top - list.getBoundingClientRect().top)
-      //   + list.scrollTop`` — that produces the element's top RELATIVE TO
-      // the list's *unscrolled* coordinate system, which is the correct
-      // ``scrollTop`` value to pin it at the list's visible top. But this
-      // returns a NEGATIVE number if the element is ABOVE the list's
-      // current viewport (i.e. the user has scrolled past it), which would
-      // push ``scrollTop`` negative and silently fail to scroll. Clamp to
-      // ``0`` so a question buried earlier in the chat rises to the top.
+      // This is STATE ONLY. The SCROLL belongs to ChatView, which reacts to the
+      // highlight in a layout effect (#302). Doing it here meant reaching into
+      // the DOM by id from outside the component that owns the scroll container:
+      // the lookup raced ChatView's mount when the question came from a landing
+      // entry point (which switches screen and submits in one gesture) and
+      // returned silently, and even when it did land, ChatView's passive
+      // stick-to-bottom effect re-pinned the list to the bottom on the next
+      // render and dragged the reader back off the answer.
+      //
+      // The -1 → index round trip restarts the CSS pulse when the SAME question
+      // is re-asked twice: React skips the re-render if the value never changes,
+      // so the animation would not replay.
+      // Stop the PREVIOUS flash's timers first. Overwriting the slots without
+      // stopping them left the earlier 2s clear running, so a second flash inside
+      // that window was cut short by a timer belonging to the first one.
+      timers.current.highlightRestart?.stop();
+      timers.current.highlightTimeout?.stop();
       dispatch({ type: "SET_HIGHLIGHT", index: -1 });
-      setTimeout(() => {
-        dispatch({ type: "SET_HIGHLIGHT", index });
-        // Run the scroll on the next frame so the element exists in the
-        // DOM (it always does, since it was rendered when the user first
-        // asked) and so any layout from the highlight class is settled.
-        // If the chat-list is missing (component unmounted) or has 0 height
-        // (mid-re-mount), fall back to ``scrollIntoView`` on the bubble
-        // itself — at minimum the user's browser will bring the bubble
-        // into view, even if we can't pin it to the top of our list.
-        requestAnimationFrame(() => {
-          const el = document.getElementById(`cv-msg-${index}`);
-          if (!el) return;
-          const list = document.getElementById("chat-list");
-          if (!list || list.clientHeight === 0) {
-            el.scrollIntoView({ block: "start", behavior: "smooth" });
-            return;
-          }
-          const desiredTop =
-            el.getBoundingClientRect().top -
-            list.getBoundingClientRect().top +
-            list.scrollTop -
-            12;
-          list.scrollTo({
-            top: Math.max(0, desiredTop),
-            behavior: "smooth",
-          });
-        });
-      }, 10);
-
+      timers.current.highlightRestart = timeout(
+        () => dispatch({ type: "SET_HIGHLIGHT", index }),
+        10,
+      );
       timers.current.highlightTimeout = timeout(
         () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
         2000,
@@ -764,14 +761,32 @@ export function useLandingState() {
   );
 
   const enterChat = useCallback(
-    (q: string | null) => {
+    (q: string | null, opts?: { carryHeroText?: boolean }) => {
       dispatch({ type: "SET_SCREEN", screen: "chat" });
       window.scrollTo({ top: 0 });
+      // Hand over to the chat rather than stranding a half-typed question on a
+      // screen the user is being taken away from (#302). Anything still in the
+      // hero box moves into the chat composer, which ChatView focuses on mount.
+      //
+      // ``askHero`` opts OUT because its text BECAME the question. It cannot be
+      // detected here: ``askHero`` dispatches the clear and calls straight in, so
+      // this callback still closes over the pre-clear ``state.heroInput`` and
+      // would copy the question the user just asked back into the composer.
+      // Never at the cost of an existing draft: the reader could have typed in the
+      // chat composer, gone back to the landing page via a nav link (which does not
+      // clear the hero box), typed there too, and come back. Carrying then would
+      // silently destroy the chat draft, so the hero text stays put instead.
+      const carried =
+        opts?.carryHeroText === false || state.chatInput ? "" : state.heroInput.trim();
+      if (carried) {
+        dispatch({ type: "SET_CHAT_INPUT", value: state.heroInput });
+        dispatch({ type: "SET_HERO_INPUT", value: "" });
+      }
       if (q) {
         setTimeout(() => send(q), 60);
       }
     },
-    [send],
+    [send, state.heroInput, state.chatInput],
   );
 
   /**
@@ -797,6 +812,7 @@ export function useLandingState() {
           text: m.content,
           sources: citationsToSources(m.citations),
         }));
+        stopFlash();
         dispatch({ type: "RESUME_SESSION", messages });
         dispatch({ type: "SET_SCREEN", screen: "chat" });
         window.scrollTo({ top: 0 });
@@ -805,10 +821,11 @@ export function useLandingState() {
         handleApiError(err);
       }
     },
-    [nextMessageId, handleApiError],
+    [nextMessageId, handleApiError, stopFlash],
   );
 
   const backToLanding = useCallback(() => {
+    stopFlash();
     dispatch({ type: "SET_SCREEN", screen: "landing" });
     // A stale pending=true from a still-in-flight sendLive would survive
     // across the screen swap and re-appear as a phantom "Searching…"
@@ -821,7 +838,7 @@ export function useLandingState() {
     // linger for the user to delete before asking something new.
     dispatch({ type: "SET_HERO_INPUT", value: "" });
     window.scrollTo({ top: 0 });
-  }, []);
+  }, [stopFlash]);
 
   // Hero "Ask" is self-contained: on a valid question it navigates into chat
   // itself; on empty input it focuses the box and nudges. Defined *after*
@@ -842,7 +859,7 @@ export function useLandingState() {
     // submitChat clears the chat composer), so a later "Back to landing" never
     // shows a stale question.
     dispatch({ type: "SET_HERO_INPUT", value: "" });
-    enterChat(q);
+    enterChat(q, { carryHeroText: false });
   }, [state.heroInput, enterChat]);
 
   const onHeroKey = useCallback(
@@ -901,6 +918,7 @@ export function useLandingState() {
       // Nav links work from both views. From chat, return to landing first,
       // then scroll once React has remounted the sections.
       if (state.screen === "chat") {
+        stopFlash();
         dispatch({ type: "SET_SCREEN", screen: "landing" });
         window.scrollTo({ top: 0 });
         setTimeout(() => scrollToId(id), 80);
@@ -908,7 +926,7 @@ export function useLandingState() {
         scrollToId(id);
       }
     },
-    [state.screen],
+    [state.screen, stopFlash],
   );
 
   // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
  * sample answers in demo mode.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 /** A doc URL is a safe link only when it is http(s) or a site-relative path; anything
  *  else (e.g. a ``javascript:`` scheme) renders as inert text, not a clickable link. */
@@ -63,6 +63,7 @@ export function ChatView({
   sendTick = 0,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLInputElement>(null);
   // Stick-to-bottom LATCH. Armed (true) means "keep pinning to the bottom as new
   // content streams in"; the first time the user scrolls UP it disarms, so streaming
   // chunks stop yanking them back down. It re-arms only when they return to the true
@@ -70,6 +71,10 @@ export function ChatView({
   // streamed token whenever the user was within 120px of the bottom, so an upward
   // scroll of a few px was instantly reversed by the next chunk — the jitter (#122).
   const stickRef = useRef(true);
+  // True while a duplicate-question highlight owns the list (see the layout effect
+  // below). It blocks only the RE-ARMING of the latch, never its disarming, so a
+  // reader who scrolls away mid-flash still takes control.
+  const highlightHoldRef = useRef(false);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -80,7 +85,29 @@ export function ChatView({
     if (!list) return;
     const onScroll = () => {
       const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
-      stickRef.current = distanceFromBottom <= 8;
+      const atBottom = distanceFromBottom <= 8;
+      // Two transitions, deliberately NOT symmetric:
+      // Leaving the bottom ALWAYS disarms — a reader who scrolls away mid-flash
+      // takes control immediately. It also RELEASES the hold: the hold exists only
+      // to survive the first frames of a smooth scroll that has not moved yet, so
+      // once the list has genuinely left the bottom that window is over. Without
+      // this release the hold outlives its purpose, and because re-arming is
+      // edge-triggered on a scroll event, a reader who scrolls back to the bottom
+      // during the 2s highlight never re-arms — streaming silently stops following
+      // even after the highlight has cleared.
+      if (!atBottom) {
+        stickRef.current = false;
+        highlightHoldRef.current = false;
+        return;
+      }
+      // Arriving at the bottom normally re-arms — but not while a highlight owns
+      // the list. A SMOOTH scroll away from the bottom starts AT the bottom, so its
+      // first frames still read "at bottom" and would re-arm the latch we just
+      // disarmed to run them — after which the passive effect pins straight back
+      // down and cancels the animation. That loop is what left a landing re-ask
+      // stranded at the newest message instead of the answer it asked for (#302).
+      if (highlightHoldRef.current) return;
+      stickRef.current = true;
     };
     list.addEventListener("scroll", onScroll, { passive: true });
     return () => list.removeEventListener("scroll", onScroll);
@@ -99,13 +126,113 @@ export function ChatView({
   // An EXPLICIT send always brings the new question into view, even from a scrolled-up
   // position, and re-arms the latch so its streaming answer stays followed. Keyed on
   // ``sendTick`` (bumped once per submit) so it never runs on a passive stream token.
+  //
+  // Seeded from the CURRENT value rather than guarded with ``sendTick === 0``, so it
+  // fires on a CHANGE and never on mount. ``sendTick`` lives in the landing hook's
+  // reducer, which outlives this component: after any earlier send, a remount (every
+  // landing -> chat switch) arrived with a non-zero tick, so the old guard let this
+  // effect pin to the bottom and RE-ARM the latch immediately after the highlight
+  // effect had scrolled away and disarmed it — reinstating #302 on exactly the
+  // mount-with-a-pending-highlight path this fix exists to close.
+  const seenSendTickRef = useRef(sendTick);
   useEffect(() => {
-    if (sendTick === 0) return; // initial mount, no send yet
+    if (sendTick === seenSendTickRef.current) return;
+    seenSendTickRef.current = sendTick;
     const list = chatListRef.current;
     if (!list) return;
     stickRef.current = true;
     list.scrollTop = list.scrollHeight;
   }, [sendTick]);
+
+  // The bubble a duplicate-question highlight points at. Derived as a STRING so
+  // this drives the effect below: ``messages`` is a fresh array identity on every
+  // render of the landing hook, so depending on the array itself would re-issue
+  // the scroll ~40x/second and restart the smooth animation on every frame.
+  const highlightedDomId =
+    highlightedIndex >= 0 ? messages[highlightedIndex]?.domId : undefined;
+
+  // A duplicate-question highlight OWNS the scroll while it is active (#302).
+  //
+  // This used to be done imperatively from the landing hook, which reached into
+  // the DOM by id and returned silently when the bubble was not there yet. The
+  // landing entry points switch screen and submit in one gesture, so that lookup
+  // raced this component's mount. Reacting to the highlight instead means the
+  // scroll happens wherever the mount lands.
+  //
+  // It must be a LAYOUT effect, for effect-PHASE ordering — not to paint sooner
+  // (the scroll is smooth, so nothing is positioned before paint either way).
+  // Every layout effect in a commit runs before every passive effect, which is what
+  // puts ``stickRef.current = false`` in front of the passive ``[messages]`` pin
+  // above. As a plain ``useEffect`` declaration order wins instead, the pin runs
+  // first, and the fight this whole fix exists to end resumes inside one commit.
+  //
+  // Disarming the stick-to-bottom latch is the load-bearing half. Without it the
+  // passive effect above re-pins the list to the bottom on the very next render
+  // — and the landing hero's demo animation re-renders continuously — so the
+  // reader was dragged straight back down off the answer they asked to see.
+  useLayoutEffect(() => {
+    if (!highlightedDomId) return;
+    const el = document.getElementById(highlightedDomId);
+    if (!el) return;
+    // A reader who asked for less motion gets the jump, not the journey. An explicit
+    // ``behavior`` overrides the CSS ``scroll-behavior`` cascade, so the stylesheet
+    // cannot do this for us — ``reset.css``'s ``html { scroll-behavior: auto }``
+    // targets the document, not this list, and loses to an explicit value anyway.
+    //
+    // ``matchMedia?.`` is load-bearing, not defensive: jsdom does not implement it,
+    // so an unguarded call throws in every unit test. (``useRevealOnScroll`` calls it
+    // unguarded, but only from an effect no unit test mounts.)
+    const behavior: ScrollBehavior = window.matchMedia?.(
+      "(prefers-reduced-motion: reduce)",
+    ).matches
+      ? "auto"
+      : "smooth";
+    stickRef.current = false;
+    highlightHoldRef.current = true;
+    const list = chatListRef.current;
+    if (!list || list.clientHeight === 0) {
+      // No list (or a zero-height one mid-remount): fall back to the browser's own
+      // scrolling so the bubble is at least brought into view.
+      el.scrollIntoView({ block: "start", behavior });
+    } else {
+      // The element's top in the list's UNSCROLLED coordinate system — the correct
+      // ``scrollTop`` to pin it to the list's visible top.
+      //
+      // The clamp is defence, not arithmetic: for any descendant of the list this
+      // sum is >= -12 (the inset), so the only real negative is the FIRST message,
+      // and a browser would clamp a negative ``top`` itself. It earns its place by
+      // refusing to turn a meaningless number into a plausible-looking "scrolled to
+      // the very top" if ``el`` ever stops being a descendant of ``list``.
+      const desiredTop =
+        el.getBoundingClientRect().top -
+        list.getBoundingClientRect().top +
+        list.scrollTop -
+        12;
+      list.scrollTo({ top: Math.max(0, desiredTop), behavior });
+    }
+    // Released when the highlight clears (or moves to another bubble), by which
+    // time the smooth scroll has settled and the reader is parked on their answer.
+    // A flag this effect sets is this effect's to release.
+    //
+    // HYGIENE, NOT A GUARDED BEHAVIOUR: no test goes red if this release alone is
+    // deleted — verified by mutation, not assumed. Holding the flag forever only
+    // blocks the latch from RE-arming at the bottom, and every explicit send
+    // re-arms it directly via ``sendTick``, so within one mount nothing reachable
+    // tells the two apart. The asymmetry it guards IS tested, both directions.
+    return () => {
+      highlightHoldRef.current = false;
+    };
+  }, [highlightedDomId]);
+
+  // Entering the chat hands the conversation over to the composer: once a
+  // conversation exists the landing sections are no longer a second place to
+  // ask, so the chat opens ready to type (#302).
+  useEffect(() => {
+    // ``preventScroll``: focusing an input scrolls its nearest scrollable ancestor
+    // into view, which would compete with the highlight scroll started one effect
+    // phase earlier.
+    composerRef.current?.focus({ preventScroll: true });
+  }, []);
 
   return (
     <main data-screen-label="Chat">
@@ -245,6 +372,7 @@ export function ChatView({
         <div className="composer-box">
           <span className="composer-prompt">›</span>
           <input
+            ref={composerRef}
             type="text"
             value={chatInput}
             onChange={onChatInput}

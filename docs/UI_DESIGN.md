@@ -466,6 +466,8 @@ below the 64px header.
 **Composer:**
 - Input + send button (ink, 44×44px, border-radius 10px)
 - Disclaimer: `JetBrains Mono` 11px, "DEMO — canned responses"
+- Takes focus when the chat screen mounts (`preventScroll: true`, so it cannot
+  fight the duplicate-question scroll), so the chat opens ready to type
 
 ---
 
@@ -482,6 +484,13 @@ below the 64px header.
 - No routing required
 - "Try the demo" button, hero input "Ask →", and any question entry
   transitions to chat view
+- Five landing entry points submit a question: the hero box, the hero TRY chips,
+  the ticker/marquee pills, the "Who it's for" persona buttons, and Pricing's
+  "Get Pro". (The "Live demo" chips do NOT enter chat — they swap the in-place
+  demo answer.)
+- Entering chat hands over to the composer: anything still typed in the hero box
+  moves into the chat input, and the hero box is cleared. A hero SUBMIT carries
+  nothing across, since its text became the question.
 - Chat's "Back to landing" returns to landing and scrolls to top
 
 ### Nav Anchors
@@ -518,6 +527,13 @@ below the 64px header.
 - Re-asking a question already answered in the session does NOT create a new entry
 - Chat smooth-scrolls back to the original user bubble
 - Pulses a yellow ring around it 3 times (~1.7s)
+- The scroll is owned by `ChatView` (a layout effect keyed on the highlighted
+  bubble's `domId`), not by the landing hook, so it works when a LANDING entry
+  point re-asks and the chat is only just mounting
+- While the highlight is active it HOLDS the list: the stick-to-bottom latch is
+  disarmed and cannot re-arm, or the passive re-pin would drag the reader off the
+  answer within a frame (#302). Scrolling away still hands control back
+- Honours `prefers-reduced-motion`: the jump is instant rather than smooth
 
 ### "Get Pro" Flow
 - Clicking "Get Pro" (pricing) opens chat
@@ -593,6 +609,7 @@ what is fundamentally a two-view marketing page.
 | Date | Change | Reason |
 |------|--------|--------|
 | 2026-07-05 | Initial implementation from design handoff v2 | First production implementation of the CiteVyn landing page + demo chat, recreating the `CiteVyn Landing v2.dc.html` prototype in React with the project's established patterns |
+| 2026-09-03 | Duplicate-question scroll moved into `ChatView` and made to hold the list; composer focused on chat entry; unsent hero text carried into the composer; reduced-motion honoured | #302 — re-asking an answered question from a landing section left the reader at the newest message. The one-shot scroll was overwritten by the stick-to-bottom re-pin within ~24ms |
 
 ### Future entries
 

@@ -4,8 +4,8 @@
  * ``requestMagicLink`` and ``updatePassword`` are imported solely by the
  * lazy-loaded ``AuthModal``, so keeping them here (not in ``api.ts`` /
  * ``authStore.ts``, both eager) lets Vite bundle them into the modal's own
- * chunk: the eager bundle sits within ~0.1 kB of its 63.5 kB gzip ceiling
- * (see ``docs/BACKLOG.md`` #270), and every visitor should not pay for
+ * chunk: the eager bundle is held to a 64.0 kB gzip ceiling with little
+ * headroom (see ``docs/BACKLOG.md`` #270), and every visitor should not pay for
  * forms most never open. Same ``apiFetch`` transport and the same
  * identity-application path (``authStore.applyIdentityFrom``) as the eager
  * calls -- only the module boundary differs.

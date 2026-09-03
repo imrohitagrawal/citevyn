@@ -955,3 +955,176 @@ test.describe("Landing UX regressions", () => {
     expect(box!.x).toBeGreaterThan(16);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #302 — re-asking an answered question from a LANDING entry point must land the
+// reader on the existing answer, and KEEP them there.
+//
+// Why this is "live only": the defect is a race between the flash scroll and
+// ChatView's passive stick-to-bottom effect, which re-pins the list on every
+// re-render. The landing hero's streaming animation dispatches ~40x/second, so
+// the passive effect overwrites the flash scroll within one frame. Demo mode
+// happened to settle before the next re-render, which is exactly why the whole
+// existing demo suite stayed green while production was broken.
+// ---------------------------------------------------------------------------
+test.describe("Landing re-ask hands over to the chat (#302)", () => {
+  const FOLLOWUPS = [
+    "How do I install the Codex CLI?",
+    "How do I get a Gemini API key?",
+    "Which Claude models are available in the API?",
+    "How do I stream responses from the Gemini API?",
+    "Does Claude Code cost money?",
+    "What does the --model flag do in Codex?",
+  ];
+
+  test("re-asking from a landing section scrolls to the existing answer and STAYS there (regression is live only)", async ({
+    page,
+  }) => {
+    const Q0 = "What is Claude Code?";
+    await page.goto("/");
+    await page.locator("#hero-input").fill(Q0);
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    await waitStreamDone(page);
+
+    // Build a conversation tall enough that Q0 is fully off the top of the list.
+    const input = page.locator(".chat-input");
+    let n = 1;
+    for (const q of FOLLOWUPS) {
+      await input.fill(q);
+      await page.keyboard.press("Enter");
+      n += 1;
+      await expect(page.locator(".message.user-msg")).toHaveCount(n);
+      await waitStreamDone(page);
+    }
+    const original = page.locator("#cv-msg-0");
+    expect((await original.textContent())!.trim()).toBe(Q0);
+
+    // PRECONDITION: without this the assertion below could pass with no scroll at
+    // all, which is how a "scrolls to top" test silently stops testing anything.
+    const before = await original.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const list = document.getElementById("chat-list")!.getBoundingClientRect();
+      return { bottom: r.bottom, listTop: list.top };
+    });
+    expect(before.bottom).toBeLessThan(before.listTop);
+
+    // Back to the landing page, then re-ask Q0 from a landing entry point.
+    const beforeCount = await page.locator(".message.user-msg").count();
+    await page.locator(".back-button").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toHaveCount(0);
+    const persona = page.locator(".persona-q-btn", { hasText: Q0 }).first();
+    await persona.scrollIntoViewIfNeeded();
+    await persona.click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+
+    // The duplicate guard still holds: no second bubble for the same question.
+    await expect(page.locator(".message.user-msg")).toHaveCount(beforeCount);
+
+    // It reaches the top of the list...
+    const distance = async () =>
+      original.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const list = document.getElementById("chat-list")!.getBoundingClientRect();
+        return Math.abs(r.top - list.top);
+      });
+    await expect.poll(distance, { timeout: 3000 }).toBeLessThan(20);
+
+    // ...and is STILL there after the highlight window closes. This is the half
+    // that fails on `main`: the one-shot scroll lands, then ChatView's passive
+    // stick-to-bottom effect drags the reader back down to the newest message.
+    await page.waitForTimeout(2500);
+    expect(await distance()).toBeLessThan(20);
+  });
+});
+
+test.describe("Duplicate pulse restarts within its own window", () => {
+  test("re-asking the SAME question again before the pulse ends restarts the animation", async ({
+    page,
+  }) => {
+    // ``flashExisting`` resets the highlight to -1 before setting it back to the
+    // same index. Without that reset React sees an unchanged value, skips the
+    // re-render, and the pulse does NOT replay — so a user who re-asks twice in
+    // quick succession gets no feedback the second time. The existing "second
+    // duplicate" test waits for the pulse to clear first, so it passes either way.
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+    await input.fill("How do I install the Codex CLI?");
+    await page.keyboard.press("Enter");
+    await waitStreamDone(page);
+
+    const original = page.locator("#cv-msg-0");
+    // A pulse that has ENDED must never read as "restarted", so absence maps to
+    // Infinity rather than to a small number.
+    const elapsed = () =>
+      original.evaluate((el) => {
+        const a = el.getAnimations().find((x) => x.playState === "running");
+        return a ? Number(a.currentTime ?? 0) : Number.POSITIVE_INFINITY;
+      });
+
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
+    // Let the pulse get well into its run, but stay inside the ~2s highlight window.
+    await page.waitForTimeout(900);
+    const before = await elapsed();
+    expect(before).toBeGreaterThan(300);
+
+    // Re-ask the SAME question while it is still pulsing.
+    await input.fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    // Restarting means the SAME animation is still running from near zero again.
+    await expect.poll(elapsed, { timeout: 1500 }).toBeLessThan(before);
+    expect(await original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
+
+    // The second flash also gets its OWN full highlight window. Each flash used to
+    // overwrite the timer slots without stopping them, so the first flash's 2s
+    // clear survived and cut the second one short (here: ~1.1s instead of ~2s).
+    await page.waitForTimeout(1400);
+    await expect(original).toHaveClass(/highlighted/);
+  });
+});
+
+test.describe("Landing hands typed text over to the chat composer (#302)", () => {
+  test("text left in the hero box moves into the chat composer, and the composer has focus", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    // Type a question but DON'T submit it, then enter the chat another way.
+    await page.locator("#hero-input").fill("half-typed question about Codex");
+    const persona = page.locator(".persona-q-btn", { hasText: "What is Claude Code?" }).first();
+    await persona.scrollIntoViewIfNeeded();
+    await persona.click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+
+    const composer = page.locator(".chat-input");
+    await expect(composer).toHaveValue("half-typed question about Codex");
+    await expect(composer).toBeFocused();
+    // The hero box is emptied by the carry itself, so the question that now lives
+    // in the composer is not also sitting on the landing page.
+    //
+    // Leave via a NAV LINK, not "Back to landing": `backToLanding` clears the hero
+    // box on its own (and has since before this change), so exiting that way would
+    // assert someone else's code and stay green with the carry's own clear deleted.
+    // `goSection` does not clear it, so this path sees only the carry's clear.
+    await page.locator(".nav-link", { hasText: "Who it's for" }).click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toHaveCount(0);
+    await expect(page.locator("#hero-input")).toHaveValue("");
+  });
+
+  test("a hero SUBMIT carries nothing across — its text became the question", async ({ page }) => {
+    await page.goto("/");
+    await page.locator("#hero-input").fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    // Partner assertion: the question really was asked, so an empty composer here
+    // cannot be "nothing happened at all".
+    await expect(page.locator(".message.user-msg").first()).toContainText("What is Claude Code?");
+    await expect(page.locator(".chat-input")).toHaveValue("");
+  });
+});
