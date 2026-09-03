@@ -257,7 +257,26 @@ page quote that value in minutes). 422 `validation_error` for a malformed
 address. `404` when no email provider is configured (no
 `CITEVYN_RESEND_API_KEY` in production; locally the file outbox is used).
 
-Rate-limited per TARGET EMAIL in a **dedicated** bucket
+Rate-limited per TARGET EMAIL by **two independent buckets**, both applied
+before the account lookup and on both branches:
+
+* a **minimum interval** — 1 request per
+  `CITEVYN_RATE_LIMIT_MAGIC_LINK_INTERVAL_SECONDS` (default 60), whose 429
+  reads `A link was sent moments ago — check your inbox.` This is a FLOOR
+  between consecutive requests. Without it five clicks in five seconds sent
+  five emails, and because the route keeps one live token per user, the first
+  four were dead links by the time they arrived (#301).
+* an **hourly ceiling** — the dedicated bucket below.
+
+They are separate buckets on purpose: a request refused by the interval must
+not consume one of the hourly sends (both limiters record a hit only on the
+success path), and draining one must not silence the other.
+
+The interval is also the only role whose window differs from the
+limiter-wide one. Every other role is an hourly count; expressing a 60-second
+floor as "1 per hour" would be a lockout, not a cooldown.
+
+Hourly ceiling, per TARGET EMAIL in a **dedicated** bucket
 (`CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR`, default 5) — never the
 `auth_login` bucket, or flooding link requests at a victim's address would
 lock them out of password login with no credentials at all. Applied on both

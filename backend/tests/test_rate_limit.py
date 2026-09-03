@@ -198,3 +198,122 @@ async def test_concurrent_hits_do_not_burst_the_limit() -> None:
     rejected = sum(1 for ok in results if not ok)
     assert accepted == LIMIT, f"expected exactly {LIMIT} accepted, got {accepted}"
     assert rejected == LIMIT, f"expected exactly {LIMIT} rejected, got {rejected}"
+
+
+# ---------------------------------------------------------------------------
+# Per-role window (#301)
+# ---------------------------------------------------------------------------
+#
+# These exist because a mutation SURVIVED without them. Replacing
+# ``cutoff = now - self.window_for(role=role)`` with ``self._window_seconds`` in
+# ``check`` left every #301 route test green: they assert "first accepted, second
+# refused", which is equally true of a 1-per-HOUR lockout. The cooldown could
+# silently become 60x too long and nothing would notice — so the window length
+# itself needs pinning, not just the refusal.
+
+
+async def test_the_magic_link_interval_role_counts_over_its_own_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The interval role must count over 60s, not the limiter-wide hour.
+
+    Drives a controlled clock instead of sleeping: real time would make this slow
+    and flaky, and the thing under test is arithmetic on a timestamp.
+
+    RED if ``check`` reads ``self._window_seconds`` instead of
+    ``window_for(role=...)`` — the surviving mutation this test was written for.
+    """
+    from app.core.rate_limit import _MAGIC_LINK_INTERVAL_ROLE, RateLimiter
+
+    now = [1000.0]
+    monkeypatch.setattr("app.core.rate_limit.time.monotonic", lambda: now[0])
+
+    limiter = RateLimiter(
+        window_seconds=3600,  # the limiter-wide hour every other role uses
+        demo_user_per_window=30,
+        admin_per_window=100,
+        magic_link_interval_seconds=60,
+    )
+    key = "mlinterval_probe"
+
+    await limiter.check(user_id=key, role=_MAGIC_LINK_INTERVAL_ROLE)  # accepted
+
+    now[0] += 30  # inside the 60s floor
+    with pytest.raises(HTTPException) as refused:
+        await limiter.check(user_id=key, role=_MAGIC_LINK_INTERVAL_ROLE)
+    assert refused.value.status_code == 429
+
+    now[0] += 31  # 61s after the first: the floor has elapsed
+    await limiter.check(user_id=key, role=_MAGIC_LINK_INTERVAL_ROLE)  # accepted again
+
+    # And the partner assertion: an ORDINARY role still counts over the hour, so
+    # this change cannot have quietly shortened everyone else's window.
+    hourly_key = "demo_probe"
+    await limiter.check(user_id=hourly_key, role="demo_user")
+    now[0] += 61  # well past the interval window, nowhere near the hour
+    assert len(limiter._buckets[hourly_key]) == 1, (
+        "an ordinary role's hits must still be counted over the limiter-wide hour"
+    )
+
+
+async def test_the_interval_window_is_operator_tunable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``window_for`` must return the configured value, not a hard-coded 60.
+
+    Scope, stated honestly because an earlier draft of this docstring overstated it:
+    this constructs a limiter DIRECTLY, so it pins ``window_for`` and nothing else. It
+    proves nothing about whether an operator changing the setting reaches the running
+    limiter — that is the next test.
+    """
+    from app.core.rate_limit import _MAGIC_LINK_INTERVAL_ROLE, RateLimiter
+
+    limiter = RateLimiter(
+        window_seconds=3600,
+        demo_user_per_window=30,
+        admin_per_window=100,
+        magic_link_interval_seconds=15,
+    )
+    assert limiter.window_for(role=_MAGIC_LINK_INTERVAL_ROLE) == 15
+    # Every other role still falls back to the limiter-wide window.
+    for role in ("demo_user", "admin", "global", "auth_login", "magic_link"):
+        assert limiter.window_for(role=role) == 3600
+
+
+async def test_changing_the_interval_setting_rebuilds_the_cached_limiter() -> None:
+    """The settings -> limiter -> ``_settings_match`` plumbing must actually be wired.
+
+    RED if ``_build_limiter`` stops passing the setting through, or if
+    ``_settings_match`` stops comparing the interval WINDOW. That clause was pure
+    decoration before this test: deleting it left all 1728 backend tests green.
+
+    It compares the WINDOW rather than the limit deliberately — the interval role's
+    limit is fixed at 1 by definition, so a limit comparison could never notice a
+    changed cooldown.
+
+    The "same settings -> same object" assertion is load-bearing in the other
+    direction: a rebuild CLEARS every bucket, so a comparison that flapped would reset
+    the demo, global and auth_login limiters on every request — a limiter bypass, not
+    merely a wasted allocation.
+    """
+    from app.core.config import Settings
+    from app.core.rate_limit import _MAGIC_LINK_INTERVAL_ROLE, get_limiter, reset_limiter
+
+    reset_limiter()
+    try:
+        base: dict[str, object] = dict(
+            rate_limit_window_seconds=3600,
+            rate_limit_demo_user_per_hour=30,
+            rate_limit_admin_per_hour=100,
+        )
+        first = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=60))
+        assert first.window_for(role=_MAGIC_LINK_INTERVAL_ROLE) == 60
+
+        again = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=60))
+        assert again is first, "identical settings must not rebuild (a rebuild clears every bucket)"
+
+        changed = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=15))
+        assert changed is not first, "a changed interval must rebuild the cached limiter"
+        assert changed.window_for(role=_MAGIC_LINK_INTERVAL_ROLE) == 15
+    finally:
+        reset_limiter()

@@ -98,6 +98,7 @@ from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.rate_limit import (
     email_notice_allowed,
+    enforce_magic_link_interval,
     enforce_magic_link_rate_limit,
     rate_limited_demo,
     rate_limited_oauth_navigation,
@@ -178,7 +179,17 @@ async def magic_link_request(
             request_id=request_id, code=APIErrorCode.not_found, message="Not found."
         )
     email = normalize_email(request_id, body.email)
-    # Dedicated bucket, applied BEFORE the lookup and on both branches.
+    # Dedicated buckets, applied BEFORE the lookup and on both branches.
+    #
+    # Order matters for the COPY the caller sees, not for security: the interval
+    # floor is checked first, so someone who double-clicks gets "a link was sent
+    # moments ago" (true, and reassuring) rather than "too many sign-in links"
+    # (also true, but it reads like an accusation for a second click).
+    #
+    # Neither call touches the database, which is why the always-202 statement-count
+    # parity below is unaffected: a refusal here raises before any SQL runs, and an
+    # acceptance adds none.
+    await enforce_magic_link_interval(email, settings)
     await enforce_magic_link_rate_limit(email, settings)
 
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
