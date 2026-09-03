@@ -28,7 +28,7 @@ for reproducible defects and accepted work.
 | Cache / rate-limit  | Production    | Redis 7 sliding-window limiter (per-user, per-route)        |
 | TLS termination     | Production    | Caddy v2 (auto-issued Let's Encrypt)                        |
 | Frontend            | Optional preview| React + Vite; build via `make demo-frontend`              |
-| Test coverage       | 361 passed    | pytest + httpx AsyncClient; postgres-marker opt-in          |
+| Test coverage       | 1760 tests, 96% lines | pytest + httpx AsyncClient; postgres-marker opt-in          |
 | CI                  | 2 jobs        | pytest + lint (SQLite), alembic + postgres integration      |
 
 ---
@@ -44,7 +44,7 @@ for reproducible defects and accepted work.
 
 | Gate                              | Status | How it's enforced                           |
 |-----------------------------------|--------|----------------------------------------------|
-| Unit + integration tests          | 🟢 green | `make test` (361+ tests, in-memory SQLite) |
+| Unit + integration tests          | 🟢 green | `make test` (1760 tests, in-memory SQLite) |
 | Type-check (pyright strict)       | 🟢 green | `make typecheck`                            |
 | Lint (ruff + format)              | 🟢 green | `make lint`                                 |
 | Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
@@ -215,7 +215,7 @@ citevyn/
 │   │   ├── retrieval/      # Hybrid search (pgvector + lexical)
 │   │   ├── worker/         # citevyn-worker entry point + loop
 │   │   └── main.py         # FastAPI app, lifespan, router wiring
-│   ├── tests/              # 361 tests; pytest-asyncio; in-memory SQLite
+│   ├── tests/              # 1760 tests; pytest-asyncio; in-memory SQLite
 │   ├── pyproject.toml      # uv-managed; ruff + pyright strict
 │   └── uv.lock
 ├── db/                     # Alembic migrations (single source of truth)
@@ -347,6 +347,7 @@ stack answers; there is no second hand-written catalog to keep in sync
 ```bash
 make demo          # one-shot stack bring-up
 make test          # backend suite, no DB needed
+make coverage      # same suite + a line-coverage report (measurement, NOT a gate)
 make smoke         # compose stack up, assert /health, tear down
 make verify        # lint + typecheck + test (the pre-merge gate)
 make db-down       # tear down the stack (keeps volumes)
@@ -384,6 +385,15 @@ the opt-in integration tests against a real Postgres if you set
 - **Smoke** — `scripts/smoke.sh` brings up the compose stack
   (Postgres), waits for the API, asserts `/health` reports
   `healthy`, and tears down.
+- **Coverage** — `make coverage` runs the same suite as `make test` and
+  reports line coverage (currently **96%** of the hermetic suite; the
+  `postgres`-marked tests run in their own job without coverage), plus
+  `artifacts/coverage.xml`.
+  It is a **measurement, never a gate**: coverage shows which lines *ran*,
+  not which are *checked*. A line in `promotion_eval.py` once measured 97%
+  covered and still left 42 tests green when deleted. Use it to find code no
+  test touches; use mutation testing to find code no test defends. What would
+  make it blocking is recorded beside the CI step (#308).
 
 Test strategy: [`docs/TEST_STRATEGY.md`](docs/TEST_STRATEGY.md).
 

@@ -99,6 +99,29 @@ Cover:
 | Follow-up context correctness | >=90% |
 | Cache correctness | >=95% |
 | End-to-end golden pass rate | >=95% |
+| Backend line coverage | **measured, never gated** — see below |
+
+### 4.1 Why line coverage is not in the table above
+
+Every other row is a *required score*. Coverage deliberately is not, and this is
+the one gate we argue AGAINST having.
+
+Coverage shows which lines **ran**, never which are **checked**. The repo has the
+scar: a line in `app/worker/promotion_eval.py` measured **97% covered** and was
+executed by the suite, yet deleting it left all 42 promotion tests green. A
+percentage would have said nothing about that defect, and a required score invites
+tests written to move the number rather than to catch a defect.
+
+So `make coverage` and the CI step (#308) **report** — currently 96% — and nothing
+fails on the number. Read that figure precisely: it covers the hermetic suite
+(`-m "not postgres"`), because the `postgres`-marked tests run in their own job
+without coverage. It is not a whole-repo number. Use coverage to find code no test *touches*; use mutation
+testing to find code no test *defends*. Where the two disagree, mutation wins.
+
+What would make it blocking, stated so it cannot drift into permanence
+unexamined: only once a baseline is stable across three consecutive `main` runs,
+and then as **no decrease against that baseline** — never an absolute floor.
+Tracked in [#321](https://github.com/imrohitagrawal/citevyn/issues/321).
 
 ## 5. Golden Dataset
 
