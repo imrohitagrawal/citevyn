@@ -14,6 +14,7 @@ from app.guardrails.domain import (
     ALLOWED_DOMAINS,
     Domain,
     canonicalize_product_name,
+    canonicalize_self_reference,
     classify_domain,
     classify_domains,
     is_unsupported,
@@ -523,3 +524,238 @@ def test_frontend_offline_mirror_agrees_on_the_shared_corpus(
     runners, so a rewrite on either side that changes an answer fails on the other.
     """
     assert bool(_CITEVYN_RE.search(question)) is expected, why
+
+
+# ---------------------------------------------------------------------------
+# Self-referential questions (#300)
+# ---------------------------------------------------------------------------
+#
+# RED before the fix: every question below classified ``unsupported`` and was
+# refused with "NO SOURCE — REFUSED" even though the indexed About-CiteVyn source
+# answers it. Reverting ``canonicalize_self_reference`` to ``return question``
+# turns every ``test_self_reference_*_is_rewritten`` case red.
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        ("who are you?", "What is CiteVyn?"),
+        ("Who are you", "What is CiteVyn?"),
+        ("WHO ARE YOU?!", "What is CiteVyn?"),
+        ("who're you?", "What is CiteVyn?"),
+        # Every remaining alternative of the regex, so none is reachable-but-unasserted:
+        # deleting any one of them must turn a case below red (review finding).
+        ("who re you", "What is CiteVyn?"),  # the \\s+ branch of who(?:\\s+|')re
+        ("who am i chatting with", "What is CiteVyn?"),  # the "chatting" branch
+        ("who am i talking with?", "What is CiteVyn?"),
+        ("who am i speaking to?", "What is CiteVyn?"),
+        ("what can you help with?", "What can CiteVyn do?"),  # optional "me"
+        ("what topic do you cover?", "What does CiteVyn cover?"),  # singular topics?
+        ("what source do you use?", "What does CiteVyn cover?"),  # singular sources?
+        # Dictation and phone keyboards emit a curly apostrophe; the owner dictates,
+        # so this is the COMMON spelling, not an exotic one.
+        ("what\u2019s your name?", "What is CiteVyn?"),
+        ("who\u2019re you", "What is CiteVyn?"),
+        ("what\u02bcs your name", "What is CiteVyn?"),
+        # A closed set of discourse openers. Without these #300's own symptom survives
+        # for the commonest natural phrasing: "hey, who are you?" is NOT a bare greeting
+        # (_GREETING_RE requires the message to end after the greeting), so before this
+        # it fell straight through to the refusal the issue was filed about.
+        ("hey, who are you?", "What is CiteVyn?"),
+        ("hi, what can you do?", "What can CiteVyn do?"),
+        ("so what do you cover?", "What does CiteVyn cover?"),
+        ("ok what are you?", "What is CiteVyn?"),
+        ("well, help", "What can CiteVyn do?"),
+        # Every opener needs a POSITIVE assertion, not just the negative loop in
+        # test_self_reference_opener_cannot_smuggle_a_product_question — that one
+        # asserts the phrase is left UNCHANGED, so it stays green if an opener is
+        # dropped from the regex entirely. A coverage review caught okay/um/hello
+        # sitting in the pattern with nothing asserting they work.
+        ("hello, what are you?", "What is CiteVyn?"),
+        ("okay, what do you know?", "What does CiteVyn cover?"),
+        ("um, who are you?", "What is CiteVyn?"),
+        # Trailing punctuation the single-character-class tail accepts.
+        ("who are you,", "What is CiteVyn?"),
+        ("who are you...", "What is CiteVyn?"),
+        ("what can you do?!", "What can CiteVyn do?"),
+        ("what are you?", "What is CiteVyn?"),
+        ("who am I talking to?", "What is CiteVyn?"),
+        ("who am i speaking with", "What is CiteVyn?"),
+        ("what's your name?", "What is CiteVyn?"),
+        ("what is your name", "What is CiteVyn?"),
+        ("tell me about yourself", "What is CiteVyn?"),
+        ("introduce yourself.", "What is CiteVyn?"),
+        ("what can you do?", "What can CiteVyn do?"),
+        ("what do you do?", "What can CiteVyn do?"),
+        ("what are you for?", "What can CiteVyn do?"),
+        ("how can you help me?", "What can CiteVyn do?"),
+        ("how can you help?", "What can CiteVyn do?"),
+        ("what can you help me with?", "What can CiteVyn do?"),
+        ("help", "What can CiteVyn do?"),
+        ("help?", "What can CiteVyn do?"),
+        ("  help  ", "What can CiteVyn do?"),
+        ("what do you know?", "What does CiteVyn cover?"),
+        ("what do you know about?", "What does CiteVyn cover?"),
+        ("what do you cover?", "What does CiteVyn cover?"),
+        ("what topics do you cover?", "What does CiteVyn cover?"),
+        ("what can you answer?", "What does CiteVyn cover?"),
+        ("what can I ask you?", "What does CiteVyn cover?"),
+        ("what can i ask?", "What does CiteVyn cover?"),
+        ("what sources do you use?", "What does CiteVyn cover?"),
+    ],
+)
+def test_self_reference_is_rewritten_to_the_citevyn_question_it_means(
+    question: str, expected: str
+) -> None:
+    """A listed self-referential phrasing becomes the CiteVyn question it means."""
+    assert canonicalize_self_reference(question) == expected
+
+
+@pytest.mark.parametrize(
+    "question,why",
+    [
+        (
+            "who are the Codex maintainers?",
+            "the issue's named negative: a real Codex question opening with 'who are'",
+        ),
+        (
+            "what can you do with the Gemini API?",
+            "a listed phrasing with a substantive tail is a real product question",
+        ),
+        (
+            "what do you know about the Claude API rate limits?",
+            "same, and it already routes to claude_api correctly",
+        ),
+        ("help me install Claude Code", "'help' as a verb with an object, not a bare cry"),
+        ("help with codex login", "same"),
+        ("what are you doing about the codex outage", "tail past the phrase"),
+        ("who are you going to bill for this?", "tail past the phrase"),
+        ("what is CiteVyn?", "already routes to citevyn — must not be rewritten"),
+        ("what do you cover in the enterprise plan", "tail past the phrase"),
+        ("", "empty input"),
+        ("   ", "whitespace-only input"),
+        ("what is Claude Code?", "an ordinary product question"),
+        ("so what is Claude Code?", "an opener must not smuggle a product question through"),
+        ("hey, what can you do with the Gemini API?", "opener + listed phrase + product tail"),
+        ("hello, who are the Codex maintainers?", "opener does not weaken the end anchor"),
+        ("hey there, help me install codex", "opener + help as a verb with an object"),
+        ("selfhelp", "'help' only as a substring, not the whole message"),
+        ("help help", "not a listed phrasing"),
+    ],
+)
+def test_self_reference_leaves_everything_else_verbatim(question: str, why: str) -> None:
+    """Anything off the closed list — including a listed phrasing carrying a
+    substantive tail — is returned byte-for-byte, so today's routing is unchanged."""
+    assert canonicalize_self_reference(question) == question, why
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "who are you?",
+        "what can you do?",
+        "what do you cover?",
+        "help",
+        "tell me about yourself",
+    ],
+)
+def test_self_referential_questions_reach_the_citevyn_domain_after_rewrite(
+    question: str,
+) -> None:
+    """The whole point of the rewrite: these route to ``citevyn``, not ``unsupported``.
+
+    Without ``canonicalize_self_reference`` every one of them is ``unsupported``
+    (that is the #300 bug), so this test is red on the unfixed tree.
+    """
+    assert classify_domain(question) is Domain.unsupported  # the raw utterance still is
+    assert classify_domain(canonicalize_self_reference(question)) is Domain.citevyn
+
+
+def test_self_reference_rewrite_is_idempotent() -> None:
+    """Re-running the rewrite on its own output is a no-op (the canonical forms
+    name CiteVyn, so they are off the list by construction)."""
+    for question in ("who are you?", "what can you do?", "what do you cover?", "help"):
+        once = canonicalize_self_reference(question)
+        assert canonicalize_self_reference(once) == once
+
+
+def test_self_reference_negative_matches_the_codex_maintainers_case_end_to_end() -> None:
+    """The issue's explicit negative keeps its ``codex`` routing through the rewrite."""
+    question = "who are the Codex maintainers?"
+    assert classify_domain(canonicalize_self_reference(question)) is Domain.codex
+
+
+def test_self_reference_tail_does_not_backtrack_quadratically() -> None:
+    """The anchor tail must stay a single character class, not nested quantifiers.
+
+    The first version spelled it ``\\s*[?.!]*\\s*$`` — two ``\\s*`` around a
+    quantifier that can match empty. A listed phrasing followed by a long
+    whitespace run that cannot satisfy ``$`` makes the engine re-split the run
+    O(n) ways and rescan O(n) each time: 63 ms of BLOCKED EVENT LOOP for one
+    4000-char message (the API's own cap, ``AnswerRequest.message``) against
+    ~0.5 us for a real question. ``canonicalize_self_reference`` runs
+    synchronously inside ``Orchestrator.ask`` before any await, so that stalls
+    every other in-flight request on the machine, not just the sender's.
+
+    Asserted as a RATIO between two input sizes rather than a wall-clock budget,
+    so a slow or loaded machine cannot fail it on speed alone. The sizes are 4x
+    apart, so linear scaling predicts ~4x and quadratic ~16x; the threshold sits
+    at 8, an even multiplicative margin from both. A review of the first version
+    of this test measured 3.09 and 6.33 on a contended machine against a 3.0
+    threshold set for a 2x gap — too tight to be trustworthy, hence the wider gap.
+
+    Restoring ``\\s*[?.!]*\\s*$`` turns this red, and so does the plausible
+    half-fix ``[\\s,.!?]*\\s*$``.
+    """
+    import time
+
+    stem = "what can you help me with"
+    # PARTNER ASSERTION (the project's rule: a check that counts nothing needs a
+    # partner proving the thing counted exists). Without this the test degrades
+    # SILENTLY to a ratio of ~1.00 the moment ``stem`` stops matching the
+    # phrasing list — the regex would bail immediately at both sizes and the
+    # ratio assertion would pass while measuring nothing at all.
+    assert canonicalize_self_reference(stem) == "What can CiteVyn do?", (
+        "the timing probe's stem must still be a LISTED phrasing, or this test "
+        "measures the fast reject path and passes vacuously"
+    )
+    assert canonicalize_self_reference(stem + " " * 8 + "x") == stem + " " * 8 + "x", (
+        "the probe must FAIL to match once the tail is unsatisfiable — that failure "
+        "is the path that backtracks"
+    )
+
+    def elapsed(n: int) -> float:
+        # A listed phrasing, then a whitespace run, then a character that makes
+        # the ``$`` anchor fail — the worst case for a backtracking tail.
+        probe = stem + " " * n + "x"
+        best = float("inf")
+        for _ in range(5):  # best-of-5 damps scheduler noise
+            start = time.perf_counter()
+            canonicalize_self_reference(probe)
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    small = elapsed(1000)
+    large = elapsed(4000)  # 4x the input
+    # Guard against a divide-by-zero on a machine fast enough to floor `small`.
+    ratio = large / max(small, 1e-9)
+    assert ratio < 8.0, (
+        f"self-reference tail scales super-linearly: 1000 chars {small:.6f}s -> "
+        f"4000 chars {large:.6f}s (ratio {ratio:.1f}x, linear would be ~4x). "
+        "The tail must be ONE character class, e.g. [\\s,.!?]*$"
+    )
+
+
+def test_self_reference_opener_cannot_smuggle_a_product_question() -> None:
+    """The discourse opener widens the START of the match, never the END.
+
+    Adding an opener is only safe because the message stays anchored at both
+    ends. If the end anchor were ever dropped, "hey, what can you do with the
+    Gemini API?" would be rewritten to a CiteVyn question and answered from the
+    wrong source — a confidently-wrong, confidently-cited answer, the exact
+    failure mode the #84 alias work spent three rounds avoiding.
+    """
+    for opener in ("hi", "hey", "hello", "ok", "okay", "so", "well", "um"):
+        hijacked = f"{opener}, what can you do with the Gemini API?"
+        assert canonicalize_self_reference(hijacked) == hijacked
+        assert classify_domain(canonicalize_self_reference(hijacked)) is Domain.gemini_api

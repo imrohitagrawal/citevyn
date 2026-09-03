@@ -33,6 +33,7 @@ from app.models import Base
 from app.models.enums import EvaluationStatus, IndexStatus
 from app.models.evaluation import EvaluationRun
 from app.models.index_versions import IndexVersion
+from app.retrieval.types import RetrievalResult, VectorDegrade
 from app.services import index_versions as index_service
 from app.services.index_versions import IndexPromotionBlocked, _pass_rate_from_metrics
 from app.worker import cli, promotion_eval
@@ -910,3 +911,122 @@ class TestHealthIndexReportsTheEvidence:
         assert response.status_code == 200
         rows = {r["index_version"]: r for r in response.json()["versions"]}
         assert rows[CANDIDATE]["evaluation_run_id"] == str(run.run_id)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline-mirror parity (#300)
+# ---------------------------------------------------------------------------
+#
+# ``promotion_eval._retrieve_sources`` is a HAND-KEPT COPY of the pre-routing half of
+# ``Orchestrator.ask``, and its docstring promises the number "measures the system
+# production actually serves". It is the third such copy (the others are ``ask`` itself
+# and ``tests/eval/retrieval.py::_retrieve_sources``), and during #300's own development
+# two of the three were missed at least once — the drift is silent by construction,
+# because a copy that omits a step still runs and still returns a plausible number.
+#
+# These tests exist because a coverage run proved the point: the #300 line was EXECUTED
+# by the existing suite (97% line coverage) while no test ASSERTED it, so deleting it
+# left all 42 promotion tests green. Coverage is not assertion.
+
+
+async def test_promotion_gate_mirrors_the_orchestrator_query_pipeline(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promotion gate must hand the retriever the query production would issue.
+
+    BEHAVIOURAL, not a source grep. An earlier version of this test asserted on
+    ``inspect.getsource`` and was replaced after review showed it was theatre: it
+    PASSED a behaviour-breaking edit that kept both call names in order while
+    discarding the result::
+
+        _ignored = canonicalize_self_reference(case.question)   # still greps clean
+        query = canonicalize_product_name(case.question)        # rewrite thrown away
+
+    and it FAILED semantics-preserving refactors (renaming the local, extracting a
+    helper). It measured the text, not the behaviour.
+
+    This spies on the retriever and asserts the QUERY IT ACTUALLY RECEIVES, which is
+    the thing that decides what the gate measures.
+
+    Mutation-confirmed RED for: dropping the rewrite, and computing it then discarding
+    the result (the edit the source-grep version passed).
+
+    Mutation-confirmed GREEN — stated plainly, because the first draft of this docstring
+    claimed otherwise and was wrong — for a pure REORDER (alias canonicalization first,
+    then self-reference). That is not a hole in the test; the two passes genuinely
+    commute for the current lists, and cannot stop commuting by accident: order could
+    only matter if a question became, or stopped being, a listed self-referential
+    phrasing as a RESULT of alias canonicalization, and every listed phrasing is plain
+    English containing no alias token. The order in the code mirrors ``ask`` so the two
+    stay comparable if either list ever grows; it is not a property this test proves.
+    """
+    captured: list[str] = []
+
+    class _SpyRetriever:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def retrieve(self, query: str, **kwargs: object) -> RetrievalResult:
+            captured.append(query)
+            return RetrievalResult(hits=[], vector_degrade=VectorDegrade.none)
+
+        async def retrieve_multi(self, query: str, **kwargs: object) -> RetrievalResult:
+            captured.append(query)
+            return RetrievalResult(hits=[], vector_degrade=VectorDegrade.none)
+
+    monkeypatch.setattr(promotion_eval, "HybridRetriever", _SpyRetriever)
+
+    # (question the user types, query production issues for it)
+    pairs = [
+        ("who are you?", "What is CiteVyn?"),  # #300 self-reference
+        ("hey, what can you do?", "What can CiteVyn do?"),  # ... with an opener
+        (
+            "Is sitewin free to use right now?",  # #84 alias, unaffected
+            "Is CiteVyn free to use right now?",
+        ),
+        (
+            "How do I install Claude Code?",  # ordinary, untouched
+            "How do I install Claude Code?",
+        ),
+    ]
+    for question, expected_query in pairs:
+        captured.clear()
+        await promotion_eval._retrieve_sources(
+            session,
+            PromotionCase(id="mirror", question=question, expected_source="citevyn"),
+            index_version="v-test",
+            settings=get_settings(),
+            embedder=None,
+            embedder_identity=None,
+        )
+        assert captured == [expected_query], (
+            f"promotion gate issued {captured!r} for {question!r}; production issues "
+            f"[{expected_query!r}]. The gate's docstring promises it mirrors "
+            "Orchestrator.ask — a divergence here means the promotion number attests to "
+            "a query production never sends."
+        )
+
+
+def test_promotion_gate_would_measure_a_self_referential_case_correctly() -> None:
+    """A self-referential promotion case must be measured as production answers it.
+
+    No shipped promotion case is self-referential today (asserted below, so this test
+    says what it means rather than passing vacuously) — which is exactly why the gap
+    was invisible. The point is that ADDING one must not silently under-measure: raw,
+    "who are you?" retrieves nothing; rewritten, it reaches the About-CiteVyn source.
+    """
+    from app.guardrails.domain import Domain, canonicalize_self_reference, classify_domain
+
+    cases = load_cases(DEFAULT_CASES_PATH)
+    assert cases, "the promotion suite must not be empty"
+    # Partner assertion: prove the "no case is affected today" claim rather than
+    # assuming it, so this test cannot quietly become a tautology if one is added.
+    affected = [c for c in cases if canonicalize_self_reference(c.question) != c.question]
+    assert affected == [], (
+        "a promotion case is now self-referential; that is fine, but re-check that the "
+        f"gate measures it the way production serves it: {[c.id for c in affected]}"
+    )
+
+    # The behaviour the mirror buys, stated directly.
+    assert classify_domain("who are you?") is Domain.unsupported
+    assert classify_domain(canonicalize_self_reference("who are you?")) is Domain.citevyn

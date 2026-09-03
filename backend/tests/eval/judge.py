@@ -28,7 +28,7 @@ no-key path) the judge returns ``None`` — an explicit "unavailable", never a
 fabricated score. A malformed model response raises :class:`JudgeParseError`.
 
 **Budget.** The panel costs ``N + 1`` judge calls per case (default 4). Against the
-58-case golden set that is ~232 judge calls on the opt-in ``--postgres`` judged run.
+60-case golden set that is ~240 judge calls on the opt-in ``--postgres`` judged run.
 ``CITEVYN_EVAL_JUDGE_PANEL`` caps N (clamped to the available framings) so CI can
 trade robustness for cost; CI pins it to 1 (2 calls/case). See
 ``docs/COST_CONTROLS.md`` §6 for the measured call volume and the CI cost policy.

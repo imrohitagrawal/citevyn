@@ -42,6 +42,28 @@
 # indexed. A RECOGNITION gap, not a corpus gap (#84 item 1). One literal per alias shape.
 {"id": "citevyn_lit_alias_sitewin", "area": "citevyn", "kind": "literal", "question": "Is sitewin free to use right now?", "expected_source": "citevyn", "expected_gist": "CiteVyn is a free MVP demo; everything is currently free to try.", "expect_no_answer": false, "gold_chunks": ["citevyn#0"]}
 {"id": "citevyn_lit_alias_sitevyn", "area": "citevyn", "kind": "literal", "question": "What do I get with sitevyn pro?", "expected_source": "citevyn", "expected_gist": "CiteVyn Pro is not live yet; it is planned to add higher rate limits, exact lookups, and shareable answers.", "expect_no_answer": false, "gold_chunks": ["citevyn#0"]}
+# Self-referential questions (#300). A question addressed to the assistant in the second
+# person never says "CiteVyn", so it routed `unsupported` and the owner got the off-domain
+# refusal in production while the About-CiteVyn source could answer it — a RECOGNITION gap
+# like the dictation aliases above. `canonicalize_self_reference` rewrites it to the CiteVyn
+# question it means, BEFORE the memory rewrite; these lock that in at the retrieval layer.
+#
+# SCOPE of the cases below, stated honestly. The hermetic seed carries only the
+# Pro/membership chunk of the About-CiteVyn source, and the hermetic keyword arm requires
+# TWO distinct query tokens to match on a multi-token query (app/retrieval/keyword.py). So
+# only the IDENTITY group's canonical target ("What is CiteVyn?" — one content token after
+# stopwords) is provable on the hermetic run. The capability and coverage groups rewrite to
+# "What can CiteVyn do?" / "What does CiteVyn cover?", whose second content token ("can",
+# "cover") is absent from that one seeded chunk; they are covered instead by the unit tests
+# in test_guardrails_domain.py and the orchestrator wiring tests, rather than being declared
+# here as cases this harness cannot actually prove. The gist is anchored on what the SEEDED
+# chunk supports, not on the fuller Overview section the production corpus has.
+{"id": "citevyn_lit_selfref_identity", "area": "citevyn", "kind": "literal", "question": "who are you?", "expected_source": "citevyn", "expected_gist": "CiteVyn is the assistant answering: currently an MVP demo, free to try with or without an account.", "expect_no_answer": false, "gold_chunks": ["citevyn#0"]}
+# The echo-oracle style NEGATIVE for the rewrite: a listed phrasing ("what can you do")
+# carrying a substantive product tail is a real Codex question and must KEEP its codex
+# routing. If the rewrite ever loses its end anchor and over-matches, this case retrieves
+# the citevyn source instead and goes red.
+{"id": "codex_lit_selfref_negative", "area": "codex", "kind": "literal", "question": "What can you do with the --model flag in Codex?", "expected_source": "codex", "expected_gist": "The --model flag selects which model the Codex CLI uses to generate code.", "expect_no_answer": false, "expected_facts": ["--model"], "gold_chunks": ["codex#0"]}
 # --- paraphrase (semantic, zero literal overlap; expected miss at baseline) ----
 {"id": "claude_api_par_throttle", "area": "claude_api", "kind": "paraphrase", "question": "How quickly does Claude throttle heavy usage?", "expected_source": "claude_api", "expected_gist": "The Claude API throttles at a default of 50 requests per minute.", "expect_no_answer": false, "expected_facts": ["50 requests per minute|50 requests a minute|50 requests/minute|50 req/min"], "gold_chunks": ["claude_api#0"]}
 {"id": "claude_code_par_toolgate", "area": "claude_code", "kind": "paraphrase", "question": "How do I restrict which tools the coding assistant may run?", "expected_source": "claude_code", "expected_gist": "Use Claude Code's allow/deny lists in the settings file to restrict which tools and commands run.", "expect_no_answer": false, "gold_chunks": ["claude_code#0"]}
