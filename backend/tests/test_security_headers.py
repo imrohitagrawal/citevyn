@@ -22,7 +22,7 @@ from starlette.routing import Route
 
 from app.core import db as db_module
 from app.core.config import Settings, get_settings
-from app.core.security_headers import configure_security_headers
+from app.core.security_headers import _CSP, configure_security_headers
 from app.main import create_app
 from app.models import Base
 
@@ -68,13 +68,99 @@ def _parse_csp(csp: str) -> dict[str, set[str]]:
         tokens = part.strip().split()
         if not tokens:
             continue
+        # A plain assignment here is LAST-WINS, which is the opposite of what a
+        # browser does: CSP Level 3 says a directive repeated inside one policy
+        # uses the FIRST occurrence and ignores the rest. So a policy with
+        # ``script-src 'unsafe-inline'`` prepended parsed to ``{'self'}`` here
+        # while Chromium read ``{'unsafe-inline'}`` -- every assertion below
+        # passed and inline script executed (#322). Refuse the input instead of
+        # silently picking the wrong one.
+        assert tokens[0] not in directives, (
+            f"duplicate directive {tokens[0]!r} in the policy. Browsers honour the "
+            f"FIRST occurrence, this parser would take the last, so any assertion "
+            f"made on it would be about a policy the browser never enforces."
+        )
         directives[tokens[0]] = set(tokens[1:])
     return directives
+
+
+# The policy, byte for byte. This is a BACKSTOP, not a restatement: the
+# per-directive assertions below say WHY each origin is allowed and are the
+# useful failure message, but they are all made through a parser, and a parser
+# can only check the directives it is asked about.
+#
+# Three edits passed the entire suite before this existed (#322), each verified
+# against the real ``_CSP``:
+#
+#   * prepend ``script-src 'unsafe-inline' https://evil;`` -- the parser read
+#     the LAST ``script-src`` (``{'self'}``) while a browser honours the FIRST,
+#     so inline script executed with every test green;
+#   * prepend ``frame-ancestors *;`` -- same mechanism, and because a present
+#     ``frame-ancestors`` supersedes ``X-Frame-Options`` it defeated both;
+#   * append ``; script-src-elem 'self' 'unsafe-inline'`` -- nothing asserted
+#     that directive at all, and it overrides ``script-src`` for <script>.
+#
+# ``base-uri``, ``connect-src``, ``form-action`` and ``img-src`` likewise had no
+# equality assertion; weakening ``base-uri`` re-enables <base>-tag script
+# hijacking. Equality covers every one of those without enumerating them, and
+# makes any future change to the policy a deliberate two-place edit.
+_EXPECTED_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' https://fonts.googleapis.com https://api.fontshare.com; "
+    "font-src 'self' https://fonts.gstatic.com https://api.fontshare.com "
+    "https://cdn.fontshare.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+
+def test_csp_constant_is_exactly_the_expected_policy() -> None:
+    """Pin the whole policy string, not just the directives someone thought to check."""
+    assert _CSP == _EXPECTED_CSP
+
+
+def test_csp_has_no_repeated_directive() -> None:
+    """Partner to the equality check, and the one that names the actual hazard.
+
+    Equality alone would also be satisfied by editing this file, so state the
+    invariant independently: browsers honour the FIRST occurrence of a repeated
+    directive, so a policy containing one enforces something other than what a
+    last-wins reader (this suite, until #322) reports.
+    """
+    names = [part.strip().split()[0] for part in _CSP.split(";") if part.strip()]
+    assert len(names) == len(set(names)), f"repeated directive in the policy: {names}"
+    # Partner: prove the extraction actually found directives, so "no duplicates"
+    # cannot pass because the list is empty.
+    assert len(names) >= 9
 
 
 def _assert_common_headers(headers: dict[str, str]) -> None:
     for name, value in _EXPECTED_STATIC_HEADERS.items():
         assert headers[name] == value, f"{name}: expected {value!r}, got {headers.get(name)!r}"
+    # Pin the header BYTE-EXACT, not just the constant. Guarding `_CSP` alone was
+    # the same mistake #322 is about, one layer over: an adversarial review took
+    # the very bypass this PR claimed to kill -- appending `script-src-elem 'self'
+    # 'unsafe-inline'`, which overrides `script-src` for <script> elements -- moved
+    # it from the constant to `apply_security_headers`, and the FULL backend suite
+    # stayed green (1755 passed). Same for prepending `Script-Src 'unsafe-inline'
+    # https://evil` (first-wins in browsers, and the capitalisation also slips past
+    # the duplicate check, since CSP directive names are case-insensitive but a
+    # dict is not), and for `base-uri *` / `connect-src *`, which no per-directive
+    # assertion covered at all.
+    #
+    # The constant is not what a browser reads; this header is. Assert it first, so
+    # every response path -- router, StaticFiles mount, and the unhandled-exception
+    # handler -- is covered by one line no future directive can slip past. The
+    # parser assertions below stay: they are the readable failure message, and they
+    # say WHY each origin is permitted.
+    assert headers["content-security-policy"] == _CSP, (
+        "the emitted policy differs from `_CSP`. The browser reads THIS string, not "
+        "the constant, so any divergence is the real policy."
+    )
     directives = _parse_csp(headers["content-security-policy"])
     assert directives["default-src"] == {"'self'"}
     assert directives["script-src"] == {"'self'"}
