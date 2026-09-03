@@ -92,10 +92,24 @@ describe("HistoryDrawer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("restores focus to the trigger on unmount", async () => {
+  it("takes focus on open and restores it to the trigger on unmount", async () => {
+    // Both halves, and the FIRST is what makes the second mean anything.
+    //
+    // The previous version of this test asserted only the restore, and it was
+    // decorative: `renderDrawer` focuses the trigger, nothing moved focus into
+    // the dialog, so "focus returns to the trigger" held trivially. Proven --
+    // deleting the unmount cleanup outright left all 6 tests green.
+    //
+    // RED if the mount effect stops calling `dialogRef.current?.focus()`, if the
+    // dialog loses `tabIndex={-1}` (an element with no tabindex cannot take
+    // programmatic focus, so focus silently stays on <body> and the next Tab
+    // walks the page BEHIND the backdrop -- #290), or if the unmount cleanup
+    // stops calling `trigger?.focus()`.
     const { listMySessions } = await import("../lib/api");
     vi.mocked(listMySessions).mockResolvedValueOnce({ request_id: "r", sessions: [] });
     const { trigger, unmount } = renderDrawer();
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+    expect(trigger).not.toHaveFocus();
     unmount();
     expect(trigger).toHaveFocus();
     trigger.remove();
