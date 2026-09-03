@@ -84,9 +84,10 @@ jobs:
           uv run pytest -m "not postgres" -v
           --cov=app --cov-report=term-missing:skip-covered
           --cov-report=xml:artifacts/coverage.xml
-      # WHAT WOULD MAKE THIS BLOCKING, stated here rather than left to drift
-      # (AGENTS.md: "a gate shipped advisory states, in the same commit, what
-      # makes it blocking"):
+      # WHAT WOULD MAKE THIS BLOCKING, stated here rather than left to drift.
+      # (This follows the project practice that a gate shipped advisory says, in
+      # the same commit, what would make it blocking. That rule is NOT in
+      # AGENTS.md — an earlier version of this comment claimed it was.)
       #   * only once a baseline is recorded and stable across THREE consecutive
       #     `main` runs, and
       #   * then as "no DECREASE against that baseline" — never an absolute floor.
@@ -95,11 +96,22 @@ jobs:
       # in promotion_eval.py measured 97% covered, was executed by the suite, and
       # still left all 42 promotion tests green when deleted.
       - name: Upload coverage report
-        if: always()
+        # `!cancelled()` rather than `always()`: the report is most useful on the
+        # runs that FAILED, but a cancelled run should stay cancelled.
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
+          # `defaults.run.working-directory` applies to `run:` steps only, never to
+          # an action's inputs — so this path is relative to the WORKSPACE root
+          # while the pytest flag above is relative to `backend/`. A test pins the
+          # two together, because getting it wrong uploads nothing and stays green.
           path: backend/artifacts/coverage.xml
+          # Declared, not inherited: a crash before the XML is written should warn,
+          # not fail — the failing pytest step is what should red the job. The
+          # sibling eval upload states its choice too, rather than relying on the
+          # action's default.
+          if-no-files-found: warn
           retention-days: 14
 
   postgres-migrations:
