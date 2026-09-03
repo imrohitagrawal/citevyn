@@ -26,10 +26,14 @@
 /** An inline run within a line. `value` is always plain text for React to escape. */
 export type Span =
   | { kind: "text"; value: string }
-  | { kind: "bold"; value: string }
   | { kind: "code"; value: string }
-  /** A citation marker. `value` holds the digits only, e.g. `"3"` for `[3]`. */
-  | { kind: "marker"; value: string };
+  /** A citation marker. `value` holds the number, normalised, e.g. `"3"`. */
+  | { kind: "marker"; value: string }
+  /** Bold holds SPANS, not a string: a citation inside bold is still a citation.
+   *  `**Rate limits: 30/hour [1]**` is ordinary output now that the prompt asks
+   *  for bold, and flattening it to text left the marker inert — the exact defect
+   *  this feature exists to fix. */
+  | { kind: "bold"; spans: Span[] };
 
 export type Block =
   | { kind: "para"; spans: Span[] }
@@ -37,8 +41,11 @@ export type Block =
 
 /** `- ` at the start of a line, the only block-level construct in the subset. */
 const BULLET = /^[ \t]*-[ \t]+/;
-/** `[12]` — digits only, so prose like "[see below]" is never a marker. */
-const MARKER = /^\[(\d{1,3})\]/;
+/** `[12]` — digits only, so prose like "[see below]" is never a marker.
+ *  Unbounded `\d+` matches the backend's own marker regex
+ *  (``app/llm/validation.py``); a number with no matching citation simply takes
+ *  the miss path and renders as plain text. */
+const MARKER = /^\[(\d+)\]/;
 
 /** Append text to the trailing text span, or start one. Keeps runs contiguous
  *  so `a**b**c` yields text/bold/text rather than a span per character. */
@@ -65,7 +72,11 @@ export function parseInline(line: string): Span[] {
       const close = line.indexOf("**", i + 2);
       // Require non-empty content: `****` is literal, not an empty bold.
       if (close > i + 2) {
-        spans.push({ kind: "bold", value: line.slice(i + 2, close) });
+        // Recurse so code and citation markers inside bold still work. This
+        // cannot nest: ``close`` is the FIRST "**" after the opener, so the slice
+        // being re-parsed provably contains none, and the recursion is one level
+        // deep by construction rather than by a flag.
+        spans.push({ kind: "bold", spans: parseInline(line.slice(i + 2, close)) });
         i = close + 2;
         continue;
       }
@@ -89,7 +100,9 @@ export function parseInline(line: string): Span[] {
     if (ch === "[") {
       const m = MARKER.exec(line.slice(i));
       if (m) {
-        spans.push({ kind: "marker", value: m[1] });
+        // Normalise so `[01]` and `[1]` are the same citation, as the backend's
+        // ``int()`` conversion already treats them.
+        spans.push({ kind: "marker", value: String(Number(m[1])) });
         i += m[0].length;
         continue;
       }

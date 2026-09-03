@@ -4,13 +4,8 @@
  */
 
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { AnswerBody } from "./AnswerBody";
-
-/** A doc URL is a safe link only when it is http(s) or a site-relative path; anything
- *  else (e.g. a ``javascript:`` scheme) renders as inert text, not a clickable link. */
-function isSafeHref(url: string): boolean {
-  return /^https?:\/\//i.test(url) || url.startsWith("/");
-}
+import { AnswerBody, hasCitationChips } from "./AnswerBody";
+import { isSafeHref } from "../lib/safeHref";
 
 interface ChatViewProps {
   messages: Array<{
@@ -157,7 +152,7 @@ export function ChatView({
   // Demo-mode answers carry sources but no ``[n]`` markers, so they produce no
   // chips and no legend — which is correct: there would be nothing to explain.
   const legendIndex = messages.findIndex(
-    (m) => !m.isUser && m.hasSources && (m.sources?.length ?? 0) > 0 && /\[\d{1,3}\]/.test(m.text),
+    (m) => !m.isUser && m.hasSources && hasCitationChips(m.text, m.sources ?? []),
   );
 
   // A duplicate-question highlight OWNS the scroll while it is active (#302).

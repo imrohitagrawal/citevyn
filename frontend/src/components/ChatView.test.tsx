@@ -405,6 +405,28 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     expect(container.querySelectorAll(".message.bot")[0].contains(legends[0])).toBe(true);
   });
 
+  it("shows no legend when the only marker matches no source", () => {
+    // The legend explains chips. A gapped or dropped citation means [9] renders
+    // as plain text, so a legend there would explain something not on screen.
+    const { container } = renderChat({
+      messages: [
+        msg(0, true, "q"),
+        {
+          isUser: false,
+          domId: "cv-msg-1",
+          userStyle: {},
+          text: "Grounded in [9].",
+          hasSources: true,
+          sources: [{ n: "1", title: "About CiteVyn", url: "/about" }],
+        },
+      ],
+    });
+    expect(container.querySelector(".citation-legend")).toBeNull();
+    expect(container.querySelectorAll(".citation-chip")).toHaveLength(0);
+    // Partner: the card IS rendered, so this is not passing on an empty render.
+    expect(container.querySelectorAll(".source-card").length).toBe(1);
+  });
+
   it("shows no legend when answers carry sources but no [n] markers (demo mode)", () => {
     // Demo answers have sources and zero markers, so no chips are rendered and
     // there is nothing for a legend to explain.

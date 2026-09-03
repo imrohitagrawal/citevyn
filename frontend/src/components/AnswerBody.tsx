@@ -12,6 +12,7 @@
 import { useState } from "react";
 import { parseAnswer, type Span } from "../lib/answerFormat";
 import type { Source } from "../data/knowledgeBase";
+import { isSafeHref } from "../lib/safeHref";
 
 /** A source card, after collapsing every citation that points at one document. */
 export interface SourceGroup {
@@ -47,21 +48,23 @@ export function groupSources(sources: Source[]): SourceGroup[] {
   return groups;
 }
 
-/** A doc URL is a safe link only when it is http(s) or a site-relative path. */
-function isSafeHref(url: string): boolean {
-  return /^https?:\/\//i.test(url) || url.startsWith("/");
-}
-
 function renderSpans(
   spans: Span[],
   groupFor: (marker: string) => SourceGroup | undefined,
   activeKey: string | null,
-  onChipClick: (key: string) => void,
+  onChipClick: (key: string | null) => void,
   keyPrefix: string,
 ) {
   return spans.map((span, i) => {
     const k = `${keyPrefix}-${i}`;
-    if (span.kind === "bold") return <strong key={k}>{span.value}</strong>;
+    if (span.kind === "bold") {
+      // Recurse: markers and code inside bold keep working.
+      return (
+        <strong key={k}>
+          {renderSpans(span.spans, groupFor, activeKey, onChipClick, `${k}b`)}
+        </strong>
+      );
+    }
     if (span.kind === "code") return <code key={k} className="answer-code">{span.value}</code>;
     if (span.kind === "marker") {
       const group = groupFor(span.value);
@@ -70,14 +73,16 @@ function renderSpans(
       // than a chip that leads nowhere.
       if (!group) return <span key={k}>{`[${span.value}]`}</span>;
       const active = activeKey === group.key;
-      const label = `Source ${span.value}: ${group.title}`;
       // The brackets are REAL characters, not CSS content, so copied text keeps
-      // the plain ``[n]`` form the persisted answer uses.
+      // the plain ``[n]`` form the persisted answer uses. They are NOT
+      // ``aria-hidden``: on the linked chip the ``aria-label`` wins anyway, and on
+      // the inert one they are the only thing that makes it read as "[2]" rather
+      // than a bare "2".
       const inner = (
         <>
-          <span className="chip-bracket" aria-hidden="true">[</span>
+          <span className="chip-bracket">[</span>
           {span.value}
-          <span className="chip-bracket" aria-hidden="true">]</span>
+          <span className="chip-bracket">]</span>
         </>
       );
       const cls = "citation-chip" + (active ? " is-active" : "");
@@ -88,21 +93,51 @@ function renderSpans(
           href={group.url}
           target="_blank"
           rel="noopener noreferrer"
-          title={group.title}
-          aria-label={label}
+          aria-label={`Source ${span.value}: ${group.title}`}
           data-marker={span.value}
           onClick={() => onChipClick(group.key)}
+          // Keyboard parity for the chip -> card tie. Without this, tabbing to a
+          // chip highlights nothing and the affordance is mouse-only.
+          onFocus={() => onChipClick(group.key)}
+          onBlur={() => onChipClick(null)}
         >
           {inner}
         </a>
       ) : (
-        <span key={k} className={cls} title={group.title} aria-label={label} data-marker={span.value}>
+        // No ``aria-label`` here: ARIA 1.2 prohibits it on role=generic, and a
+        // conforming reader that drops it would announce a bare "2".
+        <span key={k} className={cls} title={group.title} data-marker={span.value}>
           {inner}
         </span>
       );
     }
     return <span key={k}>{span.value}</span>;
   });
+}
+
+/**
+ * Does this answer actually render at least one citation chip?
+ *
+ * `ChatView` uses this to decide where the once-per-session legend goes. It must
+ * be the SAME logic the renderer uses, not a regex approximation: a `[9]` with
+ * no matching source, or a marker the parser does not recognise, produces no
+ * chip, and a legend explaining chips that are not there is worse than none.
+ */
+export function hasCitationChips(text: string, sources: Source[]): boolean {
+  const markers = new Set<string>();
+  for (const g of groupSources(sources)) for (const m of g.markers) markers.add(m);
+  if (markers.size === 0) return false;
+  const walk = (spans: Span[]): boolean =>
+    spans.some((span) =>
+      span.kind === "marker"
+        ? markers.has(span.value)
+        : span.kind === "bold"
+          ? walk(span.spans)
+          : false,
+    );
+  return parseAnswer(text).some((block) =>
+    block.kind === "list" ? block.items.some(walk) : walk(block.spans),
+  );
 }
 
 interface AnswerBodyProps {
@@ -146,6 +181,10 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
         {streaming && <span className="typing-cursor" />}
       </div>
 
+      {!streaming && groups.length > 0 && showLegend && (
+        <p className="citation-legend">Numbers link each sentence to its source below.</p>
+      )}
+
       {!streaming && groups.length > 0 && (
         <div className="sources">
           {groups.map((g) => (
@@ -154,7 +193,6 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
               className={"source-card" + (activeKey === g.key ? " is-active" : "")}
               onMouseEnter={() => setActiveKey(g.key)}
               onMouseLeave={() => setActiveKey(null)}
-              data-markers={g.markers.join(",")}
             >
               <span className="source-number">{g.markers.join(", ")}</span>
               <div className="source-info">
@@ -163,11 +201,6 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
               </div>
             </div>
           ))}
-          {showLegend && (
-            <p className="citation-legend">
-              Numbers link each sentence to its source below.
-            </p>
-          )}
         </div>
       )}
     </>

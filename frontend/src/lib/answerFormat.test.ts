@@ -4,7 +4,7 @@ import { parseAnswer, parseInline, type Block } from "./answerFormat";
 import type { Span } from "./answerFormat";
 
 const text = (v: string): Span => ({ kind: "text", value: v });
-const bold = (v: string): Span => ({ kind: "bold", value: v });
+const bold = (...spans: Span[]): Span => ({ kind: "bold", spans });
 const code = (v: string): Span => ({ kind: "code", value: v });
 const marker = (v: string): Span => ({ kind: "marker", value: v });
 
@@ -12,7 +12,7 @@ describe("parseInline — the allowed subset", () => {
   it("reads bold, inline code and citation markers", () => {
     expect(parseInline("Use **npm** to run `codex` [2]")).toEqual([
       text("Use "),
-      bold("npm"),
+      bold(text("npm")),
       text(" to run "),
       code("codex"),
       text(" "),
@@ -49,7 +49,7 @@ describe("parseInline — everything outside the subset stays literal text", () 
     // Nothing was interpreted as markup...
     expect(spans.every((s) => s.kind === "text")).toBe(true);
     // ...and the characters survive verbatim, so the reader sees what was written.
-    expect(spans.map((s) => s.value).join("")).toBe(input);
+    expect(spans.map((s) => (s.kind === "bold" ? "" : s.value)).join("")).toBe(input);
   });
 
   it("never treats a bracketed word as a citation marker", () => {
@@ -76,7 +76,76 @@ describe("parseInline — tolerates half-written input mid-stream", () => {
   });
 
   it("resolves the moment the closing delimiter streams in", () => {
-    expect(parseInline("Use **npm**")).toEqual([text("Use "), bold("npm")]);
+    expect(parseInline("Use **npm**")).toEqual([text("Use "), bold(text("npm"))]);
+  });
+});
+
+describe("parseInline — delimiter edge cases", () => {
+  it("renders single-character bold and code", () => {
+    expect(parseInline("**a**")).toEqual([bold(text("a"))]);
+    expect(parseInline("`a`")).toEqual([code("a")]);
+  });
+
+  it("does not render an empty code span from two backticks", () => {
+    expect(parseInline("``")).toEqual([text("``")]);
+  });
+
+  it("keeps whitespace inside delimiters verbatim", () => {
+    expect(parseInline("** a **")).toEqual([bold(text(" a "))]);
+    expect(parseInline("`  x  `")).toEqual([code("  x  ")]);
+  });
+
+  it("only matches a marker at the current position, never mid-string", () => {
+    // Without the ^ anchor the regex would find "[1]" later in the string and
+    // consume the wrong three characters.
+    expect(parseInline("[x] [1]")).toEqual([text("[x] "), marker("1")]);
+  });
+});
+
+describe("parseAnswer — bullet edge cases", () => {
+  it("accepts an indented bullet and a tab-separated one", () => {
+    expect(parseAnswer("  - indented")).toEqual([
+      { kind: "list", items: [[text("indented")]] },
+    ]);
+    expect(parseAnswer("-\ttabbed")).toEqual([
+      { kind: "list", items: [[text("tabbed")]] },
+    ]);
+  });
+});
+
+describe("parseInline — markup nested inside bold still works", () => {
+  // The prompt now ASKS for bold, so `**Rate limits: 30/hour [1]**` is ordinary
+  // output. Flattening bold to a string left that marker inert — the exact
+  // defect this feature exists to fix, on the most likely sentence shape.
+  it("keeps a citation marker inside bold a real marker", () => {
+    expect(parseInline("**Rate limits: 30/hour [1]**")).toEqual([
+      bold(text("Rate limits: 30/hour "), marker("1")),
+    ]);
+  });
+
+  it("keeps inline code inside bold", () => {
+    expect(parseInline("**run `npm i` first**")).toEqual([
+      bold(text("run "), code("npm i"), text(" first")),
+    ]);
+  });
+
+  it("does not nest bold within bold", () => {
+    // `**a **b** c**` closes at the first `**` pair; the remainder is literal.
+    const spans = parseInline("**a **b** c**");
+    expect(spans[0]).toEqual(bold(text("a ")));
+  });
+});
+
+describe("parseInline — marker numbering matches the backend", () => {
+  it("normalises a zero-padded marker, as the backend's int() does", () => {
+    expect(parseInline("[01]")).toEqual([marker("1")]);
+    expect(parseInline("[007]")).toEqual([marker("7")]);
+  });
+
+  it("accepts markers of any length, like the backend regex", () => {
+    // The backend uses an unbounded \d+ and hard-fails out-of-range numbers, so
+    // a client cap here would silently disagree about what a marker even is.
+    expect(parseInline("[1234]")).toEqual([marker("1234")]);
   });
 });
 
