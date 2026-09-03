@@ -49,10 +49,11 @@ defect that motivated it.
 
 ## Open follow-ups this round created — read before starting anything else
 
-- **#311 — the demo Playwright suite (145 tests) runs in NO CI job, and 70 of its runs already
-  fail on `main`** from one CSS class collision (`AccountMenu` reuses `className="theme-toggle"`,
-  colliding with `Header`'s real toggle). This is the suite that should have caught #302. Highest
-  value of the three.
+- **#311 — FIXED (PR #323).** The demo Playwright suite ran in NO CI job, and 70 of its runs
+  failed on `main` from one CSS class collision (`AccountMenu` reused `className="theme-toggle"`,
+  colliding with `Header`'s real toggle). Renamed to `.account-button`, and the suite now runs in
+  a `demo-e2e` CI job. Note the job is still ADVISORY — the `frontend` workflow is not in `main`'s
+  required status checks, which is owner-only to change.
 - **#312** — the landing hero animation re-renders the whole app ~40×/second while the CHAT
   screen is up; it is what turned #302 into a production-only bug. Measured honestly: **not** a
   CPU problem (+33% renders, identical `LayoutCount`, CPU within noise). A `useMemo` on `chatView`

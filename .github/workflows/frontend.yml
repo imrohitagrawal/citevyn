@@ -11,7 +11,6 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/worker/sources/**'
-      - 'frontend.yml'
       - '.github/workflows/frontend.yml'
   pull_request:
     paths:
@@ -102,18 +101,60 @@ jobs:
       #   - it selects no visual test, WHILE the default config still selects 22.
       # The second half is the partner assertion: without it, deleting
       # visual.spec.ts outright would satisfy "zero visual tests" just as well.
-      - name: Guard against a vacuous run
+      # A job that runs ZERO tests passes. `playwright.demo-ci.config.ts` excludes
+      # tests/visual.spec.ts (its baselines are -darwin only), and a testIgnore
+      # regex that over-matches would empty the whole run silently. So assert BOTH
+      # directions before running anything:
+      #   - the CI config still selects a substantial suite, and
+      #   - it selects no visual test, WHILE the default config still selects 22.
+      # The second half is the partner assertion: without it, deleting
+      # visual.spec.ts outright would satisfy "zero visual tests" just as well.
+      #
+      # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
+      # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
+      # needs `|| true` -- which then also swallows a CRASHED playwright, and
+      # "no visual specs leaked" passes because the command produced no output at
+      # all. Writing to a file first lets `set -e` catch the producer's failure,
+      # so the `|| true` afterwards can only ever mean "grep found nothing".
+      - name: Guard against a vacuous selection
         run: |
           set -euo pipefail
-          ci_total=$(npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
-          ci_visual=$(npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list 2>/dev/null | grep -c 'visual regression' || true)
-          all_visual=$(npx playwright test -c playwright.config.ts --list --reporter=list 2>/dev/null | grep -c 'visual regression' || true)
+          npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list > /tmp/ci_list.txt
+          npx playwright test -c playwright.config.ts        --list --reporter=list > /tmp/all_list.txt
+          ci_total=$(grep -oE 'Total: [0-9]+' /tmp/ci_list.txt | grep -oE '[0-9]+')
+          ci_visual=$(grep -c 'visual regression' /tmp/ci_list.txt || true)
+          all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)
           echo "ci_total=$ci_total ci_visual=$ci_visual all_visual=$all_visual"
           test "$ci_total" -ge 100 || { echo "::error::demo suite collapsed to $ci_total tests (expected >=100)"; exit 1; }
           test "$ci_visual" -eq 0 || { echo "::error::visual specs leaked into the CI run"; exit 1; }
           test "$all_visual" -gt 0 || { echo "::error::visual.spec.ts vanished — the exclusion above is now vacuous"; exit 1; }
       - name: Run demo-mode e2e suite
-        run: npx playwright test -c playwright.demo-ci.config.ts
+        run: npx playwright test -c playwright.demo-ci.config.ts --reporter=list,json
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/demo-results.json
+      # The selection guard above is NOT enough, and the gap is the exact failure
+      # mode this whole issue is about. `--list` counts SKIPPED tests, and
+      # Playwright exits 0 when every test skips -- so a `test.skip(true, ...)` at
+      # the top of a few spec files leaves the selection guard reading 124 while
+      # the run executes nothing and reports green. Not hypothetical here: three
+      # tests already self-skip in demo mode (`if (!isLive)`).
+      #
+      # So assert EXECUTION, from the run's own JSON stats, not selection.
+      - name: Assert the suite actually executed
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, sys
+          stats = json.load(open("/tmp/demo-results.json"))["stats"]
+          print("stats:", stats)
+          if stats["expected"] < 100:
+              print(f"::error::only {stats['expected']} tests actually PASSED "
+                    f"({stats['skipped']} skipped) — the suite ran but asserted almost nothing")
+              sys.exit(1)
+          if stats["unexpected"]:
+              print(f"::error::{stats['unexpected']} unexpected failures")
+              sys.exit(1)
+          PY
       - name: Upload HTML report on failure
         if: failure()
         uses: actions/upload-artifact@v7
