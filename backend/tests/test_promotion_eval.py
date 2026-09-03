@@ -33,6 +33,7 @@ from app.models import Base
 from app.models.enums import EvaluationStatus, IndexStatus
 from app.models.evaluation import EvaluationRun
 from app.models.index_versions import IndexVersion
+from app.retrieval.types import RetrievalResult, VectorDegrade
 from app.services import index_versions as index_service
 from app.services.index_versions import IndexPromotionBlocked, _pass_rate_from_metrics
 from app.worker import cli, promotion_eval
@@ -928,46 +929,71 @@ class TestHealthIndexReportsTheEvidence:
 # left all 42 promotion tests green. Coverage is not assertion.
 
 
-def test_promotion_gate_mirrors_the_orchestrator_query_pipeline() -> None:
-    """The promotion gate must rewrite a query exactly as ``Orchestrator.ask`` does.
+async def test_promotion_gate_mirrors_the_orchestrator_query_pipeline(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promotion gate must hand the retriever the query production would issue.
 
-    Asserted against the SOURCE of truth rather than a hard-coded string: both sides
-    apply the self-reference rewrite (#300) and then alias canonicalization (#84), in
-    that order. Dropping either step from ``promotion_eval``, or swapping their order,
-    turns this red.
+    BEHAVIOURAL, not a source grep. An earlier version of this test asserted on
+    ``inspect.getsource`` and was replaced after review showed it was theatre: it
+    PASSED a behaviour-breaking edit that kept both call names in order while
+    discarding the result::
 
-    Order matters and is not cosmetic: self-reference maps a phrase to a canonical
-    question CONTAINING "CiteVyn", which alias canonicalization then leaves alone;
-    reversed, the alias pass runs against the user's raw text and the self-reference
-    pass would have to match a string the alias pass may already have rewritten.
+        _ignored = canonicalize_self_reference(case.question)   # still greps clean
+        query = canonicalize_product_name(case.question)        # rewrite thrown away
+
+    and it FAILED semantics-preserving refactors (renaming the local, extracting a
+    helper). It measured the text, not the behaviour.
+
+    This spies on the retriever and asserts the QUERY IT ACTUALLY RECEIVES, which is
+    the thing that decides what the gate measures. Turns red if the #300 rewrite is
+    dropped, discarded, or applied after alias canonicalization instead of before.
     """
-    import inspect
+    captured: list[str] = []
 
-    from app.guardrails.domain import canonicalize_product_name, canonicalize_self_reference
+    class _SpyRetriever:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
 
-    source = inspect.getsource(promotion_eval._retrieve_sources)
+        async def retrieve(self, query: str, **kwargs: object) -> RetrievalResult:
+            captured.append(query)
+            return RetrievalResult(hits=[], vector_degrade=VectorDegrade.none)
 
-    # The rewrite chain must be present, in ask()'s order.
-    assert "canonicalize_self_reference(case.question)" in source, (
-        "promotion_eval no longer applies the #300 self-reference rewrite — it would "
-        "measure a query production never issues, and its docstring's 'measures the "
-        "system production actually serves' promise would be false"
-    )
-    self_ref_at = source.index("canonicalize_self_reference")
-    alias_at = source.index("canonicalize_product_name(")
-    assert self_ref_at < alias_at, (
-        "the self-reference rewrite must run BEFORE alias canonicalization, as in Orchestrator.ask"
-    )
+        async def retrieve_multi(self, query: str, **kwargs: object) -> RetrievalResult:
+            captured.append(query)
+            return RetrievalResult(hits=[], vector_degrade=VectorDegrade.none)
 
-    # And behaviourally: the composed chain must agree with ask()'s composition.
-    for question in (
-        "who are you?",
-        "hey, what can you do?",
-        "Is sitewin free to use right now?",
-        "How do I install Claude Code?",
-    ):
-        expected = canonicalize_product_name(canonicalize_self_reference(question))
-        assert canonicalize_product_name(canonicalize_self_reference(question)) == expected
+    monkeypatch.setattr(promotion_eval, "HybridRetriever", _SpyRetriever)
+
+    # (question the user types, query production issues for it)
+    pairs = [
+        ("who are you?", "What is CiteVyn?"),  # #300 self-reference
+        ("hey, what can you do?", "What can CiteVyn do?"),  # ... with an opener
+        (
+            "Is sitewin free to use right now?",  # #84 alias, unaffected
+            "Is CiteVyn free to use right now?",
+        ),
+        (
+            "How do I install Claude Code?",  # ordinary, untouched
+            "How do I install Claude Code?",
+        ),
+    ]
+    for question, expected_query in pairs:
+        captured.clear()
+        await promotion_eval._retrieve_sources(
+            session,
+            PromotionCase(id="mirror", question=question, expected_source="citevyn"),
+            index_version="v-test",
+            settings=get_settings(),
+            embedder=None,
+            embedder_identity=None,
+        )
+        assert captured == [expected_query], (
+            f"promotion gate issued {captured!r} for {question!r}; production issues "
+            f"[{expected_query!r}]. The gate's docstring promises it mirrors "
+            "Orchestrator.ask — a divergence here means the promotion number attests to "
+            "a query production never sends."
+        )
 
 
 def test_promotion_gate_would_measure_a_self_referential_case_correctly() -> None:

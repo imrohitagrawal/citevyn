@@ -197,8 +197,13 @@ async def _retrieve_sources(
     ``index_version``: evaluating the active index would measure the thing we
     are trying to replace.
 
-    Conversation memory is deliberately absent: every promotion case is
-    single-turn by construction, so there is no history to resolve.
+    Two steps of ``ask`` are deliberately absent. CONVERSATION MEMORY: every
+    promotion case is single-turn by construction, so there is no history to
+    resolve. The AMBIGUOUS-ALIAS LLM intent check (#84 follow-up): it needs a
+    real provider and this gate must stay hermetic and free, and no promotion
+    case contains a two-word CiteVyn homophone. Both omissions make the gate
+    measure a floor, never an inflated number — the property that matters for a
+    promotion decision.
     """
     # Same order as ``Orchestrator.ask``: the #300 self-reference rewrite runs FIRST,
     # then alias canonicalization. Omitting it would make this gate measure a query

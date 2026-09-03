@@ -232,7 +232,26 @@ cd backend && PYTHONPATH=. CITEVYN_EVAL_JUDGE_PANEL=1 \
 Reading the table: 44 = 60 golden cases − 16 `postgres_only`. Only 25 of those 44
 make an answer call, because this is the *hermetic* run — with the vector arm dead,
 the other cases retrieve nothing and the orchestrator short-circuits to a refusal
-before reaching the LLM. The judge is `N + 1` calls per case (N framings + the
+before reaching the LLM.
+
+> **Reproducing these three numbers** (they are measured, not derived by arithmetic, and
+> they move whenever the golden set or the corpus does):
+>
+> ```bash
+> cd backend && env -u CITEVYN_DATABASE_URL uv run python -c "
+> import asyncio
+> from tests.eval.cases import load_cases
+> from tests.eval.paths import GOLDEN_PATH
+> from tests.eval.retrieval import evaluate_retrieval
+> cs = load_cases(GOLDEN_PATH)
+> print('judged pool :', len([c for c in cs if not c.postgres_only]))
+> rep = asyncio.run(evaluate_retrieval(cs))
+> print('answer calls:', len([o for o in rep.outcomes if o.retrieved_sources]))"
+> ```
+>
+> "Answer calls" is approximated by *cases that retrieve at least one chunk*, which is an
+> UPPER BOUND: the orchestrator can still decline on the confidence gate after retrieving,
+> and would then not call the LLM. Judge calls are exact — `judged pool x (panel + 1)`. The judge is `N + 1` calls per case (N framings + the
 adversarial veto), so it dominates: **~80% of calls** at the CI panel size and ~89%
 at the local default.
 

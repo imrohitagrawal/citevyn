@@ -237,7 +237,7 @@ jobs:
     # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
     #
     # This job is the project's largest recurring spend: ~65 orchestrator answers +
-    # ~120 judge calls, ≈$0.026 a run (measured — see docs/COST_CONTROLS.md §6).
+    # ~120 judge calls, ≈$0.026 a run (extrapolated from a measured local run — docs/COST_CONTROLS.md §6).
     # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
     # PRs would consume most of a $1.10 key.
     #

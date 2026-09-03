@@ -315,7 +315,7 @@ def test_a_bound_on_the_real_golden_set_keeps_every_oracle_and_every_kind() -> N
             assert case.id in sel_ids, f"refusal case {case.id} dropped by the bound"
         if case.judge_only:
             assert case.id in sel_ids, f"judge-only case {case.id} dropped by the bound"
-    # At limit 20 the 42-case priority pool already exceeds the limit, so NO
+    # At limit 20 the 43-case priority pool already exceeds the limit, so NO
     # stratified fill happens and the selection is exactly the pool. That is the
     # documented "the limit is a target, not a licence to drop an oracle" rule.
     assert len(selected) == sum(1 for c in cases if is_priority(c))
@@ -341,10 +341,10 @@ def test_the_documented_saving_ceiling_is_still_true() -> None:
     pool = [c for c in cases if is_priority(c)]
     assert (len(pool), len(cases)) == (43, 60), (
         f"priority pool is now {len(pool)}/{len(cases)}; update the ~28%-ceiling "
-        "claim in docs/COST_CONTROLS.md §6, tests/eval/subset.py, tests/eval/judge.py "
-        "AND .github/workflows/ci.yml (its comment block carries the same numbers and "
-        "is outside any docs/ or tests/ grep), then re-decide whether CI should sample "
-        "cases after all"
+        "claim in docs/COST_CONTROLS.md §6, tests/eval/subset.py, tests/eval/judge.py, "
+        "tests/eval/README.md AND .github/workflows/ci.yml (that last one carries the "
+        "same numbers and is outside any docs/ or tests/ grep, which is how it was "
+        "missed once already), then re-decide whether CI should sample cases after all"
     )
 
 
