@@ -47,6 +47,11 @@ jobs:
       # test — including the corpus drift guard added in #178 — was decorative.
       - name: Unit tests
         run: npm test
+      # `lint:css` was defined in package.json and run by no workflow — the same
+      # defect as #311 itself, one directory over. It passes on `main`, so this
+      # only stops it from rotting.
+      - name: CSS lint
+        run: npm run lint:css
       - name: Build
         run: npm run build
       # The eager-chunk gzip ceiling used to be prose in a docs/BACKLOG.md row —
@@ -64,4 +69,55 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist
+          retention-days: 7
+
+  # The demo Playwright suite ran in NO CI job (#311). It is the suite that
+  # should have caught #302, and 39 of its runs were failing on `main` from a
+  # single CSS class collision that nobody could see, because nothing ran it.
+  demo-e2e:
+    name: Demo-mode Playwright (no visual snapshots)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
+          # key alongside this — setup-node gives `node-version` precedence, which
+          # would make the file decorative and re-open #231.
+          node-version-file: frontend/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      # A job that runs ZERO tests passes. `playwright.demo-ci.config.ts` excludes
+      # tests/visual.spec.ts (its baselines are -darwin only), and a testIgnore
+      # regex that over-matches would empty the whole run silently. So assert BOTH
+      # directions before running anything:
+      #   - the CI config still selects a substantial suite, and
+      #   - it selects no visual test, WHILE the default config still selects 22.
+      # The second half is the partner assertion: without it, deleting
+      # visual.spec.ts outright would satisfy "zero visual tests" just as well.
+      - name: Guard against a vacuous run
+        run: |
+          set -euo pipefail
+          ci_total=$(npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1)
+          ci_visual=$(npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list 2>/dev/null | grep -c 'visual regression' || true)
+          all_visual=$(npx playwright test -c playwright.config.ts --list --reporter=list 2>/dev/null | grep -c 'visual regression' || true)
+          echo "ci_total=$ci_total ci_visual=$ci_visual all_visual=$all_visual"
+          test "$ci_total" -ge 100 || { echo "::error::demo suite collapsed to $ci_total tests (expected >=100)"; exit 1; }
+          test "$ci_visual" -eq 0 || { echo "::error::visual specs leaked into the CI run"; exit 1; }
+          test "$all_visual" -gt 0 || { echo "::error::visual.spec.ts vanished — the exclusion above is now vacuous"; exit 1; }
+      - name: Run demo-mode e2e suite
+        run: npx playwright test -c playwright.demo-ci.config.ts
+      - name: Upload HTML report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-demo
+          path: frontend/playwright-report
           retention-days: 7
