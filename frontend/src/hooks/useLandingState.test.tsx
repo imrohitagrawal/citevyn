@@ -1003,3 +1003,198 @@ describe("useLandingState — landing hands over to the chat (#302)", () => {
     spy.mockRestore();
   });
 });
+
+describe("useLandingState — the landing hero does not run on the chat screen (#312)", () => {
+  it("keeps the chatView array IDENTITY stable when only hero state changes", async () => {
+    // This is the defect, encoded directly. `chatView` used to be a bare `.map`, so
+    // every SET_HERO dispatch -- ~40 per second from the landing demo animation --
+    // handed `ChatView` a brand new `messages` array. Its passive `[messages]` effect
+    // then ran and wrote `scrollTop`: measured 197 writes in 12 IDLE seconds with no
+    // user interaction, which is the 42Hz scroll fight that made #302 reproduce only
+    // in production while the entire suite stayed green.
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+
+    const before = result.current.chatView;
+    // Drive hero state directly, so this measures the memo and not the screen gate.
+    await act(async () => {
+      result.current.dispatch({ type: "SET_HERO", hero: { text: "a" } });
+      result.current.dispatch({ type: "SET_HERO", hero: { text: "ab" } });
+      result.current.dispatch({ type: "SET_HERO", hero: { text: "abc" } });
+    });
+
+    expect(result.current.chatView).toBe(before);
+  });
+
+  it("still produces a NEW chatView when the messages actually change", async () => {
+    // Partner: without this, `toBe(before)` above would also pass if `chatView` were
+    // frozen, memoised on `[]`, or never rebuilt at all.
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    const before = result.current.chatView;
+
+    await act(async () => {
+      result.current.send("How do I install the Codex CLI?");
+    });
+    await settle();
+
+    expect(result.current.chatView).not.toBe(before);
+    expect(result.current.chatView.length).toBeGreaterThan(before.length);
+  });
+
+  it("rebuilds chatView when the HIGHLIGHT changes, not only the messages", async () => {
+    // `state.highlight` drives the duplicate-question pulse styling inside the map,
+    // so it must be a dependency. Memoising on `[state.messages]` alone type-checks,
+    // passes every other test here, and silently kills the #302 flash -- the whole
+    // reason ChatView gets a highlight at all.
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    const before = result.current.chatView;
+    expect(before[0].userStyle.animation).toBeUndefined(); // partner: no pulse yet
+
+    await act(async () => {
+      result.current.dispatch({ type: "SET_HIGHLIGHT", index: 0 });
+    });
+
+    expect(result.current.chatView).not.toBe(before);
+    expect(result.current.chatView[0].userStyle.animation).toContain("cv-pulse");
+  });
+
+  it("freezes the hero mid-stream when the chat screen takes over", async () => {
+    // Entering chat WHILE a hero answer is still streaming is the case that needs
+    // `timers.current.heroLoop?.stop()`. Leaving between items is covered by the
+    // heroPause test below; without this one, dropping the heroLoop stop passes.
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300); // mid-stream, not at a pause
+    });
+    expect(result.current.state.hero.streaming).toBe(true); // partner: really streaming
+
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    // Capture IMMEDIATELY -- no `settle()`. Settling advances 4000ms, which is long
+    // enough for the hero stream to finish on its own, and then a frozen-vs-frozen
+    // comparison holds whether or not anything stopped it. That is exactly how the
+    // first version of this test passed with `heroLoop?.stop()` deleted.
+    const frozen = result.current.state.hero.text;
+    expect(result.current.state.hero.streaming).toBe(true); // partner: still mid-stream
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(result.current.state.hero.text).toBe(frozen);
+  });
+
+  it("restarts the hero from its FIRST item on returning to landing", async () => {
+    // Pins what actually happens, because I claimed the wrong thing. `playHeroLoop`
+    // re-initialises `let idx = 0` on every call, so returning to the landing page
+    // restarts the reel rather than resuming it. My browser probe only checked that
+    // the hero text CHANGED after coming back -- which a restart satisfies just as
+    // well as a resume -- so the claim outran the evidence. Whichever behaviour is
+    // wanted, it should be the one written down and guarded.
+    const { result } = renderHook(() => useLandingState());
+    const firstKey = result.current.state.hero.key;
+    // Advance past the first item so the reel has genuinely moved on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14000);
+    });
+    const laterKey = result.current.state.hero.key;
+    expect(laterKey).not.toBe(firstKey); // partner: the reel really does advance
+
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    await act(async () => {
+      result.current.backToLanding();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(result.current.state.hero.key).toBe(firstKey);
+  });
+
+  it("stops rotating the hero placeholder on the chat screen", async () => {
+    const { result } = renderHook(() => useLandingState());
+    const first = result.current.heroPlaceholder;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3400); // past the 3200ms interval
+    });
+    // Partner: it really does rotate on the landing screen.
+    expect(result.current.heroPlaceholder).not.toBe(first);
+
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    const onChat = result.current.heroPlaceholder;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(result.current.heroPlaceholder).toBe(onChat);
+  });
+
+  it("does not let the self-re-arming heroPause restart the loop after leaving", async () => {
+    // `playHeroLoop` schedules the NEXT item through `timers.current.heroPause`
+    // (a 4600ms timeout) once a hero answer finishes streaming. Stopping only
+    // `heroLoop` on the way out therefore looks correct and is not: 4.6s later
+    // that pause fires, dispatches SET_HERO and re-arms the whole loop from a
+    // handle nobody is holding. Without this test, deleting
+    // `timers.current.heroPause?.stop()` passes the entire suite.
+    const { result } = renderHook(() => useLandingState());
+    // Let a full hero item stream and finish, so `heroPause` is genuinely armed.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+
+    const heroTextOnEntry = result.current.state.hero.text;
+    const timersOnEntry = vi.getTimerCount();
+
+    // Well past the 4600ms pause.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+
+    expect(result.current.state.hero.text).toBe(heroTextOnEntry);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(timersOnEntry);
+  });
+
+  it("stops the hero + placeholder timers on the chat screen and restarts them on return", async () => {
+    // The loop re-arms itself through `timers.current.heroPause`, so stopping only
+    // `heroLoop` would let it resume 4.6s later from a handle nobody is holding.
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    const onLanding = vi.getTimerCount();
+    expect(onLanding).toBeGreaterThan(0); // partner: the loop really is running here
+
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    const onChat = vi.getTimerCount();
+
+    await act(async () => {
+      result.current.backToLanding();
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    const backOnLanding = vi.getTimerCount();
+
+    expect(onChat).toBeLessThan(onLanding);
+    expect(backOnLanding).toBeGreaterThan(onChat);
+  });
+});
