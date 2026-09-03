@@ -81,6 +81,7 @@ from app.embeddings.protocol import Embedder
 from app.embeddings.stub import StubEmbedder
 from app.guardrails.domain import (
     canonicalize_product_name,
+    canonicalize_self_reference,
     classify_domain,
     classify_domains,
     is_unsupported,
@@ -189,17 +190,24 @@ async def _retrieve_sources(
 ) -> tuple[str, ...]:
     """Return the top-k source names for ``case`` against ``index_version``.
 
-    Mirrors ``Orchestrator.ask``'s query pipeline — alias canonicalization,
-    domain routing, intent routing, multi-hop fan-out, and the Phase-2
-    "answer when grounded" global path — so the number measures the system
-    production actually serves. It is scoped to the CANDIDATE
+    Mirrors ``Orchestrator.ask``'s query pipeline — self-reference rewriting
+    (#300), alias canonicalization, domain routing, intent routing, multi-hop
+    fan-out, and the Phase-2 "answer when grounded" global path — so the number
+    measures the system production actually serves. It is scoped to the CANDIDATE
     ``index_version``: evaluating the active index would measure the thing we
     are trying to replace.
 
     Conversation memory is deliberately absent: every promotion case is
     single-turn by construction, so there is no history to resolve.
     """
-    query = canonicalize_product_name(case.question)
+    # Same order as ``Orchestrator.ask``: the #300 self-reference rewrite runs FIRST,
+    # then alias canonicalization. Omitting it would make this gate measure a query
+    # production never issues -- "who are you?" retrieves nothing raw, but production
+    # rewrites it to "What is CiteVyn?" and retrieves the About-CiteVyn source. No
+    # promotion case is self-referential today, so this changes no current number; it
+    # keeps the mirror true for the case that adding one would otherwise mis-measure.
+    query = canonicalize_self_reference(case.question)
+    query = canonicalize_product_name(query)
     domain = classify_domain(query)
     intent = classify_intent(query, domain)
     if is_unsupported(domain):

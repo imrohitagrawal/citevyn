@@ -341,8 +341,10 @@ def test_the_documented_saving_ceiling_is_still_true() -> None:
     pool = [c for c in cases if is_priority(c)]
     assert (len(pool), len(cases)) == (43, 60), (
         f"priority pool is now {len(pool)}/{len(cases)}; update the ~28%-ceiling "
-        "claim in docs/COST_CONTROLS.md §6 and tests/eval/subset.py, and re-decide "
-        "whether CI should sample cases after all"
+        "claim in docs/COST_CONTROLS.md §6, tests/eval/subset.py, tests/eval/judge.py "
+        "AND .github/workflows/ci.yml (its comment block carries the same numbers and "
+        "is outside any docs/ or tests/ grep), then re-decide whether CI should sample "
+        "cases after all"
     )
 
 

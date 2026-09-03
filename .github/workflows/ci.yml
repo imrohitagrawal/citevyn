@@ -236,12 +236,12 @@ jobs:
     #
     # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
     #
-    # This job is the project's largest recurring spend: ~58 orchestrator answers +
-    # ~116 judge calls, ≈$0.026 a run (measured — see docs/COST_CONTROLS.md §6).
+    # This job is the project's largest recurring spend: ~65 orchestrator answers +
+    # ~120 judge calls, ≈$0.026 a run (measured — see docs/COST_CONTROLS.md §6).
     # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
     # PRs would consume most of a $1.10 key.
     #
-    # Sampling CASES was evaluated and REJECTED: 42 of the 58 golden cases carry a
+    # Sampling CASES was evaluated and REJECTED: 43 of the 60 golden cases carry a
     # ZERO-TOLERANCE judge-independent oracle (injection, multi-turn echo, per-case
     # groundedness, refusal leak), which a subset does not average down — it
     # switches off. The maximum honest saving was ~28%, in exchange for silently
@@ -297,7 +297,7 @@ jobs:
       CITEVYN_EMBEDDING_MODEL: openai/text-embedding-3-small
       CITEVYN_LLM_PROVIDER: router
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
-      # calls/case over the 58-case golden set on a small model.
+      # calls/case over the 60-case golden set on a small model.
       CITEVYN_EVAL_JUDGE_PANEL: "1"
     steps:
       - uses: actions/checkout@v7
