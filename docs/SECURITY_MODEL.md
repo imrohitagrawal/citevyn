@@ -104,6 +104,16 @@ magic_link: 5 requests/hour, keyed per TARGET EMAIL, a SEPARATE bucket —
   ADR-0004 PR 14, POST /v1/auth/magic-link/request — never shared with
   auth_login (a flood of link requests must not lock the victim out of
   password login); doubles as the per-address email-bombing ceiling.
+magic_link_interval: 1 request per 60s, keyed per TARGET EMAIL, its own
+  bucket — #301, POST /v1/auth/magic-link/request — a FLOOR between
+  consecutive requests, where magic_link above is the hourly CEILING. Kept
+  separate so a request refused by the floor cannot consume one of the five
+  hourly sends (both limiters record a hit only on the success path) and so
+  draining one cannot silence the other. Applied before the account lookup
+  and on BOTH branches, like magic_link, or a second click would reveal
+  whether an address is registered. This is the only role whose window
+  differs from the limiter-wide hour: expressing a 60-second floor as
+  "1 per hour" would be a lockout, not a cooldown.
 email_notice: same value as magic_link, keyed per ADDRESS, its own bucket —
   ADR-0004 PR 15 — caps the sign-in / password-changed notices one address
   can receive (registration never verifies addresses); a denied notice is

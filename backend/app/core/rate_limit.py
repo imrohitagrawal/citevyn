@@ -103,6 +103,21 @@ _EMAIL_NOTICE_ROLE = "email_notice"
 _DEFAULT_PASSWORD_CHANGE_PER_WINDOW = 3
 _PASSWORD_CHANGE_ROLE = "password_change"
 
+# Minimum interval between two magic-link requests for one address (#301).
+#
+# This is the ONLY role whose bucket does not share the limiter-wide window. Every
+# other role is an hourly CEILING and differs only in its limit; this one is a
+# FLOOR between consecutive requests, which is a different shape of control and
+# cannot be expressed as a count over an hour -- "1 per 3600s" would be a lockout,
+# not a cooldown. Hence the per-role window machinery below (``_windows`` /
+# ``window_for``): adding another role would NOT have worked.
+#
+# The limit is fixed at 1 because that is what "minimum interval" means; the
+# operator tunes the WINDOW (``rate_limit_magic_link_interval_seconds``).
+_MAGIC_LINK_INTERVAL_ROLE = "magic_link_interval"
+_MAGIC_LINK_INTERVAL_LIMIT = 1
+_DEFAULT_MAGIC_LINK_INTERVAL_SECONDS = 60
+
 # Fallback for the signed-in-caller bucket (ADR-0004 PR 11) when a caller
 # constructs a limiter directly without naming one. Production passes
 # ``settings.rate_limit_demo_user_registered_per_hour``.
@@ -117,6 +132,8 @@ class _LimiterLike(Protocol):
     def window_seconds(self) -> int: ...
 
     def limit_for(self, *, role: str) -> int: ...
+
+    def window_for(self, *, role: str) -> int: ...
 
     async def check(self, *, user_id: str, role: str) -> None: ...
 
@@ -156,6 +173,7 @@ class RateLimiter:
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
         magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
         password_change_per_window: int = _DEFAULT_PASSWORD_CHANGE_PER_WINDOW,
+        magic_link_interval_seconds: int = _DEFAULT_MAGIC_LINK_INTERVAL_SECONDS,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -171,6 +189,8 @@ class RateLimiter:
             raise ValueError("magic_link_per_window must be >= 1")
         if password_change_per_window < 1:
             raise ValueError("password_change_per_window must be >= 1")
+        if magic_link_interval_seconds < 1:
+            raise ValueError("magic_link_interval_seconds must be >= 1")
         self._window_seconds = window_seconds
         self._limits: dict[str, int] = {
             "demo_user": demo_user_per_window,
@@ -195,6 +215,17 @@ class RateLimiter:
             # per-USER cap on current-password-supplied changes (PR 15).
             _EMAIL_NOTICE_ROLE: magic_link_per_window,
             _PASSWORD_CHANGE_ROLE: password_change_per_window,
+            # A FLOOR between requests, not an hourly ceiling -- see
+            # ``_MAGIC_LINK_INTERVAL_ROLE``. Its window is overridden below.
+            _MAGIC_LINK_INTERVAL_ROLE: _MAGIC_LINK_INTERVAL_LIMIT,
+        }
+        # Per-role window overrides. Every role not listed here uses the
+        # limiter-wide ``window_seconds``; ``window_for`` falls back to it. Kept as
+        # a separate dict rather than widening ``_limits`` to tuples so that every
+        # existing role's construction, comparison and semantics are byte-for-byte
+        # unchanged.
+        self._windows: dict[str, int] = {
+            _MAGIC_LINK_INTERVAL_ROLE: magic_link_interval_seconds,
         }
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = asyncio.Lock()
@@ -207,6 +238,14 @@ class RateLimiter:
         """Return the per-window hit limit for ``role``."""
         return self._limits.get(role, self._limits["demo_user"])
 
+    def window_for(self, *, role: str) -> int:
+        """Return the window ``role`` is counted over.
+
+        Defaults to the limiter-wide window, so every pre-existing role behaves
+        exactly as before. Only a role with its own FLOOR semantics overrides it.
+        """
+        return self._windows.get(role, self._window_seconds)
+
     async def check(self, *, user_id: str, role: str) -> None:
         """Record a hit and raise :class:`HTTPException` if over the limit.
 
@@ -217,7 +256,7 @@ class RateLimiter:
         """
         limit = self.limit_for(role=role)
         now = time.monotonic()
-        cutoff = now - self._window_seconds
+        cutoff = now - self.window_for(role=role)
         async with self._lock:
             bucket = self._buckets[user_id]
             while bucket and bucket[0] <= cutoff:
@@ -312,6 +351,7 @@ class RedisRateLimiter:
         demo_user_registered_per_window: int = _DEFAULT_DEMO_USER_REGISTERED_PER_WINDOW,
         magic_link_per_window: int = _DEFAULT_MAGIC_LINK_PER_WINDOW,
         password_change_per_window: int = _DEFAULT_PASSWORD_CHANGE_PER_WINDOW,
+        magic_link_interval_seconds: int = _DEFAULT_MAGIC_LINK_INTERVAL_SECONDS,
     ) -> None:
         if window_seconds < 1:
             raise ValueError("window_seconds must be >= 1")
@@ -327,6 +367,8 @@ class RedisRateLimiter:
             raise ValueError("magic_link_per_window must be >= 1")
         if password_change_per_window < 1:
             raise ValueError("password_change_per_window must be >= 1")
+        if magic_link_interval_seconds < 1:
+            raise ValueError("magic_link_interval_seconds must be >= 1")
         if not key_prefix:
             raise ValueError("key_prefix must be a non-empty string")
         self._client = client
@@ -354,6 +396,17 @@ class RedisRateLimiter:
             # per-USER cap on current-password-supplied changes (PR 15).
             _EMAIL_NOTICE_ROLE: magic_link_per_window,
             _PASSWORD_CHANGE_ROLE: password_change_per_window,
+            # A FLOOR between requests, not an hourly ceiling -- see
+            # ``_MAGIC_LINK_INTERVAL_ROLE``. Its window is overridden below.
+            _MAGIC_LINK_INTERVAL_ROLE: _MAGIC_LINK_INTERVAL_LIMIT,
+        }
+        # Per-role window overrides. Every role not listed here uses the
+        # limiter-wide ``window_seconds``; ``window_for`` falls back to it. Kept as
+        # a separate dict rather than widening ``_limits`` to tuples so that every
+        # existing role's construction, comparison and semantics are byte-for-byte
+        # unchanged.
+        self._windows: dict[str, int] = {
+            _MAGIC_LINK_INTERVAL_ROLE: magic_link_interval_seconds,
         }
         self._key_prefix = key_prefix.rstrip(":")
         # The script body is held as a string so we can call
@@ -373,6 +426,10 @@ class RedisRateLimiter:
 
     def limit_for(self, *, role: str) -> int:
         return self._limits.get(role, self._limits["demo_user"])
+
+    def window_for(self, *, role: str) -> int:
+        """Return the window ``role`` is counted over (see :class:`RateLimiter`)."""
+        return self._windows.get(role, self._window_seconds)
 
     async def check(self, *, user_id: str, role: str) -> None:
         """Record a hit atomically and raise 429 if over the limit.
@@ -398,8 +455,9 @@ class RedisRateLimiter:
         # doesn't need this code path.
 
         limit = self.limit_for(role=role)
+        window = self.window_for(role=role)
         now = time.time()
-        cutoff = now - self._window_seconds
+        cutoff = now - window
         member = f"{now:.6f}:{uuid.uuid4().hex}"
         key = self._bucket_key(user_id)
         try:
@@ -411,7 +469,7 @@ class RedisRateLimiter:
                 member,
                 now,
                 limit,
-                self._window_seconds + 1,
+                window + 1,
             )
         except (redis.exceptions.RedisError, OSError) as exc:
             request_id = get_current_request_id()
@@ -443,7 +501,13 @@ def _too_many_requests(*, role: str = "demo_user") -> Exception:
     buckets, none of which this upsell applies to) gets the plain message.
     """
     request_id = get_current_request_id()
-    if role == _MAGIC_LINK_ROLE:
+    if role == _MAGIC_LINK_INTERVAL_ROLE:
+        # Surfaced verbatim in the sign-in dialog. Deliberately says a link WAS
+        # sent rather than "too many requests": the caller's own last request
+        # succeeded, so this is reassurance, not a scolding -- and it must read
+        # the same whether or not the address is registered (#301 / API_SPEC 4c).
+        message = "A link was sent moments ago — check your inbox."
+    elif role == _MAGIC_LINK_ROLE:
         # Surfaced verbatim in the sign-in dialog: "queries per hour" would
         # mislead someone who only asked for a link (review finding).
         message = "Too many sign-in links requested for this address. Try again later."
@@ -484,6 +548,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
             demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
             magic_link_per_window=settings.rate_limit_magic_link_per_hour,
             password_change_per_window=settings.rate_limit_password_change_per_hour,
+            magic_link_interval_seconds=settings.rate_limit_magic_link_interval_seconds,
         )
     return RateLimiter(
         window_seconds=settings.rate_limit_window_seconds,
@@ -494,6 +559,7 @@ def _build_limiter(settings: Settings) -> RateLimiter | RedisRateLimiter:
         demo_user_registered_per_window=settings.rate_limit_demo_user_registered_per_hour,
         magic_link_per_window=settings.rate_limit_magic_link_per_hour,
         password_change_per_window=settings.rate_limit_password_change_per_hour,
+        magic_link_interval_seconds=settings.rate_limit_magic_link_interval_seconds,
     )
 
 
@@ -546,6 +612,11 @@ def _settings_match(limiter: _LimiterLike, settings: Settings) -> bool:
         and limiter.limit_for(role=_MAGIC_LINK_ROLE) == settings.rate_limit_magic_link_per_hour
         and limiter.limit_for(role=_PASSWORD_CHANGE_ROLE)
         == settings.rate_limit_password_change_per_hour
+        # The interval role is tuned by its WINDOW, not its limit (which is fixed
+        # at 1), so comparing limits alone would let an operator change the
+        # cooldown and silently keep serving the stale limiter.
+        and limiter.window_for(role=_MAGIC_LINK_INTERVAL_ROLE)
+        == settings.rate_limit_magic_link_interval_seconds
         and isinstance(limiter, RedisRateLimiter) == bool(settings.redis_url)
     )
 
@@ -790,8 +861,10 @@ async def rate_limited_admin(
 def _email_bucket_key(prefix: str, email: str, settings: Settings) -> str:
     """Salted-HMAC bucket key for a (normalised) email, one per bucket ``prefix``.
 
-    Shared by the ``auth_login`` and ``magic_link`` buckets so the two can
-    never drift in how they hash an address; the prefix keeps them separate.
+    Shared by every address-keyed bucket -- ``auth_login`` (prefix ``authlogin``),
+    ``magic_link`` (``magiclink``), the sign-in/password notices (``notify``) and
+    the #301 send interval (``mlinterval``) -- so they can never drift in how they
+    hash an address; the prefix is what keeps them separate.
     """
     salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
     digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
@@ -844,6 +917,37 @@ async def enforce_magic_link_rate_limit(email: str, settings: Settings) -> None:
     """
     await enforce_rate_limit(
         user_id=magic_link_rate_key(email, settings), role=_MAGIC_LINK_ROLE, settings=settings
+    )
+
+
+def magic_link_interval_rate_key(email: str, settings: Settings) -> str:
+    """Return the magic-link INTERVAL bucket key for a (normalised) email.
+
+    Its own prefix, so it cannot share state with the hourly bucket. That
+    separation is what keeps a refused interval attempt from consuming one of the
+    five hourly sends -- both limiters record a hit only on the success path, so a
+    shared bucket would have made an impatient double-click cost a real send.
+    """
+    return _email_bucket_key("mlinterval", email, settings)
+
+
+async def enforce_magic_link_interval(email: str, settings: Settings) -> None:
+    """Apply the minimum-interval guard for one magic-link request (#301).
+
+    Call this with the SAME normalised email whether or not the account exists,
+    and BEFORE the account lookup -- applied only on the match branch it would be
+    an account-existence oracle, telling anyone willing to click twice whether an
+    address is registered. That is the same rule, and the same reason, as
+    :func:`enforce_magic_link_rate_limit`.
+
+    Separate from the hourly bucket on purpose: this is a FLOOR between requests
+    (1 per ``rate_limit_magic_link_interval_seconds``), the other is a CEILING per
+    hour. They answer different questions and must not drain each other.
+    """
+    await enforce_rate_limit(
+        user_id=magic_link_interval_rate_key(email, settings),
+        role=_MAGIC_LINK_INTERVAL_ROLE,
+        settings=settings,
     )
 
 
@@ -903,10 +1007,12 @@ __all__ = [
     "client_rate_key",
     "email_notice_allowed",
     "enforce_auth_login_rate_limit",
+    "enforce_magic_link_interval",
     "enforce_magic_link_rate_limit",
     "enforce_password_change_rate_limit",
     "enforce_rate_limit",
     "get_limiter",
+    "magic_link_interval_rate_key",
     "magic_link_rate_key",
     "rate_limited_admin",
     "rate_limited_demo",

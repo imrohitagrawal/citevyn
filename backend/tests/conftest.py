@@ -223,6 +223,35 @@ _CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
 ]
 
 
+def clear_magic_link_interval(email: str) -> None:
+    """Step past the #301 magic-link minimum interval without waiting 60s.
+
+    Several tests need SEVERAL link requests for one address to exercise something
+    else entirely -- draining the HOURLY ceiling, proving one live token per user,
+    checking each same-origin signal, proving the notice bucket is independent of
+    the request bucket. The 1-per-60s interval bucket blocks all of that, and
+    sleeping a minute per send is not a test.
+
+    Clears ONLY the interval bucket, deliberately NOT the hourly one: several
+    callers assert the hourly ceiling still trips, so a blanket ``reset_limiter()``
+    would silently destroy exactly what they measure.
+
+    Lives here rather than in one test module because two modules need it and the
+    behaviour it bypasses is auth-adjacent -- two copies drifting apart is a real
+    hazard. Reaching into ``_buckets`` is deliberate: the alternative is a
+    production "disable" switch on a rate limiter, which is the footgun
+    ``_effective_global_limit`` already warns about.
+    """
+    from app.core.config import get_settings
+    from app.core.rate_limit import get_limiter, magic_link_interval_rate_key
+
+    settings = get_settings()
+    limiter = get_limiter(settings)
+    buckets = getattr(limiter, "_buckets", None)
+    if buckets is not None:  # in-process limiter only; these tests never use Redis
+        buckets.pop(magic_link_interval_rate_key(email, settings), None)
+
+
 def corpus_fixture_specs() -> list[dict[str, str]]:
     """Return a copy of the hermetic corpus fixture specs.
 

@@ -23,6 +23,7 @@ from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import AuditEvent, AuthSession, Base, User
+from tests.conftest import clear_magic_link_interval
 
 DEMO_BEARER = "Bearer local-demo-key"
 EMAIL = "stepup@example.com"
@@ -401,8 +402,12 @@ def test_notice_bucket_is_separate_from_the_link_request_bucket(
     _register(_client())
     thief = _client()
     # Two requests: the first mints the link the thief "stole", the second
-    # exhausts the request bucket for the address.
+    # exhausts the request bucket for the address. Stepping past the #301 minimum
+    # interval each time, because what this test measures is the HOURLY request
+    # bucket -- a 429 from the interval floor would look like the drain succeeded
+    # while the bucket was in fact untouched.
     for _ in range(2):
+        clear_magic_link_interval(EMAIL)
         assert (
             thief.post(
                 "/v1/auth/magic-link/request",
@@ -411,6 +416,8 @@ def test_notice_bucket_is_separate_from_the_link_request_bucket(
             ).status_code
             == 202
         )
+    # Still past the interval, so this 429 can only be the HOURLY ceiling.
+    clear_magic_link_interval(EMAIL)
     assert (
         thief.post(
             "/v1/auth/magic-link/request",

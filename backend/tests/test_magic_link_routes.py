@@ -26,6 +26,7 @@ from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import AuditEvent, Base, MagicLinkToken, Session, User
+from tests.conftest import clear_magic_link_interval
 
 DEMO_BEARER = "Bearer local-demo-key"
 _TOKEN_RE = re.compile(r"/v1/auth/magic-link/confirm\?token=([0-9a-f]{32}\.[0-9a-f]{64})")
@@ -123,6 +124,16 @@ def _request_link(client: TestClient, email: str, **headers: str) -> httpx.Respo
         json={"email": email},
         headers={"Authorization": DEMO_BEARER, **headers},
     )
+
+
+def _request_link_past_cooldown(client: TestClient, email: str, **headers: str) -> httpx.Response:
+    """Request a link as if the #301 minimum interval had already elapsed.
+
+    See ``tests.conftest.clear_magic_link_interval`` for why this bypass exists and
+    why it clears only the interval bucket and never the hourly one.
+    """
+    clear_magic_link_interval(email)
+    return _request_link(client, email, **headers)
 
 
 def _outbox_tokens(outbox: Path) -> list[str]:
@@ -286,7 +297,8 @@ def test_request_uses_its_own_rate_limit_bucket_not_auth_login(
     client = _client()
 
     # Exhaust the magic-link bucket for the victim...
-    responses = [_request_link(client, "victim@example.com") for _ in range(3)]
+    # Past the #301 interval each time: this test measures the HOURLY ceiling.
+    responses = [_request_link_past_cooldown(client, "victim@example.com") for _ in range(3)]
     assert [r.status_code for r in responses] == [202, 202, 429]
     # ...with a message about sign-in links, not "queries" (it is shown in the dialog).
     assert "sign-in links" in responses[2].json()["error"]["message"]
@@ -319,7 +331,10 @@ def test_request_rate_limit_applies_to_unknown_emails_too(
         CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR="2",
     )
     client = _client()
-    assert [_request_link(client, "ghost@example.com").status_code for _ in range(3)] == [
+    # Past the #301 interval each time: this test measures the HOURLY ceiling.
+    assert [
+        _request_link_past_cooldown(client, "ghost@example.com").status_code for _ in range(3)
+    ] == [
         202,
         202,
         429,
@@ -331,7 +346,9 @@ def test_issuing_a_new_token_invalidates_the_users_prior_live_token(magic_app: P
     older, still-unread email would remain redeemable."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")
-    _request_link(_client(), "real@example.com")
+    # Second send for the SAME address: past the #301 interval, because what this test
+    # measures is that a new token invalidates the previous one.
+    _request_link_past_cooldown(_client(), "real@example.com")
     first, second = _outbox_tokens(magic_app)
     assert len(_query_all(MagicLinkToken)) == 1
 
@@ -583,7 +600,9 @@ def test_confirm_post_accepts_each_same_origin_signal_on_its_own(magic_app: Path
     headers or treats ``none`` as cross-site."""
     _register(_client(), "real@example.com")
     for headers in ({"Origin": "http://localhost:8000"}, {"Sec-Fetch-Site": "none"}):
-        _request_link(_client(), "real@example.com")
+        # One send per pass for the same address: past the #301 interval, because what
+        # this test measures is each same-origin signal on its own.
+        _request_link_past_cooldown(_client(), "real@example.com")
         browser = _client()
         ok = _confirm_post(browser, _latest_token(magic_app), **headers)
         assert ok.headers["location"] == "/?auth=ok", headers
@@ -730,3 +749,98 @@ def test_confirm_post_claims_the_anonymous_sessions_history(magic_app: Path) -> 
     assert fetched.status_code == 200
     owners = {str(row.user_id) for row in _query_all(Session)}
     assert owners == {_me(browser).json()["user_id"]}
+
+
+# ---------------------------------------------------------------------------
+# Minimum send interval (#301)
+# ---------------------------------------------------------------------------
+#
+# The 5-per-hour bucket (PR 14) caps the DAY's damage but sets no floor between
+# requests: the owner reported clicking "Send link" five times in five seconds and
+# receiving five emails, each one invalidating the previous link (the route keeps a
+# single live token per user), so the first four links in the inbox are dead. A
+# second bucket of 1-per-60s fixes the interval without touching the hourly ceiling.
+
+
+def test_a_second_link_request_within_the_interval_is_refused(magic_app: Path) -> None:
+    """Two sends in a row: the first is accepted, the second is refused.
+
+    RED before #301 — both returned 202, which is the bug. The hourly bucket allows
+    five, so nothing stopped a burst.
+    """
+    _register(_client(), "burst@example.com")
+    client = _client()
+
+    first = _request_link(client, "burst@example.com")
+    second = _request_link(client, "burst@example.com")
+
+    assert first.status_code == 202, first.text
+    assert second.status_code == 429, second.text
+    assert second.json()["error"]["code"] == "rate_limited"
+    assert second.json()["error"]["message"] == ("A link was sent moments ago — check your inbox.")
+
+
+def test_the_interval_applies_to_an_unknown_address_too(magic_app: Path) -> None:
+    """The cooldown must NOT become an account-existence oracle.
+
+    Applied only to the match branch, a 429-on-second-try would say "this address is
+    registered" to anyone willing to click twice — the exact enumeration leak the
+    always-202 contract (docs/API_SPEC.md 4c) and the statement-count parity test
+    exist to prevent. So an unknown address gets the identical treatment.
+    """
+    client = _client()
+
+    first = _request_link(client, "ghost@example.com")
+    second = _request_link(client, "ghost@example.com")
+
+    assert first.status_code == 202, first.text
+    assert second.status_code == 429, second.text
+    assert second.json()["error"]["message"] == ("A link was sent moments ago — check your inbox.")
+
+
+def test_the_interval_is_per_address_not_global(magic_app: Path) -> None:
+    """One address's cooldown must not block a different address.
+
+    A global or per-IP bucket here would let one visitor lock every other visitor out
+    of email sign-in — the #203 shared-bucket mistake, repeated on the auth path.
+    """
+    _register(_client(), "alice@example.com")
+    _register(_client(), "bob@example.com")
+    client = _client()
+
+    assert _request_link(client, "alice@example.com").status_code == 202
+    assert _request_link(client, "bob@example.com").status_code == 202
+    assert _request_link(client, "alice@example.com").status_code == 429
+
+
+def test_the_interval_bucket_does_not_drain_the_hourly_bucket(magic_app: Path) -> None:
+    """The two buckets are independent; a blocked interval attempt costs no hourly hit.
+
+    Both limiters record a hit only on the SUCCESS path, so a 429 from the interval
+    bucket must not consume one of the five hourly sends. Otherwise an impatient user
+    double-clicking would burn their hour's allowance without receiving the emails.
+    """
+    _register(_client(), "double@example.com")
+    client = _client()
+
+    assert _request_link(client, "double@example.com").status_code == 202
+    for _ in range(4):  # four refused attempts inside the interval
+        assert _request_link(client, "double@example.com").status_code == 429
+
+    # The hourly bucket should still have 4 of its 5 left. Prove it by widening the
+    # interval to zero effect: a fresh limiter with a 1-second interval, then wait it
+    # out is flaky; instead assert the hourly bucket's own counter directly.
+    from app.core.rate_limit import (
+        _MAGIC_LINK_ROLE,
+        get_limiter,
+        magic_link_rate_key,
+    )
+
+    settings = get_settings()
+    limiter = get_limiter(settings)
+    key = magic_link_rate_key("double@example.com", settings)
+    # One accepted send => exactly one hit in the hourly bucket.
+    assert limiter.limit_for(role=_MAGIC_LINK_ROLE) == settings.rate_limit_magic_link_per_hour
+    assert len(limiter._buckets[key]) == 1, (  # type: ignore[attr-defined]
+        "a refused interval attempt consumed an hourly send"
+    )
