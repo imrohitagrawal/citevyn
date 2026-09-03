@@ -95,6 +95,43 @@ jobs:
       # catch a defect, which is precisely the failure #308 was filed over: a line
       # in promotion_eval.py measured 97% covered, was executed by the suite, and
       # still left all 42 promotion tests green when deleted.
+      # NON-VACUITY, and the only place a human actually sees the number.
+      #
+      # pytest exits 0 when coverage collects NOTHING — rename `app`, or add
+      # `[tool.coverage.run] omit = ["app/*"]`, and you get a green job, a
+      # CoverageWarning nobody reads, and no XML at all. The upload then warns and
+      # stays green. So the measurement can silently stop happening while every
+      # test that claims to guard it still passes.
+      #
+      # This is the repo's own rule applied to itself: a check that counts nothing
+      # needs a partner proving the thing counted exists. It asserts lines were
+      # MEASURED, never how many are covered — it is not a threshold, and adding
+      # one here would be the gate #308 exists to refuse.
+      #
+      # It doubles as the report's only reader. Before this, the number lived at
+      # the bottom of ~1760 `-v` lines in a collapsed log plus a 204 KB XML that
+      # expires in 14 days — present, but not visible.
+      - name: Coverage was actually measured
+        run: |
+          uv run python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          xml = Path("artifacts/coverage.xml")
+          if not xml.exists():
+              print("### Coverage\n\n**No coverage.xml was produced.** The suite ran but "
+                    "measured nothing — check that `--cov=app` still names a real package.")
+              sys.exit(1)
+          root = ET.parse(xml).getroot()
+          valid = int(root.get("lines-valid", 0))
+          covered = int(root.get("lines-covered", 0))
+          if valid == 0:
+              print("### Coverage\n\n**0 lines measured.** Coverage collected no data.")
+              sys.exit(1)
+          print(f"### Coverage\n\n**{covered / valid:.1%}** of {valid:,} lines "
+                f"({valid - covered:,} missed).\n\n"
+                "_Measurement, not a gate: this shows which lines RAN, not which are "
+                "CHECKED. See #308 and #321._")
+          PY
       - name: Upload coverage report
         # `!cancelled()` rather than `always()`: the report is most useful on the
         # runs that FAILED, but a cancelled run should stay cancelled.
@@ -112,6 +149,9 @@ jobs:
           # sibling eval upload states its choice too, rather than relying on the
           # action's default.
           if-no-files-found: warn
+          # Re-running a failed job in the same workflow run would otherwise hit
+          # "an artifact for the given name already exists" and fail the upload.
+          overwrite: true
           retention-days: 14
 
   postgres-migrations:

@@ -1,8 +1,10 @@
 """Coverage is measured, and must stay a REPORT rather than a gate (#308).
 
 The repo's own scar is why this file exists: a line in ``app/worker/promotion_eval.py``
-measured **97% covered** and was **executed by the suite**, yet deleting it left all
-42 promotion tests green. Coverage shows which lines RAN, never which are CHECKED —
+measured **97% covered** and was **executed by the suite**, yet deleting it left the
+whole promotion suite green. (That defect has since been fixed and is now guarded by
+``test_promotion_gate_mirrors_the_orchestrator_query_pipeline`` — it is history, not
+a live hole. The lesson is what survives.) Coverage shows which lines RAN, never which are CHECKED —
 so a coverage threshold would have said nothing about that defect while inviting
 tests written to move a number.
 
@@ -35,6 +37,10 @@ from __future__ import annotations
 import configparser
 import os
 import re
+import subprocess
+import sys
+import tempfile
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -42,6 +48,7 @@ import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
 _CI = _REPO / ".github" / "workflows" / "ci.yml"
+_WORKFLOWS = sorted((_REPO / ".github" / "workflows").glob("*.yml"))
 _MAKEFILE = _REPO / "Makefile"
 _PYPROJECT = _REPO / "backend" / "pyproject.toml"
 _BACKEND = _REPO / "backend"
@@ -67,6 +74,15 @@ def _ini_addopts(path: Path) -> str:
     parser = configparser.ConfigParser()
     parser.read(path)
     return " ".join(parser[section].get("addopts", "") for section in parser.sections())
+
+
+def _embedded_python(run_block: str) -> str:
+    """Pull the python program out of a `uv run python - <<'PY' ... PY` heredoc."""
+    body = run_block.split("<<'PY'", 1)[1]
+    body = body.split("\nPY", 1)[0]
+    # Drop the redirection remainder on the opening line, then de-indent.
+    body = body.split("\n", 1)[1]
+    return textwrap.dedent(body)
 
 
 def _pytest_step() -> dict:
@@ -144,15 +160,21 @@ def test_no_coverage_threshold_is_configured_anywhere() -> None:
     #    threshold without appearing in any command. Line continuations are joined
     #    first, because `--cov-fail\<newline>-under=95` reaches the shell as one
     #    token while the literal never appears contiguously in the file.
-    for name, job in yaml.safe_load(_CI.read_text(encoding="utf-8"))["jobs"].items():
-        for step in job.get("steps", []):
-            assert not _mentions_threshold(str(step.get("run", ""))), (
-                f"ci.yml job {name!r} runs a coverage threshold"
-            )
-            for key, value in (step.get("env") or {}).items():
-                assert not _mentions_threshold(str(value)), (
-                    f"ci.yml job {name!r} sets {key}, imposing a coverage threshold"
+    #    WHAT THIS CANNOT SEE, stated rather than implied: a threshold inside a
+    #    shell script invoked from a `run:`, or inside the external reusable
+    #    workflow behind `pr-quality.yml` (it lives in another repo). Neither is
+    #    closed by pretending otherwise.
+    for workflow in _WORKFLOWS:
+        data = yaml.safe_load(workflow.read_text(encoding="utf-8")) or {}
+        for name, job in (data.get("jobs") or {}).items():
+            for step in job.get("steps", []) or []:
+                assert not _mentions_threshold(str(step.get("run", ""))), (
+                    f"{workflow.name} job {name!r} runs a coverage threshold"
                 )
+                for key, value in (step.get("env") or {}).items():
+                    assert not _mentions_threshold(str(value)), (
+                        f"{workflow.name} job {name!r} sets {key}, imposing a threshold"
+                    )
 
     # 4. The Makefile, comment lines stripped. The repo writes recipe comments as
     #    `@#`, not just `#` — a strip that only handled `#` would go red on a
@@ -185,6 +207,55 @@ def test_the_threshold_check_would_actually_notice() -> None:
     # The CI parser finds the job and steps it is supposed to scan.
     jobs = yaml.safe_load(_CI.read_text(encoding="utf-8"))["jobs"]
     assert "test" in jobs and len(jobs["test"]["steps"]) > 3
+
+
+def test_ci_fails_when_coverage_measured_nothing() -> None:
+    """pytest exits 0 when coverage collects NO data.
+
+    Rename `app`, or add ``[tool.coverage.run] omit = ["app/*"]``, and you get a
+    green job, a CoverageWarning nobody reads, and no XML at all — the upload then
+    warns and stays green. Every other assertion here would still pass, because
+    they check that the FLAGS are present, not that anything was measured.
+
+    So a step reds the job when the measurement vanished. It asserts lines were
+    measured, never how many are covered — that distinction is what keeps it from
+    being the threshold #308 refuses.
+    """
+    steps = yaml.safe_load(_CI.read_text(encoding="utf-8"))["jobs"]["test"]["steps"]
+    checks = [s for s in steps if "lines-valid" in str(s.get("run", ""))]
+    assert len(checks) == 1, "the non-vacuity check on the coverage measurement is gone"
+    body = checks[0]["run"]
+    assert not _mentions_threshold(body), "the non-vacuity check grew into a threshold"
+    # It is also the report's only reader: without this the number lives at the
+    # bottom of ~1760 -v lines in a collapsed log and in a 14-day artifact.
+    assert "GITHUB_STEP_SUMMARY" in body
+
+    # RUN the embedded script rather than grepping it for `sys.exit`. Asserting a
+    # string is present is the exact mistake this whole file was rewritten to stop
+    # making — and a partial edit that left one `sys.exit(1)` behind while breaking
+    # the other would satisfy a substring check.
+    script = _embedded_python(body)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / "artifacts").mkdir()
+
+        def _run() -> int:
+            return subprocess.run(
+                [sys.executable, "-c", script], cwd=work, capture_output=True
+            ).returncode
+
+        # (a) no report at all — the rename-the-package / omit-the-package case.
+        assert _run() == 1, "a MISSING coverage.xml does not fail the step"
+
+        # (b) a report that measured nothing.
+        xml = work / "artifacts" / "coverage.xml"
+        xml.write_text('<coverage lines-valid="0" lines-covered="0"></coverage>')
+        assert _run() == 1, "a report measuring ZERO lines does not fail the step"
+
+        # (c) partner: a real report must PASS, or (a) and (b) would be satisfied by
+        #     a script that always fails.
+        xml.write_text('<coverage lines-valid="100" lines-covered="96"></coverage>')
+        assert _run() == 0, "a valid coverage report is being rejected"
 
 
 def test_ci_uploads_the_report_from_the_path_it_writes() -> None:
