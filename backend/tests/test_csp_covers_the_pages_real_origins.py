@@ -3,11 +3,16 @@
 WHY THIS FILE EXISTS
 --------------------
 ``font-src`` listed ``api.fontshare.com`` — where Fontshare's *stylesheet*
-lives — but Fontshare serves the font *files* from ``cdn.fontshare.com``. All 12
-Satoshi requests were blocked on every page load, the page silently fell back to
-a system font, and nothing looked broken. The Google Fonts pair beside it is
-correct (``fonts.googleapis.com`` CSS -> ``fonts.gstatic.com`` files, both
+lives — but Fontshare serves the font *files* from ``cdn.fontshare.com``, so the
+browser logged 12 CSP violations on every page load (one per ``src`` URL across
+4 weights x 3 formats) and nothing looked broken. The Google Fonts pair beside it
+is correct (``fonts.googleapis.com`` CSS -> ``fonts.gstatic.com`` files, both
 listed), which is exactly why the identical Fontshare split was missed.
+
+(#306 described this as the page "falling back to a system font". It does not:
+no ``font-family`` in the codebase uses Satoshi, so the files are never actually
+fetched and no pixel changes — see #316. The errors were real; the fallback was
+not.)
 
 WHY IT IS NOT DERIVED FROM ``index.html`` ALONE
 -----------------------------------------------
@@ -69,15 +74,24 @@ def _stylesheet_origins() -> set[str]:
     return origins
 
 
-def test_the_page_really_does_load_external_stylesheets() -> None:
-    """Partner assertion. Without it, every check below passes vacuously the day
-    someone self-hosts the fonts and the parser stops finding anything."""
-    found = _stylesheet_origins()
-    assert found, "no external stylesheet <link> found in frontend/index.html"
-    assert found <= set(_FONT_FILE_ORIGIN), (
-        f"{found - set(_FONT_FILE_ORIGIN)} loads a stylesheet with no declared "
-        "font-file origin. Add it to _FONT_FILE_ORIGIN (check the provider's CSS "
-        "for the host in its @font-face src) and to the CSP."
+def test_the_parser_finds_exactly_the_providers_we_expect() -> None:
+    """Partner assertion, pinned to the exact SET rather than just non-emptiness.
+
+    A non-empty check only catches TOTAL parse failure. Partial loss is the real
+    risk and it is silent: an unquoted attribute (``href=https://...``, valid
+    HTML5) or a protocol-relative ``href="//api.fontshare.com/..."`` makes the
+    regexes below skip that tag, and with the other provider still found the
+    suite stays green while one provider's coverage has evaporated. Comparing the
+    whole set turns that into a failure that names what went missing.
+    """
+    assert _stylesheet_origins() == set(_FONT_FILE_ORIGIN), (
+        "the stylesheet origins parsed from frontend/index.html no longer match "
+        "the declared providers. If you ADDED one, add its font-file origin to "
+        "_FONT_FILE_ORIGIN (check the provider's CSS for the host in its "
+        "@font-face src) and to the CSP. If you REMOVED one, drop it from both — "
+        "and if you changed neither, the parser has stopped seeing a <link> it "
+        "used to see (unquoted attribute? protocol-relative href?), which would "
+        "otherwise silently reduce this file's coverage to nothing."
     )
 
 

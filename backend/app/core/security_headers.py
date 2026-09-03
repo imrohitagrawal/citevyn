@@ -42,9 +42,11 @@ from app.core.config import Settings
 #     api.fontshare.com      ->   cdn.fontshare.com
 #
 # That split is the whole trap (#306). `cdn.fontshare.com` was missing here, so
-# all 12 Satoshi requests were blocked on every page load and the page silently
-# fell back to a system font — nothing looked broken. The Google pair beside it
-# was correct, which is exactly why the identical Fontshare split was missed.
+# the browser logged 12 CSP violations on every page load — one per `src` URL
+# across 4 weights x 3 formats — and nothing looked broken. The Google pair
+# beside it was correct, which is exactly why the identical split was missed.
+# (Measured: no pixel changed either way, because no `font-family` uses Satoshi.
+# The errors were real; the "falls back to a system font" in #306 was not. #316.)
 #
 # A same-origin-only CSP here would silently break the loaded theme — the
 # error is invisible unless you check the browser console, so this is listed
