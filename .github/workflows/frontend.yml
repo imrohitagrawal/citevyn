@@ -49,6 +49,15 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      # The eager-chunk gzip ceiling used to be prose in a docs/BACKLOG.md row —
+      # raised and recorded by the same person, with nothing checking it in either
+      # direction. It moved twice in two PRs before anyone noticed. The number now
+      # lives in frontend/bundle-budget.json where a diff can see it, and this step
+      # is what makes it real. The script rebuilds the SHIPPING variant itself
+      # (VITE_API_LIVE=true, matching the Dockerfile) because a build without that
+      # flag is ~860 B larger and is not what ships.
+      - name: Bundle budget
+        run: npm run check:bundle
       - name: Upload dist artifact
         if: success()
         uses: actions/upload-artifact@v7
