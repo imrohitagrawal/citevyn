@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import { AuthModal } from "./AuthModal";
@@ -471,5 +471,148 @@ describe("AuthModal magic-link step-up (ADR-0004 PR 15, #293)", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("Validation error.");
     expect(within(dialog).queryByLabelText("Current password")).not.toBeInTheDocument();
     expect(within(dialog).getByRole("heading", { name: "Set a new password" })).toBeInTheDocument();
+  });
+});
+
+describe("AuthModal magic-link send cooldown (#301)", () => {
+  // The owner clicked "Send link" five times in five seconds and received five
+  // emails. The route keeps ONE live token per user, so the first four were dead
+  // links by the time they arrived. The server now refuses a second request for
+  // 60s; these cover the client half — the button must SAY so rather than let the
+  // user click into a 429.
+  //
+  // Two deliberate deviations from the rest of this file, both forced:
+  //
+  // 1. FAKE TIMERS, never sleeping. A real 60s wait would make the suite unusable
+  //    and a shortened real wait would be flaky. This is what the issue means by
+  //    "driven by a mockable timer", and it is why the component uses a plain
+  //    setInterval rather than a chain of setTimeouts.
+  // 2. fireEvent, not userEvent. userEvent does not work under vitest's fake
+  //    timers here — I probed it in isolation with both the default and a narrowed
+  //    `toFake`, with `delay: null` and with `advanceTimers` wired up, and every
+  //    combination hung until the 5s test timeout rather than failing an
+  //    assertion. fireEvent dispatches synchronously and needs no clock. The
+  //    tradeoff is that fireEvent skips the focus/pointer sequence userEvent
+  //    simulates; that is fine here because these tests assert on the button's
+  //    label and disabled state, and the focus behaviour is already covered by the
+  //    userEvent-based tests above.
+  //
+  // Also: no findBy*/waitFor below. Those poll on timers, so under fake timers they
+  // hang until something advances the clock. Every wait here is an explicit act().
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function openMagicLink(): Promise<HTMLElement> {
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+    fireEvent.change(within(dialog).getByLabelText("Email"), {
+      target: { value: "link@example.com" },
+    });
+    return dialog;
+  }
+
+  async function submit(dialog: HTMLElement): Promise<void> {
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send link" }));
+    await act(async () => {}); // flush the request promise
+  }
+
+  async function sendLink(): Promise<HTMLElement> {
+    const { requestMagicLink } = await import("../lib/authActions");
+    vi.mocked(requestMagicLink).mockResolvedValueOnce(undefined);
+    const dialog = await openMagicLink();
+    await submit(dialog);
+    return dialog;
+  }
+
+  const cooldownButton = (dialog: HTMLElement) =>
+    within(dialog).getByRole("button", { name: /Request another in/ });
+
+  it("disables the button and counts down after a successful send", async () => {
+    // RED if the cooldown is never started, or if the button stays enabled.
+    const dialog = await sendLink();
+
+    expect(cooldownButton(dialog)).toBeDisabled();
+    expect(cooldownButton(dialog)).toHaveTextContent("Sent. Request another in 1:00");
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(cooldownButton(dialog)).toHaveTextContent("Sent. Request another in 0:59");
+
+    await act(async () => {
+      vi.advanceTimersByTime(29_000);
+    });
+    expect(cooldownButton(dialog)).toHaveTextContent("Sent. Request another in 0:30");
+  });
+
+  it("re-enables the button once the cooldown elapses", async () => {
+    // Partner to the test above: a countdown that never ENDS would lock the user
+    // out of a legitimate resend, which is worse than the bug being fixed.
+    const dialog = await sendLink();
+    expect(cooldownButton(dialog)).toBeDisabled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+
+    expect(within(dialog).getByRole("button", { name: "Send link" })).toBeEnabled();
+    expect(within(dialog).queryByText(/Request another in/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the role=status notice while the cooldown runs", async () => {
+    // The countdown must not replace the "check your inbox" copy — that notice is
+    // the only thing telling the user what to do next.
+    const dialog = await sendLink();
+
+    expect(cooldownButton(dialog)).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent(/sign-in link is on its way/);
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the cooldown when the user switches away and back", async () => {
+    // The cooldown belongs to the ADDRESS on the server, not to this screen.
+    // Clearing it on a mode switch would re-enable a button the server still
+    // refuses — one click, one 429, for nothing.
+    const dialog = await sendLink();
+    expect(cooldownButton(dialog)).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Back to sign in" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Email me a sign-in link" }));
+
+    expect(cooldownButton(dialog)).toBeDisabled();
+  });
+
+  it("renders the server's 429 message inline and does not start a countdown", async () => {
+    // A 429 means the server refused; we do NOT know how much of its window is
+    // left, so inventing a fresh 60s countdown would over-wait. Show what the
+    // server said and leave the button alone.
+    const { ApiClientError } = await import("../lib/types");
+    const { requestMagicLink } = await import("../lib/authActions");
+    vi.mocked(requestMagicLink).mockRejectedValueOnce(
+      new ApiClientError("A link was sent moments ago — check your inbox.", 429, "rate_limited"),
+    );
+    const dialog = await openMagicLink();
+    await submit(dialog);
+
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "A link was sent moments ago — check your inbox.",
+    );
+    expect(within(dialog).getByRole("button", { name: "Send link" })).toBeEnabled();
+  });
+
+  it("clears its timer on unmount", async () => {
+    // A surviving interval would tick against an unmounted component — a React
+    // state-update warning today, and a leak for every modal closed in a session.
+    const clearSpy = vi.spyOn(globalThis, "clearInterval");
+    const dialog = await sendLink();
+    expect(cooldownButton(dialog)).toBeDisabled();
+    clearSpy.mockClear();
+
+    cleanup();
+
+    expect(clearSpy).toHaveBeenCalled();
+    clearSpy.mockRestore();
   });
 });

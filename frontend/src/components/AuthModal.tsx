@@ -45,6 +45,21 @@ const PASSWORD_MAX_LENGTH = 128;
 
 export type AuthModalMode = "login" | "register" | "magic-link" | "set-password";
 
+// #301. After a successful send the server refuses another request for this long, so
+// the button says so instead of letting the user click into a 429. The owner clicked
+// "Send link" five times in five seconds and got five emails — and because the route
+// keeps ONE live token per user, the first four were already dead links by the time
+// they arrived.
+//
+// Mirrors CITEVYN_RATE_LIMIT_MAGIC_LINK_INTERVAL_SECONDS. The two can drift, and drift
+// is harmless in both directions: too short here and the click lands on the server's
+// own 429 copy; too long and the user waits a few seconds more than necessary. That is
+// why this stays a plain constant rather than a new field on the 202 — the response is
+// deliberately identical for known and unknown addresses (docs/API_SPEC.md 4c), so
+// anything it returned about a cooldown would have to be returned for BOTH, or it
+// becomes an account-existence oracle.
+const MAGIC_LINK_COOLDOWN_SECONDS = 60;
+
 interface AuthModalProps {
   /** Element to restore focus to on close — the button that opened the modal. */
   triggerRef: React.RefObject<HTMLElement | null>;
@@ -78,6 +93,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // announcing a success as a warning is exactly the mis-signal the
   // ToastHost error→alert / else→status split already avoids.
   const [notice, setNotice] = useState<string | null>(null);
+  // Seconds left on the #301 send cooldown; 0 means "may send".
+  const [cooldown, setCooldown] = useState(0);
   const [done, setDone] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -168,6 +185,18 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  // One interval for the whole countdown, keyed on whether it is running rather than
+  // on the value — keying on `cooldown` would tear down and recreate the timer on every
+  // tick. Cleared on unmount and on reaching zero, so a closed modal leaves no timer.
+  // A plain setInterval is what makes this mockable: vitest's fake timers advance it
+  // deterministically, so the test never sleeps.
+  const cooling = cooldown > 0;
+  useEffect(() => {
+    if (!cooling) return;
+    const id = setInterval(() => setCooldown((left) => Math.max(0, left - 1)), 1000);
+    return () => clearInterval(id);
+  }, [cooling]);
+
   const switchMode = (next: AuthModalMode) => {
     setMode(next);
     setError(null);
@@ -186,6 +215,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         await signUp(email, password);
       } else if (mode === "magic-link") {
         await requestMagicLink(email);
+        setCooldown(MAGIC_LINK_COOLDOWN_SECONDS);
         // Deliberately generic: the server never says whether the address is
         // registered, so neither can this copy.
         setNotice(
@@ -260,6 +290,12 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         : mode === "magic-link"
           ? "Send link"
           : "Save password";
+
+  // The cooldown is a property of the ADDRESS on the server, not of this screen, so it
+  // deliberately survives switchMode: hiding it when the user flips to "Sign in" and
+  // back would re-enable a button the server will still refuse.
+  const coolingDown = cooling && mode === "magic-link";
+  const cooldownLabel = `${Math.floor(cooldown / 60)}:${String(cooldown % 60).padStart(2, "0")}`;
 
   const showsEmail = mode !== "set-password";
   const showsPassword = mode !== "magic-link";
@@ -460,10 +496,14 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
 
             <button
               type="submit"
-              disabled={submitting}
-              style={{ ...submitStyle, cursor: submitting ? "default" : "pointer", opacity: submitting ? 0.7 : 1 }}
+              disabled={submitting || coolingDown}
+              style={{
+                ...submitStyle,
+                cursor: submitting || coolingDown ? "default" : "pointer",
+                opacity: submitting || coolingDown ? 0.7 : 1,
+              }}
             >
-              {submitting ? "Working…" : submitLabel}
+              {submitting ? "Working…" : coolingDown ? `Sent. Request another in ${cooldownLabel}` : submitLabel}
             </button>
           </form>
         )}
