@@ -287,7 +287,9 @@ for (const theme of THEMES) {
 
     test("FAQ: --ink questions, --muted answer + sign, one open by default", async ({ page }) => {
       const toggles = page.locator(".faq-toggle");
-      await expect(toggles).toHaveCount(6);
+      // 7 since ADR-0004 PR 7 added "Do I need an account?". This count drifted
+      // unnoticed for weeks because no CI job ran this suite (#311).
+      await expect(toggles).toHaveCount(7);
       for (const t of await toggles.all()) {
         expect(await t.evaluate((el) => getComputedStyle(el).color)).toBe(T.ink);
       }
@@ -317,7 +319,20 @@ for (const theme of THEMES) {
       const box = page.locator(".composer-box");
       await expect(box).toBeVisible();
       expect(await box.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(T.surface);
-      expect(await box.evaluate((el) => getComputedStyle(el).borderColor)).toBe(T.border2);
+
+      // #302 focuses the composer on mount, so `.composer-box:focus-within` applies
+      // and the border is --ink, not --border-2. Assert BOTH states rather than
+      // just relaxing the check: the focus ring is a real affordance, and the
+      // resting colour is what the design doc specifies.
+      // `.composer-box` carries `transition: border-color 0.15s`, so read the
+      // SETTLED colour — an instantaneous read samples mid-transition and returns
+      // an interpolated value that matches neither token.
+      const borderColor = async () =>
+        box.evaluate((el) => getComputedStyle(el).borderColor);
+      expect(await page.evaluate(() => document.activeElement?.className)).toContain("chat-input");
+      await expect.poll(borderColor).toBe(T.ink);
+      await page.locator(".chat-header").click(); // move focus off the composer
+      await expect.poll(borderColor).toBe(T.border2);
 
       // Input fills the box (not squished by an inline hint) and its placeholder is themed & visible.
       const input = page.locator(".chat-input");

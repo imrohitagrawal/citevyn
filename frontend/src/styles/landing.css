@@ -154,7 +154,13 @@ body {
   gap: 12px;
 }
 
-.theme-toggle {
+/* `.account-button` shares the pill styling but is a SEPARATE class on purpose.
+   `AccountMenu` used to render `.theme-toggle`, so `locator(".theme-toggle")`
+   matched two elements and every Playwright test touching the theme control died
+   on a strict-mode violation — 70 failing runs, invisible because no CI job ran
+   that suite (#311). Style may be shared; identity may not. */
+.theme-toggle,
+.account-button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -172,7 +178,8 @@ body {
   transition: background 0.25s ease, border-color 0.15s, color 0.15s;
 }
 
-.theme-toggle:hover {
+.theme-toggle:hover,
+.account-button:hover {
   border-color: var(--ink);
   color: var(--ink);
 }
@@ -2239,6 +2246,7 @@ a.citation-chip:focus-visible {
   .ask-button,
   .cta-button,
   .theme-toggle,
+  .account-button,
   .send-button,
   .back-button,
   .ticker-chip {
