@@ -49,7 +49,7 @@ defect that motivated it.
 
 ## Open follow-ups this round created — read before starting anything else
 
-- **#311 — FIXED (PR #323).** The demo Playwright suite ran in NO CI job, and 70 of its runs
+- **#311 — FIXED (PR #324).** The demo Playwright suite ran in NO CI job, and 70 of its runs
   failed on `main` from one CSS class collision (`AccountMenu` reused `className="theme-toggle"`,
   colliding with `Header`'s real toggle). Renamed to `.account-button`, and the suite now runs in
   a `demo-e2e` CI job. Note the job is still ADVISORY — the `frontend` workflow is not in `main`'s
