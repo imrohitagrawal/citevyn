@@ -946,8 +946,19 @@ async def test_promotion_gate_mirrors_the_orchestrator_query_pipeline(
     helper). It measured the text, not the behaviour.
 
     This spies on the retriever and asserts the QUERY IT ACTUALLY RECEIVES, which is
-    the thing that decides what the gate measures. Turns red if the #300 rewrite is
-    dropped, discarded, or applied after alias canonicalization instead of before.
+    the thing that decides what the gate measures.
+
+    Mutation-confirmed RED for: dropping the rewrite, and computing it then discarding
+    the result (the edit the source-grep version passed).
+
+    Mutation-confirmed GREEN — stated plainly, because the first draft of this docstring
+    claimed otherwise and was wrong — for a pure REORDER (alias canonicalization first,
+    then self-reference). That is not a hole in the test; the two passes genuinely
+    commute for the current lists, and cannot stop commuting by accident: order could
+    only matter if a question became, or stopped being, a listed self-referential
+    phrasing as a RESULT of alias canonicalization, and every listed phrasing is plain
+    English containing no alias token. The order in the code mirrors ``ask`` so the two
+    stay comparable if either list ever grows; it is not a property this test proves.
     """
     captured: list[str] = []
 
