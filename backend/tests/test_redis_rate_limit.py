@@ -301,3 +301,74 @@ async def test_redis_limiter_has_its_own_magic_link_bucket(fake_redis) -> None:
     assert rate_limit._settings_match(limiter, matching)
     changed = matching.model_copy(update={"rate_limit_magic_link_per_hour": 3})
     assert not rate_limit._settings_match(limiter, changed)
+
+
+# ---------------------------------------------------------------------------
+# Per-role window on the REDIS path (#301)
+# ---------------------------------------------------------------------------
+#
+# This is the limiter PRODUCTION runs (Upstash on Fly). A mutation survived
+# without this test: replacing ``window = self.window_for(role=role)`` with
+# ``self._window_seconds`` in the Redis ``check`` left all 12 Redis tests green,
+# because none of them exercised a role whose window differs from the
+# limiter-wide one. The in-process twin of this test does not cover it — the two
+# limiters have separate ``check`` implementations, and only one of them ships.
+
+
+async def test_magic_link_interval_counts_over_its_own_window_on_redis(
+    fake_redis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interval role must count over its own window on the Redis path too.
+
+    The Lua script receives the cutoff and the TTL as arguments, so a per-role
+    window flows through without touching the script — but only if ``check``
+    actually passes the per-role value. That is what this pins.
+
+    Drives a controlled clock (the Redis limiter uses ``time.time``) rather than
+    sleeping. RED if ``check`` passes ``self._window_seconds``.
+    """
+    now = [1_000_000.0]
+    monkeypatch.setattr("app.core.rate_limit.time.time", lambda: now[0])
+
+    limiter = rate_limit.RedisRateLimiter(
+        client=fake_redis,
+        window_seconds=3600,  # the hour every other role uses
+        demo_user_per_window=30,
+        admin_per_window=100,
+        key_prefix="citevyn:rl:test",
+        magic_link_interval_seconds=60,
+    )
+    role = rate_limit._MAGIC_LINK_INTERVAL_ROLE
+    key = "mlinterval_probe"
+
+    await limiter.check(user_id=key, role=role)  # accepted
+
+    now[0] += 30  # inside the floor
+    with pytest.raises(HTTPException) as refused:
+        await limiter.check(user_id=key, role=role)
+    assert refused.value.status_code == 429
+
+    now[0] += 31  # 61s after the first — the floor has elapsed
+    await limiter.check(user_id=key, role=role)  # accepted again
+
+    # Partner assertion: an ordinary role is still counted over the full hour on
+    # this path, so the change cannot have shortened everyone else's window.
+    await limiter.check(user_id="demo_probe", role="demo_user")
+    now[0] += 61
+    with_hits = await fake_redis.zcard("citevyn:rl:test:demo_probe")
+    assert with_hits == 1, "an ordinary role's hit aged out of the hour far too early"
+
+
+async def test_redis_window_for_falls_back_to_the_limiter_window(fake_redis) -> None:
+    """Only the interval role overrides the window; everything else inherits it."""
+    limiter = rate_limit.RedisRateLimiter(
+        client=fake_redis,
+        window_seconds=3600,
+        demo_user_per_window=30,
+        admin_per_window=100,
+        key_prefix="citevyn:rl:test",
+        magic_link_interval_seconds=45,
+    )
+    assert limiter.window_for(role=rate_limit._MAGIC_LINK_INTERVAL_ROLE) == 45
+    for role in ("demo_user", "admin", "global", "auth_login", "magic_link"):
+        assert limiter.window_for(role=role) == 3600

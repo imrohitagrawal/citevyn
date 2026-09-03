@@ -209,6 +209,13 @@ class Settings(BaseSettings):
     # credentials. Low on purpose: every hit under the cap is one email
     # sent to that address, so this is also the email-bombing ceiling.
     rate_limit_magic_link_per_hour: int = Field(default=5, ge=1)
+    # Minimum gap between two magic-link requests for ONE address (#301). The
+    # hourly bucket above caps the day's damage but sets no floor between
+    # requests, so five clicks in five seconds sent five emails -- and because
+    # the route keeps a single live token per user, each one killed the previous
+    # link, leaving four dead links in the inbox above the only working one.
+    # This is a WINDOW, not a count: the limit is fixed at 1 by definition.
+    rate_limit_magic_link_interval_seconds: int = Field(default=60, ge=1)
     # ADR-0004 PR 15 (#293): how long after redeeming a magic link the SAME
     # session may set a new password without the current one (one shot).
     # Short: the window is the whole exposure a stolen link adds beyond the
