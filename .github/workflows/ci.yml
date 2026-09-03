@@ -78,8 +78,16 @@ jobs:
         #
         # Coverage is measured here rather than in a separate job so the number
         # describes the suite that actually gates merges — a second invocation
-        # would measure a different program. It is a REPORT: there is deliberately
-        # NO `--cov-fail-under`, so coverage can never fail this job (#308).
+        # would measure a different program.
+        #
+        # It is a REPORT: there is deliberately no `--cov-fail-under`, so the
+        # PERCENTAGE can never fail this job (#308). Precisely that, and not more:
+        # a coverage report-write error still exits 3, and the next step fails
+        # deliberately when nothing was measured. What is excluded is a threshold,
+        # not every possible failure.
+        #
+        # Note the number excludes `postgres`-marked tests, which run in their own
+        # job without coverage — so it describes the hermetic suite, not the union.
         run: >-
           uv run pytest -m "not postgres" -v
           --cov=app --cov-report=term-missing:skip-covered
@@ -144,10 +152,12 @@ jobs:
           # while the pytest flag above is relative to `backend/`. A test pins the
           # two together, because getting it wrong uploads nothing and stays green.
           path: backend/artifacts/coverage.xml
-          # Declared, not inherited: a crash before the XML is written should warn,
-          # not fail — the failing pytest step is what should red the job. The
-          # sibling eval upload states its choice too, rather than relying on the
-          # action's default.
+          # Declared, not inherited. `warn` rather than the sibling eval upload's
+          # `ignore`, deliberately: a missing report is already a hard failure at
+          # the previous step, so the warning here is a breadcrumb next to it
+          # rather than a second, redundant red — and `ignore` would erase even
+          # that breadcrumb on the Ruff/Pyright-failed path, where pytest never
+          # ran and no report is expected.
           if-no-files-found: warn
           # Re-running a failed job in the same workflow run would otherwise hit
           # "an artifact for the given name already exists" and fail the upload.

@@ -88,8 +88,11 @@ def _embedded_python(run_block: str) -> str:
 def _pytest_step() -> dict:
     jobs = yaml.safe_load(_CI.read_text(encoding="utf-8"))["jobs"]
     steps = jobs["test"]["steps"]
-    matches = [s for s in steps if "pytest" in str(s.get("run", "")).lower()]
-    assert len(matches) == 1, f"expected exactly one pytest step, found {len(matches)}"
+    # Match the INVOCATION, not the word: a step that merely mentions pytest
+    # (`pip install pytest`) must not red a required check by looking like a
+    # second test run.
+    matches = [s for s in steps if "uv run pytest" in str(s.get("run", ""))]
+    assert len(matches) == 1, f"expected exactly one `uv run pytest` step, found {len(matches)}"
     return matches[0]
 
 

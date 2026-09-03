@@ -113,7 +113,9 @@ percentage would have said nothing about that defect, and a required score invit
 tests written to move the number rather than to catch a defect.
 
 So `make coverage` and the CI step (#308) **report** — currently 96% — and nothing
-fails on the number. Use coverage to find code no test *touches*; use mutation
+fails on the number. Read that figure precisely: it covers the hermetic suite
+(`-m "not postgres"`), because the `postgres`-marked tests run in their own job
+without coverage. It is not a whole-repo number. Use coverage to find code no test *touches*; use mutation
 testing to find code no test *defends*. Where the two disagree, mutation wins.
 
 What would make it blocking, stated so it cannot drift into permanence

@@ -30,7 +30,7 @@ dev = [
     # was executed by the suite, yet deleting it left all 42 promotion tests green.
     # Where the two disagree, mutation wins. See `make coverage` and #308 for the
     # conditions under which this would become blocking.
-    "pytest-cov>=6.0.0",
+    "pytest-cov>=7.0.0",
     # Declared for tests/test_ci_workflow_conditions.py, which parses the GitHub
     # workflow YAML. It was already installed transitively via uvicorn[standard];
     # naming it here means a future uvicorn extras change cannot silently break

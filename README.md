@@ -386,7 +386,9 @@ the opt-in integration tests against a real Postgres if you set
   (Postgres), waits for the API, asserts `/health` reports
   `healthy`, and tears down.
 - **Coverage** — `make coverage` runs the same suite as `make test` and
-  reports line coverage (currently **96%**), plus `artifacts/coverage.xml`.
+  reports line coverage (currently **96%** of the hermetic suite; the
+  `postgres`-marked tests run in their own job without coverage), plus
+  `artifacts/coverage.xml`.
   It is a **measurement, never a gate**: coverage shows which lines *ran*,
   not which are *checked*. A line in `promotion_eval.py` once measured 97%
   covered and still left 42 tests green when deleted. Use it to find code no
