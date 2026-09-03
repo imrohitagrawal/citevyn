@@ -37,7 +37,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell ci \
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell coverage ci \
         build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
@@ -67,6 +67,19 @@ install-hooks: ## Install the git pre-commit hook (ruff format+check gate; see s
 test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLite)
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
+
+coverage: ## Measure backend line coverage (REPORT only — never a gate; see #308)
+	@# Deliberately mirrors `make test` so the number describes the suite people
+	@# actually run: same marker exclusion, same env -u, same in-memory SQLite.
+	@# A different invocation would measure a different program.
+	cd backend && uv sync --group dev
+	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q \
+		--cov=app --cov-report=term-missing:skip-covered --cov-report=xml:artifacts/coverage.xml
+	@echo
+	@echo "Coverage is NOT assertion. It shows which lines were EXECUTED, not which"
+	@echo "are CHECKED: a line in promotion_eval.py once measured 97% covered and"
+	@echo "still left 42 tests green when deleted. Use this to find code no test"
+	@echo "touches at all; use mutation testing to find code no test defends."
 
 test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scripts)
 	@# Globs deliberately — a hardcoded list is how the suites drifted in the first
@@ -275,9 +288,10 @@ e2e: ## End-to-end test (chat UI happy-path: render + ask + citation)
 	@echo "e2e: To upgrade to Playwright, see docs/adr/0004-frontend-ci.md."
 	bash scripts/smoke.sh
 
-clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + smoke artefacts
+clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + coverage + smoke artefacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 	rm -rf .pytest_cache .ruff_cache .smoke-uvicorn.log .smoke-uvicorn.pid .smoke-last-response.json
+	rm -f backend/.coverage backend/artifacts/coverage.xml
 
 # ─────────────────────────── Production build ───────────────────────────
 build: ## Build the api + worker images (VERSION=tag to label)
