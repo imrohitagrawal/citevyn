@@ -56,6 +56,16 @@ def _directives() -> dict[str, set[str]]:
     for part in _CSP.split(";"):
         tokens = part.split()
         if tokens:
+            # LAST-WINS here, FIRST-WINS in every browser (CSP Level 3). A policy
+            # with a directive repeated therefore enforces something this function
+            # never reports -- see #322, where prepending ``script-src
+            # 'unsafe-inline'`` left the whole suite green while inline script ran.
+            # ``test_security_headers.py`` pins the policy byte-exact; this refuses
+            # the ambiguous input rather than quietly resolving it the wrong way.
+            assert tokens[0] not in out, (
+                f"duplicate directive {tokens[0]!r}: browsers honour the FIRST "
+                f"occurrence, this parser would take the last"
+            )
             out[tokens[0]] = set(tokens[1:])
     return out
 
