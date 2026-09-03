@@ -93,8 +93,20 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // announcing a success as a warning is exactly the mis-signal the
   // ToastHost error→alert / else→status split already avoids.
   const [notice, setNotice] = useState<string | null>(null);
-  // Seconds left on the #301 send cooldown; 0 means "may send".
-  const [cooldown, setCooldown] = useState(0);
+  // #301 send cooldown, stored as a DEADLINE plus the address it belongs to.
+  //
+  // A deadline, not a tick counter: browsers throttle setInterval in a backgrounded
+  // tab (to ~1/minute), so counting ticks would leave the button disabled long after
+  // the server would accept again — the user returns to the tab and waits for a
+  // cooldown that already expired. Remaining time is always recomputed from the clock;
+  // the interval below only forces a re-render.
+  //
+  // Keyed by ADDRESS because the server's bucket is per-address
+  // (`magic_link_interval_rate_key`). Without this, correcting a mistyped address left
+  // the button disabled for a minute against a bucket that was never touched.
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [cooldownFor, setCooldownFor] = useState<string | null>(null);
+  const [, forceTick] = useState(0);
   const [done, setDone] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -185,17 +197,29 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  // One interval for the whole countdown, keyed on whether it is running rather than
-  // on the value — keying on `cooldown` would tear down and recreate the timer on every
-  // tick. Cleared on unmount and on reaching zero, so a closed modal leaves no timer.
-  // A plain setInterval is what makes this mockable: vitest's fake timers advance it
-  // deterministically, so the test never sleeps.
-  const cooling = cooldown > 0;
+  // Seconds left, derived from the deadline on every render — never accumulated.
+  const secondsLeft = cooldownUntil
+    ? Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000))
+    : 0;
+
+  // One interval for the whole countdown, keyed on the deadline rather than on the
+  // remaining seconds, so the timer is created once instead of being rebuilt each tick.
+  // It only re-renders; the value comes from the clock. Cleared on unmount, so a closed
+  // modal leaves no timer behind. A plain setInterval is what makes this mockable.
   useEffect(() => {
-    if (!cooling) return;
-    const id = setInterval(() => setCooldown((left) => Math.max(0, left - 1)), 1000);
+    if (cooldownUntil === null) return;
+    const id = setInterval(() => forceTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [cooling]);
+  }, [cooldownUntil]);
+
+  // Drop the deadline once it passes, so the state cannot describe a cooldown that is
+  // over and the interval stops.
+  useEffect(() => {
+    if (cooldownUntil !== null && secondsLeft === 0) {
+      setCooldownUntil(null);
+      setCooldownFor(null);
+    }
+  }, [cooldownUntil, secondsLeft]);
 
   const switchMode = (next: AuthModalMode) => {
     setMode(next);
@@ -215,7 +239,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         await signUp(email, password);
       } else if (mode === "magic-link") {
         await requestMagicLink(email);
-        setCooldown(MAGIC_LINK_COOLDOWN_SECONDS);
+        setCooldownUntil(Date.now() + MAGIC_LINK_COOLDOWN_SECONDS * 1000);
+        setCooldownFor(email.trim().toLowerCase());
         // Deliberately generic: the server never says whether the address is
         // registered, so neither can this copy.
         setNotice(
@@ -293,9 +318,15 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
 
   // The cooldown is a property of the ADDRESS on the server, not of this screen, so it
   // deliberately survives switchMode: hiding it when the user flips to "Sign in" and
-  // back would re-enable a button the server will still refuse.
-  const coolingDown = cooling && mode === "magic-link";
-  const cooldownLabel = `${Math.floor(cooldown / 60)}:${String(cooldown % 60).padStart(2, "0")}`;
+  // back would re-enable a button the server will still refuse. It applies ONLY to the
+  // address it was started for — editing the field to a different address re-enables the
+  // button, because the server's bucket for that address is untouched.
+  //
+  // The `mode` guard matters: without it a cooldown started on the magic-link screen
+  // would disable the PASSWORD "Sign in" button too, with copy that makes no sense there.
+  const coolingDown =
+    mode === "magic-link" && secondsLeft > 0 && email.trim().toLowerCase() === cooldownFor;
+  const cooldownLabel = `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, "0")}`;
 
   const showsEmail = mode !== "set-password";
   const showsPassword = mode !== "magic-link";

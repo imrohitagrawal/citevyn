@@ -861,8 +861,10 @@ async def rate_limited_admin(
 def _email_bucket_key(prefix: str, email: str, settings: Settings) -> str:
     """Salted-HMAC bucket key for a (normalised) email, one per bucket ``prefix``.
 
-    Shared by the ``auth_login`` and ``magic_link`` buckets so the two can
-    never drift in how they hash an address; the prefix keeps them separate.
+    Shared by every address-keyed bucket -- ``auth_login`` (prefix ``authlogin``),
+    ``magic_link`` (``magiclink``), the sign-in/password notices (``notify``) and
+    the #301 send interval (``mlinterval``) -- so they can never drift in how they
+    hash an address; the prefix is what keeps them separate.
     """
     salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
     digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()

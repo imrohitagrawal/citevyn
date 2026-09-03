@@ -346,6 +346,8 @@ def test_issuing_a_new_token_invalidates_the_users_prior_live_token(magic_app: P
     older, still-unread email would remain redeemable."""
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")
+    # Second send for the SAME address: past the #301 interval, because what this test
+    # measures is that a new token invalidates the previous one.
     _request_link_past_cooldown(_client(), "real@example.com")
     first, second = _outbox_tokens(magic_app)
     assert len(_query_all(MagicLinkToken)) == 1
@@ -392,7 +394,7 @@ def test_confirm_get_does_not_consume_the_token(magic_app: Path) -> None:
     """Plan test 5, the scanner-safety regression. RED if the GET deletes the
     row, sets a cookie, or auto-submits (script / meta-refresh / onload)."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
 
     scanner = _client()
@@ -482,7 +484,7 @@ def test_confirm_post_atomically_claims_and_logs_in(magic_app: Path) -> None:
     ``claim_and_login`` (no cookie / 401 on /me), or touches the password."""
     _register(_client(), "real@example.com")
     hash_before = _password_hash("real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
 
     browser = _client()
@@ -521,7 +523,7 @@ def test_confirm_post_reused_token_fails_closed(magic_app: Path) -> None:
     cannot tell an atomic claim from a SELECT-then-DELETE -- that shape is
     pinned by ``test_confirm_post_claims_with_one_conditional_delete`` below."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
     assert _confirm_post(_client(), token).headers["location"] == "/?auth=ok"
 
@@ -542,7 +544,7 @@ def test_confirm_post_claims_with_one_conditional_delete(magic_app: Path) -> Non
     it. RED if the claim becomes SELECT-then-DELETE (two statements) or drops
     a predicate."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
     engine = db_module.get_engine()
     statements: list[str] = []
@@ -572,7 +574,7 @@ def test_confirm_post_fails_closed_when_the_user_row_is_gone(magic_app: Path) ->
     this SQLite harness it would mint a ghost session for a deleted user
     (302 ``/?auth=ok``) -- either way not the ``/?auth=error`` asserted here."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
 
     async def _delete_user() -> None:
@@ -598,6 +600,8 @@ def test_confirm_post_accepts_each_same_origin_signal_on_its_own(magic_app: Path
     headers or treats ``none`` as cross-site."""
     _register(_client(), "real@example.com")
     for headers in ({"Origin": "http://localhost:8000"}, {"Sec-Fetch-Site": "none"}):
+        # One send per pass for the same address: past the #301 interval, because what
+        # this test measures is each same-origin signal on its own.
         _request_link_past_cooldown(_client(), "real@example.com")
         browser = _client()
         ok = _confirm_post(browser, _latest_token(magic_app), **headers)
@@ -608,7 +612,7 @@ def test_confirm_post_accepts_each_same_origin_signal_on_its_own(magic_app: Path
 def test_confirm_post_expired_token_fails_closed(magic_app: Path) -> None:
     """Plan test 8. RED if the expiry check on the claimed row is dropped."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
 
     async def _expire() -> None:
@@ -655,7 +659,7 @@ def test_confirm_post_with_the_wrong_secret_consumes_nothing(magic_app: Path) ->
     """The griefing guard: a guess at the secret must not burn the real user's
     link. RED if the DELETE's WHERE clause drops the ``secret_hash`` predicate."""
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
     token_id, _, _secret = token.partition(".")
 
@@ -712,7 +716,7 @@ def test_confirm_post_accepts_chromiums_null_origin_when_sec_fetch_site_vouches(
     Sec-Fetch-Site is refused.
     """
     _register(_client(), "real@example.com")
-    _request_link_past_cooldown(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
 
     contradictory = _confirm_post(

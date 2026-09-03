@@ -372,3 +372,39 @@ async def test_redis_window_for_falls_back_to_the_limiter_window(fake_redis) -> 
     assert limiter.window_for(role=rate_limit._MAGIC_LINK_INTERVAL_ROLE) == 45
     for role in ("demo_user", "admin", "global", "auth_login", "magic_link"):
         assert limiter.window_for(role=role) == 3600
+
+
+async def test_redis_bucket_ttl_follows_the_per_role_window(fake_redis) -> None:
+    """The bucket's Redis TTL must be the ROLE's window, not the limiter-wide one.
+
+    The Lua script takes the TTL as an argument, so passing the wrong one is a one-token
+    edit with no visible symptom in any other test: a 60s interval bucket would be kept
+    alive for 3601s. That wastes nothing functionally — the sliding window still evicts
+    by score — but it pins a key per address for an hour instead of a minute, and on a
+    metered Upstash plan that is real memory for every address anyone ever probes.
+
+    RED if ``check`` passes ``self._window_seconds + 1``. Verified: that mutation left
+    all 14 Redis tests green before this test existed.
+    """
+    limiter = rate_limit.RedisRateLimiter(
+        client=fake_redis,
+        window_seconds=3600,
+        demo_user_per_window=30,
+        admin_per_window=100,
+        key_prefix="citevyn:rl:test",
+        magic_link_interval_seconds=60,
+    )
+
+    await limiter.check(user_id="ttl_probe", role=rate_limit._MAGIC_LINK_INTERVAL_ROLE)
+    interval_ttl = await fake_redis.ttl("citevyn:rl:test:ttl_probe")
+    assert 0 < interval_ttl <= 61, (
+        f"interval bucket TTL should track its 60s window, got {interval_ttl}"
+    )
+
+    # Partner assertion: an ordinary role still gets the limiter-wide hour, so this
+    # cannot have shortened everyone else's TTL.
+    await limiter.check(user_id="hour_probe", role="demo_user")
+    hourly_ttl = await fake_redis.ttl("citevyn:rl:test:hour_probe")
+    assert hourly_ttl > 3000, (
+        f"an ordinary role's TTL should still track the hour, got {hourly_ttl}"
+    )

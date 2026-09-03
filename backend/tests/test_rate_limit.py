@@ -261,8 +261,10 @@ async def test_the_interval_window_is_operator_tunable(
 ) -> None:
     """``window_for`` must return the configured value, not a hard-coded 60.
 
-    Pins the seam ``_settings_match`` compares, so an operator changing
-    ``rate_limit_magic_link_interval_seconds`` genuinely takes effect.
+    Scope, stated honestly because an earlier draft of this docstring overstated it:
+    this constructs a limiter DIRECTLY, so it pins ``window_for`` and nothing else. It
+    proves nothing about whether an operator changing the setting reaches the running
+    limiter — that is the next test.
     """
     from app.core.rate_limit import _MAGIC_LINK_INTERVAL_ROLE, RateLimiter
 
@@ -276,3 +278,42 @@ async def test_the_interval_window_is_operator_tunable(
     # Every other role still falls back to the limiter-wide window.
     for role in ("demo_user", "admin", "global", "auth_login", "magic_link"):
         assert limiter.window_for(role=role) == 3600
+
+
+async def test_changing_the_interval_setting_rebuilds_the_cached_limiter() -> None:
+    """The settings -> limiter -> ``_settings_match`` plumbing must actually be wired.
+
+    RED if ``_build_limiter`` stops passing the setting through, or if
+    ``_settings_match`` stops comparing the interval WINDOW. That clause was pure
+    decoration before this test: deleting it left all 1728 backend tests green.
+
+    It compares the WINDOW rather than the limit deliberately — the interval role's
+    limit is fixed at 1 by definition, so a limit comparison could never notice a
+    changed cooldown.
+
+    The "same settings -> same object" assertion is load-bearing in the other
+    direction: a rebuild CLEARS every bucket, so a comparison that flapped would reset
+    the demo, global and auth_login limiters on every request — a limiter bypass, not
+    merely a wasted allocation.
+    """
+    from app.core.config import Settings
+    from app.core.rate_limit import _MAGIC_LINK_INTERVAL_ROLE, get_limiter, reset_limiter
+
+    reset_limiter()
+    try:
+        base: dict[str, object] = dict(
+            rate_limit_window_seconds=3600,
+            rate_limit_demo_user_per_hour=30,
+            rate_limit_admin_per_hour=100,
+        )
+        first = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=60))
+        assert first.window_for(role=_MAGIC_LINK_INTERVAL_ROLE) == 60
+
+        again = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=60))
+        assert again is first, "identical settings must not rebuild (a rebuild clears every bucket)"
+
+        changed = get_limiter(Settings(**base, rate_limit_magic_link_interval_seconds=15))
+        assert changed is not first, "a changed interval must rebuild the cached limiter"
+        assert changed.window_for(role=_MAGIC_LINK_INTERVAL_ROLE) == 15
+    finally:
+        reset_limiter()

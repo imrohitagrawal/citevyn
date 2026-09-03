@@ -146,7 +146,8 @@ production subset lives in
 | `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS` | optional | How long after redeeming a magic link that same session may set a new password without the old one (default 600, minimum 60, one shot) |
 | `CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR` | optional | Per-user cap on password changes that supply the current password (default 3; the stepped-up recovery set is exempt) |
 | `CITEVYN_MAGIC_LINK_TTL_SECONDS` | optional        | Sign-in link lifetime in seconds (default 600, minimum 60); quoted in the email and confirm page |
-| `CITEVYN_RATE_LIMIT_MAGIC_LINK_INTERVAL_SECONDS` | optional | Minimum gap between two sign-in-link requests for one address (default 60, minimum 1). A FLOOR between requests, in its own bucket — distinct from `CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR`, which is the hourly CEILING |
+| `CITEVYN_RATE_LIMIT_MAGIC_LINK_PER_HOUR` | optional | Sign-in links one address may request per hour (default 5). The hourly CEILING; its own bucket, never shared with `auth_login` |
+| `CITEVYN_RATE_LIMIT_MAGIC_LINK_INTERVAL_SECONDS` | optional | Minimum gap between two sign-in-link requests for one address (default 60, minimum 1). A FLOOR between requests, in its own bucket — the counterpart to the hourly ceiling above |
 | `CITEVYN_EMAIL_OUTBOX_DIR`       | local only      | Where the dev file outbox writes emails (default: `citevyn_email_outbox` under the system temp dir); refused in production |
 
 **Never commit a real `.env`.** The repo `.gitignore` rejects
