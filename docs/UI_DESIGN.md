@@ -632,6 +632,7 @@ what is fundamentally a two-view marketing page.
 | 2026-07-05 | Initial implementation from design handoff v2 | First production implementation of the CiteVyn landing page + demo chat, recreating the `CiteVyn Landing v2.dc.html` prototype in React with the project's established patterns |
 | 2026-09-03 | Duplicate-question scroll moved into `ChatView` and made to hold the list; composer focused on chat entry; unsent hero text carried into the composer; reduced-motion honoured | #302 — re-asking an answered question from a landing section left the reader at the newest message. The one-shot scroll was overwritten by the stick-to-bottom re-pin within ~24ms |
 | 2026-09-03 | Markdown subset (bold / inline code / `- ` bullets) rendered in answers; `[n]` markers become chips linking to their source; source cards collapsed per document; one-time citation legend | #303 — the live model emitted markdown that showed as literal characters, `[n]` markers were inert and unexplained, and one page cited five times produced five identical cards |
+| 2026-09-04 | `AccountMenu`'s trigger renamed from `.theme-toggle` to `.account-button` (same styling, now via explicit selector lists) | #311 — it shared a class with the Header's real light/dark toggle, so every `locator(".theme-toggle")` matched two elements and 39 demo Playwright runs died on a strict-mode violation. No visual change |
 
 ### Future entries
 
