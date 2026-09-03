@@ -141,6 +141,26 @@ def test_csp_has_no_repeated_directive() -> None:
 def _assert_common_headers(headers: dict[str, str]) -> None:
     for name, value in _EXPECTED_STATIC_HEADERS.items():
         assert headers[name] == value, f"{name}: expected {value!r}, got {headers.get(name)!r}"
+    # Pin the header BYTE-EXACT, not just the constant. Guarding `_CSP` alone was
+    # the same mistake #322 is about, one layer over: an adversarial review took
+    # the very bypass this PR claimed to kill -- appending `script-src-elem 'self'
+    # 'unsafe-inline'`, which overrides `script-src` for <script> elements -- moved
+    # it from the constant to `apply_security_headers`, and the FULL backend suite
+    # stayed green (1755 passed). Same for prepending `Script-Src 'unsafe-inline'
+    # https://evil` (first-wins in browsers, and the capitalisation also slips past
+    # the duplicate check, since CSP directive names are case-insensitive but a
+    # dict is not), and for `base-uri *` / `connect-src *`, which no per-directive
+    # assertion covered at all.
+    #
+    # The constant is not what a browser reads; this header is. Assert it first, so
+    # every response path -- router, StaticFiles mount, and the unhandled-exception
+    # handler -- is covered by one line no future directive can slip past. The
+    # parser assertions below stay: they are the readable failure message, and they
+    # say WHY each origin is permitted.
+    assert headers["content-security-policy"] == _CSP, (
+        "the emitted policy differs from `_CSP`. The browser reads THIS string, not "
+        "the constant, so any divergence is the real policy."
+    )
     directives = _parse_csp(headers["content-security-policy"])
     assert directives["default-src"] == {"'self'"}
     assert directives["script-src"] == {"'self'"}
