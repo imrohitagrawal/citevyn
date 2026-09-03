@@ -24,6 +24,9 @@ def test_the_prompt_constrains_the_model_to_the_subset_the_client_parses() -> No
     assert "**bold**" in SYSTEM_PROMPT
     assert "`backticks`" in SYSTEM_PROMPT
     assert '"- "' in SYSTEM_PROMPT
+    # Both bullet markers, because the client accepts both — the first live answer
+    # after #303 shipped used "* " and rendered literal asterisks.
+    assert '"* "' in SYSTEM_PROMPT
     # ...and names the things it must NOT emit, which is the half that keeps
     # unconstrained markdown from reaching the reader as visible punctuation.
     for banned in ("headings", "tables", "links", "images", "code fences"):

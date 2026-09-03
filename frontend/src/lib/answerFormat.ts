@@ -39,8 +39,19 @@ export type Block =
   | { kind: "para"; spans: Span[] }
   | { kind: "list"; items: Span[][] };
 
-/** `- ` at the start of a line, the only block-level construct in the subset. */
-const BULLET = /^[ \t]*-[ \t]+/;
+/** `- ` or `* ` at the start of a line — the only block-level construct in the
+ *  subset. Both markers are accepted even though the prompt asks for `-`: the
+ *  first live answer after this shipped used `*`, and every bullet rendered a
+ *  literal asterisk. The prompt CONSTRAINS the model, it does not compel it, so
+ *  the renderer takes the near-universal alternative too. (#303 said so from the
+ *  start — "the live model emits ... `*` bullets".)
+ *
+ *  The trailing space is what keeps this from eating emphasis, and it is doing
+ *  ALL of that work: `*notabullet` and `*emphasis* here` stay literal, and
+ *  `**bold**` cannot match either, because the character after the first `*` is
+ *  another `*` rather than the required whitespace. An explicit bold-first guard
+ *  here would be unreachable, so there isn't one. */
+const BULLET = /^[ \t]*[-*][ \t]+/;
 /** `[12]` — digits only, so prose like "[see below]" is never a marker.
  *  Unbounded `\d+` matches the backend's own marker regex
  *  (``app/llm/validation.py``); a number with no matching citation simply takes

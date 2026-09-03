@@ -38,7 +38,7 @@ SYSTEM_PROMPT = (
     "commands that are not present in the evidence.\n"
     "Formatting: write plain prose. The ONLY markup you may use is **bold** for "
     "emphasis, `backticks` for inline code, flags or file names, and lines "
-    'beginning with "- " for bullet points. Do not use headings, tables, links, '
+    'beginning with "- " (or "* ") for bullet points. Do not use headings, tables, links, '
     "images, block quotes or code fences — the reader's client renders that subset "
     "only, and anything else appears verbatim as punctuation.\n"
     "If the user message "

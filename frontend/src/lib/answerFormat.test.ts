@@ -164,6 +164,40 @@ describe("parseAnswer — blocks", () => {
     ]);
   });
 
+  it("accepts '*' bullets, which is what the live model actually emits", () => {
+    // Observed in PRODUCTION on the first answer after this feature shipped: the
+    // prompt asks for "- ", the model wrote "* ", and every bullet rendered a
+    // literal asterisk. #303's own text said the model emits `*` bullets; the
+    // prompt constrains, it does not compel.
+    expect(parseAnswer("* first\n* second")).toEqual([
+      { kind: "list", items: [[text("first")], [text("second")]] },
+    ]);
+  });
+
+  it("keeps a mixed '-' and '*' run as ONE list", () => {
+    expect(parseAnswer("- a\n* b")).toEqual([
+      { kind: "list", items: [[text("a")], [text("b")]] },
+    ]);
+  });
+
+  it("still does not treat inline emphasis or a bare asterisk as a bullet", () => {
+    // `*text*` is emphasis, outside the subset, and must stay literal — the
+    // bullet rule needs the trailing space just as `-` does.
+    expect(parseAnswer("*emphasis* here")).toEqual([
+      { kind: "para", spans: [text("*emphasis* here")] },
+    ]);
+    expect(parseAnswer("*notabullet")).toEqual([
+      { kind: "para", spans: [text("*notabullet")] },
+    ]);
+  });
+
+  it("does not mistake a bold run at the start of a line for a bullet", () => {
+    // `**bold** text` starts with `*` but is bold, not a list.
+    expect(parseAnswer("**Key:** value")).toEqual([
+      { kind: "para", spans: [bold(text("Key:")), text(" value")] },
+    ]);
+  });
+
   it("does not treat a hyphenated word or a bare dash as a bullet", () => {
     expect(parseAnswer("well-known\n-notabullet")).toEqual([
       { kind: "para", spans: [text("well-known\n-notabullet")] },
