@@ -34,18 +34,32 @@ from app.core.config import Settings
 #
 # style-src and font-src DO need third-party origins: `frontend/index.html`
 # pulls Google Fonts and Fontshare stylesheets (each `<link rel="stylesheet"
-# href="https://...">` is itself a style-src load) and the font files those
-# stylesheets reference come from fonts.gstatic.com / api.fontshare.com. A
-# same-origin-only CSP here would silently break the loaded theme — the
+# href="https://...">` is itself a style-src load) and the font FILES those
+# stylesheets reference come from a DIFFERENT host in each case:
+#
+#     stylesheet                  font files
+#     fonts.googleapis.com   ->   fonts.gstatic.com
+#     api.fontshare.com      ->   cdn.fontshare.com
+#
+# That split is the whole trap (#306). `cdn.fontshare.com` was missing here, so
+# all 12 Satoshi requests were blocked on every page load and the page silently
+# fell back to a system font — nothing looked broken. The Google pair beside it
+# was correct, which is exactly why the identical Fontshare split was missed.
+#
+# A same-origin-only CSP here would silently break the loaded theme — the
 # error is invisible unless you check the browser console, so this is listed
-# explicitly rather than tightened blindly. `backend/tests/
-# test_security_headers.py` pins these exact hosts so an unrelated frontend
-# change (a new font/style CDN) can't widen the policy unnoticed.
+# explicitly rather than tightened blindly. `test_security_headers.py` pins these
+# exact hosts so a new font/style CDN can't widen the policy unnoticed, and
+# `test_csp_covers_the_pages_real_origins.py` pins the OTHER direction: every
+# origin the page actually loads must be permitted. Note the font-file host
+# cannot be discovered from `index.html` — it only appears inside the fetched
+# stylesheet — so that test declares the mapping rather than parsing for it.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self' https://fonts.googleapis.com https://api.fontshare.com; "
-    "font-src 'self' https://fonts.gstatic.com https://api.fontshare.com; "
+    "font-src 'self' https://fonts.gstatic.com https://api.fontshare.com "
+    "https://cdn.fontshare.com; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "

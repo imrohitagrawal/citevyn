@@ -87,10 +87,13 @@ def _assert_common_headers(headers: dict[str, str]) -> None:
         "https://fonts.googleapis.com",
         "https://api.fontshare.com",
     }
+    # Both Fontshare hosts: `api` serves the stylesheet, `cdn` serves the font
+    # files. Listing only the first blocked every glyph (#306).
     assert directives["font-src"] == {
         "'self'",
         "https://fonts.gstatic.com",
         "https://api.fontshare.com",
+        "https://cdn.fontshare.com",
     }
 
 
