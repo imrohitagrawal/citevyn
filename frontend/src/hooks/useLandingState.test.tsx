@@ -1095,6 +1095,34 @@ describe("useLandingState — the landing hero does not run on the chat screen (
     expect(result.current.state.hero.text).toBe(frozen);
   });
 
+  it("restarts the hero from its FIRST item on returning to landing", async () => {
+    // Pins what actually happens, because I claimed the wrong thing. `playHeroLoop`
+    // re-initialises `let idx = 0` on every call, so returning to the landing page
+    // restarts the reel rather than resuming it. My browser probe only checked that
+    // the hero text CHANGED after coming back -- which a restart satisfies just as
+    // well as a resume -- so the claim outran the evidence. Whichever behaviour is
+    // wanted, it should be the one written down and guarded.
+    const { result } = renderHook(() => useLandingState());
+    const firstKey = result.current.state.hero.key;
+    // Advance past the first item so the reel has genuinely moved on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14000);
+    });
+    const laterKey = result.current.state.hero.key;
+    expect(laterKey).not.toBe(firstKey); // partner: the reel really does advance
+
+    await act(async () => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    await settle();
+    await act(async () => {
+      result.current.backToLanding();
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    expect(result.current.state.hero.key).toBe(firstKey);
+  });
+
   it("stops rotating the hero placeholder on the chat screen", async () => {
     const { result } = renderHook(() => useLandingState());
     const first = result.current.heroPlaceholder;

@@ -177,9 +177,13 @@ export function ChatView({
   }, [sendTick]);
 
   // The bubble a duplicate-question highlight points at. Derived as a STRING so
-  // this drives the effect below: ``messages`` is a fresh array identity on every
-  // render of the landing hook, so depending on the array itself would re-issue
-  // the scroll ~40x/second and restart the smooth animation on every frame.
+  // this drives the effect below rather than the array. #312 memoised `chatView`,
+  // so `messages` is no longer a fresh identity on every render -- but the string
+  // is still the right dependency, and now for a plainer reason: an identity that
+  // changes for ANY message edit (a streamed chunk, say) would re-issue the smooth
+  // scroll and restart the animation mid-flight, while the domId changes only when
+  // the highlight actually moves. Before #312 this was load-bearing against a
+  // ~40x/second re-render; it is now defence, not a fix.
   const highlightedDomId =
     highlightedIndex >= 0 ? messages[highlightedIndex]?.domId : undefined;
 
@@ -207,9 +211,11 @@ export function ChatView({
   // first, and the fight this whole fix exists to end resumes inside one commit.
   //
   // Disarming the stick-to-bottom latch is the load-bearing half. Without it the
-  // passive effect above re-pins the list to the bottom on the very next render
-  // — and the landing hero's demo animation re-renders continuously — so the
-  // reader was dragged straight back down off the answer they asked to see.
+  // passive effect above re-pins the list to the bottom on the very next render,
+  // so the reader was dragged straight back down off the answer they asked to
+  // see. (Until #312 the landing hero re-rendered this continuously, which is
+  // what made the fight constant; a streamed answer still supplies renders, so
+  // the disarm is still required.)
   useLayoutEffect(() => {
     if (!highlightedDomId) return;
     const el = document.getElementById(highlightedDomId);
