@@ -86,13 +86,21 @@ export function ChatView({
     const onScroll = () => {
       const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
       const atBottom = distanceFromBottom <= 8;
-      // A SMOOTH scroll away from the bottom starts AT the bottom, so its first
-      // frames still read "at bottom" and would re-arm the latch we just disarmed
-      // to run them — after which the passive effect pins straight back down and
-      // cancels the animation. That loop is what left a landing re-ask stranded at
-      // the newest message instead of the answer it asked for (#302).
-      if (atBottom && highlightHoldRef.current) return;
-      stickRef.current = atBottom;
+      // Two transitions, deliberately NOT symmetric:
+      // Leaving the bottom ALWAYS disarms — a reader who scrolls away mid-flash
+      // takes control immediately.
+      if (!atBottom) {
+        stickRef.current = false;
+        return;
+      }
+      // Arriving at the bottom normally re-arms — but not while a highlight owns
+      // the list. A SMOOTH scroll away from the bottom starts AT the bottom, so its
+      // first frames still read "at bottom" and would re-arm the latch we just
+      // disarmed to run them — after which the passive effect pins straight back
+      // down and cancels the animation. That loop is what left a landing re-ask
+      // stranded at the newest message instead of the answer it asked for (#302).
+      if (highlightHoldRef.current) return;
+      stickRef.current = true;
     };
     list.addEventListener("scroll", onScroll, { passive: true });
     return () => list.removeEventListener("scroll", onScroll);
@@ -111,8 +119,18 @@ export function ChatView({
   // An EXPLICIT send always brings the new question into view, even from a scrolled-up
   // position, and re-arms the latch so its streaming answer stays followed. Keyed on
   // ``sendTick`` (bumped once per submit) so it never runs on a passive stream token.
+  //
+  // Seeded from the CURRENT value rather than guarded with ``sendTick === 0``, so it
+  // fires on a CHANGE and never on mount. ``sendTick`` lives in the landing hook's
+  // reducer, which outlives this component: after any earlier send, a remount (every
+  // landing -> chat switch) arrived with a non-zero tick, so the old guard let this
+  // effect pin to the bottom and RE-ARM the latch immediately after the highlight
+  // effect had scrolled away and disarmed it — reinstating #302 on exactly the
+  // mount-with-a-pending-highlight path this fix exists to close.
+  const seenSendTickRef = useRef(sendTick);
   useEffect(() => {
-    if (sendTick === 0) return; // initial mount, no send yet
+    if (sendTick === seenSendTickRef.current) return;
+    seenSendTickRef.current = sendTick;
     const list = chatListRef.current;
     if (!list) return;
     stickRef.current = true;
@@ -132,8 +150,14 @@ export function ChatView({
   // the DOM by id and returned silently when the bubble was not there yet. The
   // landing entry points switch screen and submit in one gesture, so that lookup
   // raced this component's mount. Reacting to the highlight instead means the
-  // scroll happens wherever the mount lands, and a LAYOUT effect places the list
-  // before paint rather than showing the wrong position for a frame.
+  // scroll happens wherever the mount lands.
+  //
+  // It must be a LAYOUT effect, for effect-PHASE ordering — not to paint sooner
+  // (the scroll is smooth, so nothing is positioned before paint either way).
+  // Every layout effect in a commit runs before every passive effect, which is what
+  // puts ``stickRef.current = false`` in front of the passive ``[messages]`` pin
+  // above. As a plain ``useEffect`` declaration order wins instead, the pin runs
+  // first, and the fight this whole fix exists to end resumes inside one commit.
   //
   // Disarming the stick-to-bottom latch is the load-bearing half. Without it the
   // passive effect above re-pins the list to the bottom on the very next render
@@ -143,36 +167,46 @@ export function ChatView({
     if (!highlightedDomId) return;
     const el = document.getElementById(highlightedDomId);
     if (!el) return;
+    // A reader who asked for less motion gets the jump, not the journey. Same probe
+    // ``useRevealOnScroll`` uses; an explicit ``behavior`` overrides the CSS
+    // ``scroll-behavior`` cascade, so the stylesheet cannot do this for us.
+    const behavior: ScrollBehavior = window.matchMedia?.(
+      "(prefers-reduced-motion: reduce)",
+    ).matches
+      ? "auto"
+      : "smooth";
     stickRef.current = false;
     highlightHoldRef.current = true;
     const list = chatListRef.current;
-    // No list (or a zero-height one mid-remount): fall back to the browser's own
-    // scrolling so the bubble is at least brought into view.
     if (!list || list.clientHeight === 0) {
-      el.scrollIntoView({ block: "start", behavior: "smooth" });
-      return () => {
-        highlightHoldRef.current = false;
-      };
+      // No list (or a zero-height one mid-remount): fall back to the browser's own
+      // scrolling so the bubble is at least brought into view.
+      el.scrollIntoView({ block: "start", behavior });
+    } else {
+      // The element's top in the list's UNSCROLLED coordinate system — the correct
+      // ``scrollTop`` to pin it to the list's visible top.
+      //
+      // The clamp is defence, not arithmetic: for any descendant of the list this
+      // sum is >= -12 (the inset), so the only real negative is the FIRST message,
+      // and a browser would clamp a negative ``top`` itself. It earns its place by
+      // refusing to turn a meaningless number into a plausible-looking "scrolled to
+      // the very top" if ``el`` ever stops being a descendant of ``list``.
+      const desiredTop =
+        el.getBoundingClientRect().top -
+        list.getBoundingClientRect().top +
+        list.scrollTop -
+        12;
+      list.scrollTo({ top: Math.max(0, desiredTop), behavior });
     }
-    // The element's top in the list's UNSCROLLED coordinate system — the correct
-    // ``scrollTop`` to pin it to the list's visible top. It goes negative when the
-    // bubble is above the current viewport, so clamp: a question buried earlier in
-    // the conversation must rise to the top, not fail to scroll at all.
-    const desiredTop =
-      el.getBoundingClientRect().top -
-      list.getBoundingClientRect().top +
-      list.scrollTop -
-      12;
-    list.scrollTo({ top: Math.max(0, desiredTop), behavior: "smooth" });
     // Released when the highlight clears (or moves to another bubble), by which
     // time the smooth scroll has settled and the reader is parked on their answer.
+    // A flag this effect sets is this effect's to release.
     //
-    // HYGIENE, NOT A GUARDED BEHAVIOUR: no test goes red if this release is
-    // deleted, and that was verified by mutation rather than assumed. Holding the
-    // flag forever only blocks the latch from RE-arming at the bottom, and every
-    // explicit send re-arms it directly via ``sendTick`` — so within one mount
-    // there is no reachable case that tells the two apart. It stays because a flag
-    // this effect sets is this effect's to release.
+    // HYGIENE, NOT A GUARDED BEHAVIOUR: no test goes red if this release alone is
+    // deleted — verified by mutation, not assumed. Holding the flag forever only
+    // blocks the latch from RE-arming at the bottom, and every explicit send
+    // re-arms it directly via ``sendTick``, so within one mount nothing reachable
+    // tells the two apart. The asymmetry it guards IS tested, both directions.
     return () => {
       highlightHoldRef.current = false;
     };
@@ -182,7 +216,10 @@ export function ChatView({
   // conversation exists the landing sections are no longer a second place to
   // ask, so the chat opens ready to type (#302).
   useEffect(() => {
-    composerRef.current?.focus();
+    // ``preventScroll``: focusing an input scrolls its nearest scrollable ancestor
+    // into view, which would compete with the highlight scroll started one effect
+    // phase earlier.
+    composerRef.current?.focus({ preventScroll: true });
   }, []);
 
   return (

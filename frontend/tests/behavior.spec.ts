@@ -1104,9 +1104,15 @@ test.describe("Landing hands typed text over to the chat composer (#302)", () =>
     const composer = page.locator(".chat-input");
     await expect(composer).toHaveValue("half-typed question about Codex");
     await expect(composer).toBeFocused();
-    // The hero box is emptied, so returning to the landing page does not show a
-    // stale copy of a question that now lives in the composer.
-    await page.locator(".back-button").click();
+    // The hero box is emptied by the carry itself, so the question that now lives
+    // in the composer is not also sitting on the landing page.
+    //
+    // Leave via a NAV LINK, not "Back to landing": `backToLanding` clears the hero
+    // box on its own (and has since before this change), so exiting that way would
+    // assert someone else's code and stay green with the carry's own clear deleted.
+    // `goSection` does not clear it, so this path sees only the carry's clear.
+    await page.locator(".nav-link", { hasText: "Who it's for" }).click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toHaveCount(0);
     await expect(page.locator("#hero-input")).toHaveValue("");
   });
 

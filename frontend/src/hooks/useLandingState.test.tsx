@@ -683,3 +683,166 @@ describe("useLandingState — resumeSession (ADR-0004 PR 10)", () => {
     expect(result.current.state.messages[0].text).toBe("the newer conversation");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #302 — landing hands over to the chat. These live in vitest, not only in
+// Playwright, because CI runs `npm test` but runs NO demo-mode Playwright job
+// (see #311), so a Playwright-only guard on these behaviours is not enforced.
+// ---------------------------------------------------------------------------
+describe("useLandingState — landing hands over to the chat (#302)", () => {
+  it("carries unsent hero text into the chat composer and clears the hero box", async () => {
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.onHeroInput({
+        target: { value: "draft I never sent" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+    expect(result.current.state.heroInput).toBe("draft I never sent");
+
+    // A landing entry point that is NOT the hero box (e.g. a persona question).
+    act(() => {
+      result.current.enterChat("What is Claude Code?");
+    });
+    expect(result.current.state.chatInput).toBe("draft I never sent");
+    expect(result.current.state.heroInput).toBe("");
+    await settle();
+  });
+
+  it("a hero SUBMIT carries nothing across — its text became the question", async () => {
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.onHeroInput({
+        target: { value: "What is Claude Code?" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+    act(() => {
+      result.current.onAskHero();
+    });
+    await settle();
+    // Partner assertion: the question really was asked, so an empty composer
+    // here cannot be "nothing happened at all".
+    expect(result.current.state.messages[0]).toMatchObject({
+      role: "user",
+      text: "What is Claude Code?",
+    });
+    expect(result.current.state.chatInput).toBe("");
+  });
+
+  it("re-asking an answered question highlights it via a -1 round trip, then clears", async () => {
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    expect(result.current.state.messages).toHaveLength(2);
+
+    act(() => {
+      result.current.send("what is CLAUDE code?"); // duplicate, case-insensitive
+    });
+    // No new bubble, and the highlight has NOT been applied yet: `flashExisting`
+    // resets to -1 first so React re-renders and the CSS pulse replays even when
+    // the same bubble is flashed twice in a row.
+    expect(result.current.state.messages).toHaveLength(2);
+    expect(result.current.state.highlight).toBe(-1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0);
+
+    // ...and it clears itself, so a highlight can never be left stuck on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2100);
+    });
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
+  it("a second flash resets the highlight to -1 first, so the pulse can replay", async () => {
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0); // pulsing
+
+    // Re-ask the SAME question while it is still highlighted. Without the reset to
+    // -1 the value never changes, React skips the re-render, and the CSS animation
+    // does not replay — the user gets no feedback the second time.
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    expect(result.current.state.highlight).toBe(-1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0);
+  });
+
+  it("a superseded flash never applies its own index", async () => {
+    // Each flash stops the previous flash's timers before arming its own. Without
+    // that, an earlier flash's 10ms restart still fires and briefly highlights the
+    // WRONG bubble on its way past.
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("How do I install the Codex CLI?");
+    });
+    await settle();
+    expect(result.current.state.messages).toHaveLength(4);
+
+    act(() => {
+      result.current.send("What is Claude Code?"); // flash index 0, restart at +10
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5);
+    });
+    act(() => {
+      result.current.send("How do I install the Codex CLI?"); // flash index 2, restart at +15
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7); // t = 12: index 0's restart would have fired
+    });
+    expect(result.current.state.highlight).toBe(-1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10); // t = 22: index 2's restart has fired
+    });
+    expect(result.current.state.highlight).toBe(2);
+  });
+
+  it("unmounting between the reset and the restart leaves no timer to fire", async () => {
+    // The 10ms restart timer used to be a bare `setTimeout`, invisible to the
+    // unmount sweep. A post-unmount dispatch is a React state-update-on-unmounted
+    // warning at best, and a leak either way.
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a) => errors.push(a));
+    const { result, unmount } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?"); // duplicate -> arms both timers
+    });
+    // Partner assertion: the flash really did arm timers, so "none pending after
+    // unmount" cannot pass because nothing was ever scheduled.
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    unmount();
+    // The unmount sweep walks `timers.current`, so an UNTRACKED `setTimeout` would
+    // still be sitting here.
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500); // past BOTH the 10ms and the 2s timers
+    });
+    expect(errors).toEqual([]);
+    spy.mockRestore();
+  });
+});

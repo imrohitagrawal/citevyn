@@ -7,7 +7,7 @@
  * the component that owns the scroll container, and raced its mount.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { ChatView } from "./ChatView";
 
 type Props = Parameters<typeof ChatView>[0];
@@ -47,10 +47,34 @@ function installLayout(targetTop: number) {
       return this.id === "chat-list" ? 400 : 0;
     },
   });
+  const scrollHeight = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight");
+  Object.defineProperty(Element.prototype, "scrollHeight", {
+    configurable: true,
+    get(this: Element) {
+      return this.id === "chat-list" ? 5000 : 0;
+    },
+  });
   return () => {
     Element.prototype.getBoundingClientRect = rect;
     if (clientHeight) Object.defineProperty(Element.prototype, "clientHeight", clientHeight);
+    if (scrollHeight) Object.defineProperty(Element.prototype, "scrollHeight", scrollHeight);
   };
+}
+
+function chat(props: Partial<Props> = {}) {
+  return (
+    <ChatView
+      messages={MESSAGES}
+      chatEmpty={false}
+      chatSuggestions={[]}
+      chatInput=""
+      onChatInput={() => {}}
+      onChatKey={() => {}}
+      onSendClick={() => {}}
+      onBackClick={() => {}}
+      {...props}
+    />
+  );
 }
 
 function renderChat(props: Partial<Props> = {}) {
@@ -68,23 +92,50 @@ function renderChat(props: Partial<Props> = {}) {
     />
   );
   const utils = render(el);
-  // The list's own scroll offset is state, not layout, so it is set after mount.
-  const list = document.getElementById("chat-list");
-  if (list) list.scrollTop = SCROLL_TOP;
+  // The list's own scroll offset is state, not layout, so it is seeded after mount.
+  // Written through the stub's backing field rather than the property, so the
+  // harness's own seed never shows up in ``ops`` alongside the component's writes.
+  const list = document.getElementById("chat-list") as unknown as { __st?: number } | null;
+  if (list) list.__st = SCROLL_TOP;
   return utils;
 }
 
 let restoreLayout: (() => void) | null = null;
 const scrollTo = () => Element.prototype.scrollTo as unknown as ReturnType<typeof vi.fn>;
 
+/** Every scroll operation on the list, in order. ``scrollTo`` is the highlight jump;
+ *  ``scrollTop=`` is a pin to the bottom. Ordering is the whole point: the bug was a
+ *  jump immediately undone by a pin. */
+let ops: string[] = [];
+let restoreScrollTop: (() => void) | null = null;
+
 beforeEach(() => {
-  Element.prototype.scrollTo = vi.fn() as unknown as Element["scrollTo"];
-  Element.prototype.scrollIntoView = vi.fn();
+  ops = [];
+  Element.prototype.scrollTo = vi.fn(function (this: Element, o: ScrollToOptions) {
+    ops.push(`scrollTo(${o.top})`);
+  }) as unknown as Element["scrollTo"];
+  Element.prototype.scrollIntoView = vi.fn(() => ops.push("scrollIntoView"));
+  const prev = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+  Object.defineProperty(Element.prototype, "scrollTop", {
+    configurable: true,
+    get(this: Element) {
+      return (this as unknown as { __st?: number }).__st ?? 0;
+    },
+    set(this: Element, v: number) {
+      if (this.id === "chat-list") ops.push(`scrollTop=${v}`);
+      (this as unknown as { __st?: number }).__st = v;
+    },
+  });
+  restoreScrollTop = () => {
+    if (prev) Object.defineProperty(Element.prototype, "scrollTop", prev);
+  };
 });
 
 afterEach(() => {
   restoreLayout?.();
   restoreLayout = null;
+  restoreScrollTop?.();
+  restoreScrollTop = null;
 });
 
 describe("ChatView owns the duplicate-question scroll (#302)", () => {
@@ -182,6 +233,10 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     expect(scrollTo()).not.toHaveBeenCalled();
     // Partner assertion: prove the very same setup DOES scroll once a bubble is
     // highlighted, so this case cannot pass because the harness is inert.
+    // ``cleanup()`` first: two live trees would put two ``#chat-list`` and two
+    // ``#cv-msg-0`` nodes in the document, and the effect's ``getElementById``
+    // would resolve the FIRST tree's bubble while its ref held the SECOND's list.
+    cleanup();
     renderChat({ highlightedIndex: 0 });
     expect(scrollTo()).toHaveBeenCalled();
   });
@@ -195,6 +250,71 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
       behavior: "smooth",
     });
     expect(scrollTo()).not.toHaveBeenCalled();
+  });
+
+  it("a highlight arriving with a NEW messages identity produces no pin to the bottom", () => {
+    // Effect-PHASE ordering, which is the whole reason this is a layout effect.
+    // Layout effects run before passive ones, so the highlight disarms the latch
+    // before the passive ``[messages]`` pin reads it. As a plain ``useEffect``,
+    // declaration order wins and the pin fires first — the fight this fix ends.
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat({ highlightedIndex: -1, sendTick: 2 });
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 2 }));
+    expect(ops).toEqual(["scrollTo(288)"]);
+  });
+
+  it("does NOT pin to the bottom when it mounts with a highlight already pending", () => {
+    // ``sendTick`` lives in the landing hook's reducer and outlives this component,
+    // so every remount after an earlier send arrives with a non-zero tick. Guarding
+    // that effect with ``sendTick === 0`` let it pin (and re-arm) right after the
+    // highlight scroll, reinstating #302 on the remount path.
+    restoreLayout = installLayout(-500);
+    renderChat({ highlightedIndex: 0, sendTick: 3 });
+    expect(ops.filter((o) => o.startsWith("scrollTop="))).toEqual([]);
+    expect(ops).toContain("scrollTo(0)");
+  });
+
+  it("still pins to the bottom on mount when nothing is highlighted", () => {
+    // Partner to the case above: the mount pin must survive for ordinary entry,
+    // or "no pin" would be passing because the component stopped scrolling at all.
+    restoreLayout = installLayout(-500);
+    renderChat({ sendTick: 3 });
+    expect(ops).toContain("scrollTop=5000");
+  });
+
+  it("still pins to the bottom when a NEW send bumps sendTick", () => {
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat({ sendTick: 3 });
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], sendTick: 4 }));
+    expect(ops).toContain("scrollTop=5000");
+  });
+
+  it("while a highlight holds the list, reaching the bottom does NOT re-arm the latch", () => {
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat({ highlightedIndex: 0, sendTick: 2 });
+    const list = document.getElementById("chat-list")!;
+    list.scrollTop = 4600; // the true bottom: scrollHeight 5000 - clientHeight 400
+    list.dispatchEvent(new Event("scroll"));
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 2 }));
+    expect(ops).toEqual([]); // no pin => the latch stayed disarmed
+  });
+
+  it("but a reader who scrolls AWAY mid-highlight still disarms it", () => {
+    // The hold is deliberately one-way. This is its partner: without it, the two
+    // tests together would be satisfied by a hold that simply froze the latch.
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat({ highlightedIndex: 0, sendTick: 2 });
+    // An explicit send is the only thing that re-arms while a highlight is held.
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 3 }));
+    const list = document.getElementById("chat-list")!;
+    list.scrollTop = 100; // scrolled well away from the bottom
+    list.dispatchEvent(new Event("scroll"));
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 3 }));
+    expect(ops).toEqual([]); // disarmed, despite the hold being active
   });
 
   it("focuses the composer on mount so the chat is ready to type", () => {
