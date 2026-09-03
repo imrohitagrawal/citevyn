@@ -109,8 +109,21 @@ const scrollTo = () => Element.prototype.scrollTo as unknown as ReturnType<typeo
 let ops: string[] = [];
 let restoreScrollTop: (() => void) | null = null;
 
+/** jsdom ships no ``matchMedia``, so without this the reduced-motion branch is
+ *  dead code in every unit test and every "smooth" assertion below would hold
+ *  even if the OS preference were set. */
+function stubReducedMotion(reduce: boolean) {
+  (window as unknown as { matchMedia: unknown }).matchMedia = ((q: string) => ({
+    matches: reduce && q.includes("prefers-reduced-motion"),
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  })) as unknown as typeof window.matchMedia;
+}
+
 beforeEach(() => {
   ops = [];
+  stubReducedMotion(false);
   Element.prototype.scrollTo = vi.fn(function (this: Element, o: ScrollToOptions) {
     ops.push(`scrollTo(${o.top})`);
   }) as unknown as Element["scrollTo"];
@@ -284,11 +297,18 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
   });
 
   it("still pins to the bottom when a NEW send bumps sendTick", () => {
+    // Deliberately hostile setup: scroll AWAY first so the latch is disarmed, and
+    // keep the ``messages`` array identity STABLE across the rerender. Without both,
+    // the passive ``[messages]`` pin produces the very same ``scrollTop=5000`` and
+    // the assertion holds with this effect deleted entirely.
     restoreLayout = installLayout(-500);
     const { rerender } = renderChat({ sendTick: 3 });
+    const list = document.getElementById("chat-list")!;
+    list.scrollTop = 100;
+    list.dispatchEvent(new Event("scroll"));
     ops.length = 0;
-    rerender(chat({ messages: [...MESSAGES], sendTick: 4 }));
-    expect(ops).toContain("scrollTop=5000");
+    rerender(chat({ sendTick: 4 })); // same MESSAGES reference
+    expect(ops).toEqual(["scrollTop=5000"]);
   });
 
   it("while a highlight holds the list, reaching the bottom does NOT re-arm the latch", () => {
@@ -309,12 +329,25 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     const { rerender } = renderChat({ highlightedIndex: 0, sendTick: 2 });
     // An explicit send is the only thing that re-arms while a highlight is held.
     rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 3 }));
+    // Prove it: a fresh messages identity now pins. Without this the test would
+    // also pass if the latch had simply never been re-armed.
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 3 }));
+    expect(ops).toEqual(["scrollTop=5000"]);
+
     const list = document.getElementById("chat-list")!;
     list.scrollTop = 100; // scrolled well away from the bottom
     list.dispatchEvent(new Event("scroll"));
     ops.length = 0;
     rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 3 }));
     expect(ops).toEqual([]); // disarmed, despite the hold being active
+  });
+
+  it("jumps instantly instead of animating when the reader asked for less motion", () => {
+    stubReducedMotion(true);
+    restoreLayout = installLayout(-500);
+    renderChat({ highlightedIndex: 0, sendTick: 3 });
+    expect(scrollTo()).toHaveBeenCalledWith({ top: 0, behavior: "auto" });
   });
 
   it("focuses the composer on mount so the chat is ready to type", () => {

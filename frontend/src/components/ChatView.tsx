@@ -167,9 +167,14 @@ export function ChatView({
     if (!highlightedDomId) return;
     const el = document.getElementById(highlightedDomId);
     if (!el) return;
-    // A reader who asked for less motion gets the jump, not the journey. Same probe
-    // ``useRevealOnScroll`` uses; an explicit ``behavior`` overrides the CSS
-    // ``scroll-behavior`` cascade, so the stylesheet cannot do this for us.
+    // A reader who asked for less motion gets the jump, not the journey. An explicit
+    // ``behavior`` overrides the CSS ``scroll-behavior`` cascade, so the stylesheet
+    // cannot do this for us — ``reset.css``'s ``html { scroll-behavior: auto }``
+    // targets the document, not this list, and loses to an explicit value anyway.
+    //
+    // ``matchMedia?.`` is load-bearing, not defensive: jsdom does not implement it,
+    // so an unguarded call throws in every unit test. (``useRevealOnScroll`` calls it
+    // unguarded, but only from an effect no unit test mounts.)
     const behavior: ScrollBehavior = window.matchMedia?.(
       "(prefers-reduced-motion: reduce)",
     ).matches

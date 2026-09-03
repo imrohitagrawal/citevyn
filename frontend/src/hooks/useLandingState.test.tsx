@@ -849,12 +849,14 @@ describe("useLandingState — landing hands over to the chat (#302)", () => {
       result.current.send("What is Claude Code?");
     });
     await settle();
+    const before = vi.getTimerCount();
     act(() => {
       result.current.send("What is Claude Code?"); // duplicate -> arms both timers
     });
-    // Partner assertion: the flash really did arm timers, so "none pending after
-    // unmount" cannot pass because nothing was ever scheduled.
-    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    // Partner assertion, as a DELTA. A bare `getTimerCount() > 0` proves nothing
+    // here: the hook always has its placeholder interval and hero loop pending, so
+    // that assertion holds even if the flash armed no timers at all.
+    expect(vi.getTimerCount()).toBe(before + 2); // the 10ms restart + the 2s clear
     unmount();
     // The unmount sweep walks `timers.current`, so an UNTRACKED `setTimeout` would
     // still be sitting here.
