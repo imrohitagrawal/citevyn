@@ -4,12 +4,8 @@
  */
 
 import { useEffect, useLayoutEffect, useRef } from "react";
-
-/** A doc URL is a safe link only when it is http(s) or a site-relative path; anything
- *  else (e.g. a ``javascript:`` scheme) renders as inert text, not a clickable link. */
-function isSafeHref(url: string): boolean {
-  return /^https?:\/\//i.test(url) || url.startsWith("/");
-}
+import { AnswerBody, hasCitationChips } from "./AnswerBody";
+import { isSafeHref } from "../lib/safeHref";
 
 interface ChatViewProps {
   messages: Array<{
@@ -150,6 +146,14 @@ export function ChatView({
   // the scroll ~40x/second and restart the smooth animation on every frame.
   const highlightedDomId =
     highlightedIndex >= 0 ? messages[highlightedIndex]?.domId : undefined;
+
+  // The legend ("Numbers link each sentence to its source below.") is a one-time
+  // orientation, so it goes under the FIRST answer that actually renders chips.
+  // Demo-mode answers carry sources but no ``[n]`` markers, so they produce no
+  // chips and no legend — which is correct: there would be nothing to explain.
+  const legendIndex = messages.findIndex(
+    (m) => !m.isUser && m.hasSources && hasCitationChips(m.text, m.sources ?? []),
+  );
 
   // A duplicate-question highlight OWNS the scroll while it is active (#302).
   //
@@ -298,23 +302,19 @@ export function ChatView({
                       Before it existed this div carried NO class when idle, so
                       there was nothing for `white-space: pre-wrap` to attach to
                       — which is how that rule was lost in the landing-design
-                      port (2503dd4) and never noticed. */}
-                  <div className={"message-body" + (m.streaming ? " streaming" : "")}>
-                    {m.text}
-                    {m.streaming && <span className="typing-cursor" />}
-                  </div>
-                  {m.hasSources && m.sources && m.sources.length > 0 && (
-                    <div className="sources">
-                      {m.sources.map((src) => (
-                        <div key={src.n} className="source-card">
-                          <span className="source-number">{src.n}</span>
-                          <div className="source-info">
-                            <div className="source-title">{src.title}</div>
-                            <div className="source-url">{src.url}</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                      port (2503dd4) and never noticed.
+
+                      A USER bubble is the reader's own text and gets none of the
+                      answer formatting: no markdown, no citation chips. */}
+                  {m.isUser ? (
+                    <div className="message-body">{m.text}</div>
+                  ) : (
+                    <AnswerBody
+                      text={m.text}
+                      streaming={m.streaming}
+                      sources={m.hasSources ? m.sources || [] : []}
+                      showLegend={i === legendIndex}
+                    />
                   )}
                   {/* Graceful fallback (Phase 4a): when the answer was declined but the
                       backend found nearby docs, offer them instead of a dead-end refusal.
