@@ -149,7 +149,11 @@ function reducer(state: AppState, action: Action): AppState {
     case "RESUME_SESSION":
       // Wholesale replace, not append: resuming a DIFFERENT session must
       // not leave the previous one's bubbles mixed in above it.
-      return { ...state, messages: action.messages };
+      //
+      // ``highlight`` is an INDEX into the list being replaced, so it must go too:
+      // resuming within the 2s flash window otherwise pulses an unrelated bubble of
+      // the new transcript and scrolls the reader into the middle of it (#302 review).
+      return { ...state, messages: action.messages, highlight: -1 };
     case "UPDATE_MESSAGE":
       return {
         ...state,
@@ -173,7 +177,10 @@ function reducer(state: AppState, action: Action): AppState {
         ),
       };
     case "SET_SCREEN":
-      return { ...state, screen: action.screen };
+      // A highlight is a transient "here is your existing answer" tied to the
+      // CURRENT ChatView mount. Leaving or entering the chat screen makes it stale,
+      // and a stale one scrolls the next mount to an unrelated message (#302 review).
+      return { ...state, screen: action.screen, highlight: -1 };
     case "SET_PENDING":
       return { ...state, pending: action.value };
     case "BUMP_SEND_TICK":
@@ -707,6 +714,15 @@ export function useLandingState() {
     [nextMessageId],
   );
 
+  /** Cancel an in-flight duplicate-question flash. The reducer clears ``highlight``
+   *  on SET_SCREEN / RESUME_SESSION, but the flash also arms a 10ms restart timer —
+   *  if that survives, it sets the highlight straight back on a list that no longer
+   *  has that message, and the next ChatView mount scrolls to it (#302 review). */
+  const stopFlash = useCallback(() => {
+    timers.current.highlightRestart?.stop();
+    timers.current.highlightTimeout?.stop();
+  }, []);
+
   const flashExisting = useCallback(
     (index: number) => {
       // The duplicate is a user question at `index`. That is the anchor the user
@@ -796,6 +812,7 @@ export function useLandingState() {
           text: m.content,
           sources: citationsToSources(m.citations),
         }));
+        stopFlash();
         dispatch({ type: "RESUME_SESSION", messages });
         dispatch({ type: "SET_SCREEN", screen: "chat" });
         window.scrollTo({ top: 0 });
@@ -804,10 +821,11 @@ export function useLandingState() {
         handleApiError(err);
       }
     },
-    [nextMessageId, handleApiError],
+    [nextMessageId, handleApiError, stopFlash],
   );
 
   const backToLanding = useCallback(() => {
+    stopFlash();
     dispatch({ type: "SET_SCREEN", screen: "landing" });
     // A stale pending=true from a still-in-flight sendLive would survive
     // across the screen swap and re-appear as a phantom "Searching…"
@@ -820,7 +838,7 @@ export function useLandingState() {
     // linger for the user to delete before asking something new.
     dispatch({ type: "SET_HERO_INPUT", value: "" });
     window.scrollTo({ top: 0 });
-  }, []);
+  }, [stopFlash]);
 
   // Hero "Ask" is self-contained: on a valid question it navigates into chat
   // itself; on empty input it focuses the box and nudges. Defined *after*
@@ -900,6 +918,7 @@ export function useLandingState() {
       // Nav links work from both views. From chat, return to landing first,
       // then scroll once React has remounted the sections.
       if (state.screen === "chat") {
+        stopFlash();
         dispatch({ type: "SET_SCREEN", screen: "landing" });
         window.scrollTo({ top: 0 });
         setTimeout(() => scrollToId(id), 80);
@@ -907,7 +926,7 @@ export function useLandingState() {
         scrollToId(id);
       }
     },
-    [state.screen],
+    [state.screen, stopFlash],
   );
 
   // ---------------------------------------------------------------------------

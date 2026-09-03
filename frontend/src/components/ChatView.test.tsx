@@ -350,6 +350,25 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     expect(scrollTo()).toHaveBeenCalledWith({ top: 0, behavior: "auto" });
   });
 
+  it("releases the hold once the list has genuinely left the bottom", () => {
+    // The hold only has to survive the first frames of a smooth scroll that has not
+    // moved yet. Holding it any longer means a reader who scrolls back to the bottom
+    // during the 2s highlight never re-arms stick-to-bottom — and because re-arming
+    // is edge-triggered on a scroll event, that miss outlives the highlight itself.
+    restoreLayout = installLayout(-500);
+    const { rerender } = renderChat({ highlightedIndex: 0, sendTick: 2 });
+    const list = document.getElementById("chat-list")!;
+    // The smooth scroll has now actually moved away from the bottom.
+    list.scrollTop = 100;
+    list.dispatchEvent(new Event("scroll"));
+    // The reader scrolls back down to the true bottom themselves.
+    list.scrollTop = 4600;
+    list.dispatchEvent(new Event("scroll"));
+    ops.length = 0;
+    rerender(chat({ messages: [...MESSAGES], highlightedIndex: 0, sendTick: 2 }));
+    expect(ops).toEqual(["scrollTop=5000"]); // following again
+  });
+
   it("focuses the composer on mount so the chat is ready to type", () => {
     renderChat();
     expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about Claude/i));

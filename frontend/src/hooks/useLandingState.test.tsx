@@ -838,6 +838,141 @@ describe("useLandingState — landing hands over to the chat (#302)", () => {
     expect(result.current.state.highlight).toBe(2);
   });
 
+  it("a highlight never survives leaving the chat screen", async () => {
+    // A stale highlight is an INDEX into a list the next mount may not share, and
+    // ChatView scrolls to whatever it points at — so re-entering the chat within the
+    // 2s window would open on an unrelated message instead of the newest one.
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?"); // duplicate -> flash
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0); // armed, so the clear is real
+
+    act(() => {
+      result.current.backToLanding();
+    });
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
+  it("leaving BEFORE the 10ms restart fires cancels it rather than racing it", async () => {
+    // The reducer clears `highlight` on SET_SCREEN, but that alone is not enough:
+    // a flash arms a 10ms restart timer, and if it survives the screen change it
+    // sets the highlight straight back on a screen that no longer has that message.
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?"); // flash: restart armed for +10ms
+      result.current.backToLanding(); // ...and we leave immediately, before it fires
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
+  it("a nav link out of the chat cancels an in-flight flash too", async () => {
+    // `goSection` is the OTHER way out of the chat screen, and unlike "Back to
+    // landing" it does not clear the hero box — it is a genuinely separate path.
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.enterChat("What is Claude Code?"); // must be ON the chat screen
+    });
+    await settle();
+    expect(result.current.state.screen).toBe("chat");
+    act(() => {
+      result.current.send("What is Claude Code?"); // flash armed
+    });
+    act(() => {
+      result.current.goSection(
+        { preventDefault() {} } as React.MouseEvent,
+        "who",
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(result.current.state.screen).toBe("landing");
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
+  it("a highlight never survives resuming a different session", async () => {
+    mockGetSession.mockResolvedValue({
+      request_id: "r",
+      session_id: "old-1",
+      messages: [
+        { role: "user", content: "older question", citations: [] },
+        { role: "assistant", content: "older answer", citations: [] },
+      ],
+    } as unknown as GetSessionResponse);
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0);
+
+    // Flash again and resume WITHOUT letting the 10ms restart fire first, so the
+    // in-flight timer would re-apply a stale index to the replaced transcript.
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await act(async () => {
+      await result.current.resumeSession("old-1");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(result.current.state.messages).toHaveLength(2);
+    expect(result.current.state.highlight).toBe(-1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
+  it("RESUME_SESSION itself invalidates the highlight, not just the screen change", async () => {
+    // `resumeSession` also dispatches SET_SCREEN, which clears the highlight — so
+    // the reducer case above would look guarded while doing nothing. Drive the
+    // action on its own: `highlight` is an INDEX into the list being replaced, and
+    // replacing the list is what makes it meaningless.
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await settle();
+    act(() => {
+      result.current.send("What is Claude Code?");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20);
+    });
+    expect(result.current.state.highlight).toBe(0);
+
+    act(() => {
+      result.current.dispatch({
+        type: "RESUME_SESSION",
+        messages: [{ id: 99, role: "user", text: "a different conversation" }],
+      });
+    });
+    expect(result.current.state.highlight).toBe(-1);
+  });
+
   it("unmounting between the reset and the restart leaves no timer to fire", async () => {
     // The 10ms restart timer used to be a bare `setTimeout`, invisible to the
     // unmount sweep. A post-unmount dispatch is a React state-update-on-unmounted

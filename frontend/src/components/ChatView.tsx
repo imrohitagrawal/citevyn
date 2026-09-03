@@ -88,9 +88,16 @@ export function ChatView({
       const atBottom = distanceFromBottom <= 8;
       // Two transitions, deliberately NOT symmetric:
       // Leaving the bottom ALWAYS disarms — a reader who scrolls away mid-flash
-      // takes control immediately.
+      // takes control immediately. It also RELEASES the hold: the hold exists only
+      // to survive the first frames of a smooth scroll that has not moved yet, so
+      // once the list has genuinely left the bottom that window is over. Without
+      // this release the hold outlives its purpose, and because re-arming is
+      // edge-triggered on a scroll event, a reader who scrolls back to the bottom
+      // during the 2s highlight never re-arms — streaming silently stops following
+      // even after the highlight has cleared.
       if (!atBottom) {
         stickRef.current = false;
+        highlightHoldRef.current = false;
         return;
       }
       // Arriving at the bottom normally re-arms — but not while a highlight owns
