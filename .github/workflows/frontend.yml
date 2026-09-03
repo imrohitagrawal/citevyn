@@ -11,7 +11,6 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/worker/sources/**'
-      - 'frontend.yml'
       - '.github/workflows/frontend.yml'
   pull_request:
     paths:
@@ -47,6 +46,11 @@ jobs:
       # test — including the corpus drift guard added in #178 — was decorative.
       - name: Unit tests
         run: npm test
+      # `lint:css` was defined in package.json and run by no workflow — the same
+      # defect as #311 itself, one directory over. It passes on `main`, so this
+      # only stops it from rotting.
+      - name: CSS lint
+        run: npm run lint:css
       - name: Build
         run: npm run build
       # The eager-chunk gzip ceiling used to be prose in a docs/BACKLOG.md row —
@@ -65,3 +69,130 @@ jobs:
           name: frontend-dist
           path: frontend/dist
           retention-days: 7
+
+  # The demo Playwright suite ran in NO CI job (#311). It is the suite that
+  # should have caught #302, and 39 of its runs were failing on `main` from a
+  # single CSS class collision that nobody could see, because nothing ran it.
+  demo-e2e:
+    name: Demo-mode Playwright (no visual snapshots)
+    runs-on: ubuntu-latest
+    # The base config's webServer waits up to 120s and the suite runs serially;
+    # without a cap a hung dev server burns the 360-minute default.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
+          # key alongside this — setup-node gives `node-version` precedence, which
+          # would make the file decorative and re-open #231.
+          node-version-file: frontend/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      # A job that runs ZERO tests passes, and there are two distinct ways for that
+      # to happen, so there are two guards.
+      #
+      # SELECTION: `playwright.demo-ci.config.ts` excludes tests/visual.spec.ts (its
+      # baselines are -darwin only), and a testIgnore regex that over-matches would
+      # empty the whole run silently. Rather than a magic threshold, assert the
+      # EXACT differential: the CI config must select precisely the default config's
+      # suite minus its visual tests. That has no number to rot -- adding a spec file
+      # keeps it true, while losing one makes it false. The `all_visual > 0` line is
+      # the partner: without it, deleting visual.spec.ts outright would satisfy
+      # "zero visual tests in CI" just as well.
+      #
+      # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
+      # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
+      # needs `|| true` -- which then also swallows a CRASHED playwright, and
+      # "no visual specs leaked" passes because the command produced no output at
+      # all. Writing to a file first lets `set -e` catch the producer's failure,
+      # so the `|| true` afterwards can only ever mean "grep found nothing".
+      - name: Guard against a vacuous selection
+        run: |
+          set -euo pipefail
+          npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list > /tmp/ci_list.txt
+          npx playwright test -c playwright.config.ts        --list --reporter=list > /tmp/all_list.txt
+          ci_total=$(grep -oE 'Total: [0-9]+' /tmp/ci_list.txt  | grep -oE '[0-9]+')
+          all_total=$(grep -oE 'Total: [0-9]+' /tmp/all_list.txt | grep -oE '[0-9]+')
+          ci_visual=$(grep -c 'visual regression' /tmp/ci_list.txt || true)
+          all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)
+          echo "ci_total=$ci_total all_total=$all_total ci_visual=$ci_visual all_visual=$all_visual"
+          test "$ci_visual" -eq 0 || { echo "::error::visual specs leaked into the CI run"; exit 1; }
+          test "$all_visual" -gt 0 || { echo "::error::visual.spec.ts vanished — the exclusion above is now vacuous"; exit 1; }
+          test "$ci_total" -eq "$((all_total - all_visual))" || {
+            echo "::error::CI selects $ci_total but the default suite minus its $all_visual visual tests is $((all_total - all_visual)) — the exclusion is dropping something else too";
+            exit 1; }
+          echo "CI_TOTAL=$ci_total" >> "$GITHUB_ENV"
+      # `--reporter` REPLACES the config's reporters rather than adding to them
+      # (playwright/lib/runner/index.js: `result.reporter = [...configOverrides.reporter]`),
+      # so `html` MUST be listed here or the upload step below silently collects
+      # nothing and warns instead of failing. Verified by running both forms.
+      - name: Run demo-mode e2e suite
+        run: npx playwright test -c playwright.demo-ci.config.ts --reporter=list,json,html
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/demo-results.json
+      # The selection guard above is NOT enough, and the gap is the exact failure
+      # mode this whole issue is about. `--list` counts SKIPPED tests, and
+      # Playwright exits 0 when every test skips -- so a `test.skip(true, ...)` at
+      # the top of a few spec files leaves the selection guard reading 124 while
+      # the run executes nothing and reports green. Not hypothetical here: three
+      # tests already self-skip in demo mode (`if (!isLive)`).
+      #
+      # So assert EXECUTION, from the run's own JSON stats, not selection.
+      # `flaky` is checked too: the base config sets `retries: 2` under CI, so a
+      # test that fails twice and passes on the third try would otherwise report
+      # green -- which `playwright.live.config.ts` explicitly refuses ("a
+      # green-by-flake is worse than a red signal") and code_review.md blocks on.
+      - name: Assert the suite actually executed
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          stats = json.load(open("/tmp/demo-results.json"))["stats"]
+          selected = int(os.environ["CI_TOTAL"])
+          print("stats:", stats, "selected:", selected)
+          # Account for EVERY selected test. `expected >= N` was still a magic
+          # number one step down: with N=100 and 124 selected, 21 tests could be
+          # turned into `test.skip` and the job would stay green -- this issue's
+          # thesis verbatim. `--list` cannot see it either, because it COUNTS
+          # skipped tests. A full account has no threshold to rot.
+          if stats["expected"] + stats["skipped"] + stats["unexpected"] + stats["flaky"] != selected:
+              print(f"::error::selected {selected} tests but the run accounts for "
+                    f"{stats['expected']}+{stats['skipped']}+{stats['unexpected']}+{stats['flaky']}")
+              sys.exit(1)
+          # Exactly three tests self-skip in demo mode -- the `if (!isLive)` guards in
+          # behavior.spec.ts:466 and answer-format.spec.ts:61,158. Pinning the number
+          # means a NEW skip has to be justified here rather than quietly reducing
+          # what this job asserts.
+          if stats["skipped"] != 3:
+              print(f"::error::{stats['skipped']} skipped, expected exactly 3 "
+                    f"(the `if (!isLive)` guards) — a new skip silently shrinks this job")
+              sys.exit(1)
+          if stats["unexpected"]:
+              print(f"::error::{stats['unexpected']} unexpected failures")
+              sys.exit(1)
+          if stats["flaky"]:
+              print(f"::error::{stats['flaky']} flaky test(s) — passed only on retry; "
+                    f"a green-by-flake is worse than a red signal")
+              sys.exit(1)
+          PY
+      - name: Upload report + traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-demo
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          # The dead-artifact bug went unnoticed precisely because the default here
+          # is `warn`. Fail instead: a debugging artifact that collects nothing is
+          # worth knowing about on the first run, not the tenth.
+          if-no-files-found: error

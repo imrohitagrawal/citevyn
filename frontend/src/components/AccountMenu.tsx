@@ -70,7 +70,7 @@ export function AccountMenu({
           onClick={() => setMenuOpen((v) => !v)}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
-          className="theme-toggle"
+          className="account-button"
         >
           {user.email}
         </button>
@@ -165,7 +165,7 @@ export function AccountMenu({
         ref={triggerRef}
         type="button"
         onClick={() => setModalOpen(true)}
-        className="theme-toggle"
+        className="account-button"
       >
         Sign in
       </button>

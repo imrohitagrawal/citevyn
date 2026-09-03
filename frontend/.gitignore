@@ -7,6 +7,14 @@ playwright.config.js
 playwright.config.d.ts
 playwright.live.config.js
 playwright.live.config.d.ts
+playwright.demo-ci.config.js
+playwright.demo-ci.config.d.ts
+# Local verification harnesses (pwverify/pwf*/pw.tmp...). A machine-specific
+# config with an absolute path was committed once; nothing in CI would ever
+# have told us it was broken, since tsconfig.node.json does not include it.
+pw*.config.ts
+pw*.config.js
+pw*.config.d.ts
 vite.config.js
 vite.config.d.ts
 vite.liveStub.js
