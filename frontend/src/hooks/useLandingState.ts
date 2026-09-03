@@ -5,12 +5,28 @@
  * and the hook can be unit-tested independently.
  */
 
-import React, { useCallback, useEffect, useRef, useReducer } from "react";
-import { matchKB, matchCitevynMeta, KB, PLACEHOLDERS, type Source } from "../data/knowledgeBase";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useReducer,
+} from "react";
+import {
+  matchKB,
+  matchCitevynMeta,
+  KB,
+  PLACEHOLDERS,
+  type Source,
+} from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
 import { getAuthSnapshot } from "../lib/authStore";
-import { ApiClientError, type StoredMessage, type Suggestion } from "../lib/types";
+import {
+  ApiClientError,
+  type StoredMessage,
+  type Suggestion,
+} from "../lib/types";
 import { useToast } from "./useToast";
 
 // ---------------------------------------------------------------------------
@@ -158,7 +174,7 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         messages: state.messages.map((m) =>
-          m.id === action.id ? { ...m, text: action.text } : m
+          m.id === action.id ? { ...m, text: action.text } : m,
         ),
       };
     case "FINISH_MESSAGE":
@@ -173,7 +189,7 @@ function reducer(state: AppState, action: Action): AppState {
                 refusal: action.refusal,
                 suggestions: action.suggestions,
               }
-            : m
+            : m,
         ),
       };
     case "SET_SCREEN":
@@ -270,7 +286,12 @@ function streamText(
       }
     }
   }, delay);
-  return { stop: () => { stopped = true; clearInterval(id); } };
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(id);
+    },
+  };
 }
 
 /** Smooth-scroll the section with `id` into view below the ~72px fixed header. */
@@ -350,19 +371,12 @@ export function useLandingState() {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    playHeroLoop();
-
-    timers.current.placeholderTimer = interval(
-      () => dispatch({ type: "ADVANCE_PLACEHOLDER" }),
-      3200,
-    );
-
     // Keyboard shortcut: / focuses hero input
     const onKeyDown = (e: KeyboardEvent) => {
       if (
         e.key === "/" &&
         !/(INPUT|TEXTAREA)/.test(
-          (document.activeElement as HTMLElement)?.tagName || ""
+          (document.activeElement as HTMLElement)?.tagName || "",
         )
       ) {
         e.preventDefault();
@@ -401,7 +415,10 @@ export function useLandingState() {
         entry.a,
         (chunk) => dispatch({ type: "SET_HERO", hero: { text: chunk } }),
         () => {
-          dispatch({ type: "SET_HERO", hero: { streaming: false, showSources: true } });
+          dispatch({
+            type: "SET_HERO",
+            hero: { streaming: false, showSources: true },
+          });
           timers.current.heroPause = timeout(play, 4600);
         },
       );
@@ -410,36 +427,64 @@ export function useLandingState() {
     play();
   }, []);
 
+  // The hero animation and the placeholder rotation drive the LANDING screen only,
+  // so they are keyed on `screen` rather than started once on mount. Previously they
+  // ran forever: the hero kept dispatching SET_HERO into an unmounted landing DOM
+  // while the chat screen was up, re-rendering this hook ~40x/second (#312). The
+  // `chatView` memo above stops that reaching `ChatView`; this stops the renders and
+  // the timer wakeups at the source, which matters more on mobile than the CPU
+  // numbers suggest.
+  //
+  // `playHeroLoop` re-arms itself through `timers.current.heroPause`, so BOTH handles
+  // have to be stopped on the way out or the loop resumes 4.6s later from a timer
+  // nobody is holding.
+  useEffect(() => {
+    if (state.screen !== "landing") return;
+
+    playHeroLoop();
+
+    timers.current.placeholderTimer = interval(
+      () => dispatch({ type: "ADVANCE_PLACEHOLDER" }),
+      3200,
+    );
+
+    return () => {
+      timers.current.heroLoop?.stop();
+      timers.current.heroPause?.stop();
+      timers.current.placeholderTimer?.stop();
+      timers.current.heroLoop = null;
+      timers.current.heroPause = null;
+      timers.current.placeholderTimer = null;
+    };
+  }, [state.screen, playHeroLoop]);
+
   // ---------------------------------------------------------------------------
   // Demo
   // ---------------------------------------------------------------------------
 
-  const selectDemo = useCallback(
-    (key: string) => {
-      const entry = KB[key];
-      dispatch({
-        type: "SET_DEMO",
-        demo: {
-          key,
-          text: "",
-          streaming: true,
-          done: false,
-          refusal: !!entry.refusal,
-        },
-      });
+  const selectDemo = useCallback((key: string) => {
+    const entry = KB[key];
+    dispatch({
+      type: "SET_DEMO",
+      demo: {
+        key,
+        text: "",
+        streaming: true,
+        done: false,
+        refusal: !!entry.refusal,
+      },
+    });
 
-      timers.current.demoTimer = streamText(
-        entry.a,
-        (chunk) => dispatch({ type: "SET_DEMO", demo: { text: chunk } }),
-        () =>
-          dispatch({
-            type: "SET_DEMO",
-            demo: { streaming: false, done: true },
-          }),
-      );
-    },
-    [],
-  );
+    timers.current.demoTimer = streamText(
+      entry.a,
+      (chunk) => dispatch({ type: "SET_DEMO", demo: { text: chunk } }),
+      () =>
+        dispatch({
+          type: "SET_DEMO",
+          demo: { streaming: false, done: true },
+        }),
+    );
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Hero ask
@@ -506,7 +551,8 @@ export function useLandingState() {
         // Prefer the friendly copy over the raw "Request failed with status 429."
         // This is CiteVyn's own request throttle (not a provider quota), so it
         // clears on its own — "wait a moment" is the right, non-technical guidance.
-        message = "You're sending requests a little too quickly — please wait a moment and try again.";
+        message =
+          "You're sending requests a little too quickly — please wait a moment and try again.";
         // A signed-in caller is already on the higher tier (ADR-0004 PR 11) —
         // pitching them to sign in again would be wrong, so only an anonymous
         // visitor sees the upsell. Read via getAuthSnapshot() (no subscription)
@@ -624,7 +670,7 @@ export function useLandingState() {
 
       // Duplicate question guard
       const existing = state.messages.findIndex(
-        (m) => m.role === "user" && m.text.trim().toLowerCase() === norm
+        (m) => m.role === "user" && m.text.trim().toLowerCase() === norm,
       );
       if (existing !== -1) {
         // A prior attempt that FAILED is allowed to retry rather than just
@@ -682,7 +728,14 @@ export function useLandingState() {
       // reader who scrolled up keeps their position). An explicit send re-arms it.
       dispatch({
         type: "ADD_MESSAGE",
-        message: { id, role: "bot", text: "", streaming: true, sources: [], ...extra },
+        message: {
+          id,
+          role: "bot",
+          text: "",
+          streaming: true,
+          sources: [],
+          ...extra,
+        },
       });
 
       // Each stream targets its own bubble by stable id, so concurrent
@@ -723,42 +776,39 @@ export function useLandingState() {
     timers.current.highlightTimeout?.stop();
   }, []);
 
-  const flashExisting = useCallback(
-    (index: number) => {
-      // The duplicate is a user question at `index`. That is the anchor the user
-      // wants re-confirmed, so we pulse ONLY the user bubble — the user said "I
-      // asked this before", they want to see THE QUESTION, not relive the answer.
-      // The answer below it is visible automatically once the bubble is in view.
-      //
-      // This is STATE ONLY. The SCROLL belongs to ChatView, which reacts to the
-      // highlight in a layout effect (#302). Doing it here meant reaching into
-      // the DOM by id from outside the component that owns the scroll container:
-      // the lookup raced ChatView's mount when the question came from a landing
-      // entry point (which switches screen and submits in one gesture) and
-      // returned silently, and even when it did land, ChatView's passive
-      // stick-to-bottom effect re-pinned the list to the bottom on the next
-      // render and dragged the reader back off the answer.
-      //
-      // The -1 → index round trip restarts the CSS pulse when the SAME question
-      // is re-asked twice: React skips the re-render if the value never changes,
-      // so the animation would not replay.
-      // Stop the PREVIOUS flash's timers first. Overwriting the slots without
-      // stopping them left the earlier 2s clear running, so a second flash inside
-      // that window was cut short by a timer belonging to the first one.
-      timers.current.highlightRestart?.stop();
-      timers.current.highlightTimeout?.stop();
-      dispatch({ type: "SET_HIGHLIGHT", index: -1 });
-      timers.current.highlightRestart = timeout(
-        () => dispatch({ type: "SET_HIGHLIGHT", index }),
-        10,
-      );
-      timers.current.highlightTimeout = timeout(
-        () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
-        2000,
-      );
-    },
-    [],
-  );
+  const flashExisting = useCallback((index: number) => {
+    // The duplicate is a user question at `index`. That is the anchor the user
+    // wants re-confirmed, so we pulse ONLY the user bubble — the user said "I
+    // asked this before", they want to see THE QUESTION, not relive the answer.
+    // The answer below it is visible automatically once the bubble is in view.
+    //
+    // This is STATE ONLY. The SCROLL belongs to ChatView, which reacts to the
+    // highlight in a layout effect (#302). Doing it here meant reaching into
+    // the DOM by id from outside the component that owns the scroll container:
+    // the lookup raced ChatView's mount when the question came from a landing
+    // entry point (which switches screen and submits in one gesture) and
+    // returned silently, and even when it did land, ChatView's passive
+    // stick-to-bottom effect re-pinned the list to the bottom on the next
+    // render and dragged the reader back off the answer.
+    //
+    // The -1 → index round trip restarts the CSS pulse when the SAME question
+    // is re-asked twice: React skips the re-render if the value never changes,
+    // so the animation would not replay.
+    // Stop the PREVIOUS flash's timers first. Overwriting the slots without
+    // stopping them left the earlier 2s clear running, so a second flash inside
+    // that window was cut short by a timer belonging to the first one.
+    timers.current.highlightRestart?.stop();
+    timers.current.highlightTimeout?.stop();
+    dispatch({ type: "SET_HIGHLIGHT", index: -1 });
+    timers.current.highlightRestart = timeout(
+      () => dispatch({ type: "SET_HIGHLIGHT", index }),
+      10,
+    );
+    timers.current.highlightTimeout = timeout(
+      () => dispatch({ type: "SET_HIGHLIGHT", index: -1 }),
+      2000,
+    );
+  }, []);
 
   const enterChat = useCallback(
     (q: string | null, opts?: { carryHeroText?: boolean }) => {
@@ -777,7 +827,9 @@ export function useLandingState() {
       // clear the hero box), typed there too, and come back. Carrying then would
       // silently destroy the chat draft, so the hero text stays put instead.
       const carried =
-        opts?.carryHeroText === false || state.chatInput ? "" : state.heroInput.trim();
+        opts?.carryHeroText === false || state.chatInput
+          ? ""
+          : state.heroInput.trim();
       if (carried) {
         dispatch({ type: "SET_CHAT_INPUT", value: state.heroInput });
         dispatch({ type: "SET_HERO_INPUT", value: "" });
@@ -962,71 +1014,92 @@ export function useLandingState() {
     select: () => enterChat(KB[k].q),
   }));
 
-  const demoQuestions = ["claude-code", "codex-flag", "gemini-stream", "laptop"].map(
-    (k) => {
-      const active = k === state.demo.key;
-      const entry = KB[k];
-      return {
-        key: k,
-        q: entry.q,
-        tag: entry.tag,
-        active,
-        select: () => selectDemo(k),
-        btnStyle: {
-          textAlign: "left" as const,
-          cursor: "pointer" as const,
-          borderRadius: "12px",
-          padding: "13px 14px",
-          border: `1px solid ${active ? "var(--ink)" : "var(--border)"}`,
-          background: active ? "var(--surface)" : "transparent",
-          color: "var(--ink)",
-          boxShadow: active ? "0 2px 10px -6px rgba(0,0,0,0.3)" : "none",
-        },
-      };
-    },
-  );
+  const demoQuestions = [
+    "claude-code",
+    "codex-flag",
+    "gemini-stream",
+    "laptop",
+  ].map((k) => {
+    const active = k === state.demo.key;
+    const entry = KB[k];
+    return {
+      key: k,
+      q: entry.q,
+      tag: entry.tag,
+      active,
+      select: () => selectDemo(k),
+      btnStyle: {
+        textAlign: "left" as const,
+        cursor: "pointer" as const,
+        borderRadius: "12px",
+        padding: "13px 14px",
+        border: `1px solid ${active ? "var(--ink)" : "var(--border)"}`,
+        background: active ? "var(--surface)" : "transparent",
+        color: "var(--ink)",
+        boxShadow: active ? "0 2px 10px -6px rgba(0,0,0,0.3)" : "none",
+      },
+    };
+  });
 
   const heroChips = ["claude-code-cost", "codex-flag", "laptop"].map((k) => ({
     q: KB[k].q,
     select: () => enterChat(KB[k].q),
   }));
 
-  const chatView = state.messages.map((m, i) => ({
-    isUser: m.role === "user",
-    isBot: m.role === "bot",
-    domId: `cv-msg-${i}`,
-    userStyle: {
-      alignSelf: "flex-end",
-      maxWidth: "78%",
-      background: "var(--ink)",
-      color: "var(--bg)",
-      padding: "11px 16px",
-      borderRadius: "16px 16px 4px 16px",
-      fontSize: "15px",
-      lineHeight: "1.5",
-      transition: "box-shadow .3s ease",
-      ...(state.highlight === i && {
-        animation: "cv-pulse .55s ease-in-out 3",
-        boxShadow: "0 0 0 3px var(--hl)",
-      }),
-    } as React.CSSProperties,
-    text: m.text,
-    streaming: !!m.streaming,
-    refusal: !!m.refusal,
-    errorKind: m.errorKind,
-    hasSources: !m.streaming && (m.sources?.length ?? 0) > 0,
-    sources: m.sources || [],
-    // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
-    // bubble has finished streaming and only when the backend offered any.
-    docSuggestions: !m.streaming ? m.suggestions || [] : [],
-  }));
-
-  const chatSuggestions = ["claude-code", "codex-flag", "gemini-stream", "laptop"].map(
-    (k) => ({
-      q: KB[k].q,
-      select: () => send(KB[k].q),
-    }),
+  // Memoised on purpose, and it is a correctness fix rather than a micro-optimisation.
+  // The landing hero's demo animation keeps dispatching SET_HERO while the CHAT screen
+  // is up, so this hook re-renders ~40x/second with the landing DOM unmounted. Rebuilding
+  // this array each time handed `ChatView` a fresh `messages` IDENTITY, which fired its
+  // passive `[messages]` effect and wrote `scrollTop` -- measured 197 writes in 12 IDLE
+  // seconds with no user interaction. That 42Hz scroll fight is what made #302 reproduce
+  // only in production while the whole suite stayed green, and any future effect keyed on
+  // `messages` inherits the same landmine.
+  //
+  // `state.messages` and `state.highlight` are the only inputs; `highlight` is read for
+  // the pulse styling below, so it must be a dependency or a flash would not re-render.
+  const chatView = useMemo(
+    () =>
+      state.messages.map((m, i) => ({
+        isUser: m.role === "user",
+        isBot: m.role === "bot",
+        domId: `cv-msg-${i}`,
+        userStyle: {
+          alignSelf: "flex-end",
+          maxWidth: "78%",
+          background: "var(--ink)",
+          color: "var(--bg)",
+          padding: "11px 16px",
+          borderRadius: "16px 16px 4px 16px",
+          fontSize: "15px",
+          lineHeight: "1.5",
+          transition: "box-shadow .3s ease",
+          ...(state.highlight === i && {
+            animation: "cv-pulse .55s ease-in-out 3",
+            boxShadow: "0 0 0 3px var(--hl)",
+          }),
+        } as React.CSSProperties,
+        text: m.text,
+        streaming: !!m.streaming,
+        refusal: !!m.refusal,
+        errorKind: m.errorKind,
+        hasSources: !m.streaming && (m.sources?.length ?? 0) > 0,
+        sources: m.sources || [],
+        // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
+        // bubble has finished streaming and only when the backend offered any.
+        docSuggestions: !m.streaming ? m.suggestions || [] : [],
+      })),
+    [state.messages, state.highlight],
   );
+
+  const chatSuggestions = [
+    "claude-code",
+    "codex-flag",
+    "gemini-stream",
+    "laptop",
+  ].map((k) => ({
+    q: KB[k].q,
+    select: () => send(KB[k].q),
+  }));
 
   return {
     state,
