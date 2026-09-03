@@ -463,6 +463,27 @@ below the 64px header.
 - Sources: rendered only after completion, fade-up animation
 - Refusals: amber `⚠ NO SOURCE — REFUSED` badge
 
+**Answer formatting (#303).** Answers render a deliberately tiny markdown
+subset — `**bold**`, `` `inline code` ``, and `- ` bullet lines — parsed by
+`frontend/src/lib/answerFormat.ts`. Everything else (headings, tables, links,
+images, raw HTML) shows as literal text. The parser returns DATA, never an HTML
+string, so React escapes every value; there is no sanitiser to bypass. The
+system prompt constrains the model to the same subset.
+
+**Citation chips (#303).**
+- Each `[n]` in the prose renders as a small chip linking to its source (new
+  tab, `title` = source name). The brackets are real characters, so copied text
+  keeps the plain `[n]` form.
+- A marker with no matching source renders as plain `[n]`, never a dead link.
+- Source cards are collapsed **per document**: one card per URL, its badge
+  listing every marker it backs (`1, 3`).
+- Clicking a chip highlights its card; hovering a card highlights every chip
+  occurrence it backs.
+- A one-time-per-session legend — "Numbers link each sentence to its source
+  below." — sits under the first answer that renders chips. Demo answers carry
+  sources but no markers, so they show no chips and no legend.
+- The reader's own question renders verbatim: no markdown, no chips.
+
 **Composer:**
 - Input + send button (ink, 44×44px, border-radius 10px)
 - Disclaimer: `JetBrains Mono` 11px, "DEMO — canned responses"
@@ -610,6 +631,7 @@ what is fundamentally a two-view marketing page.
 |------|--------|--------|
 | 2026-07-05 | Initial implementation from design handoff v2 | First production implementation of the CiteVyn landing page + demo chat, recreating the `CiteVyn Landing v2.dc.html` prototype in React with the project's established patterns |
 | 2026-09-03 | Duplicate-question scroll moved into `ChatView` and made to hold the list; composer focused on chat entry; unsent hero text carried into the composer; reduced-motion honoured | #302 — re-asking an answered question from a landing section left the reader at the newest message. The one-shot scroll was overwritten by the stick-to-bottom re-pin within ~24ms |
+| 2026-09-03 | Markdown subset (bold / inline code / `- ` bullets) rendered in answers; `[n]` markers become chips linking to their source; source cards collapsed per document; one-time citation legend | #303 — the live model emitted markdown that showed as literal characters, `[n]` markers were inert and unexplained, and one page cited five times produced five identical cards |
 
 ### Future entries
 

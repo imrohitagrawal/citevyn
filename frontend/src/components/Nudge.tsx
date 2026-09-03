@@ -28,7 +28,7 @@
  *
  * The FILE is named ``Nudge`` rather than ``PasswordNudge`` on purpose: the
  * lazy chunk's file name is one of the very few strings this feature adds
- * to the eager bundle, which is held to a 64.0 kB gzip ceiling
+ * to the eager bundle, which is held to a 66.0 kB gzip ceiling
  * (``docs/BACKLOG.md`` #270) -- measured, not guessed: against the 63.5 kB
  * line in force at the time, the longer name put the eager chunk 8 bytes
  * over and this one 4 bytes under.

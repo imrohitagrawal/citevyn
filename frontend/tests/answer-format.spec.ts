@@ -121,3 +121,104 @@ test.describe("answer formatting", () => {
     expect(lineTops).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #303 — the markdown subset, citation chips and collapsed cards, END TO END.
+//
+// Unit tests cover the parser and the component in jsdom. This drives the real
+// browser because three of the claims are only true in a real layout: that the
+// unsupported markup is VISIBLE text rather than a swallowed element, that a
+// chip is a working link, and that the whole thing survives the streaming
+// reveal (the parser re-runs on every cumulative chunk).
+// ---------------------------------------------------------------------------
+const RICH_ANSWER = [
+  "Claude Code applies edits through **permissioned tools** [1].",
+  "Install it with `npm i -g @anthropic-ai/claude-code` [2].",
+  "It is useful for:",
+  "- multi-file refactors [1]",
+  "- test runs and PR prep [3]",
+  "Unsupported markup like <script>alert(1)</script> and # Heading shows literally.",
+].join("\n");
+
+const RICH_CITATIONS = [
+  { citation_id: "c1", source_name: "About CiteVyn", title: "About CiteVyn", url: "/about", chunk_id: "a", marker: 1 },
+  { citation_id: "c2", source_name: "Claude Code Docs", title: "Install", url: "https://docs.claude.com/install", chunk_id: "b", marker: 2 },
+  { citation_id: "c3", source_name: "About CiteVyn", title: "About CiteVyn", url: "/about", chunk_id: "c", marker: 3 },
+];
+
+test.describe("answer rendering: markdown subset + citation chips (#303)", () => {
+  test("renders the subset, chips the markers, collapses cards per document (live only)", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    const isLive = await page.evaluate(() =>
+      /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (!isLive) {
+      test.skip(true, "Needs the live path to inject an answer with [n] markers.");
+      return;
+    }
+
+    await page.route("**/v1/sessions/*/messages", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          request_id: "req_303",
+          message_id: "msg_303",
+          answer: RICH_ANSWER,
+          citations: RICH_CITATIONS,
+          domain: "claude_code",
+          intent: "how_to",
+          confidence: "high",
+          cache_hit: false,
+          retrieval_strategy: "hybrid_reranked",
+          unsupported: false,
+          no_answer: false,
+          source_version_hash: "stub",
+          answer_policy_version: "stub",
+        }),
+      });
+    });
+
+    await page.locator(".chat-input").fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+    const bot = page.locator(".message.bot-msg").last();
+    await expect(bot.locator(".source-card").first()).toBeVisible({ timeout: 20000 });
+
+    // The subset renders as real elements.
+    await expect(bot.locator("strong")).toHaveText("permissioned tools");
+    await expect(bot.locator(".answer-code")).toHaveText("npm i -g @anthropic-ai/claude-code");
+    await expect(bot.locator(".answer-list li")).toHaveCount(2);
+
+    // Unsupported markup is VISIBLE text, and produced no element.
+    await expect(bot).toContainText("<script>alert(1)</script>");
+    await expect(bot).toContainText("# Heading");
+    expect(await bot.locator("script").count()).toBe(0);
+
+    // Three citations, two documents -> two cards; the repeated one lists both markers.
+    await expect(bot.locator(".source-card")).toHaveCount(2);
+    await expect(bot.locator(".source-card").first().locator(".source-number")).toHaveText("1, 3");
+
+    // Chips are real links, and the plain [n] form survives for copy/paste.
+    const chips = bot.locator(".citation-chip");
+    await expect(chips).toHaveCount(4); // [1] [2] [1] [3]
+    await expect(chips.first()).toHaveAttribute("href", "/about");
+    await expect(chips.first()).toHaveAttribute("target", "_blank");
+    await expect(chips.first()).toHaveText("[1]");
+
+    // Hovering a card lights up every chip OCCURRENCE it backs. "About CiteVyn"
+    // backs markers 1 and 3, and [1] is written twice, so that is three chips —
+    // not two. The distinction matters: a reader scanning for "which sentences
+    // does this source support?" needs every occurrence lit, not one per marker.
+    await bot.locator(".source-card").first().hover();
+    await expect(bot.locator(".citation-chip.is-active")).toHaveCount(3);
+    // ...and hovering the OTHER card lights exactly its one chip, so the first
+    // assertion is not just "all chips are always active".
+    await bot.locator(".source-card").nth(1).hover();
+    await expect(bot.locator(".citation-chip.is-active")).toHaveCount(1);
+
+    // The legend appears once, under the first cited answer.
+    await expect(page.locator(".citation-legend")).toHaveCount(1);
+  });
+});

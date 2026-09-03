@@ -1991,6 +1991,82 @@ footer {
   white-space: pre-wrap;
 }
 
+/* ---------------------------------------------------------------------------
+   Answer formatting + citation chips (#303)
+   --------------------------------------------------------------------------- */
+
+/* Bullet lists are real ``<ul>``s, so they must opt OUT of the paragraph's
+   ``pre-wrap`` — otherwise the newline that ended the previous line renders as a
+   blank line above the list, and each item wraps on its own source newlines. */
+.message.bot .answer-list {
+  white-space: normal;
+  margin: 6px 0 6px 0;
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.message.bot .answer-list li {
+  margin: 2px 0;
+}
+
+/* A collapsed card backs several markers ("1, 3"), so the badge has to grow
+   sideways instead of wrapping inside the fixed 22px square it was built as. */
+.message.bot .source-card .source-number {
+  width: auto;
+  min-width: 22px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.message.bot .answer-code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.88em;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: normal;
+}
+
+/* The chip is an anchor, so it must not inherit the link underline. */
+a.citation-chip {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* Brackets are real characters (so copied text keeps the plain ``[n]`` form),
+   dimmed so the number still reads as the chip's content. */
+.citation-chip .chip-bracket {
+  opacity: 0.45;
+}
+
+.citation-chip.is-active,
+a.citation-chip:hover,
+a.citation-chip:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.message.bot .source-card.is-active {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--hl);
+}
+
+.citation-legend {
+  grid-column: 1 / -1;
+  margin: 2px 0 0 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message.bot .source-card,
+  .citation-chip {
+    transition: none;
+  }
+}
+
 .message.bot .streaming {
   display: inline;
 }

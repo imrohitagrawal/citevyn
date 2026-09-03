@@ -498,6 +498,30 @@ step_by_step
 }
 ```
 
+#### `answer` formatting contract (#303)
+
+`answer` is text, not HTML, and the model is constrained by the system prompt
+(`backend/app/llm/prompts.py`) to a deliberately tiny markdown subset:
+
+| Allowed | Meaning |
+|---|---|
+| `**bold**` | emphasis |
+| `` `code` `` | inline code, flags, file names |
+| lines starting with `- ` | bullet list items |
+| `[n]` | citation marker; `n` matches a `citations[].marker` |
+
+Everything else — headings, tables, links, images, block quotes, code fences,
+raw HTML — is **not** interpreted. Clients should render this subset only and
+show anything else verbatim; the reference client
+(`frontend/src/lib/answerFormat.ts`) parses to data and never builds an HTML
+string, so unrecognised input reaches the DOM as text rather than markup.
+
+Markers may be **gapped** (an answer can cite `[1]` and `[3]`), and a marker with
+no matching `citations[]` entry may appear if a citation was dropped in
+validation — render such a marker as the plain `[n]` text, never as a link.
+Several citations may share one `url`; a client may collapse them into one source
+card listing every marker it backs.
+
 **`citations[].marker`** is the 1-based evidence index the model actually wrote
 in `answer` — **not** the position of the citation in the array. The two differ
 whenever the model skips a bullet: an answer citing `[1]` and `[3]` returns two

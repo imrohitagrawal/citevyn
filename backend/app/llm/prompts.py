@@ -11,6 +11,16 @@ Citation contract:
   listed the evidence.
 * When the user message contains no evidence bullets, the model MUST
   refuse with the no-answer paragraph below and emit no markers.
+
+Formatting contract (#303):
+
+* The answer may use ONLY ``**bold**``, ```inline code``` and ``- `` bullet
+  lines. The client parses exactly that subset (``frontend/src/lib/answerFormat.ts``)
+  and renders anything else as literal text, so unconstrained markdown reaches the
+  reader as visible punctuation.
+* The trailing "respond with exactly ... and nothing else" clause must stay LAST
+  and byte-exact: ``_is_no_answer_refusal`` compares against it and
+  ``knowledgeBase.ts``'s ``GENERIC_REFUSAL`` mirrors it.
 """
 
 from __future__ import annotations
@@ -25,7 +35,13 @@ SYSTEM_PROMPT = (
     "Answer ONLY using the evidence bullets in the user message. Every factual "
     "claim must be followed by a bracketed citation marker like [1] that "
     "references the matching evidence bullet. Do not invent facts, links, or "
-    "commands that are not present in the evidence. If the user message "
+    "commands that are not present in the evidence.\n"
+    "Formatting: write plain prose. The ONLY markup you may use is **bold** for "
+    "emphasis, `backticks` for inline code, flags or file names, and lines "
+    'beginning with "- " for bullet points. Do not use headings, tables, links, '
+    "images, block quotes or code fences — the reader's client renders that subset "
+    "only, and anything else appears verbatim as punctuation.\n"
+    "If the user message "
     "contains no evidence bullets, respond with exactly: "
     f'"{NO_ANSWER_REFUSAL}" and nothing else.'
 )

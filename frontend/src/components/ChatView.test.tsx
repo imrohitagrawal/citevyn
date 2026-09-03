@@ -369,6 +369,63 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     expect(ops).toEqual(["scrollTop=5000"]); // following again
   });
 
+  it("renders the reader's OWN text verbatim — no markdown, no chips", () => {
+    // A question is the user's words, not the model's output. Formatting it would
+    // rewrite what they typed, and a `[1]` in their question is not a citation.
+    const { container } = renderChat({
+      messages: [msg(0, true, "Why does **npm** print `[1]` here?")],
+    });
+    const bubble = container.querySelector(".message.user");
+    expect(bubble?.textContent).toBe("Why does **npm** print `[1]` here?");
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.querySelector(".answer-code")).toBeNull();
+    expect(container.querySelector(".citation-chip")).toBeNull();
+  });
+
+  it("shows the citation legend under the FIRST cited answer only", () => {
+    const cited = (i: number, text: string): Msg => ({
+      isUser: false,
+      domId: `cv-msg-${i}`,
+      userStyle: {},
+      text,
+      hasSources: true,
+      sources: [{ n: "1", title: "About CiteVyn", url: "/about" }],
+    });
+    const { container } = renderChat({
+      messages: [
+        msg(0, true, "q1"),
+        cited(1, "First cited answer [1]."),
+        msg(2, true, "q2"),
+        cited(3, "Second cited answer [1]."),
+      ],
+    });
+    const legends = container.querySelectorAll(".citation-legend");
+    expect(legends).toHaveLength(1);
+    // ...and it is under the FIRST one, not just "somewhere".
+    expect(container.querySelectorAll(".message.bot")[0].contains(legends[0])).toBe(true);
+  });
+
+  it("shows no legend when answers carry sources but no [n] markers (demo mode)", () => {
+    // Demo answers have sources and zero markers, so no chips are rendered and
+    // there is nothing for a legend to explain.
+    const { container } = renderChat({
+      messages: [
+        msg(0, true, "q"),
+        {
+          isUser: false,
+          domId: "cv-msg-1",
+          userStyle: {},
+          text: "A demo answer with no markers.",
+          hasSources: true,
+          sources: [{ n: "1", title: "About CiteVyn", url: "/about" }],
+        },
+      ],
+    });
+    expect(container.querySelector(".citation-legend")).toBeNull();
+    // Partner: the cards ARE there, so this is not passing because nothing rendered.
+    expect(container.querySelectorAll(".source-card").length).toBeGreaterThan(0);
+  });
+
   it("focuses the composer on mount so the chat is ready to type", () => {
     renderChat();
     expect(document.activeElement).toBe(screen.getByPlaceholderText(/Ask about Claude/i));
