@@ -771,14 +771,18 @@ async def _apply_per_visitor_rate_limit(
     avoids the equivalent cycle at the Python import level:
     ``auth_sessions.py`` already imports from this module.
     """
-    from app.core.auth_sessions import try_resolve_principal
+    from app.core.auth_sessions import is_registered_principal, try_resolve_principal
 
     # A positive allowlist, not a denylist on "anon_" -- an unrecognized future
     # principal shape (a new prefix, a malformed id) must fall back to the
-    # LOWER anonymous tier, not silently earn the higher one. Mirrors the same
-    # fail-closed reasoning in ``auth_sessions.py``'s claim-on-login check.
+    # LOWER anonymous tier, not silently earn the higher one.
+    #
+    # Shares ``is_registered_principal`` with every other registered-vs-anonymous
+    # decision (#288). This copy was the last bare ``startswith("usr_")`` literal,
+    # and it is the one that actually grants something -- the higher rate tier --
+    # so it is exactly where a drift between copies would be worth the most.
     registered_id = await try_resolve_principal(request, db, settings)
-    if registered_id is not None and registered_id.startswith("usr_"):
+    if registered_id is not None and is_registered_principal(registered_id):
         await enforce_rate_limit(
             user_id=registered_id, role="demo_user_registered", settings=settings
         )
