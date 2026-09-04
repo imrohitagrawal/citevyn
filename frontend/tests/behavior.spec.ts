@@ -124,8 +124,24 @@ test.describe("Question ticker", () => {
 
   test("list is duplicated (16 pills) with fade masks; a pill enters chat", async ({ page }) => {
     await expect(page.locator(".ticker-chip")).toHaveCount(16);
-    // Marquee is always moving, so the pill never reaches "stable" — force the click.
-    await page.locator(".ticker-chip").first().click({ force: true });
+    // Stop the marquee before clicking, rather than force-clicking a moving target.
+    //
+    // `click({ force: true })` skips the actionability WAIT but still dispatches at
+    // the coordinates resolved a moment earlier — so when the pill slides between
+    // resolve and dispatch, the click lands on whatever is now under that point and
+    // the chat never opens. That is a real flake, seen in CI (#326): this spec
+    // failed on attempt 1 and passed on retry, which the `flaky > 0` guard turns
+    // into a red job by design.
+    //
+    // Freezing the animation makes the click deterministic while keeping the parts
+    // worth testing -- real hit-testing and the actual handler -- rather than
+    // bypassing them with a synthetic `el.click()`.
+    await page.addStyleTag({
+      content: ".ticker-track, .ticker-track * { animation: none !important; transition: none !important; }",
+    });
+    const pill = page.locator(".ticker-chip").first();
+    await expect(pill).toBeVisible();
+    await pill.click();
     await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
   });
 });
