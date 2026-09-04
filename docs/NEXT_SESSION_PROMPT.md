@@ -2,125 +2,114 @@
 
 ---
 
-Fresh-context continuation for CiteVyn. **The owner's 2026-09-03 production-QA round is code-
-complete and merged. Nothing from it is deployed.** What remains is one owner-gated deploy and
-one measurement item.
+Fresh-context continuation for CiteVyn. Repo: `/Users/rohitagrawal/Projects/citevyn`.
 
-Repo: `/Users/rohitagrawal/Projects/citevyn`. Before planning anything, read `AGENTS.md`,
-`code_review.md`, `docs/BACKLOG.md`, the session memory notes, and run
-`gh issue list --state open`. **Re-verify every fact below against the repo before acting on it —
-this block is a snapshot, not a source of truth.**
+Before planning anything, read `AGENTS.md`, `code_review.md`, `docs/BACKLOG.md`, the session
+memory notes, and run `gh issue list --state open`. **Re-verify every fact below against the
+repo before acting on it — this block is a snapshot, not a source of truth.**
 
-## Where things stand — verified 2026-09-03
+## Where things stand — verified 2026-09-04
 
-`main` is at **`22ea68f`**. All four QA items are MERGED with post-merge CI green:
+`main` is at **`a51e209`**, and **production is release v13**, deployed and verified. Unlike
+previous handovers, merged work IS live.
 
-| Issue | PR | On `main` |
+Closed this round, each merged with post-merge CI green and deployed:
+
+| Issue | PR | What it was |
 |---|---|---|
-| #300 who-are-you routing | #305 | `4b1c5e0` |
-| #301 magic-link cooldown | #309 | `8127c43` |
-| #302 landing re-ask scroll | #314 | `f928928` |
-| #303 markdown subset + citation chips | #315 | `b805e80` |
-| #306 CSP font host | #317 | `22ea68f` |
+| #311 | #324 | Demo Playwright suite ran in no CI job; 39 specs failing on a CSS class collision |
+| #322 | #327 | CSP guards were last-wins while browsers are first-wins |
+| #312 | #328 | Landing hero re-rendered the app ~40x/s behind the chat screen |
+| #290 | #330 | HistoryDrawer never took focus, and its focus test guarded nothing |
+| #289 | #333 | OAuth env vars documented nowhere an operator looks |
+| #288 | #334 | A real OAuth account was reported anonymous and locked out of its own menu |
+| #316 | #336, #338 | Geist was never delivered; four other families loaded but rendered nothing |
+| #326 | #339 | Frontend CI could not block a merge |
 
-**Production (https://citevyn.stackclimb.com, Fly app `citevyn`) still runs release v9 =
-`f3e64ca`. None of the above is live.**
+## The one thing that changed about HOW you work here
 
-## The one gate
+**`main` now requires seven status checks, not five.** `type-check + unit tests + build`
+(which carries the 341 unit tests AND the bundle budget gate) and `Demo-mode Playwright (no
+visual snapshots)` (124 tests) are now REQUIRED. `frontend.yml` deliberately has NO `paths:`
+filter — a path-filtered workflow that does not trigger reports nothing, so a required context
+would hang forever on a docs-only PR. Do not add path filters back to that workflow.
 
-**Ask the owner for the deploy "go" before anything else.** It is the only thing standing between
-the merged work and production, and it is explicitly owner-only. If authorised:
+Consequence: a flaky frontend test now blocks merges. The job asserts `flaky == 0` on purpose.
+Two flakes were fixed this round (`behavior.spec.ts:553` scroll, `behavior.spec.ts:125`
+ticker); if a third appears, fix the flake rather than relaxing the guard.
 
-- `docs/DEPLOY_FLY.md` §4.1, with **BOTH** build args. A deploy without `VITE_API_DEMO_KEY` broke
-  production for an hour (#296).
-- Wake the scaled-to-zero machine with `curl /health` FIRST, or the key read comes back empty.
-- Afterwards verify the served bundle has **0** hits for `local-demo-key`.
-- **Flush `answer_cache`.** #303 changed the system prompt, so cached answers predate the
-  markdown-subset instruction and would replay unformatted for the 24 h TTL (the same deploy note
-  #174 carries).
-- Then check the four QA fixes on the live site, not just `/health`.
+## Open follow-ups, roughly by value
 
-## Then: #308 — coverage tooling (small, after the deploy)
+- **#337** — the shared `quality-gate` workflow fails a required check when `npm audit` hits a
+  registry blip. Blocked two PRs in one day. The fix is in `imrohitagrawal/.github`, a
+  different repo, so this is best done in a session focused there.
+- **#323** — the bundle gate passes silently if the budget key is mistyped (`gz > undefined`
+  is `false`), and measures one chunk rather than the eager graph.
+- **#325** — the 22 visual snapshots are darwin-only and run in no CI job; `how-it-works` has
+  a ±1px unstable height.
+- **#332** — 29 of 84 `Settings` fields appear in no env example, including
+  `cors_allowed_origins` and `rate_limit_key_salt`. Needs triage + an allowlist BEFORE
+  widening the #289 guard.
+- **#331** — both drawers set `aria-modal="true"` but do not trap Tab; three presses reach the
+  page behind the backdrop. `AuthModal` already has a guarded trap worth extracting.
+- **#329** — `demoTimer` is not gated on `screen` (same class as #312, bounded and harmless).
+- **#335** — the password nudge reaches email-less OAuth accounts, where a password can never
+  log anyone in.
 
-Deliberately **measurement, not a gate**: dev dependency + `make coverage` + report-not-gate in
-CI, with the blocking condition stated up front (no-decrease-vs-baseline after three stable `main`
-runs, never an absolute floor). See the issue for why a percentage would not have caught the
-defect that motivated it.
+Also open and unchanged: #321, #296, #294, #286, #273, #270, #265, #264, and the V1/V2 items.
 
-## Open follow-ups this round created — read before starting anything else
+## Deploy
 
-- **#311 — FIXED (PR #324).** The demo Playwright suite ran in NO CI job, and 70 of its runs
-  failed on `main` from one CSS class collision (`AccountMenu` reused `className="theme-toggle"`,
-  colliding with `Header`'s real toggle). Renamed to `.account-button`, and the suite now runs in
-  a `demo-e2e` CI job. Note the job is still ADVISORY — the `frontend` workflow is not in `main`'s
-  required status checks, which is owner-only to change.
-- **#312** — the landing hero animation re-renders the whole app ~40×/second while the CHAT
-  screen is up; it is what turned #302 into a production-only bug. Measured honestly: **not** a
-  CPU problem (+33% renders, identical `LayoutCount`, CPU within noise). A `useMemo` on `chatView`
-  takes idle chat-screen `scrollTop` writes from 221/12 s to **0** for +17 B.
-- **#313** — `isSafeHref` in `ChatView` accepts protocol-relative URLs. **The fix written in that
-  issue is insufficient**: the WHATWG URL parser strips ASCII tab/LF/CR before parsing, so
-  `/\t/evil.com` IS `//evil.com` and no `startsWith` patch catches it. `frontend/src/lib/safeHref.ts`
-  (added in #303) is the correct parser-based implementation — #313 is now mostly "delete the
-  remaining copy and point it at that", so re-read the issue before building what it says.
-- **#316** — the page loads a render-blocking Fontshare stylesheet and a preconnect for Satoshi,
-  **a typeface no `font-family` in the codebase uses** (both grep hits are comments; the tokens
-  are Geist). Needs an owner decision: wire Satoshi up, or delete the link and take BOTH fontshare
-  hosts back out of the CSP.
+`docs/DEPLOY_FLY.md` §4.1, with **BOTH** build args. Two things that runbook does not say
+loudly enough, both learned the hard way:
 
-## Two decisions awaiting the owner
+- **Fly's REMOTE builder stalled three times** on the build-context upload (548 KB at ~0.5
+  KB/s, then `deadline_exceeded`). `flyctl deploy --local-only` with Docker Desktop worked
+  first try. A failed build creates NO release — check `flyctl releases` rather than assuming
+  a partial deploy.
+- Wake the scaled-to-zero machine with `curl /health` FIRST or the demo-key read returns
+  empty, and an empty `VITE_API_DEMO_KEY` ships the public default and 401s every browser call
+  (#296). Guard for it; the deploy script did.
 
-1. **The eager-bundle ceiling moved twice this round**, 63.5 → 64.0 kB (#302) → 66.0 kB (#303).
-   It is now 65,329 B with 671 B headroom. **No mechanical gate enforces this number in either
-   direction** — it is prose in the `docs/BACKLOG.md` #270 row. Worth deciding whether it should
-   become a real CI check, since it has now been raised twice in two PRs by the same person who
-   records it.
-   **Measure it with `frontend/.env.local` present** (`VITE_API_LIVE=true`, which the Dockerfile
-   sets): a `git archive` checkout lacks it and builds ~860 B larger, which is not what ships.
-   That discrepancy already caused one reviewer to report a wrong number.
-2. **How "rather than act as a second entry point" was read in #302** — as satisfied by composer
-   focus + carry-across, with every landing entry point still submitting. The strict reading would
-   make #302's own bug unreachable. Easy to change if the owner meant the strict one.
+Afterwards verify the served bundle has **0** hits for `local-demo-key`, and check the actual
+UI, not just `/health`.
 
-## How to work — the discipline that held; do not relax it
+## How to work — the discipline that held
 
-- **Verify → implement → document. No claim without a check.** Every number you report is one you
-  measured this session. This round corrected several claims that came from issue text rather than
-  measurement — including two of the issues' own descriptions of their symptoms.
+- **Verify → implement → document. No claim without a check.** Every number you report is one
+  you measured this session.
 - **Order per PR:** baselines → RED test → implementation → **mutation-test every guard**
-  (sequentially in the one tree, byte-copy restore, assert the mutation applied) → docs
-  (`API_SPEC` for any contract change, `UI_DESIGN.md` for any frontend change **including its
-  changelog row**, README/`.env.example` for any new setting, `SECURITY_MODEL.md` for any new
-  rate-limit bucket, BACKLOG row) → commit → **live browser walkthrough BEFORE review** → review →
-  fixes → **a skeptic round on the fix diff** → release-readiness gate → PR → CI → plain
-  squash-merge → post-merge CI green → delete the branch → next item.
-- **Review sizing:** write the dimension list BEFORE launching, and mark each run or
-  skipped-because-N/A: correctness · silent-failure · security · performance · architecture/taste ·
-  test-adequacy · coverage · data contract · docs-contract · completeness. An unlisted dimension is
-  *silently* skipped.
+  (sequentially, byte-copy restore, assert the mutation applied) → docs (`API_SPEC` for a
+  contract change, `UI_DESIGN.md` + its changelog row for any frontend change, BACKLOG row) →
+  commit → **live browser walkthrough BEFORE review** → review → fixes → **a skeptic round on
+  the fix diff** → PR → CI → plain squash-merge → post-merge CI green → delete branch → next.
+- **Review sizing:** write the dimension list BEFORE launching and mark each run or
+  skipped-because-N/A. An unlisted dimension is *silently* skipped.
 
 ### Traps this round paid for — do not re-learn them
 
-- **A "read-only" reviewer ran `git checkout` in the shared tree** and silently reverted the
-  branch. A full live walkthrough then measured `main` and appeared to show the fix completely
-  broken. **Assert `git rev-parse HEAD` before AND after every measurement**, tell reviewers
-  explicitly not to run checkout/stash/restore, and prefer a separate `git worktree` for
-  measurement runs.
-- **A test can pass for the wrong reason in ways coverage never shows.** This round: a pulse-restart
-  test where an *ended* animation also read as "restarted"; a `[sendTick]` effect that could be
-  deleted whole with 215 tests green, because the test never scrolled away first; a `getTimerCount()
-  > 0` partner that held even when the code armed no timers; and a CSP scheme check that every
-  test "covered" via the origin comparison instead. **Mutate, then read why it died.**
-- **`waitStreamDone`-style waits return IMMEDIATELY** when no `.typing-cursor` exists yet, so a
-  question sent 60 ms later has not landed. Wait on the BOT bubble count
-  (`.message.bot-msg:not(.pending-msg)`), or your conversation is malformed and every measurement
-  from it is meaningless. This cost a whole misdiagnosis round.
-- **`.map(parseInline)` passes the index as the second argument.** Be explicit in `.map` callbacks.
-- Port 3000 is often occupied by a dev server that is not yours. Use your own port; never kill it.
+- **The guard you write is the guard to mutate.** Three separate guards written this round were
+  themselves the bug they guarded against: a CI step that asserted tests were SELECTED (`--list`
+  counts skipped tests, and Playwright exits 0 when all skip); a CSP check that pinned the
+  CONSTANT while the emitted header went unchecked; and an env-var docs check that matched the
+  name ANYWHERE in the file, so deleting the assignment left it green because the name appeared
+  in a comment above.
+- **Assert what the consumer receives**, not the value you happen to be looking at.
+- **A hidden Chrome tab throttles timers ~32x**, which makes a streaming answer look stalled
+  mid-sentence and reads exactly like a production bug. Check `document.visibilityState` before
+  concluding anything about streaming.
+- **`playwright.config.ts`'s `reuseExistingServer: false` is load-bearing.** Set it to `true`
+  and Playwright adopts a hand-started dev server carrying `.env.local`'s `VITE_API_LIVE=true`,
+  and 20 chat specs fail against a backend that is not running. The config's own comment warns
+  about this; I did it anyway and lost a round.
+- **`setsid` does not exist on macOS**, and a Monitor whose filter matches only success patterns
+  will sit silent through a failure for an hour. Verify a background process actually started.
+- **A reviewer subagent can move HEAD.** Assert `git rev-parse HEAD` before and after any
+  measurement, and tell reviewers not to run checkout/stash/restore.
 
 ## Definition of done
 
 Merged **and** post-merge CI green on `main`, with a live walkthrough recorded in the PR body.
-Finish with **Done / Verified myself / Cleanup / Pending / Next action**, separating what *you* ran
-from what a subagent reported, and stating explicitly what is merged versus what is running in
-production.
+Finish with **Done / Verified myself / Cleanup / Pending / Next action**, separating what *you*
+ran from what a subagent reported, and stating explicitly what is merged versus what is running
+in production.
