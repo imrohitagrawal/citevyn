@@ -1,22 +1,27 @@
 name: frontend
 
-# The corpus paths are here on purpose: ``knowledgeBase.corpus.test.ts`` asserts
-# the offline KB does not tell a user to paste a command the shipped corpus no
-# longer contains (#178). That guard is only useful if editing the corpus RUNS
-# it, so a change under ``backend/app/worker/sources/`` triggers this workflow
-# even though it touches no frontend file.
+# NO `paths:` FILTER, DELIBERATELY (#326).
+#
+# These two jobs are REQUIRED status checks on `main`. A path-filtered workflow
+# that does not trigger reports NOTHING -- so a required context sits forever at
+# "Expected — waiting for status to be reported" and the PR can never merge. A
+# docs-only change would be permanently blocked.
+#
+# The usual dodges are a skip-shim workflow duplicating the job names on the
+# inverse filter (which double-reports when a PR touches both sides), or
+# job-level `if:` guards relying on skipped-counts-as-success. Both work; both
+# are subtle enough to get wrong in a way that blocks every PR. This repo is
+# PUBLIC, so Actions minutes are free, and the whole workflow is ~6 minutes.
+# Always running it is the version nobody can get wrong.
+#
+# This also subsumes what the old filter existed for: ``knowledgeBase.corpus
+# .test.ts`` asserts the offline KB does not tell a user to paste a command the
+# shipped corpus no longer contains (#178), and that guard is only useful if
+# editing ``backend/app/worker/sources/`` actually runs it.
 on:
   push:
     branches: [main]
-    paths:
-      - 'frontend/**'
-      - 'backend/app/worker/sources/**'
-      - '.github/workflows/frontend.yml'
   pull_request:
-    paths:
-      - 'frontend/**'
-      - 'backend/app/worker/sources/**'
-      - '.github/workflows/frontend.yml'
 
 permissions:
   contents: read
