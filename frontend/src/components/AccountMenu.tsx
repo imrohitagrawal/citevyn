@@ -29,6 +29,24 @@ interface AccountMenuProps {
   onResumeSession?: (sessionId: string) => void;
 }
 
+/** Label for the account trigger, which must never be empty.
+ *
+ * `user.email` is null for an account created by OAuth login when the provider
+ * reported the address as unverified -- PR 12 deliberately stores no email in
+ * that case. Rendering `{user.email}` directly gave a button with no text and
+ * no accessible name (#288), on the only control that reaches History and
+ * Connected accounts.
+ *
+ * Falls back to the linked provider, which PR 13 put on the wire, and then to a
+ * generic word so the last case cannot be empty either.
+ */
+function accountLabel(user: { email: string | null; providers: string[] }): string {
+  if (user.email) return user.email;
+  const provider = user.providers[0];
+  if (provider) return `${provider[0].toUpperCase()}${provider.slice(1)} account`;
+  return "Account";
+}
+
 export function AccountMenu({
   hasChatHistory = false,
   onAuthenticated,
@@ -72,7 +90,7 @@ export function AccountMenu({
           aria-expanded={menuOpen}
           className="account-button"
         >
-          {user.email}
+          {accountLabel(user)}
         </button>
         {menuOpen && (
           <div

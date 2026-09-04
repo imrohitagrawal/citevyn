@@ -627,6 +627,63 @@ def test_unverified_email_is_not_persisted_on_the_new_user(
     assert users[0].email is None
 
 
+def test_an_oauth_account_with_no_verified_email_is_not_reported_anonymous(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """#288: `/v1/auth/me` used to compute `anonymous` as `user.email is None`.
+
+    PR 12 deliberately stores `email=None` when the provider says the address is
+    unverified (the test above pins that). So a real `usr_` account with a live
+    session came back as `anonymous: true`, `authStore.stateFor()` mapped that to
+    status "anonymous", and `AccountMenu` rendered the "Sign in" button -- the
+    user could not reach History or Connected accounts despite being signed in.
+
+    RED before the fix: `anonymous` is `True` here.
+    """
+    _patch_provider(
+        monkeypatch,
+        "google",
+        account_id=_GOOGLE_SUB,
+        email="unverified@example.com",
+        email_verified=False,
+    )
+    start = _start(oauth_client, "google")
+    callback = _callback(oauth_client, "google", state=_state_from_start_response(start))
+    assert callback.headers["location"] == "/?auth=ok"
+
+    me = oauth_client.get("/v1/auth/me", headers={"Authorization": DEMO_BEARER})
+    assert me.status_code == 200
+    body = me.json()
+    # Partner: this really is the unverified-email account, so `anonymous: false`
+    # cannot be passing because some OTHER, email-bearing user was resolved.
+    assert body["email"] is None
+    assert body["user_id"].startswith("usr_")
+    assert body["anonymous"] is False
+
+
+def test_an_anonymous_principal_is_still_reported_anonymous(
+    oauth_client: TestClient,
+) -> None:
+    """Partner to the test above: the fix must not make EVERYONE non-anonymous.
+
+    Without this, hardcoding `anonymous` to `False` would pass.
+
+    `/v1/auth/me` deliberately does NOT mint a session (a missing cookie is a
+    401, not a silent new identity), so an anonymous principal has to be created
+    the way a real visitor creates one -- by touching a session route first.
+    """
+    created = oauth_client.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert created.status_code in (200, 201), created.text
+
+    me = oauth_client.get("/v1/auth/me", headers={"Authorization": DEMO_BEARER})
+    assert me.status_code == 200, me.text
+    body = me.json()
+    assert body["user_id"].startswith("anon_")
+    assert body["anonymous"] is True
+
+
 # ---------------------------------------------------------------------------
 # callback: unknown / unconfigured provider (defense in depth)
 # ---------------------------------------------------------------------------
