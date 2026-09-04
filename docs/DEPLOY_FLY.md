@@ -192,8 +192,37 @@ the sending domain is verified in Resend (SPF/DKIM/DMARC records from its
 dashboard pasted into DNS): `CITEVYN_RESEND_API_KEY`, `CITEVYN_EMAIL_FROM`
 (an address on that verified domain) and `CITEVYN_MAGIC_LINK_BASE_URL`
 (`https://citevyn.stackclimb.com`). Without them the request route 404s and
-the UI reports email sign-in as unavailable; nothing else changes. (The OAuth
-variables are tracked separately in #289.)
+the UI reports email sign-in as unavailable; nothing else changes.
+
+Optional, for GitHub/Google sign-in (ADR-0004 PR 12) and account linking (PR
+13) — per provider, **both** halves or neither, since a half-configured
+provider is refused at startup:
+
+```
+fly secrets set \
+  CITEVYN_GITHUB_OAUTH_CLIENT_ID=... \
+  CITEVYN_GITHUB_OAUTH_CLIENT_SECRET=... \
+  CITEVYN_GOOGLE_OAUTH_CLIENT_ID=... \
+  CITEVYN_GOOGLE_OAUTH_CLIENT_SECRET=... \
+  CITEVYN_OAUTH_REDIRECT_BASE_URL=https://citevyn.stackclimb.com
+```
+
+`CITEVYN_OAUTH_REDIRECT_BASE_URL` is **required in production once any
+provider is set** (the app refuses to start otherwise). The callback URL is
+always `<base>/v1/auth/oauth/{provider}/callback`, derived from that setting
+and never from the request Host — register that exact URL in the GitHub OAuth
+app / Google OAuth client, or the provider rejects the redirect.
+
+Leaving these unset is safe but not invisible: the sign-in modal and the
+connected-accounts drawer render **both** provider buttons unconditionally, so
+an operator who skips this step gets buttons that 404.
+
+Optional, only if the default 20 minutes is wrong for you — how fresh a session
+must be to *link* a provider to an existing account:
+
+```
+fly secrets set CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS=1200
+```
 
 Notes on the list:
 

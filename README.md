@@ -146,6 +146,12 @@ production subset lives in
 | `CITEVYN_RESEND_API_KEY`         | for magic links | Resend API key; without it magic-link login is off in production (local dev writes emails to a file outbox instead) |
 | `CITEVYN_EMAIL_FROM`             | with the key    | `From:` address on a domain the Resend account has verified |
 | `CITEVYN_MAGIC_LINK_BASE_URL`    | prod, with key  | Public origin the emailed link points at, e.g. `https://citevyn.stackclimb.com` (never derived from the request) |
+| `CITEVYN_GITHUB_OAUTH_CLIENT_ID` | for GitHub login | With the secret below — both or neither, a half-configured provider is refused at startup |
+| `CITEVYN_GITHUB_OAUTH_CLIENT_SECRET` | for GitHub login | Pairs with the id above |
+| `CITEVYN_GOOGLE_OAUTH_CLIENT_ID` | for Google login | Same both-or-neither rule |
+| `CITEVYN_GOOGLE_OAUTH_CLIENT_SECRET` | for Google login | Pairs with the id above |
+| `CITEVYN_OAUTH_REDIRECT_BASE_URL` | prod, with a provider | Origin the callback is built from — always `<base>/v1/auth/oauth/{provider}/callback`, never derived from the request Host; register that exact URL with the provider. See [`docs/API_SPEC.md`](docs/API_SPEC.md) §4b |
+| `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS` | optional | How fresh a session must be to LINK a provider to an existing account (default 1200) |
 | `CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS` | optional | How long after redeeming a magic link that same session may set a new password without the old one (default 600, minimum 60, one shot) |
 | `CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR` | optional | Per-user cap on password changes that supply the current password (default 3; the stepped-up recovery set is exempt) |
 | `CITEVYN_MAGIC_LINK_TTL_SECONDS` | optional        | Sign-in link lifetime in seconds (default 600, minimum 60); quoted in the email and confirm page |
