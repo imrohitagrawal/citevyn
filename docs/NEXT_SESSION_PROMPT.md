@@ -10,8 +10,18 @@ repo before acting on it — this block is a snapshot, not a source of truth.**
 
 ## Where things stand — verified 2026-09-04
 
-`main` is at **`a51e209`**, and **production is release v13**, deployed and verified. Unlike
-previous handovers, merged work IS live.
+**Do not trust any SHA or issue list in this file — regenerate them.** A handover that states
+its own commit SHA is wrong the moment it is committed; that exact defect shipped twice here.
+Run these first and treat the output, not this file, as truth:
+
+```
+git rev-parse --short HEAD && git status --porcelain && gh pr list --state open
+flyctl releases --app citevyn | head -3 && curl -s https://citevyn.stackclimb.com/health
+gh api repos/imrohitagrawal/citevyn/branches/main/protection --jq '.required_status_checks.contexts'
+gh issue list --state open --limit 60
+```
+
+At the time of writing production was release **v13** and every merged item below was live.
 
 Closed this round, each merged with post-merge CI green and deployed:
 
@@ -40,23 +50,36 @@ ticker); if a third appears, fix the flake rather than relaxing the guard.
 
 ## Open follow-ups, roughly by value
 
-- **#337** — the shared `quality-gate` workflow fails a required check when `npm audit` hits a
-  registry blip. Blocked two PRs in one day. The fix is in `imrohitagrawal/.github`, a
-  different repo, so this is best done in a session focused there.
-- **#323** — the bundle gate passes silently if the budget key is mistyped (`gz > undefined`
-  is `false`), and measures one chunk rather than the eager graph.
-- **#325** — the 22 visual snapshots are darwin-only and run in no CI job; `how-it-works` has
-  a ±1px unstable height.
-- **#332** — 29 of 84 `Settings` fields appear in no env example, including
-  `cors_allowed_origins` and `rate_limit_key_salt`. Needs triage + an allowlist BEFORE
-  widening the #289 guard.
-- **#331** — both drawers set `aria-modal="true"` but do not trap Tab; three presses reach the
-  page behind the backdrop. `AuthModal` already has a guarded trap worth extracting.
-- **#329** — `demoTimer` is not gated on `screen` (same class as #312, bounded and harmless).
-- **#335** — the password nudge reaches email-less OAuth accounts, where a password can never
-  log anyone in.
+Regenerated from GitHub at the time of writing — **re-run `gh issue list --state open`**,
+and read `docs/BACKLOG.md` for the write-up on each:
 
-Also open and unchanged: #321, #296, #294, #286, #273, #270, #265, #264, and the V1/V2 items.
+```
+  #59   Embeddings: additional providers behind the seam + scale tuning (Voyage/OpenAI, HNSW recall, corpus refresh)
+  #61   Frontend: real SSE streaming for chat answers (replace client-side reveal)
+  #62   Frontend: gate the composer while a live answer is in flight (concurrent-send interleave)
+  #84   CiteVyn-meta answers: maturation follow-ups (from #49 review)
+  #119  Conversation memory: scale to long conversations (rolling summary + LLM rewrite + token budget + index)
+  #125  Eval harness: chunk-level context precision/recall + distractor corpus + golden-set growth
+  #154  V1: Feedback capture wired into the eval loop (not model retraining)
+  #155  V1: Evaluation + live-ops dashboard
+  #156  V1: Better re-ranking of retrieved chunks
+  #157  V2: ChatGPT (OpenAI) official docs as a 5th product domain
+  #158  V2: Voice output (TTS) for answers
+  #264  /health/index is not dual-active aware: it reports the vector arm healthy while retrieval fails closed
+  #265  Zero active index rows: the arms scan by document status while the provenance gate has no row to check, so the vector arm can run on foreign vectors
+  #270  Real user accounts (login): ADR-0004 implementation, PRs 0-12
+  #273  Move /health/index and /health/dependencies behind admin auth (deferred from ADR-0004 PR 2)
+  #286  SQLite test suite has FK enforcement off — masks real Postgres-only bugs
+  #294  ADR-0004 PR 14 advisory follow-ups (magic-link login + password) recorded from review
+  #296  Deploy runbook omits --build-arg VITE_API_DEMO_KEY: a deploy that follows docs/DEPLOY_FLY.md ships a frontend that cannot call the API
+  #321  Coverage: record a baseline across three main runs, then decide whether to make it blocking
+  #323  Bundle budget gate passes silently if the budget key is mistyped, and measures only one chunk of the eager graph
+  #325  Visual snapshot suite runs in no CI job (darwin-only baselines), and how-it-works has a ±1px unstable height
+  #329  demoTimer is not gated on screen: a landing demo answer keeps streaming while the chat screen is up
+  #331  Drawers set aria-modal="true" but do not trap Tab: 3 presses reach the page behind the backdrop
+  #332  29 of 84 Settings fields are documented in no env example (the OAuth gap was one instance)
+  #335  Password nudge now reaches email-less OAuth accounts, where a password can never be used to log in
+```
 
 ## Deploy
 
