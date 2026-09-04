@@ -27,12 +27,28 @@
          to actually be delivered: without this link the first entry in the stack
          is unavailable and every heading and paragraph silently falls through to
          `system-ui` — SF Pro on macOS, Segoe UI on Windows (#316). Weights are
-         requested as a VARIABLE font (`wght@400..700`) rather than four static
-         weights: one file covering the whole range the CSS uses is 28.6 KB
-         against 114.4 KB for 400/500/600/700 separately -- both measured, a 75%
-         saving. Served from fonts.gstatic.com, already allowed by the CSP
-         font-src, and folded into the existing Google Fonts request so it adds
-         no new host, preconnect, or round trip. -->
+         requested as a VARIABLE font (`wght@400..700`), which is ONE @font-face
+         rule covering the whole range the CSS uses (400/500/600/700 — measured,
+         and nothing anywhere needs 800). It is 28.6 KB.
+
+         NOT a byte saving: asking for the four static weights returns four
+         @font-face blocks whose `src` is the SAME file, so a browser fetches
+         28.6 KB either way. An earlier version of this comment claimed 114.4 KB
+         and a "75% saving" — that was the same file counted four times by a
+         script that keyed on weight instead of de-duplicating URLs. The variable
+         form is still right, for the honest reason: one rule, whole range, no
+         weight synthesis.
+
+         CAVEAT worth knowing: `<strong>`/`<b>` default to `font-weight: bolder`,
+         which is RELATIVE — inside a 600 or 700 container it resolves to 900, and
+         Geist clamps 800/900 to 700, so bold emphasis would render exactly as
+         heavy as its parent and visually vanish. Safe today: every prose
+         container that produces <strong> (AnswerBody's markdown bold) computes to
+         400. Setting a prose container to 600 would break it silently.
+
+         Served from fonts.gstatic.com, already allowed by the CSP font-src, and
+         folded into the existing Google Fonts request so it adds no new host,
+         preconnect, or round trip. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
