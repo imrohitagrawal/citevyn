@@ -92,6 +92,36 @@ describe("HistoryDrawer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("clicking the backdrop closes; clicking inside the dialog does not", async () => {
+    // `ConnectedAccountsDrawer` has exactly this test and this drawer did not --
+    // the same one-guarded/one-not asymmetry between the two drawers that let
+    // #290 exist in the first place. Deleting the
+    // `if (e.target === e.currentTarget) onClose();` line used to leave all 336
+    // tests green.
+    const { listMySessions } = await import("../lib/api");
+    vi.mocked(listMySessions).mockResolvedValueOnce({ request_id: "r", sessions: [] });
+    const user = userEvent.setup();
+    const { onClose, trigger } = renderDrawer();
+    await user.click(screen.getByRole("dialog"));
+    expect(onClose).not.toHaveBeenCalled(); // partner: an inside click must NOT close
+    await user.click(screen.getByRole("presentation"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    trigger.remove();
+  });
+
+  it("names the dialog for a screen reader", async () => {
+    // The accessible name was unguarded: deleting `aria-label` left every test
+    // green, including the focus test above, because `getByRole("dialog")` does
+    // not care what the dialog is called. A reader would then hear an anonymous
+    // dialog. The sibling drawer's name is guarded only incidentally, by its
+    // `getByRole("dialog", { name })` locators; this says it outright.
+    const { listMySessions } = await import("../lib/api");
+    vi.mocked(listMySessions).mockResolvedValueOnce({ request_id: "r", sessions: [] });
+    const { trigger } = renderDrawer();
+    expect(screen.getByRole("dialog", { name: "Chat history" })).toBeInTheDocument();
+    trigger.remove();
+  });
+
   it("takes focus on open and restores it to the trigger on unmount", async () => {
     // Both halves, and the FIRST is what makes the second mean anything.
     //

@@ -78,6 +78,13 @@ describe("AccountMenu signed-in dropdown", () => {
     await user.click(await screen.findByRole("button", { name: "a@example.com" }));
     const item = screen.getByRole("menuitem", { name: "Sign-in methods" });
     expect(item).toHaveAttribute("aria-haspopup", "dialog");
+    // History advertises a dialog too, and until #290 it advertised one it did
+    // not focus. The sibling menuitem's attribute was asserted here and this one
+    // was not -- the same asymmetry that let the bug through. Both now pinned.
+    expect(screen.getByRole("menuitem", { name: "History" })).toHaveAttribute(
+      "aria-haspopup",
+      "dialog",
+    );
     // Between History and Sign out, per the plan.
     const names = screen.getAllByRole("menuitem").map((el) => el.textContent);
     expect(names).toEqual(["History", "Sign-in methods", "Sign out"]);
