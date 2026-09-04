@@ -50,6 +50,27 @@ from app.core.db import get_session
 from app.core.rate_limit import rate_limited_demo
 from app.models import AuthSession, Session, User, UserRole
 
+# The two principal shapes, and the single source of truth for telling them
+# apart. Both prefixes were bare literals in four places (`auth.py` twice,
+# `rate_limit.py`, and a private `_REGISTERED_PREFIX` in `oauth.py`) -- which is
+# how `/v1/auth/me` came to use a DIFFERENT predicate entirely, `email is None`,
+# and report a real OAuth account as anonymous (#288). Minting and testing now
+# read the same names.
+REGISTERED_USER_PREFIX = "usr_"
+ANONYMOUS_USER_PREFIX = "anon_"
+
+
+def is_registered_principal(user_id: str) -> bool:
+    """Whether ``user_id`` names a real account rather than an anonymous visitor.
+
+    A POSITIVE test on the registered prefix, deliberately not ``not
+    startswith(anon_)``: an unrecognised future prefix should read as
+    NOT-registered (fail closed), which the negative form gets backwards.
+    ``rate_limit.py`` already documents that reasoning for its own copy.
+    """
+    return user_id.startswith(REGISTERED_USER_PREFIX)
+
+
 _COOKIE_NAME_PROD = "__Host-citevyn_session"
 _COOKIE_NAME_LOCAL = "citevyn_session"
 
@@ -199,7 +220,7 @@ async def _mint_principal(
     is off for this app's engine (no ``PRAGMA foreign_keys=ON`` anywhere in
     ``app.core.db``) — found only by live-testing against real Postgres.
     """
-    principal_id = f"anon_{uuid.uuid4().hex}"
+    principal_id = f"{ANONYMOUS_USER_PREFIX}{uuid.uuid4().hex}"
     db.add(User(user_id=principal_id, role=UserRole.demo_user, created_at=_now()))
     await db.flush()
     auth_session_id = await _create_auth_session(db, settings, response, user_id=principal_id)
@@ -351,7 +372,7 @@ async def claim_and_login(
         # fold in, and `anon_` is the one identifying mark they carry. This
         # is a positive allowlist, not a denylist against `usr_` — a future
         # prefix (e.g. PR 12's OAuth-linked accounts) fails closed here too.
-        if old_row.user_id != user_id and old_row.user_id.startswith("anon_"):
+        if old_row.user_id != user_id and old_row.user_id.startswith(ANONYMOUS_USER_PREFIX):
             await db.execute(
                 update(Session).where(Session.user_id == old_row.user_id).values(user_id=user_id)
             )

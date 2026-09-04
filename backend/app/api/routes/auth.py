@@ -30,7 +30,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_sessions import (
+    REGISTERED_USER_PREFIX,
     claim_and_login,
+    is_registered_principal,
     revoke_current_session,
     revoke_other_sessions,
     step_up_active,
@@ -171,7 +173,20 @@ async def _auth_user_payload(
         "request_id": request_id,
         "user_id": user.user_id,
         "email": user.email,
-        "anonymous": user.email is None,
+        # Keyed on the PRINCIPAL SHAPE, not on whether an email is stored.
+        #
+        # `user.email is None` was wrong for a real account (#288): OAuth login
+        # deliberately stores no email when the provider reports the address as
+        # unverified (`test_unverified_email_is_not_persisted_on_the_new_user`),
+        # so a genuine `usr_` account with a live session came back
+        # `anonymous: true`. `authStore.stateFor()` maps that to status
+        # "anonymous" and `AccountMenu` renders "Sign in", locking the signed-in
+        # user out of History and Connected accounts.
+        #
+        # The `usr_`/`anon_` prefix is what every other registered-vs-anonymous
+        # decision in the backend already keys on -- `auth.py`'s own step-up
+        # check, `rate_limit.py:781`, and `oauth.py`'s `_REGISTERED_PREFIX`.
+        "anonymous": not is_registered_principal(user.user_id),
         "providers": await _linked_providers(db, user.user_id),
         "has_password": user.password_hash is not None,
         "password_step_up": step_up,
@@ -222,7 +237,7 @@ async def register(
 
     password_hash = await hash_password(body.password)
     new_user = User(
-        user_id=f"usr_{uuid.uuid4().hex}",
+        user_id=f"{REGISTERED_USER_PREFIX}{uuid.uuid4().hex}",
         role=UserRole.demo_user,
         created_at=datetime.now(UTC),
         email=email,
@@ -405,7 +420,7 @@ async def update_password(
     """
     request_id = _request_id(request)
     current = await try_resolve_auth_session(request, db, settings)
-    if current is None or not current.user_id.startswith("usr_"):
+    if current is None or not is_registered_principal(current.user_id):
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.auth_required,

@@ -146,8 +146,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth_sessions import (
+    REGISTERED_USER_PREFIX,
     claim_and_login,
     ensure_auth_session,
+    is_registered_principal,
     resolve_principal_by_auth_session_id,
     try_resolve_auth_session,
     try_resolve_auth_session_id,
@@ -172,8 +174,6 @@ _NONCE_TTL_SECONDS = 300
 # one intent must never complete as the other.
 _INTENT_LOGIN = "login"
 _INTENT_CONNECT = "connect"
-
-_REGISTERED_PREFIX = "usr_"
 
 
 class LinkResult(enum.StrEnum):
@@ -518,7 +518,7 @@ async def oauth_connect_start(
     session = await try_resolve_auth_session(request, db, settings)
     if (
         session is None
-        or not session.user_id.startswith(_REGISTERED_PREFIX)
+        or not is_registered_principal(session.user_id)
         or not _session_is_fresh(session, settings)
     ):
         return RedirectResponse(
@@ -597,7 +597,7 @@ async def _resolve_or_create_identity(
             email_for_new_user = None
 
     new_user = User(
-        user_id=f"usr_{uuid.uuid4().hex}",
+        user_id=f"{REGISTERED_USER_PREFIX}{uuid.uuid4().hex}",
         role=UserRole.demo_user,
         created_at=_now(),
         email=email_for_new_user,
@@ -722,7 +722,7 @@ async def _resolve_connect_target(db: AsyncSession, nonce: OAuthNonce) -> str | 
     if nonce.auth_session_id is None:
         return None
     principal_id = await resolve_principal_by_auth_session_id(db, nonce.auth_session_id)
-    if principal_id is None or not principal_id.startswith(_REGISTERED_PREFIX):
+    if principal_id is None or not is_registered_principal(principal_id):
         return None
     return principal_id
 

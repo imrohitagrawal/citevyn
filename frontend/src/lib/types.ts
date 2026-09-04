@@ -280,9 +280,16 @@ export interface AuthCredentials {
 }
 
 /**
- * Response of register/login/``GET /v1/auth/me``. ``anonymous`` is true
- * for a visitor with no registered account — that principal still has a
- * ``user_id`` (an ``anon_<uuid4hex>``), but no ``email``.
+ * Response of register/login/``GET /v1/auth/me``. ``anonymous`` is true for a
+ * visitor with no registered account — that principal still has a ``user_id``
+ * (an ``anon_<uuid4hex>``).
+ *
+ * ``email`` does NOT distinguish the two, and assuming it did is what produced
+ * #288: OAuth login stores no email when the provider reports the address as
+ * unverified, so a REGISTERED account can have ``email: null`` too. The backend
+ * derives ``anonymous`` from the principal prefix (``usr_`` vs ``anon_``), never
+ * from whether an email is stored — so treat ``email`` as a display value that
+ * may be absent for anyone, and ``anonymous`` as the only signed-in test.
  */
 export interface AuthUserResponse {
   request_id: RequestId;

@@ -122,3 +122,63 @@ describe("AccountMenu anonymous state (ADR-0004 PR 13)", () => {
     expect(screen.queryByRole("button", { name: /^Connect (GitHub|Google)$/ })).not.toBeInTheDocument();
   });
 });
+
+describe("AccountMenu with no stored email (#288)", () => {
+  // OAuth login stores NO email when the provider reports the address
+  // unverified, so a real `usr_` account can have `email: null`. The trigger
+  // rendered `{user.email}` directly, which is an EMPTY button -- no label for
+  // a sighted user and no accessible name for a screen reader, on the only
+  // control that reaches History and Connected accounts.
+  const NO_EMAIL_USER = {
+    request_id: "req_2",
+    user_id: "usr_b",
+    email: null,
+    anonymous: false,
+    providers: ["github"],
+    has_password: false,
+    password_step_up: false,
+  };
+
+  /** Seed BOTH the store and the mocked bootstrap.
+   *
+   * `useAuth`'s mount effect calls `bootstrapAuth()` unconditionally, and the
+   * module-level mock resolves the email-bearing SIGNED_IN_USER -- so seeding
+   * the store alone is overwritten the instant the component mounts. That is
+   * the race this file's own fixture comment warns about.
+   */
+  async function seedUser(u: typeof NO_EMAIL_USER) {
+    const { getCurrentUser } = await import("../lib/api");
+    vi.mocked(getCurrentUser).mockResolvedValue(u as never);
+    __testOnly.setState({ status: "signed-in", user: u });
+    __testOnly.resetBootstrapped();
+  }
+
+  it("falls back to the linked provider for the trigger label", async () => {
+    await seedUser(NO_EMAIL_USER);
+    render(<AccountMenu />);
+    const trigger = await screen.findByRole("button", { name: /github/i });
+    expect(trigger).toHaveAccessibleName();
+    expect(trigger.textContent?.trim()).not.toBe("");
+  });
+
+  it("still opens the signed-in menu, not the Sign in button", async () => {
+    // The whole point of #288: this account must not be treated as anonymous.
+    await seedUser(NO_EMAIL_USER);
+    const user = userEvent.setup();
+    render(<AccountMenu />);
+    await user.click(await screen.findByRole("button", { name: /github/i }));
+    expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual([
+      "History",
+      "Sign-in methods",
+      "Sign out",
+    ]);
+  });
+
+  it("falls back again when there is no provider either", async () => {
+    // Partner: the fallback must not itself be empty when `providers` is [].
+    await seedUser({ ...NO_EMAIL_USER, providers: [] });
+    render(<AccountMenu />);
+    const trigger = await screen.findByRole("button", { name: /account/i });
+    expect(trigger.textContent?.trim()).not.toBe("");
+  });
+});
