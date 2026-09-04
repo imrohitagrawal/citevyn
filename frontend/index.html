@@ -23,7 +23,16 @@
     <meta name="color-scheme" content="light dark" />
     <title>CiteVyn — Cited answers for your AI tools</title>
 
-    <!-- Anton (display) + Satoshi (body) via Fontshare / Google Fonts. -->
+    <!-- Geist is the typeface `--font-sans` / `--font-display` ask for, so it has
+         to actually be delivered: without this link the first entry in the stack
+         is unavailable and every heading and paragraph silently falls through to
+         `system-ui` — SF Pro on macOS, Segoe UI on Windows (#316). Weights are
+         requested as a VARIABLE font (`wght@400..700`) rather than four static
+         weights: one file covering the whole range the CSS uses is 28.6 KB
+         against 114.4 KB for 400/500/600/700 separately -- both measured, a 75%
+         saving. Served from fonts.gstatic.com, already allowed by the CSP
+         font-src, and folded into the existing Google Fonts request so it adds
+         no new host, preconnect, or round trip. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -32,7 +41,7 @@
       crossorigin
     />
     <link
-      href="https://fonts.googleapis.com/css2?family=Anton&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Anton&family=Geist:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
     <link
