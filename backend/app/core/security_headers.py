@@ -59,9 +59,8 @@ from app.core.config import Settings
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
-    "style-src 'self' https://fonts.googleapis.com https://api.fontshare.com; "
-    "font-src 'self' https://fonts.gstatic.com https://api.fontshare.com "
-    "https://cdn.fontshare.com; "
+    "style-src 'self' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
