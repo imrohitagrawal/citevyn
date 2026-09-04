@@ -52,9 +52,17 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
     };
   }, []);
 
-  // Same restore-focus-on-unmount + Escape-to-close contract as AuthModal;
-  // this drawer has no form fields to trap Tab within, so no focus trap.
+  // Move focus INTO the dialog on open, then restore it to the trigger on
+  // unmount. Same contract as AuthModal and ConnectedAccountsDrawer; no form
+  // fields here, so no Tab trap.
+  //
+  // The open half was missing (#290): AccountMenu's "History" menuitem unmounts
+  // with the menu when clicked, so focus fell to <body> and the next Tab walked
+  // the page controls BEHIND the backdrop before reaching this drawer's own
+  // buttons -- while the menuitem advertised `aria-haspopup="dialog"`. It needs
+  // `tabIndex={-1}` on the dialog below to be focusable at all.
   useEffect(() => {
+    dialogRef.current?.focus();
     const trigger = triggerRef.current;
     return () => {
       trigger?.focus();
@@ -92,6 +100,7 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
         role="dialog"
         aria-modal="true"
         aria-label="Chat history"
+        tabIndex={-1}
         style={{
           background: "var(--surface, #fff)",
           color: "var(--ink, #111)",
