@@ -107,9 +107,8 @@ def _parse_csp(csp: str) -> dict[str, set[str]]:
 _EXPECTED_CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
-    "style-src 'self' https://fonts.googleapis.com https://api.fontshare.com; "
-    "font-src 'self' https://fonts.gstatic.com https://api.fontshare.com "
-    "https://cdn.fontshare.com; "
+    "style-src 'self' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
@@ -168,19 +167,12 @@ def _assert_common_headers(headers: dict[str, str]) -> None:
     # The two third-party origins the shipped frontend actually loads
     # (frontend/index.html): Google Fonts + Fontshare stylesheets, and the
     # font files those stylesheets reference.
-    assert directives["style-src"] == {
-        "'self'",
-        "https://fonts.googleapis.com",
-        "https://api.fontshare.com",
-    }
-    # Both Fontshare hosts: `api` serves the stylesheet, `cdn` serves the font
-    # files. Listing only the first blocked every glyph (#306).
-    assert directives["font-src"] == {
-        "'self'",
-        "https://fonts.gstatic.com",
-        "https://api.fontshare.com",
-        "https://cdn.fontshare.com",
-    }
+    assert directives["style-src"] == {"'self'", "https://fonts.googleapis.com"}
+    # Google Fonts only. Fontshare served Satoshi, which no CSS ever referenced,
+    # so both its hosts came out with the link (#316). The `gstatic` host is the
+    # font-FILE origin — listing only the stylesheet host blocked every glyph
+    # once before (#306), which is why the pair is asserted together.
+    assert directives["font-src"] == {"'self'", "https://fonts.gstatic.com"}
 
 
 # ---------------------------------------------------------------------------

@@ -297,6 +297,25 @@
  * single ``setAttribute`` with no flash.
  * ========================================================================== */
 
+/* ---------------------------------------------------------------------------
+ * THE THREE SKINS BELOW ARE NOT REACHABLE, AND THEIR FONTS ARE NO LONGER LOADED.
+ *
+ * Nothing in the app ever sets `data-style` — grep it: the only other mention is
+ * a comment in landing.css. So `softly`, `devtools` and `devtools-alt` cannot
+ * activate, and `Inter` (devtools) was never in a font link to begin with, so
+ * they were already partly broken.
+ *
+ * #316 removed the `Outfit`/`Reenie Beanie` and `Satoshi` stylesheet links,
+ * because they were render-blocking requests to fonts that nothing rendered.
+ * Consequence, stated here rather than left as a trap: if you ever wire
+ * `data-style` up, these skins will fall back to system fonts until you add the
+ * links back. That is the same defect #316 was about — CSS naming a face nobody
+ * delivers — so it is written down instead of discovered later.
+ *
+ * The blocks are kept rather than deleted (420 lines, 58% of this file) because
+ * removing them is a product decision about whether alternate skins are wanted,
+ * not a font-loading one.
+ * --------------------------------------------------------------------------- */
 :root[data-style="softly"] {
   /* ----- Surfaces ----- */
   --surface-base: #FDFCF8;

@@ -47,7 +47,6 @@ _INDEX_HTML = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
 #:   Google Fonts CSS likewise points at fonts.gstatic.com.
 _FONT_FILE_ORIGIN = {
     "https://fonts.googleapis.com": "https://fonts.gstatic.com",
-    "https://api.fontshare.com": "https://cdn.fontshare.com",
 }
 
 
