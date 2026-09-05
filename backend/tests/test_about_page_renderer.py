@@ -14,6 +14,7 @@ tripwire for that, and it is the reason the renderer is allowed to stay small.
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -174,11 +175,29 @@ def test_page_actually_requests_the_typeface_its_css_asks_for() -> None:
     through to ``system-ui`` and no error appears anywhere. Dropping the font
     ``<link>`` from this page is invisible to the CSP guard (which only cares
     that loaded origins are permitted), so it is asserted here instead.
+
+    Asserted on the PARSED ORIGIN of the stylesheet link, not on a substring of
+    the page. CodeQL flagged the substring form
+    (``py/incomplete-url-substring-sanitization``, high): a host name can sit at
+    an arbitrary position in a URL, so ``https://evil.example/?x=fonts.
+    googleapis.com`` satisfied it. Same "guards that check strings" family as
+    the two bypasses review already found in this change.
     """
     page = render_about_page([("About CiteVyn", "# About CiteVyn\n\nBody.")])
-    assert "fonts.googleapis.com" in page
-    assert "Geist" in page
-    assert 'rel="preconnect"' in page
+    stylesheets = re.findall(r'<link rel="stylesheet" href="([^"]+)"', page)
+    assert stylesheets, "no stylesheet links rendered — this guard would be vacuous"
+    origins = {f"{u.scheme}://{u.netloc}" for u in map(urlsplit, stylesheets) if u.scheme}
+    assert origins == {"https://fonts.googleapis.com"}, (
+        f"unexpected external stylesheet origins on /about: {sorted(origins)}"
+    )
+    families = {
+        family for url in stylesheets for family in parse_qs(urlsplit(url).query).get("family", [])
+    }
+    assert any(f.startswith("Geist") for f in families), (
+        f"the page requests no Geist family, so --font-sans falls to system-ui: {families}"
+    )
+    preconnects = re.findall(r'<link rel="preconnect" href="([^"]+)"', page)
+    assert {urlsplit(u).netloc for u in preconnects} >= {"fonts.googleapis.com"}
 
 
 def test_table_of_contents_links_resolve_to_real_anchors() -> None:
