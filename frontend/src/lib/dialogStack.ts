@@ -1,5 +1,5 @@
 /**
- * Which modal dialogs are currently mounted, in mount order.
+ * Which modal dialogs are currently mounted, in REGISTRATION order.
  *
  * Deliberately its OWN module, holding nothing but this array and two tiny
  * readers. `useFocusTrap` lives only in lazy chunks (AuthModal, HistoryDrawer,
@@ -13,7 +13,19 @@
  * registry, which is also what makes it safe to read from a `window` listener.
  */
 
-/** Opaque tokens, one per mounted trap. Only identity matters. */
+/**
+ * Opaque tokens, one per mounted trap. Only identity matters.
+ *
+ * Ordered by React EFFECT order, which is child-before-parent — not by visual
+ * stacking. For every flow in this app the two agree, because a dialog is only
+ * ever opened from a click in the dialog below it and therefore mounts in a
+ * LATER commit. They would disagree for a dialog whose JSX contains a nested
+ * dialog open on the SAME commit: the outer one registers last and would wrongly
+ * take Escape (reproduced in review, and not reachable here — the only nesting
+ * is ConnectedAccountsDrawer -> AuthModal, gated behind `passwordOpen`, which a
+ * click sets). Stated because "mount order" would be the wrong mental model to
+ * build a fourth dialog on.
+ */
 const trapStack: object[] = [];
 
 export function pushTrap(token: object): void {

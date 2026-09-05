@@ -67,10 +67,11 @@ export function useFocusTrap(
   containerRef: RefObject<HTMLElement | null>,
   { onEscape }: Options = {},
 ) {
-  // Held in a ref so the listener effect can have EMPTY deps. All three call
-  // sites pass an inline arrow for `onClose`, so a dependency on it would
-  // re-subscribe on every parent render — and, worse, would re-order the stack
-  // above, silently promoting a background dialog over the one on top of it.
+  // Held in a ref so the listener effect can have EMPTY deps. `AccountMenu`
+  // renders all three dialogs with an inline arrow for `onClose`, so a
+  // dependency on it would re-subscribe on every parent render — and, worse,
+  // would re-order the stack, silently promoting a background dialog over the
+  // one on top of it.
   const onEscapeRef = useRef(onEscape);
   useEffect(() => {
     onEscapeRef.current = onEscape;
@@ -134,5 +135,12 @@ export function useFocusTrap(
       removeTrap(token);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [containerRef]);
+    // EMPTY deps, deliberately. `containerRef` is read as `.current` at keypress
+    // time, so it is not a dependency — and listing it made the stack order
+    // depend on ref IDENTITY: a caller passing a fresh ref object each render
+    // would pop and re-push its token, promoting a BACKGROUND dialog to the top
+    // on every parent render (reproduced in review). Registration must happen
+    // once per mount and never again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 }

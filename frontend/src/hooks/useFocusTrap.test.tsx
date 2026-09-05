@@ -264,6 +264,38 @@ describe("useFocusTrap", () => {
     remove.mockRestore();
   });
 
+  /**
+   * The stack must key on MOUNT, not on ref identity. Listing `containerRef` in
+   * the effect deps made a caller that passes a fresh ref object each render
+   * pop and re-push its token on every parent render — promoting a BACKGROUND
+   * dialog above the one actually on top. Reproduced in review.
+   *
+   * RED if `containerRef` returns to the dependency array.
+   */
+  it("a background dialog re-rendering with a fresh ref does not steal the top of the stack", async () => {
+    const user = userEvent.setup();
+    const lower = vi.fn();
+
+    // Deliberately unstable: a new ref object on every render.
+    function UnstableLower() {
+      const el = useRef<HTMLDivElement>(null);
+      useFocusTrap({ get current() { return el.current; } }, { onEscape: lower });
+      return (
+        <div ref={el} role="dialog" aria-modal="true" aria-label="Lower" tabIndex={-1}>
+          <button type="button">lower-1</button>
+        </div>
+      );
+    }
+
+    const lowerView = render(<UnstableLower />);
+    render(<Harness controls={["upper-1", "upper-2"]} label="Upper" />);
+    // Force the background dialog to re-render several times.
+    for (let i = 0; i < 3; i += 1) lowerView.rerender(<UnstableLower />);
+
+    await user.keyboard("{Escape}");
+    expect(lower).not.toHaveBeenCalled(); // the UPPER dialog is still on top
+  });
+
   it("stops trapping once unmounted, so the listener does not outlive the dialog", async () => {
     const user = userEvent.setup();
     const { unmount } = render(<Harness controls={["one", "two"]} />);
