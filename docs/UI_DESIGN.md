@@ -586,7 +586,18 @@ frontend/src/
 │   ├── tokens.css                   # Design tokens (light + dark themes)
 │   ├── reset.css                    # Minimal CSS reset
 │   └── landing.css                  # Component styles for the landing page
+
+frontend/public/                     # copied verbatim into dist/ (unhashed URLs)
+├── about.css                        # Styles for the API-rendered /about page
+└── about-theme.js                   # Mirrors the SPA's stored theme onto /about
 ```
+
+`/about` is the one page the React app does not render. It is served by the API
+(`backend/app/services/about_page.py`) from the corpus documents that cite it, so
+the two files above are the only way it can be styled: everything under `src/` is
+content-hashed by Vite, and the app-wide CSP forbids inline `<style>`/`<script>`.
+`backend/tests/test_about_page_tokens.py` fails if `about.css` drifts from
+`tokens.css`.
 
 ---
 
@@ -640,6 +651,7 @@ what is fundamentally a two-view marketing page.
 | 2026-09-04 | Stick-to-bottom now verifies the DOM before pinning, instead of trusting a latch that an async `scroll` event disarms | #311 — a streamed chunk landing between a reader's scroll and its scroll event silently erased the scroll and re-armed the latch. Found by the demo Playwright suite on its first CI run; systematic on slower hardware |
 | 2026-09-04 | `AccountMenu`'s trigger renamed from `.theme-toggle` to `.account-button` (same styling, now via explicit selector lists) | #311 — it shared a class with the Header's real light/dark toggle, so every `locator(".theme-toggle")` matched two elements and 39 demo Playwright runs died on a strict-mode violation. No visual change |
 | 2026-09-05 | Both drawers now trap Tab, via a shared `useFocusTrap` hook extracted from `AuthModal`; the `/` shortcut no longer reaches past an open dialog | #331 — `HistoryDrawer` and `ConnectedAccountsDrawer` set `aria-modal="true"` and put a backdrop over the page, so the mouse could not reach the controls behind them, but the keyboard could: measured in real Chromium, **3 forward Tabs reached `BODY` and then the page nav, and ONE Shift+Tab landed on a page button**. Both files had documented the omission as *"no form fields, so no Tab trap"* — but the hazard is escaping the dialog, not moving between inputs. Review then found the same hazard reached by a **different key**: the global `/` shortcut is a `window` listener the trap never sees, so it focused the hero input *behind* the backdrop and a typed question submitted and navigated the app. Both are fixed and both re-measured in the same browser: Tab cycles inside indefinitely; `/` with a drawer open leaves focus in the dialog and a full typed question never reaches the page (hero input still empty, drawer still open), while `/` with no dialog open still focuses the hero input as before. Only the top-most dialog reacts, so the drawer keeps trapping during the lazy password modal's cold load rather than standing down before its replacement exists. **No visual change** — keyboard behaviour only |
+| 2026-09-06 | New `/about` page, served by the API and rendered from the corpus documents that cite it; styled by `frontend/public/about.css` + `about-theme.js` | #84 item 6 — every CiteVyn-about-itself answer cites `/about`, and the frontend renders it as a real `<a href>`. Measured against production: `GET /about` returned the API's **JSON 404 envelope**, so clicking a citation dropped the reader onto `{"status":"error"...}`. The URL is persisted on `documents.source_url`, so changing the corpus would have fixed nothing already indexed without a re-ingest; serving the URL repairs every stored citation with a deploy. The page renders `citevyn.md` **and** `concepts.md` — both carry `source_url: "/about"` — so the link resolves to the source text itself rather than to yet another restatement of it (the copy #84 item 4 tracks as duplicated). Styling had to be an external same-origin stylesheet: the CSP has no `'unsafe-inline'` on `style-src` or `script-src`, measured in real Chromium. Tokens are redeclared in `about.css` (a hashed `tokens.css` cannot be linked by hand) and a pytest guard fails if any value drifts |
 
 ### Future entries
 

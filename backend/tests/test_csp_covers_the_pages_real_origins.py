@@ -69,9 +69,25 @@ def _directives() -> dict[str, set[str]]:
     return out
 
 
+def _rendered_about_page() -> str:
+    """The SECOND page this app serves, rendered exactly as ``GET /about`` does.
+
+    ``/about`` (#84 item 6) is not the SPA shell: it is built by
+    ``app.services.about_page`` and declares its own external font stylesheet,
+    independently of ``index.html``. Parsing only ``index.html`` left it
+    unguarded — review repointed the About page's font host at an origin absent
+    from the CSP and this file stayed GREEN while the page loaded it. That is
+    the #306 defect class on a new page, so the page is a second input here.
+    """
+    from app.api.routes.about import _load_documents
+    from app.services.about_page import render_about_page
+
+    return render_about_page(_load_documents())
+
+
 def _stylesheet_origins() -> set[str]:
-    """Every external stylesheet origin ``frontend/index.html`` loads."""
-    html = _INDEX_HTML.read_text(encoding="utf-8")
+    """Every external stylesheet origin the app's pages load."""
+    html = _INDEX_HTML.read_text(encoding="utf-8") + _rendered_about_page()
     links = re.findall(r"<link\b[^>]*>", html, flags=re.IGNORECASE | re.DOTALL)
     origins = set()
     for tag in links:
@@ -94,7 +110,8 @@ def test_the_parser_finds_exactly_the_providers_we_expect() -> None:
     whole set turns that into a failure that names what went missing.
     """
     assert _stylesheet_origins() == set(_FONT_FILE_ORIGIN), (
-        "the stylesheet origins parsed from frontend/index.html no longer match "
+        "the stylesheet origins parsed from frontend/index.html AND the rendered "
+        "/about page no longer match "
         "the declared providers. If you ADDED one, add its font-file origin to "
         "_FONT_FILE_ORIGIN (check the provider's CSS for the host in its "
         "@font-face src) and to the CSP. If you REMOVED one, drop it from both — "

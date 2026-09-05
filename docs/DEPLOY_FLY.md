@@ -441,7 +441,23 @@ still yours to check.
 curl -sS https://citevyn.stackclimb.com/health                 # liveness, no DB
 curl -sS https://citevyn.stackclimb.com/health/dependencies    # 503 if Postgres is unreachable
 curl -sS https://citevyn.stackclimb.com/health/index           # vector_arm must NOT be "dead"
+
+# The page every CiteVyn-about-itself citation links to (#84 item 6). Must be
+# 200 text/html -- it answered a JSON 404 envelope in production until the
+# route existed, and no health check noticed, because none of them ask for a
+# page. The grep is the second half: the page renders the corpus markdown that
+# ships INSIDE the API image, so a packaging break degrades it to a polite
+# placeholder with a 200 status. pytest cannot catch that -- it exercises the
+# source tree, not the image.
+curl -sS -o /tmp/about.html -w '%{http_code} %{content_type}\n' \
+  https://citevyn.stackclimb.com/about                         # 200 text/html
+if grep -q 'source documents for this page are not available' /tmp/about.html; then
+  echo 'FAIL: the corpus markdown is missing from the image'
+fi
 ```
+
+(Written as an `if`, not `grep … && echo`: that form exits 1 on the *healthy*
+path and would abort a `set -e` runbook when the page is fine.)
 
 `vector_arm.status: "dead"` means the corpus was seeded with the stub
 embedder and every embedding is NULL — semantic search is off and answers
