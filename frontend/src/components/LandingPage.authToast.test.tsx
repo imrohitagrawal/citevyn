@@ -41,15 +41,91 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * #344: these two tests were the two slowest of the whole 443-test suite
+ * (2439 ms and 1099 ms; the third-slowest was 673 ms), and under CPU contention
+ * they blew vitest's 5 s per-test timeout deterministically — in a REQUIRED
+ * status check. Both costs below were MEASURED, not guessed; the issue's own
+ * hypothesis (inter-keystroke macrotasks) turned out to be a third of the story.
+ *
+ * COST 1 — a 24 ms interval re-rendering React for the life of the test.
+ * `useLandingState` drives the hero typewriter through `streamText`, a
+ * `setInterval` that dispatches a state update every 24 ms for as long as the
+ * landing screen is mounted; the demo answer streams the same way. Every test
+ * in this file pays it, but the bill is proportional to how long the test
+ * lives, so the eighteen short ones (36-193 ms) tick a handful of times while
+ * these two tick for the whole sign-in interaction. That is a feedback loop —
+ * a slower machine means more re-renders means a slower test — which is exactly
+ * why they degrade under load and pass in isolation.
+ *
+ * COST 2 — one await per typed character. Under contention each await is a trip
+ * through a scheduler shared with eight other jsdom workers; 38 characters cost
+ * 2537 ms in the email field alone. See `openAuthModalAndSignIn`.
+ *
+ * THE FIX. Fake ONLY `setInterval`, scoped to this describe block, so the
+ * typewriter never fires; and type short credentials. `delay: null` drops the
+ * macrotask userEvent would otherwise yield between keystrokes, while every
+ * keydown/keypress/input/keyup still fires, in order, through React's real
+ * handlers. No timeout is raised and no assertion is relaxed — both tests still
+ * fail if `handleAuthenticated` picks the wrong toast copy (verified by
+ * mutation, in both directions).
+ *
+ * MEASURED, full suite, three runs each under identical induced load (30 busy
+ * processes on 10 cores):
+ *   before — 2 failed / 441 passed EVERY run, at 5128/5481, 5106/5267, 5018/5099 ms
+ *   after  — 447 passed / 447 every run
+ * Isolated, the same two tests went 2439 ms -> 516 ms and 1099 ms -> 295 ms.
+ */
+const signInUser = () => userEvent.setup({ delay: null });
+
+/**
+ * The credentials are deliberately SHORT. `login` is mocked and no assertion in
+ * this file reads what was typed, but `user.type` awaits once per character and
+ * every await is a trip through a scheduler shared with eight other jsdom
+ * workers. Measured under identical induced load: 38 characters cost 2537 ms in
+ * the email field alone; 8 characters cost 92 ms. The field constraints still
+ * hold — the email is a valid address for `type="email" required`, and login
+ * mode sets no `minLength` on the password (AuthModal.tsx:469 applies it to
+ * register/set-password only), so nothing here is typing past a validation
+ * rule that a real user would have to satisfy.
+ */
 async function openAuthModalAndSignIn(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "Sign in" }));
   const dialog = await screen.findByRole("dialog");
-  await user.type(within(dialog).getByLabelText("Email"), "claim@example.com");
-  await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+  await user.type(within(dialog).getByLabelText("Email"), "a@b.co");
+  await user.type(within(dialog).getByLabelText("Password"), "pw");
   await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
 }
 
 describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
+  beforeEach(() => {
+    // ONLY setInterval. Faking setTimeout as well deadlocks the file:
+    // @testing-library/dom advances a fake clock inside waitFor only when it
+    // can see a JEST fake-timer install (`jestFakeTimersAreEnabled`), which
+    // under vitest it cannot. Measured: all four sign-in assertions hung to
+    // the full 5 s timeout even on an idle machine.
+    //
+    // BE PRECISE ABOUT WHAT SURVIVES, because a review round found the first
+    // version of this comment was wrong. `waitFor` polls with a setInterval
+    // (@testing-library/dom/dist/wait-for.js:91), so this install DOES freeze
+    // its poll. What still resolves every findBy* here is the immediate
+    // `checkCallback()` (:97), the MutationObserver (:95), and the overall
+    // timeout, which is a real setTimeout (:40). Both assertions in this
+    // describe wait on a toast being ADDED to the DOM, which is a childList
+    // mutation, so the observer carries them.
+    //
+    // The trap that leaves: an assertion in THIS describe that becomes true
+    // without a DOM mutation would hang to the full timeout and read as a
+    // product bug. Put such a test in another describe, or advance the clock.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  });
+
+  afterEach(() => {
+    // Back to real timers BEFORE the file-level cleanup() unmounts the tree,
+    // so nothing downstream inherits a frozen clock.
+    vi.useRealTimers();
+  });
+
   it("shows the history-saved toast when the tab already has messages", async () => {
     vi.mocked(login).mockResolvedValueOnce({
       request_id: "req_1",
@@ -60,7 +136,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       has_password: true,
     password_step_up: false,
     });
-    const user = userEvent.setup();
+    const user = signInUser();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
 
     // Enter chat and pick a suggested question -- this is what puts a real
@@ -74,6 +150,33 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
     expect(await screen.findByText("Your conversation is saved to your account.")).toBeInTheDocument();
   });
 
+  // Review found the two tests above conflate "entered the chat screen" with
+  // "has messages": test 1 does both, test 2 does neither. So swapping the
+  // signal for `state.screen === "chat"` at LandingPage.tsx's two call sites
+  // left BOTH green while telling a user with no conversation that their
+  // conversation was saved. This is that missing third case.
+  it("does not claim a conversation was saved when the chat screen is empty", async () => {
+    vi.mocked(login).mockResolvedValueOnce({
+      request_id: "req_1",
+      user_id: "usr_c",
+      email: "claim@example.com",
+      anonymous: false,
+      providers: [],
+      has_password: true,
+      password_step_up: false,
+    });
+    const user = signInUser();
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    // Enter the chat screen but ask nothing, so `state.messages` stays empty.
+    await user.click(screen.getAllByRole("button", { name: "Try the demo" })[0]);
+
+    await openAuthModalAndSignIn(user);
+
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(screen.queryByText("Your conversation is saved to your account.")).not.toBeInTheDocument();
+  });
+
   it("shows a plain welcome toast when there is no chat history yet", async () => {
     vi.mocked(login).mockResolvedValueOnce({
       request_id: "req_1",
@@ -84,7 +187,7 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
       has_password: true,
     password_step_up: false,
     });
-    const user = userEvent.setup();
+    const user = signInUser();
     render(<LandingPage theme="light" onThemeChange={() => {}} />);
 
     await openAuthModalAndSignIn(user);
