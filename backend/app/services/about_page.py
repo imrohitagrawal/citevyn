@@ -106,16 +106,21 @@ def _blocks(markdown: str) -> Iterable[list[str]]:
 
 
 def _is_heading(line: str) -> bool:
-    """True for an ATX heading — ``#``\\ s followed by a SPACE, per CommonMark.
+    """True for an ATX heading — ``#``\\ s followed by a space or a tab.
 
-    The space is required, and that is not pedantry: without it ``#1 priority``
-    and ``#hashtag`` render as headings whose ``id`` starts with a digit, which
-    is legal HTML5 but makes ``querySelector('#1-…')`` and the equivalent CSS
-    selector throw. Requiring the space also stops a bare ``#`` from emitting an
-    empty ``<h2></h2>``; it becomes an ordinary paragraph instead.
+    Without the whitespace requirement, ``#1 priority`` and ``#hashtag`` render
+    as headings whose ``id`` starts with a digit: legal HTML5, but
+    ``querySelector('#1-…')`` throws and the equivalent CSS selector is invalid.
+    It also stops a bare ``#`` from emitting an empty ``<h2></h2>``.
+
+    This is DELIBERATELY narrower than CommonMark, which also accepts a ``#``
+    run terminated by end-of-line (a valid empty heading). An empty heading has
+    no anchor text and nothing to link to, so it is rendered as a paragraph
+    instead. A tab IS accepted, because CommonMark accepts one and rejecting it
+    would silently turn a real heading into a paragraph of hashes.
     """
     stripped = line.lstrip("#")
-    return stripped != line and stripped.startswith(" ")
+    return stripped != line and stripped[:1] in (" ", "\t")
 
 
 def _is_list_item(line: str) -> bool:
@@ -234,7 +239,7 @@ def document_anchor(title: str, markdown: str) -> str:
     return slugify(title)
 
 
-def _table_of_contents(documents: Sequence[tuple[str, str]]) -> str:
+def _table_of_contents(rendered_documents: Sequence[tuple[str, str, str]]) -> str:
     """Jump links to each document section.
 
     Present because the page carries more than one source: an answer cited to
@@ -243,9 +248,15 @@ def _table_of_contents(documents: Sequence[tuple[str, str]]) -> str:
     signpost is the citation equivalent of "see the manual".
     """
     links: list[str] = []
-    for title, markdown in documents:
+    for title, markdown, rendered in rendered_documents:
+        # An anchor is only real once the section it names has actually been
+        # rendered and carries that id. A previous version linked every
+        # document, so a corpus file that shipped truncated-but-present gave
+        # the reader a jump link to an id nowhere on the page — and because
+        # only ONE document has to render for the whole-page fallback to stay
+        # quiet, that shipped a 200 with a dead link in it.
         anchor = document_anchor(title, markdown)
-        if anchor:
+        if anchor and f'id="{anchor}"' in rendered:
             links.append(
                 f'<li><a href="#{html.escape(anchor, quote=True)}">{html.escape(title)}</a></li>'
             )
@@ -264,15 +275,16 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
     written twice (see :func:`document_anchor`).
     """
     sections: list[str] = []
-    rendered_anything = False
-    for _title, markdown in documents:
+    rendered_documents: list[tuple[str, str, str]] = []
+    for title, markdown in documents:
         # heading_offset=1: the source doc's `#` becomes an <h2> beneath the
         # page's single <h1>, and carries the section's only id.
         rendered = render_markdown(markdown, heading_offset=1)
-        rendered_anything = rendered_anything or bool(rendered)
+        rendered_documents.append((title, markdown, rendered))
         sections.append(f'<section class="about-doc">{rendered}</section>')
+    rendered_anything = any(rendered for _, _, rendered in rendered_documents)
     body = "".join(sections)
-    toc = _table_of_contents(documents)
+    toc = _table_of_contents(rendered_documents)
     if not rendered_anything:
         # Tested on the RENDERED CONTENT, not on ``body``. An earlier version
         # checked ``if not body``, which could never fire once a document was

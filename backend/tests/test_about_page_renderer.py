@@ -76,9 +76,23 @@ def test_heading_offset_keeps_one_h1_on_the_page() -> None:
     assert render_markdown("## Section", heading_offset=1).startswith("<h3")
 
 
-def test_heading_level_is_clamped_to_h6() -> None:
-    """There is no ``<h7>``; a deep heading must not emit an unknown element."""
-    assert render_markdown("###### Deep", heading_offset=1).startswith("<h6")
+@pytest.mark.parametrize(
+    ("markdown", "offset", "expected"),
+    [
+        ("###### Deep", 1, "<h6"),
+        ("####### Deeper", 0, "<h6"),
+        ("# Shallow", -3, "<h1"),
+        ("## Shallow", -5, "<h1"),
+    ],
+)
+def test_heading_level_is_clamped_at_both_ends(markdown: str, offset: int, expected: str) -> None:
+    """There is no ``<h7>`` and no ``<h0>``.
+
+    ``heading_offset`` is a public parameter, so the LOWER bound is reachable
+    from outside this module. Review mutated the ``max(..., 1)`` away and the
+    whole suite stayed green while the renderer emitted ``<h0>``.
+    """
+    assert render_markdown(markdown, heading_offset=offset).startswith(expected)
 
 
 def test_hard_wrapped_paragraph_becomes_one_paragraph() -> None:
@@ -225,6 +239,26 @@ def test_documents_that_render_nothing_also_trigger_the_fallback() -> None:
     assert not targets, f"dangling table-of-contents anchors on an empty page: {targets}"
 
 
+def test_one_empty_document_does_not_leave_a_dangling_jump_link() -> None:
+    """The fallback is all-or-nothing; the table of contents is per-document.
+
+    Reachable in production when ONE corpus file ships truncated-but-present:
+    the other document renders, so the whole-page fallback stays quiet and the
+    reader gets a 200 with a jump link to an id that is nowhere on the page.
+    The first fix for this only covered the case where EVERY document was
+    empty, and review reproduced the gap; mutating the per-link render check
+    away must turn this red.
+    """
+    page = render_about_page(
+        [("AI concepts glossary", ""), ("About CiteVyn", "# About CiteVyn\n\nBody.")]
+    )
+    targets = set(re.findall(r'href="#([^"]+)"', page))
+    ids = set(re.findall(r'id="([^"]+)"', page))
+    assert targets, "no jump links at all — this guard would be vacuous"
+    assert targets <= ids, f"dangling anchors: {sorted(targets - ids)}"
+    assert "about-citevyn" in targets, "the document that DID render lost its link"
+
+
 def test_the_real_served_page_never_repeats_an_id() -> None:
     """The id guard above uses a two-document literal; this one uses the CORPUS.
 
@@ -276,6 +310,12 @@ _UNSUPPORTED = {
     "italic or emphasis": re.compile(r"(?<!\w)[*_]\w"),
     "inline code": re.compile(r"`"),
     "horizontal rule": re.compile(r"^\s*(?:---+|\*\*\*+|___+)\s*$", re.MULTILINE),
+    # An HTML comment is the likeliest raw-HTML construct in a prose Markdown
+    # file, and the `raw html` pattern above does not match `<!--`. It renders
+    # VISIBLY to the reader as escaped text rather than disappearing.
+    "html comment": re.compile(r"<!--"),
+    "task list": re.compile(r"^\s*-\s+\[[ xX]\]", re.MULTILINE),
+    "indented code block": re.compile(r"^ {4,}\S", re.MULTILINE),
 }
 
 
@@ -319,6 +359,9 @@ def test_the_subset_detector_actually_detects() -> None:
         "setext heading": "Title\n=====",
         "raw html": "<b>bold</b>",
         "closed atx heading": "## Title ##",
+        "html comment": "<!-- note -->",
+        "task list": "- [ ] todo",
+        "indented code block": "    code()",
     }
     assert samples.keys() == _UNSUPPORTED.keys()
     for name, sample in samples.items():

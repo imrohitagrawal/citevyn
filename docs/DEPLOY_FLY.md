@@ -451,9 +451,13 @@ curl -sS https://citevyn.stackclimb.com/health/index           # vector_arm must
 # source tree, not the image.
 curl -sS -o /tmp/about.html -w '%{http_code} %{content_type}\n' \
   https://citevyn.stackclimb.com/about                         # 200 text/html
-grep -q 'source documents for this page are not available' /tmp/about.html \
-  && echo 'FAIL: the corpus markdown is missing from the image'
+if grep -q 'source documents for this page are not available' /tmp/about.html; then
+  echo 'FAIL: the corpus markdown is missing from the image'
+fi
 ```
+
+(Written as an `if`, not `grep … && echo`: that form exits 1 on the *healthy*
+path and would abort a `set -e` runbook when the page is fine.)
 
 `vector_arm.status: "dead"` means the corpus was seeded with the stub
 embedder and every embedding is NULL — semantic search is off and answers

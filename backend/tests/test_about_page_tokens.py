@@ -146,7 +146,8 @@ def test_the_page_uses_tokens_rather_than_raw_hex(about_css: str) -> None:
         end = body.index("}", start) + 1
         body = body[:start] + body[end:]
     stray = re.findall(r"#[0-9a-fA-F]{3,8}\b", body)
-    assert not stray, f"about.css uses raw hex outside its token blocks: {stray}"
+    stray += re.findall(r"\b(?:rgba?|hsla?)\([^)]*\)", body)
+    assert not stray, f"about.css uses raw colours outside its token blocks: {stray}"
 
 
 def test_the_theme_key_matches_the_app(about_css: str) -> None:
@@ -163,7 +164,35 @@ def test_the_theme_key_matches_the_app(about_css: str) -> None:
     assert match, "could not find THEME_STORAGE_KEY in App.tsx — this guard would be vacuous"
     key = match.group(1)
     assert key == "citevyn:theme", f"unexpected key {key!r}; update the /about page with it"
-    theme_js = ABOUT_THEME_JS.read_text(encoding="utf-8")
-    assert f'"{key}"' in theme_js, (
-        f"App.tsx stores the theme under {key!r} but about-theme.js does not read that key"
+    # Matched in an EXECUTABLE position, with comments stripped first. The
+    # first version of this guard asserted only that the key string appeared
+    # somewhere in the file -- and `about-theme.js` names it in a docstring on
+    # line 4 as well as in the `getItem` call. Review pointed the real
+    # `getItem` at a wrong key and this test stayed GREEN. A guard satisfied by
+    # a comment is not a guard.
+    theme_js = _strip_comments(ABOUT_THEME_JS.read_text(encoding="utf-8"))
+    theme_js = re.sub(r"(?m)^\s*//.*$", "", theme_js)
+    assert f'getItem("{key}")' in theme_js, (
+        f"App.tsx stores the theme under {key!r} but about-theme.js does not READ "
+        "that key (checked outside comments)"
     )
+    # ...and the value has to reach the DOM, or the page never changes theme.
+    assert 'setAttribute("data-theme"' in theme_js, (
+        "about-theme.js reads the stored theme but never applies it"
+    )
+
+
+def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
+    """``@import`` and ``url()`` inside about.css are invisible to page parsing.
+
+    The CSP guard on ``/about`` walks the HTML the browser receives; a font or
+    stylesheet pulled in from INSIDE the linked CSS never appears there. That
+    is the #306 shape exactly -- the host that broke it existed only inside a
+    fetched stylesheet. This page's CSS is expected to reference nothing
+    external at all, so the honest guard is to assert that.
+    """
+    body = _strip_comments(about_css)
+    assert "@import" not in body, "about.css @imports a stylesheet the CSP guard cannot see"
+    urls = re.findall(r"url\(([^)]*)\)", body)
+    remote = [u for u in urls if "//" in u or u.strip().strip("'\"").startswith("http")]
+    assert not remote, f"about.css loads remote resources the CSP guard cannot see: {remote}"

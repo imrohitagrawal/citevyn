@@ -27,6 +27,7 @@ assumed (see ``test_about_route_wins_against_a_bundle_that_also_claims_the_path`
 from __future__ import annotations
 
 import html
+import logging
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -132,7 +133,7 @@ def test_the_citation_url_is_literally_slash_about() -> None:
 
 
 def test_unreadable_source_degrades_instead_of_500ing(
-    bundle: Path, monkeypatch: pytest.MonkeyPatch
+    bundle: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A packaging fault must not turn into an outage of the page.
 
@@ -147,13 +148,26 @@ def test_unreadable_source_degrades_instead_of_500ing(
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(fetchers_module.LocalFetcher, "fetch", _explode)
-    with TestClient(create_app(), follow_redirects=False) as client:
+    with (
+        caplog.at_level(logging.WARNING),
+        TestClient(create_app(), follow_redirects=False) as client,
+    ):
         response = client.get(ABOUT_PATH)
 
     assert response.status_code == 200, response.text
     assert "not available" in response.text
     # ...and the page must not offer jump links to sections it failed to render.
     assert 'href="#' not in response.text
+    # The operator has to be able to tell WHICH source failed. The app's log
+    # format is "%(message)s", so an `extra=` dict is dropped entirely and the
+    # line would read `about_page_source_unreadable` and nothing else -- the
+    # same trap already recorded against #296. Asserted on the emitted record.
+    logged = [
+        r.getMessage() for r in caplog.records if "about_page_source_unreadable" in str(r.msg)
+    ]
+    assert logged, "the degrade path logged nothing"
+    assert "citevyn" in logged[0], f"log line names no source: {logged[0]}"
+    assert "Permission denied" in logged[0], f"log line carries no reason: {logged[0]}"
 
 
 def test_every_source_that_cites_about_is_on_the_page(bundle: Path) -> None:
@@ -479,8 +493,25 @@ class _PageParser(HTMLParser):
     become ordinary attributes here.
     """
 
-    #: (url, the CSP directive that governs loading it)
-    _SOURCE_ATTRS = {("script", "src"): "script-src", ("img", "src"): "img-src"}
+    #: element -> (attribute, the CSP directive that governs loading it). Every
+    #: shape here is one review demonstrated bypassing the first version of this
+    #: parser while the browser would have BLOCKED it under the shipped policy.
+    _SOURCE_ATTRS: dict[str, tuple[str, str]] = {
+        "script": ("src", "script-src"),
+        "img": ("src", "img-src"),
+        "iframe": ("src", "frame-src"),
+        "frame": ("src", "frame-src"),
+        "embed": ("src", "object-src"),
+        "object": ("data", "object-src"),
+        "source": ("src", "media-src"),
+        "audio": ("src", "media-src"),
+        "video": ("src", "media-src"),
+        "form": ("action", "form-action"),
+        "base": ("href", "base-uri"),
+    }
+
+    #: ``rel`` value -> the directive that governs the resulting fetch.
+    _LINK_RELS = {"stylesheet": "style-src", "icon": "img-src", "manifest": "manifest-src"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -519,12 +550,29 @@ class _PageParser(HTMLParser):
         if tag == "link":
             rel = mapping.get("rel", "").lower()
             href = mapping.get("href", "")
-            if rel == "stylesheet" and href:
-                self.external_sources.append((href, "style-src"))
-            elif rel == "icon" and href:
-                self.external_sources.append((href, "img-src"))
-        if tag == "img" and mapping.get("src"):
-            self.external_sources.append((mapping["src"], "img-src"))
+            if href:
+                if rel in self._LINK_RELS:
+                    self.external_sources.append((href, self._LINK_RELS[rel]))
+                elif rel in ("preload", "prefetch", "modulepreload"):
+                    # `as` decides which directive the eventual fetch lands in.
+                    as_directive = {
+                        "script": "script-src",
+                        "style": "style-src",
+                        "font": "font-src",
+                        "image": "img-src",
+                        "fetch": "connect-src",
+                    }.get(mapping.get("as", "").lower(), "default-src")
+                    self.external_sources.append((href, as_directive))
+        source_attr = self._SOURCE_ATTRS.get(tag)
+        if source_attr and tag != "script":
+            attr, directive = source_attr
+            if mapping.get(attr):
+                self.external_sources.append((mapping[attr], directive))
+        if mapping.get("srcset"):
+            for candidate in mapping["srcset"].split(","):
+                url = candidate.strip().split(" ")[0]
+                if url:
+                    self.external_sources.append((url, "img-src"))
         if tag == "meta" and mapping.get("name") == "description":
             self.meta_description = mapping.get("content")
 
