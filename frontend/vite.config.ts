@@ -72,7 +72,11 @@ export default defineConfig({
     globals: false,
     setupFiles: ["./src/test/setup.ts"],
     css: false,
-    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // ``scripts/**`` is included so the build-tooling guards run in the same
+    // required CI check as the app tests. The eager-bundle budget gate
+    // (scripts/check-bundle-size.mjs) was untestable and silently broken for
+    // exactly as long as nothing ran a test against it (#323).
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.{test,spec}.mjs"],
     exclude: ["e2e/**", "node_modules/**"],
   },
 });

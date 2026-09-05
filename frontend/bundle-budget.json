@@ -12,7 +12,24 @@
     "trusting the caller.",
     "",
     "Raising this number is a deliberate act: say why in the PR body, and expect to",
-    "justify it, which is the whole point of it living somewhere a diff can see."
+    "justify it, which is the whole point of it living somewhere a diff can see.",
+    "",
+    "WHAT IS COUNTED (#323): the whole EAGER GRAPH -- the entry <script type=",
+    "'module'> plus every <link rel='modulepreload'>, read out of the built",
+    "dist/index.html. It used to be 'the largest dist/assets/index-*.js', which",
+    "is the same number today but stops being the same the moment the build",
+    "splits: with manualChunks configured, the old form measured 19,594 B while",
+    "the browser eagerly fetched 65,284 B (measured -- it under-reported by",
+    "45,690 B and showed headroom that did not exist).",
+    "",
+    "NOT counted, deliberately: CSS (a separate ~8.9 kB gzip that no version of",
+    "this gate has ever included), and lazily-imported chunks, which are absent",
+    "from index.html by construction.",
+    "",
+    "The KEY NAME below is load-bearing. Mistyping or renaming it used to make",
+    "the gate read `undefined`, compare `gz > undefined` (false), and print",
+    "'bundle budget OK ... headroom NaN B' for a bundle of any size, exit 0.",
+    "It is now validated as a positive integer and a bad value FAILS the build."
   ],
   "eagerChunkGzipMaxBytes": 66000
 }
