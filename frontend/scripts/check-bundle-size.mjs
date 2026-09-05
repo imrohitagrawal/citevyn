@@ -8,20 +8,22 @@
  *      VITE_API_LIVE=true (what the Dockerfile sets); a build without it is ~860 B
  *      larger and is not what ships. Rather than trust the caller to have set it,
  *      this builds the shipping variant itself.
- *   3. It measures what the BROWSER FETCHES before first paint, read out of the
- *      built index.html — not a filename pattern. See bundle-budget.mjs.
+ *   3. It measures the eager module graph from Vite's own build manifest, not a
+ *      filename pattern and not preload hints. See bundle-budget.mjs.
  *
  * All decision logic lives in ./bundle-budget.mjs so it is testable without a
  * 7-second build; see bundle-budget.test.mjs, which drives this file too.
  */
 import { gzipSync } from "node:zlib";
-import { readFileSync } from "node:fs";
-import { join, dirname, normalize, sep } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import {
   parseBudget,
-  eagerScriptUrlsFromHtml,
+  buildCommand,
+  eagerChunkFilesFromManifest,
+  resolveAssetPath,
   measureEagerGraph,
   evaluate,
   EXCEEDED_ADVICE,
@@ -34,8 +36,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
  * script end-to-end (real process, real exit code) against fixtures without
  * paying for a vite build. They are NOT for CI: with no arguments this builds
  * the shipping variant itself, which is the only mode `npm run check:bundle`
- * uses. A test in bundle-budget.test.mjs pins that package.json script string
- * exactly, so wiring a flag into CI cannot happen quietly.
+ * uses. bundle-budget.test.mjs pins package.json's script string AND the
+ * workflow step (anchored, whole-line, and asserted not to be
+ * `continue-on-error`), so neither seam can be wired into CI quietly.
  */
 function parseArgs(argv) {
   const opts = { dist: null, budget: null };
@@ -58,40 +61,23 @@ if (distOverride === null) {
   // It only looked like it worked because the demo build is ~860 B larger and
   // tripped the size check instead — a guard passing for the wrong reason.
   //
-  // `--config vite.config.ts` is load-bearing: `tsc -b` emits a COMPILED
-  // `vite.config.js` next to the source (both gitignored), and Vite resolves
-  // `.js` before `.ts`. Running this script standalone would otherwise build
-  // against whatever stale compiled config happened to be lying around — which
-  // cost real time to diagnose while fixing #323, because an edit to
-  // vite.config.ts had no effect on the output at all.
-  execFileSync("npx", ["vite", "build", "--mode", "production", "--config", "vite.config.ts"], {
-    cwd: root,
-    stdio: "inherit",
-    env: { ...process.env, VITE_API_LIVE: "true" },
-  });
+  // The argv and env come from buildCommand() so a test can pin them; every
+  // flag in there is load-bearing and is explained at its definition.
+  const { cmd, args, env } = buildCommand();
+  execFileSync(cmd, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...env } });
 }
 
 const distDir = distOverride === null ? join(root, "dist") : distOverride;
 const budgetPath = budgetOverride === null ? join(root, "bundle-budget.json") : budgetOverride;
 
 const max = parseBudget(readFileSync(budgetPath, "utf8"));
-const html = readFileSync(join(distDir, "index.html"), "utf8");
-const urls = eagerScriptUrlsFromHtml(html);
+const manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8"));
+const files = eagerChunkFilesFromManifest(manifest);
 
 const measurement = measureEagerGraph({
-  urls,
-  readAsset: (url) => {
-    // index.html carries absolute, root-relative URLs ("/assets/x.js"). Resolve
-    // them under distDir and refuse anything that escapes it, so a crafted or
-    // malformed index.html cannot make the gate read (and "measure") a file
-    // outside the build output.
-    const rel = url.replace(/^\/+/, "");
-    const resolved = normalize(join(distDir, rel));
-    if (resolved !== normalize(distDir) && !resolved.startsWith(normalize(distDir) + sep)) {
-      throw new Error(`index.html references an asset outside dist/: ${url}`);
-    }
-    return readFileSync(resolved);
-  },
+  files,
+  readAsset: (file) =>
+    readFileSync(resolveAssetPath({ distDir, file, realpath: realpathSync })),
   gzipSize: (bytes) => gzipSync(bytes).length,
 });
 

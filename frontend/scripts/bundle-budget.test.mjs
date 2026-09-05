@@ -4,23 +4,31 @@
  * The gate is a GUARD, and the defect it had was that it did not guard: a
  * mistyped budget key made `gz > undefined` evaluate to `false`, so it printed
  * "bundle budget OK" and exited 0 for a bundle of any size. So these tests are
- * written the way a guard's tests have to be — the last block drives the REAL
- * script as a REAL process and asserts the EXIT CODE, because the exit code is
- * the only thing CI actually consumes. Asserting on stdout text would pass for
- * a script that printed the right words and exited 0.
+ * written the way a guard's tests have to be — one block drives the REAL script
+ * as a REAL process and asserts the EXIT CODE and the printed NUMBERS, because
+ * the exit code is the only thing CI actually consumes and a report line that
+ * is always "0 B" tells nobody anything.
+ *
+ * NOTE ON WHERE THE SELECTION GUARD LIVES: the assertion that vitest is
+ * configured to run THIS file cannot live in THIS file — reverting the config
+ * would deselect the guard along with everything it guards. It lives in
+ * src/test/buildGuards.test.ts, which the original `src/**` glob selects.
  */
 import { describe, it, expect } from "vitest";
 import { gzipSync } from "node:zlib";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import {
   BUDGET_KEY,
+  MIN_PLAUSIBLE_GZIP,
   parseBudget,
-  eagerScriptUrlsFromHtml,
+  buildCommand,
+  eagerChunkFilesFromManifest,
+  resolveAssetPath,
   measureEagerGraph,
   evaluate,
 } from "./bundle-budget.mjs";
@@ -29,24 +37,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 const frontendRoot = join(here, "..");
 const scriptPath = join(here, "check-bundle-size.mjs");
 
-// The exact <head> shape Vite 6 emits today, comment block included. Kept
-// verbatim rather than simplified: the comment is the reason the parser strips
-// comments at all, and a simplified fixture would not exercise that.
-const VITE_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <!--
-      Icons live in frontend/public/. Note <strong>/<b> below — tag-shaped text
-      inside a comment, which is why comments are stripped before scanning.
-    -->
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <script type="module" crossorigin src="/assets/index-abc.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-abc.css">
-  </head>
-  <body><div id="root"></div></body>
-</html>`;
+/** The shape Vite 6 actually emits — verified against a real build of this app. */
+const MANIFEST_SINGLE = {
+  "index.html": { file: "assets/index-abc.js", name: "index", isEntry: true, css: ["assets/index-abc.css"] },
+};
+/** A real split build: entry + a statically-imported vendor chunk + lazy chunks. */
+const MANIFEST_SPLIT = {
+  "index.html": {
+    file: "assets/index-abc.js",
+    isEntry: true,
+    imports: ["_vendor-xyz.js"],
+    dynamicImports: ["src/components/AuthModal.tsx"],
+  },
+  "_vendor-xyz.js": { file: "assets/vendor-xyz.js" },
+  "src/components/AuthModal.tsx": { file: "assets/AuthModal-lazy.js" },
+};
 
 describe("parseBudget — a missing or malformed budget must FAIL, not pass silently (#323)", () => {
   it("returns the ceiling for a well-formed budget file", () => {
@@ -64,7 +69,7 @@ describe("parseBudget — a missing or malformed budget must FAIL, not pass sile
   });
 
   it.each([
-    ['a string ceiling', `{"${BUDGET_KEY}": "66000"}`],
+    ["a string ceiling", `{"${BUDGET_KEY}": "66000"}`],
     ["null", `{"${BUDGET_KEY}": null}`],
     ["zero", `{"${BUDGET_KEY}": 0}`],
     ["a negative number", `{"${BUDGET_KEY}": -1}`],
@@ -84,123 +89,225 @@ describe("parseBudget — a missing or malformed budget must FAIL, not pass sile
   });
 
   it("accepts the budget file that actually ships", () => {
-    const text = readFileSync(join(frontendRoot, "bundle-budget.json"), "utf8");
-    expect(parseBudget(text)).toBeGreaterThan(0);
+    expect(parseBudget(readFileSync(join(frontendRoot, "bundle-budget.json"), "utf8"))).toBeGreaterThan(0);
   });
 });
 
-describe("eagerScriptUrlsFromHtml — measure what the browser fetches, not a filename pattern", () => {
-  it("finds the entry module in real Vite output", () => {
-    expect(eagerScriptUrlsFromHtml(VITE_HTML)).toEqual(["/assets/index-abc.js"]);
+/**
+ * Every one of these flags was uncovered in the first version of this fix: a
+ * reviewer deleted `--config vite.config.ts` (which the commit message called
+ * "load-bearing") and all 36 tests still passed.
+ */
+describe("buildCommand — the flags that decide WHICH artifact gets measured", () => {
+  it("builds the production mode that `npm run build` builds", () => {
+    const { args } = buildCommand();
+    expect(args.join(" ")).toContain("--mode production");
   });
 
-  // The manualChunks case from #323: code moves into vendor-*.js, which Vite
-  // then modulepreloads. The old filename-glob gate stopped counting it and
-  // under-reported by 45,690 B on this repo (measured).
-  it("counts every modulepreloaded chunk, not just the entry", () => {
-    const html = VITE_HTML.replace(
-      '<link rel="stylesheet"',
-      '<link rel="modulepreload" crossorigin href="/assets/vendor-xyz.js">\n    <link rel="stylesheet"',
-    );
-    expect(eagerScriptUrlsFromHtml(html)).toEqual([
-      "/assets/index-abc.js",
-      "/assets/vendor-xyz.js",
+  it("pins the TypeScript config, so a stale compiled vite.config.js cannot win", () => {
+    expect(buildCommand().args.join(" ")).toContain("--config vite.config.ts");
+  });
+
+  it("asks for the manifest, which is the measurement input", () => {
+    expect(buildCommand().args).toContain("--manifest");
+  });
+
+  it("builds the LIVE variant, which is what the Dockerfile ships", () => {
+    expect(buildCommand().env.VITE_API_LIVE).toBe("true");
+  });
+
+  it("invokes vite build and nothing else", () => {
+    const { cmd, args } = buildCommand();
+    expect(cmd).toBe("npx");
+    expect(args.slice(0, 2)).toEqual(["vite", "build"]);
+  });
+});
+
+describe("eagerChunkFilesFromManifest — eager is what the manifest says, not what preload hints say", () => {
+  it("returns the entry chunk for an unsplit build", () => {
+    expect(eagerChunkFilesFromManifest(MANIFEST_SINGLE)).toEqual(["assets/index-abc.js"]);
+  });
+
+  // The defect that survived the FIRST fix: with build.modulePreload:false Vite
+  // emits no <link rel="modulepreload">, so an index.html-derived gate missed a
+  // statically-imported 45.69 kB vendor chunk entirely. The manifest does not.
+  it("follows static imports, which no preload link may exist for", () => {
+    expect(eagerChunkFilesFromManifest(MANIFEST_SPLIT)).toEqual([
+      "assets/index-abc.js",
+      "assets/vendor-xyz.js",
     ]);
   });
 
-  it("excludes the stylesheet, the icon and the preconnect links", () => {
-    const urls = eagerScriptUrlsFromHtml(VITE_HTML);
-    expect(urls.some((u) => u.endsWith(".css"))).toBe(false);
-    expect(urls.some((u) => u.includes("favicon"))).toBe(false);
-    expect(urls.some((u) => u.includes("fonts.googleapis"))).toBe(false);
+  it("does NOT follow dynamicImports — that is the lazy half", () => {
+    expect(eagerChunkFilesFromManifest(MANIFEST_SPLIT)).not.toContain("assets/AuthModal-lazy.js");
   });
 
-  it("ignores a classic (non-module) script", () => {
-    const html = VITE_HTML.replace(
-      "<script type=\"module\"",
-      '<script src="/assets/legacy.js"></script>\n    <script type="module"',
-    );
-    expect(eagerScriptUrlsFromHtml(html)).toEqual(["/assets/index-abc.js"]);
+  it("excludes CSS even when the entry declares it", () => {
+    expect(eagerChunkFilesFromManifest(MANIFEST_SINGLE).some((f) => f.endsWith(".css"))).toBe(false);
   });
 
-  it("ignores a module script that is only inside an HTML comment", () => {
-    const html = VITE_HTML.replace(
-      "<!--",
-      '<!-- example: <script type="module" src="/assets/NOT-SHIPPED.js"></script>\n      ',
-    );
-    expect(eagerScriptUrlsFromHtml(html)).toEqual(["/assets/index-abc.js"]);
+  it("walks the graph transitively, not one level", () => {
+    const m = {
+      "index.html": { file: "a.js", isEntry: true, imports: ["b"] },
+      b: { file: "b.js", imports: ["c"] },
+      c: { file: "c.js" },
+    };
+    expect(eagerChunkFilesFromManifest(m)).toEqual(["a.js", "b.js", "c.js"]);
   });
 
-  it("does not assume Vite's attribute order", () => {
-    const html = VITE_HTML.replace(
-      '<script type="module" crossorigin src="/assets/index-abc.js">',
-      "<script src='/assets/index-abc.js' crossorigin type='module'>",
-    );
-    expect(eagerScriptUrlsFromHtml(html)).toEqual(["/assets/index-abc.js"]);
+  it("terminates on an import cycle instead of hanging", () => {
+    const m = {
+      "index.html": { file: "a.js", isEntry: true, imports: ["b"] },
+      b: { file: "b.js", imports: ["index.html"] },
+    };
+    expect(eagerChunkFilesFromManifest(m)).toEqual(["a.js", "b.js"]);
   });
 
-  it("counts a chunk once when it is both the entry and modulepreloaded", () => {
-    const html = VITE_HTML.replace(
-      '<link rel="stylesheet"',
-      '<link rel="modulepreload" href="/assets/index-abc.js">\n    <link rel="stylesheet"',
-    );
-    expect(eagerScriptUrlsFromHtml(html)).toEqual(["/assets/index-abc.js"]);
+  it("counts a file once when two manifest keys emit it", () => {
+    const m = {
+      "index.html": { file: "a.js", isEntry: true, imports: ["b", "c"] },
+      b: { file: "shared.js" },
+      c: { file: "shared.js" },
+    };
+    expect(eagerChunkFilesFromManifest(m)).toEqual(["a.js", "shared.js"]);
   });
 
-  // Fail CLOSED. "No entry found" must not measure 0 B and report headroom.
-  it("throws when there is no module entry at all", () => {
-    const html = VITE_HTML.replace(
-      '<script type="module" crossorigin src="/assets/index-abc.js"></script>',
-      "",
-    );
-    expect(() => eagerScriptUrlsFromHtml(html)).toThrow(/no <script type="module"/);
+  it("includes every entry when a build has more than one", () => {
+    const m = {
+      "index.html": { file: "a.js", isEntry: true },
+      "admin.html": { file: "b.js", isEntry: true },
+    };
+    expect(eagerChunkFilesFromManifest(m)).toEqual(["a.js", "b.js"]);
   });
 
-  it("throws when the module entry has no src (an inline module is not a chunk)", () => {
-    const html = VITE_HTML.replace(
-      '<script type="module" crossorigin src="/assets/index-abc.js"></script>',
-      '<script type="module">console.log("inline")</script>',
+  // Fail CLOSED in every shape-changed case: measuring 0 B and reporting
+  // headroom is the silent pass this file exists to remove.
+  it("throws when no chunk is marked isEntry", () => {
+    expect(() => eagerChunkFilesFromManifest({ "_x.js": { file: "x.js" } })).toThrow(/no entry chunk/);
+  });
+
+  it("throws when an import names a chunk the manifest does not contain", () => {
+    const m = { "index.html": { file: "a.js", isEntry: true, imports: ["_missing.js"] } };
+    expect(() => eagerChunkFilesFromManifest(m)).toThrow(/unknown chunk/);
+  });
+
+  it("throws when a record carries no file", () => {
+    expect(() => eagerChunkFilesFromManifest({ "index.html": { isEntry: true } })).toThrow(/no file/);
+  });
+
+  it("throws when the manifest is not an object", () => {
+    expect(() => eagerChunkFilesFromManifest([])).toThrow(/must contain a JSON object/);
+    expect(() => eagerChunkFilesFromManifest(null)).toThrow(/must contain a JSON object/);
+  });
+});
+
+describe("resolveAssetPath — containment, with symlinks resolved", () => {
+  const identity = (p) => p;
+
+  it("resolves a normal asset under dist", () => {
+    expect(resolveAssetPath({ distDir: "/d", file: "assets/x.js", realpath: identity })).toBe(
+      join("/d", "assets", "x.js"),
     );
-    expect(() => eagerScriptUrlsFromHtml(html)).toThrow(/no <script type="module"/);
+  });
+
+  // A trailing slash made the first version reject EVERY legitimate asset,
+  // because normalize() preserves it while the containment test appended sep.
+  it("tolerates a trailing separator on distDir", () => {
+    expect(resolveAssetPath({ distDir: `/d${sep}`, file: "assets/x.js", realpath: identity })).toBe(
+      join("/d", "assets", "x.js"),
+    );
+  });
+
+  it.each([
+    ["parent traversal", "../outside.js"],
+    ["deep traversal", "../../../../etc/hosts"],
+    ["an absolute path", "/etc/hosts"],
+    ["dist itself", "."],
+  ])("refuses %s", (_label, file) => {
+    expect(() => resolveAssetPath({ distDir: "/d", file, realpath: identity })).toThrow(
+      /outside dist/,
+    );
+  });
+
+  it("refuses a sibling directory that merely shares the dist prefix", () => {
+    expect(() =>
+      resolveAssetPath({ distDir: "/d/dist", file: "../dist-evil/x.js", realpath: identity }),
+    ).toThrow(/outside dist/);
+  });
+
+  // The containment check is lexical; without realpath a symlink INSIDE dist
+  // pointing outside it passed, and the gate measured a file from elsewhere.
+  it("refuses a symlink that escapes dist, using the REAL path", () => {
+    const fakeRealpath = (p) => (p.endsWith("link.js") ? "/somewhere/else/big.js" : p);
+    expect(() =>
+      resolveAssetPath({ distDir: "/d", file: "assets/link.js", realpath: fakeRealpath }),
+    ).toThrow(/outside dist/);
+  });
+
+  it("allows a symlink that stays inside dist", () => {
+    const fakeRealpath = (p) => (p.endsWith("link.js") ? join("/d", "assets", "real.js") : p);
+    expect(resolveAssetPath({ distDir: "/d", file: "assets/link.js", realpath: fakeRealpath })).toBe(
+      join("/d", "assets", "real.js"),
+    );
   });
 });
 
 describe("measureEagerGraph + evaluate", () => {
   const graphOf = (sizes) =>
     measureEagerGraph({
-      urls: sizes.map((_, i) => `/assets/c${i}.js`),
-      readAsset: (url) => Buffer.alloc(sizes[Number(url.match(/c(\d+)\.js/)[1])], "x"),
+      files: sizes.map((_, i) => `assets/c${i}.js`),
+      readAsset: (f) => Buffer.alloc(sizes[Number(f.match(/c(\d+)\.js/)[1])], "x"),
       gzipSize: (bytes) => bytes.length, // identity, so the arithmetic is visible
     });
 
   it("sums every eager file rather than taking the largest", () => {
-    const m = graphOf([100, 250, 30]);
-    expect(m.totalGzip).toBe(380);
+    const m = graphOf([10000, 25000, 3000]);
+    expect(m.totalGzip).toBe(38000);
     expect(m.files).toHaveLength(3);
   });
 
   it("passes when the total is under the ceiling", () => {
-    expect(evaluate({ measurement: graphOf([100]), max: 200 }).ok).toBe(true);
+    expect(evaluate({ measurement: graphOf([10000]), max: 20000 }).ok).toBe(true);
   });
 
   it("passes when the total exactly equals the ceiling", () => {
-    expect(evaluate({ measurement: graphOf([200]), max: 200 }).ok).toBe(true);
+    expect(evaluate({ measurement: graphOf([20000]), max: 20000 }).ok).toBe(true);
   });
 
   it("FAILS when the total exceeds the ceiling by one byte", () => {
-    const r = evaluate({ measurement: graphOf([201]), max: 200 });
+    const r = evaluate({ measurement: graphOf([20001]), max: 20000 });
     expect(r.ok).toBe(false);
     expect(r.headroom).toBe(-1);
   });
 
   // The defect in miniature: two chunks that each fit but together do not.
   it("FAILS when the chunks individually fit but the graph does not", () => {
-    expect(evaluate({ measurement: graphOf([150, 150]), max: 200 }).ok).toBe(false);
+    expect(evaluate({ measurement: graphOf([15000, 15000]), max: 20000 }).ok).toBe(false);
+  });
+
+  it("reports the real numbers in the line, not a constant", () => {
+    const r = evaluate({ measurement: graphOf([12000, 8000]), max: 25000 });
+    expect(r.line).toContain("20000 B gzip total");
+    expect(r.line).toContain("budget 25000 B");
+    expect(r.line).toContain("headroom 5000 B");
+    expect(r.line).toContain("assets/c0.js (12000 B)");
+  });
+
+  // A check that counts nothing must not read as success.
+  it("throws rather than passing when the graph measures implausibly small", () => {
+    expect(() => evaluate({ measurement: graphOf([0]), max: 66000 })).toThrow(/plausibility floor/);
+    expect(() => evaluate({ measurement: graphOf([MIN_PLAUSIBLE_GZIP - 1]), max: 66000 })).toThrow(
+      /plausibility floor/,
+    );
+  });
+
+  it("accepts a graph exactly at the plausibility floor", () => {
+    expect(evaluate({ measurement: graphOf([MIN_PLAUSIBLE_GZIP]), max: 66000 }).ok).toBe(true);
   });
 
   it("really gzips when handed a real gzip function", () => {
     const m = measureEagerGraph({
-      urls: ["/assets/a.js"],
+      files: ["assets/a.js"],
       readAsset: () => Buffer.from("compress me ".repeat(500)),
       gzipSize: (bytes) => gzipSync(bytes).length,
     });
@@ -213,41 +320,65 @@ describe("measureEagerGraph + evaluate", () => {
  * End-to-end: run the REAL script as a REAL process and assert the exit code.
  *
  * Everything above tests functions. CI consumes an exit code, and the #323
- * defect was precisely that a broken gate still exited 0. A test that never
- * runs the process cannot see that.
+ * defect was precisely that a broken gate still exited 0.
  */
 describe("check-bundle-size.mjs as a process — the exit code is what CI consumes", () => {
-  function fixture({ budgetJson, html, assets }) {
+  // Big enough to clear MIN_PLAUSIBLE_GZIP with real gzip: random-ish bytes,
+  // not a repeated character (which compresses to almost nothing).
+  const incompressible = (n, seed) => {
+    let x = seed;
+    return Buffer.from(
+      Array.from({ length: n }, () => {
+        x = (x * 1103515245 + 12345) & 0x7fffffff;
+        return x % 256;
+      }),
+    );
+  };
+
+  function fixture({ budgetJson, manifest, assets }) {
     const dir = mkdtempSync(join(tmpdir(), "bundle-gate-"));
     const dist = join(dir, "dist");
     mkdirSync(join(dist, "assets"), { recursive: true });
-    writeFileSync(join(dist, "index.html"), html);
+    mkdirSync(join(dist, ".vite"), { recursive: true });
+    writeFileSync(join(dist, ".vite", "manifest.json"), JSON.stringify(manifest));
     for (const [name, content] of Object.entries(assets)) {
       writeFileSync(join(dist, "assets", name), content);
     }
     const budgetPath = join(dir, "budget.json");
     writeFileSync(budgetPath, budgetJson);
-    return { dist, budgetPath };
+    return { dir, dist, budgetPath };
   }
 
-  function runGate({ budgetJson, html = VITE_HTML, assets = { "index-abc.js": "x".repeat(5000) } }) {
-    const { dist, budgetPath } = fixture({ budgetJson, html, assets });
-    const r = spawnSync(
-      process.execPath,
-      [scriptPath, "--dist", dist, "--budget", budgetPath],
-      { encoding: "utf8" },
-    );
+  const ENTRY_BYTES = incompressible(40000, 7);
+  const VENDOR_BYTES = incompressible(40000, 99);
+  const ENTRY_GZ = gzipSync(ENTRY_BYTES).length;
+  const VENDOR_GZ = gzipSync(VENDOR_BYTES).length;
+
+  function runGate({
+    budgetJson,
+    manifest = MANIFEST_SINGLE,
+    assets = { "index-abc.js": ENTRY_BYTES },
+  }) {
+    const { dist, budgetPath } = fixture({ budgetJson, manifest, assets });
+    const r = spawnSync(process.execPath, [scriptPath, "--dist", dist, "--budget", budgetPath], {
+      encoding: "utf8",
+    });
     return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
 
-  it("exits 0 for a graph under budget", () => {
-    const r = runGate({ budgetJson: `{"${BUDGET_KEY}": 10000000}` });
+  it("exits 0 for a graph under budget, and prints the REAL measured numbers", () => {
+    const r = runGate({ budgetJson: `{"${BUDGET_KEY}": ${ENTRY_GZ + 500}}` });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/bundle budget OK/);
+    // Pin the arithmetic the reader relies on: a report line hardcoded to zeros
+    // would otherwise pass every other assertion here.
+    expect(r.stdout).toContain(`${ENTRY_GZ} B gzip total`);
+    expect(r.stdout).toContain(`budget ${ENTRY_GZ + 500} B`);
+    expect(r.stdout).toContain("headroom 500 B");
   });
 
   it("exits 1 for a graph over budget", () => {
-    const r = runGate({ budgetJson: `{"${BUDGET_KEY}": 1}` });
+    const r = runGate({ budgetJson: `{"${BUDGET_KEY}": ${ENTRY_GZ - 1}}` });
     expect(r.status).toBe(1);
     expect(r.stderr).toMatch(/BUNDLE BUDGET EXCEEDED/);
   });
@@ -261,38 +392,55 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     expect(`${r.stdout}${r.stderr}`).not.toMatch(/NaN/);
   });
 
-  it("exits NON-ZERO when index.html has no module entry", () => {
+  it("exits NON-ZERO when the manifest declares no entry", () => {
     const r = runGate({
       budgetJson: `{"${BUDGET_KEY}": 10000000}`,
-      html: "<!doctype html><html><head></head><body></body></html>",
+      manifest: { "_x.js": { file: "assets/index-abc.js" } },
     });
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toMatch(/bundle budget OK/);
   });
 
-  it("exits NON-ZERO when index.html points at a missing asset", () => {
+  it("exits NON-ZERO when the manifest points at a missing asset", () => {
     const r = runGate({ budgetJson: `{"${BUDGET_KEY}": 10000000}`, assets: {} });
     expect(r.status).not.toBe(0);
   });
 
-  // The escaped path must point at a file that EXISTS, or this test passes for
-  // the wrong reason. The first version used "/../../../../etc/hosts", which
-  // resolves to a path that is not there — so it died on ENOENT and stayed
-  // green with the path guard deleted (caught by mutation). Writing a real file
-  // one level above dist/ isolates the guard as the only thing that can fail it.
-  it("refuses an index.html that reaches outside dist/, even to a file that exists", () => {
-    const dir = mkdtempSync(join(tmpdir(), "bundle-gate-escape-"));
+  it("exits NON-ZERO when there is no manifest at all", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bundle-gate-nom-"));
     const dist = join(dir, "dist");
-    mkdirSync(join(dist, "assets"), { recursive: true });
-    const outsider = join(dir, "outside.js");
-    writeFileSync(outsider, "z".repeat(1000));
-    expect(readFileSync(outsider, "utf8").length).toBe(1000); // it really is readable
-    writeFileSync(
-      join(dist, "index.html"),
-      VITE_HTML.replace("/assets/index-abc.js", "/../outside.js"),
-    );
-    const budgetPath = join(dir, "budget.json");
+    mkdirSync(dist, { recursive: true });
+    const budgetPath = join(dir, "b.json");
     writeFileSync(budgetPath, `{"${BUDGET_KEY}": 10000000}`);
+    const r = spawnSync(process.execPath, [scriptPath, "--dist", dist, "--budget", budgetPath], {
+      encoding: "utf8",
+    });
+    expect(r.status).not.toBe(0);
+  });
+
+  it("exits NON-ZERO for an implausibly small graph rather than reporting headroom", () => {
+    const r = runGate({
+      budgetJson: `{"${BUDGET_KEY}": 66000}`,
+      assets: { "index-abc.js": Buffer.alloc(0) },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toMatch(/bundle budget OK/);
+  });
+
+  // Uses a REAL symlink to a REAL file, so the only thing that can fail it is
+  // the containment guard. An earlier version of this test pointed at a
+  // nonexistent path and died on ENOENT — it stayed green with the guard
+  // deleted, which mutation testing caught.
+  it("refuses a symlinked asset that escapes dist, even though it reads fine", () => {
+    const { dir, dist, budgetPath } = fixture({
+      budgetJson: `{"${BUDGET_KEY}": 10000000}`,
+      manifest: MANIFEST_SINGLE,
+      assets: {},
+    });
+    const outsider = join(dir, "outside-big.js");
+    writeFileSync(outsider, VENDOR_BYTES);
+    expect(readFileSync(outsider).length).toBe(VENDOR_BYTES.length); // really readable
+    symlinkSync(outsider, join(dist, "assets", "index-abc.js"));
 
     const r = spawnSync(process.execPath, [scriptPath, "--dist", dist, "--budget", budgetPath], {
       encoding: "utf8",
@@ -302,38 +450,110 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     expect(r.stderr).toMatch(/outside dist/);
   });
 
-  it("counts the modulepreloaded chunk, so a split graph can exceed the budget", () => {
-    const html = VITE_HTML.replace(
-      '<link rel="stylesheet"',
-      '<link rel="modulepreload" href="/assets/vendor-xyz.js">\n    <link rel="stylesheet"',
+  it("works when --dist is given with a trailing separator", () => {
+    const { dist, budgetPath } = fixture({
+      budgetJson: `{"${BUDGET_KEY}": ${ENTRY_GZ + 10}}`,
+      manifest: MANIFEST_SINGLE,
+      assets: { "index-abc.js": ENTRY_BYTES },
+    });
+    const r = spawnSync(
+      process.execPath,
+      [scriptPath, "--dist", `${dist}${sep}`, "--budget", budgetPath],
+      { encoding: "utf8" },
     );
-    const assets = { "index-abc.js": "a".repeat(5000), "vendor-xyz.js": "b".repeat(500000) };
-    // Sized so the ENTRY alone passes and the GRAPH does not: exactly the
-    // manualChunks blind spot the old filename-glob gate had.
-    const entryOnly = gzipSync(Buffer.from("a".repeat(5000))).length;
-    const budget = `{"${BUDGET_KEY}": ${entryOnly + 50}}`;
-    expect(runGate({ budgetJson: budget, html, assets }).status).toBe(1);
-    expect(runGate({ budgetJson: budget, html: VITE_HTML, assets }).status).toBe(0);
+    expect(r.status).toBe(0);
+  });
+
+  // The manualChunks / modulePreload:false blind spot, end to end: each chunk
+  // fits on its own and only the SUM exceeds the ceiling, so this can only pass
+  // if the vendor chunk is genuinely counted.
+  it("counts a statically-imported chunk, so a split graph can exceed the budget", () => {
+    const assets = { "index-abc.js": ENTRY_BYTES, "vendor-xyz.js": VENDOR_BYTES };
+    const budget = Math.max(ENTRY_GZ, VENDOR_GZ) + 100;
+    expect(budget).toBeLessThan(ENTRY_GZ + VENDOR_GZ); // the sum is what fails
+    const over = runGate({
+      budgetJson: `{"${BUDGET_KEY}": ${budget}}`,
+      manifest: MANIFEST_SPLIT,
+      assets,
+    });
+    expect(over.status).toBe(1);
+    expect(over.stderr).toContain(`${ENTRY_GZ + VENDOR_GZ} B gzip total`);
+
+    const under = runGate({
+      budgetJson: `{"${BUDGET_KEY}": ${ENTRY_GZ + VENDOR_GZ}}`,
+      manifest: MANIFEST_SPLIT,
+      assets,
+    });
+    expect(under.status).toBe(0);
+  });
+
+  it("does not count the lazy chunk the manifest lists under dynamicImports", () => {
+    const r = runGate({
+      budgetJson: `{"${BUDGET_KEY}": ${ENTRY_GZ + VENDOR_GZ + 100}}`,
+      manifest: MANIFEST_SPLIT,
+      assets: {
+        "index-abc.js": ENTRY_BYTES,
+        "vendor-xyz.js": VENDOR_BYTES,
+        // Deliberately enormous: if it were counted, the budget above would blow.
+        "AuthModal-lazy.js": incompressible(400000, 3),
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toContain("AuthModal-lazy.js");
   });
 });
 
 /**
- * Guard the guard's INVOCATION. The --dist/--budget seam above exists for these
- * tests; if it ever appeared in the npm script, CI would stop building the
- * shipping variant and start measuring whatever was lying in dist/ — which is
- * the "wrong artifact" failure the script's docblock says it exists to prevent.
+ * Guard the guard's INVOCATION. The --dist/--budget seam exists for the tests
+ * above; if it reached CI, the gate would stop building the shipping variant
+ * and start measuring whatever was lying in dist/.
  */
 describe("the CI invocation itself", () => {
+  const workflow = () =>
+    readFileSync(join(frontendRoot, "..", ".github", "workflows", "frontend.yml"), "utf8");
+
+  /** The `build:` job block, up to the next job at the same indentation. */
+  function buildJobBlock(yaml) {
+    const lines = yaml.split("\n");
+    const start = lines.findIndex((l) => /^ {2}build:\s*$/.test(l));
+    expect(start).toBeGreaterThan(-1);
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^ {2}\S/.test(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    return lines.slice(start, end).join("\n");
+  }
+
   it("runs the script with no arguments, so CI always builds the shipping variant", () => {
     const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
     expect(pkg.scripts["check:bundle"]).toBe("node scripts/check-bundle-size.mjs");
   });
 
-  it("is wired into the frontend workflow", () => {
-    const wf = readFileSync(
-      join(frontendRoot, "..", ".github", "workflows", "frontend.yml"),
-      "utf8",
-    );
-    expect(wf).toMatch(/run:\s*npm run check:bundle/);
+  // A substring grep stayed green when the step was commented out or given
+  // arguments, so this is anchored to a whole line.
+  it("invokes the gate as a whole, unargumented line in the build job", () => {
+    expect(buildJobBlock(workflow())).toMatch(/^ +run: npm run check:bundle$/m);
+  });
+
+  // ...and green is meaningless if the step cannot fail the job.
+  it("does not let the build job continue past a failing step", () => {
+    expect(buildJobBlock(workflow())).not.toMatch(/continue-on-error/);
+  });
+
+  it("does not run the gate conditionally", () => {
+    const block = buildJobBlock(workflow());
+    const stepIdx = block.indexOf("run: npm run check:bundle");
+    // The 3 lines above the run: are that step's own keys.
+    const stepHead = block.slice(Math.max(0, stepIdx - 200), stepIdx);
+    expect(stepHead.split("\n").slice(-3).join("\n")).not.toMatch(/^\s+if:/m);
+  });
+
+  it("keeps the workflow unfiltered, so a required check always reports (#326)", () => {
+    // A path-filtered workflow that does not trigger reports NOTHING, and a
+    // required context then hangs forever.
+    expect(workflow()).not.toMatch(/^\s{4}paths:/m);
   });
 });
