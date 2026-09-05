@@ -4,16 +4,20 @@ This module is pure mechanism: a bounded Markdown-subset renderer plus the page
 shell. It imports nothing from ``app.*`` on purpose — per AGENTS.md, protocol /
 wire-format logic stays free of app-specific imports so it can move to a shared
 package later without dragging the application with it. Check the seam holds
-with ``grep "^from app\\." backend/app/services/about_page.py`` (nothing).
+with ``grep "^from app\\." backend/app/services/about_page.py`` (nothing). That
+makes it deliberately unlike its neighbours in ``app/services/``, which all take
+a session or a repository; it lives here for discoverability, not because it is
+a service.
 
 Why render the corpus rather than write a page
 ----------------------------------------------
 The citation URL ``/about`` is stamped onto every self-referential answer from
-``app.worker.allowlist``. If the page were hand-authored it would become the
-seventh paraphrase of the same copy (#84 item 4 counts six today), and the
-citation would point at a page that merely *resembles* the source the claim was
-drawn from. Rendering the source doc itself makes the link truthful by
-construction and adds no copy to keep in sync.
+``app.worker.allowlist``. A hand-authored page would be one more paraphrase of
+copy that issue #84 item 4 already tracks as duplicated (the issue says four
+places; ``citevyn.md`` is the canonical one), and the citation would point at a
+page that merely *resembles* the source the claim was drawn from. Rendering the
+source doc itself makes the link truthful by construction and adds no copy to
+keep in sync.
 
 The supported subset, and why it is a subset
 --------------------------------------------
@@ -101,25 +105,66 @@ def _blocks(markdown: str) -> Iterable[list[str]]:
         yield block
 
 
-def _render_list(block: list[str]) -> str:
+def _is_heading(line: str) -> bool:
+    """True for an ATX heading — ``#``\\ s followed by a SPACE, per CommonMark.
+
+    The space is required, and that is not pedantry: without it ``#1 priority``
+    and ``#hashtag`` render as headings whose ``id`` starts with a digit, which
+    is legal HTML5 but makes ``querySelector('#1-…')`` and the equivalent CSS
+    selector throw. Requiring the space also stops a bare ``#`` from emitting an
+    empty ``<h2></h2>``; it becomes an ordinary paragraph instead.
+    """
+    stripped = line.lstrip("#")
+    return stripped != line and stripped.startswith(" ")
+
+
+def _is_list_item(line: str) -> bool:
+    """True for a ``- `` bullet. Only ``-`` — see the subset guard for why."""
+    return line.lstrip().startswith("- ")
+
+
+def _render_list(lines: list[str]) -> str:
     """``- item`` lines into ``<ul>``; continuation lines join their item.
 
-    A continuation line is any line in a list block that does not itself start a
-    new ``- `` item — the corpus hard-wraps bullets across several lines.
+    A continuation line is any line that does not itself start a new ``- ``
+    item — the corpus hard-wraps bullets across several lines. Callers only
+    reach here with a first line that IS an item, so there is no stray-leading-
+    line case to handle; an earlier version had one and it was unreachable.
     """
     items: list[str] = []
-    for line in block:
+    for line in lines:
         stripped = line.strip()
         if stripped.startswith("- "):
             items.append(stripped[2:].strip())
-        elif items:
-            items[-1] = f"{items[-1]} {stripped}"
         else:
-            # A block that only *starts* looking like a list. Treat the stray
-            # leading line as its own item rather than dropping it.
-            items.append(stripped)
+            items[-1] = f"{items[-1]} {stripped}"
     rendered = "".join(f"<li>{html.escape(item)}</li>" for item in items)
     return f"<ul>{rendered}</ul>"
+
+
+def _split_block(block: list[str]) -> Iterable[list[str]]:
+    """Split one blank-line block wherever a heading or a list starts.
+
+    ``_blocks`` splits on blank lines only, so a list written directly under its
+    lead-in — no blank line between, which is valid Markdown and which
+    ``concepts.md`` is one edit away from — arrived here as a single block whose
+    first line was a paragraph. The whole list then rendered as
+    ``<p>Lead in: - a - b</p>``: silently mangled, and invisible to the
+    subset tripwire, because bullets ARE a supported construct.
+    """
+    run: list[str] = []
+    for line in block:
+        # A heading always starts a run. A bullet starts one unless the run is
+        # already a list, in which case it is the next item; anything else is a
+        # continuation line and belongs to whatever run is open.
+        in_list = bool(run) and _is_list_item(run[0])
+        starts_run = _is_heading(line.strip()) or (_is_list_item(line) and not in_list)
+        if starts_run and run:
+            yield run
+            run = []
+        run.append(line)
+    if run:
+        yield run
 
 
 def render_markdown(markdown: str, *, heading_offset: int = 0) -> str:
@@ -135,24 +180,35 @@ def render_markdown(markdown: str, *, heading_offset: int = 0) -> str:
     """
     parts: list[str] = []
     for block in _blocks(markdown):
-        first = block[0].strip()
-        if first.startswith("#"):
-            hashes = len(first) - len(first.lstrip("#"))
-            text = first[hashes:].strip()
-            # Clamp to h6: HTML has no h7, and a deeper corpus heading would
-            # otherwise emit an element browsers do not recognise.
-            level = min(hashes + heading_offset, 6)
-            anchor = slugify(text)
-            attrs = f' id="{html.escape(anchor, quote=True)}"' if anchor else ""
-            parts.append(f"<h{level}{attrs}>{html.escape(text)}</h{level}>")
-            # A heading block may carry following lines when the source has no
-            # blank line after it; render them as a paragraph rather than lose them.
-            if len(block) > 1:
-                parts.append(f"<p>{html.escape(' '.join(x.strip() for x in block[1:]))}</p>")
-        elif first.startswith("- "):
-            parts.append(_render_list(block))
-        else:
-            parts.append(f"<p>{html.escape(' '.join(line.strip() for line in block))}</p>")
+        for run in _split_block(block):
+            first = run[0].strip()
+            if _is_heading(first):
+                hashes = len(first) - len(first.lstrip("#"))
+                text = first[hashes:].strip()
+                # Clamp to 1..6 in BOTH directions: HTML has no h7 and no h0,
+                # and `heading_offset` is a public parameter, so a negative one
+                # would otherwise emit an element browsers do not recognise.
+                level = min(max(hashes + heading_offset, 1), 6)
+                anchor = slugify(text)
+                # ``quote=True`` is belt-and-braces: `slugify` emits only
+                # [a-z0-9-], so no quote can reach here and a mutant that
+                # removes it will survive. Kept because the escape is the
+                # invariant, not the current alphabet.
+                #
+                # ``tabindex="-1"`` makes a jump link MOVE FOCUS rather than
+                # only scroll. Without it `document.activeElement` stays on
+                # <body> after following a table-of-contents link, so where the
+                # keyboard resumes is up to the browser rather than the page.
+                # -1 keeps the heading out of the Tab order.
+                attrs = f' id="{html.escape(anchor, quote=True)}" tabindex="-1"' if anchor else ""
+                parts.append(f"<h{level}{attrs}>{html.escape(text)}</h{level}>")
+                if len(run) > 1:
+                    body = " ".join(x.strip() for x in run[1:])
+                    parts.append(f"<p>{html.escape(body)}</p>")
+            elif _is_list_item(first):
+                parts.append(_render_list(run))
+            else:
+                parts.append(f"<p>{html.escape(' '.join(line.strip() for line in run))}</p>")
     return "".join(parts)
 
 
@@ -173,7 +229,7 @@ def document_anchor(title: str, markdown: str) -> str:
     """
     for line in markdown.splitlines():
         stripped = line.strip()
-        if stripped.startswith("#"):
+        if _is_heading(stripped):
             return slugify(stripped.lstrip("#").strip())
     return slugify(title)
 
@@ -208,17 +264,23 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
     written twice (see :func:`document_anchor`).
     """
     sections: list[str] = []
+    rendered_anything = False
     for _title, markdown in documents:
         # heading_offset=1: the source doc's `#` becomes an <h2> beneath the
         # page's single <h1>, and carries the section's only id.
         rendered = render_markdown(markdown, heading_offset=1)
+        rendered_anything = rendered_anything or bool(rendered)
         sections.append(f'<section class="about-doc">{rendered}</section>')
     body = "".join(sections)
-    if not body:
-        # Defensive, and honest about it: an empty corpus selection would
-        # otherwise ship a page with a heading and nothing under it, which reads
-        # as a broken deploy rather than a broken configuration.
+    toc = _table_of_contents(documents)
+    if not rendered_anything:
+        # Tested on the RENDERED CONTENT, not on ``body``. An earlier version
+        # checked ``if not body``, which could never fire once a document was
+        # present but empty: the wrapping ``<section>`` made ``body`` non-empty,
+        # so the page shipped an empty section plus a table-of-contents link
+        # pointing at an anchor that did not exist.
         body = "<p>The source documents for this page are not available.</p>"
+        toc = ""
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -236,17 +298,24 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
         f'<script src="{THEME_SCRIPT_URL}"></script>\n'
         "</head>\n"
         "<body>\n"
-        '<main class="about-page">\n'
+        # <header> and <footer> sit OUTSIDE <main> on purpose. Per HTML-AAM
+        # they only map to the banner / contentinfo landmarks when they are not
+        # inside main/article/aside/nav/section; nested, they expose
+        # role=generic and the page has no banner or contentinfo at all. The
+        # shared width is `.about-page`, which wraps all three.
+        '<div class="about-page">\n'
         '<header class="about-header">\n'
-        '<a class="about-back" href="/">CiteVyn</a>\n'
+        '<a class="about-back" href="/" aria-label="Back to CiteVyn">&#8592; CiteVyn</a>\n'
         f"<h1>{html.escape(PAGE_TITLE)}</h1>\n"
         '<p class="about-lead">These are the pages CiteVyn cites when it answers '
         "questions about itself. They are the source text, not a summary of it.</p>\n"
         "</header>\n"
-        f"{_table_of_contents(documents)}\n"
+        "<main>\n"
+        f"{toc}\n"
         f"{body}\n"
-        '<footer class="about-footer"><a href="/">Back to CiteVyn</a></footer>\n'
         "</main>\n"
+        '<footer class="about-footer"><a href="/">Back to CiteVyn</a></footer>\n'
+        "</div>\n"
         "</body>\n"
         "</html>\n"
     )

@@ -40,7 +40,6 @@
   --border: #e7e3da;
   --hl: #ffd75e;
   --hl-ink: #1c1b19;
-  --border-focus: #ffd75e;
 
   --font-sans: "Geist", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
@@ -79,7 +78,6 @@
   --muted: #a4a19a;
   --border: #323238;
   --hl: #f6c453;
-  --border-focus: #f6c453;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -90,7 +88,6 @@
     --muted: #a4a19a;
     --border: #323238;
     --hl: #f6c453;
-    --border-focus: #f6c453;
   }
 }
 
@@ -134,7 +131,9 @@ body {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
-  letter-spacing: 0.04em;
+  /* 0.08em, inside UI_DESIGN §1.2's 0.06-0.14em band for mono labels.
+   * Uppercase needs MORE tracking, not less; 0.04em was under the floor. */
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   text-decoration: none;
   color: var(--muted);
@@ -230,7 +229,15 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* --ink, NOT --border-focus. Measured in real Chromium: the yellow
+ * --border-focus ring is 1.32:1 against --bg and 1.39:1 against --surface in
+ * light mode, i.e. WORSE than the browser's own default ring this rule
+ * replaces (~18:1), so shipping it would have left keyboard users worse off
+ * than writing no rule at all. --ink measures 16.35:1 light / 15.69:1 dark,
+ * and it is what the SPA's only real focus style already uses
+ * (landing.css `a.citation-chip:focus-visible`). --border-focus is declared in
+ * tokens.css but consumed by nothing in frontend/src. */
 :focus-visible {
-  outline: 2px solid var(--border-focus);
+  outline: 2px solid var(--ink);
   outline-offset: 2px;
 }

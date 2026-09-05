@@ -32,6 +32,7 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from app.core.logging import build_log_event
 from app.services.about_page import render_about_page
 from app.worker.allowlist import MVP_SOURCES, SourceSpec
 from app.worker.fetchers import FetchError, build_fetcher
@@ -63,15 +64,29 @@ def _load_documents() -> list[tuple[str, str]]:
     one means a broken build — but answering a 500 on a public page would turn a
     packaging fault into an outage of the page, and the remaining sections are
     still worth serving.
+
+    ``OSError`` is caught alongside ``FetchError`` because ``LocalFetcher``
+    only converts "missing" and "not utf-8"; a permissions or I/O error from
+    ``read_text`` escapes it and would have 500'd this page — the exact reader
+    experience #84 exists to remove.
+
+    Logged through :func:`build_log_event`, not ``extra=``: the app's log
+    format is ``%(message)s`` (``app/core/logging.py``), so an ``extra`` dict is
+    DROPPED and the line would have read ``about_page_source_unreadable`` with
+    no indication of which source failed or why. Same trap already recorded
+    against the email-failure log line in #296.
     """
     documents: list[tuple[str, str]] = []
     for spec in about_sources():
         try:
             documents.append((spec.title, build_fetcher(spec).fetch(spec)))
-        except FetchError as exc:  # pragma: no cover - packaging fault, not logic
+        except (FetchError, OSError) as exc:
             logger.warning(
-                "about_page_source_unreadable",
-                extra={"source": spec.name, "error": str(exc)},
+                build_log_event(
+                    "about_page_source_unreadable",
+                    source=spec.name,
+                    error=str(exc),
+                )
             )
     return documents
 

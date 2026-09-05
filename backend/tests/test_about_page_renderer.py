@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from app.api.routes.about import ABOUT_PATH
 from app.services.about_page import (
     STYLESHEET_URL,
@@ -33,8 +35,39 @@ from app.worker.fetchers import build_fetcher
 
 
 def test_headings_become_headings_with_anchors() -> None:
-    assert render_markdown("# About CiteVyn") == '<h1 id="about-citevyn">About CiteVyn</h1>'
-    assert render_markdown("## Coverage") == '<h2 id="coverage">Coverage</h2>'
+    """``tabindex="-1"`` is part of the contract, not decoration: without it a
+    table-of-contents link scrolls without moving focus, and where the keyboard
+    resumes is left to the browser."""
+    assert (
+        render_markdown("# About CiteVyn")
+        == '<h1 id="about-citevyn" tabindex="-1">About CiteVyn</h1>'
+    )
+    assert render_markdown("## Coverage") == '<h2 id="coverage" tabindex="-1">Coverage</h2>'
+
+
+@pytest.mark.parametrize("text", ["#no space", "#1 priority for us", "#"])
+def test_hashes_without_a_following_space_are_not_headings(text: str) -> None:
+    """CommonMark requires the space, and the space is load-bearing here.
+
+    Without it ``#1 priority`` became ``<h2 id="1-priority-for-us">`` — legal
+    HTML5, but ``querySelector('#1-…')`` throws and the equivalent CSS selector
+    is invalid — and a bare ``#`` emitted an empty ``<h2></h2>``.
+    """
+    rendered = render_markdown(text, heading_offset=1)
+    assert rendered.startswith("<p>"), rendered
+
+
+def test_a_list_written_under_its_lead_in_still_renders_as_a_list() -> None:
+    """Blocks are blank-line delimited, but Markdown lists need no blank line.
+
+    Before this, ``Lead in:\\n- a\\n- b`` rendered as
+    ``<p>Lead in: - a - b</p>`` — the whole list silently flattened into a
+    paragraph of hyphens, and invisible to the subset tripwire because bullets
+    ARE a supported construct. ``concepts.md`` is one deleted blank line away
+    from this shape.
+    """
+    assert render_markdown("Lead in:\n- a\n- b") == "<p>Lead in:</p><ul><li>a</li><li>b</li></ul>"
+    assert render_markdown("## T\n- a") == ('<h2 id="t" tabindex="-1">T</h2><ul><li>a</li></ul>')
 
 
 def test_heading_offset_keeps_one_h1_on_the_page() -> None:
@@ -63,12 +96,27 @@ def test_bullet_list_becomes_a_list_and_continuations_join_their_item() -> None:
     )
 
 
-def test_markup_in_the_corpus_is_escaped_not_executed() -> None:
+@pytest.mark.parametrize(
+    ("markdown", "where"),
+    [
+        ("a <script>alert(1)</script> b", "paragraph"),
+        ("- <script>alert(1)</script>", "list item"),
+        ("# <script>alert(1)</script>", "heading"),
+        ('# x" onload="alert(1)', "heading attribute context"),
+    ],
+)
+def test_markup_in_the_corpus_is_escaped_not_executed(markdown: str, where: str) -> None:
     """Defence in depth: the corpus is repo-controlled, but the renderer is not
-    entitled to assume that about whatever calls it later."""
-    rendered = render_markdown("a <script>alert(1)</script> b")
-    assert "<script>" not in rendered
-    assert "&lt;script&gt;" in rendered
+    entitled to assume that about whatever calls it later.
+
+    Parametrized over ALL THREE escape call sites. The first version fed only a
+    paragraph, and review then dropped ``html.escape`` from the ``<li>`` and the
+    heading independently — both mutants survived a fully green suite while the
+    module docstring claimed "escaping is unconditional".
+    """
+    rendered = render_markdown(markdown)
+    assert "<script>" not in rendered, where
+    assert "&lt;script&gt;" in rendered or "&quot;" in rendered, (where, rendered)
 
 
 def test_unsupported_markup_degrades_to_text_rather_than_raising() -> None:
@@ -103,6 +151,20 @@ def test_page_links_its_external_stylesheet_and_script() -> None:
     page = render_about_page([("About CiteVyn", "# About CiteVyn\n\nBody.")])
     assert f'<link rel="stylesheet" href="{STYLESHEET_URL}">' in page
     assert f'<script src="{THEME_SCRIPT_URL}"></script>' in page
+
+
+def test_page_actually_requests_the_typeface_its_css_asks_for() -> None:
+    """``about.css`` names "Geist" first; something has to deliver it.
+
+    #316's defect exactly: CSS naming a face nobody fetches falls silently
+    through to ``system-ui`` and no error appears anywhere. Dropping the font
+    ``<link>`` from this page is invisible to the CSP guard (which only cares
+    that loaded origins are permitted), so it is asserted here instead.
+    """
+    page = render_about_page([("About CiteVyn", "# About CiteVyn\n\nBody.")])
+    assert "fonts.googleapis.com" in page
+    assert "Geist" in page
+    assert 'rel="preconnect"' in page
 
 
 def test_table_of_contents_links_resolve_to_real_anchors() -> None:
@@ -149,6 +211,44 @@ def test_empty_selection_says_so_instead_of_shipping_a_bare_heading() -> None:
     assert "not available" in page
 
 
+def test_documents_that_render_nothing_also_trigger_the_fallback() -> None:
+    """The fallback tests the RENDERED CONTENT, not the concatenated markup.
+
+    An earlier version checked ``if not body``, which could never fire once a
+    document was present but empty: the wrapping ``<section>`` kept ``body``
+    non-empty, so the page shipped an empty section plus a table-of-contents
+    link pointing at an id that was never rendered.
+    """
+    page = render_about_page([("About CiteVyn", "")])
+    assert "not available" in page
+    targets = set(re.findall(r'href="#([^"]+)"', page))
+    assert not targets, f"dangling table-of-contents anchors on an empty page: {targets}"
+
+
+def test_the_real_served_page_never_repeats_an_id() -> None:
+    """The id guard above uses a two-document literal; this one uses the CORPUS.
+
+    Review reproduced the gap: give ``concepts.md`` a ``## Coverage`` heading —
+    ``citevyn.md`` already has one — and the served page ships ``id="coverage"``
+    twice while every hand-written test stays green. ``slugify`` does not
+    de-duplicate across documents, so the only honest check is against the real
+    documents that will actually be rendered.
+    """
+    documents = [
+        (spec.title, build_fetcher(spec).fetch(spec))
+        for spec in MVP_SOURCES
+        if spec.source_url == ABOUT_PATH
+    ]
+    assert len(documents) >= 2, "fewer than two /about sources — this guard would be weak"
+    ids = re.findall(r'id="([^"]+)"', render_about_page(documents))
+    assert len(ids) > 10, f"only {len(ids)} ids rendered — the corpus or the parser is wrong"
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
+    assert not duplicates, (
+        "two headings across the /about corpus slug to the same id: "
+        f"{duplicates}. Rename one heading, or namespace the anchors per document."
+    )
+
+
 # ---------------------------------------------------------------------------
 # The tripwire that lets the renderer stay small
 # ---------------------------------------------------------------------------
@@ -164,6 +264,15 @@ _UNSUPPORTED = {
     "link": re.compile(r"\[[^\]]+\]\([^)]+\)"),
     "image": re.compile(r"!\[[^\]]*\]"),
     "bold": re.compile(r"\*\*\S"),
+    # Bullets written with * or +, and nested bullets, are ORDINARY Markdown
+    # that this renderer does not accept: `* one` renders as a paragraph of
+    # asterisks and an indented sub-bullet flattens into a sibling <li>.
+    # Because bullets are a *supported* construct, nothing else notices.
+    "asterisk or plus bullet": re.compile(r"^[ \t]*[*+][ \t]+\S", re.MULTILINE),
+    "nested bullet": re.compile(r"^[ \t]+[-*+][ \t]+\S", re.MULTILINE),
+    "setext heading": re.compile(r"^[^\n]+\n[ \t]*=+[ \t]*$", re.MULTILINE),
+    "raw html": re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*\s*/?>"),
+    "closed atx heading": re.compile(r"^#{1,6} .*[^#]#+[ \t]*$", re.MULTILINE),
     "italic or emphasis": re.compile(r"(?<!\w)[*_]\w"),
     "inline code": re.compile(r"`"),
     "horizontal rule": re.compile(r"^\s*(?:---+|\*\*\*+|___+)\s*$", re.MULTILINE),
@@ -205,6 +314,11 @@ def test_the_subset_detector_actually_detects() -> None:
         "italic or emphasis": "*em*",
         "inline code": "`code`",
         "horizontal rule": "---",
+        "asterisk or plus bullet": "* one",
+        "nested bullet": "  - nested",
+        "setext heading": "Title\n=====",
+        "raw html": "<b>bold</b>",
+        "closed atx heading": "## Title ##",
     }
     assert samples.keys() == _UNSUPPORTED.keys()
     for name, sample in samples.items():

@@ -27,7 +27,9 @@ assumed (see ``test_about_route_wins_against_a_bundle_that_also_claims_the_path`
 from __future__ import annotations
 
 import html
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +37,7 @@ from fastapi.testclient import TestClient
 from app import main as main_module
 from app.api.routes.about import ABOUT_PATH, about_sources
 from app.main import create_app
+from app.services.about_page import PAGE_TITLE, THEME_SCRIPT_URL
 from app.worker.allowlist import MVP_SOURCES
 from app.worker.fetchers import build_fetcher
 
@@ -110,6 +113,47 @@ def test_about_page_carries_the_prose_the_citation_promises(bundle: Path) -> Non
             f"source {spec.name!r} cites {ABOUT_PATH} but its prose is missing "
             f"from the served page; expected to find {sentence!r}"
         )
+
+
+def test_the_citation_url_is_literally_slash_about() -> None:
+    """``ABOUT_PATH`` is not free to change — the value is already in the DB.
+
+    Every other test follows ``ABOUT_PATH`` wherever it points, so a coordinated
+    edit changing both this constant and ``allowlist.py``'s ``source_url`` to
+    ``/about-us`` would leave the whole suite green while re-breaking every
+    citation ALREADY PERSISTED in ``documents.source_url`` — which is the exact
+    bug #84 item 6 is about, and the reason the fix serves the URL instead of
+    changing it. Pinned to the literal so that edit goes red.
+    """
+    assert ABOUT_PATH == "/about"
+    assert [spec.name for spec in MVP_SOURCES if spec.source_url == "/about"] == [
+        spec.name for spec in about_sources()
+    ]
+
+
+def test_unreadable_source_degrades_instead_of_500ing(
+    bundle: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A packaging fault must not turn into an outage of the page.
+
+    This path used to be marked ``# pragma: no cover`` — a flattering 100% over
+    a reachable, untested branch. ``OSError`` is included because
+    ``LocalFetcher`` only converts "missing" and "not utf-8"; a permissions or
+    I/O error escapes it, and before this it 500'd the page.
+    """
+    from app.worker import fetchers as fetchers_module
+
+    def _explode(self: object, source: object) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(fetchers_module.LocalFetcher, "fetch", _explode)
+    with TestClient(create_app(), follow_redirects=False) as client:
+        response = client.get(ABOUT_PATH)
+
+    assert response.status_code == 200, response.text
+    assert "not available" in response.text
+    # ...and the page must not offer jump links to sections it failed to render.
+    assert 'href="#' not in response.text
 
 
 def test_every_source_that_cites_about_is_on_the_page(bundle: Path) -> None:
@@ -199,26 +243,68 @@ def test_api_routes_are_still_not_shadowed(bundle: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_page_has_no_inline_style_or_script(bundle: Path) -> None:
+def test_page_carries_nothing_the_csp_would_block(bundle: Path) -> None:
     """The app-wide CSP has no 'unsafe-inline' on script-src OR style-src.
 
     Measured in real Chromium against this app: an inline ``<style>``, a
     ``style=`` attribute and an inline ``<script>`` are all blocked, silently
     as far as the page is concerned. A page that styled itself inline would
     therefore render unstyled in production while passing every status-code
-    test. Asserted on the response body — what the browser is handed — not on
-    the template that produced it.
+    test.
+
+    PARSED, not substring-matched. The first version of this test asserted the
+    strings ``"<style"``, ``"style="`` and ``"<script"`` were absent, and review
+    walked through it twice: ``onclick="alert(1)"`` is inline script under
+    ``script-src 'self'`` and contains none of those strings, and
+    ``style ="..."`` — one space before the ``=`` — is a live style attribute
+    that the literal ``"style="`` never sees. Both left the suite fully green.
+    A guard that asserts a string is absent is not a guard; this one walks the
+    real elements the browser will build.
     """
     with TestClient(create_app(), follow_redirects=False) as client:
         body = client.get(ABOUT_PATH).text
 
-    lowered = body.lower()
-    assert "<style" not in lowered
-    assert "style=" not in lowered
-    assert "<script>" not in lowered
-    # An external same-origin script IS allowed by script-src 'self'; an inline
-    # one is not. Distinguish them rather than banning <script> outright.
-    assert "<script" not in lowered.replace("<script src=", "")
+    page = _parse(body)
+    assert page.elements, "the parser found no elements — this guard would be vacuous"
+    assert not page.inline_styles, f"inline <style> blocks: {page.inline_styles}"
+    assert not page.style_attributes, f"style= attributes on: {page.style_attributes}"
+    assert not page.event_handlers, f"inline event handlers (CSP-blocked): {page.event_handlers}"
+    assert not page.javascript_urls, f"javascript: URLs (CSP-blocked): {page.javascript_urls}"
+    assert not page.inline_scripts, f"<script> elements with a body: {page.inline_scripts}"
+    # An external same-origin script IS allowed by script-src 'self'.
+    assert page.script_sources == [THEME_SCRIPT_URL], page.script_sources
+
+
+def test_every_origin_the_page_loads_is_permitted_by_the_csp_it_ships_with(
+    bundle: Path,
+) -> None:
+    """Resolve each origin the page loads against the CSP on the SAME response.
+
+    The other direction from the test above: not "is there anything inline"
+    but "is every source the page names actually allowed". Both the policy and
+    the body are taken from one response, so this cannot drift from what the
+    browser receives — and it does not care which constant the URL came from.
+    """
+    with TestClient(create_app(), follow_redirects=False) as client:
+        response = client.get(ABOUT_PATH)
+
+    directives = _parse_csp(response.headers["content-security-policy"])
+    page = _parse(response.text)
+    checked = 0
+    for url, directive in page.external_sources:
+        checked += 1
+        origin = urlsplit(url)
+        allowed = directives.get(directive, set()) | directives.get("default-src", set())
+        if origin.scheme:
+            assert f"{origin.scheme}://{origin.netloc}" in allowed, (
+                f"{url} is loaded under {directive} but that origin is not in the "
+                f"policy this very response carries: {sorted(allowed)}"
+            )
+        else:
+            assert "'self'" in allowed, f"{url} is same-origin but {directive} lacks 'self'"
+    assert checked >= 4, (
+        f"expected the stylesheet, font stylesheet, script and icon, found {checked}"
+    )
 
 
 def test_local_assets_the_page_references_actually_ship(bundle: Path) -> None:
@@ -278,11 +364,60 @@ def test_security_headers_are_present_on_the_page(bundle: Path) -> None:
     assert "content-security-policy" in headers
 
 
-def test_page_links_back_to_the_app(bundle: Path) -> None:
-    """A citation is a one-way trip unless the page offers a way back."""
+def test_page_links_back_to_the_app_from_header_and_footer(bundle: Path) -> None:
+    """A citation is a one-way trip unless the page offers a way back.
+
+    COUNTED, because there are two such links and the first version of this
+    test asserted only that one existed. Review deleted the header link and the
+    whole suite stayed green — the footer link supplied the observation. Both
+    are load-bearing: a reader who lands mid-page from a jump link, and one who
+    reaches the bottom of a long document, need different exits.
+    """
+    with TestClient(create_app(), follow_redirects=False) as client:
+        page = _parse(client.get(ABOUT_PATH).text)
+
+    back = [(tag, attrs) for tag, attrs in page.elements if tag == "a" and attrs.get("href") == "/"]
+    assert len(back) == 2, f"expected a header AND a footer link home, found {back}"
+    # The accessible name must say where it goes: "CiteVyn" alone does not
+    # (WCAG 2.4.4), so the header link carries an explicit label.
+    assert any(attrs.get("aria-label") == "Back to CiteVyn" for _, attrs in back)
+
+
+def test_landmarks_are_not_nested_inside_main(bundle: Path) -> None:
+    """``<header>``/``<footer>`` map to banner/contentinfo only OUTSIDE ``<main>``.
+
+    Per HTML-AAM they expose ``role=generic`` when nested inside
+    main/article/aside/nav/section, so the first version of this page — which
+    wrapped both in ``<main class="about-page">`` — shipped no banner and no
+    contentinfo landmark at all. Measured in the served markup, not asserted
+    about the template.
+    """
     with TestClient(create_app(), follow_redirects=False) as client:
         body = client.get(ABOUT_PATH).text
-    assert 'href="/"' in body
+
+    main_open = body.index("<main")
+    main_close = body.index("</main>")
+    assert body.index("<header") < main_open, "<header> is inside <main> (role=generic)"
+    assert body.index("<footer") > main_close, "<footer> is inside <main> (role=generic)"
+
+
+def test_page_declares_the_document_metadata_a_browser_needs(bundle: Path) -> None:
+    """Title, language, charset and viewport — the page's document contract.
+
+    None of these were covered before: review mutated each away in turn and the
+    suite stayed green. The viewport one matters most in practice — a citation
+    chip is overwhelmingly a phone tap, and without the meta the page renders
+    at desktop width and zoomed out.
+    """
+    with TestClient(create_app(), follow_redirects=False) as client:
+        body = client.get(ABOUT_PATH).text
+
+    assert '<html lang="en">' in body
+    assert '<meta charset="utf-8">' in body
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in body
+    assert f"<title>{PAGE_TITLE} — CiteVyn</title>" in body
+    description = _parse(body).meta_description
+    assert description and len(description) > 40, f"thin or missing description: {description!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +451,101 @@ def _first_prose_sentence(markdown: str) -> str:
 
 def _local_refs(html: str) -> list[str]:
     """Rooted local ``href``/``src`` values, minus the back-to-the-app link."""
-    import re
+    return [
+        ref
+        for ref, _ in _parse(html).external_sources
+        if ref.startswith("/") and ref != "/" and not ref.startswith("//")
+    ]
 
-    refs = re.findall(r"""\b(?:href|src)\s*=\s*["'](/[^"']*)["']""", html)
-    return [ref for ref in refs if ref != "/" and not ref.startswith("//")]
+
+def _parse_csp(header: str) -> dict[str, set[str]]:
+    """``directive -> sources`` for a Content-Security-Policy header value."""
+    directives: dict[str, set[str]] = {}
+    for chunk in header.split(";"):
+        parts = chunk.split()
+        if parts:
+            directives[parts[0].lower()] = set(parts[1:])
+    return directives
+
+
+class _PageParser(HTMLParser):
+    """What the browser will actually build out of the response body.
+
+    Deliberately an element/attribute walk rather than a set of substring
+    checks. The tests above exist to catch content the CSP would block, and
+    substring checks for ``"<style"`` / ``"style="`` were demonstrably bypassed
+    by ``onclick=`` and by ``style ="..."``. ``HTMLParser`` normalises
+    attribute names and whitespace the way a browser does, so those bypasses
+    become ordinary attributes here.
+    """
+
+    #: (url, the CSP directive that governs loading it)
+    _SOURCE_ATTRS = {("script", "src"): "script-src", ("img", "src"): "img-src"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.elements: list[tuple[str, dict[str, str]]] = []
+        self.inline_styles: list[str] = []
+        self.style_attributes: list[str] = []
+        self.event_handlers: list[str] = []
+        self.javascript_urls: list[str] = []
+        self.inline_scripts: list[str] = []
+        self.script_sources: list[str] = []
+        self.external_sources: list[tuple[str, str]] = []
+        self.meta_description: str | None = None
+        self._in_script = False
+        self._in_style = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        mapping = {name: (value or "") for name, value in attrs}
+        self.elements.append((tag, mapping))
+        for name, value in mapping.items():
+            if name == "style":
+                self.style_attributes.append(tag)
+            elif name.startswith("on"):
+                self.event_handlers.append(f"{tag}[{name}]")
+            elif value.strip().lower().startswith(("javascript:", "data:text/html")):
+                self.javascript_urls.append(f"{tag}[{name}]")
+        if tag == "style":
+            # Recorded on the ELEMENT, not only on its text: an empty
+            # <style></style> is still a CSP-blocked inline style block.
+            self._in_style = True
+            self.inline_styles.append("<style> element")
+        if tag == "script":
+            self._in_script = True
+            if "src" in mapping:
+                self.script_sources.append(mapping["src"])
+                self.external_sources.append((mapping["src"], "script-src"))
+        if tag == "link":
+            rel = mapping.get("rel", "").lower()
+            href = mapping.get("href", "")
+            if rel == "stylesheet" and href:
+                self.external_sources.append((href, "style-src"))
+            elif rel == "icon" and href:
+                self.external_sources.append((href, "img-src"))
+        if tag == "img" and mapping.get("src"):
+            self.external_sources.append((mapping["src"], "img-src"))
+        if tag == "meta" and mapping.get("name") == "description":
+            self.meta_description = mapping.get("content")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "style":
+            self._in_style = False
+        if tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style and data.strip():
+            self.inline_styles.append(data.strip()[:60])
+        if self._in_script and data.strip():
+            # Also catches a <script src="..."> whose body carries code: the
+            # browser ignores that body, but it is inline script text and has
+            # no business on the page.
+            self.inline_scripts.append(data.strip()[:60])
+
+
+def _parse(html_text: str) -> _PageParser:
+    parser = _PageParser()
+    parser.feed(html_text)
+    parser.close()
+    return parser
