@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.answer.orchestrator import OrchestratorError
+from app.api.routes.about import router as about_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
@@ -132,6 +133,10 @@ def create_app() -> FastAPI:
     app.include_router(messages_router)
     app.include_router(search_router)
     app.include_router(admin_router)
+    # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
+    # and would answer /about with a 307 to /about/ instead, silently. See
+    # app/api/routes/about.py and tests/test_about_page.py.
+    app.include_router(about_router)
 
     # Exception handlers are defined at module scope (below) so pyright
     # can see them as referenced symbols; the FastAPI decorator binds
@@ -165,8 +170,13 @@ def _mount_frontend(app: FastAPI) -> None:
     imports ``create_app`` must keep working without it. In that case ``/``
     stays a 404, which is exactly the pre-existing API-only behaviour.
 
-    ``html=True`` serves ``index.html`` for ``/`` and falls back to it for
-    unknown paths, which is what a single-page app needs.
+    ``html=True`` serves ``index.html`` for the ``/`` DIRECTORY. It does NOT
+    fall back to ``index.html`` for unknown paths — an earlier version of this
+    docstring claimed it did, and that claim was wrong. Measured against the
+    installed Starlette: a miss looks for ``404.html`` and then raises 404, so
+    ``/about`` 404'd for as long as it was cited (#84 item 6), and any client
+    route would too. ``test_frontend_mount.py`` already proved this for
+    ``/v1/...``; nothing had noticed it also applied to page paths.
     """
     if not FRONTEND_DIST.is_dir():
         _logger.info("frontend_bundle_absent", extra={"path": str(FRONTEND_DIST)})

@@ -1,0 +1,236 @@
+/* ============================================================================
+ * Stylesheet for the server-rendered /about page (#84 item 6).
+ *
+ * WHY THIS FILE IS NOT IN src/styles/
+ * -----------------------------------
+ * /about is rendered by the API (backend/app/services/about_page.py), not by
+ * the React bundle, so it has to name its stylesheet in a hand-written <link>.
+ * Everything Vite emits from src/ is content-hashed (assets/index-CFKwmVMY.css)
+ * and no hand-written href can track that. Files under frontend/public/ are
+ * copied verbatim into dist/ and from there into the image, so /about.css is a
+ * stable URL the existing StaticFiles mount already serves — the same path
+ * /favicon.svg ships by, verified live.
+ *
+ * It cannot be an inline <style> either: the app-wide CSP carries no
+ * 'unsafe-inline' on style-src. Measured in real Chromium against this app, an
+ * inline <style> AND a style= attribute are both blocked, with no visible
+ * breakage until you open the console.
+ *
+ * WHY THE TOKENS ARE REDECLARED HERE
+ * ----------------------------------
+ * Same reason: tokens.css is bundled and hashed, so this page cannot import it.
+ * The values below are copied from frontend/src/styles/tokens.css, and
+ * backend/tests/test_about_page_tokens.py parses BOTH files and fails if any
+ * value drifts — so this duplication is enforced-identical, not hoped-identical.
+ * Only the tokens this page actually uses are copied; adding a new one here
+ * means the guard starts checking it too.
+ *
+ * stylelint note: `npm run lint:css` globs only src/styles/landing.css, so this
+ * file is not linted and its `color-no-hex` rule does not apply. It could not:
+ * a token DEFINITION is where the hex has to live. The drift guard is the check
+ * that matters for this file.
+ * ========================================================================== */
+
+:root {
+  /* --- copied from tokens.css `:root, [data-theme="light"]` --- */
+  --bg: #faf9f6;
+  --surface: #ffffff;
+  --ink: #1c1b19;
+  --muted: #6b6862;
+  --border: #e7e3da;
+  --hl: #ffd75e;
+  --hl-ink: #1c1b19;
+  --border-focus: #ffd75e;
+
+  --font-sans: "Geist", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 20px;
+  --text-2xl: 32px;
+  --text-3xl: 40px;
+  --leading-prose: 1.6;
+  --leading-tight: 1.08;
+  --weight-medium: 500;
+  --weight-bold: 700;
+
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --radius-md: 8px;
+  --content-prose: 640px;
+}
+
+/* The SPA writes data-theme onto <html> from localStorage; about-theme.js
+ * mirrors that here so following a citation out of a dark-mode chat does not
+ * flash a white page. The media query covers the (much commoner) case of no
+ * stored preference at all, and keeps the page correct with JS disabled. */
+[data-theme="dark"] {
+  /* --- copied from tokens.css `[data-theme="dark"]` --- */
+  --bg: #161618;
+  --surface: #1e1e21;
+  --ink: #f0efe9;
+  --muted: #a4a19a;
+  --border: #323238;
+  --hl: #f6c453;
+  --border-focus: #f6c453;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161618;
+    --surface: #1e1e21;
+    --ink: #f0efe9;
+    --muted: #a4a19a;
+    --border: #323238;
+    --hl: #f6c453;
+    --border-focus: #f6c453;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  /* Anchored to the themed tokens for the reason landing.css spells out: an
+   * unset body background paints browser-default white and the light --ink
+   * prose becomes near-invisible in dark mode. */
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-prose);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--hl);
+  color: var(--hl-ink);
+}
+
+.about-page {
+  max-width: var(--content-prose);
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6) var(--space-16);
+}
+
+.about-header {
+  padding-bottom: var(--space-8);
+  border-bottom: 1px solid var(--border);
+}
+
+.about-back,
+.about-footer a {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.about-back:hover,
+.about-footer a:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+.about-page h1 {
+  margin: var(--space-4) 0 var(--space-3);
+  font-size: var(--text-3xl);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+}
+
+.about-lead {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-lg);
+}
+
+.about-toc {
+  margin: var(--space-8) 0 0;
+  padding: var(--space-4) var(--space-6);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.about-toc ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.about-toc li + li {
+  margin-top: var(--space-2);
+}
+
+.about-toc a {
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 2px solid var(--hl);
+}
+
+.about-toc a:hover {
+  background: var(--hl);
+  color: var(--hl-ink);
+}
+
+.about-doc {
+  margin-top: var(--space-12);
+}
+
+.about-doc h2 {
+  margin: 0 0 var(--space-4);
+  /* The section's anchor lives on this heading (see about_page.document_anchor).
+   * Jumping to a heading flush against the viewport edge reads as a broken jump. */
+  scroll-margin-top: var(--space-6);
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.01em;
+}
+
+.about-doc h3 {
+  margin: var(--space-8) 0 var(--space-3);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  scroll-margin-top: var(--space-6);
+}
+
+.about-doc p {
+  margin: 0 0 var(--space-4);
+}
+
+.about-doc ul {
+  margin: 0 0 var(--space-4);
+  padding-left: var(--space-6);
+}
+
+.about-doc li {
+  margin-bottom: var(--space-2);
+}
+
+.about-footer {
+  margin-top: var(--space-16);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--border);
+}
+
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}

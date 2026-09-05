@@ -834,6 +834,35 @@ completed for that index. For the verdict, read the run through
 `GET /v1/admin/evaluations/{run_id}`. The promotion gate in §13 does not consult
 this field; it re-derives the measurement from `evaluation_runs` on every promote.
 
+## 14a. About page (`GET /about`)
+
+```http
+GET /about
+```
+
+Returns `200 text/html` — not JSON. This is the one HTML page the API serves in
+its own right, and it exists because it is a **citation target**: the
+`citevyn` and `concepts` sources in `backend/app/worker/allowlist.py` both carry
+`source_url: "/about"`, so every answer grounded in them ships
+`citations[].url = "/about"` (§6) and the browser renders it as a real link.
+
+The page is rendered from those source documents themselves, so the link
+resolves to the text the answer was drawn from rather than a paraphrase of it.
+Adding a source with `source_url: "/about"` puts it on the page automatically.
+
+Notes:
+
+- Public and unauthenticated; no query parameters; no request body.
+- Registered **before** the SPA's `StaticFiles` mount at `/`, which is a
+  catch-all. Registered after it, the mount answers `/about` with a `307` to
+  `/about/` and the page never renders.
+- `/about/` (trailing slash) is **not** served — the mount suppresses
+  Starlette's `redirect_slashes`, so it returns the standard §15 `not_found`
+  envelope. No citation emits that form.
+- Does not depend on the browser bundle: the corpus markdown ships in the API
+  image, so the page renders even when `frontend_dist` is absent (its
+  stylesheet, served from the bundle, is the part that would be missing).
+
 ## 15. Error Codes
 
 | Code | Meaning |

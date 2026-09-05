@@ -258,6 +258,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /health`              | none   | DB-free liveness probe                        |
 | `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
 | `GET  /health/index`        | none   | Active index + vector-arm health              |
+| `GET  /about`               | none   | HTML page every CiteVyn self-citation links to |
 | `POST /v1/auth/register`    | demo   | Create an account, log in, claim prior anon history |
 | `POST /v1/auth/login`       | demo   | Log in, claim prior anon history              |
 | `POST /v1/auth/logout`      | demo   | Revoke the current session cookie             |
