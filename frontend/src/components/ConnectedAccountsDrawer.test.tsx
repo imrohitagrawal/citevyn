@@ -144,3 +144,75 @@ describe("ConnectedAccountsDrawer password row (ADR-0004 PR 14)", () => {
     expect(screen.getByRole("dialog", { name: "Sign-in methods" })).toBeInTheDocument();
   });
 });
+
+/**
+ * #331. Same defect as `HistoryDrawer`: `aria-modal="true"` plus a backdrop
+ * that blocks the mouse, while the keyboard walked straight out to the page.
+ * `renderDrawer` appends a real "Sign-in methods" button to `document.body`
+ * outside the dialog, so escaping is measured against an actual page control.
+ */
+describe("ConnectedAccountsDrawer traps Tab (#331)", () => {
+  const inDialog = () =>
+    screen.getByRole("dialog", { name: "Sign-in methods" }).contains(document.activeElement);
+
+  it("keeps focus inside through many forward Tabs", async () => {
+    const user = userEvent.setup();
+    const { trigger } = renderDrawer(["github"]);
+    for (let i = 0; i < 8; i += 1) {
+      await user.tab();
+      expect(inDialog()).toBe(true);
+    }
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  it("keeps focus inside through many backward Tabs", async () => {
+    const user = userEvent.setup();
+    const { trigger } = renderDrawer(["github"]);
+    for (let i = 0; i < 8; i += 1) {
+      await user.tab({ shift: true });
+      expect(inDialog()).toBe(true);
+    }
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  // The exact reported case: ONE press escaped, because focus started on the
+  // dialog element itself (`tabIndex={-1}`) which is not one of its focusable
+  // controls, so neither wrap edge matched.
+  it("does not escape on the very first Shift+Tab after opening", async () => {
+    const user = userEvent.setup();
+    const { trigger } = renderDrawer(["github"]);
+    expect(screen.getByRole("dialog", { name: "Sign-in methods" })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(inDialog()).toBe(true);
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  /**
+   * The stacking case, which a naive shared hook gets wrong. This drawer opens
+   * `AuthModal` ON TOP of itself; that modal installs its own document-level
+   * trap. If the drawer stayed in charge, the two would fight and the drawer
+   * would yank focus back out of the modal on every Tab, making the password
+   * fields unreachable by keyboard.
+   *
+   * RED if `useFocusTrap` stops deferring to the top-most mounted dialog.
+   */
+  it("lets the password modal on top of it govern focus", async () => {
+    const user = userEvent.setup();
+    const { trigger } = renderDrawer([], vi.fn(), false);
+    await user.click(screen.getByRole("button", { name: /set a password/i }));
+    const modal = await screen.findByRole("dialog", { name: /password/i });
+    const field = within(modal).getByLabelText("New password");
+
+    field.focus();
+    expect(field).toHaveFocus();
+    await user.tab();
+    // Focus must remain inside the MODAL, governed by the modal's own trap —
+    // not be dragged back into the drawer behind it.
+    expect(modal.contains(document.activeElement)).toBe(true);
+    trigger.remove();
+  });
+});
+

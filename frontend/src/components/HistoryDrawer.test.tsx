@@ -145,3 +145,97 @@ describe("HistoryDrawer", () => {
     trigger.remove();
   });
 });
+
+/**
+ * #331. The drawer is `role="dialog"` + `aria-modal="true"` behind a backdrop
+ * that blocks the MOUSE, yet the keyboard reached the page underneath: 3
+ * forward Tabs, or ONE Shift+Tab, measured in real Chromium. `renderDrawer`
+ * appends a real `History` button to `document.body` outside the dialog, so
+ * "escaped" here means landing on an actual page control, not a proxy for one.
+ */
+describe("HistoryDrawer traps Tab (#331)", () => {
+  async function openWithSessions() {
+    const { listMySessions } = await import("../lib/api");
+    vi.mocked(listMySessions).mockResolvedValueOnce({
+      request_id: "r",
+      sessions: [
+        {
+          session_id: "sess_1",
+          created_at: "2026-09-01T00:00:00Z",
+          expires_at: "2026-09-08T00:00:00Z",
+          current_product_area: "claude_code",
+          message_count: 4,
+        },
+        {
+          session_id: "sess_2",
+          created_at: "2026-09-02T00:00:00Z",
+          expires_at: "2026-09-09T00:00:00Z",
+          current_product_area: "codex",
+          message_count: 2,
+        },
+      ],
+    });
+    const fixture = renderDrawer();
+    await screen.findByText("claude_code");
+    return fixture;
+  }
+
+  const inDialog = () =>
+    screen.getByRole("dialog").contains(document.activeElement) ? true : false;
+
+  it("keeps focus inside through many forward Tabs, never reaching the page behind", async () => {
+    const user = userEvent.setup();
+    const { trigger } = await openWithSessions();
+    // The dialog holds 3 controls; 8 presses is more than a full cycle, so a
+    // trap that only wrapped once would still be caught.
+    for (let i = 0; i < 8; i += 1) {
+      await user.tab();
+      expect(inDialog()).toBe(true);
+    }
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  it("keeps focus inside through many backward Tabs", async () => {
+    const user = userEvent.setup();
+    const { trigger } = await openWithSessions();
+    for (let i = 0; i < 8; i += 1) {
+      await user.tab({ shift: true });
+      expect(inDialog()).toBe(true);
+    }
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  // The exact reported case: focus starts on the dialog element itself
+  // (`tabIndex={-1}`), which is inside the dialog but is not one of its
+  // focusable controls, so neither wrap edge matched and ONE press escaped.
+  it("does not escape on the very first Shift+Tab after opening", async () => {
+    const user = userEvent.setup();
+    const { trigger } = await openWithSessions();
+    expect(screen.getByRole("dialog")).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(inDialog()).toBe(true);
+    expect(trigger).not.toHaveFocus();
+    trigger.remove();
+  });
+
+  // Partner assertion: proves the page control is genuinely reachable by Tab
+  // when the dialog is NOT there. Without this, every test above could pass
+  // because `trigger` was unfocusable for some unrelated reason.
+  it("the page control behind it IS tabbable once the drawer is gone", async () => {
+    const user = userEvent.setup();
+    const { trigger, unmount } = await openWithSessions();
+    unmount();
+    // Earlier tests in this file append their own trigger to document.body and
+    // do not always remove it, so Tab would otherwise land on the FIRST
+    // leftover rather than this one. Clear them, so this asserts what it says.
+    for (const stray of Array.from(document.body.querySelectorAll("button"))) {
+      if (stray !== trigger) stray.remove();
+    }
+    (document.activeElement as HTMLElement | null)?.blur();
+    await user.tab();
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+});

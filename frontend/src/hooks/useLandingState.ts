@@ -22,6 +22,7 @@ import {
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
 import { getAuthSnapshot } from "../lib/authStore";
+import { isModalDialogOpen } from "../lib/dialogStack";
 import {
   ApiClientError,
   type StoredMessage,
@@ -371,10 +372,18 @@ export function useLandingState() {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    // Keyboard shortcut: / focuses hero input
+    // Keyboard shortcut: / focuses hero input.
+    //
+    // Ignored while a modal dialog is open (#331). The focus trap covers Tab;
+    // this is a different key on a `window` listener, so it walked straight
+    // past it and focused the hero input BEHIND the backdrop. The keystrokes
+    // after it were not merely lost -- a reviewer typed a question and pressed
+    // Enter with a drawer open and the app navigated to the chat screen, i.e.
+    // operated a control inside the region `aria-modal="true"` declares inert.
     const onKeyDown = (e: KeyboardEvent) => {
       if (
         e.key === "/" &&
+        !isModalDialogOpen() &&
         !/(INPUT|TEXTAREA)/.test(
           (document.activeElement as HTMLElement)?.tagName || "",
         )

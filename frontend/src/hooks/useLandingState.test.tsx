@@ -1198,3 +1198,73 @@ describe("useLandingState — the landing hero does not run on the chat screen (
     expect(backOnLanding).toBeGreaterThan(onChat);
   });
 });
+
+/**
+ * #331. The `/` shortcut is a `window` keydown listener, so the dialog focus
+ * trap — which only handles Tab and Escape — never saw it. With a drawer open
+ * it focused the hero input BEHIND the backdrop, and the keystrokes after it
+ * were not merely lost: a reviewer typed a question, pressed Enter, and the app
+ * navigated to the chat screen. That is the same hazard #331 is about
+ * (operating a control inside a region `aria-modal="true"` calls inert),
+ * reached by a different key.
+ */
+describe("the / shortcut respects an open modal dialog (#331)", () => {
+  function mountHeroInput() {
+    const input = document.createElement("input");
+    input.id = "hero-input";
+    document.body.appendChild(input);
+    return input;
+  }
+
+  function mountDialog() {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+    return dialog;
+  }
+
+  afterEach(() => {
+    document.querySelectorAll("#hero-input, [role='dialog']").forEach((n) => n.remove());
+  });
+
+  // The partner: proves the shortcut genuinely works, so the assertion below
+  // cannot pass because `/` was broken for some unrelated reason.
+  it("still focuses the hero input when NO dialog is open", () => {
+    renderHook(() => useLandingState());
+    const input = mountHeroInput();
+    document.body.focus();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("does NOT reach past an open dialog to the hero input behind it", async () => {
+    const { useFocusTrap } = await import("./useFocusTrap");
+    renderHook(() => useLandingState());
+    const input = mountHeroInput();
+    const dialogEl = mountDialog();
+    // Register a real trap for that dialog, the way a drawer does.
+    const { unmount } = renderHook(() => useFocusTrap({ current: dialogEl }));
+
+    document.body.focus();
+    const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(document.activeElement).not.toBe(input);
+    expect(event.defaultPrevented).toBe(false);
+    unmount();
+  });
+
+  it("works again once the dialog closes", async () => {
+    const { useFocusTrap } = await import("./useFocusTrap");
+    renderHook(() => useLandingState());
+    const input = mountHeroInput();
+    const dialogEl = mountDialog();
+    const { unmount } = renderHook(() => useFocusTrap({ current: dialogEl }));
+    unmount();
+
+    document.body.focus();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(input);
+  });
+});

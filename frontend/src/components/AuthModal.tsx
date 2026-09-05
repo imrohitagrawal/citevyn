@@ -30,13 +30,11 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "../hooks/useAuth";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { API_BASE_URL } from "../lib/api";
 import { requestMagicLink, updatePassword } from "../lib/authActions";
 import { ApiClientError } from "../lib/types";
 import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
-
-const FOCUSABLE_SELECTOR =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 // Mirrors the backend's _PASSWORD_MIN_LENGTH / _PASSWORD_MAX_LENGTH so the
 // browser rejects what the server would reject, before a round trip.
@@ -156,46 +154,10 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     if (done) doneButtonRef.current?.focus();
   }, [done]);
 
-  // Escape-to-close and the Tab focus trap. One listener, not two: both
-  // are keydown handlers scoped to the same dialog, and splitting them
-  // would just be two effects doing the same subscribe/unsubscribe dance.
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-
-      const container = dialogRef.current;
-      if (!container) return;
-      // No ``offsetParent``/layout-based visibility filter: nothing in this
-      // modal is ever conditionally hidden, and ``offsetParent`` is always
-      // null under jsdom (no layout engine), which silently emptied this
-      // list and disabled the trap under test — found by the trap tests
-      // themselves, not a manual browser check.
-      const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-      if (focusable.length === 0) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-
-      // Wrap at both ends — this is what makes it a TRAP, not just an
-      // initial-focus courtesy. Without the wrap, Tab from the last
-      // field walks focus out into the page behind the modal.
-      if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  // Escape-to-close and the Tab focus trap, shared with both drawers (#331).
+  // This modal's own implementation was the one extracted into the hook — it
+  // was already mutation-guarded in both wrap directions.
+  useFocusTrap(dialogRef, { onEscape: onClose });
 
   // Seconds left, derived from the deadline on every render — never accumulated.
   const secondsLeft = cooldownUntil

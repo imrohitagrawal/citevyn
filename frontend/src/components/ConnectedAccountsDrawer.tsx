@@ -25,6 +25,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { API_BASE_URL } from "../lib/api";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { AuthUserResponse } from "../lib/types";
 import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
 
@@ -57,7 +58,9 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
   // been unmounted with the menu, so focus would otherwise fall to <body> and
   // the next Tab would land on the page behind the backdrop -- review
   // finding), and restore it to the trigger on unmount. Same contract as
-  // AuthModal; no form fields, so no Tab trap.
+  // AuthModal, including the Tab trap as of #331 -- the old note here said
+  // "no form fields, so no Tab trap", but the hazard is escaping the dialog,
+  // not moving between inputs.
   useEffect(() => {
     dialogRef.current?.focus();
     const trigger = triggerRef.current;
@@ -66,20 +69,20 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
     };
   }, [triggerRef]);
 
-  // Escape closes the drawer -- unless the password modal is open on top of
-  // it, in which case the modal's own Escape handler closes the modal and
-  // this one must not ALSO close the drawer underneath in the same keypress.
-  useEffect(() => {
-    if (passwordOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, passwordOpen]);
+  // Escape-to-close AND the Tab focus trap (#331).
+  //
+  // No stand-down flag here: `useFocusTrap` keeps a mount-ordered stack and
+  // only the TOP-most dialog reacts, so this drawer defers automatically the
+  // moment the password modal mounts above it, and one Escape closes the modal
+  // rather than also the drawer underneath.
+  //
+  // It used to pass `enabled: !passwordOpen`, and review found the hole: the
+  // modal is `React.lazy`, so on the FIRST open of a page load `passwordOpen`
+  // flips while the modal's chunk is still loading — standing this trap down
+  // with nothing yet in its place. Measured in that window, Tab was not
+  // prevented and Escape did nothing. Keyed on mount instead of on the flag,
+  // this drawer stays in charge until its replacement really exists.
+  useFocusTrap(dialogRef, { onEscape: onClose });
 
   return createPortal(
     <div
