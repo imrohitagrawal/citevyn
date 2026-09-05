@@ -33,7 +33,7 @@
  * executed: `--list` counting skipped Playwright tests, a suite whose every
  * test skipped while the job exited 0, a workflow whose job ran nothing.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -47,8 +47,15 @@ type WorkflowFile = { jobs: { build: { steps?: { run?: unknown }[] } } };
  * The files vitest ACTUALLY selects, straight from vitest. `list --filesOnly`
  * resolves the config and globs exactly as a real run does, but executes no
  * tests, so there is no recursion.
+ *
+ * Spawning a second vitest costs ~2 s alone but well over 5 s while the rest of
+ * the suite is running, so it is done ONCE in `beforeAll` with an explicit
+ * timeout rather than per test. Both were needed: without the shared call this
+ * paid the cost twice, and without the timeout it tripped vitest's 5 s default
+ * and failed the run — which is a flake in a REQUIRED check, and the exact
+ * shape tracked as #344. A slow probe must not read as a broken guard.
  */
-function selectedTestFiles(): string[] {
+function listSelectedTestFiles(): string[] {
   const r = spawnSync("npx", ["vitest", "list", "--filesOnly"], {
     cwd: frontendRoot,
     encoding: "utf8",
@@ -69,16 +76,24 @@ function selectedTestFiles(): string[] {
 }
 
 describe("the build-tooling test suite is really selected by vitest", () => {
+  let selected: string[] = [];
+  // 120 s, not the 5 s default: this spawns a whole second vitest, and the
+  // machine is already running the rest of the suite. The spawn itself also
+  // throws on a non-zero exit or an empty list, so a broken probe fails loudly
+  // here rather than making every assertion below vacuously true.
+  beforeAll(() => {
+    selected = listSelectedTestFiles();
+  }, 120_000);
+
   it("vitest selects scripts/bundle-budget.test.mjs", () => {
-    expect(selectedTestFiles()).toContain("scripts/bundle-budget.test.mjs");
+    expect(selected).toContain("scripts/bundle-budget.test.mjs");
   });
 
   // The partner assertion: proves the probe can see files at all, so the check
   // above cannot pass vacuously on a broken or empty listing.
   it("and still selects the app suite, so widening did not replace src/", () => {
-    const files = selectedTestFiles();
-    expect(files).toContain("src/test/buildGuards.test.ts");
-    expect(files.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);
+    expect(selected).toContain("src/test/buildGuards.test.ts");
+    expect(selected.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);
   });
 
   it("the file that glob selects exists on disk", () => {
