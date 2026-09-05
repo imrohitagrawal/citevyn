@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listMySessions } from "../lib/api";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { SessionSummary } from "../lib/types";
 
 interface HistoryDrawerProps {
@@ -53,8 +54,10 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
   }, []);
 
   // Move focus INTO the dialog on open, then restore it to the trigger on
-  // unmount. Same contract as AuthModal and ConnectedAccountsDrawer; no form
-  // fields here, so no Tab trap.
+  // unmount. Same contract as AuthModal and ConnectedAccountsDrawer, including
+  // the Tab trap as of #331 -- the old note here said "no form fields, so no
+  // Tab trap", but the hazard is escaping the dialog, not moving between
+  // inputs.
   //
   // The open half was missing (#290): AccountMenu's "History" menuitem unmounts
   // with the menu when clicked, so focus fell to <body> and the next Tab walked
@@ -69,16 +72,10 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
     };
   }, [triggerRef]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  // Escape-to-close AND the Tab focus trap (#331). This dialog is
+  // `aria-modal="true"` with a backdrop, so the keyboard must not reach the
+  // page behind it — it previously did, in 3 forward presses or ONE Shift+Tab.
+  useFocusTrap(dialogRef, { onEscape: onClose });
 
   return createPortal(
     <div
