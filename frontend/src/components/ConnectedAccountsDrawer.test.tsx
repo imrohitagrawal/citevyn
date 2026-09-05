@@ -193,14 +193,13 @@ describe("ConnectedAccountsDrawer traps Tab (#331)", () => {
   /**
    * The stacking case, which a naive shared hook gets wrong. This drawer opens
    * `AuthModal` ON TOP of itself; that modal installs its own document-level
-   * trap. If the drawer's trap stayed armed, the two would fight and the
-   * drawer would yank focus back out of the modal on every Tab, making the
-   * password fields unreachable by keyboard. The drawer's Escape handler
-   * already stood down for the same reason (`if (passwordOpen) return`).
+   * trap. If the drawer stayed in charge, the two would fight and the drawer
+   * would yank focus back out of the modal on every Tab, making the password
+   * fields unreachable by keyboard.
    *
-   * RED if `enabled: !passwordOpen` is dropped from the useFocusTrap call.
+   * RED if `useFocusTrap` stops deferring to the top-most mounted dialog.
    */
-  it("stands its trap down while the password modal is open on top of it", async () => {
+  it("lets the password modal on top of it govern focus", async () => {
     const user = userEvent.setup();
     const { trigger } = renderDrawer([], vi.fn(), false);
     await user.click(screen.getByRole("button", { name: /set a password/i }));
@@ -216,3 +215,4 @@ describe("ConnectedAccountsDrawer traps Tab (#331)", () => {
     trigger.remove();
   });
 });
+
