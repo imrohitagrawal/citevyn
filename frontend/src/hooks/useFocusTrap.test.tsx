@@ -45,6 +45,30 @@ function Harness({
 const dialog = () => screen.getByRole("dialog", { name: "Harness" });
 const activeText = () => (document.activeElement as HTMLElement | null)?.textContent;
 
+/**
+ * Dispatch a REAL cancelable Tab and report whether the trap claimed it.
+ *
+ * `userEvent.tab()` walks the DOM itself, so a test that only asserts WHERE
+ * focus ended can be satisfied by native tab order with no trap present at all
+ * — this harness renders `outside-before`, then a `tabIndex={-1}` dialog, then
+ * the controls, so plain Tab from `outside-before` reaches "one" regardless.
+ * A skeptic proved several assertions here survived a completely dead keydown
+ * handler for exactly that reason.
+ *
+ * A synthetic dispatch moves no focus on its own, so anything that DOES move is
+ * the trap, and `defaultPrevented` says so directly.
+ */
+function dispatchTab({ shift = false } = {}) {
+  const event = new KeyboardEvent("keydown", {
+    key: "Tab",
+    shiftKey: shift,
+    bubbles: true,
+    cancelable: true,
+  });
+  document.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
 describe("useFocusTrap", () => {
   it("Shift+Tab from the dialog itself goes to the LAST control, not the first", async () => {
     // The natural backward destination. A pull-back that always chose `first`
@@ -57,11 +81,11 @@ describe("useFocusTrap", () => {
     expect(activeText()).toBe("three");
   });
 
-  it("Tab from the dialog itself goes to the FIRST control", async () => {
-    const user = userEvent.setup();
+  it("Tab from the dialog itself goes to the FIRST control", () => {
     render(<Harness controls={["one", "two", "three"]} />);
     dialog().focus();
-    await user.tab();
+    // Synthetic dispatch: focus can only move because the trap moved it.
+    expect(dispatchTab()).toBe(true);
     expect(activeText()).toBe("one");
   });
 
@@ -95,11 +119,19 @@ describe("useFocusTrap", () => {
     expect(activeText()).not.toBe("outside-before");
   });
 
-  it("pulls focus back in if it is already on a control outside the dialog", async () => {
-    const user = userEvent.setup();
+  it("pulls focus back in if it is already on a control outside the dialog", () => {
     render(<Harness controls={["one", "two"]} />);
     screen.getByText("outside-before").focus();
-    await user.tab();
+    // "outside-before" sits BEFORE the dialog, so native order would reach
+    // "one" too. Only the prevention proves the trap did it.
+    expect(dispatchTab()).toBe(true);
+    expect(activeText()).toBe("one");
+  });
+
+  it("pulls focus back in from a control AFTER the dialog, which native order would not", () => {
+    render(<Harness controls={["one", "two"]} />);
+    screen.getByText("outside-after").focus();
+    expect(dispatchTab()).toBe(true);
     expect(activeText()).toBe("one");
   });
 
@@ -181,13 +213,15 @@ describe("useFocusTrap", () => {
    *
    * RED if the hook ever regains a caller-driven stand-down flag.
    */
-  it("keeps trapping while a dialog above it is only REQUESTED, not yet mounted", async () => {
-    const user = userEvent.setup();
+  it("keeps trapping while a dialog above it is only REQUESTED, not yet mounted", () => {
     render(<Harness controls={["one", "two"]} />);
     // Nothing else has mounted — the exact state during a lazy chunk fetch.
     expect(__testOnly.depth()).toBe(1);
-    screen.getByText("outside-before").focus();
-    await user.tab();
+    screen.getByText("outside-after").focus();
+    // Asserted via prevention, not destination: an earlier version checked only
+    // where focus landed and was satisfied by native tab order, so it survived
+    // a completely dead handler — the very thing its comment claims it catches.
+    expect(dispatchTab()).toBe(true);
     expect(activeText()).toBe("one");
   });
 
