@@ -2,23 +2,20 @@
 playwright-report/
 test-results/
 
-# Compiled config artifacts (the .ts files are the sources)
-playwright.config.js
-playwright.config.d.ts
-playwright.live.config.js
-playwright.live.config.d.ts
-playwright.demo-ci.config.js
-playwright.demo-ci.config.d.ts
 # Local verification harnesses (pwverify/pwf*/pw.tmp...). A machine-specific
 # config with an absolute path was committed once; nothing in CI would ever
 # have told us it was broken, since tsconfig.node.json does not include it.
 pw*.config.ts
 pw*.config.js
 pw*.config.d.ts
-vite.config.js
-vite.config.d.ts
-vite.liveStub.js
-vite.liveStub.d.ts
+
+# NOTE: the compiled-config ignores that used to sit here
+# (vite.config.js/.d.ts, vite.liveStub.js/.d.ts, playwright*.config.js/.d.ts)
+# are gone. `tsconfig.node.json` now has an `outDir`, so `tsc -b` emits into
+# node_modules/ instead of littering this directory (#343). Ignoring those
+# names again would re-hide the exact staleness Vite's config resolution
+# feeds on; src/test/buildGuards.test.ts fails if the emit comes back here.
+# If you still have leftovers from before that change, delete them.
 
 # The app's knowledge base lives in src/data/. The repo-root `.gitignore`
 # has a bare `data/` rule (meant for local Docker data) that would otherwise
