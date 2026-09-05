@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { load } from "js-yaml";
 
 import {
   BUDGET_KEY,
@@ -504,56 +505,70 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
 });
 
 /**
- * Guard the guard's INVOCATION. The --dist/--budget seam exists for the tests
- * above; if it reached CI, the gate would stop building the shipping variant
- * and start measuring whatever was lying in dist/.
+ * Guard the guard's INVOCATION.
+ *
+ * This block PARSES the workflow instead of matching its text. Two earlier
+ * versions did match text and both were defeated in review:
+ *   - a substring grep for "npm run check:bundle" stayed green with the step
+ *     commented out entirely;
+ *   - an anchored whole-line match plus a 3-line window above the `run:` was
+ *     defeated three ways — `if:` written AFTER `run:` (YAML mapping key order
+ *     is not semantic, so Actions honours it identically), `if:` written above
+ *     `run:` but pushed out of the window by comment lines, and a JOB-level
+ *     `if:` that skips the gate along with everything else in the job.
+ *
+ * A YAML document's meaning is its parse, not its layout, so the only honest
+ * way to assert what GitHub Actions will do is to read the same structure
+ * Actions reads. That is what js-yaml is a devDependency for.
  */
 describe("the CI invocation itself", () => {
-  const workflow = () =>
-    readFileSync(join(frontendRoot, "..", ".github", "workflows", "frontend.yml"), "utf8");
-
-  /** The `build:` job block, up to the next job at the same indentation. */
-  function buildJobBlock(yaml) {
-    const lines = yaml.split("\n");
-    const start = lines.findIndex((l) => /^ {2}build:\s*$/.test(l));
-    expect(start).toBeGreaterThan(-1);
-    let end = lines.length;
-    for (let i = start + 1; i < lines.length; i += 1) {
-      if (/^ {2}\S/.test(lines[i])) {
-        end = i;
-        break;
-      }
-    }
-    return lines.slice(start, end).join("\n");
-  }
+  const workflowPath = join(frontendRoot, "..", ".github", "workflows", "frontend.yml");
+  const workflow = () => load(readFileSync(workflowPath, "utf8"));
+  const buildJob = () => workflow().jobs.build;
+  const gateSteps = () =>
+    (buildJob().steps ?? []).filter((s) => typeof s.run === "string" && s.run.trim() === "npm run check:bundle");
 
   it("runs the script with no arguments, so CI always builds the shipping variant", () => {
     const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
     expect(pkg.scripts["check:bundle"]).toBe("node scripts/check-bundle-size.mjs");
   });
 
-  // A substring grep stayed green when the step was commented out or given
-  // arguments, so this is anchored to a whole line.
-  it("invokes the gate as a whole, unargumented line in the build job", () => {
-    expect(buildJobBlock(workflow())).toMatch(/^ +run: npm run check:bundle$/m);
+  it("invokes the gate exactly once in the build job, with no extra arguments", () => {
+    // `run` compared whole: `npm run check:bundle --dist x` or a trailing
+    // `|| true` is a different string and fails here.
+    expect(gateSteps()).toHaveLength(1);
   });
 
-  // ...and green is meaningless if the step cannot fail the job.
-  it("does not let the build job continue past a failing step", () => {
-    expect(buildJobBlock(workflow())).not.toMatch(/continue-on-error/);
+  it("does not run the gate conditionally, at step OR job level", () => {
+    expect(gateSteps()[0].if).toBeUndefined();
+    // A job-level `if:` skips the gate along with the whole job — the bypass
+    // that the previous window-based assertion could not see at all.
+    expect(buildJob().if).toBeUndefined();
   });
 
-  it("does not run the gate conditionally", () => {
-    const block = buildJobBlock(workflow());
-    const stepIdx = block.indexOf("run: npm run check:bundle");
-    // The 3 lines above the run: are that step's own keys.
-    const stepHead = block.slice(Math.max(0, stepIdx - 200), stepIdx);
-    expect(stepHead.split("\n").slice(-3).join("\n")).not.toMatch(/^\s+if:/m);
+  it("lets a failing gate actually fail the job, at step OR job level", () => {
+    expect(gateSteps()[0]["continue-on-error"]).toBeUndefined();
+    expect(buildJob()["continue-on-error"]).toBeUndefined();
+  });
+
+  /**
+   * The job NAME is the required status check's context string on `main`.
+   * Rename the job and the required context never reports again, which hangs
+   * every PR at "Expected — waiting for status to be reported" (#326).
+   */
+  it("keeps the job name that main's branch protection requires", () => {
+    expect(buildJob().name).toBe("type-check + unit tests + build");
+    expect(workflow().jobs["demo-e2e"].name).toBe("Demo-mode Playwright (no visual snapshots)");
   });
 
   it("keeps the workflow unfiltered, so a required check always reports (#326)", () => {
     // A path-filtered workflow that does not trigger reports NOTHING, and a
-    // required context then hangs forever.
-    expect(workflow()).not.toMatch(/^\s{4}paths:/m);
+    // required context then hangs forever. Checked on the parsed triggers, so
+    // a `paths:` at any indentation under either trigger is caught.
+    const on = workflow().on;
+    expect(on.pull_request?.paths).toBeUndefined();
+    expect(on.pull_request?.["paths-ignore"]).toBeUndefined();
+    expect(on.push?.paths).toBeUndefined();
+    expect(on.push?.["paths-ignore"]).toBeUndefined();
   });
 });

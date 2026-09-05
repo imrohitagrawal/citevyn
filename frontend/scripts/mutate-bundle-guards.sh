@@ -30,10 +30,12 @@ cd "$(dirname "$0")/.." || exit 99
 PURE=scripts/bundle-budget.mjs
 RUN=scripts/check-bundle-size.mjs
 PKG=package.json
+VC=vite.config.ts
+WF=../.github/workflows/frontend.yml
 TESTS="scripts/bundle-budget.test.mjs src/test/buildGuards.test.ts"
 
-if ! git diff --quiet -- "$PURE" "$RUN" "$PKG"; then
-  echo "refusing to run: $PURE / $RUN / $PKG have uncommitted changes."
+if ! git diff --quiet -- "$PURE" "$RUN" "$PKG" "$VC" "$WF"; then
+  echo "refusing to run: one of $PURE / $RUN / $PKG / $VC / $WF has uncommitted changes."
   echo "commit or stash them first, so a restore cannot lose your work."
   exit 1
 fi
@@ -41,6 +43,7 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 cp "$PURE" "$TMP/pure"; cp "$RUN" "$TMP/run"; cp "$PKG" "$TMP/pkg"
+cp "$VC" "$TMP/vc"; cp "$WF" "$TMP/wf"
 
 KILLED=0; SURVIVED=0
 
@@ -149,8 +152,88 @@ mutate "package.json: sneak a --dist bypass into the CI invocation" "$PKG" "$TMP
 '"check:bundle": "node scripts/check-bundle-size.mjs"' \
 '"check:bundle": "node scripts/check-bundle-size.mjs --dist dist"'
 
+# --- THE META-GUARDS: can the guards themselves be switched off? -------------
+#
+# Every mutation below was a WORKING BYPASS at some point in this PR's history.
+# The first version of the workflow assertion was a substring grep; the second
+# sliced a 3-line window above the `run:` line; the selection pin matched
+# vite.config.ts's TEXT. A skeptic round defeated all three. They now parse the
+# workflow YAML and ask vitest what it actually selects.
+
+echo
+echo "--- workflow: can the gate be switched off? ---"
+mutate "workflow: if: written AFTER run: (YAML key order is not semantic)" "$WF" "$TMP/wf" \
+'      - name: Bundle budget
+        run: npm run check:bundle' \
+'      - name: Bundle budget
+        run: npm run check:bundle
+        if: ${{ false }}'
+mutate "workflow: if: above run:, pushed out of a 3-line window by comments" "$WF" "$TMP/wf" \
+'      - name: Bundle budget
+        run: npm run check:bundle' \
+'      - name: Bundle budget
+        if: ${{ false }}
+        # one
+        # two
+        # three
+        run: npm run check:bundle'
+mutate "workflow: JOB-level if: on build:" "$WF" "$TMP/wf" \
+'  build:
+    name: type-check' '  build:
+    if: ${{ false }}
+    name: type-check'
+mutate "workflow: step-level continue-on-error" "$WF" "$TMP/wf" \
+'      - name: Bundle budget
+        run:' '      - name: Bundle budget
+        continue-on-error: true
+        run:'
+mutate "workflow: JOB-level continue-on-error" "$WF" "$TMP/wf" \
+'  build:
+    name: type-check' '  build:
+    continue-on-error: true
+    name: type-check'
+mutate "workflow: || true appended to the gate" "$WF" "$TMP/wf" \
+'        run: npm run check:bundle' '        run: npm run check:bundle || true'
+mutate "workflow: gate step commented out" "$WF" "$TMP/wf" \
+'      - name: Bundle budget
+        run: npm run check:bundle' '      # - name: Bundle budget
+      #   run: npm run check:bundle'
+mutate "workflow: --dist bypass wired into CI" "$WF" "$TMP/wf" \
+'        run: npm run check:bundle' '        run: npm run check:bundle --dist dist'
+mutate "workflow: job renamed (required context would hang forever)" "$WF" "$TMP/wf" \
+'    name: type-check + unit tests + build' '    name: type-check + unit tests + build RENAMED'
+mutate "workflow: paths: filter reintroduced (#326)" "$WF" "$TMP/wf" \
+'  pull_request:' '  pull_request:
+    paths:
+      - "frontend/**"'
+
+echo
+echo "--- vitest selection: can the scripts suite be silently deselected? ---"
+mutate "select: exclude scripts/** (include left untouched)" "$VC" "$TMP/vc" \
+'    exclude: ["e2e/**", "node_modules/**"],' '    exclude: ["e2e/**", "node_modules/**", "scripts/**"],'
+mutate "select: narrow the glob extension (the text still matches)" "$VC" "$TMP/vc" \
+'"scripts/**/*.{test,spec}.mjs"' '"scripts/**/*.{test,spec}.ts"'
+mutate "select: comment the real glob out, leaving the text present" "$VC" "$TMP/vc" \
+'    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.{test,spec}.mjs"],' \
+'    // include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.{test,spec}.mjs"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],'
+mutate "select: a projects key takes over selection" "$VC" "$TMP/vc" \
+'    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.{test,spec}.mjs"],' \
+'    include: ["src/**/*.{test,spec}.{ts,tsx}", "scripts/**/*.{test,spec}.mjs"],
+    projects: [{ test: { name: "app", include: ["src/**/*.{test,spec}.{ts,tsx}"] } }],'
+mutate "select: plain revert of the glob (the control case)" "$VC" "$TMP/vc" \
+'"scripts/**/*.{test,spec}.mjs"' '"scriptsNOPE/**/*.{test,spec}.mjs"'
+
+echo
+echo "--- argv: narrowing the run without touching vite.config.ts ---"
+mutate "argv: npm test narrowed to src" "$PKG" "$TMP/pkg" \
+'"test": "vitest run"' '"test": "vitest run src"'
+mutate "argv: the workflow passes a path to npm test" "$WF" "$TMP/wf" \
+'        run: npm test' '        run: npm test -- src'
+
 echo
 echo "=== KILLED: $KILLED    SURVIVED/ERROR: $SURVIVED ==="
 cmp -s "$PURE" "$TMP/pure" && cmp -s "$RUN" "$TMP/run" && cmp -s "$PKG" "$TMP/pkg" \
+  && cmp -s "$VC" "$TMP/vc" && cmp -s "$WF" "$TMP/wf" \
   && echo "all files restored byte-identical" || { echo "TREE DIRTY -- restore by hand"; exit 97; }
 [ "$SURVIVED" -eq 0 ]
