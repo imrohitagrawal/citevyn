@@ -87,7 +87,7 @@ s=s.replace("type Options = {\n  /** Close handler for Escape. Omit to leave Esc
             "type Options = {\n  onEscape?: () => void;\n  enabled?: boolean;\n};")
 s=s.replace("  { onEscape }: Options = {},", "  { onEscape, enabled = true }: Options = {},")
 s=s.replace("  useEffect(() => {\n    const token = {};", "  useEffect(() => {\n    if (!enabled) return;\n    const token = {};")
-s=s.replace("  }, [containerRef]);", "  }, [containerRef, enabled]);")
+s=s.replace("  }, []);", "  }, [enabled]);")
 open(h,"w").write(s)
 c="src/components/ConnectedAccountsDrawer.tsx"; s=open(c).read()
 s=s.replace("useFocusTrap(dialogRef, { onEscape: onClose });","useFocusTrap(dialogRef, { onEscape: onClose, enabled: !passwordOpen });")
