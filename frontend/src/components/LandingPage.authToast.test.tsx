@@ -99,14 +99,24 @@ async function openAuthModalAndSignIn(user: ReturnType<typeof userEvent.setup>) 
 
 describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
   beforeEach(() => {
-    // ONLY setInterval. Faking setTimeout as well deadlocks the suite:
+    // ONLY setInterval. Faking setTimeout as well deadlocks the file:
     // @testing-library/dom advances a fake clock inside waitFor only when it
-    // can see a JEST fake-timer install, which under vitest it cannot, so
-    // every findBy* polls a clock nobody moves. Measured: all four sign-in
-    // assertions hung to the full 5 s timeout even on an idle machine.
-    // Faking the interval alone freezes the typewriter and leaves every
-    // setTimeout — waitFor's polling, userEvent's internal waits, the toast's
-    // auto-dismiss — running for real.
+    // can see a JEST fake-timer install (`jestFakeTimersAreEnabled`), which
+    // under vitest it cannot. Measured: all four sign-in assertions hung to
+    // the full 5 s timeout even on an idle machine.
+    //
+    // BE PRECISE ABOUT WHAT SURVIVES, because a review round found the first
+    // version of this comment was wrong. `waitFor` polls with a setInterval
+    // (@testing-library/dom/dist/wait-for.js:91), so this install DOES freeze
+    // its poll. What still resolves every findBy* here is the immediate
+    // `checkCallback()` (:97), the MutationObserver (:95), and the overall
+    // timeout, which is a real setTimeout (:40). Both assertions in this
+    // describe wait on a toast being ADDED to the DOM, which is a childList
+    // mutation, so the observer carries them.
+    //
+    // The trap that leaves: an assertion in THIS describe that becomes true
+    // without a DOM mutation would hang to the full timeout and read as a
+    // product bug. Put such a test in another describe, or advance the clock.
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   });
 
@@ -138,6 +148,33 @@ describe("sign-in confirms claimed chat history (ADR-0004 PR 9)", () => {
     await openAuthModalAndSignIn(user);
 
     expect(await screen.findByText("Your conversation is saved to your account.")).toBeInTheDocument();
+  });
+
+  // Review found the two tests above conflate "entered the chat screen" with
+  // "has messages": test 1 does both, test 2 does neither. So swapping the
+  // signal for `state.screen === "chat"` at LandingPage.tsx's two call sites
+  // left BOTH green while telling a user with no conversation that their
+  // conversation was saved. This is that missing third case.
+  it("does not claim a conversation was saved when the chat screen is empty", async () => {
+    vi.mocked(login).mockResolvedValueOnce({
+      request_id: "req_1",
+      user_id: "usr_c",
+      email: "claim@example.com",
+      anonymous: false,
+      providers: [],
+      has_password: true,
+      password_step_up: false,
+    });
+    const user = signInUser();
+    render(<LandingPage theme="light" onThemeChange={() => {}} />);
+
+    // Enter the chat screen but ask nothing, so `state.messages` stays empty.
+    await user.click(screen.getAllByRole("button", { name: "Try the demo" })[0]);
+
+    await openAuthModalAndSignIn(user);
+
+    expect(await screen.findByText("Welcome to CiteVyn.")).toBeInTheDocument();
+    expect(screen.queryByText("Your conversation is saved to your account.")).not.toBeInTheDocument();
   });
 
   it("shows a plain welcome toast when there is no chat history yet", async () => {

@@ -250,6 +250,88 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
     }
   });
 
+  /**
+   * `loadConfigFromFile` models what Vite does when it is asked with no
+   * explicit config. It knows nothing about the ARGV the npm scripts pass, so
+   * `"dev": "vite --config vite.dev.config.ts"` would leave every other test in
+   * this block green while the dev server loaded something else entirely.
+   *
+   * This is the same hole, in the same file, that the vitest-selection guard
+   * above was already burned by ("`vitest list` resolves the CONFIG. It knows
+   * nothing about the argv CI passes"). Found again by review, one describe
+   * block down. Both levels get pinned, the same way.
+   */
+  it("npm run dev and npm run preview do not redirect Vite at another config", () => {
+    const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
+    expect(pkg.scripts.dev).toBe("vite");
+    expect(pkg.scripts.preview).toBe("vite preview --port 4173");
+    // playwright.config.ts's webServer.command is what actually starts the dev
+    // server in an e2e run; if it stops being `npm run dev` the pin above stops
+    // covering it.
+    expect(readFileSync(join(frontendRoot, "playwright.config.ts"), "utf8")).toContain(
+      "npm run dev",
+    );
+  });
+
+  /**
+   * The stray-file check below is only non-vacuous once something has actually
+   * run `tsc`. In `frontend.yml` that holds because Type-check precedes Unit
+   * tests — but nothing asserted the ORDER, so a reordered workflow would make
+   * that test quietly always-true. (It would still be backed by the emit-path
+   * test above, which is order-independent; this keeps the second line of
+   * defence real rather than theoretical.)
+   */
+  it("the required workflow type-checks BEFORE it runs the unit tests", () => {
+    const wf = load(
+      readFileSync(join(frontendRoot, "..", ".github", "workflows", "frontend.yml"), "utf8"),
+    ) as WorkflowFile;
+    const runs = (wf.jobs.build.steps ?? [])
+      .map((step) => step.run)
+      .filter((r): r is string => typeof r === "string")
+      .map((r) => r.trim());
+    const typeCheck = runs.indexOf("npm run type-check");
+    const unitTests = runs.indexOf("npm test");
+    expect(typeCheck, "no `npm run type-check` step").toBeGreaterThanOrEqual(0);
+    expect(unitTests, "no `npm test` step").toBeGreaterThanOrEqual(0);
+    expect(typeCheck).toBeLessThan(unitTests);
+  });
+
+  /**
+   * The reason a stray compiled config is now VISIBLE is that #343 deleted the
+   * `.gitignore` lines that hid it. Re-add one line and the whole class goes
+   * back to being invisible in `git status`, with nothing to notice.
+   *
+   * This asks GIT what it resolves rather than reading `.gitignore` for a
+   * string — the file has `pw*.config.js` in it, which a substring check would
+   * confuse with `playwright.config.js`, and ignore rules can arrive from the
+   * repo root, a parent, or a global excludes file that no single file shows.
+   */
+  it("git does not ignore the compiled configs any more", () => {
+    const names = rootSources.flatMap((src) => [
+      basename(src).replace(/\.ts$/, ".js"),
+      basename(src).replace(/\.ts$/, ".d.ts"),
+    ]);
+    const r = spawnSync("git", ["check-ignore", ...names], {
+      cwd: frontendRoot,
+      encoding: "utf8",
+    });
+    // git check-ignore exits 1 when NOTHING matches, 0 when something does, and
+    // >1 on a real error — so the error case cannot be mistaken for success.
+    expect(r.error, `git check-ignore failed to run: ${r.error}`).toBeUndefined();
+    expect(
+      r.status,
+      `these compiled configs are gitignored again, which re-hides #343:\n${r.stdout}`,
+    ).toBe(1);
+    // Partner: the harness really did ask about the right files, and git is
+    // reachable at all. A pw*.config.js IS still ignored, by design.
+    const stillIgnored = spawnSync("git", ["check-ignore", "pwverify.config.js"], {
+      cwd: frontendRoot,
+      encoding: "utf8",
+    });
+    expect(stillIgnored.status, "git check-ignore is not working here").toBe(0);
+    expect(names).toContain("vite.config.js");
+  });
+
   it("and Vite, asked the way `npm run dev` asks, loads the .ts source", async () => {
     // The end of the causal chain: not "no .js exists" but "the file Vite
     // chose". This also covers the .mjs/.cjs/.mts/.cts names that sit ahead of
