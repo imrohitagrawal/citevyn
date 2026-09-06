@@ -3,7 +3,7 @@
  * Wiring is theme-agnostic, so these run in the default theme except where a
  * flow is explicitly re-checked in dark.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { gotoApp, ensureTheme, enterChat, waitStreamDone, TOKENS, SEMANTIC } from "./helpers";
 
 test.beforeEach(async ({ page }) => {

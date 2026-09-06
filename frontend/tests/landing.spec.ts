@@ -2,7 +2,7 @@
  * Playwright test suite for CiteVyn Landing Page
  * Tests theming, navigation, chat, and interactive components in both light/dark modes.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 // ---------------------------------------------------------------------------
 // Helpers

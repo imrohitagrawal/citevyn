@@ -1,0 +1,75 @@
+/*
+ * VENDORED COPY of the `latin` @font-face rules from
+ * https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap
+ * as served to Chrome 140 on 2026-09-07, together with the two .woff2 files
+ * beside this one. `tests/fixtures.ts` serves all of it from disk so no e2e
+ * test ever waits on fonts.googleapis.com. See that file for why.
+ *
+ * ONLY the `latin` subsets are here, because they are the only ones this page
+ * asks for — measured, not assumed: instrumenting a real page load in BOTH
+ * THEMES records exactly two fonts.gstatic.com requests, and they are these two
+ * files. That measurement covers the landing page as loaded, not every route
+ * the suite drives, so it is a floor rather than a proof; what makes it safe is
+ * that the fixture answers an unvendored subset with 404 instead of passing it
+ * to the network, and `tests/harness.spec.ts` fails on that 404 by name. New
+ * content needing latin-ext/cyrillic/greek/vietnamese therefore turns the suite
+ * red, naming the file to vendor, rather than silently rendering in a fallback
+ * face and moving every pixel measurement in fidelity.spec.ts and
+ * visual.spec.ts.
+ *
+ * The `src` URLs are left pointing at fonts.gstatic.com on purpose: the fixture
+ * intercepts them and answers from disk, and keeping them as Google writes them
+ * keeps the diff against a fresh response readable.
+ *
+ * Both faces are SIL Open Font License 1.1 (Geist: vercel/geist-font;
+ * JetBrains Mono: JetBrains/JetBrainsMono), which permits redistribution.
+ *
+ * TO REGENERATE — three steps, and it is NOT a straight copy:
+ *   1. curl the URL above with a desktop Chrome User-Agent and keep the blocks
+ *      whose preceding comment says latin. (Verified: Playwright's own
+ *      HeadlessChrome UA gets byte-identical blocks and files.)
+ *   2. RE-ADD the `:root { --e2e-fonts-vendored: 1 }` block below. It is not in
+ *      Google's response. Dropping it does not break the fonts — the fixture
+ *      still serves everything from disk — but `harness.spec.ts` then fails
+ *      saying the stylesheet "reached the network", which would be untrue and
+ *      would send you hunting a network problem that does not exist.
+ *      `src/test/buildGuards.test.ts` asserts this block is still here so the
+ *      two failures can be told apart.
+ *   3. The `src` URLs carry version hashes. If they changed, update
+ *      `VENDORED_FONTS` in `tests/fixtures.ts` with the new basenames and
+ *      re-download the files they name, or every font request 404s.
+ */
+
+/* The handle tests/harness.spec.ts uses to assert, from inside the browser,
+   that what the page applied is THIS file and not Google's response. */
+:root {
+  --e2e-fonts-vendored: 1;
+}
+
+/* latin */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/geist/v5/gyByhwUxId8gMEwcGFWNOITd.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwgknk-4.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwgknk-4.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}

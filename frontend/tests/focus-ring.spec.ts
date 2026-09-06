@@ -42,7 +42,7 @@
  * of the tokens in `frontend/public/about.css` (measured 14.43-17.21:1 by hand,
  * in agreement with the SPA).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import {
   gotoApp,
   ensureTheme,

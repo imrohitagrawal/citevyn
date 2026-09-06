@@ -43,7 +43,7 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { spawnSync } from "node:child_process";
 import { load } from "js-yaml";
 import ts from "typescript";
@@ -466,4 +466,238 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
     // the rest of the suite is running. This is a budget for a genuinely heavy
     // operation in a NEW test, not a raise on an existing one (#344).
   }, 60_000);
+});
+
+/**
+ * Every e2e spec must take `test` from `tests/fixtures.ts`, which serves Geist
+ * and JetBrains Mono from `tests/fonts/` instead of `fonts.googleapis.com`.
+ *
+ * WHY A GUARD AT ALL. `tests/harness.spec.ts` proves the fixture WORKS, but only
+ * for itself. A spec that imports `test` straight from `@playwright/test` gets
+ * no route, every one of its navigations goes back to waiting on a third-party
+ * request before the app mounts, and nothing anywhere says so — which is exactly
+ * how run 34050016261 reddened `main` (#364).
+ *
+ * WHY IT ASKS PLAYWRIGHT FOR THE FILE LIST. The first version globbed
+ * `readdirSync(testsDir)` for `*.spec.ts`. A reviewer defeated it in three ways
+ * that all RUN in the required CI job: `readdirSync` is not recursive, so
+ * `tests/auth/session.spec.ts` was invisible; and the suffix filter missed
+ * `tests/nudge.test.ts` and `tests/drawer.spec.tsx`, both of which match
+ * Playwright's default `testMatch`
+ * (`**\/*.@(spec|test).?(c|m)[jt]s?(x)`, verified in
+ * `node_modules/playwright/lib/common/index.js`). So this asks Playwright which
+ * files it actually selects, which is the same discipline the vitest-selection
+ * guard at the top of this file had to learn: resolve what the system resolved,
+ * do not glob for what you assume it means.
+ *
+ * WHY IT PARSES INSTEAD OF GREPPING. A guard asserting a STRING is absent is not
+ * a guard. `grep '@playwright/test'` is defeated by `import { test as t }`, by
+ * `import * as pw` + `pw.test(...)`, and by `import test from` — while a
+ * type-only import that is not a bypass at all would trip it. So this walks the
+ * TypeScript AST and asks the question the module loader asks: which module
+ * supplies the `test` binding this file calls? The last test in the block runs
+ * the parser against those exact forms, so its coverage is demonstrated.
+ *
+ * WHAT IT CANNOT SEE, stated rather than implied:
+ *   - a spec that builds its own context from the `browser` fixture
+ *     (`browser.newContext()`); the routes live on the `context` fixture. No
+ *     spec does this today (grepped). `context.newPage()` and popups ARE
+ *     covered, which is why `fixtures.ts` overrides `context` and not `page`.
+ *   - whether `fixtures.ts` still routes anything, or still serves the right
+ *     bytes. That is `tests/harness.spec.ts`'s job, from inside a real browser.
+ *   - a spec that imports `test` from a THIRD module which re-exports it from
+ *     `@playwright/test`. That form is not silently missed — the exact-equality
+ *     assertion below reports `["./helpers"]` and goes red — but the message
+ *     names the wrong culprit.
+ */
+describe("every e2e spec is insulated from the third-party font stylesheet (#364)", () => {
+  const testsDir = join(frontendRoot, "tests");
+  let specs: string[] = [];
+
+  /**
+   * The spec files Playwright ACTUALLY selects, straight from Playwright.
+   * `--list` resolves testDir/testMatch/testIgnore exactly as a real run does
+   * but executes nothing, and (unlike a real run) starts no web server — which
+   * is why `frontend.yml` can call it twice before the suite.
+   *
+   * The DEFAULT config is used, not `playwright.demo-ci.config.ts`: it is the
+   * superset (demo-ci is the same set minus `visual.spec.ts`), so a spec cannot
+   * hide from this by being excluded from CI.
+   *
+   * 120 s, not vitest's 5 s default: this spawns a whole Playwright process
+   * while the rest of the suite is running. A slow probe must not read as a
+   * broken guard (#344).
+   */
+  beforeAll(() => {
+    const r = spawnSync(
+      "npx",
+      ["playwright", "test", "-c", "playwright.config.ts", "--list", "--reporter=json"],
+      {
+        cwd: frontendRoot,
+        encoding: "utf8",
+        timeout: 120_000,
+        maxBuffer: 32 * 1024 * 1024,
+        // PLAYWRIGHT_JSON_OUTPUT_NAME redirects the JSON reporter to a FILE and
+        // leaves stdout empty, so an exported one turns this into a JSON.parse
+        // crash with no hint why. CI does not export it (frontend.yml scopes it
+        // to the demo-e2e run step) but a developer easily might.
+        env: (() => {
+          const e = { ...process.env };
+          delete e.PLAYWRIGHT_JSON_OUTPUT_NAME;
+          return e;
+        })(),
+      },
+    );
+    // Fail loudly rather than returning []: an empty list would make "no spec
+    // bypasses the fixture" and "the probe broke" indistinguishable, and only
+    // one of those is a real defect.
+    if (r.status !== 0) {
+      throw new Error(`playwright --list failed (status ${r.status}): ${r.stderr || r.stdout}`);
+    }
+    const parsed = JSON.parse(r.stdout) as { suites?: { file?: string }[] };
+    specs = [...new Set((parsed.suites ?? []).map((s) => s.file).filter((f): f is string => !!f))].sort();
+    if (specs.length === 0) throw new Error(`playwright --list selected no files: ${r.stdout}`);
+  }, 120_000);
+
+  /**
+   * The module specifiers that could supply this source's `test` binding.
+   *
+   * Named imports match on the IMPORTED name (`propertyName ?? name`), so
+   * `import { test as t }` is caught. A default import counts, because
+   * `playwright/test.js` ends
+   * `module.exports = Object.assign(combinedExports.test, combinedExports)` and
+   * its `.d.ts` has `export default test` — so `import test from` is a real,
+   * usable form. A namespace import from `@playwright/test` counts too, since
+   * `pw.test(...)` is the same bypass with extra steps. Type-only imports and
+   * type-only specifiers are skipped: they erase at compile time and bind
+   * nothing at runtime.
+   */
+  function testBindingSources(source: string): string[] {
+    const sf = ts.createSourceFile("spec.ts", source, ts.ScriptTarget.Latest, true);
+    const found: string[] = [];
+    for (const st of sf.statements) {
+      if (!ts.isImportDeclaration(st) || !st.importClause) continue;
+      if (!ts.isStringLiteral(st.moduleSpecifier)) continue;
+      const from = st.moduleSpecifier.text;
+      const clause = st.importClause;
+      if (clause.isTypeOnly) continue;
+      // `import test from "..."` / `import test, { expect } from "..."`
+      if (clause.name && clause.name.text === "test") found.push(from);
+      const bindings = clause.namedBindings;
+      if (!bindings) continue;
+      if (ts.isNamespaceImport(bindings)) {
+        if (from === "@playwright/test") found.push(from);
+        continue;
+      }
+      for (const el of bindings.elements) {
+        if (el.isTypeOnly) continue;
+        if ((el.propertyName ?? el.name).text === "test") found.push(from);
+      }
+    }
+    return [...new Set(found)];
+  }
+
+  // PARTNER for every equality assertion below: without it, an empty spec list
+  // or a parser that finds nothing would satisfy all of them for free.
+  it("Playwright selects the specs this guard thinks it does, and each binds `test` once", () => {
+    expect(specs).toContain("landing.spec.ts");
+    expect(specs).toContain("visual.spec.ts");
+    expect(specs).toContain("harness.spec.ts");
+    // The floor is the current population, not one below it: `>= 6` with 7
+    // files present would let someone delete a spec and stay green.
+    expect(specs.length).toBeGreaterThanOrEqual(7);
+    for (const spec of specs) {
+      expect(existsSync(join(testsDir, spec)), `${spec} is not under tests/`).toBe(true);
+      const sources = testBindingSources(readFileSync(join(testsDir, spec), "utf8"));
+      expect(sources, `no import supplies \`test\` in tests/${spec}`).toHaveLength(1);
+    }
+  });
+
+  it("and every one of them takes `test` from tests/fixtures.ts — no exceptions", () => {
+    // There is deliberately no carve-out. An earlier draft exempted
+    // visual.spec.ts because an empty font stub moved 9 of its 22 baselines;
+    // serving the REAL vendored fonts instead made the exemption unnecessary,
+    // and the 22 baselines pass through the fixture unchanged.
+    //
+    // The specifier is RESOLVED against the spec's own directory rather than
+    // compared as a string. `--list` finds specs recursively, so a legitimate
+    // `tests/auth/session.spec.ts` must write `../fixtures` — which an exact
+    // `toEqual(["./fixtures"])` would reject with a message saying the opposite
+    // of the truth. `./fixtures.js` (the ESM-idiomatic form) is accepted too.
+    const fixturesModule = join(testsDir, "fixtures");
+    for (const spec of specs) {
+      const sources = testBindingSources(readFileSync(join(testsDir, spec), "utf8"));
+      const resolved = sources.map((from) =>
+        from.startsWith(".")
+          ? resolvePath(dirname(join(testsDir, spec)), from).replace(/\.(ts|tsx|js|mjs)$/, "")
+          : from,
+      );
+      expect(
+        resolved,
+        `tests/${spec} does not use tests/fixtures.ts, so its navigations wait on ` +
+          `fonts.googleapis.com before the app can mount — see tests/fixtures.ts (#364)`,
+      ).toEqual([fixturesModule]);
+    }
+  });
+
+  it("the parser catches the forms a substring check would miss", () => {
+    // Demonstrated coverage, not claimed coverage. Each of these binds a usable
+    // `test` from @playwright/test while a naive grep for
+    // `import { test, expect } from "@playwright/test"` sees nothing.
+    const bypasses = [
+      `import { test as t, expect } from "@playwright/test";`,
+      `import * as pw from "@playwright/test";`,
+      `import test from "@playwright/test";`,
+      `import test, { expect } from "@playwright/test";`,
+      `import { expect, test } from "@playwright/test";`,
+      `import {\n  test,\n} from "@playwright/test";`,
+    ];
+    for (const src of bypasses) {
+      expect(testBindingSources(src), `this form slips past the parser: ${src}`).toEqual([
+        "@playwright/test",
+      ]);
+    }
+    // ...and forms that are NOT a bypass are not flagged, so the rule is not
+    // "reject every @playwright/test import" — helpers.ts legitimately imports
+    // `Page`, `expect` and `Locator` from it.
+    expect(testBindingSources(`import type { Page } from "@playwright/test";`)).toEqual([]);
+    expect(testBindingSources(`import { expect, type Locator } from "@playwright/test";`)).toEqual(
+      [],
+    );
+    expect(testBindingSources(`import * as path from "node:path";`)).toEqual([]);
+    expect(testBindingSources(`import { test, expect } from "./fixtures";`)).toEqual(["./fixtures"]);
+  });
+
+  it("the fixture and the fonts it serves are all on disk", () => {
+    // The route reads these files at request time; a missing one would surface
+    // as a 404 inside the browser rather than as a load error here.
+    expect(existsSync(join(testsDir, "fixtures.ts"))).toBe(true);
+    for (const f of [
+      "google-fonts-latin.css",
+      "geist-latin.woff2",
+      "jetbrains-mono-latin.woff2",
+      "OFL.txt",
+    ]) {
+      expect(existsSync(join(testsDir, "fonts", f)), `tests/fonts/${f} is missing`).toBe(true);
+    }
+  });
+
+  it("the vendored stylesheet carries its marker, so a red harness test means the route", () => {
+    // Splits one failure into two distinguishable ones. `harness.spec.ts` reads
+    // `--e2e-fonts-vendored` from inside the browser and, if it is absent,
+    // reports that the stylesheet "reached the network". That diagnosis is only
+    // correct while the FILE still defines the property — and the property is
+    // NOT part of Google's response, so anyone following the regeneration
+    // recipe can drop it. When that happens this test goes red too, and the
+    // pair says "the file lost its marker" rather than "the network was hit".
+    const css = readFileSync(join(testsDir, "fonts", "google-fonts-latin.css"), "utf8");
+    expect(css, "tests/fonts/google-fonts-latin.css lost --e2e-fonts-vendored").toMatch(
+      /--e2e-fonts-vendored:\s*1\s*;/,
+    );
+    // Partner: the file is the real stylesheet, not an empty stub that happens
+    // to define the marker.
+    expect(css).toContain("@font-face");
+    expect(css).toContain("font-family: 'Geist'");
+    expect(css).toContain("font-family: 'JetBrains Mono'");
+  });
 });

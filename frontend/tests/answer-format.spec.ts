@@ -28,7 +28,7 @@
  *     breaks long-line wrapping goes unnoticed; a geometry assertion does not
  *     care which mechanism produced the lines, only that they are there.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { enterChat, gotoApp } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
