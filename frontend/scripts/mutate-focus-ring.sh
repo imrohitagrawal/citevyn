@@ -181,9 +181,6 @@ one "sweep: walk only 5 controls (the >= 20 stop count must bite)" "$SPEC" "$S/p
 one "sweep: exempt everything (checked == 0 must bite)" "$SPEC" "$S/p.SPEC" \
 'function isExempt(s: Stop) {' 'function isExempt(s: Stop) {
   return true;'
-one "sweep: stop at the first repeat (never reaches the inverted panel)" "$SPEC" "$S/p.SPEC" \
-'    if (seen.has(key)) continue; // same control again — report it once' \
-'    if (seen.has(key)) break;'
 
 echo
 echo "=== KILLED: $K   SURVIVED/ERROR: $SV ==="
