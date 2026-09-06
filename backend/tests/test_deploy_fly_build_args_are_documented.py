@@ -81,15 +81,33 @@ _RUNBOOK = _REPO_ROOT / "docs" / "DEPLOY_FLY.md"
 # `"$DEMO_KEY"`. A guard that enumerates the BAD forms only ever catches the
 # ones its author already thought of; enumerating the GOOD forms fails closed
 # on everything else, including the next syntax nobody has thought of yet.
-_BUILD_ARG_RE = re.compile(r'--build-arg ([A-Z][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|\S+)')
+#
+# The value alternation ends in `\S*`, not `\S+`, so that a bare
+# `--build-arg VITE_API_DEMO_KEY=` (nothing at all after the `=`) is CAPTURED
+# as an empty value and rejected below. With `\S+` the regex simply did not
+# match that form, so the argument was never examined -- and the sibling test
+# that looks for the literal `--build-arg NAME=` was satisfied by it. Between
+# them, the most direct possible spelling of the #296 outage passed both
+# guards. An extractor that silently skips its subject is worse than no
+# extractor, because it reports green.
+_BUILD_ARG_RE = re.compile(r'--build-arg ([A-Z][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|\S*)')
 
 # `"${VAR:?message}"` and nothing else -- anchored to the WHOLE value, so a
 # guarded expansion with anything appended (`"${VAR:?x}`evil`"`) is rejected.
 # `[^{}]*` in the message keeps a nested `${OTHER:-default}` out.
 _GUARDED_EXPANSION_RE = re.compile(r'^"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^{}]*\}"$')
 
-# A literal with no expansion syntax at all: `true`, `dev`, `1.2.3`.
-_PLAIN_LITERAL_RE = re.compile(r'^"?[A-Za-z0-9_.:/-]*"?$')
+# A NON-EMPTY literal with no expansion syntax at all: `true`, `dev`, `1.2.3`,
+# optionally quoted with BALANCED quotes.
+#
+# The `+` and the balanced alternation are both load-bearing. The first version
+# of this whitelist used `^"?[A-Za-z0-9_.:/-]*"?$`, whose `*` matched the EMPTY
+# string -- so `--build-arg VITE_API_DEMO_KEY=""` was accepted as a "plain
+# literal". That is the #296 outage written verbatim into the runbook, passed
+# by the guard whose entire purpose is to prevent it: the deny-by-default
+# rewrite had reintroduced, as a literal, the exact defect it was closing in
+# its expanded form. A lone `"` slipped through the same way.
+_PLAIN_LITERAL_RE = re.compile(r'^(?:"[A-Za-z0-9_.:/-]+"|[A-Za-z0-9_.:/-]+)$')
 
 
 def _frontend_stage() -> str:
@@ -182,7 +200,13 @@ def test_every_declared_arg_is_actually_threaded_into_the_build() -> None:
     site and leaving the declaration -- or, worse, leave a declared-but-unused
     ARG that this file then demands the runbook pass for no reason.
     """
-    stage = _frontend_stage()
+    # Comments stripped before counting. The Dockerfile discusses these args at
+    # length in comments, so counting raw occurrences would let a declared-but-
+    # unused ARG be "used" by a sentence about it -- the same comment-satisfies-
+    # the-guard defect this file strips comments elsewhere to avoid.
+    stage = "\n".join(
+        ln for ln in _frontend_stage().splitlines() if not ln.lstrip().startswith("#")
+    )
     unused = [a for a in _baked_build_args() if stage.count(a) < 2]
     assert not unused, (
         f"declared in the frontend stage but never used: {unused}. Either thread them "
@@ -262,6 +286,61 @@ def test_no_build_arg_can_silently_receive_an_empty_value() -> None:
         'a fully guarded `"${VAR:?why this is empty}"`, so the deploy aborts instead '
         "of shipping a bundle whose baked value is the empty string (#296)."
     )
+
+
+def _classify(cmd: str) -> list[str]:
+    """The offender list :func:`test_no_build_arg...` computes, for one command."""
+    return [
+        f"{name}={value}"
+        for name, value in _BUILD_ARG_RE.findall(cmd)
+        if not _GUARDED_EXPANSION_RE.match(value) and not _PLAIN_LITERAL_RE.match(value)
+    ]
+
+
+# Every value shape that has ever been proposed for this argument, and whether
+# the classifier must reject it. The test above only ever sees the ONE shape
+# the runbook currently uses, so on its own it proves almost nothing about the
+# rule -- a hole in the regex is invisible until someone writes that form into
+# the docs, which is precisely too late.
+#
+# Two entries are scars. `"$DEMO_KEY"` and the backtick form each walked
+# through the original blacklist. `""` walked through the deny-by-default
+# rewrite that replaced it, because the literal pattern's `*` matched the empty
+# string -- the #296 outage accepted verbatim by the guard written to stop it.
+_VALUE_SHAPES: tuple[tuple[str, bool], ...] = (
+    ('"${DEMO_KEY:?the machine is asleep}"', True),
+    ("true", True),
+    ("dev", True),
+    ('"1.2.3"', True),
+    ('""', False),
+    ("", False),
+    ('"', False),
+    ('"$(fly ssh console -C x)"', False),
+    ("$(fly ssh console -C x)", False),
+    ('"`fly ssh console -C x`"', False),
+    ('"$DEMO_KEY"', False),
+    ("$DEMO_KEY", False),
+    ('"${DEMO_KEY}"', False),
+    ("'${DEMO_KEY}'", False),
+    ('"${DEMO_KEY:-local-demo-key}"', False),
+    ('"${DEMO_KEY:?x}`evil`"', False),
+    ('"${DEMO_KEY:?${OTHER:-x}}"', False),
+)
+
+
+@pytest.mark.parametrize(("value", "acceptable"), _VALUE_SHAPES, ids=lambda v: repr(v))
+def test_the_build_arg_value_classifier_accepts_only_safe_shapes(
+    value: str, acceptable: bool
+) -> None:
+    offenders = _classify(f"fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY={value}")
+    if acceptable:
+        assert not offenders, f"{value!r} is safe but was rejected: {offenders}"
+    else:
+        assert offenders, (
+            f"{value!r} was ACCEPTED. It cannot fail on empty (or is already empty), so "
+            f"a deploy using it bakes an empty bearer into the bundle and every browser "
+            f"call 401s while /health stays green -- #296."
+        )
 
 
 def test_the_runbook_has_runnable_bash_blocks_at_all() -> None:
