@@ -6,7 +6,7 @@
  * hardcoded colors that only surface in one theme (e.g. light text on the
  * yellow accent, muted headings, drifted skeleton widths).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import {
   TOKENS,
   SEMANTIC,
