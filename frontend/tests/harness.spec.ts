@@ -168,8 +168,9 @@ test.describe("e2e harness: nothing reaches a third party", () => {
     // pixel measurement in fidelity.spec.ts and visual.spec.ts.
     expect(
       fontResponses.filter((r) => r.status !== 200).map((r) => `${r.status} ${r.url}`),
-      "a font request was not served from tests/fonts/ — vendor it (see the " +
-        "regeneration note in tests/fonts/google-fonts-latin.css)",
+      "a font request to a THIRD-PARTY host was not served from disk — vendor it " +
+        "(see the regeneration note in tests/fonts/google-fonts-latin.css). Since #365 " +
+        "the page asks for no such host, so this is normally vacuous by design.",
     ).toEqual([]);
 
     // PARTNER for that emptiness check, in the same implication form so #365
@@ -186,8 +187,10 @@ test.describe("e2e harness: nothing reaches a third party", () => {
 
     expect(
       loadedFamilies,
-      "the browser did not end up with both faces loaded — a vendored file is " +
-        "missing or truncated",
+      "the browser did not end up with both faces loaded. Since #365 these come " +
+        "from frontend/public/fonts/ over the dev server, NOT from tests/fonts/ — so " +
+        "look there first: a missing, truncated or renamed .woff2, or an @font-face " +
+        "src in src/styles/fonts.css that no longer resolves",
     ).toEqual(expect.arrayContaining(["Geist", "JetBrains Mono"]));
 
     // A 200 only proves bytes arrived, and "loaded" only proves they parsed —
@@ -214,13 +217,15 @@ test.describe("e2e harness: nothing reaches a third party", () => {
     });
     expect(
       shape.monoWide,
-      "the face serving JetBrains Mono is not monospaced — tests/fixtures.ts's " +
-        "VENDORED_FONTS is serving the wrong file for it",
+      "the face serving JetBrains Mono is not monospaced — the two .woff2 files in " +
+        "frontend/public/fonts/ are swapped, or tests/fixtures.ts's VENDORED_FONTS " +
+        "maps the wrong one (public/fonts/ is the likelier of the two since #365)",
     ).toBeCloseTo(shape.monoNarrow, 1);
     expect(
       shape.geistNarrow,
-      "the face serving Geist is monospaced — tests/fixtures.ts's VENDORED_FONTS " +
-        "is serving JetBrains Mono's file under Geist's name",
+      "the face serving Geist is monospaced — JetBrains Mono's bytes are being " +
+        "served under Geist's name. Check frontend/public/fonts/ first, then " +
+        "tests/fixtures.ts's VENDORED_FONTS",
     ).toBeLessThan(shape.geistWide * 0.9);
   });
 

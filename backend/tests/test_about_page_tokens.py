@@ -19,6 +19,7 @@ not a behaviour test of the React app, and vitest's ``include`` globs only
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import re
 
@@ -182,6 +183,52 @@ def test_the_theme_key_matches_the_app(about_css: str) -> None:
     )
 
 
+_CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)")
+
+
+def _unescape_css(text: str) -> str:
+    r"""Resolve CSS escape sequences, so a guard reads what the PARSER reads.
+
+    This is load-bearing, not tidiness. ``@import`` was checked as a plain
+    substring, and review defeated it with one character class CSS explicitly
+    allows in an at-keyword::
+
+        @\69mport "\/\/x.example/a.css";
+
+    ``@\69mport`` is not the substring ``@import``; ``"\/\/x..."`` contains no
+    ``url()`` and does not start with ``http``. Every backend and frontend test
+    stayed green (1946 pytest, 523 vitest) — and served in real Chromium the
+    page issued a render-blocking request to ``http://x.example/a.css``.
+    ``frontend/public/`` is copied verbatim into ``dist/``, so it would have
+    shipped.
+
+    The lesson is the one already in this repo's notes: resolve what the SYSTEM
+    resolved. A guard that matches source bytes is guarding a spelling.
+    """
+    return _CSS_ESCAPE_RE.sub(
+        lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2), text
+    )
+
+
+def test_the_css_escape_reader_resolves_what_the_browser_resolves(about_css: str) -> None:
+    """PARTNER for the two absence checks below, which a broken reader satisfies.
+
+    Every line here is a form review actually used to smuggle a third-party
+    request past the substring check.
+    """
+    assert _unescape_css(r"@\69mport") == "@import"
+    assert _unescape_css(r"@\49 mport") == "@Import"  # hex is case-insensitive, one trailing space
+    assert _unescape_css(r'"\/\/x.example/a.css"') == '"//x.example/a.css"'
+    assert _unescape_css(r"url(\68 ttps://x)") == "url(https://x)"
+    # And it leaves ordinary CSS alone, so the checks below are not reading
+    # mangled input.
+    assert _unescape_css("@font-face { src: url(/fonts/a.woff2); }") == (
+        "@font-face { src: url(/fonts/a.woff2); }"
+    )
+    # Partner for THAT: the real file survives the transform intact.
+    assert "@font-face" in _unescape_css(about_css)
+
+
 def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     """``@import`` and ``url()`` inside about.css are invisible to page parsing.
 
@@ -190,12 +237,55 @@ def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     is the #306 shape exactly -- the host that broke it existed only inside a
     fetched stylesheet. This page's CSS is expected to reference nothing
     external at all, so the honest guard is to assert that.
+
+    Read through ``_unescape_css`` because the browser does; see its docstring
+    for the bypass that made that necessary.
     """
-    body = _strip_comments(about_css)
-    assert "@import" not in body, "about.css @imports a stylesheet the CSP guard cannot see"
+    body = _unescape_css(_strip_comments(about_css))
+    assert "@import" not in body.lower(), "about.css @imports a stylesheet the CSP guard cannot see"
     urls = re.findall(r"url\(([^)]*)\)", body)
-    remote = [u for u in urls if "//" in u or u.strip().strip("'\"").startswith("http")]
+    quoted = re.findall(r"""["']([^"']*)["']""", body)
+    remote = [
+        u
+        for u in urls + quoted
+        if "//" in u or re.match(r"^\s*[a-z][a-z0-9+.-]*:", u.strip().strip("'\""), re.IGNORECASE)
+    ]
     assert not remote, f"about.css loads remote resources the CSP guard cannot see: {remote}"
+
+
+def test_the_page_s_own_script_pulls_in_no_further_origins() -> None:
+    """``/about``'s theme script can inject a stylesheet at runtime.
+
+    Review demonstrated it: three lines appended to ``about-theme.js`` creating
+    a ``<link rel="stylesheet">`` for fonts.googleapis.com and appending it to
+    ``<head>``. Nothing looked — this file was read only for its
+    ``localStorage`` key and its ``setAttribute`` call, and the HTML-scanning
+    guards see the DOM the server sends, not the DOM the script builds. 1946
+    pytest and 523 vitest tests stayed green.
+
+    ``/about`` is the surface with no browser-level coverage at all: no
+    Playwright spec navigates to it (it needs the real backend, and the demo
+    config runs only the Vite dev server). So this static scan is what stands
+    in for one, and it says so rather than implying otherwise.
+    """
+    js = ABOUT_THEME_JS.read_text(encoding="utf-8")
+    # Strip comments so a URL merely discussed in one is not a false red.
+    body = re.sub(r"/\*.*?\*/", "", js, flags=re.DOTALL)
+    body = re.sub(r"^\s*//.*$", "", body, flags=re.MULTILINE)
+    remote = re.findall(r"""["'`]\s*(?:[a-z][a-z0-9+.-]*:)?//[^"'`]+["'`]""", body, re.IGNORECASE)
+    assert not remote, (
+        f"about-theme.js references a third-party host: {remote}. A script-injected "
+        "stylesheet is render-blocking for everything after it and is invisible to "
+        "every HTML-scanning guard here — that is #365's mechanism, one layer down."
+    )
+    # PARTNER: the scan really is looking at the script, and really would find
+    # such a URL. Without this, an empty or mis-read file passes for free.
+    assert len(body) > 200, "about-theme.js is implausibly short — the scan is vacuous"
+    assert re.findall(
+        r"""["'`]\s*(?:[a-z][a-z0-9+.-]*:)?//[^"'`]+["'`]""",
+        'var l="https://fonts.googleapis.com/css2";',
+        re.IGNORECASE,
+    ), "the scan cannot see the very shape it exists to catch"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +381,45 @@ def test_every_self_hosted_font_file_actually_ships(fonts_css: str, about_css: s
             f"{src} is declared by an @font-face rule but does not exist under "
             "frontend/public/ — the browser would 404 and fall back silently"
         )
+
+
+#: sha256 of the two shipped faces, verified byte-for-byte against what
+#: fonts.gstatic.com serves for the `latin` subsets of the exact css2 query
+#: `frontend/index.html` used to make (2026-09-07).
+_FONT_DIGESTS = {
+    "geist-latin.woff2": "9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608",
+    "jetbrains-mono-latin.woff2": (
+        "2c32b9b3ee358c119e210f6f5195f9bd34894d78a785ff2e95d60e718e400af4"
+    ),
+}
+
+
+def test_the_shipped_font_binaries_are_the_bytes_we_vetted() -> None:
+    """Pin the CONTENT, not just the presence, of two redistributed binaries.
+
+    Everything else about these files is checked by existence or by pixels, and
+    neither is enough. A .woff2 renders as ``Bin`` in a diff, so a replacement
+    is unreviewable by eye; and a substituted face designed to render similarly
+    would not move the 22 visual baselines either. These are third-party
+    binaries we now redistribute from our own origin under our own TLS — the
+    one property worth asserting is that they are the exact bytes that were
+    licence-checked and compared against upstream.
+
+    Turns red by changing ONE byte of either file. If it goes red after a
+    deliberate re-download, re-verify the licence and update the digest in the
+    same commit — do not just refresh the constant.
+    """
+    for name, expected in _FONT_DIGESTS.items():
+        path = PUBLIC_DIR / "fonts" / name
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert digest == expected, (
+            f"{name} is not the vetted binary: expected {expected}, got {digest}"
+        )
+    # PARTNER: the loop above is empty-passing if the mapping is ever emptied,
+    # and a digest of nothing is still a digest.
+    assert len(_FONT_DIGESTS) == 2
+    for name in _FONT_DIGESTS:
+        assert (PUBLIC_DIR / "fonts" / name).stat().st_size > 20_000, f"{name} looks truncated"
 
 
 def test_the_redistributed_fonts_carry_their_licence() -> None:

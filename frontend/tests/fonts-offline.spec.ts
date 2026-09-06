@@ -37,7 +37,8 @@
  *   1. the page's mount waits on any third-party request — i.e. #365 is back
  *   2. the app cannot render without its font FILES (a hard dependency on a
  *      resource that was never meant to be one)
- *   3. the page requests a font from anywhere but this origin
+ *   3. a face stops loading, or the page requests a font from anywhere but this
+ *      origin
  *   4. the in-test routes stop taking precedence, which would make 1-3 vacuous
  *
  * REVERTING THE FIX turns 1 red: put the third-party stylesheet link back in
@@ -159,10 +160,12 @@ test.describe("#365: a failing font never blanks the page", () => {
     }
   });
 
-  test("every font the page asks for comes from this origin", async ({ page }) => {
+  test("every font the page asks for comes from this origin, and both faces load", async ({
+    page,
+  }) => {
     // The positive half. The two tests above are satisfied by a page that uses
-    // no web font at all; this one fails if the faces stop being requested, and
-    // fails differently if they are requested from someone else.
+    // no web font at all; this one fails if the faces stop arriving, and fails
+    // differently if they arrive from someone else.
     const fontRequests: string[] = [];
     page.on("request", (r) => {
       if (r.resourceType() === "font") fontRequests.push(r.url());
@@ -170,15 +173,31 @@ test.describe("#365: a failing font never blanks the page", () => {
 
     await page.goto("/", { waitUntil: "commit" });
     await page.waitForSelector(MOUNTED, { timeout: MOUNT_BUDGET_MS * 2 });
-    await page.evaluate(async () => {
+    const loaded = await page.evaluate(async () => {
       await Promise.allSettled([
         document.fonts.load('400 16px "Geist"'),
         document.fonts.load('400 16px "JetBrains Mono"'),
       ]);
       await document.fonts.ready;
+      return [...document.fonts].filter((f) => f.status === "loaded").map((f) => f.family);
     });
 
     const origin = new URL(page.url()).origin;
+
+    // PARTNER — and it must be `document.fonts`, NOT a request count. The
+    // count version of this was measured to pass for the wrong reason: with
+    // `src/styles/fonts.css` emptied to ZERO @font-face rules, all four tests
+    // in this file still passed, because the two `<link rel=preload as=font>`
+    // tags in index.html issue two `resourceType === "font"` requests on their
+    // own. A second mechanism was supplying the observation. `document.fonts`
+    // is populated from the @font-face rules themselves, so it cannot be.
+    expect(
+      loaded,
+      "the browser ended up with no self-hosted face loaded — the @font-face rules in " +
+        "src/styles/fonts.css are missing, or their url() does not resolve. (A preload " +
+        "tag alone still fetches the file, so a request count would not have caught this.)",
+    ).toEqual(expect.arrayContaining(["Geist", "JetBrains Mono"]));
+
     expect(
       fontRequests.length,
       "the page requested no web font at all — the origin check below would be vacuous",

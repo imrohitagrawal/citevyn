@@ -514,7 +514,15 @@ done
 # stylesheet also blocks <script type="module"> from EXECUTING, so its return
 # would show up as a blank page for anyone whose network is slow to that host —
 # a class of visitor no smoke test from here can impersonate.
-curl -sS https://citevyn.stackclimb.com/ | grep -c 'https://'   # expect: 0
+#
+# Written as an `if`, for the same reason the /about check above is: `grep -c`
+# EXITS 1 when the count is zero, and zero is the HEALTHY answer here. A bare
+# `curl … | grep -c` would abort a `set -e` runbook exactly when the page is
+# fine. (This block shipped with that bug in its first draft, two paragraphs
+# below the note warning about it.)
+if [ "$(curl -sS https://citevyn.stackclimb.com/ | grep -c 'https://')" -ne 0 ]; then
+  echo 'FAIL: the shipped index.html references a third-party host (#365)'
+fi
 ```
 
 (Written as an `if`, not `grep … && echo`: that form exits 1 on the *healthy*

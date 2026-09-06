@@ -273,6 +273,26 @@ describe("the bundle gate is reachable from npm", () => {
  * EMITS the header and the full suite stayed green with inline script
  * executing. So this one builds and asserts what the BROWSER receives.
  *
+ * WHY IT RUNS `npm run build` AND PINS THE WHOLE CHAIN. The first version of
+ * this guard built with the bundle gate's `buildCommand()` — `vite build
+ * --mode production --config vite.config.ts --manifest` — reasoning that
+ * sharing the gate's flags stopped the two drifting apart. That was guarding a
+ * PROXY, and adversarial review landed it: `infra/docker/Dockerfile.api` ships
+ * `npm run build`, WITHOUT `--manifest`. A `vite.config.ts` plugin with
+ * `apply: "build"` and a `transformIndexHtml` hook that returns early when
+ * `config.build.manifest` is set therefore injects a third-party stylesheet
+ * into the SHIPPED image while this guard, `check:bundle`, the whole vitest
+ * suite (523 passed), pytest (1946 passed) and the Playwright specs all stay
+ * green. `grep -c googleapis dist/index.html` was 1 for the shipped build and 0
+ * for the guard's. Reproduced end to end, not theorised.
+ *
+ * So the build below is the SHIPPING one, and the two links in the chain are
+ * pinned as tests: `package.json`'s `build` script, and the fact that the
+ * Dockerfile invokes that script. Changing either now has to change this file.
+ * This is the repo's own "a fix can repeat the defect" lesson — both of my
+ * first two attempts at #365's guard keyed on something adjacent to the
+ * artifact rather than on the artifact.
+ *
  * It also follows the emitted stylesheet INTO the CSS, because the tag is not
  * the only way back to a third party: `@import url(https://...)` at the top of
  * a bundled stylesheet is render-blocking in exactly the same way, and a
@@ -300,54 +320,29 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
   let emittedCss: { file: string; text: string }[] = [];
 
   /**
-   * Build the SHIPPING variant, the same way the bundle gate does, and read
-   * what it produced.
+   * Build EXACTLY what ships, and read what it produced.
    *
-   * The flags come from the gate's OWN `buildCommand()` rather than being
-   * re-spelled here, so the two cannot drift onto different artifacts — they
-   * are load-bearing (`--config vite.config.ts` in particular: `tsc -b` can
-   * leave a compiled `vite.config.js` that Vite resolves FIRST, so without it
-   * a build can silently measure a stale config).
+   * `npm run build` with `VITE_API_LIVE=true` is character-for-character the
+   * command `infra/docker/Dockerfile.api` runs to produce the `dist/` it copies
+   * into `/app/frontend_dist`. The two tests below pin the rest of that chain,
+   * so this cannot quietly start measuring something else.
    *
-   * It is fetched by RUNNING the module in a child node rather than by
-   * `import`ing it. `scripts/bundle-budget.mjs` is plain JS with no declaration
-   * file, and a direct import fails `tsc -b` with TS7016 — which is a required
-   * CI job, and is how this was caught. Executing it keeps the single source of
-   * truth (this really is the function the gate calls) without adding a type
-   * shim or loosening the project's `allowJs`.
+   * NOT the bundle gate's `buildCommand()`, which is what this used to do:
+   * that adds `--manifest`, the Dockerfile does not, and a build plugin can
+   * branch on the difference. See the header.
    */
   beforeAll(async () => {
-    const probe = spawnSync(
-      "node",
-      [
-        "-e",
-        "import('./scripts/bundle-budget.mjs').then(m => " +
-          "console.log(JSON.stringify(m.buildCommand())))",
-      ],
-      { cwd: frontendRoot, encoding: "utf8" },
-    );
-    if (probe.status !== 0) {
-      throw new Error(`could not read buildCommand() from the bundle gate:\n${probe.stderr ?? ""}`);
-    }
-    const { cmd, args, env } = JSON.parse(probe.stdout) as {
-      cmd: string;
-      args: string[];
-      env: Record<string, string>;
-    };
-    // Fail closed if the gate's command shape changes under us, rather than
-    // building something else and calling the result a guarantee.
-    expect(cmd, "the bundle gate no longer builds with a recognisable command").toBe("npx");
-    expect(args, "the gate's build flags changed shape").toContain("--config");
-    const r = spawnSync(cmd, args, {
+    const r = spawnSync("npm", ["run", "build"], {
       cwd: frontendRoot,
       encoding: "utf8",
-      env: { ...process.env, ...env },
+      env: { ...process.env, VITE_API_LIVE: "true" },
     });
     // Fail LOUDLY on a broken build. A silent skip here would make every
     // assertion below vacuous, which is this file's own standing complaint.
     if (r.status !== 0) {
       throw new Error(
-        `the production build this guard measures failed (status ${r.status}):\n${r.stderr ?? ""}`,
+        `the production build this guard measures failed (status ${r.status}):\n` +
+          `${r.stdout ?? ""}\n${r.stderr ?? ""}`,
       );
     }
     emittedHtml = readFileSync(join(distDir, "index.html"), "utf8");
@@ -364,7 +359,35 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
       });
   }, 120_000);
 
-  /** Attribute value with an OPTIONAL quote, per the HTML spec, not `="..."`. */
+  it("the artifact this guard builds is the artifact the image ships", () => {
+    // THE PIN. Without these two lines the `beforeAll` above is only *claimed*
+    // to build what ships. Review demonstrated the cost of that gap: a build
+    // plugin branching on `--manifest` put a third-party stylesheet in the
+    // Docker image while every gate in the repo stayed green.
+    const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
+    expect(
+      pkg.scripts.build,
+      "the `build` script changed — this guard runs `npm run build` precisely because " +
+        "that is what Dockerfile.api runs, so the two must be re-checked together",
+    ).toBe("tsc -b && vite build");
+
+    const dockerfile = readFileSync(
+      join(frontendRoot, "..", "infra", "docker", "Dockerfile.api"),
+      "utf8",
+    );
+    expect(
+      dockerfile,
+      "Dockerfile.api no longer builds the frontend with `npm run build`, so this guard " +
+        "is measuring an artifact the image does not ship",
+    ).toMatch(/\bnpm run build\b/);
+    // And it copies THAT dist into the image — otherwise the pin above is
+    // about a build whose output goes nowhere.
+    expect(dockerfile).toMatch(/COPY --from=frontend[^\n]*\/fe\/dist\s+\/app\/frontend_dist/);
+  });
+
+  /**
+   * Attribute value with an OPTIONAL quote, per the HTML spec, not `="..."`.
+   */
   const attr = (tag: string, name: string): string | null => {
     const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
     return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
@@ -372,9 +395,22 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
   /** `rel` is a space-separated TOKEN LIST. `"stylesheet "` and `"stylesheet alternate"` count. */
   const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
 
+  /**
+   * Tags of `name`, ending at the first `>` that is OUTSIDE a quoted value.
+   *
+   * `<link\b[^>]*>` — the obvious version, and the one this had — is wrong, and
+   * review turned it into a working bypass: a `>` inside a quoted attribute is
+   * perfectly legal HTML and does NOT close the tag, so
+   * `<link rel="stylesheet" title="Brand > Fonts" href="https://...">` was
+   * truncated before its `href` and the third-party stylesheet was invisible to
+   * every static check here and in the pytest guard. Browsers parse it fine and
+   * fetch it.
+   */
+  const tagsNamed = (html: string, name: string): string[] =>
+    [...html.matchAll(new RegExp(`<${name}\\b(?:"[^"]*"|'[^']*'|[^>])*>`, "gi"))].map((m) => m[0]);
+
   function linkedStylesheetHrefs(html: string): string[] {
-    return [...html.matchAll(/<link\b[^>]*>/gi)]
-      .map((m) => m[0])
+    return tagsNamed(html, "link")
       .filter((tag) => tokens(attr(tag, "rel")).includes("stylesheet"))
       .map((tag) => attr(tag, "href") ?? "")
       .filter(Boolean);
@@ -386,7 +422,30 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
    * or a bare `x.css` does not. Scheme-relative is the one a `startsWith("http")`
    * check misses, and it is a perfectly good way to load Google Fonts.
    */
-  const isOffOrigin = (url: string) => /^([a-z][a-z0-9+.-]*:)?\/\//i.test(url.trim());
+  /**
+   * Off-origin means "names a host", judged the way the URL parser judges it.
+   *
+   * The naive `^(scheme:)?//` was bypassed in review THREE ways, each of which
+   * real Chromium resolves to a third-party host and actually requests:
+   *   https:\fonts.googleapis.com/x     (single backslash)
+   *   https:\\fonts.googleapis.com/x    (double backslash)
+   *   https:////fonts.googleapis.com/x  (extra slashes)
+   * WHATWG treats `\` as `/` after a special scheme, and collapses runs of
+   * slashes — so all three are `https://fonts.googleapis.com/x` to a browser
+   * and were `null` to this matcher. Normalise the same way before testing.
+   *
+   * A root-relative `/fonts/x.woff2`, a bare `x.css` and a `data:` URI still
+   * name no host and are correctly not reported.
+   */
+  const normaliseUrl = (url: string) => url.trim().replace(/\\/g, "/");
+  const isOffOrigin = (url: string) => {
+    const u = normaliseUrl(url);
+    // Scheme-relative: `//host/...`, which inherits the page's scheme.
+    if (/^\/{2,}[^/?#]/.test(u)) return true;
+    // Absolute: a scheme, then ONE OR MORE slashes, then a host. The `+` is the
+    // fix — `https:/host` and `https:////host` both reach `host`.
+    return /^[a-z][a-z0-9+.-]*:\/+[^/?#]/i.test(u);
+  };
 
   /**
    * Every URL an emitted stylesheet fetches: `url()` targets and `@import`
@@ -438,9 +497,30 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
     // `preload`/`modulepreload` is a third-party fetch in the critical path
     // even though it is not a stylesheet. `href` covers <link>; `src` covers
     // <script> and <img>.
-    const refs = [...emittedHtml.matchAll(/<(?:link|script|img)\b[^>]*>/gi)]
-      .map((m) => m[0])
-      .flatMap((tag) => [attr(tag, "href"), attr(tag, "src")])
+    //
+    // The tag list is wider than `link|script|img` because the name of this
+    // test is a claim about the whole page: `iframe`, `video`, `audio`,
+    // `source`, `object`, `embed`, SVG `use` and a `form action` are all ways
+    // to name a third-party host. Every one of them is blocked by the CSP
+    // today (they inherit `default-src 'self'`, and `form-action` is `'self'`),
+    // so this is guard coverage rather than live exposure — but a guard whose
+    // name overstates what it looks at is the shape this repo keeps getting
+    // caught by.
+    const refs = [
+      "link",
+      "script",
+      "img",
+      "iframe",
+      "video",
+      "audio",
+      "source",
+      "object",
+      "embed",
+      "use",
+      "form",
+    ]
+      .flatMap((name) => tagsNamed(emittedHtml, name))
+      .flatMap((tag) => [attr(tag, "href"), attr(tag, "src"), attr(tag, "data"), attr(tag, "action")])
       .filter((v): v is string => Boolean(v));
     expect(refs.length, "no href/src found at all — the probe is broken").toBeGreaterThan(3);
     expect(
@@ -504,6 +584,17 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
       `<link rel="stylesheet " href="https://fonts.googleapis.com/css2">`,
       `<link rel="alternate stylesheet" href="//fonts.googleapis.com/css2">`,
       `<link rel='stylesheet' href='//example.com/a.css'>`,
+      // A `>` INSIDE a quoted value does not close the tag. `<link\b[^>]*>`
+      // truncated this before `href` and the whole third-party stylesheet was
+      // invisible — demonstrated in review against the real emitted artifact,
+      // with vitest 523/523 and pytest 50/50 green while it shipped.
+      `<link rel="stylesheet" title="Brand > Fonts" href="https://fonts.googleapis.com/css2">`,
+      // WHATWG reads `\` as `/` after a special scheme, and collapses slash
+      // runs. Chromium really issues these requests; the old matcher saw none
+      // of them.
+      `<link rel="stylesheet" href="https:\\fonts.googleapis.com/css2">`,
+      `<link rel="stylesheet" href="https:\\\\fonts.googleapis.com/css2">`,
+      `<link rel="stylesheet" href="https:////fonts.googleapis.com/css2">`,
     ];
     for (const tag of bypasses) {
       const hrefs = linkedStylesheetHrefs(tag);
@@ -514,7 +605,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
     expect(isOffOrigin("/fonts/geist-latin.woff2")).toBe(false);
     expect(isOffOrigin("/assets/index-abc.css")).toBe(false);
     expect(isOffOrigin("data:font/woff2;base64,AAA")).toBe(false);
+    expect(isOffOrigin("about.css")).toBe(false);
     expect(linkedStylesheetHrefs(`<link rel="preload" as="style" href="//x/a.css">`)).toEqual([]);
+    // The quote-aware tokeniser must still find a plain tag, and must not run
+    // two adjacent tags together into one.
+    expect(tagsNamed(`<link rel="a"><link rel="b">`, "link")).toHaveLength(2);
   });
 
   it("and the CSS reader catches every @import form the MINIFIER can produce", () => {

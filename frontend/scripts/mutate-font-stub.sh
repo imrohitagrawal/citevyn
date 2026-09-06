@@ -1,5 +1,26 @@
 #!/bin/bash
 #
+# RETIRED BY #365 — DO NOT TRUST A GREEN RUN OF THIS SCRIPT.
+#
+# This harness proved that the #364 font fixture bites. It did, while the page
+# still asked fonts.googleapis.com for its faces. #365 self-hosted them, so the
+# page asks no third-party host at all and the fixture's routes never fire —
+# which makes several of the mutants below UNFALSIFIABLE rather than killed.
+# Measured after #365, in an isolated tree: M1 (neuter the stylesheet route
+# host) SURVIVES, M3 (a vendored subset missing) SURVIVES, M9 (the two vendored
+# files swapped) SURVIVES, and M4's anchor — a `<link rel="preconnect"
+# href="https://fonts.googleapis.com" />` in index.html — no longer exists, so
+# the script reports BROKEN and exits 1 for a reason that is not the real one.
+#
+# It is kept, not deleted, because the #364 record in docs/BACKLOG.md cites it
+# and because the fixture it exercises is still present as a backstop. The
+# guards that actually protect the production path after #365 are proved by
+# `frontend/scripts/mutate-font-guards.sh` instead — run that one.
+#
+# The banner below fires before any mutation, so nobody reads a stale result.
+#
+# ---------------------------------------------------------------------------
+#
 # Mutation harness for the vendored-font fixture (tests/fixtures.ts) that fixes
 # the demo-suite flake, #364.
 #
@@ -33,6 +54,25 @@
 # tree that is dirty RELATIVE TO HEAD (`git diff HEAD`, not `git diff` — the
 # latter compares against the index and waves through anything `git add`ed).
 set -u
+
+# Refuse to run rather than print a stale verdict (see the RETIRED note above).
+cat >&2 <<'RETIRED'
+mutate-font-stub.sh is RETIRED by #365.
+
+The page no longer requests fonts.googleapis.com, so this script's mutants can
+no longer bite: M1, M3 and M9 were MEASURED to survive after #365, and M4's
+anchor no longer exists in index.html. A run here would report a verdict that
+means nothing.
+
+Run frontend/scripts/mutate-font-guards.sh instead — it proves the guards that
+protect the production path now.
+
+Set MUTATE_FONT_STUB_ANYWAY=1 to run it regardless (for archaeology only).
+RETIRED
+if [ "${MUTATE_FONT_STUB_ANYWAY:-}" != "1" ]; then
+  exit 1
+fi
+
 cd "$(dirname "$0")/.." || exit 99
 S=$(mktemp -d)
 

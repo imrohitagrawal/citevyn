@@ -36,12 +36,23 @@
  * ---------
  * `latin` subsets only, byte-identical to what fonts.gstatic.com serves:
  * 29,288 B + 31,340 B = 60,628 B, both SIL OFL 1.1 (see public/fonts/OFL.txt).
- * The full 11-subset set is 136,112 B; latin is what this page actually asks
- * for — measured by instrumenting a real page load in both themes, which
- * records exactly these two requests. The one non-latin glyph rendered in the
- * UI today is the U+2713 check mark in ConnectedAccountsDrawer, which is
- * outside every subset Google serves for these families and already falls
- * through to the system stack — unchanged by this file.
+ * The full set is 11 unique woff2 files totalling 142,112 B, so the 9 subsets
+ * not vendored here are 81,484 B. (Measured by curling the css2 URL with a
+ * desktop Chrome UA and summing each file's Content-Length. An earlier draft of
+ * this comment said 136,112 / 75,484 — a subagent's arithmetic I repeated
+ * without adding it up myself, which is precisely the mistake this repo has a
+ * note about.)
+ *
+ * `latin` is what this page actually asks for: instrumenting a real page load
+ * in both themes records exactly these two requests and no others.
+ *
+ * Plenty of the UI's glyphs fall OUTSIDE this unicode-range and always have —
+ * the theme toggle's U+2600/U+263E, the hero CTA's U+2192, U+2265 in the stats
+ * row, U+2713 and U+2717 in the comparison table, and about a dozen more across
+ * 12 files. Google's `latin` subset has the identical unicode-range, so every
+ * one of them already fell through to the system stack before this change and
+ * still does. Vendoring more subsets would not help: none of these characters
+ * is in ANY subset Google serves for these two families.
  *
  * Geist is one VARIABLE face covering 400-700 in a single file. JetBrains Mono
  * is declared twice (400 and 500) pointing at the SAME file, exactly as Google
@@ -49,9 +60,14 @@
  *
  * KEEP IN SYNC WITH `public/about.css`. The About page is server-rendered by
  * `backend/app/services/about_page.py` and cannot import this file, so it
- * carries its own copy of these three rules. `src/test/buildGuards.test.ts`
- * fails if the two drift, and if any `url()` here does not resolve to a real
- * file under `public/`.
+ * carries its own copy of these three rules.
+ *
+ * `backend/tests/test_about_page_tokens.py` is the guard: it fails if the two
+ * copies drift, and if any `url()` here does not resolve to a real file under
+ * `public/`. (An earlier draft of this comment credited
+ * `src/test/buildGuards.test.ts`, which contains no reference to `about.css` at
+ * all — a fabricated citation, caught by review drifting a weight and watching
+ * which file went red. Grep before you cite.)
  */
 
 @font-face {
