@@ -665,14 +665,20 @@ body {
  * rgb(210,209,206) on rgb(251,251,248)) — up to 2x below the 3:1 floor, on a
  * control an ordinary keyboard user reaches early.
  *
- * `:focus-visible` only, so nothing about the resting marquee changes: no
- * layout shift, no new stacking context at rest, and all 22 visual baselines
- * still pass unregenerated. z-index 2 clears the fades' 1.
+ * The rule is on the TRACK, not the chip. `.ticker-track` carries the scrolling
+ * `transform`, which makes it a STACKING CONTEXT — so a `z-index` on a chip is
+ * scoped inside the track and can never rise above the strip's fades no matter
+ * how high it is. Measured: with the z-index on the chip, one ticker chip still
+ * painted its ring at 2.31:1. Raising the track lifts every chip in it.
+ *
+ * `:focus-within` only, so nothing about the resting marquee changes: no layout
+ * shift, no new stacking context at rest, and all 22 visual baselines still
+ * pass unregenerated. z-index 2 clears the fades' 1.
  *
  * tests/focus-ring.spec.ts refuses to score a ring under a painting pseudo-
  * element unless the control is raised like this, so removing either half
  * turns the sweep red. */
-.ticker-chip:focus-visible {
+.ticker-strip:focus-within .ticker-track {
   position: relative;
   z-index: 2;
 }

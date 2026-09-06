@@ -75,8 +75,16 @@ run () {
 # test is a mutant that proves nothing about the guard you were aiming at — a
 # reviewer made exactly that point about the exit-code-only version of this
 # harness, having done the per-test attribution by hand.
+# ONLY the numbered failure blocks. The first version grepped every "›" line out
+# of --reporter=line output, and that reporter prints one progress line PER TEST
+# THAT RAN, pass or fail — so on a fully GREEN run it happily named four
+# "killers". A reviewer proved that by running it unmutated. Since the same 28
+# tests run every time and the list was sorted, the attribution was very nearly
+# constant regardless of which mutant was applied, which defeats the entire
+# purpose stated above it.
 killers () {
-  grep -oE '›[^›]+$' "$S/out" 2>/dev/null | sed 's/^› *//' | sort -u | head -4 | tr '\n' ';'
+  grep -aoE '^[[:space:]]+[0-9]+\) .*›.*$' "$S/out" 2>/dev/null |
+    sed 's/.*› //' | cut -c1-70 | sort -u | head -4 | tr '\n' ';'
 }
 
 one () {  # label file pristine old new
@@ -148,6 +156,16 @@ one "inverted: drop the .cta-banner override (--ink on --ink = 1.00:1)" "$LANDIN
   background: var(--ink);' '  background: var(--ink);'
 
 echo
+echo "=== the marquee, whose edge fades paint over a focused chip ==="
+one "ticker: stop lifting the track above the strip's fades" "$LANDING" "$S/p.LANDING" \
+'.ticker-strip:focus-within .ticker-track {
+  position: relative;
+  z-index: 2;
+}' ''
+one "ticker: lift the CHIP instead of the track (a transform makes the track a stacking context)" "$LANDING" "$S/p.LANDING" \
+'.ticker-strip:focus-within .ticker-track {' '.ticker-chip:focus-visible {'
+
+echo
 echo "=== the exempt text inputs, which must signal focus another way ==="
 one "hero box: drop the :focus-within border" "$LANDING" "$S/p.LANDING" \
 '.hero-input-box:focus-within {
@@ -174,9 +192,29 @@ echo
 # behaviourally equivalent, because a repeat can no longer hide a distinct
 # control. An EQUIVALENT MUTANT is a legitimate reason to drop one; "the anchor
 # moved" is not, and the difference matters to anyone auditing this list.
+# NO MUTANT for the canvas two-sentinel parse check. It fires only on a colour
+# `getComputedStyle` cannot produce, so nothing a sweep walks can trigger it and
+# any mutant of it would SURVIVE for that reason rather than because the check
+# is weak. Its logic is asserted directly instead, in both directions, by
+# "the canvas colour reader rejects a colour it cannot parse".
 echo "=== META: can the sweep be made to check nothing? ==="
-one "sweep: stop noticing a backdrop it cannot composite (the gradient bypass)" "$SPEC" "$S/p.SPEC" \
-'    if (s.unmeasurableBackdrop !== null) {' '    if (false) {'
+one "sweep: ignore the pixels and trust the computed colours again" "$SPEC" "$S/p.SPEC" \
+'    if (s.pixels.strongPixels < 8) {' '    if (false) {'
+one "sweep: accept a ring nothing on screen actually changed" "$SPEC" "$S/p.SPEC" \
+'    if (s.pixels.changedPixels < 12) {' '    if (false) {'
+one "sweep: never measure pixels at all" "$SPEC" "$S/p.SPEC" \
+'    (stop as Stop).pixels = await measureFocusIndicator(page);' \
+'    (stop as Stop).pixels = { changedPixels: 999, strongPixels: 999, ratio: 21, indicator: [0,0,0], adjacent: [255,255,255] };'
+one "measure: stop freezing the marquee (the two frames drift apart)" "$SPEC" "$S/p.SPEC" \
+'  await freezeAnimations(page);' ''
+one "sweep: exempt by class TOKEN again, so any control sharing it is skipped" "$SPEC" "$S/p.SPEC" \
+'    exempt: el.matches(EXEMPT_SELECTOR),' \
+'    exempt: (typeof el.className === "string" ? el.className : "").split(/\\s+/).some((c) => ["hero-input", "chat-input"].includes(c)),'
+one "sweep: never clear the identity stamps between walks" "$SPEC" "$S/p.SPEC" \
+'  await page.evaluate(() =>
+    document.querySelectorAll("[data-fr-seen]").forEach((n) => n.removeAttribute("data-fr-seen")),
+  );
+  for (let i = 0; i < max; i++) {' '  for (let i = 0; i < max; i++) {'
 one "sweep: de-duplicate on a KEY again, so a broken twin hides" "$SPEC" "$S/p.SPEC" \
 '      const seenBefore = el.hasAttribute("data-fr-seen");' \
 '      const seenBefore = !!document.querySelector(

@@ -49,6 +49,8 @@ import {
   enterChat,
   waitStreamDone,
   contrastRatio,
+  measureFocusIndicator,
+  freezeAnimations,
   type ThemeName,
 } from "./helpers";
 
@@ -90,12 +92,18 @@ type Stop = {
   /** Matches OUTLINE_EXEMPT_SELECTOR — decided in the page, on the element. */
   exempt: boolean;
   /**
-   * Set when an ancestor paints a `background-image` (a gradient) before any
-   * opaque `background-color` is found. `backdropOf` composites COLOURS only,
-   * so in that case it does not know what is actually behind the ring and must
-   * say so rather than return a confident wrong answer.
+   * What focusing this control actually CHANGED on screen, from a screenshot
+   * diff. This is the source of truth for whether a ring is visible; the
+   * computed-style fields above are kept because they give a precise message
+   * when the cause is a missing `outline`, but they cannot see occlusion.
    */
-  unmeasurableBackdrop: string | null;
+  pixels: {
+    changedPixels: number;
+    strongPixels: number;
+    ratio: number | null;
+    indicator: number[] | null;
+    adjacent: number[] | null;
+  } | null;
   outlineStyle: string;
   outlineWidth: number;
   /** Resolved through a canvas, so `color-mix()` / `color(srgb …)` normalise. */
@@ -116,6 +124,10 @@ type Stop = {
  */
 async function tabWalk(page: import("@playwright/test").Page, max: number): Promise<Stop[]> {
   const stops: Stop[] = [];
+  // Freeze animation BEFORE any measurement: the before/after screenshot pair
+  // must differ only by the focus state, and the marquee otherwise scrolls
+  // between the two frames.
+  await freezeAnimations(page);
   // Clear any stamps a previous walk in this same page left behind, so two
   // sweeps in one test do not silently measure nothing the second time.
   await page.evaluate(() =>
@@ -144,14 +156,31 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
         // nothing here: an unparseable colour would have come back magenta,
         // and magenta measures 5.77:1 against the dark --bg, so it would have
         // PASSED the 3:1 floor. Now it throws.
-        ctx.fillStyle = "#ff00ff";
-        ctx.fillStyle = col;
-        ctx.fillRect(0, 0, 1, 1);
-        const d = ctx.getImageData(0, 0, 1, 1).data;
-        if (d[0] === 255 && d[1] === 0 && d[2] === 255 && !/^#ff00ff$/i.test(col.trim())) {
+        // TWO sentinels, not one. Canvas silently IGNORES an unparseable
+        // fillStyle and keeps the previous value, so the check is "does the
+        // result depend on what was there before?" — if it does, the assignment
+        // did not take.
+        //
+        // The single-sentinel version had a dead escape hatch: it compared the
+        // INPUT against /^#ff00ff$/i, but `getComputedStyle` never returns hex
+        // — Chromium hands back `rgb(255, 0, 255)` for `magenta`, `fuchsia` and
+        // `#ff00ff` alike. So a magenta focus ring (a common high-visibility
+        // choice) or any magenta ancestor background would have thrown inside
+        // `page.evaluate` and killed the ENTIRE sweep, not one stop.
+        const read = (sentinel: string) => {
+          ctx.fillStyle = sentinel;
+          ctx.fillStyle = col;
+          ctx.fillRect(0, 0, 1, 1);
+          const d = ctx.getImageData(0, 0, 1, 1).data;
+          return [d[0], d[1], d[2], d[3] / 255];
+        };
+        const a = read("#ff00ff");
+        ctx.clearRect(0, 0, 1, 1);
+        const b = read("#00ff00");
+        if (a.join() !== b.join()) {
           throw new Error(`focus-ring guard: canvas could not parse the colour ${col}`);
         }
-        return [d[0], d[1], d[2], d[3] / 255];
+        return a;
       };
 
       // `over(fg, bg)` — source-over compositing, so a translucent header or a
@@ -164,63 +193,25 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
       // The ring is drawn at `outline-offset: 2px`, i.e. OUTSIDE the border
       // box, so what sits behind it is the ancestor chain's paint, not the
       // control's own background. Start at the parent for exactly that reason.
-      const backdropOf = (node: HTMLElement): { rgb: number[]; unmeasurable: string | null } => {
+      // The composited ancestor background, kept ONLY for the failure message
+      // (naming what the ring was drawn over is useful when a stop fails). It
+      // is deliberately NOT the verdict any more: two rounds of keying on
+      // computed colours reported 16.35:1 for rings that screenshots measured
+      // at 1.00:1, because a proxy cannot see occlusion, filters or opacity.
+      const backdropOf = (node: HTMLElement): number[] => {
         const layers: number[][] = [];
-        let unmeasurable: string | null = null;
-        // Is the FOCUSED element lifted into its own stacking position? If it
-        // is, an ancestor's painted pseudo-element cannot cover its ring, so a
-        // painting ::before/::after below is not an occluder and the colour
-        // composite stays honest.
-        const own = getComputedStyle(node);
-        const raised = own.position !== "static" && own.zIndex !== "auto";
         let n: HTMLElement | null = node.parentElement;
         while (n) {
-          const cs = getComputedStyle(n);
-          // ::before / ::after are INVISIBLE to getComputedStyle(n) and paint
-          // over descendants when they are positioned above them. This is not
-          // hypothetical: `.ticker-strip::before/::after` are 80px
-          // `linear-gradient(to right, var(--bg), transparent)` fades at
-          // z-index 1, and `.ticker-chip` is a plain non-positioned <button> in
-          // the tab order — so the fade paints OVER its focus ring. Measured on
-          // a natural Tab walk: the guard reported 17.21:1 for a ring painting
-          // at 1.47-1.85:1, i.e. up to 2x BELOW its own 3:1 floor, on the first
-          // ticker stop an ordinary keyboard user reaches.
-          for (const pseudo of ["::before", "::after"]) {
-            const ps = getComputedStyle(n, pseudo);
-            if (!ps.content || ps.content === "none") continue;
-            const paints =
-              (ps.backgroundImage && ps.backgroundImage !== "none") ||
-              paint(ps.backgroundColor)[3] > 0;
-            if (paints && !raised && unmeasurable === null) {
-              unmeasurable =
-                `${n.tagName}.${typeof n.className === "string" ? n.className : ""}${pseudo} ` +
-                `paints over an unraised descendant`;
-            }
-          }
-          // A gradient is a background-IMAGE, and this walk composites
-          // background-COLOURS. An ancestor painting `linear-gradient(--ink,
-          // --ink)` has `backgroundColor: rgba(0,0,0,0)`, so it looked
-          // TRANSPARENT to the first version of this walk and the composite
-          // fell through to the page canvas: the guard measured 16.35:1 for a
-          // ring that a reviewer measured at 1.00:1 in the same pixel. That is
-          // the .cta-banner defect again, one CSS property over. Rather than
-          // guess, record that this backdrop cannot be composited and let
-          // assertRings fail loudly with the element named.
-          if (cs.backgroundImage && cs.backgroundImage !== "none" && unmeasurable === null) {
-            unmeasurable = `${n.tagName}.${typeof n.className === "string" ? n.className : ""} paints ${cs.backgroundImage.slice(0, 60)}`;
-          }
-          const c = paint(cs.backgroundColor);
+          const c = paint(getComputedStyle(n).backgroundColor);
           if (c[3] > 0) {
             layers.push(c);
             if (c[3] >= 1) break;
           }
           n = n.parentElement;
         }
-        // Anything still translucent lands on the canvas the browser paints,
-        // which is white unless html/body says otherwise (they do here).
         let acc = [255, 255, 255];
         for (let i = layers.length - 1; i >= 0; i--) acc = over(layers[i], acc);
-        return { rgb: acc, unmeasurable };
+        return acc;
       };
 
       const cs = getComputedStyle(el);
@@ -235,7 +226,7 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
       return {
         seenBefore,
         exempt: el.matches(EXEMPT_SELECTOR),
-        unmeasurableBackdrop: backdrop.unmeasurable,
+        pixels: null,
         id: el.id || "",
         tag: el.tagName,
         cls: typeof el.className === "string" ? el.className : "",
@@ -247,7 +238,7 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
         outlineWidth: parseFloat(cs.outlineWidth) || 0,
         outlineRGBA: paint(cs.outlineColor),
         outlineRaw: cs.outlineColor,
-        backdropRGB: backdrop.rgb,
+        backdropRGB: backdrop,
         backdropRaw: getComputedStyle(el.parentElement ?? el).backgroundColor,
       };
     }, OUTLINE_EXEMPT_SELECTOR);
@@ -258,6 +249,9 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
     // and never reached the inverted CTA banner further down the page.
     if (stop === null) continue;
     if (stop.seenBefore) continue; // this exact element again — report it once
+    // The verdict: what focusing actually changed on screen. Taken here, while
+    // this control is the one the browser has focused from a real Tab.
+    (stop as Stop).pixels = await measureFocusIndicator(page);
     stops.push(stop as Stop);
   }
   await page.evaluate(() =>
@@ -289,22 +283,39 @@ function assertRings(stops: Stop[], where: string) {
       );
       continue;
     }
-    if (s.unmeasurableBackdrop !== null) {
-      // NOT skipped. A backdrop this sweep cannot composite is a backdrop it
-      // cannot vouch for, and staying quiet about it is how a guard reports
-      // green on something it never looked at.
+    // THE VERDICT IS THE PIXELS. Everything above is a computed-style
+    // convenience that gives a precise message for the common cause; it cannot
+    // see an overlay, a filter or an opacity, and two earlier versions of this
+    // guard passed rings that screenshots measured at 1.00:1 for exactly that
+    // reason.
+    if (s.pixels === null) {
+      failures.push(`${who} — could not sample this control's pixels (no box to screenshot)`);
+      continue;
+    }
+    if (s.pixels.changedPixels < 12) {
       failures.push(
-        `${who} — the paint behind this ring cannot be composited from ` +
-          `background-color alone (${s.unmeasurableBackdrop}); the ring's real ` +
-          `contrast is unknown, so this sweep refuses to pass it`,
+        `${who} — focusing it changes ${s.pixels.changedPixels} pixels on screen. ` +
+          `Computed style says outline ${s.outlineStyle} ${s.outlineWidth}px ${s.outlineRaw}, ` +
+          `so something is painting OVER the ring (an overlay, a filter, an opacity) ` +
+          `or it is drawn outside the sampled area`,
       );
       continue;
     }
-    const ratio = contrastRatio(s.outlineRGBA, s.backdropRGB);
-    if (ratio < MIN_RING_CONTRAST) {
+    if (s.pixels.ratio === null) {
+      failures.push(`${who} — the focus indicator has no adjacent pixels to compare against`);
+      continue;
+    }
+    // At least a ring's worth of pixels must clear the floor. Counting them
+    // rather than averaging is what lets a legitimately large visual change —
+    // the marquee un-fading when focus enters it — coexist with a strict
+    // verdict on the ring itself.
+    if (s.pixels.strongPixels < 8) {
       failures.push(
-        `${who} — ring ${s.outlineRaw} on ${s.backdropRaw} measures ${ratio.toFixed(2)}:1, ` +
-          `below the ${MIN_RING_CONTRAST}:1 floor`,
+        `${who} — the focus indicator's best pixel PAINTS at ` +
+          `${s.pixels.ratio.toFixed(2)}:1 (rgb(${s.pixels.indicator}) vs adjacent ` +
+          `rgb(${s.pixels.adjacent})), and only ${s.pixels.strongPixels} pixels reach the ` +
+          `${MIN_RING_CONTRAST}:1 floor. Computed style claimed ${s.outlineRaw} on ` +
+          `${s.backdropRaw}, so something is painting over or through it`,
       );
     }
   }
@@ -430,38 +441,116 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
       ).toBeGreaterThanOrEqual(MIN_RING_CONTRAST);
     });
 
-    test("refuses to vouch for a ring whose backdrop it cannot composite", async ({ page }) => {
-      // The bite-proof for the gradient blind spot. `backdropOf` composites
-      // background-COLOURS; a panel painting --ink via a GRADIENT reports
-      // `backgroundColor: rgba(0,0,0,0)`, so the walk used to fall through to
-      // the page canvas and score a 1.00:1 ring as 16.35:1 — reproduced by a
-      // reviewer, and it is the .cta-banner defect one CSS property over.
-      //
-      // Injected at runtime rather than shipped in the app: the point is to
-      // prove the DETECTION fires, not to add an inverted panel to the page.
+    // Every shape below produced a MEASURED 1.00:1 ring that earlier versions of
+    // this sweep passed at a confident 16.35:1, because they composited
+    // computed background colours instead of looking at the screen. They are
+    // injected at runtime rather than shipped: the point is to prove the
+    // measurement catches the CLASS, not to add occluders to the app.
+    const OCCLUDERS: Array<{ name: string; setup: string }> = [
+      {
+        name: "a gradient-painted panel (background-color reads transparent)",
+        setup: `panel.style.backgroundImage = "linear-gradient(var(--ink), var(--ink))";`,
+      },
+      {
+        name: "an absolutely-positioned SIBLING drawn over the control",
+        setup: `panel.style.position = "relative";
+          const cover = document.createElement("div");
+          cover.style.cssText =
+            "position:absolute;inset:-20px;background:var(--ink);z-index:5";
+          panel.appendChild(cover);`,
+      },
+      {
+        name: "an ancestor ::before overlay",
+        setup: `panel.style.position = "relative";
+          const st = document.createElement("style");
+          st.id = "fr-probe-style";
+          st.textContent =
+            "#fr-probe::before{content:'';position:absolute;inset:-20px;background:var(--ink);z-index:5}";
+          document.head.appendChild(st);`,
+      },
+      {
+        // The panel needs its OWN background, or the filter only touches the
+        // panel's content and the ring still sits on an unfiltered page. That
+        // distinction is measured, not assumed: with a transparent panel this
+        // probe leaves 588 changed pixels and 172 distinct colours, and the
+        // ring stays perceivable — so a version of this test without the
+        // background would have asserted a bug that does not exist.
+        name: "an ancestor filter: invert(0.5), which flattens ring and backdrop alike",
+        setup: `panel.style.background = "var(--bg)";
+          panel.style.filter = "invert(0.5)";`,
+      },
+      {
+        name: "an overlay with backdrop-filter: contrast(0)",
+        setup: `panel.style.background = "var(--bg)";
+          panel.style.position = "relative";
+          const cover = document.createElement("div");
+          cover.style.cssText =
+            "position:absolute;inset:-20px;backdrop-filter:contrast(0);z-index:5";
+          panel.appendChild(cover);`,
+      },
+      {
+        name: "an ancestor opacity: 0.06",
+        setup: `panel.style.background = "var(--bg)";
+          panel.style.opacity = "0.06";`,
+      },
+    ];
+
+    for (const occluder of OCCLUDERS) {
+      test(`sees through ${occluder.name}`, async ({ page }) => {
+        await page.evaluate((setup) => {
+          const panel = document.createElement("div");
+          panel.id = "fr-probe";
+          panel.style.padding = "24px";
+          const btn = document.createElement("button");
+          btn.className = "fr-probe-pill";
+          btn.textContent = "Occluded probe";
+          panel.appendChild(btn);
+          document.body.appendChild(panel);
+          // eslint-disable-next-line no-new-func
+          new Function("panel", setup)(panel);
+        }, occluder.setup);
+
+        const stops = await tabWalk(page, 160);
+        const probe = stops.filter((st) => st.cls.includes("fr-probe-pill"));
+        // Partner: the sweep must actually have REACHED the probe, or the
+        // assertion below would pass on an empty list.
+        expect(probe.length, "the sweep must reach the injected probe").toBe(1);
+        // It must FAIL — either because focusing changes nothing visible, or
+        // because what it does change paints below the floor.
+        expect(() => assertRings(probe, "probe")).toThrow(
+          /changes \d+ pixels on screen|PAINTS at|no adjacent pixels|could not sample/,
+        );
+
+        await page.evaluate(() => {
+          document.getElementById("fr-probe")?.remove();
+          document.getElementById("fr-probe-style")?.remove();
+        });
+      });
+    }
+
+    test("and PASSES the same probe with no occluder, so it is not simply rejecting probes", async ({
+      page,
+    }) => {
+      // The control case for the six above. Without it, a measurement that
+      // failed everything would look like a perfect guard.
       await page.evaluate(() => {
         const panel = document.createElement("div");
-        panel.id = "fr-gradient-probe";
-        panel.style.backgroundImage = "linear-gradient(var(--ink), var(--ink))";
+        panel.id = "fr-probe";
         panel.style.padding = "24px";
         const btn = document.createElement("button");
-        btn.className = "fr-gradient-pill";
-        btn.textContent = "Gradient probe";
+        btn.className = "fr-probe-pill";
+        btn.textContent = "Clear probe";
         panel.appendChild(btn);
         document.body.appendChild(panel);
       });
-      const stops = await tabWalk(page, 140);
-      const probe = stops.filter((s) => s.cls.includes("fr-gradient-pill"));
-      // Partner: the sweep must actually have REACHED the probe, or the
-      // assertion below would pass on an empty list.
-      expect(probe.length, "the sweep must reach the injected probe").toBe(1);
-      expect(
-        probe[0].unmeasurableBackdrop,
-        "a gradient-painted ancestor must be reported as unmeasurable",
-      ).not.toBeNull();
-      // And it must FAIL the sweep rather than being quietly skipped.
-      expect(() => assertRings(probe, "probe")).toThrow(/cannot be composited/);
-      await page.evaluate(() => document.getElementById("fr-gradient-probe")?.remove());
+      const stops = await tabWalk(page, 160);
+      const probe = stops.filter((st) => st.cls.includes("fr-probe-pill"));
+      expect(probe.length).toBe(1);
+      expect(probe[0].pixels!.changedPixels).toBeGreaterThan(12);
+      expect(probe[0].pixels!.strongPixels).toBeGreaterThanOrEqual(8);
+      expect(probe[0].pixels!.ratio!).toBeGreaterThanOrEqual(MIN_RING_CONTRAST);
+      expect(() => assertRings(probe, "probe")).not.toThrow();
+      await page.evaluate(() => document.getElementById("fr-probe")?.remove());
     });
 
     test("a citation chip's ring follows --focus-ring, not a hardcoded --ink", async ({
@@ -527,6 +616,90 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
       });
       expect(rule, "a.citation-chip:focus-visible must exist as its own rule").not.toBeNull();
       expect(rule).toContain("var(--focus-ring)");
+    });
+
+    test("a control that merely SHARES an exempt class token is still measured", async ({
+      page,
+    }) => {
+      // The exemption used to match any element carrying `chat-input` among its
+      // classes, so a future control sharing that token would have been
+      // exempted wholesale and never measured. It is a selector now, and this
+      // is its bite-proof — reinstating the token match makes the probe below
+      // invisible and the sweep green.
+      await page.evaluate(() => {
+        const btn = document.createElement("button");
+        // Shares the token, is NOT the exempt control.
+        btn.className = "chat-input fr-token-probe";
+        btn.style.outline = "none";
+        btn.textContent = "Token probe";
+        document.body.appendChild(btn);
+      });
+      const stops = await tabWalk(page, 160);
+      const probe = stops.filter((st) => st.cls.includes("fr-token-probe"));
+      expect(probe.length, "the sweep must reach the probe").toBe(1);
+      expect(probe[0].exempt, "sharing a class token must NOT exempt a control").toBe(false);
+      expect(() => assertRings(probe, "token")).toThrow();
+      await page.evaluate(() => document.querySelector(".fr-token-probe")?.remove());
+    });
+
+    test("two sweeps in one page both measure the whole page", async ({ page }) => {
+      // The identity stamps must be cleared between walks. Without it the
+      // second sweep in a test would skip every control it had already seen and
+      // report green having measured nothing — a vacuous pass.
+      const first = await tabWalk(page, 140);
+      const second = await tabWalk(page, 140);
+      expect(first.length).toBeGreaterThanOrEqual(20);
+      expect(second.length, "the second sweep must not be silently empty").toBe(first.length);
+    });
+
+    test("the canvas colour reader rejects a colour it cannot parse", async ({ page }) => {
+      // The sweep normalises colours through a canvas, and canvas silently
+      // IGNORES an unparseable fillStyle, keeping the previous value — which
+      // would hand back a confident WRONG colour. Two sentinels catch that: if
+      // the answer depends on what was there before, the assignment did not
+      // take.
+      //
+      // This asserts the expression the sweep embeds, in BOTH directions,
+      // because no colour `getComputedStyle` can return will ever trigger it in
+      // a real walk. The earlier single-sentinel version compared the INPUT
+      // against /^#ff00ff$/i and was dead code: Chromium returns
+      // `rgb(255, 0, 255)` for `magenta`, `fuchsia` and `#ff00ff` alike, so a
+      // magenta ring would have thrown and killed the entire sweep.
+      const r = await page.evaluate(() => {
+        const probe = (col: string) => {
+          const c = document.createElement("canvas");
+          c.width = c.height = 1;
+          const ctx = c.getContext("2d")!;
+          const read = (sentinel: string) => {
+            ctx.fillStyle = sentinel;
+            ctx.fillStyle = col;
+            ctx.fillRect(0, 0, 1, 1);
+            const d = ctx.getImageData(0, 0, 1, 1).data;
+            return [d[0], d[1], d[2], d[3] / 255];
+          };
+          const a = read("#ff00ff");
+          ctx.clearRect(0, 0, 1, 1);
+          const b = read("#00ff00");
+          return { parsed: a.join() === b.join(), value: a };
+        };
+        return {
+          magenta: probe("rgb(255, 0, 255)"),
+          named: probe("magenta"),
+          srgb: probe("color(srgb 1 0 1)"),
+          ink: probe("rgb(28, 27, 25)"),
+          garbage: probe("not-a-colour"),
+        };
+      });
+      // Real colours parse — including the three magenta spellings that the
+      // dead escape hatch would have thrown on.
+      expect(r.magenta.parsed).toBe(true);
+      expect(r.named.parsed).toBe(true);
+      expect(r.srgb.parsed).toBe(true);
+      expect(r.ink.parsed).toBe(true);
+      expect(r.ink.value.slice(0, 3)).toEqual([28, 27, 25]);
+      // And an unparseable one is caught rather than silently read as whatever
+      // was in the context before it.
+      expect(r.garbage.parsed).toBe(false);
     });
 
     test("a broken TWIN of a compliant control is still measured", async ({ page }) => {

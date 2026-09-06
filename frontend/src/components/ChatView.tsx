@@ -159,13 +159,26 @@ export function ChatView({
         arrived = m;
       }
     }
-    if (!last || last.isUser) {
-      // A question just went in (or the transcript is empty). Drop any previous
+    if (!last || last.isUser || last.streaming) {
+      // A question just went in (or the transcript is empty, or an answer is
+      // still arriving). Drop any previous
       // arrival text: the error branch below returns WITHOUT writing, so
       // otherwise an "Answer ready." from the last question would be left
-      // standing over a request that then fails. Functional form, so an
-      // unchanged value returns the same reference and React provably bails out
-      // instead of committing a render.
+      // standing over a request that then fails.
+      //
+      // `|| last.streaming` is load-bearing and was MISSING for one commit. In
+      // demo mode `send()` dispatches the user bubble and then
+      // `routeQuestion -> streamBot`'s bot bubble SYNCHRONOUSLY, so React
+      // batches them and the tail is never a user message. Without this clause
+      // the region never returned to "" between two answers — and `role=status`
+      // announces on a text CHANGE, so the SECOND consecutive answer was
+      // announced to nobody. Measured in a real browser: the region took the
+      // values ["", "Answer ready. 1 source cited."] across two questions,
+      // where it should take four. Two consecutive refusals were silent the
+      // same way.
+      //
+      // Both `setSettled` calls can run in one pass; the announcement below is
+      // second and wins, which is why an out-of-order arrival still announces.
       setSettled((s) => (s === "" ? s : ""));
     }
     if (!arrived) return;

@@ -860,6 +860,62 @@ describe("ChatView announces an ARRIVING answer (#356)", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
   });
 
+  it("announces the SECOND consecutive answer too, not just the first", () => {
+    // `role="status"` announces on a text CHANGE. If the region never returns
+    // to "" between two answers, the second one is announced to NOBODY because
+    // the string is identical.
+    //
+    // This is not theoretical and it is not caught by any other test here: in
+    // DEMO mode `send()` dispatches the user bubble and then `streamBot`'s bot
+    // bubble synchronously, so React batches them and the tail is NEVER a user
+    // message. A clear keyed only on `!last || last.isUser` therefore never
+    // fires. Measured in a real browser at that commit, the region took the
+    // values ["", "Answer ready. 1 source cited."] across two questions instead
+    // of four. Deleting the clear survived all 40 other tests in this file.
+    const seen: string[] = [];
+    const record = () => {
+      const t = screen.getByRole("status").textContent ?? "";
+      if (seen[seen.length - 1] !== t) seen.push(t);
+    };
+
+    const one = (i: number) => [
+      { ...msg(i, true, `q${i}`), msgId: 6000 + i },
+      { ...msg(i + 1, false, ""), msgId: 6001 + i, streaming: true, sources: [] },
+    ];
+    const done = (i: number, src: string) => [
+      { ...msg(i, true, `q${i}`), msgId: 6000 + i },
+      {
+        ...msg(i + 1, false, "an answer"),
+        msgId: 6001 + i,
+        streaming: false,
+        sources: [{ n: "1", title: src, url: `https://e.co/${src}` }],
+      },
+    ];
+
+    const { rerender } = renderChat({ messages: [] });
+    record();
+    // First question and answer. Both bubbles land in ONE commit, which is what
+    // demo mode really does.
+    rerender(chat({ messages: one(0) }));
+    record();
+    rerender(chat({ messages: done(0, "A") }));
+    record();
+    // Second question and answer, same shape.
+    rerender(chat({ messages: [...done(0, "A"), ...one(10)] }));
+    record();
+    rerender(chat({ messages: [...done(0, "A"), ...done(10, "B")] }));
+    record();
+
+    // The region must have RETURNED to empty in between, or the second
+    // announcement is a no-op string change that no screen reader will read.
+    expect(seen).toEqual([
+      "",
+      "Answer ready. 1 source cited.",
+      "",
+      "Answer ready. 1 source cited.",
+    ]);
+  });
+
   it("gives the chat landmark an accessible name", () => {
     // Measured via Chromium's AX tree before this: `AX main: name=""`.
     renderChat();

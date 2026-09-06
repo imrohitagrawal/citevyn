@@ -451,6 +451,17 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
     // ...and it is the real config, not an empty stand-in that would make the
     // path assertion the only thing holding this up.
     expect(loaded!.config.server?.port).toBe(3000);
+    // The build's ENTRY must stay index.html, which is the file the guard above
+    // reads. A reviewer set `build.rollupOptions.input` to a second HTML file
+    // carrying a `<script src="/heavy.js">` and a 266,669 B `public/heavy.js`:
+    // the build succeeded, `dist/` shipped both, `check:bundle` reported
+    // "headroom 1672 B", and every test stayed green — because the script tag
+    // lived in a file nothing looks at. Pinning "no custom input" is one line
+    // and closes it; changing the entry now has to change this test too.
+    expect(
+      loaded!.config.build?.rollupOptions?.input,
+      "a custom rollup input means index.html is no longer the entry the script guard reads",
+    ).toBeUndefined();
     // 60 s, not the 5 s default: Vite bundles the config through esbuild, and
     // the rest of the suite is running. This is a budget for a genuinely heavy
     // operation in a NEW test, not a raise on an existing one (#344).
