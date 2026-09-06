@@ -108,9 +108,15 @@ one "announce: watch by list POSITION, which a resume re-uses" "$CV" "$S/p.CV" \
 '        watching.current.add(m.msgId);' \
 '        watching.current.add(Number(m.domId.replace("cv-msg-", "")));'
 one "announce: never clear on a new question (stale text over a failure)" "$CV" "$S/p.CV" \
-'    if (!last || last.isUser) {
-      // A question just went in' '    if (false) {
-      // A question just went in'
+'    if (!last || last.isUser || last.streaming) {' '    if (false) {'
+# THE THIRD DEFECT: dropping just the `|| last.streaming` clause. In demo mode
+# the user bubble and the bot bubble land in ONE React commit, so the tail is
+# never a user message and the region never returns to "" -- and `role=status`
+# announces on a text CHANGE, so the SECOND consecutive answer was announced to
+# nobody. Measured in a real browser: the region took two values across two
+# questions where it should take four.
+one "announce: clear only on a user tail (the second answer goes silent)" "$CV" "$S/p.CV" \
+'    if (!last || last.isUser || last.streaming) {' '    if (!last || last.isUser) {'
 one "announce: drop the transport-failure guard" "$CV" "$S/p.CV" \
 '    if (arrived.errorKind) {' '    if (false) {'
 one "announce: drop the refusal branch" "$CV" "$S/p.CV" \
@@ -119,11 +125,15 @@ one "announce: always pluralise sources" "$CV" "$S/p.CV" \
 '${n === 1 ? "" : "s"}' 's'
 one "announce: emit the source clause unconditionally" "$CV" "$S/p.CV" \
 '`Answer ready.${n ? ` ${n} source' '`Answer ready.${true ? ` ${n} source'
-one "announce: skip user bubbles no more (announce the reader back to themselves)" "$CV" "$S/p.CV" \
-'      if (m.isUser) continue;' '      if (false) continue;'
 one "landmark: drop the accessible name" "$CV" "$S/p.CV" \
 ' aria-label="Chat"' ''
 
+# NO MUTANT for `if (m.isUser) continue`. Removing it is an EQUIVALENT mutant,
+# not a surviving one: a user bubble is never `streaming`, and its id was never
+# added to `watching`, so the loop falls through both branches and does nothing
+# either way. The line is defensive and cheap; a mutant of it would "survive"
+# for a reason that says nothing about the guard, which is exactly the kind of
+# number that makes a mutation score dishonest.
 echo
 echo "=== the parked-question notice, and its stale-closure trap ==="
 one "park: read the STALE closure value again" "$LS" "$S/p.LS" \
