@@ -8,7 +8,7 @@
  *
  * Regenerate baselines intentionally with:  npx playwright test visual.spec.ts --update-snapshots
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 import { gotoApp, ensureTheme, enterChat, type ThemeName } from "./helpers";
 
 const THEMES: ThemeName[] = ["light", "dark"];

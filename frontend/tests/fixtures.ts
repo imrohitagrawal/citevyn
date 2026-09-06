@@ -15,7 +15,7 @@
  *
  *     fonts served normally         mount in 191-323 ms
  *     fonts stalled 40 s            mount in 40 150 ms   <-- tracks the stall 1:1
- *     fonts stubbed (this file)     mount in 108-158 ms
+ *     fonts served from disk        mount in 108-158 ms
  *
  * That is what reddened `main` in run 34050016261. `landing.spec.ts:96` sat on a
  * blank page for exactly 30.0 s — the retained video's first 30 s are one
@@ -28,63 +28,97 @@
  *
  * So the fix belongs here, once, and not in any single spec.
  *
- * WHY STUB RATHER THAN LET THE FONTS LOAD
- * ---------------------------------------
- * Nothing outside `visual.spec.ts` asserts typography — there is no
- * `font-family`, `Geist` or `JetBrains` reference anywhere else under `tests/`.
- * The real bytes buy those specs nothing and cost them three third-party round
- * trips per test, ~480 per suite run, every one of which can stall.
+ * WHY IT SERVES THE REAL FONTS INSTEAD OF STUBBING THEM AWAY
+ * ---------------------------------------------------------
+ * The cheap version of this fix answers the font request with an empty
+ * stylesheet. It removes the stall just as well, and no spec names a typeface
+ * (grep: no `font-family`, `Geist` or `JetBrains` reference anywhere else under
+ * `tests/`) — but "no spec names a font" is not "no spec depends on one", and
+ * measuring found two places that do:
  *
- * The stub is a real (tiny) stylesheet rather than an abort on purpose:
- * `route.abort()` surfaces as a `net::ERR_FAILED` console message, and
- * `behavior.spec.ts` has tests that fail on any console error.
+ *   - `fidelity.spec.ts`'s D2.5 legibility guard samples a pixel row through the
+ *     cap region of a highlighted phrase and requires a bright backdrop
+ *     fraction > 0.5. It exists because dark-ink-on-dark once shipped. Measured
+ *     on `.highlight-phrase` in dark mode: **0.5437 with real Geist, 0.5336 with
+ *     the empty stub** — the margin above the threshold shrinks from 0.0437 to
+ *     0.0336, and that was against macOS's SF Pro fallback. CI runs
+ *     `ubuntu-latest`, whose fallback face is a third font again, unmeasured and
+ *     unmeasurable from here.
+ *   - `visual.spec.ts`'s 22 darwin baselines are pixels of real Geist at
+ *     `maxDiffPixelRatio: 0.02`. Pointing it at an empty-stub fixture turns 9 of
+ *     the 22 red.
  *
- * WHY visual.spec.ts DOES NOT USE THIS
- * ------------------------------------
- * Its 22 darwin baselines are pixels of real Geist at `maxDiffPixelRatio: 0.02`,
- * and falling back to `system-ui` moves far more than 2 % of the text pixels.
- * Measured, not assumed: pointing `visual.spec.ts` at this fixture and running
- * it turns **9 of its 22 snapshots red** (hero, personas, how-it-works and
- * pricing in both themes, plus light/pricing); with the real fonts it is 22/22.
- * It is excluded from the CI job by `playwright.demo-ci.config.ts` and stays a
- * local/darwin tool (#325), so it keeps the real fonts and keeps the exposure.
- * `src/test/buildGuards.test.ts` pins that carve-out to exactly that one file,
- * by parsing each spec's imports, so a NEW spec cannot quietly join it.
+ * Trading a network-dependent flake for a platform-dependent pixel margin is not
+ * a fix. So the fixture serves the SAME BYTES Google would have served, from
+ * `tests/fonts/`: identical metrics to production on every platform, zero
+ * third-party network, and `visual.spec.ts` can use this fixture like everything
+ * else rather than needing a carve-out.
  *
  * WHAT THIS DOES NOT FIX
  * ----------------------
  * Real users still meet the same render-blocking link: while
  * `fonts.googleapis.com` is slow, the CiteVyn page is blank, not merely
- * unstyled. That is a production concern with a different fix (self-host the
- * two faces, or load them off the critical path — note `script-src 'self'` in
+ * unstyled. That is a production concern with a different fix (self-host the two
+ * faces, or load them off the critical path — note `script-src 'self'` in
  * `backend/app/core/security_headers.py` rules out the usual
- * `onload="this.media='all'"` trick), and it is tracked separately.
+ * `onload="this.media='all'"` trick), tracked as #365. Nothing here goes red
+ * when that lands: `harness.spec.ts` asserts invariants ("no third-party request
+ * escapes"), not the presence of the link.
  */
 import { test as base, expect } from "@playwright/test";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const FONT_DIR = join(dirname(fileURLToPath(import.meta.url)), "fonts");
+
+/** The stylesheet host. `index.html`'s `<link>` points here. */
+export const GOOGLE_FONTS_CSS = /^https:\/\/fonts\.googleapis\.com\//;
+/** The font-file host, named by the `src:` URLs inside that stylesheet. */
+export const GOOGLE_FONTS_FILES = /^https:\/\/fonts\.gstatic\.com\//;
 
 /**
- * Both Google Fonts hosts. `fonts.googleapis.com` serves the stylesheet;
- * `fonts.gstatic.com` serves the woff2 files it names. With the stylesheet
- * stubbed there is no `@font-face` and so nothing should ever ask gstatic — it
- * is routed anyway so that a stray reference cannot reintroduce the round trip.
+ * gstatic URL basename -> the vendored file that answers it.
+ *
+ * Only the `latin` subsets are vendored, because instrumenting a real page load
+ * records exactly these two requests and no others. An unlisted basename is
+ * answered with 404 rather than passed through to the network, so a new subset
+ * requirement surfaces as a loud, local failure in `harness.spec.ts` instead of
+ * a silent third-party round trip that can stall.
  */
-export const GOOGLE_FONT_HOSTS = /^https:\/\/fonts\.(googleapis|gstatic)\.com\//;
-
-/**
- * Served in place of the real stylesheet. The custom property is the handle
- * `harness.spec.ts` uses to assert, from inside the browser, that the stub is
- * really what the page applied — a timing assertion could not tell a stub from
- * a fast network, and counting requests cannot distinguish a fulfilled route
- * from a real response.
- */
-export const FONT_STUB_CSS = ":root { --e2e-fonts-stubbed: 1; }\n";
+const VENDORED_FONTS: Record<string, string> = {
+  "gyByhwUxId8gMEwcGFWNOITd.woff2": "geist-latin.woff2",
+  "tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwgknk-4.woff2":
+    "jetbrains-mono-latin.woff2",
+};
 
 export const test = base.extend({
-  page: async ({ page }, use) => {
-    await page.route(GOOGLE_FONT_HOSTS, (route) =>
-      route.fulfill({ status: 200, contentType: "text/css", body: FONT_STUB_CSS }),
+  // Overriding `context` rather than `page`: Playwright builds `page` from
+  // `context`, so a context-level route covers the default page AND any extra
+  // page a test opens (`context.newPage()`, a `target=_blank` popup). A
+  // `page.route` would cover only the first. It does not cover a test that
+  // builds its own context from the `browser` fixture — no spec does, and
+  // src/test/buildGuards.test.ts records that as a known blind spot.
+  context: async ({ context }, use) => {
+    await context.route(GOOGLE_FONTS_CSS, (route) =>
+      route.fulfill({ contentType: "text/css", path: join(FONT_DIR, "google-fonts-latin.css") }),
     );
-    await use(page);
+    await context.route(GOOGLE_FONTS_FILES, (route) => {
+      const name = new URL(route.request().url()).pathname.split("/").pop() ?? "";
+      const vendored = VENDORED_FONTS[name];
+      // 404, never a pass-through: a miss must fail locally and visibly. Letting
+      // it reach the network would quietly restore the exact dependency this
+      // fixture exists to remove.
+      if (!vendored || !existsSync(join(FONT_DIR, vendored))) {
+        return route.fulfill({
+          status: 404,
+          contentType: "text/plain",
+          body: `no vendored copy of ${name} in tests/fonts — see tests/fixtures.ts`,
+        });
+      }
+      return route.fulfill({ contentType: "font/woff2", path: join(FONT_DIR, vendored) });
+    });
+    await use(context);
   },
 });
 

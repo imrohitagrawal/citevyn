@@ -1,0 +1,59 @@
+/*
+ * VENDORED COPY of the `latin` @font-face rules from
+ * https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap
+ * as served to Chrome 140 on 2026-09-07, together with the two .woff2 files
+ * beside this one. `tests/fixtures.ts` serves all of it from disk so no e2e
+ * test ever waits on fonts.googleapis.com. See that file for why.
+ *
+ * ONLY the `latin` subsets are here, because they are the only ones this page
+ * ever asks for — measured, not assumed: instrumenting a real page load (light
+ * and dark, chat exercised) records exactly two fonts.gstatic.com requests,
+ * and they are these two files. `tests/harness.spec.ts` asserts that stays
+ * true, so content needing latin-ext/cyrillic/greek/vietnamese turns the suite
+ * red rather than silently rendering in a fallback face.
+ *
+ * The `src` URLs are left pointing at fonts.gstatic.com on purpose: keeping
+ * them byte-identical to Google's response means regenerating this file is a
+ * copy, not an edit. The fixture intercepts those URLs and answers from disk.
+ *
+ * Both faces are SIL Open Font License 1.1 (Geist: vercel/geist-font;
+ * JetBrains Mono: JetBrains/JetBrainsMono), which permits redistribution.
+ *
+ * TO REGENERATE: curl the URL above with a desktop Chrome User-Agent, keep the
+ * blocks whose preceding comment says latin, and re-download the two files
+ * those blocks name.
+ */
+
+/* The handle tests/harness.spec.ts uses to assert, from inside the browser,
+   that what the page applied is THIS file and not Google's response. */
+:root {
+  --e2e-fonts-vendored: 1;
+}
+
+/* latin */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/geist/v5/gyByhwUxId8gMEwcGFWNOITd.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwgknk-4.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* latin */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwgknk-4.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
