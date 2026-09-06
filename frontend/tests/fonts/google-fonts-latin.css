@@ -6,11 +6,16 @@
  * test ever waits on fonts.googleapis.com. See that file for why.
  *
  * ONLY the `latin` subsets are here, because they are the only ones this page
- * ever asks for — measured, not assumed: instrumenting a real page load (light
- * and dark, chat exercised) records exactly two fonts.gstatic.com requests,
- * and they are these two files. `tests/harness.spec.ts` asserts that stays
- * true, so content needing latin-ext/cyrillic/greek/vietnamese turns the suite
- * red rather than silently rendering in a fallback face.
+ * asks for — measured, not assumed: instrumenting a real page load in BOTH
+ * THEMES records exactly two fonts.gstatic.com requests, and they are these two
+ * files. That measurement covers the landing page as loaded, not every route
+ * the suite drives, so it is a floor rather than a proof; what makes it safe is
+ * that the fixture answers an unvendored subset with 404 instead of passing it
+ * to the network, and `tests/harness.spec.ts` fails on that 404 by name. New
+ * content needing latin-ext/cyrillic/greek/vietnamese therefore turns the suite
+ * red, naming the file to vendor, rather than silently rendering in a fallback
+ * face and moving every pixel measurement in fidelity.spec.ts and
+ * visual.spec.ts.
  *
  * The `src` URLs are left pointing at fonts.gstatic.com on purpose: the fixture
  * intercepts them and answers from disk, and keeping them as Google writes them
