@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from app.core.email_client import (
     FileOutboxEmailClient,
     ResendEmailClient,
 )
+from app.core.logging import LOG_FORMAT
 
 _MESSAGE = EmailMessage(
     to_addr="someone@example.com",
@@ -225,3 +227,86 @@ def test_the_magic_link_limit_is_wired_through_the_in_process_limiter_and_settin
         RateLimiter(
             window_seconds=60, demo_user_per_window=1, admin_per_window=1, magic_link_per_window=0
         )
+
+
+# ---------------------------------------------------------------------------
+# What production actually PRINTS on a delivery failure (#296)
+# ---------------------------------------------------------------------------
+
+
+def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log line must be actionable through ``configure_logging``'s formatter.
+
+    NOT via ``record.__dict__``. ``configure_logging`` formats with
+    ``%(message)s``, so anything passed as ``extra=`` is DROPPED before it
+    reaches stdout -- a `fly logs` reader saw the bare string
+    ``resend_send_error`` and could not tell an unverified sending domain from
+    a bad API key from a rate limit. This asserts the rendered line, which is
+    what the operator receives.
+
+    RED if the status code lives only in ``extra=``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"message": "The domain is not verified."})
+
+    with (
+        caplog.at_level(logging.WARNING, logger="citevyn.email"),
+        pytest.raises(EmailDeliveryError),
+    ):
+        asyncio.run(_resend(handler).send(_MESSAGE))
+
+    records = [r for r in caplog.records if r.name == "citevyn.email"]
+    assert records, "the failure logged nothing at all"
+    rendered = logging.Formatter(LOG_FORMAT).format(records[0])
+    assert "resend_send_error" in rendered
+    assert "422" in rendered, (
+        f"the rendered production log line carries no status code: {rendered!r}"
+    )
+
+
+def test_the_resend_failure_line_never_carries_the_upstream_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Resend echoes the RECIPIENT'S EMAIL ADDRESS in some 4xx bodies.
+
+    Measured: ``redact_value("body", ...)`` returns an email address unchanged
+    (``body`` matches no entry in ``RAW_TEXT_KEYS`` or ``SECRET_KEY_PARTS``, and
+    the 32-char entropy sweep does not fire on an address). So the body must not
+    be promoted into the message string -- the status code is the actionable
+    part. RED if a future edit folds ``response.text`` into the rendered line.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"message": "You can only send testing emails to victim@example.com."},
+        )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="citevyn.email"),
+        pytest.raises(EmailDeliveryError),
+    ):
+        asyncio.run(_resend(handler).send(_MESSAGE))
+
+    rendered = logging.Formatter(LOG_FORMAT).format(caplog.records[0])
+    assert "victim@example.com" not in rendered, f"PII leaked into the log line: {rendered!r}"
+    assert "403" in rendered
+
+
+def test_the_production_formatter_is_the_one_this_file_asserts_against() -> None:
+    """Partner: the two tests above are meaningless if LOG_FORMAT drifts.
+
+    They render with ``LOG_FORMAT``; production renders with whatever
+    ``configure_logging`` passes to ``basicConfig``. If those stop being the
+    same string, the assertions above would be testing a formatter nobody uses.
+    """
+    src = (Path(__file__).resolve().parents[1] / "app" / "core" / "logging.py").read_text(
+        encoding="utf-8"
+    )
+    assert "format=LOG_FORMAT" in src, (
+        "configure_logging no longer formats with LOG_FORMAT, so the rendered-line "
+        "assertions in this file no longer describe production output"
+    )

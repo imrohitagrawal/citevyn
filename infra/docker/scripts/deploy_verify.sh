@@ -265,13 +265,29 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     # itself. Rebuild with `make demo-frontend`, which now threads the key
     # through. (The prod compose stack serves no frontend at all; the bundle is
     # built out of band, which is exactly why nothing else notices.)
+    #
+    # This asserts PRESENCE of the expected key, not ABSENCE of the old
+    # default. The absence form was blind to a second failure with the same
+    # symptom: a bundle built with an EMPTY `--build-arg VITE_API_DEMO_KEY`
+    # contains neither the default nor any key (measured -- docker leaves the
+    # arg empty rather than defaulting, and Vite bakes `""`), so
+    # `grep -F local-demo-key` finds nothing and the gate reports PASS over a
+    # bundle whose every request 401s. Same reasoning, and the same script, as
+    # docs/DEPLOY_FLY.md §4.1 -- see scripts/check_bundle_key.sh.
+    #
+    # KNOWN GAP, deliberately not closed here: the `-d` test has no `else`, so
+    # an absent frontend/dist records neither PASS nor FAIL and vanishes from
+    # the tally. That is correct for the Fly path (the bundle is built inside
+    # the image and never lands in the host's frontend/dist) and wrong for the
+    # compose path. Splitting the two needs a live stack to validate, so it is
+    # tracked rather than guessed at.
     if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
-        if grep -rqF 'local-demo-key' "${REPO_ROOT}/frontend/dist" 2>/dev/null \
-           && [[ "${DEMO_KEY}" != "local-demo-key" ]]; then
-            record FAIL "frontend bundle carries the current demo key" \
-                "frontend/dist has the DEFAULT 'local-demo-key' baked in but .env uses a different key — every browser request would 401. Rebuild: make demo-frontend"
-        else
+        if cat "${REPO_ROOT}/frontend/dist"/assets/*.js 2>/dev/null \
+           | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" >/dev/null 2>&1; then
             record PASS "frontend bundle carries the current demo key"
+        else
+            record FAIL "frontend bundle carries the current demo key" \
+                "frontend/dist does not carry the demo key from .env — every browser request would 401 while this gate's own curl probes pass. Rebuild: make demo-frontend"
         fi
     fi
 fi

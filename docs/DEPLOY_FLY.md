@@ -256,9 +256,17 @@ fly secrets list
 ### 4.1 Deploy
 
 ```bash
+# The machine scales to zero. Wake it first, or `fly ssh console` below has
+# nothing to connect to and DEMO_KEY comes back empty.
+curl -sS -o /dev/null https://citevyn.stackclimb.com/health
+
+VERSION="$(git describe --tags --always)"
+DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
+
 fly deploy --app citevyn \
-  --build-arg VERSION=$(git describe --tags --always) \
-  --build-arg VITE_API_DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
+  --build-arg VERSION="${VERSION:?git describe produced nothing — run this from the repo}" \
+  --build-arg VITE_API_LIVE=true \
+  --build-arg VITE_API_DEMO_KEY="${DEMO_KEY:?empty — the machine is asleep or the secret is unset; curl /health above, then retry}"
 ```
 
 > **`VITE_API_DEMO_KEY` is not optional.** The frontend is built inside the
@@ -267,18 +275,43 @@ fly deploy --app citevyn \
 > Without this argument the bundle carries the public default, production
 > rejects every browser call with 401 "Invalid bearer token", and the site
 > is down while `/health` stays green. This happened on 2026-09-02 (release
-> v6, fixed by v7) — see #296. The command above reads the value from the
-> running machine so it never touches your shell history; never paste the
-> key into a chat or a file. **The machine scales to zero:** hit
-> `curl -s https://citevyn.stackclimb.com/health` first, or `fly ssh console`
-> has nothing to connect to and the substitution is empty (guard against
-> that — an empty `VITE_API_DEMO_KEY` build argument ships the default key
-> again). **Verify after every deploy:**
+> v6, fixed by v7) — see #296. The command reads the value from the running
+> machine so it never touches your shell history; never paste the key into a
+> chat or a file.
 >
-> ```bash
-> J=$(curl -s https://citevyn.stackclimb.com/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1)
-> curl -s "https://citevyn.stackclimb.com/$J" | grep -c local-demo-key   # must print 0
-> ```
+> **The `:?` is the mechanism, not decoration.** An empty substitution does
+> *not* fall back to the ARG default. Measured with docker: `--build-arg
+> VITE_API_DEMO_KEY=""` leaves the argument **empty**, Vite bakes `const K =
+> ""` (the `??` in `frontend/src/lib/api.ts` fires on null/undefined, never on
+> `""`), and the browser sends a bare `Authorization: Bearer ` — the same 401
+> outage as v6, reached through a different string. `${DEMO_KEY:?…}` aborts
+> the shell *before* `fly deploy` runs, in both bash and zsh, so that build
+> cannot start. Do not "simplify" it back to an inline `$(…)`: a command
+> substitution has no way to fail on empty.
+
+**Verify after every deploy** (this is §4.4's first step, and it is not
+optional either):
+
+```bash
+BASE=https://citevyn.stackclimb.com
+CHUNK=$(curl -sS "$BASE/" | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1)
+test -n "$CHUNK" || echo 'FAIL: no entry chunk in the served index.html'
+
+curl -sS "$BASE/$CHUNK" \
+  | CITEVYN_DEMO_API_KEY="$DEMO_KEY" ./scripts/check_bundle_key.sh
+```
+
+> **Why this replaced `grep -c local-demo-key   # must print 0`.** That check
+> asserted the *absence* of the old default, which is the wrong shape twice.
+> It printed `0` — reported success — on a bundle built with an empty build
+> argument, i.e. the one failure the paragraph above tells you to guard
+> against. And an absence check fails *open*: if the key ever moves into a
+> lazily-imported chunk, "not found" still reads as a pass. `check_bundle_key.sh`
+> asserts the **presence of the expected, non-empty key**, so it fails closed,
+> and it refuses to run at all when `DEMO_KEY` is empty — otherwise the
+> comparison degenerates to "does this file contain the empty string", which
+> every file does. It prints the key's length and a SHA-256 prefix, never the
+> value. Its own tests are `tests/shell/test_check_bundle_key.sh`.
 
 What happens, in order:
 
@@ -488,25 +521,53 @@ The image serves the browser bundle at `/` (built in stage 0 of
 deployment stays one subdomain deep. Open `https://citevyn.stackclimb.com/`
 and ask there.
 
-To check the same thing from a terminal, note two shapes that are easy to get
-wrong (both cost a debugging round-trip the first time):
+To check the same thing from a terminal, note three shapes that are easy to get
+wrong (each costs a debugging round-trip the first time):
 
 * auth is **`Authorization: Bearer <key>`**, not an `X-Demo-API-Key` header;
 * the message field is **`message`**, not `content` (a wrong name gives a
   422 whose `details.errors[].input` is `<redacted>`, so the body you sent is
-  deliberately not echoed back).
+  deliberately not echoed back);
+* **sessions are cookie-bound, so `curl` needs a cookie jar.** The bearer is
+  only the *audit* identity. Ownership is the `__Host-citevyn_session` cookie
+  (`app/core/auth_sessions.py`, ADR-0004 PR 3). `resolve_principal` *mints a
+  new anonymous principal* when no cookie arrives, so a second call without
+  `-b` owns nothing and the session you just created comes back **404
+  `not_found`** — not 403, because an ownership miss is deliberately
+  indistinguishable from a genuine one. The browser works because
+  `frontend/src/lib/api.ts` fetches with `credentials: "include"`.
 
 ```bash
-SID=$(curl -sS -X POST https://citevyn.stackclimb.com/v1/sessions \
+BASE=https://citevyn.stackclimb.com
+JAR=$(mktemp)
+
+SID=$(curl -sS -c "$JAR" -X POST "$BASE/v1/sessions" \
         -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
         -H 'Content-Type: application/json' -d '{}' \
-      | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+      | jq -r .session_id)
 
-curl -sS -X POST "https://citevyn.stackclimb.com/v1/sessions/$SID/messages" \
+# -b sends the cookie, -c keeps the jar current if the server rotates it.
+curl -sS -b "$JAR" -c "$JAR" -X POST "$BASE/v1/sessions/$SID/messages" \
   -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"message":"How does streaming work in the Claude API?"}'
+  -d '{"message":"How does streaming work in the Claude API?"}' > /tmp/answer.json
+
+jq '{strategy: .retrieval_strategy, answered: (.answer | length > 0),
+     n_citations: (.citations | length)}' /tmp/answer.json
+
+# Every citation must RESOLVE, not merely be present. Two of the six corpus
+# sources cite the relative "/about", which answered a JSON 404 envelope in
+# production until that route existed (#84 item 6) — and no health check
+# noticed, because none of them follow a citation.
+jq -r '.citations[].url' /tmp/answer.json | while read -r u; do
+  case "$u" in /*) u="$BASE$u" ;; esac
+  printf '%s %s\n' "$(curl -sS -o /dev/null -w '%{http_code}' "$u")" "$u"
+done
 ```
+
+A pass is: `retrieval_strategy` is `hybrid_reranked`, `answered` is `true`,
+`n_citations` is greater than 0, and **every** line of the last command starts
+with `200`. `rm -f "$JAR"` when you are done — it holds a live session cookie.
 
 Expect `retrieval_strategy: hybrid_reranked` and a non-empty `citations`
 array. **A refusal is not automatically a bug** — the corpus is six documents,
