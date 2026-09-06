@@ -28,7 +28,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.alias_intent import is_citevyn_intent_llm
@@ -264,7 +263,14 @@ async def _retrieve_active_index(
     write gate uses that (#70/#72), so this no longer resolves the embedder stamp.
     """
     from app.core.middleware import get_current_request_id
-    from app.models import IndexStatus, IndexVersion
+    from app.services.index_resolution import ActiveIndexState, resolve_active_index
+
+    # The count guard, the status filter and the ``promoted_at DESC NULLS LAST,
+    # index_version DESC`` ordering all live in ``index_resolution`` now (#264),
+    # shared with ``HybridRetriever._active_index_stamp`` and the
+    # ``GET /health/index`` route, so the three cannot name different rows. The
+    # states below and what this function returns for each are unchanged.
+    resolution = await resolve_active_index(session)
 
     # Enforce the single-active-row invariant (#58) loudly rather than silently
     # picking a deterministic-but-arbitrary winner. Two ``active`` rows means
@@ -273,38 +279,22 @@ async def _retrieve_active_index(
     # (the caller's ``or None``) so retrieval still runs rather than 500-ing
     # the request; the WARNING is the operator-visible signal that this DB
     # is in an inconsistent state and needs ``promote_version`` to converge.
-    count_stmt = select(func.count(IndexVersion.index_version)).where(
-        IndexVersion.status == IndexStatus.active
-    )
-    active_count = (await session.execute(count_stmt)).scalar_one()
-    if active_count > 1:
+    # It is emitted HERE and not inside the resolver: this event name and the
+    # ``citevyn.answer`` logger it lands on are both asserted by tests, as is
+    # the retrieval layer's differently-named one.
+    if resolution.state is ActiveIndexState.ambiguous:
         _logger.warning(
             "orchestrator_multiple_active_indexes",
             extra={
                 "request_id": get_current_request_id(),
-                "active_count": int(active_count),
+                "active_count": int(resolution.active_count),
             },
         )
         return "", ""
 
-    # The ``index_version`` secondary sort is a deterministic tiebreaker so this
-    # resolution stays consistent with the retrieval-layer provenance gate
-    # (``HybridRetriever._active_index_stamp``, which sorts identically) if two
-    # rows are ever simultaneously ``active`` with equal ``promoted_at`` (a
-    # single-active-row invariant tracked by #58, now enforced above).
-    stmt = (
-        select(IndexVersion.index_version, IndexVersion.source_version_hash)
-        .where(IndexVersion.status == IndexStatus.active)
-        .order_by(
-            IndexVersion.promoted_at.desc().nulls_last(),
-            IndexVersion.index_version.desc(),
-        )
-        .limit(1)
-    )
-    row = (await session.execute(stmt)).first()
-    if row is None:
+    if resolution.row is None:
         return "", ""
-    return row[0], row[1]
+    return resolution.row.index_version, resolution.row.source_version_hash
 
 
 def _default_retriever(

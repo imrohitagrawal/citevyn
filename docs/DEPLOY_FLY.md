@@ -440,7 +440,7 @@ still yours to check.
 ```bash
 curl -sS https://citevyn.stackclimb.com/health                 # liveness, no DB
 curl -sS https://citevyn.stackclimb.com/health/dependencies    # 503 if Postgres is unreachable
-curl -sS https://citevyn.stackclimb.com/health/index           # vector_arm must NOT be "dead"
+curl -sS https://citevyn.stackclimb.com/health/index           # vector_arm.healthy must be true
 
 # The page every CiteVyn-about-itself citation links to (#84 item 6). Must be
 # 200 text/html -- it answered a JSON 404 envelope in production until the
@@ -462,6 +462,13 @@ path and would abort a `set -e` runbook when the page is fine.)
 `vector_arm.status: "dead"` means the corpus was seeded with the stub
 embedder and every embedding is NULL — semantic search is off and answers
 degrade to lexical matching. Fix the embedding provider/key and re-seed.
+
+`vector_arm.status: "ambiguous"` means more than one row is marked `active`
+(`active_index_count` says how many). The read path fails closed on that, so the
+vector arm is off for the same practical reason. Recovery is §4.3: promote one
+version — that demotes every other active row. Assert `healthy`, not "not dead":
+`ambiguous` and `mismatch` both mean the arm is off while `status` still reads
+`"dead" != status`.
 
 Then ask a real question and confirm it comes back **grounded and cited**. A
 200 is not a passing demo.

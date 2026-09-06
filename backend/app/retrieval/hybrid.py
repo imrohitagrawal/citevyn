@@ -22,7 +22,7 @@ import asyncio
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.middleware import get_current_request_id
@@ -32,7 +32,7 @@ from app.embeddings import (
     IndexStampStatus,
     is_index_embedder_mismatch,
 )
-from app.models import IndexStatus, IndexVersion
+from app.models import IndexVersion
 from app.models.enums import RetrievalType
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.keyword import KeywordRetriever
@@ -40,6 +40,7 @@ from app.retrieval.rerank import Reranker
 from app.retrieval.types import EvidenceHit, RetrievalResult, RetrievedChunk, VectorDegrade
 from app.retrieval.vector import Embedder, VectorRetriever
 from app.routing.intent import Intent
+from app.services.index_resolution import ActiveIndexState, resolve_active_index
 
 _logger = logging.getLogger("citevyn.retrieval")
 
@@ -435,36 +436,31 @@ class HybridRetriever:
         # fires there it returns ``("", "")``, which reaches us as
         # ``active_index_version=None`` — i.e. this branch is exactly how a
         # production dual-active request arrives here.
-        count_stmt = select(func.count(IndexVersion.index_version)).where(
-            IndexVersion.status == IndexStatus.active
-        )
-        active_count = (await self._session.execute(count_stmt)).scalar_one()
-        if active_count > 1:
+        #
+        # The count guard, the status filter and the ordering are the SHARED ones
+        # in ``app.services.index_resolution`` (#264) — the health route resolved
+        # the active index differently and so reported a clean verdict at the very
+        # moment this method fails closed. The WARN stays here rather than moving
+        # into the resolver: this event name and the ``citevyn.retrieval`` logger
+        # are asserted by tests, including two NEGATIVE assertions that a shared
+        # logger would satisfy vacuously.
+        resolution = await resolve_active_index(self._session)
+        if resolution.state is ActiveIndexState.ambiguous:
             _logger.warning(
                 "retrieval_multiple_active_indexes",
                 extra={
                     "request_id": get_current_request_id(),
-                    "active_count": int(active_count),
+                    "active_count": int(resolution.active_count),
                 },
             )
             return IndexStampStatus.ambiguous
-        stmt = (
-            select(
-                IndexVersion.embedding_provider,
-                IndexVersion.embedding_model,
-                IndexVersion.embedding_dim,
-            )
-            .where(IndexVersion.status == IndexStatus.active)
-            .order_by(
-                IndexVersion.promoted_at.desc().nulls_last(),
-                IndexVersion.index_version.desc(),
-            )
-            .limit(1)
-        )
-        row = (await self._session.execute(stmt)).first()
-        if row is None:
+        if resolution.row is None:
             return None
-        return EmbedderIdentity(provider=row[0], model=row[1], dim=row[2])
+        return EmbedderIdentity(
+            provider=resolution.row.embedding_provider,
+            model=resolution.row.embedding_model,
+            dim=resolution.row.embedding_dim,
+        )
 
 
 def _merge(
