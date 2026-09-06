@@ -72,7 +72,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import IndexStatus, IndexVersion
@@ -100,15 +100,29 @@ _STATUS_KEY = "status"
 # pathological table rather than a working limit — but an unbounded ``SELECT``
 # is a thing ``code_review.md`` blocks on, so it is stated rather than assumed.
 #
-# What the cap can and cannot distort: ``previous_good`` rows always carry an
-# EARLIER ``promoted_at`` than the active row that displaced them (a promote
-# stamps the new active in the same statement it demotes the old one), so under
-# the ordering below every ``active`` row sorts ahead of every ``previous_good``
-# row. Truncation therefore drops the OLDEST previous-good rows first and cannot
-# hide an active row, so the ambiguity decision is exact in any state the two
-# writers of ``status = active`` can produce. Above the cap ``active_count``
-# would become a floor; the state would still be ``ambiguous``.
+# What the cap can and cannot distort: :data:`_ACTIVE_FIRST` sorts every
+# ``active`` row ahead of every ``previous_good`` row, so truncation drops the
+# OLDEST previous-good rows first and can never hide an active row. The
+# ambiguity decision and ``active_count`` are therefore exact for any table with
+# 64 or fewer active rows, whatever else it holds.
+#
+# That guarantee is structural on purpose. Arguing it from ``promoted_at``
+# instead — "a demoted row always carries an earlier stamp than the active row
+# that displaced it", which is true of both writers of ``status = active``
+# (``promote_version`` and the seed's ``_promote`` each stamp it on the very next
+# line) — would have made it conditional on a row whose stamp is NULL never being
+# active. Nothing in ``backend/app`` or ``db/`` produces that row, but tests
+# construct it (``test_promote_version_recovers_from_dual_active_state`` marks a
+# candidate active without stamping), and under ``NULLS LAST`` such a row sorts
+# LAST — so with enough previous-good rows the cap could have truncated away the
+# very row that makes the database ambiguous. One extra sort key is cheaper than
+# a footnote about when the bound holds.
 _MAX_INDEX_ROWS = 64
+
+# Actives before previous-goods, so :data:`_MAX_INDEX_ROWS` can only ever
+# truncate previous-good rows. It does NOT decide anything within a status —
+# ``_ORDER_BY`` still does — so the row each caller gets is unchanged.
+_ACTIVE_FIRST = case((IndexVersion.status == IndexStatus.active, 0), else_=1).asc()
 
 # ONE ordering, shared by every status and every caller. Two call sites sorting
 # differently is the divergence #264 is about.
@@ -278,7 +292,7 @@ def _ordered_rows_query(*statuses: IndexStatus):
     return (
         select(*_INDEX_COLUMNS, IndexVersion.status)
         .where(IndexVersion.status.in_(statuses))
-        .order_by(*_ORDER_BY)
+        .order_by(_ACTIVE_FIRST, *_ORDER_BY)
         .limit(_MAX_INDEX_ROWS)
     )
 

@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import db as db_module
@@ -384,3 +385,72 @@ def test_health_index_reads_the_index_table_in_exactly_one_statement(
     # above is not 1 because the route stopped reporting something.
     assert body["active_index"]["index_version"] == "v1"
     assert body["previous_good_index"]["index_version"] == "pg1"
+
+
+@pytest.mark.asyncio
+async def test_the_row_cap_can_never_truncate_away_an_active_row(
+    session: AsyncSession,
+) -> None:
+    """The ``LIMIT`` bound must not be able to hide the rows the rule decides on.
+
+    The fetch is capped (``code_review.md`` blocks on unbounded queries). The
+    hazard that creates: an ``active`` row sorted BELOW the cap would vanish, and
+    a dual-active database would report as single-active — the exact lie #264 is
+    about, reintroduced through the bound.
+
+    An earlier draft argued this away from ``promoted_at`` (a demoted row always
+    carries an earlier stamp than the active row that displaced it). That
+    argument is conditional: it fails for an active row whose ``promoted_at`` is
+    NULL, which ``NULLS LAST`` sorts LAST. No writer in ``backend/app`` or ``db/``
+    produces one — both stamp on the next line — but
+    ``test_promote_version_recovers_from_dual_active_state`` constructs exactly
+    that, so the state is representable. The fetch now sorts actives first
+    structurally instead.
+
+    This builds the adversarial case: TWO active rows with NULL ``promoted_at``,
+    buried under far more ``previous_good`` rows than the cap allows.
+
+    Turns RED if the ``_ACTIVE_FIRST`` sort key is dropped — the actives sort to
+    the bottom, the cap truncates them, and the state comes back ``none``.
+    """
+    from app.services.index_resolution import _MAX_INDEX_ROWS, resolve_index_partition
+
+    now = datetime.now(UTC)
+    # Comfortably more previous-good rows than the cap.
+    for i in range(_MAX_INDEX_ROWS + 10):
+        session.add(
+            IndexVersion(
+                index_version=f"pg{i:03d}",
+                status=IndexStatus.previous_good,
+                source_version_hash=f"sha256:pg{i}",
+                created_at=now,
+                promoted_at=now - timedelta(minutes=i),
+            )
+        )
+    # ...and two actives that sort LAST under `promoted_at DESC NULLS LAST`.
+    for version in ("act-a", "act-b"):
+        session.add(
+            IndexVersion(
+                index_version=version,
+                status=IndexStatus.active,
+                source_version_hash=f"sha256:{version}",
+                created_at=now,
+                promoted_at=None,
+            )
+        )
+    await session.commit()
+
+    # Through the MIXED fetch — the one the health route uses. The
+    # single-status fetch cannot exhibit this at all (no previous-good rows
+    # compete for the cap there), so testing it would pass for the wrong reason.
+    resolution = (await resolve_index_partition(session)).active
+
+    assert resolution.state is ActiveIndexState.ambiguous, (
+        "the row cap hid the active rows, so a dual-active database reported as "
+        f"{resolution.state} — #264 reintroduced through the LIMIT"
+    )
+    assert resolution.active_count == 2
+    # Partner: the previous-good rows really are there in cap-exceeding numbers,
+    # so the assertion above is about truncation and not about an empty table.
+    total = len((await session.execute(select(IndexVersion))).scalars().all())
+    assert total > _MAX_INDEX_ROWS
