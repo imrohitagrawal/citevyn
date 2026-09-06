@@ -412,7 +412,7 @@ heavy surfaces (those are V2). Tracked under the **V1** GitHub milestone.
 5. **Better re-ranking** — a re-rank stage after candidate retrieval; feature-flagged,
    cost-aware, and proven on the golden + distractor eval sets
    ([#156](https://github.com/imrohitagrawal/citevyn/issues/156)).
-6. ~~**Frontend hardening: composer gating**~~ — **DONE (PR #354).** Gated on the
+6. ~~**Frontend hardening: composer gating**~~ — **DONE (PR #357).** Gated on the
    in-flight request, which also fixes the answer/question attribution the issue was
    really about; the stream interleave its original text described was already gone
    (PR #88). Closed without item 1 (SSE, #61) — they were only scheduled together
