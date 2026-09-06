@@ -43,7 +43,7 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { spawnSync } from "node:child_process";
 import { load } from "js-yaml";
 import ts from "typescript";
@@ -532,7 +532,21 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     const r = spawnSync(
       "npx",
       ["playwright", "test", "-c", "playwright.config.ts", "--list", "--reporter=json"],
-      { cwd: frontendRoot, encoding: "utf8", timeout: 120_000, maxBuffer: 32 * 1024 * 1024 },
+      {
+        cwd: frontendRoot,
+        encoding: "utf8",
+        timeout: 120_000,
+        maxBuffer: 32 * 1024 * 1024,
+        // PLAYWRIGHT_JSON_OUTPUT_NAME redirects the JSON reporter to a FILE and
+        // leaves stdout empty, so an exported one turns this into a JSON.parse
+        // crash with no hint why. CI does not export it (frontend.yml scopes it
+        // to the demo-e2e run step) but a developer easily might.
+        env: (() => {
+          const e = { ...process.env };
+          delete e.PLAYWRIGHT_JSON_OUTPUT_NAME;
+          return e;
+        })(),
+      },
     );
     // Fail loudly rather than returning []: an empty list would make "no spec
     // bypasses the fixture" and "the probe broke" indistinguishable, and only
@@ -589,8 +603,8 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     expect(specs).toContain("landing.spec.ts");
     expect(specs).toContain("visual.spec.ts");
     expect(specs).toContain("harness.spec.ts");
-    // Equal to the current population, not one below it: `>= 6` with 7 files
-    // present would let someone delete a spec and stay green.
+    // The floor is the current population, not one below it: `>= 6` with 7
+    // files present would let someone delete a spec and stay green.
     expect(specs.length).toBeGreaterThanOrEqual(7);
     for (const spec of specs) {
       expect(existsSync(join(testsDir, spec)), `${spec} is not under tests/`).toBe(true);
@@ -599,17 +613,30 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     }
   });
 
-  it("and every one of them takes `test` from ./fixtures — no exceptions", () => {
+  it("and every one of them takes `test` from tests/fixtures.ts — no exceptions", () => {
     // There is deliberately no carve-out. An earlier draft exempted
     // visual.spec.ts because an empty font stub moved 9 of its 22 baselines;
     // serving the REAL vendored fonts instead made the exemption unnecessary,
     // and the 22 baselines pass through the fixture unchanged.
+    //
+    // The specifier is RESOLVED against the spec's own directory rather than
+    // compared as a string. `--list` finds specs recursively, so a legitimate
+    // `tests/auth/session.spec.ts` must write `../fixtures` — which an exact
+    // `toEqual(["./fixtures"])` would reject with a message saying the opposite
+    // of the truth. `./fixtures.js` (the ESM-idiomatic form) is accepted too.
+    const fixturesModule = join(testsDir, "fixtures");
     for (const spec of specs) {
+      const sources = testBindingSources(readFileSync(join(testsDir, spec), "utf8"));
+      const resolved = sources.map((from) =>
+        from.startsWith(".")
+          ? resolvePath(dirname(join(testsDir, spec)), from).replace(/\.(ts|tsx|js|mjs)$/, "")
+          : from,
+      );
       expect(
-        testBindingSources(readFileSync(join(testsDir, spec), "utf8")),
+        resolved,
         `tests/${spec} does not use tests/fixtures.ts, so its navigations wait on ` +
           `fonts.googleapis.com before the app can mount — see tests/fixtures.ts (#364)`,
-      ).toEqual(["./fixtures"]);
+      ).toEqual([fixturesModule]);
     }
   });
 
@@ -642,11 +669,35 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
   });
 
   it("the fixture and the fonts it serves are all on disk", () => {
-    // The route reads these three files at request time; a missing one would
-    // surface as a 404 inside the browser rather than as a load error here.
+    // The route reads these files at request time; a missing one would surface
+    // as a 404 inside the browser rather than as a load error here.
     expect(existsSync(join(testsDir, "fixtures.ts"))).toBe(true);
-    for (const f of ["google-fonts-latin.css", "geist-latin.woff2", "jetbrains-mono-latin.woff2"]) {
+    for (const f of [
+      "google-fonts-latin.css",
+      "geist-latin.woff2",
+      "jetbrains-mono-latin.woff2",
+      "OFL.txt",
+    ]) {
       expect(existsSync(join(testsDir, "fonts", f)), `tests/fonts/${f} is missing`).toBe(true);
     }
+  });
+
+  it("the vendored stylesheet carries its marker, so a red harness test means the route", () => {
+    // Splits one failure into two distinguishable ones. `harness.spec.ts` reads
+    // `--e2e-fonts-vendored` from inside the browser and, if it is absent,
+    // reports that the stylesheet "reached the network". That diagnosis is only
+    // correct while the FILE still defines the property — and the property is
+    // NOT part of Google's response, so anyone following the regeneration
+    // recipe can drop it. When that happens this test goes red too, and the
+    // pair says "the file lost its marker" rather than "the network was hit".
+    const css = readFileSync(join(testsDir, "fonts", "google-fonts-latin.css"), "utf8");
+    expect(css, "tests/fonts/google-fonts-latin.css lost --e2e-fonts-vendored").toMatch(
+      /--e2e-fonts-vendored:\s*1\s*;/,
+    );
+    // Partner: the file is the real stylesheet, not an empty stub that happens
+    // to define the marker.
+    expect(css).toContain("@font-face");
+    expect(css).toContain("font-family: 'Geist'");
+    expect(css).toContain("font-family: 'JetBrains Mono'");
   });
 });

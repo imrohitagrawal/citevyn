@@ -12,50 +12,81 @@
  * party", not "index.html still has that link". #365 proposes removing the link
  * from `index.html` altogether, and a guard that reds when the underlying bug is
  * FIXED is this repo's standing anti-pattern. These stay green either way; they
- * only go red when a third-party request actually escapes.
+ * only go red when a third-party request actually escapes, or when what the
+ * browser applied is not what `tests/fonts/` holds.
+ *
+ * WHAT EACH TEST GOES RED FOR (one line each, per the house rule):
+ *   1. a page resource is fetched from a host the fixture does not intercept
+ *   2. the `fonts.googleapis.com` route stops fulfilling, so Google answers
+ *   3. a font file 404s (an unvendored subset), or the two faces do not end up
+ *      loaded — which is what a swapped or corrupt vendored file looks like
+ *   4. `fixtures.ts` overrides `page` instead of `context`, so a second page
+ *      opened by a test is not covered
+ *
+ * AFTER #365 LANDS (no third-party link at all), 2 and 3 go vacuously green by
+ * design — there is nothing left to intercept — while 1 and 4 keep their full
+ * force. That is the intended decay, not an oversight; delete `tests/fonts/`,
+ * this file's tests 2 and 3, and the routes together at that point.
  */
 import { test, expect } from "./fixtures";
+import type { Page } from "@playwright/test";
+
+/** Everything the fixture is supposed to intercept. */
+const FONT_HOSTS = /^https:\/\/fonts\.(googleapis|gstatic)\.com\//;
+
+/** Load the app, recording every request and response, with fonts settled. */
+async function loadRecording(page: Page) {
+  const requests: string[] = [];
+  const responses: { url: string; status: number }[] = [];
+  page.on("request", (r) => requests.push(r.url()));
+  page.on("response", (r) => responses.push({ url: r.url(), status: r.status() }));
+
+  await page.goto("/", { waitUntil: "commit" });
+  await page.waitForSelector(".theme-toggle", { timeout: 30000 });
+
+  // Ask for the faces explicitly rather than waiting for a paint to ask for
+  // them. `document.fonts.status` is ALSO "loaded" before anything has started
+  // loading, so polling it cannot tell "all done" from "not begun" — a wait on
+  // it can return with an empty recording and make every check below vacuous.
+  // `document.fonts.load()` starts the load and resolves when it finishes, so
+  // there is nothing to race.
+  const loadedFamilies = await page.evaluate(async () => {
+    await Promise.all([
+      document.fonts.load('400 16px "Geist"'),
+      document.fonts.load('400 16px "JetBrains Mono"'),
+    ]);
+    await document.fonts.ready;
+    return [...document.fonts].filter((f) => f.status === "loaded").map((f) => f.family);
+  });
+
+  const origin = new URL(page.url()).origin;
+  return {
+    requests,
+    responses,
+    loadedFamilies,
+    offOrigin: requests.filter((u) => !u.startsWith(origin)),
+    fontResponses: responses.filter((r) => FONT_HOSTS.test(r.url)),
+    askedGoogle: requests.some((u) => u.startsWith("https://fonts.googleapis.com/")),
+  };
+}
 
 test.describe("e2e harness: nothing reaches a third party", () => {
-  /** Load the app, recording every request and every response the page makes. */
-  async function loadRecording(page: import("@playwright/test").Page) {
-    const requests: string[] = [];
-    const responses: { url: string; status: number }[] = [];
-    page.on("request", (r) => requests.push(r.url()));
-    page.on("response", (r) => responses.push({ url: r.url(), status: r.status() }));
-    await page.goto("/", { waitUntil: "commit" });
-    await page.waitForSelector(".theme-toggle", { timeout: 30000 });
-    // The font files are requested only once the stylesheet has been parsed and
-    // a glyph needs them, which is after mount. Without this the font requests
-    // are simply not in the recording yet and every check below reads as green
-    // on an empty set.
-    await page.waitForFunction(() => document.fonts.status === "loaded", null, { timeout: 15000 });
-    const origin = new URL(page.url()).origin;
-    return {
-      requests,
-      responses,
-      thirdParty: requests.filter((u) => !u.startsWith(origin)),
-      origin,
-    };
-  }
-
   test("every off-origin request the page makes is one the fixture serves from disk", async ({
     page,
   }) => {
-    const { requests, thirdParty } = await loadRecording(page);
+    const { requests, offOrigin } = await loadRecording(page);
 
-    // PARTNER, and it has to come first: every assertion below is "this set
+    // PARTNER, and it has to come first: the assertion below is "this set
     // contains nothing bad", which an empty or broken recording satisfies for
     // free. The app is served as unbundled ESM in dev, so a real load is dozens
     // of requests.
     expect(
       requests.length,
-      "the request recorder saw almost nothing — the checks below would be vacuous",
+      "the request recorder saw almost nothing — the check below would be vacuous",
     ).toBeGreaterThan(10);
 
-    const allowed = /^https:\/\/fonts\.(googleapis|gstatic)\.com\//;
     expect(
-      thirdParty.filter((u) => !allowed.test(u)),
+      offOrigin.filter((u) => !FONT_HOSTS.test(u)),
       "this page reached a third-party host the harness does not intercept, so the " +
         "app's load now depends on someone else's network again — add it to " +
         "tests/fixtures.ts or remove it from the page",
@@ -63,42 +94,125 @@ test.describe("e2e harness: nothing reaches a third party", () => {
   });
 
   test("and what it applied is the vendored copy, not Google's response", async ({ page }) => {
-    const { requests } = await loadRecording(page);
-    const askedGoogle = requests.some((u) => u.startsWith("https://fonts.googleapis.com/"));
+    const { askedGoogle } = await loadRecording(page);
 
     const marker = await page.evaluate(() =>
       getComputedStyle(document.documentElement).getPropertyValue("--e2e-fonts-vendored").trim(),
     );
 
     // Written as an implication, not a bare `toBe("1")`, so that removing the
-    // third-party link (#365) leaves this green instead of red. It goes red for
-    // one reason only: the page asked Google and got Google's answer.
+    // third-party link (#365) leaves this green instead of red.
+    //
+    // The marker could be missing for two different reasons, and only one of
+    // them is this test's. `src/test/buildGuards.test.ts` separately asserts
+    // that `tests/fonts/google-fonts-latin.css` still CONTAINS the marker — so
+    // if that guard is green and this one is red, the file is fine and the
+    // route is what failed. Without that split, a regenerated CSS file that
+    // dropped the marker would fail here with a message blaming the network,
+    // and send the next reader after a problem that does not exist.
     expect(
       !askedGoogle || marker === "1",
       "the fonts.googleapis.com stylesheet reached the network. tests/fixtures.ts's " +
         "context.route no longer matches it, so every navigation in this suite is " +
-        "again waiting on a third-party request before the app can mount.",
+        "again waiting on a third-party request before the app can mount. (If " +
+        "buildGuards' \"the vendored stylesheet carries its marker\" test is ALSO " +
+        "red, the file lost the marker instead and the route is fine.)",
     ).toBe(true);
   });
 
-  test("every font file came back 200, so no glyph fell through to a fallback face", async ({
-    page,
-  }) => {
-    const { responses } = await loadRecording(page);
-    const fontResponses = responses.filter((r) =>
-      r.url.startsWith("https://fonts.gstatic.com/"),
-    );
+  test("every font request was served, and both faces really ended up loaded", async ({ page }) => {
+    const { fontResponses, loadedFamilies, askedGoogle } = await loadRecording(page);
 
-    // tests/fixtures.ts answers an unvendored subset with 404 rather than
-    // letting it reach the network. That is the signal this test reads: content
-    // needing latin-ext/cyrillic/greek/vietnamese turns the suite red here,
-    // naming the file to vendor, instead of silently rendering in a fallback
-    // face and quietly moving every pixel measurement in fidelity.spec.ts and
-    // visual.spec.ts.
+    // PARTNER for the emptiness check below, in the same implication form so
+    // #365 leaves it green: while the page still asks Google, the recording
+    // must contain the stylesheet AND both font files.
     expect(
-      fontResponses.filter((r) => r.status !== 200).map((r) => r.url),
-      "a font subset was requested that tests/fonts/ does not have — vendor it " +
-        "(see the regeneration note in tests/fonts/google-fonts-latin.css)",
+      !askedGoogle || fontResponses.length >= 3,
+      `only ${fontResponses.length} font responses were recorded while the page still ` +
+        "asks fonts.googleapis.com — expected the stylesheet plus two woff2 files, so " +
+        "the check below would be vacuous",
+    ).toBe(true);
+
+    // tests/fixtures.ts answers an unvendored subset, or an unexpected
+    // `family=`, with 404 rather than letting it reach the network. That is the
+    // signal this reads: needing latin-ext/cyrillic/greek/vietnamese, or adding
+    // a third family, turns the suite red here — naming the file to vendor —
+    // instead of silently rendering in a fallback face and quietly moving every
+    // pixel measurement in fidelity.spec.ts and visual.spec.ts.
+    expect(
+      fontResponses.filter((r) => r.status !== 200).map((r) => `${r.status} ${r.url}`),
+      "a font request was not served from tests/fonts/ — vendor it (see the " +
+        "regeneration note in tests/fonts/google-fonts-latin.css)",
     ).toEqual([]);
+
+    expect(
+      loadedFamilies,
+      "the browser did not end up with both faces loaded — a vendored file is " +
+        "missing or truncated",
+    ).toEqual(expect.arrayContaining(["Geist", "JetBrains Mono"]));
+
+    // A 200 only proves bytes arrived, and "loaded" only proves they parsed —
+    // neither proves they were the RIGHT bytes. Swap the two entries in
+    // VENDORED_FONTS and every status is still 200 and both families still
+    // report `loaded`, because each file is a perfectly valid woff2; the suite
+    // would simply render each face in the other's metrics. That is exactly the
+    // parity this whole change exists to keep, and CI could not see it
+    // (visual.spec.ts is darwin-only, and fidelity's D2.5 margin might absorb
+    // it). So check the one property that tells these two faces apart without
+    // any pixel baseline: JetBrains Mono is monospaced and Geist is not.
+    const shape = await page.evaluate(() => {
+      const width = (family: string, text: string) => {
+        const ctx = document.createElement("canvas").getContext("2d")!;
+        ctx.font = `16px "${family}"`;
+        return ctx.measureText(text).width;
+      };
+      return {
+        monoNarrow: width("JetBrains Mono", "iiiiiiiiii"),
+        monoWide: width("JetBrains Mono", "MMMMMMMMMM"),
+        geistNarrow: width("Geist", "iiiiiiiiii"),
+        geistWide: width("Geist", "MMMMMMMMMM"),
+      };
+    });
+    expect(
+      shape.monoWide,
+      "the face serving JetBrains Mono is not monospaced — tests/fixtures.ts's " +
+        "VENDORED_FONTS is serving the wrong file for it",
+    ).toBeCloseTo(shape.monoNarrow, 1);
+    expect(
+      shape.geistNarrow,
+      "the face serving Geist is monospaced — tests/fixtures.ts's VENDORED_FONTS " +
+        "is serving JetBrains Mono's file under Geist's name",
+    ).toBeLessThan(shape.geistWide * 0.9);
+  });
+
+  test("a page the test opens itself is covered too, not just the fixture's", async ({
+    context,
+  }) => {
+    // THE ONLY THING that goes red if `fixtures.ts` overrides `page` instead of
+    // `context`. Playwright builds `page` from `context`, so a context-level
+    // route reaches every page in the context; a `page.route` reaches only the
+    // first. Without this test that choice is unverified, and reverting it
+    // would leave the whole suite green — the shape AGENTS.md warns about,
+    // where the fix for a review finding ships without its own check.
+    const second = await context.newPage();
+    const requests: string[] = [];
+    second.on("request", (r) => requests.push(r.url()));
+
+    await second.goto("/", { waitUntil: "commit" });
+    await second.waitForSelector(".theme-toggle", { timeout: 30000 });
+    const marker = await second.evaluate(() =>
+      getComputedStyle(document.documentElement).getPropertyValue("--e2e-fonts-vendored").trim(),
+    );
+    const askedGoogle = requests.some((u) => u.startsWith("https://fonts.googleapis.com/"));
+    await second.close();
+
+    // Partner: prove the second page really loaded before reading the marker.
+    expect(requests.length, "the second page recorded almost nothing").toBeGreaterThan(10);
+
+    expect(
+      !askedGoogle || marker === "1",
+      "a page opened with context.newPage() got Google's stylesheet, so the font " +
+        "route is bound to a single page rather than to the context",
+    ).toBe(true);
   });
 });

@@ -92,6 +92,20 @@ const VENDORED_FONTS: Record<string, string> = {
     "jetbrains-mono-latin.woff2",
 };
 
+/**
+ * The `family=` parameters `tests/fonts/google-fonts-latin.css` actually
+ * covers, as `index.html` spells them.
+ *
+ * The stylesheet route is pinned to these for the same reason the file route is
+ * pinned to two basenames. Answering ANY `fonts.googleapis.com` URL with this
+ * one stylesheet is silently wrong the moment the page asks for a third family:
+ * the route would hand back Geist + JetBrains Mono, the host is intercepted so
+ * no third-party request escapes, the marker is still there — every guard green
+ * while the suite renders a face production does not have. A 404 here turns that
+ * into a named failure in `harness.spec.ts` instead.
+ */
+const VENDORED_FAMILIES = ["Geist:wght@400..700", "JetBrains Mono:wght@400;500"];
+
 export const test = base.extend({
   // Overriding `context` rather than `page`: Playwright builds `page` from
   // `context`, so a context-level route covers the default page AND any extra
@@ -100,12 +114,31 @@ export const test = base.extend({
   // builds its own context from the `browser` fixture — no spec does, and
   // src/test/buildGuards.test.ts records that as a known blind spot.
   context: async ({ context }, use) => {
-    await context.route(GOOGLE_FONTS_CSS, (route) =>
-      route.fulfill({ contentType: "text/css", path: join(FONT_DIR, "google-fonts-latin.css") }),
-    );
+    await context.route(GOOGLE_FONTS_CSS, (route) => {
+      // `searchParams.getAll` URL-decodes, so "JetBrains+Mono" arrives as
+      // "JetBrains Mono" — compare against the decoded form.
+      const families = new URL(route.request().url()).searchParams.getAll("family").sort();
+      if (JSON.stringify(families) !== JSON.stringify([...VENDORED_FAMILIES].sort())) {
+        return route.fulfill({
+          status: 404,
+          contentType: "text/plain",
+          body:
+            `tests/fonts/ covers [${VENDORED_FAMILIES}] but the page asked for ` +
+            `[${families}] — vendor the new family or drop it from index.html`,
+        });
+      }
+      return route.fulfill({
+        contentType: "text/css",
+        path: join(FONT_DIR, "google-fonts-latin.css"),
+      });
+    });
     await context.route(GOOGLE_FONTS_FILES, (route) => {
       const name = new URL(route.request().url()).pathname.split("/").pop() ?? "";
-      const vendored = VENDORED_FONTS[name];
+      // `Object.hasOwn`, not a bare lookup: a basename of `constructor` or
+      // `toString` would otherwise return a truthy non-string, and the handler
+      // would throw inside the route — which surfaces as a hung request and a
+      // 30 s selector timeout rather than as an error anyone can read.
+      const vendored = Object.hasOwn(VENDORED_FONTS, name) ? VENDORED_FONTS[name] : undefined;
       // 404, never a pass-through: a miss must fail locally and visibly. Letting
       // it reach the network would quietly restore the exact dependency this
       // fixture exists to remove.

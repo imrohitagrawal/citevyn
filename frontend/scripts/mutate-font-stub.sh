@@ -61,7 +61,13 @@ restore_all() {
 # Restore BEFORE cleaning, and on INT/TERM as well as EXIT. A Ctrl-C during a
 # victim run would otherwise delete the only copies and leave index.html or
 # fixtures.ts mutated in the working tree.
-trap 'restore_all; rm -rf "$S"' EXIT INT TERM
+#
+# INT/TERM get their OWN handler that exits: a bare trap runs and then bash
+# RESUMES the script, so `check()` would carry on to `restore`, find the backup
+# dir already deleted, and print `FATAL: could not restore` about a tree that is
+# in fact already clean.
+trap 'restore_all; rm -rf "$S"' EXIT
+trap 'restore_all; rm -rf "$S"; exit 130' INT TERM
 
 pass=0
 fail=0
@@ -75,11 +81,13 @@ PW="npx playwright test tests/harness.spec.ts -c playwright.demo-ci.config.ts --
 VT="npx vitest run src/test/buildGuards.test.ts"
 
 echo "== control: the unmutated tree must be GREEN for both victims =="
+n=0
 for v in "$PW" "$VT"; do
-  if ! eval "$v" >"$S/control.txt" 2>&1; then
+  n=$((n + 1))
+  if ! eval "$v" >"$S/control-$n.txt" 2>&1; then
     echo "  ABORT: \`$v\` fails on an UNMUTATED tree, so no mutation result below"
     echo "  would mean anything. Is something already listening on port 3000?"
-    tail -25 "$S/control.txt"
+    tail -25 "$S/control-$n.txt"
     exit 1
   fi
 done
@@ -117,7 +125,7 @@ check() {
     # every /v1/auth/me (expected in demo mode, there is no backend), and those
     # lines would otherwise crowd out the assertion that actually fired.
     grep -v 'WebServer' <<<"$plain" |
-      grep -E '^\s*[0-9]+\) |Error: |AssertionError' | cut -c1-108 | head -3 |
+      grep -E '^[[:space:]]*[0-9]+\) |Error: |AssertionError' | cut -c1-108 | head -3 |
       sed 's/^/             /'
     pass=$((pass + 1))
   fi
@@ -139,7 +147,10 @@ check "a font subset is not vendored" "$FIX" "geist-MISSING.woff2" "$PW" \
   "a font subset was requested that tests/fonts/ does not have"
 
 echo "== M4: index.html gains a SECOND third-party stylesheet the fixture does not serve =="
-perl -0pi -e 's{(<link rel="preconnect" href="https://fonts\.googleapis\.com" />)}{$1\n    <link rel="stylesheet" href="https://cdn.example.invalid/x.css" />}' "$HTML"
+# media="print" on purpose: the injected sheet is still FETCHED (so the request
+# is recorded) but does not block rendering, so an unresolvable host cannot turn
+# this kill into a 30 s selector timeout that reads as WRONG-REASON.
+perl -0pi -e 's{(<link rel="preconnect" href="https://fonts\.googleapis\.com" />)}{$1\n    <link rel="stylesheet" media="print" href="https://cdn.example.invalid/x.css" />}' "$HTML"
 check "an unintercepted third-party stylesheet" "$HTML" "cdn.example.invalid" "$PW" \
   "reached a third-party host the harness does not intercept"
 
@@ -156,7 +167,24 @@ check "parser made vacuous" "$GUARD" 'return ["./fixtures"];' "$VT" \
 echo "== M7: the guard stops asking Playwright and hard-codes one file =="
 perl -0pi -e 's{specs = \[\.\.\.new Set\(\(parsed\.suites \?\? \[\]\)\.map\(\(s\) => s\.file\)\.filter\(\(f\): f is string => !!f\)\)\]\.sort\(\);}{specs = ["landing.spec.ts"];}' "$GUARD"
 check "spec list no longer resolved" "$GUARD" 'specs = ["landing.spec.ts"];' "$VT" \
-  "Playwright selects the specs this guard thinks it does"
+  "to include 'visual.spec.ts'"
+
+echo "== M8: the fixture goes back to overriding \`page\` instead of \`context\` =="
+perl -0pi -e 's{context: async \(\{ context \}, use\) => \{}{page: async ({ page }, use) => {}s;
+             s{await context\.route\(}{await page.route(}g;
+             s{await use\(context\);}{await use(page);}' "$FIX"
+check "route bound to one page" "$FIX" "page: async ({ page }, use)" "$PW" \
+  "the font route is bound to a single page rather than to the context"
+
+echo "== M9: the two vendored files are swapped, so each face renders in the other's metrics =="
+perl -0pi -e 's{"geist-latin\.woff2"}{"__SWAP__"}; s{"jetbrains-mono-latin\.woff2"}{"geist-latin.woff2"}; s{"__SWAP__"}{"jetbrains-mono-latin.woff2"}' "$FIX"
+check "vendored files swapped" "$FIX" '"gyByhwUxId8gMEwcGFWNOITd.woff2": "jetbrains-mono-latin.woff2"' "$PW" \
+  "is monospaced"
+
+echo "== M10: the family pin no longer matches what index.html asks for =="
+perl -pi -e 's{"Geist:wght\@400\.\.700"}{"NotAFamily:wght\@400"}' "$FIX"
+check "stylesheet family pin wrong" "$FIX" "NotAFamily" "$PW" \
+  "a font request was not served from tests/fonts/"
 
 echo
 echo "killed=$pass  survived/broken=$fail"
