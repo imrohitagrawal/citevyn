@@ -59,6 +59,7 @@ was invisible too.
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 from app.core.security_headers import _CSP
@@ -136,55 +137,74 @@ def _pages_html() -> str:
 #: ``form-action`` is ``'self'``), so this is guard coverage rather than live
 #: exposure — but a guard whose name overstates what it looks at is the exact
 #: shape this repo keeps getting caught by.
-_REFERENCING_TAGS = [
-    "link",
-    "script",
-    "img",
-    "iframe",
-    "video",
-    "audio",
-    "source",
-    "object",
-    "embed",
-    "use",
-    "form",
-]
+_REFERENCING_TAGS = frozenset(
+    [
+        "link",
+        "script",
+        "img",
+        "iframe",
+        "video",
+        "audio",
+        "source",
+        "object",
+        "embed",
+        "use",
+        "form",
+    ]
+)
+_URL_ATTRS = ("href", "src", "data", "action", "xlink:href")
 
 
-def _tags_named(html: str, name: str) -> list[str]:
-    """Tags of ``name``, ending at the first ``>`` OUTSIDE a quoted value.
+class _TagCollector(HTMLParser):
+    """Collect ``(tag, attrs)`` for every referencing tag, with a REAL parser.
 
-    ``<link\\b[^>]*>`` — the obvious version, and the one this had — is wrong,
-    and review turned it into a working bypass: a ``>`` inside a quoted
-    attribute is legal HTML and does NOT close the tag, so
+    This replaces two generations of hand-rolled regex, both of which review
+    broke:
 
-        <link rel="stylesheet" title="Brand > Fonts" href="https://fonts...">
+    * ``<link\b[^>]*>`` stopped at a ``>`` inside a quoted attribute, so
+      ``title="Brand > Fonts"`` hid the ``href`` after it.
+    * ``<link\b(?:"[^"]*"|'[^']*'|[^>])*>`` fixed that and introduced a worse
+      one — a single stray quote in an UNQUOTED value
+      (``<link rel=stylesheet a=x" b="c>d" href="http://evil/x.css">``) shifts
+      the quote parity for the REST OF THE DOCUMENT, so every later tag
+      boundary is wrong. Chromium parses that tag fine and issues the request.
 
-    was truncated before its ``href``. The third-party stylesheet was invisible
-    to every static guard in the repo while a browser fetched it happily.
+    ``html.parser`` is the stdlib, is what the rest of this repo's HTML tests
+    already use, and settles tag boundaries, attribute quoting, character
+    references, comments and case-insensitivity in one move. It also decodes
+    ``&#x2F;`` in attribute values, which the regexes never did — and which is
+    how a URL can hide from a matcher while a browser resolves it normally.
     """
-    return re.findall(
-        rf"<{name}\b(?:\"[^\"]*\"|'[^']*'|[^>])*>", html, flags=re.IGNORECASE | re.DOTALL
-    )
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tags: list[tuple[str, dict[str, str]]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _REFERENCING_TAGS:
+            self.tags.append((tag, {k.lower(): (v or "") for k, v in attrs}))
+
+    # A void element written as ``<link ... />`` arrives here instead.
+    handle_startendtag = handle_starttag
 
 
-def _link_tags(html: str) -> list[str]:
-    return _tags_named(html, "link")
+def _parsed_tags(html: str) -> list[tuple[str, dict[str, str]]]:
+    collector = _TagCollector()
+    collector.feed(html)
+    collector.close()
+    return collector.tags
 
 
-def _attr(tag: str, name: str) -> str | None:
-    """One attribute value, with the quote OPTIONAL — which is what HTML says."""
-    m = re.search(
-        rf"""\b{name}\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""",
-        tag,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    return m.group(1).strip("\"'").strip() if m else None
+def _rel_tokens(attrs: dict[str, str]) -> set[str]:
+    """``rel`` is a space-separated TOKEN LIST, matched ASCII-case-insensitively."""
+    return {t.lower() for t in attrs.get("rel", "").split()}
 
 
-def _rel_tokens(tag: str) -> set[str]:
-    """``rel`` is a space-separated TOKEN LIST, not a string (HTML spec)."""
-    return set((_attr(tag, "rel") or "").lower().split())
+#: ASCII tab, LF and CR are removed from ANYWHERE in a URL by the WHATWG parser,
+#: and leading/trailing C0-or-space is stripped before parsing. Both were used
+#: to walk a third-party stylesheet straight past the previous matcher while
+#: Chromium fetched it — measured, with the request in the server log.
+_URL_STRIP_ANYWHERE = str.maketrans("", "", "\t\n\r")
 
 
 def _origin_of(url: str) -> str | None:
@@ -193,41 +213,50 @@ def _origin_of(url: str) -> str | None:
     Normalised the way the WHATWG URL parser normalises, because that is what
     decides where the browser actually sends the request:
 
-    * ``\\`` is equivalent to ``/`` after a special scheme, and
-    * a run of slashes after the scheme collapses.
+    * leading/trailing C0 controls and spaces are stripped,
+    * ASCII tab/LF/CR are removed from anywhere in the string,
+    * a backslash is equivalent to ``/`` after a special scheme, and a run of
+      slashes after the scheme collapses.
 
-    So ``https:\\fonts.googleapis.com/x``, ``https:\\\\fonts.googleapis.com/x``
-    and ``https:////fonts.googleapis.com/x`` all reach fonts.googleapis.com, and
-    real Chromium really issues those requests — measured in review, where all
-    three were invisible to the previous ``^(?:(https?):)?//`` form and the
-    single-backslash one left EVERY guard in this repo green with a
-    render-blocking Google Fonts stylesheet in ``index.html``.
+    ONE slash-or-backslash after a special scheme does NOT reach a new host —
+    it goes to relative state and keeps the base's host. An earlier revision of
+    this file claimed the opposite and asserted it as a test; ``new URL(
+    "https:\\host", base)`` returns the BASE's origin. Two or more reach a
+    new authority. The corpus in
+    ``test_the_parser_catches_the_forms_that_would_slip_past_it`` is taken from
+    a real URL parser, not from memory.
 
-    Also handles the protocol-relative ``//host/path`` form, which a
-    ``startswith("http")`` check does not see. Note the scheme it reports for
-    that form is a guess: the browser inherits the DOCUMENT's scheme. Production
-    is HTTPS-only so ``https`` is right there, and the direction of any error is
-    "report an origin the policy must list", which fails closed.
+    The scheme reported for the protocol-relative ``//host`` form is a guess —
+    a browser inherits the DOCUMENT's scheme. Production is HTTPS-only, and the
+    direction of any error is "report an origin the policy must list", which
+    fails closed.
     """
-    url = url.strip().replace("\\", "/")
-    m = re.match(r"^(?:([a-z][a-z0-9+.-]*):)?/{1,}([^/?#]+)", url, flags=re.IGNORECASE)
+    url = url.translate(_URL_STRIP_ANYWHERE)
+    url = url.strip("".join(chr(c) for c in range(0x21)))
+    m = re.match(r"^(?:([a-z][a-z0-9+.-]*):)?([/\\]*)([^/\\?#]+)", url, flags=re.IGNORECASE)
     if not m:
         return None
-    # A single leading slash with NO scheme is a root-relative same-origin path
-    # ("/about.css"), not a host. Only a scheme, or two-or-more slashes, names one.
-    if m.group(1) is None and not url.startswith("//"):
+    scheme, slashes, host = m.group(1), m.group(2), m.group(3)
+    if scheme is None:
+        # No scheme: only ``//host`` (two or more) names a host.
+        if len(slashes) < 2:
+            return None
+        return f"https://{host}"
+    # With a scheme, ONE slash is relative-state and keeps the base's host.
+    if len(slashes) == 1:
         return None
-    scheme = (m.group(1) or "https").lower()
-    return f"{scheme}://{m.group(2)}"
+    # ``scheme:host/path`` with no slashes still names a host to a browser when
+    # the base scheme differs, so it is reported.
+    return f"{scheme.lower()}://{host}"
 
 
 def _stylesheet_origins_in(html: str) -> set[str]:
     """Every off-origin stylesheet origin ``html`` loads."""
     origins = set()
-    for tag in _link_tags(html):
-        if "stylesheet" not in _rel_tokens(tag):
+    for tag, attrs in _parsed_tags(html):
+        if tag != "link" or "stylesheet" not in _rel_tokens(attrs):
             continue
-        origin = _origin_of(_attr(tag, "href") or "")
+        origin = _origin_of(attrs.get("href", ""))
         if origin:
             origins.add(origin)
     return origins
@@ -302,52 +331,59 @@ def test_the_parser_is_reading_real_markup_with_real_stylesheet_links() -> None:
     """
     html = _pages_html()
     assert len(html) > 4000, "the two pages together are implausibly short"
-    tags = _link_tags(html)
-    assert len(tags) > 5, f"only {len(tags)} <link> tags across both pages"
-    sheets = [t for t in tags if "stylesheet" in _rel_tokens(t)]
+    tags = _parsed_tags(html)
+    links = [a for t, a in tags if t == "link"]
+    assert len(links) > 5, f"only {len(links)} <link> tags across both pages"
+    sheets = [a for a in links if "stylesheet" in _rel_tokens(a)]
     assert sheets, "neither page links a stylesheet at all — the parser is broken"
     # Every one of them is same-origin, which is the actual #365 property.
-    assert [t for t in sheets if not _origin_of(_attr(t, "href") or "")] == sheets
+    assert [a for a in sheets if not _origin_of(a.get("href", ""))] == sheets
 
 
 def test_the_parser_catches_the_forms_that_would_slip_past_it() -> None:
     """POSITIVE CONTROL. The emptiness above means "nothing there", not "blind".
 
-    Every line here is a real way to load a third-party stylesheet that the
-    pre-#365 parser missed: it required a quoted ``href="https://..."`` and an
-    exactly-quoted ``rel="stylesheet"``.
+    Every entry is a real way to load a third-party stylesheet, and the expected
+    origin of each was taken from a REAL URL PARSER (``new URL(form, base)``),
+    not from reasoning. That matters: a previous revision of this file asserted
+    that ``https:\`` + host reaches the host. It does not — one slash or
+    backslash after a special scheme keeps the base's host — and the false claim
+    had been copied into two tests and four documents before a skeptic ran the
+    one command that settles it.
     """
+    tab, lf, cr, c0, bs = "\t", "\n", "\r", "\x01", "\\"
+    evil = "fonts.googleapis.com"
     cases = {
-        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist">': (
-            "https://fonts.googleapis.com"
-        ),
-        "<link rel=stylesheet href=https://fonts.googleapis.com/css2>": (
-            "https://fonts.googleapis.com"
-        ),
+        f'<link rel="stylesheet" href="https://{evil}/css2?family=Geist">': f"https://{evil}",
+        f"<link rel=stylesheet href=https://{evil}/css2>": f"https://{evil}",
         '<link rel="stylesheet" href="//cdn.fontshare.com/a.css">': "https://cdn.fontshare.com",
         '<link rel="alternate stylesheet" href="http://example.com/a.css">': "http://example.com",
         "<link rel='STYLESHEET' href='https://example.org/a.css'>": "https://example.org",
         '<link\n  rel="stylesheet"\n  href="https://example.net/a.css"\n>': "https://example.net",
-        # A `>` INSIDE a quoted value does not close the tag. `<link\b[^>]*>`
-        # truncated this before `href` and the third-party stylesheet was
-        # invisible to every static guard in the repo — demonstrated in review,
-        # with the tag present in the shipped artifact and 50 backend tests
-        # plus 523 vitest tests green.
-        '<link rel="stylesheet" title="Brand > Fonts" href="https://fonts.googleapis.com/css2">': (
-            "https://fonts.googleapis.com"
+        # A `>` inside a quoted value does not close the tag.
+        f'<link rel="stylesheet" title="Brand > Fonts" href="https://{evil}/css2">': (
+            f"https://{evil}"
         ),
-        # WHATWG reads `\` as `/` after a special scheme and collapses slash
-        # runs; Chromium really issues all three of these requests.
-        '<link rel="stylesheet" href="https:\\fonts.googleapis.com/css2">': (
-            "https://fonts.googleapis.com"
-        ),
-        '<link rel="stylesheet" href="https:\\\\fonts.googleapis.com/css2">': (
-            "https://fonts.googleapis.com"
-        ),
-        '<link rel="stylesheet" href="https:////fonts.googleapis.com/css2">': (
-            "https://fonts.googleapis.com"
-        ),
-        '<link rel="stylesheet" href="\\\\evil.example/a.css">': "https://evil.example",
+        # A stray quote in an UNQUOTED value shifted quote parity for the whole
+        # rest of the document under the previous tokeniser.
+        f'<link rel=stylesheet a=x" b="c>d" href="https://{evil}/css2">': f"https://{evil}",
+        # Two or more slashes/backslashes DO reach a new authority.
+        f'<link rel="stylesheet" href="https:{bs}{bs}{evil}/css2">': f"https://{evil}",
+        f'<link rel="stylesheet" href="https:////{evil}/css2">': f"https://{evil}",
+        f'<link rel="stylesheet" href="{bs}{bs}{evil}/a.css">': f"https://{evil}",
+        # ASCII tab/LF/CR are removed from ANYWHERE in a URL, and leading C0 is
+        # stripped, before the URL is parsed.
+        f'<link rel="stylesheet" href="http:{tab}//{evil}/x.css">': f"http://{evil}",
+        f'<link rel="stylesheet" href="http:{lf}//{evil}/x.css">': f"http://{evil}",
+        f'<link rel="stylesheet" href="http:{cr}//{evil}/x.css">': f"http://{evil}",
+        f'<link rel="stylesheet" href="ht{tab}tp://{evil}/x.css">': f"http://{evil}",
+        f'<link rel="stylesheet" href="{c0}http://{evil}/x.css">': f"http://{evil}",
+        f'<link rel="stylesheet" href="/{lf}/{evil}/x.css">': f"https://{evil}",
+        # A scheme with no slashes still names a host when the base scheme differs.
+        f'<link rel="stylesheet" href="http:{evil}/x.css">': f"http://{evil}",
+        # The HTML parser decodes character references before the URL parser
+        # ever sees the value — invisible to any matcher that reads raw source.
+        f'<link rel="stylesheet" href="http:&#x2F;&#x2F;{evil}/css2">': f"http://{evil}",
     }
     for tag, expected in cases.items():
         assert _stylesheet_origins_in(tag) == {expected}, f"this form slips past the parser: {tag}"
@@ -360,12 +396,19 @@ def test_the_parser_catches_the_forms_that_would_slip_past_it() -> None:
         '<link rel="preload" as="style" href="https://example.com/a.css">',
         '<link rel="preconnect" href="https://example.com">',
         '<link rel="icon" href="/favicon.svg">',
+        # ONE backslash. In the must-NOT-report list precisely because an
+        # earlier revision asserted the opposite and shipped it.
+        f'<link rel="stylesheet" href="https:{bs}{evil}/css2">',
+        f'<link rel="stylesheet" href="{bs}{evil}/css2">',
+        # A commented-out tag is not fetched, so reporting it would be a false
+        # red. This is a DELIBERATE change from the regex version, which could
+        # not see comments at all.
+        f'<!-- <link rel="stylesheet" href="https://{evil}/css2"> -->',
     ):
         assert _stylesheet_origins_in(tag) == set(), f"false positive on: {tag}"
 
-    # The quote-aware tokeniser must still split adjacent tags rather than
-    # swallowing them into one.
-    assert len(_link_tags('<link rel="a"><link rel="b">')) == 2
+    # The parser reads adjacent tags as two, not one.
+    assert len(_parsed_tags('<link rel="a"><link rel="b">')) == 2
 
 
 def test_every_stylesheet_origin_the_pages_load_is_permitted() -> None:
@@ -420,14 +463,14 @@ def test_neither_page_puts_a_third_party_in_front_of_first_paint() -> None:
     stylesheet.
     """
     html = _pages_html()
-    tags = [t for name in _REFERENCING_TAGS for t in _tags_named(html, name)]
+    tags = _parsed_tags(html)
     assert len(tags) > 5, "the tag probe found almost nothing — the check below is vacuous"
     offenders = []
-    for tag in tags:
-        for name in ("href", "src", "data", "action"):
-            origin = _origin_of(_attr(tag, name) or "")
+    for tag, attrs in tags:
+        for name in _URL_ATTRS:
+            origin = _origin_of(attrs.get(name, ""))
             if origin:
-                offenders.append(f"{origin} via {tag.strip()[:80]}")
+                offenders.append(f"{origin} via <{tag} {name}={attrs.get(name)!r}>")
     assert offenders == [], (
         "a page references a third-party host before first paint. A render-blocking "
         "off-origin stylesheet also blocks <script type=module> from EXECUTING, so "

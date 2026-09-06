@@ -183,7 +183,14 @@ def test_the_theme_key_matches_the_app(about_css: str) -> None:
     )
 
 
-_CSS_ESCAPE_RE = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)")
+# A hex escape is terminated by ONE optional whitespace character, and CSS
+# counts form feed (\x0c) and CRLF as whitespace — not just space/tab/LF.
+# A backslash before a newline is a LINE CONTINUATION and is removed entirely.
+# Both gaps were live bypasses: `@\\69<FF>mport "/\\<LF>/host/x.css"` reached the
+# network in real Chromium while every backend and frontend test stayed green.
+_CSS_ESCAPE_RE = re.compile(
+    r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|\\(\r\n|[\n\r\f])|\\([\s\S])"
+)
 
 
 def _unescape_css(text: str) -> str:
@@ -205,9 +212,15 @@ def _unescape_css(text: str) -> str:
     The lesson is the one already in this repo's notes: resolve what the SYSTEM
     resolved. A guard that matches source bytes is guarding a spelling.
     """
-    return _CSS_ESCAPE_RE.sub(
-        lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2), text
-    )
+
+    def _resolve(m: re.Match[str]) -> str:
+        if m.group(1) is not None:
+            return chr(int(m.group(1), 16))
+        if m.group(2) is not None:
+            return ""  # line continuation: the backslash AND the newline go
+        return m.group(3)
+
+    return _CSS_ESCAPE_RE.sub(_resolve, text)
 
 
 def test_the_css_escape_reader_resolves_what_the_browser_resolves(about_css: str) -> None:
@@ -216,10 +229,19 @@ def test_the_css_escape_reader_resolves_what_the_browser_resolves(about_css: str
     Every line here is a form review actually used to smuggle a third-party
     request past the substring check.
     """
+    ff, lf, cr = "\x0c", "\n", "\r"
     assert _unescape_css(r"@\69mport") == "@import"
     assert _unescape_css(r"@\49 mport") == "@Import"  # hex is case-insensitive, one trailing space
     assert _unescape_css(r'"\/\/x.example/a.css"') == '"//x.example/a.css"'
     assert _unescape_css(r"url(\68 ttps://x)") == "url(https://x)"
+    # FORM FEED as the hex-escape terminator, and a backslash LINE CONTINUATION.
+    # Both were demonstrated bypasses of the first version of this reader, with
+    # the resulting @import verified to hit the network in real Chromium.
+    assert _unescape_css("@\\69" + ff + "mport") == "@import"
+    assert _unescape_css("@\\69" + cr + lf + "mport") == "@import"
+    assert _unescape_css('"/\\' + lf + '/host/x.css"') == '"//host/x.css"'
+    assert _unescape_css('"/\\' + ff + '/host/x.css"') == '"//host/x.css"'
+    assert _unescape_css('"/\\' + cr + lf + '/host/x.css"') == '"//host/x.css"'
     # And it leaves ordinary CSS alone, so the checks below are not reading
     # mangled input.
     assert _unescape_css("@font-face { src: url(/fonts/a.woff2); }") == (
@@ -265,8 +287,29 @@ def test_the_page_s_own_script_pulls_in_no_further_origins() -> None:
 
     ``/about`` is the surface with no browser-level coverage at all: no
     Playwright spec navigates to it (it needs the real backend, and the demo
-    config runs only the Vite dev server). So this static scan is what stands
-    in for one, and it says so rather than implying otherwise.
+    config runs only the Vite dev server). So this static scan stands in for
+    one.
+
+    WHAT IT CANNOT SEE, stated rather than implied — because an earlier version
+    of this docstring said it "says so rather than implying otherwise" while
+    saying no such thing, which is the overstatement it was warning about:
+
+    * a URL built from PARTS. ``["ht", "tps:", "//", host].join("")`` contains
+      no ``//host`` in any single string literal, and this scan reads string
+      literals. Demonstrated in review: five such lines create the link and
+      Chromium issues the request with this file green. It is kept as a
+      deliberate KNOWN SURVIVOR in ``frontend/scripts/mutate-font-guards.sh``,
+      so the limit is exercised on every run rather than merely written down —
+      and if a future change DOES catch it, that case reports
+      ``UNEXPECTEDLY-KILLED`` and asks for this note to be updated.
+    * ``String.fromCharCode``, ``atob``, or any other runtime construction.
+    * anything a third-party script does, if one is ever added.
+
+    Closing that class properly needs a browser test of ``/about`` against the
+    real backend, which is tracked rather than faked here. What makes the gap
+    tolerable meanwhile is that the CSP fails CLOSED: ``style-src 'self'``
+    blocks such a stylesheet, so the visible result is a console violation and
+    a fallback face (the #306 shape), not #365's blank page.
     """
     js = ABOUT_THEME_JS.read_text(encoding="utf-8")
     # Strip comments so a URL merely discussed in one is not a false red.

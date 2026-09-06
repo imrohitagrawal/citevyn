@@ -23,6 +23,9 @@
 # Discipline this encodes, matching scripts/mutate-a11y-guards.sh and
 # scripts/mutate-focus-ring.sh:
 #   - prove a GREEN CONTROL first. Without it every "KILLED" is unfalsifiable.
+#   - judge KILLED by the runner's EXIT STATUS, never by grepping its output
+#     for the word "failed" — `pytest -q` prints "1 xfailed" and one xfail
+#     anywhere would false-kill every backend mutant
 #   - assert the mutation ACTUALLY APPLIED; a no-op edit reads as a survivor,
 #     and this repo has been burned by exactly that (ruff format silently
 #     undoing a mutation, producing three phantom survivors).
@@ -52,7 +55,7 @@ restore() {
 # mutated file in the tree with no way back.
 trap 'restore; rm -rf "$BACKUP"' EXIT INT TERM
 
-VITEST="cd '$FRONTEND' && npx vitest run src/test/buildGuards.test.ts"
+VITEST="cd '$FRONTEND' && npx vitest run src/test/emittedArtifact.test.ts src/test/buildGuards.test.ts"
 PYTEST="cd '$BACKEND' && .venv/bin/python -m pytest -q -p no:randomly"
 
 killed=0
@@ -64,9 +67,20 @@ STATUS_BEFORE="$(cd "$REPO" && git status --porcelain)"
 # apply <name> <file> <python-mutator-file> <command>
 run_case() {
   local name="$1" file="$2" mutator="$3" cmd="$4"
-  CURRENT="$file"
+  # Back up BEFORE arming the trap. The other order has a window in which an
+  # interrupt makes the EXIT trap copy the PREVIOUS case's backup over this
+  # file — restoring the wrong contents to the wrong path.
   cp "$file" "$BACKUP/keep"
-  python3 "$mutator" "$file"
+  CURRENT="$file"
+  # A mutator whose anchor has moved must report itself, not abort the run under
+  # `set -e` and throw away every verdict printed so far.
+  if ! python3 "$mutator" "$file" 2>"$BACKUP/muterr"; then
+    echo "  NOT-APPLIED  $name - the mutator errored:"
+    sed 's/^/      /' "$BACKUP/muterr" | tail -4
+    cp "$BACKUP/keep" "$file"; CURRENT=""
+    survived=$((survived + 1))
+    return
+  fi
 
   # The mutation must have CHANGED something. A silently-inapplicable edit
   # (a moved anchor, a reformat) otherwise reports as a survivor and sends the
@@ -78,13 +92,25 @@ run_case() {
     return
   fi
 
-  local out
-  out="$(eval "$cmd" 2>&1 || true)"
+  # The EXIT STATUS is the oracle, not a word in the output.
+  #
+  # This used to be `grep -qE 'FAILED|failed|...'` over the captured output,
+  # and that is a false-kill waiting to happen: `pytest -q` prints "1 xfailed",
+  # which contains "failed". One `@pytest.mark.xfail` anywhere in the six files
+  # this runs would have converted all eleven backend mutants into permanent
+  # KILLED verdicts that prove nothing — verified by adding one and watching
+  # the pattern match. A test runner's exit code says "did anything fail", and
+  # that is exactly the question.
+  local out status
+  set +e
+  out="$(eval "$cmd" 2>&1)"
+  status=$?
+  set -e
   cp "$BACKUP/keep" "$file"
   cmp -s "$BACKUP/keep" "$file" || { echo "RESTORE FAILED for $file"; exit 2; }
   CURRENT=""
 
-  if grep -qE 'FAILED|failed|✗|×' <<<"$out"; then
+  if [ "$status" -ne 0 ]; then
     echo "  KILLED       $name"
     killed=$((killed + 1))
   else
@@ -121,7 +147,7 @@ BACKEND_FONT_TESTS="'$BACKEND/tests/test_csp_covers_the_pages_real_origins.py' \
 '$BACKEND/tests/test_frontend_assets.py'"
 
 echo
-echo "=== the EMITTED artifact (frontend/src/test/buildGuards.test.ts) ==="
+echo "=== the EMITTED artifact (frontend/src/test/emittedArtifact.test.ts) ==="
 
 run_case "off-origin stylesheet in index.html" "$FRONTEND/index.html" \
   "$(mut a <<'PY'
@@ -141,12 +167,12 @@ open(p,"w",encoding="utf8").write(s.replace("  </head>",
 PY
 )" "$VITEST"
 
-run_case "off-origin stylesheet via a backslash URL" "$FRONTEND/index.html" \
+run_case "off-origin stylesheet via a double-backslash URL" "$FRONTEND/index.html" \
   "$(mut c <<'PY'
 import sys
 p=sys.argv[1]; s=open(p,encoding="utf8").read()
 open(p,"w",encoding="utf8").write(s.replace("  </head>",
-  '    <link rel="stylesheet" href="https:\\x.example/a.css" />\n  </head>',1))
+  '    <link rel="stylesheet" href="https:' + chr(92)*2 + 'x.example/a.css" />' + chr(10) + '  </head>',1))
 PY
 )" "$VITEST"
 
@@ -322,6 +348,129 @@ open(p,"w",encoding="utf8").write(
 PY
 run_case "index.html font preload points at a missing file" "$FRONTEND/index.html" \
   "$M/u.py" "$PYTEST $BACKEND_FONT_TESTS"
+
+echo
+echo "=== the bypasses adversarial review demonstrated ==="
+
+cat > "$M/v.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+tag = '    <link rel="stylesheet" title="Brand > Fonts" href="https://fonts.googleapis.com/css2" />\n'
+open(p, "w", encoding="utf8").write(s.replace("  </head>", tag + "  </head>", 1))
+PY
+run_case "off-origin stylesheet behind a quoted '>'" "$FRONTEND/index.html" \
+  "$M/v.py" "$VITEST"
+
+cat > "$M/w.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# A stray quote in an UNQUOTED value shifted quote parity for the rest of the
+# document under the old hand-rolled tokeniser.
+tag = '    <link rel=stylesheet a=x" b="c>d" href="https://fonts.googleapis.com/css2">\n'
+open(p, "w", encoding="utf8").write(s.replace("  </head>", tag + "  </head>", 1))
+PY
+run_case "off-origin stylesheet behind a quote-parity shift" "$FRONTEND/index.html" \
+  "$M/w.py" "$VITEST"
+
+cat > "$M/x.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# ASCII tab is removed from anywhere in a URL by the WHATWG parser.
+tag = '    <link rel="stylesheet" href="http:\t//fonts.googleapis.com/css2" />\n'
+open(p, "w", encoding="utf8").write(s.replace("  </head>", tag + "  </head>", 1))
+PY
+run_case "off-origin stylesheet via a tab inside the URL" "$FRONTEND/index.html" \
+  "$M/x.py" "$VITEST"
+
+cat > "$M/y.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# The HTML parser decodes character references before the URL parser sees them.
+tag = '    <link rel="stylesheet" href="http:&#x2F;&#x2F;fonts.googleapis.com/css2" />\n'
+open(p, "w", encoding="utf8").write(s.replace("  </head>", tag + "  </head>", 1))
+PY
+run_case "off-origin stylesheet via character references" "$FRONTEND/index.html" \
+  "$M/y.py" "$PYTEST $BACKEND_FONT_TESTS"
+
+cat > "$M/z.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# Form-feed terminator plus a backslash line continuation: both defeated the
+# first version of the CSS escape reader, and the @import really loads.
+inj = "@" + chr(92) + "69" + chr(12) + "mport " + chr(34) + "/" + chr(92) + chr(10)
+inj += "/fonts.googleapis.com/css2" + chr(34) + ";" + chr(10)
+open(p, "w", encoding="utf8").write(inj + s)
+PY
+run_case "about.css @import via form-feed + line continuation" "$FRONTEND/public/about.css" \
+  "$M/z.py" "$PYTEST $BACKEND_FONT_TESTS"
+
+cat > "$M/aa.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# The Dockerfile stops using `npm run build` while the words survive in a
+# COMMENT — the exact edit that defeated the whole-file substring check.
+i = s.index("RUN VITE_API_DEMO_KEY=")
+j = s.index(chr(10) + chr(10), i)
+repl = ("# Historically this was `npm run build`; now built directly." + chr(10)
+        + "RUN npx vite build --manifest --mode staging " + chr(92) + chr(10)
+        + "    && test -f dist/index.html")
+open(p, "w", encoding="utf8").write(s[:i] + repl + s[j:])
+PY
+run_case "the image stops building via the pinned npm script" "$REPO/infra/docker/Dockerfile.api" \
+  "$M/aa.py" "$VITEST"
+
+cat > "$M/ab.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+char34, char39 = chr(34), chr(39)
+# A build plugin that hides from the guard by branching on vitest's own env.
+plugin = '    {\n      name: "smuggle",\n      apply: "build",\n      transformIndexHtml(html) {\n        if (process.env.VITEST) return html;\n        return html.replace(\n          "</head>",\n          [char34, "<link rel=", char39, "stylesheet", char39,\n           " href=", char39, "https://fonts.googleapis.com/css2", char39,\n           "></head>", char34].join(""),\n        );\n      },\n    },\n'
+old = "plugins: [react(), liveStubPlugin()],"
+assert old in s
+new = "plugins: [react(), liveStubPlugin(), smuggle()],"
+fn = "function smuggle() { return " + plugin.strip().rstrip(",") + "; }" + chr(10)
+open(p, "w", encoding="utf8").write(fn + s.replace(old, new, 1))
+PY
+run_case "a build plugin branching on the vitest environment" "$FRONTEND/vite.config.ts" \
+  "$M/ab.py" "$VITEST"
+
+cat > "$M/ac.py" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p, encoding="utf8").read()
+# A runtime-injected third-party stylesheet built from string PARTS, which the
+# about-theme.js scan explicitly does NOT claim to catch. Recorded as a KNOWN
+# SURVIVOR so the guard's stated limit is checked rather than merely asserted.
+q = chr(34)
+js = (chr(10) + "var h=[" + q + "ht" + q + "," + q + "tps:" + q + "," + q + "//" + q + ","
+      + q + "fonts.googleapis.com/css2" + q + "].join(" + q + q + ");"
+      + "var l=document.createElement(" + q + "link" + q + ");"
+      + "l.rel=" + q + "stylesheet" + q + ";l.href=h;document.head.appendChild(l);" + chr(10))
+open(p, "w", encoding="utf8").write(s + js)
+PY
+echo "  (next case is a KNOWN SURVIVOR - see the limits note in test_about_page_tokens.py)"
+cp "$FRONTEND/public/about-theme.js" "$BACKUP/known_survivor"
+CURRENT="$FRONTEND/public/about-theme.js"
+python3 "$M/ac.py" "$CURRENT"
+if cmp -s "$BACKUP/known_survivor" "$CURRENT"; then
+  echo "  NOT-APPLIED  concatenated runtime injection"
+  survived=$((survived + 1))
+  cp "$BACKUP/known_survivor" "$CURRENT"; CURRENT=""
+else
+  set +e
+  eval "$PYTEST $BACKEND_FONT_TESTS" >/dev/null 2>&1
+  ks=$?
+  set -e
+  cp "$BACKUP/known_survivor" "$CURRENT"
+  cmp -s "$BACKUP/known_survivor" "$CURRENT" || { echo "RESTORE FAILED"; exit 2; }
+  CURRENT=""
+  if [ "$ks" -eq 0 ]; then
+    echo "  SURVIVED-AS-DOCUMENTED  concatenated runtime injection (a static scan cannot see it)"
+  else
+    echo "  UNEXPECTEDLY-KILLED  concatenated runtime injection - the guard got stronger;"
+    echo "                       update its 'what it cannot see' note and this case"
+    survived=$((survived + 1))
+  fi
+fi
 
 echo
 echo "KILLED: $killed   SURVIVED/NOT-APPLIED: $survived"
