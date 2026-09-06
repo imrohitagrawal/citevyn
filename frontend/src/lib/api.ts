@@ -138,6 +138,7 @@ export async function apiFetch<T>(
   headers.set("Authorization", `Bearer ${API_DEMO_KEY}`);
 
   let response: Response;
+  let text: string;
   try {
     // Required for the ADR-0004 session cookie to travel: fetch's default
     // credentials mode ("same-origin") already covers same-origin deploys
@@ -152,9 +153,20 @@ export async function apiFetch<T>(
       signal: controller.signal,
       credentials: "include",
     });
+    // Read the body inside the SAME try, so the timeout still covers it.
+    //
+    // This used to sit below, after `clearTimeout`. A server or proxy that
+    // sends headers and then stalls the body left `response.text()` pending
+    // with the timer already cancelled and nothing left to abort it —
+    // measured: still pending after 120,000 ms of a 50 ms timeout, with a
+    // partner proving the same timeout DOES fire while the headers are
+    // outstanding. That was a stuck spinner before; once the composer is
+    // gated on the request finishing (#62) it wedges the composer shut for
+    // the rest of the session, recoverable only by reloading the page.
+    //
+    // 204 No Content is returned by some admin routes; treat as null below.
+    text = await response.text();
   } catch (err) {
-    window.clearTimeout(timeoutId);
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
     if (controller.signal.aborted) {
       throw new ApiClientError(
         "Request timed out — the server took too long to respond.",
@@ -167,14 +179,11 @@ export async function apiFetch<T>(
       0,
       err instanceof Error ? err.message : String(err),
     );
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
   }
 
-  window.clearTimeout(timeoutId);
-  if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
-
-  // Read the body once, regardless of status. 204 No Content is
-  // returned by some admin routes; treat as null.
-  const text = await response.text();
   let parsed: unknown = null;
   if (text) {
     try {

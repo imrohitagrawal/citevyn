@@ -6,8 +6,9 @@
  * to see. The scroll was performed imperatively from the landing hook, outside
  * the component that owns the scroll container, and raced its mount.
  */
+import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ChatView } from "./ChatView";
 
 type Props = Parameters<typeof ChatView>[0];
@@ -505,5 +506,83 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     rerender(chat({ messages: [...MESSAGES] }));
 
     expect(ops).toContain("scrollTop=5000");
+  });
+});
+
+/**
+ * #62 — the composer while a live answer is in flight.
+ *
+ * The gate is deliberately ARIA-only on the send button, not the native
+ * `disabled` attribute the rest of the app uses (`.cta:disabled`, the Enterprise
+ * CTA). `disabled` is right for a control that is PERMANENTLY inert: it leaves
+ * the tab order and nothing is lost. It is wrong for a control that flips busy
+ * for the ~1s of a request, because the flip happens while the reader is very
+ * likely focused on it (they just clicked Send) — the browser then drops focus
+ * to `<body>` and the restore, a second later, puts it nowhere. `aria-disabled`
+ * announces the same state, keeps focus and the tab order intact, and the click
+ * handler is what actually refuses to act.
+ */
+describe("ChatView — composer while an answer is in flight (#62)", () => {
+  it("marks the send button busy and announces why, without disabling the input", () => {
+    renderChat({ pending: true });
+
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toHaveAttribute("aria-disabled", "true");
+    // Not natively disabled: it must stay focusable and in the tab order.
+    expect(send).not.toBeDisabled();
+    // Type-ahead stays possible; disabling the input would also break the
+    // focus-on-mount contract asserted above.
+    const input = screen.getByPlaceholderText(/Ask about Claude/i);
+    expect(input).not.toBeDisabled();
+    // The reason is ANNOUNCED, not just drawn — from a region that was already
+    // in the accessibility tree before the text arrived.
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+    // ...and the visible bubble is NOT a second live region announcing the
+    // avatar's "CV" alongside it.
+    expect(document.querySelector(".pending-msg")?.getAttribute("aria-live")).toBeNull();
+  });
+
+  it("leaves the send button live when nothing is in flight", () => {
+    // Partner: proves the assertion above is not passing because the attribute
+    // is simply always "true".
+    renderChat({ pending: false });
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send.getAttribute("aria-disabled")).not.toBe("true");
+    // The live region persists — that is the point of it — but it is empty, and
+    // the visible loader is gone.
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    expect(document.querySelector(".pending-bubble")).toBeNull();
+  });
+
+  it("shows the loader even when the transcript is still empty", () => {
+    // It used to render only inside the non-empty branch, so resuming a
+    // zero-message session mid-request left the send button aria-disabled with
+    // nothing on screen saying why.
+    renderChat({ pending: true, chatEmpty: true, messages: [] });
+    expect(document.querySelector(".pending-bubble")).not.toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+    expect(screen.getByRole("button", { name: "Send" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  // NOTE: there is deliberately no jsdom test that focus survives the flip.
+  // One was written and DELETED: it passed with the whole #62 change absent,
+  // and it passed with `disabled={pending}` — the exact design its own comment
+  // said it rejected — because jsdom does not blur an element when it becomes
+  // disabled. It asserted nothing this change could break. The property is real
+  // and is asserted in a real browser instead, in the live-only Playwright test
+  // in tests/behavior.spec.ts.
+
+  it("refuses the click while in flight, and takes it again once the flight ends", () => {
+    const onSendClick = vi.fn();
+    const { rerender } = renderChat({ pending: true, onSendClick });
+    const send = screen.getByRole("button", { name: "Send" });
+
+    fireEvent.click(send);
+    expect(onSendClick).not.toHaveBeenCalled();
+
+    // Partner: the button is not simply dead — the wiring still works.
+    rerender(chat({ pending: false, onSendClick }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onSendClick).toHaveBeenCalledTimes(1);
   });
 });

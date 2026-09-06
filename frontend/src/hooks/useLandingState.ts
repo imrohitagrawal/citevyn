@@ -79,9 +79,10 @@ interface AppState {
   demo: DemoState;
   messages: ChatMessage[];
   screen: "landing" | "chat";
-  /** True between submitting a question and the first bot chunk landing.
-      Drives the "thinking…" loader in ChatView. */
-  pending: boolean;
+  /** How many live requests are in flight. A COUNT, not a flag: as a boolean
+      it was cleared by whichever request came back first, so a second, still
+      unanswered question lost its "Searching the docs…" loader. */
+  pending: number;
   /** Monotonic counter bumped every time the user submits a NEW question. ChatView
       watches it to bring the just-asked question into view even when the reader had
       scrolled up — an explicit send must always be followed, unlike a passive stream
@@ -108,7 +109,8 @@ type Action =
       suggestions?: Suggestion[];
     }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" }
-  | { type: "SET_PENDING"; value: boolean }
+  | { type: "SET_PENDING"; value: number }
+  | { type: "SNAP_DEMO" }
   | { type: "BUMP_SEND_TICK" }
   | { type: "RESUME_SESSION"; messages: ChatMessage[] };
 
@@ -136,7 +138,7 @@ const initialState: AppState = {
   },
   messages: [],
   screen: "landing",
-  pending: false,
+  pending: 0,
   sendTick: 0,
 };
 
@@ -199,7 +201,32 @@ function reducer(state: AppState, action: Action): AppState {
       // and a stale one scrolls the next mount to an unrelated message (#302 review).
       return { ...state, screen: action.screen, highlight: -1 };
     case "SET_PENDING":
+      // MIRRORS the ref; it does not track it in parallel. An earlier version
+      // applied a delta here and a delta to the ref, which is two sources of
+      // truth held in step by convention — and the hook exports `dispatch`, so
+      // the convention was already breakable from outside. Assigning the ref's
+      // value makes drift structurally impossible and lets any stray dispatch
+      // self-heal on the next real transition.
       return { ...state, pending: action.value };
+    case "SNAP_DEMO":
+      // Leaving the landing screen stops the demo stream (#329). Stopping it is
+      // only half the job: `landing-sections.tsx` renders the caret on
+      // `demo.streaming` and the sources + "Continue in full chat" on
+      // `demo.done`, so a bare stop leaves the panel frozen mid-word under a
+      // caret blinking `infinite` — measured stuck at 40 of 298 characters,
+      // permanently. Snapping to the full text lands on exactly the shape the
+      // initial state already has for a first-time visitor.
+      return state.demo.streaming
+        ? {
+            ...state,
+            demo: {
+              ...state.demo,
+              text: KB[state.demo.key]?.a ?? state.demo.text,
+              streaming: false,
+              done: true,
+            },
+          }
+        : state;
     case "BUMP_SEND_TICK":
       return { ...state, sendTick: state.sendTick + 1 };
     default:
@@ -358,6 +385,24 @@ export function useLandingState() {
   // if it is still the most recent one by the time its fetch resolves.
   const resumeEpochRef = useRef(0);
 
+  // Live requests currently in flight, mirrored in a ref because the composer
+  // gate has to read it SYNCHRONOUSLY. Two Enter presses inside one React batch
+  // both see the state rendered before either of them ran, so a guard on
+  // `state.pending` reads 0 twice and lets both through; the ref is written
+  // before `sendLive`'s first await. Ref and state move together here, and
+  // nowhere else, so they cannot drift.
+  const inFlight = useRef(0);
+  const markInFlight = useCallback((delta: 1 | -1) => {
+    // Clamped on the REF, which is the half the gate reads. Clamping only the
+    // rendered copy would have been backwards: a negative ref is TRUTHY, so an
+    // unpaired decrement would wedge the composer shut while hiding the loader
+    // that explains it. Unreachable today — this is the only writer and every
+    // increment is `finally`-paired — and no test can reach it, which is
+    // exactly why it is one call rather than a branch.
+    inFlight.current = Math.max(0, inFlight.current + delta);
+    dispatch({ type: "SET_PENDING", value: inFlight.current });
+  }, []);
+
   // Normalized questions whose last live attempt FAILED. The dedup guard
   // suppresses re-asking a question that was answered, but a transport
   // failure is not an answer — the user is told to retry, so a failed
@@ -461,9 +506,17 @@ export function useLandingState() {
       timers.current.heroLoop?.stop();
       timers.current.heroPause?.stop();
       timers.current.placeholderTimer?.stop();
+      // #329: the demo rail's stream was the one landing timer #312 left out —
+      // measured 129 SET_DEMO dispatches over 3096 ms into an unmounted landing
+      // DOM for the 298-char `claude-code` answer (85 for the shorter
+      // `codex-flag` one — the count scales with answer length; both go to 0).
+      // SNAP_DEMO is what makes stopping it safe; see the reducer.
+      timers.current.demoTimer?.stop();
       timers.current.heroLoop = null;
       timers.current.heroPause = null;
       timers.current.placeholderTimer = null;
+      timers.current.demoTimer = null;
+      dispatch({ type: "SNAP_DEMO" });
     };
   }, [state.screen, playHeroLoop]);
 
@@ -472,6 +525,15 @@ export function useLandingState() {
   // ---------------------------------------------------------------------------
 
   const selectDemo = useCallback((key: string) => {
+    // Stop the stream this one replaces. Overwriting the slot left the previous
+    // handle unreachable and BOTH streams writing the same `state.demo.text`:
+    // measured 100 backward jumps and 197 attribution flips over 2.3s, and —
+    // because the winner is whichever stream finishes last, a pure length race
+    // — a second click on a SHORTER answer within the first stream's remaining
+    // time settles on the FIRST answer, permanently, under the second
+    // question's header. On the "laptop" entry that renders its amber
+    // "NO SOURCE — REFUSED" badge over a fully cited answer.
+    timers.current.demoTimer?.stop();
     const entry = KB[key];
     dispatch({
       type: "SET_DEMO",
@@ -606,11 +668,14 @@ export function useLandingState() {
   const sendLive = useCallback(
     async (text: string) => {
       const norm = text.trim().toLowerCase();
-      // Flip the loading indicator while we wait for the answer. We clear it
-      // inside ``streamBot``'s first onChunk (see sendLive/setPending wiring)
-      // — but to be safe against a backend that fails before the first chunk,
-      // also clear it in the catch.
-      dispatch({ type: "SET_PENDING", value: true });
+      // ONE start, ONE end, guaranteed by `finally`. The clear used to live in
+      // `streamBot`'s first chunk AND in this catch, which gave the indicator
+      // two owners: with two questions overlapping, the first answer's opening
+      // chunk cleared the indicator belonging to the second, still-unanswered
+      // one. `finally` runs after `streamBot` has already appended its bubble,
+      // so React batches the two into a single render — there is no frame
+      // showing neither the loader nor the answer.
+      markInFlight(1);
       try {
         const sessionId = await ensureSession();
         const resp = await askQuestion(sessionId, text);
@@ -638,10 +703,11 @@ export function useLandingState() {
         // Remember the failure so the dedup guard lets the user retry it.
         failedQuestionsRef.current.add(norm);
         handleApiError(err);
-        dispatch({ type: "SET_PENDING", value: false });
+      } finally {
+        markInFlight(-1);
       }
     },
-    [ensureSession, handleApiError],
+    [ensureSession, handleApiError, markInFlight],
   );
 
   // Route a question to the backend (live) or the canned KB (demo). Shared
@@ -754,12 +820,11 @@ export function useLandingState() {
       let handle: Timer;
       handle = streamText(
         text,
-        (chunk) => {
-          // First chunk arrived → drop the loading indicator so the typing
-          // cursor takes over visually.
-          dispatch({ type: "SET_PENDING", value: false });
-          dispatch({ type: "UPDATE_MESSAGE", id, text: chunk });
-        },
+        // The loading indicator is NOT cleared here. `streamBot` has no idea
+        // which request it belongs to — it is also the error and demo path —
+        // so clearing it from a chunk cleared whichever question happened to be
+        // waiting. `sendLive` owns that lifecycle now.
+        (chunk) => dispatch({ type: "UPDATE_MESSAGE", id, text: chunk }),
         () => {
           dispatch({
             type: "FINISH_MESSAGE",
@@ -844,7 +909,43 @@ export function useLandingState() {
         dispatch({ type: "SET_HERO_INPUT", value: "" });
       }
       if (q) {
-        setTimeout(() => send(q), 60);
+        // #62. A landing entry point (hero box, hero chips, marquee pills,
+        // persona buttons, "Get Pro") reaches `send` directly, so gating only
+        // the composer left the attribution defect reachable in three clicks:
+        // ask, Back, ask again. Four reviewers reproduced it, and the answers
+        // came back in the WORSE order — [Q1][Q2][A2][A1], so the reader
+        // credits the second answer to the first question.
+        //
+        // PARK it rather than drop it or fire a second request: the reader
+        // lands in the chat, sees the loader, and finds their question waiting
+        // in the composer to send when it clears. A draft already in the box is
+        // the reader's own and outranks it.
+        const park = () => {
+          // A draft already in the box is the reader's own and outranks the
+          // question they just clicked. When one exists the clicked question
+          // IS dropped — say so plainly rather than calling this "never
+          // dropped". It is the recoverable half of the trade: the rail pill
+          // or chip that produced it is still one click away on the screen
+          // they came from, whereas typed text, once overwritten, is gone.
+          // A toast saying so was written and measured at +62 B gzip, which
+          // would have left 12 B of the 66,000 ceiling; not worth spending
+          // the project's last headroom on, so it is recorded here and in
+          // #356 instead.
+          if (!carried && !state.chatInput) {
+            dispatch({ type: "SET_CHAT_INPUT", value: q });
+          }
+        };
+        if (inFlight.current) {
+          park();
+          return;
+        }
+        // Re-checked INSIDE the timeout, not only here. `markInFlight` runs
+        // when `sendLive` starts — 60 ms after the click — so two landing
+        // entry points fired inside that window both read 0 at this line and
+        // both sent: measured `asks=2` and [Q1][Q2][A2][A1], the very ordering
+        // this is here to prevent. By the time the second timeout fires the
+        // first has already incremented, so the check below closes it.
+        setTimeout(() => (inFlight.current ? park() : send(q)), 60);
       }
     },
     [send, state.heroInput, state.chatInput],
@@ -888,12 +989,14 @@ export function useLandingState() {
   const backToLanding = useCallback(() => {
     stopFlash();
     dispatch({ type: "SET_SCREEN", screen: "landing" });
-    // A stale pending=true from a still-in-flight sendLive would survive
-    // across the screen swap and re-appear as a phantom "Searching…"
-    // bubble the next time the user enters chat. Clear it here so the
-    // landing view (which doesn't render the bubble) doesn't leak state
-    // into the next chat session.
-    dispatch({ type: "SET_PENDING", value: false });
+    // Deliberately NOT clearing the in-flight count here. It used to be reset,
+    // because a boolean `pending` had paths with no owner to clear it and the
+    // stale `true` came back as a phantom "Searching…" bubble. `sendLive`'s
+    // `finally` is that owner now, so a reset would only DESYNC the ref the
+    // composer gate reads: the loader would be gone while the gate was still
+    // closed, and the next question would be swallowed with no visible reason.
+    // A request that is genuinely still in flight keeps its loader, which is
+    // what is actually true — its answer is still coming.
     // Clear the hero composer so returning to the landing page presents an empty
     // box — the prior question was already dispatched into chat and should not
     // linger for the user to delete before asking something new.
@@ -933,6 +1036,18 @@ export function useLandingState() {
   // Submit the chat composer (button click or Enter). Trims, clears the input,
   // then routes the question through `send` (which handles the duplicate guard).
   const submitChat = useCallback(() => {
+    // #62. Refuse while a live answer is in flight — BEFORE the input is
+    // cleared, so a type-ahead question is held rather than eaten. A bot bubble
+    // is appended when its request RESOLVES while the user bubble is appended
+    // on submit, so two questions sent back to back read as [Q1][Q2][A1][A2]
+    // and the reader attributes A1 to Q2.
+    //
+    // This guard covers the COMPOSER. The landing entry points reach `send`
+    // through `enterChat`, which parks instead (see there) — an earlier version
+    // of this comment claimed the good ordering held "by construction" on the
+    // strength of this line alone, and four reviewers disproved it in three
+    // clicks.
+    if (inFlight.current) return;
     const t = state.chatInput.trim();
     if (!t) return;
     dispatch({ type: "SET_CHAT_INPUT", value: "" });

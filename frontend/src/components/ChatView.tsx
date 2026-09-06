@@ -390,22 +390,32 @@ export function ChatView({
                 </div>
               </div>
             ))}
-            {/* Loading indicator while the backend is thinking. Renders as
-                its own bot bubble so it scrolls naturally with the rest. */}
-            {pending && (
-              <div className="message bot bot-msg pending-msg" aria-live="polite">
-                <div className="avatar bot-avatar">CV</div>
-                <div className="content">
-                  <div className="pending-bubble" role="status">
-                    <span className="pending-dot" />
-                    <span className="pending-dot" />
-                    <span className="pending-dot" />
-                    <span className="pending-label">Searching the docs…</span>
-                  </div>
-                </div>
-              </div>
-            )}
           </>
+        )}
+        {/* OUTSIDE the empty/non-empty branch. It used to live inside the
+            `else`, so a request in flight over a still-empty transcript —
+            resuming a zero-message session mid-request — left the send button
+            `aria-disabled` with nothing on screen saying why. The loader is the
+            only thing that explains the refusal, so it has to render whenever
+            there is something to explain.
+
+            No `aria-live` / `role="status"` here any more: this node is created
+            together with its own text, which is the classic way to make an
+            announcement not fire, and the avatar's literal "CV" sat inside the
+            region and got announced with it. The persistent region below the
+            composer does the announcing. */}
+        {pending && (
+          <div className="message bot bot-msg pending-msg">
+            <div className="avatar bot-avatar">CV</div>
+            <div className="content">
+              <div className="pending-bubble">
+                <span className="pending-dot" />
+                <span className="pending-dot" />
+                <span className="pending-dot" />
+                <span className="pending-label">Searching the docs…</span>
+              </div>
+            </div>
+          </div>
         )}
       </div>
 
@@ -422,10 +432,37 @@ export function ChatView({
             placeholder="Ask about Claude, Codex, Gemini…"
             className="chat-input"
           />
-          <button onClick={onSendClick} className="send-button" aria-label="Send">
+          {/* ARIA-disabled, not natively disabled (#62). `disabled` is right for
+              a permanently inert control — the Enterprise CTA — because leaving
+              the tab order costs nothing there. It is wrong for one that flips
+              busy for the second a request takes: the flip lands while the
+              reader is most likely focused on this very button (they just
+              clicked it), the browser drops focus to <body>, and the restore a
+              second later puts it nowhere. `aria-disabled` announces the same
+              state, keeps focus and the tab order, and the handler below is the
+              actual refusal. The hook refuses too, before it clears the input,
+              so a type-ahead question is held rather than eaten. */}
+          <button
+            onClick={pending ? undefined : onSendClick}
+            aria-disabled={pending}
+            className="send-button"
+            aria-label="Send"
+          >
             ↑
           </button>
         </div>
+        {/* ALWAYS rendered, empty when idle. A live region has to be in the
+            accessibility tree BEFORE its text changes, or the change is
+            unreliable across screen readers — the pending bubble above was
+            created together with its own text, so it could announce nothing at
+            all. It also lives outside the scrolling list, which the bubble does
+            not: a reader who has scrolled up had the only explanation of the
+            refusal off-screen. */}
+        <p className="sr-only" role="status">
+          {pending
+            ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
+            : ""}
+        </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}
           {live ? "This answer was generated live, just now." : "This is a sample answer for the demo."}

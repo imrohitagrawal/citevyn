@@ -284,7 +284,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onSendClick={submitChat}
             onBackClick={backToLanding}
             live={live}
-            pending={state.pending}
+            pending={state.pending > 0}
             highlightedIndex={state.highlight}
             sendTick={state.sendTick}
           />

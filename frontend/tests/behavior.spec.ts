@@ -260,22 +260,34 @@ test.describe("FAQ", () => {
 // Navigation
 // ---------------------------------------------------------------------------
 test.describe("Navigation", () => {
+  // Both of these RE-CLICK inside the poll rather than clicking once and
+  // watching. `scrollToId` computes its target from a single
+  // `getBoundingClientRect()` read, while the hero answer streams a character
+  // every 24ms and grows the card above these sections — so a target computed
+  // before the hero settles is stale by the time the smooth scroll lands, and
+  // the one-shot version could never recover. Observed failing on CI (run
+  // 34011413080, passed on retry #1) and blocking the required check on
+  // `flaky != 0`. Pre-existing, unrelated to that PR's change, folded in only
+  // because it blocks the merge; tracked in #354.
   test("nav link scrolls to section with ~72px header offset", async ({ page }) => {
-    await page.locator(".nav-link", { hasText: "How it works" }).click();
+    const link = page.locator(".nav-link", { hasText: "How it works" });
     await expect.poll(async () => {
+      await link.click();
       const y = await page.locator("#how").evaluate((el) => el.getBoundingClientRect().top);
       return y > 60 && y < 120;
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 10000 }).toBe(true);
   });
 
   test("nav links work from the chat view (return to landing, then scroll)", async ({ page }) => {
     await enterChat(page);
-    await page.locator(".nav-link", { hasText: "Pricing" }).click();
+    const link = page.locator(".nav-link", { hasText: "Pricing" });
+    await link.click();
     await expect(page.locator("#pricing")).toBeVisible();
     await expect.poll(async () => {
+      await link.click();
       const y = await page.locator("#pricing").evaluate((el) => el.getBoundingClientRect().top);
       return y > 40 && y < 140;
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 10000 }).toBe(true);
   });
 });
 
@@ -486,8 +498,12 @@ test.describe("Chat", () => {
     // Two modes:
     //   - stub mode (VITE_LIVE_STUB=1): the dev server's vite.liveStub
     //     plugin serves /v1/sessions/*/messages in-process with a
-    //     canned 800ms delay, so page.route() never matches (the
-    //     request is answered by the dev server, not the network).
+    //     canned 800ms delay, so this test does not need its own throttle.
+    //     (An earlier version of this comment said page.route() "never
+    //     matches" in stub mode. That is WRONG and was measured wrong: the
+    //     route intercepts in the browser, before the dev server sees it —
+    //     1 route hit, indicator held 4.9s at a 4s delay. The #62 test below
+    //     relies on it.)
     //   - real-backend mode (VITE_API_LIVE=true without the stub):
     //     we delay the response at the browser level so the bubble
     //     becomes observable.
@@ -513,6 +529,175 @@ test.describe("Chat", () => {
     expect(anim).toBe("cv-pending");
     // Once the API responds and streaming starts, pending goes away.
     await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 15000 });
+  });
+
+  test("composer refuses a second question while one is in flight (live only)", async ({ page }) => {
+    // #62 in a real browser, with real event timing and a real round-trip — the
+    // vitest cover for this runs on fake timers with a mocked transport, so
+    // neither the focus behaviour nor the keypress path is exercised there.
+    // Self-skips in demo mode for the same reason the test above does: demo
+    // mode never sets an in-flight count, so there is nothing to gate. That
+    // intentional skip is why the demo job's pinned skip count is 4, not 3.
+    await enterChat(page);
+    const isLive = await page.evaluate(
+      () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (!isLive) {
+      test.skip(true, "The composer gate is a live-path feature; demo mode never sets an in-flight count. Run via: VITE_LIVE_STUB=1 npx playwright test --config=playwright.live.config.ts");
+      return;
+    }
+    // Hold the answer for 6s so the in-flight window is far longer than the
+    // handful of actions below. The stub's own 800ms is NOT enough: the
+    // assertions between the first Enter and the second one cost a few hundred
+    // ms each, the window closed mid-test, and the second question went through
+    // for a reason that had nothing to do with the gate. Measured: `page.route`
+    // DOES intercept the stub's in-process response (1 route hit, indicator held
+    // 4.9s at a 4s delay) — the comment on the test above, which says it cannot,
+    // is wrong.
+    await page.route("**/v1/sessions/*/messages", async (route) => {
+      await new Promise((r) => setTimeout(r, 6000));
+      await route.continue();
+    });
+    const input = page.locator(".chat-input");
+    const send = page.locator(".send-button");
+
+    // Focus the send button BEFORE the flip, so the assertion after it is
+    // about focus SURVIVING the transition — not merely about an
+    // aria-disabled button being focusable, which is a different property and
+    // is what an earlier version of this test settled for. jsdom cannot make
+    // this assertion at all: it does not blur an element when it becomes
+    // disabled, so the vitest equivalent passed even with `disabled={pending}`
+    // and was deleted rather than shipped as false evidence.
+    await input.fill("What is Claude Code?");
+    // SUBMIT BY CLICKING, which is what puts focus on the button in the first
+    // place and is the whole scenario the `aria-disabled` choice exists for:
+    // the state flips busy while the reader is focused on the very control
+    // that is flipping. (Pressing Enter on the input would move focus to the
+    // input first and the assertion below would nothing — it failed exactly
+    // that way when this test was first written.)
+    await send.click();
+    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
+    await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
+    // Native `disabled` would have dumped focus on <body> right here.
+    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
+
+    // The state is DRAWN and ANNOUNCED, not merely enforced. The live region is
+    // a PERSISTENT node outside the scrolling list, so it is in the
+    // accessibility tree before its text arrives.
+    await expect(send).toHaveAttribute("aria-disabled", "true");
+    // Scoped to the composer: `Nudge` and `AuthModal` are also `role="status"`,
+    // so an unscoped locator would throw a strict-mode violation the moment a
+    // magic-link return or an open modal put one on the page.
+    await expect(page.locator(".composer [role='status']")).toContainText("Send is unavailable");
+    // The AA contrast fix, guarded. `--faint` on `--bg` is 2.77:1 light /
+    // 3.49:1 dark, the same failure #303 already accepted a fix for; nothing
+    // in the unit suite can see CSS (`css: false` in vite.config.ts), so
+    // reverting the token was measured to leave the whole suite green.
+    // Resolved at runtime rather than hardcoded, so a token change moves both.
+    const labelColors = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--muted)";
+      document.body.appendChild(probe);
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        label: getComputedStyle(document.querySelector(".pending-label")!).color,
+        muted,
+      };
+    });
+    expect(labelColors.label).toBe(labelColors.muted);
+    // The visible affordance, which is the only signal a mouse user gets. No
+    // unit test can see it: vitest runs with `css: false`.
+    // Polled, not read once: `.send-button` has `transition: opacity 0.15s`,
+    // so a single read lands mid-transition (measured 0.710126).
+    await expect
+      .poll(() => send.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe("0.7");
+    // Not natively disabled: it keeps focus and its place in the tab order.
+    expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
+    expect(await input.evaluate((el: HTMLInputElement) => el.disabled)).toBe(false);
+
+
+    // Type-ahead, then try both submit routes.
+    await input.fill("How do I install the Codex CLI?");
+    await input.press("Enter");
+    // `force` because Playwright's own actionability check HONOURS
+    // `aria-disabled`: a plain `.click()` here does not fail, it silently waits
+    // for the attribute to clear and then clicks the re-enabled button 7s
+    // later, which is a pass that proves nothing. Measured on this exact test.
+    // Forcing it puts a real click event on the handler while the gate is shut,
+    // which is what needs proving.
+    await send.click({ force: true });
+
+    // The FIRST request must still be open, or the refusal below proves
+    // nothing. Asserting "a pending bubble is visible" is NOT that — a second
+    // request would have its own bubble, so that assertion is satisfiable by
+    // the very bug it is meant to exclude. Assert by identity instead: exactly
+    // one message in the list, and it is the user's, so no answer has arrived.
+    // (The loader is itself a `.message`, so counting `.message` would read 2.
+    // The identity that matters is that no ANSWER bubble exists yet.)
+    await expect(page.locator(".message.bot-msg:not(.pending-msg)")).toHaveCount(0);
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    await expect(page.locator(".pending-msg")).toHaveCount(1);
+
+    // No second question entered the transcript, and the typed text was HELD.
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    await expect(input).toHaveValue("How do I install the Codex CLI?");
+
+    // The gate is transient: once the answer lands the same keypress works.
+    await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 20000 });
+    await expect(send).not.toHaveAttribute("aria-disabled", "true");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(2, { timeout: 5000 });
+    // Every answer sits under its own question, in order.
+    const roles = await page.locator(".message").evaluateAll((els) =>
+      els.map((e) => (e.classList.contains("user-msg") ? "user" : "bot")),
+    );
+    expect(roles.slice(0, 3)).toEqual(["user", "bot", "user"]);
+  });
+
+  test("the composer is never gated in demo mode", async ({ page }) => {
+    // Negative control for #62, and it runs on the REQUIRED demo job rather
+    // than self-skipping. Demo answers are instant, so there is no in-flight
+    // state to wait on and gating here would only break the five demo specs
+    // that deliberately send mid-stream. It bites if anyone re-keys the gate on
+    // something demo mode DOES set — `streaming`, say, instead of the in-flight
+    // count.
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    const send = page.locator(".send-button");
+    await input.fill("What is Claude Code?");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+
+    // ONE synchronous snapshot taken while the caret is on screen. Every
+    // assertion here used to be a separate auto-retrying `expect`, which is
+    // why the first version of this test did not bite: they simply polled
+    // until the ~2s demo stream finished, at which point the gate opens and
+    // they were all satisfied. A skeptic applied the exact mutation this
+    // test's docblock names — re-keying the gate onto
+    // `messages.some(m => m.streaming)` — and the test still PASSED, in a
+    // real browser, taking 5.1s instead of 1.5s. Reading the caret count in
+    // the SAME evaluate is the partner that makes the other two mean
+    // "mid-stream" rather than "eventually".
+    await expect(page.locator(".typing-cursor")).toHaveCount(1);
+    const midStream = await page.evaluate(() => ({
+      aria: document.querySelector(".send-button")!.getAttribute("aria-disabled"),
+      nativelyDisabled: (document.querySelector(".send-button") as HTMLButtonElement).disabled,
+      cursors: document.querySelectorAll(".typing-cursor").length,
+      loaders: document.querySelectorAll(".pending-bubble").length,
+    }));
+    expect(midStream).toEqual({
+      aria: "false",   // React renders aria-* booleans as strings
+      nativelyDisabled: false,
+      cursors: 1,
+      loaders: 0,
+    });
+
+    // ...and a second question really does go through, mid-stream.
+    await input.fill("How do I install the Codex CLI?");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(2);
   });
 
   test("autoscrolls: list stays pinned to the newest message", async ({ page }) => {
@@ -1107,8 +1292,18 @@ test.describe("Duplicate pulse restarts within its own window", () => {
     await input.fill("What is Claude Code?");
     await page.keyboard.press("Enter");
     await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
-    // Let the pulse get well into its run, but stay inside the ~2s highlight window.
-    await page.waitForTimeout(900);
+    const firstFlashSeenAt = Date.now();
+    // Wait until the animation clock has ACTUALLY advanced — under heavy load
+    // the browser had not run it by the sample instant and this read 0
+    // (measured at load average 42) — and then hold until ~900ms into the first
+    // flash's 2s window. Both halves matter: without the poll the read is
+    // racy, and without the anchor the re-ask lands too early, which leaves a
+    // leftover first-flash timer more than 1.3s of runway and the final
+    // assertion stops catching the cut-short bug. Verified by mutation both
+    // ways.
+    await expect.poll(elapsed, { timeout: 3000 }).toBeGreaterThan(300);
+    const intoFirstFlash = Date.now() - firstFlashSeenAt;
+    if (intoFirstFlash < 900) await page.waitForTimeout(900 - intoFirstFlash);
     const before = await elapsed();
     expect(before).toBeGreaterThan(300);
 
@@ -1117,12 +1312,20 @@ test.describe("Duplicate pulse restarts within its own window", () => {
     await page.keyboard.press("Enter");
     // Restarting means the SAME animation is still running from near zero again.
     await expect.poll(elapsed, { timeout: 1500 }).toBeLessThan(before);
+    const restartSeenAt = Date.now();
     expect(await original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
 
     // The second flash also gets its OWN full highlight window. Each flash used to
     // overwrite the timer slots without stopping them, so the first flash's 2s
     // clear survived and cut the second one short (here: ~1.1s instead of ~2s).
-    await page.waitForTimeout(1400);
+    //
+    // The wait is ANCHORED to when the restart was observed, not another fixed
+    // `waitForTimeout` stacked on the ones above. Accumulated fixed waits are
+    // why this flaked: under load the elapsed time since the restart exceeded
+    // the 2s highlight window and the class was already gone. 1300ms still sits
+    // above the ~1.1s a cut-short window would give and comfortably below 2s.
+    const alreadyWaited = Date.now() - restartSeenAt;
+    if (alreadyWaited < 1300) await page.waitForTimeout(1300 - alreadyWaited);
     await expect(original).toHaveClass(/highlighted/);
   });
 });

@@ -177,9 +177,24 @@ export function computed(page: Page, selector: string, prop: string) {
     .evaluate((el, p) => getComputedStyle(el as Element)[p as any], prop);
 }
 
-/** Wait until no streaming caret is present (streaming finished everywhere). */
+/**
+ * Wait until the answer is actually finished — no request in flight AND no
+ * streaming caret left anywhere.
+ *
+ * The pending bubble has to be part of the condition. On the live path there is
+ * a window between submitting a question and its first chunk in which NO caret
+ * exists yet: the answer bubble has not been created, so the caret-only version
+ * of this helper returned IMMEDIATELY and the caller went on to type its next
+ * question while the previous one was still in flight. That was invisible until
+ * something depended on it — nothing in the suite did, so a live test could
+ * "wait for the answer" and wait for nothing at all. In demo mode there is
+ * never a pending bubble, so the added condition is a no-op there.
+ */
 export async function waitStreamDone(page: Page, timeout = 12000) {
-  await page.waitForFunction(() => !document.querySelector(".typing-cursor"), {
-    timeout,
-  });
+  await page.waitForFunction(
+    () =>
+      !document.querySelector(".pending-bubble") &&
+      !document.querySelector(".typing-cursor"),
+    { timeout },
+  );
 }

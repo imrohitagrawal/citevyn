@@ -2154,6 +2154,38 @@ a.citation-chip:focus-visible {
   opacity: 0.85;
 }
 
+/* In flight (#62). ARIA-disabled rather than :disabled so the button keeps
+ * focus and its place in the tab order while an answer is on its way; the
+ * click handler is what refuses. The :hover override stops the button
+ * brightening under the cursor while it is refusing to act.
+ *
+ * 0.7, not 0.45, and `default`, not `not-allowed` — both matching AuthModal's
+ * submit button, which is the same "busy for one request" state. At 0.45 the
+ * glyph fell to 2.80:1 in light theme on a control this design deliberately
+ * keeps focusable and in the tab order, so a reader can Tab to something they
+ * cannot read; 0.7 gives 6.12:1 / 8.16:1. `not-allowed` is this codebase's
+ * idiom for a PERMANENTLY inert control (`.cta:disabled`) and overstates a
+ * state that clears in about a second. */
+.send-button[aria-disabled="true"],
+.send-button[aria-disabled="true"]:hover {
+  opacity: 0.7;
+  cursor: default;
+}
+
+/* Visually hidden, still announced. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .composer-hint {
   margin: 10px 0 0;
   text-align: center;
@@ -2301,17 +2333,21 @@ a.citation-chip:focus-visible {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--faint);
+  background: var(--muted);
   display: inline-block;
   animation: cv-pending 1.05s ease-in-out infinite;
 }
 .pending-dot:nth-child(2) { animation-delay: 0.16s; }
 .pending-dot:nth-child(3) { animation-delay: 0.32s; }
 
+/* `--muted`, not `--faint`. This diff makes this string the only thing that
+ * explains why the composer is refusing, and `--faint` on `--bg` is 2.77:1
+ * light / 3.49:1 dark — the identical failure, and the identical fix, that
+ * #303 already accepted for the citation legend (`--muted` gives 5.27 / 7.01). */
 .pending-label {
   margin-left: 4px;
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 @keyframes cv-pending {
