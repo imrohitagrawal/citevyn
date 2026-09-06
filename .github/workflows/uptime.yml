@@ -88,6 +88,19 @@ jobs:
               # the embeddings were lost. The API still answers 200 the whole
               # time, which is exactly why this is worth asserting.
               problems.append("vector_arm is DEAD — semantic search is off")
+          if arm_status == "ambiguous":
+              # More than one row is marked `active` (#58/#264). The read path
+              # fails closed on that, so the vector arm is OFF. Named explicitly
+              # rather than left to the `embedder_match` check below: that check
+              # DOES fire here (the route reports the read path's own fail-closed
+              # verdict), but it would report "the embedders disagree", which is
+              # not what happened and would send the operator to ADR-0003 instead
+              # of to `promote_version`.
+              count = arm.get("active_index_count")
+              problems.append(
+                  f"vector_arm is AMBIGUOUS — {count} index versions are marked "
+                  "active; promote one to converge"
+              )
           if match is False:
               # The configured query embedder no longer matches the one that
               # built the index: retrieval compares vectors from two different

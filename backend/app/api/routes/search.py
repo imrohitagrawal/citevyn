@@ -20,20 +20,24 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.rate_limit import rate_limited_demo
-from app.models.enums import IndexStatus, TermType
-from app.models.index_versions import IndexVersion
+from app.models.enums import TermType
 from app.services.exact_lookup import (
     MAX_RESULTS,
     ExactLookupHit,
     exact_lookup,
 )
-from app.services.index_health import active_index_vector_health
+from app.services.index_health import active_index_vector_health, ambiguous_vector_health
+from app.services.index_resolution import (
+    ActiveIndexState,
+    ResolvedIndex,
+    resolve_active_index,
+    resolve_previous_good_index,
+)
 
 router = APIRouter(tags=["search"])
 
@@ -165,19 +169,49 @@ async def health_index(
     NOT flip the health probe to a draining state (that would risk pulling a serving pod
     over a signal the operator, not the load balancer, should act on). Read
     ``vector_arm.status`` for the vector-arm verdict.
+
+    Both rows are resolved through
+    :mod:`app.services.index_resolution`, the same resolver the retrieval
+    provenance gate and the orchestrator use, so this route can no longer name a
+    different index than the one actually serving (#264). That also gives it a
+    sixth ``vector_arm.status``, ``ambiguous``: more than one row is ``active``,
+    the read path has failed closed, and there is no single index to report on.
     """
     request_id = _request_id(request)
 
-    # Fetch the active and previous_good rows in one roundtrip.
-    # A "no row" return is not an error — pre-index is a valid
-    # state during cold start.
-    stmt = select(IndexVersion).where(
-        IndexVersion.status.in_((IndexStatus.active, IndexStatus.previous_good))
-    )
-    rows = (await db.execute(stmt)).scalars().all()
+    # Resolve both rows through the SHARED resolver (#264) so this route names
+    # the same active index the retrieval gate and the orchestrator do. It used
+    # to run one unordered ``status IN (active, previous_good)`` query and take
+    # whichever row came back first, which meant no ordering and — worse — no
+    # way to notice a second active row at all.
+    resolution = await resolve_active_index(db)
+    previous = await resolve_previous_good_index(db)
 
-    active = next((r for r in rows if r.status is IndexStatus.active), None)
-    previous = next((r for r in rows if r.status is IndexStatus.previous_good), None)
+    # Dual-active (#58/#264). The read path fails closed here — the provenance
+    # gate resolves to ``IndexStampStatus.ambiguous`` and the vector arm is
+    # switched OFF — so reporting a clean verdict on one arbitrarily-chosen row
+    # is the specific lie this route existed to prevent. ``active_index`` is
+    # ``null`` rather than the newest row: naming one of the N would restate the
+    # coin flip at a second key, where a dashboard would read it as the answer.
+    if resolution.state is ActiveIndexState.ambiguous:
+        return {
+            "request_id": request_id,
+            # Still "ready", NOT a draining state: the API does keep answering
+            # (retrieval falls back to the status-only filter and the lexical
+            # arms still serve), and the docstring's additive contract exists so
+            # an operator-fixable data problem cannot pull a serving pod out of
+            # rotation. Read ``vector_arm`` for the verdict.
+            "status": "ready",
+            "active_index": None,
+            "previous_good_index": _index_payload(previous) if previous else None,
+            "vector_arm": ambiguous_vector_health(settings, active_count=resolution.active_count),
+            "message": (
+                f"{resolution.active_count} index versions are marked active; "
+                "promote one to converge."
+            ),
+        }
+
+    active = resolution.row
 
     if active is None and previous is None:
         return {
@@ -190,7 +224,9 @@ async def health_index(
         }
 
     vector_arm = (
-        await active_index_vector_health(db, active, settings) if active is not None else None
+        await active_index_vector_health(db, active, settings, active_count=resolution.active_count)
+        if active is not None
+        else None
     )
     return {
         "request_id": request_id,
@@ -202,8 +238,8 @@ async def health_index(
     }
 
 
-def _index_payload(row: IndexVersion) -> dict[str, Any]:
-    """Project an :class:`IndexVersion` row into the response shape."""
+def _index_payload(row: ResolvedIndex) -> dict[str, Any]:
+    """Project a resolved index row into the response shape."""
     return {
         "index_version": row.index_version,
         "source_version_hash": row.source_version_hash,

@@ -825,6 +825,63 @@ the shape previously documented (bare index-name strings, `status: "healthy"`,
 `degraded` (only a previous-good index remains). `vector_arm` is additive and does
 not change `status` — read it for the vector-arm verdict.
 
+`vector_arm.status` is one of `empty`, `dead`, `mismatch`, `partial`, `healthy` or
+`ambiguous`, decided in that precedence order. Every block also carries
+`active_index_count` (#264).
+
+`previous_good_index` names the **most recently demoted** index — the rollback
+target for §13's promote API. More than one row can carry `previous_good` at once:
+`promote_version` demotes every `active` row it finds and never clears the
+`previous_good` rows already there, so after N promotions N-1 coexist. The route
+orders by `promoted_at DESC NULLS LAST, index_version DESC` and returns the newest;
+before #264 it returned whichever row the database happened to yield first, which
+after a second promotion was the index demoted *longest ago*.
+
+### `ambiguous` — more than one active index (#58/#264)
+
+Nothing in the schema enforces a single `active` row, and a database really does
+drift into two (seeding plus repeated local ingests will do it). When it happens
+the read path **fails closed**: the provenance gate resolves to
+`IndexStampStatus.ambiguous` and the vector arm is switched off (#226). The route
+reports the same verdict rather than describing one arbitrarily-chosen row:
+
+```json
+{
+  "request_id": "req_011",
+  "status": "ready",
+  "active_index": null,
+  "previous_good_index": null,
+  "vector_arm": {
+    "status": "ambiguous",
+    "healthy": false,
+    "chunks_total": null,
+    "chunks_embedded": null,
+    "embedded_ratio": null,
+    "embedder_match": false,
+    "index_embedder": null,
+    "configured_query_embedder": { "provider": "gemini", "model": "...", "dim": 1536 },
+    "active_index_count": 2
+  },
+  "message": "2 index versions are marked active; promote one to converge."
+}
+```
+
+- Top-level `status` stays `ready`. The API is still answering — retrieval falls
+  back to the status-only document filter and the lexical arms still serve — and
+  `vector_arm` is additive precisely so an operator-fixable data problem cannot
+  pull a serving pod out of rotation. This is the same trade already made for
+  `dead`.
+- `active_index` is `null`. Naming one of the N rows would restate the coin flip
+  at a second key, where a dashboard would read it as *the* answer.
+- The three chunk counts are `null`, not `0`: measuring them would mean first
+  picking one of the rows, which is the defect. `0` would read as `empty`/`dead`
+  and claim something nobody checked.
+- `embedder_match` is `false` because that is what
+  `is_index_embedder_mismatch` returns for the ambiguous sentinel — the same
+  predicate the vector arm gates on, not a second implementation of it (#71).
+- Recovery is a promote: `POST /v1/admin/index_versions/{version}/promote`
+  demotes every other `active` row.
+
 `evaluation_run_id` names the newest **terminal** `EvaluationRun` for that index —
 the run `citevyn-worker evaluate --index-version <v>` wrote (#216, #229). It means
 the index **was evaluated**; it does **not** mean the index **passed**, because the
