@@ -96,23 +96,31 @@ fi
 echo "control OK"; echo
 
 echo "=== the arriving-answer announcement (#356) ==="
-# THE ORIGINAL DEFECT, reintroduced: edge on `pending` instead of on the bubble
-# finishing. This is the one that shipped and that three reviewers caught.
+# THE ORIGINAL DEFECT: edge on `pending` instead of on the bubble finishing.
 one "announce: key the edge on \`pending\` again" "$CV" "$S/p.CV" \
-'    const inProgress = !last || last.isUser || last.streaming;' \
-'    const inProgress = !last || last.isUser || pending;'
-one "announce: never clear on a new request (stale text over a failure)" "$CV" "$S/p.CV" \
-'      setSettled((s) => (s === "" ? s : ""));' '      void 0;'
-one "announce: drop the armed gate (announces a resumed transcript)" "$CV" "$S/p.CV" \
-'    if (!armed.current) return;' ''
+'      if (m.streaming) {' '      if (pending) {'
+# THE SECOND DEFECT, found by a skeptic on the first fix: a boolean latch
+# reading the TAIL, which announced a RESUMED transcript as a fresh arrival.
+one "announce: latch on a boolean instead of the streaming bubble's identity" "$CV" "$S/p.CV" \
+'      } else if (watching.current.delete(m.msgId)) {' \
+'      } else if (watching.current.size > 0 ? (watching.current.clear(), true) : false) {'
+one "announce: watch by list POSITION, which a resume re-uses" "$CV" "$S/p.CV" \
+'        watching.current.add(m.msgId);' \
+'        watching.current.add(Number(m.domId.replace("cv-msg-", "")));'
+one "announce: never clear on a new question (stale text over a failure)" "$CV" "$S/p.CV" \
+'    if (!last || last.isUser) {
+      // A question just went in' '    if (false) {
+      // A question just went in'
 one "announce: drop the transport-failure guard" "$CV" "$S/p.CV" \
-'    if (last.errorKind) return;' ''
+'    if (arrived.errorKind) {' '    if (false) {'
 one "announce: drop the refusal branch" "$CV" "$S/p.CV" \
-'      last.refusal' '      false'
+'      arrived.refusal' '      false'
 one "announce: always pluralise sources" "$CV" "$S/p.CV" \
-'${last.sources.length === 1 ? "" : "s"}' 's'
+'${n === 1 ? "" : "s"}' 's'
 one "announce: emit the source clause unconditionally" "$CV" "$S/p.CV" \
-'            last.sources?.length' '            true'
+'`Answer ready.${n ? ` ${n} source' '`Answer ready.${true ? ` ${n} source'
+one "announce: skip user bubbles no more (announce the reader back to themselves)" "$CV" "$S/p.CV" \
+'      if (m.isUser) continue;' '      if (false) continue;'
 one "landmark: drop the accessible name" "$CV" "$S/p.CV" \
 ' aria-label="Chat"' ''
 

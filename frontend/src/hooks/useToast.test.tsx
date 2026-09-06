@@ -170,7 +170,13 @@ describe("useToast stacking limits", () => {
     expect(result.current.toasts.map((t) => t.title)).toEqual(["T3", "T4", "T5"]);
   });
 
-  // RED if the cap drops the NEWEST instead of the oldest (`.slice(0, N)`).
+  // NOTE, deliberately not a bite-line: this test does NOT distinguish
+  // `.slice(-N)` from `.slice(0, N)`. With two toasts and a cap of three the
+  // two are the same array, so the claim originally written here ("RED if the
+  // cap drops the newest") was FALSE. That mutant is killed by the
+  // "caps DISTINCT toasts, keeping the newest" test above, which has six. This
+  // one covers something else and is kept for it: that a list UNDER the cap is
+  // returned untouched, i.e. the cap is a ceiling and not a floor.
   it("keeps fewer than the cap untouched, so the cap is not a floor", () => {
     const { result } = renderHook(() => useToast());
     act(() => result.current.addToast({ kind: "error", title: "A", message: "a" }));

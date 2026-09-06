@@ -11,6 +11,10 @@ interface ChatViewProps {
   messages: Array<{
     isUser: boolean;
     domId: string;
+    /** Stable, monotonic message id — NOT the list position. The arrival
+     *  announcement latches onto this, because `domId` is an index and a
+     *  resumed session re-uses it for an entirely different message. */
+    msgId: number;
     userStyle: React.CSSProperties;
     text: string;
     streaming?: boolean;
@@ -116,39 +120,66 @@ export function ChatView({
   // `live="polite"` and `atomic=true` (implicit on `role="status"`), so a full
   // text replacement is announced as a whole.
   const [settled, setSettled] = useState("");
-  // Armed once the newest thing in the transcript is unfinished — the reader's
-  // own question, or an answer still streaming. Only THEN does a finished bot
-  // bubble count as an arrival, which is what stops a transcript that was
-  // already complete when this mounted (returning to the chat screen, or a
-  // resumed session) from being announced as if it had just come back.
-  const armed = useRef(false);
+  // The bubbles we have actually WATCHED stream, by stable id. An answer is
+  // announced only when one of THOSE finishes.
+  //
+  // This was a boolean `armed` flag reading the TAIL of the list. A skeptic
+  // reproduced three defects in that, end to end through the real hook:
+  //   1. `resumeSession` is reachable from the history drawer AT ANY TIME —
+  //      #62 gated the composer, not the drawer — and it replaces the
+  //      transcript wholesale. An armed flag plus a finished tail announced the
+  //      RESUMED conversation's last answer, with ITS source count, while the
+  //      reader's own question was still unanswered. It fired on an EMPTY
+  //      transcript too (`!last` arms), which is the plain path: open the chat
+  //      screen, pick a 3-day-old conversation from History, and a screen
+  //      reader is told "Answer ready. 2 sources cited." A false statement to
+  //      an AT user is exactly what this feature exists to stop.
+  //   2. Two answers finishing out of order announced the first one twice and
+  //      the second never, because only `messages[length - 1]` was read.
+  //   3. The duplicate-question guard appends nothing, so the flag stayed
+  //      latched and mis-attributed the next arrival.
+  // All three are one mistake: tail POSITION is not identity. The set of ids we
+  // have seen streaming is.
+  //
+  // `msgId`, not `domId`: `domId` is `cv-msg-${index}`, and a resumed
+  // transcript re-uses those positions. `msgId` is the hook's monotonic
+  // counter, and `resumeSession` assigns fresh ids to resumed messages too, so
+  // an awaited id can never collide with a replacement's.
+  const watching = useRef<Set<number>>(new Set());
   useEffect(() => {
     const last = messages[messages.length - 1];
-    const inProgress = !last || last.isUser || last.streaming;
-    if (inProgress) {
-      armed.current = true;
-      // Drop any previous arrival text. Load-bearing in a way that is easy to
-      // miss: the error branch below returns WITHOUT writing, so without this
-      // clear a "Answer ready. 2 sources cited." from the previous question
-      // would still be standing in the region over a request that then failed.
-      // Written functionally so an unchanged value returns the same reference
-      // and React provably bails out rather than committing a render.
+    let arrived: (typeof messages)[number] | null = null;
+    for (const m of messages) {
+      if (m.isUser) continue;
+      if (m.streaming) {
+        watching.current.add(m.msgId);
+      } else if (watching.current.delete(m.msgId)) {
+        // Was streaming when we last looked, is not now. Take the LAST such in
+        // list order, so a commit finishing two announces the newest.
+        arrived = m;
+      }
+    }
+    if (!last || last.isUser) {
+      // A question just went in (or the transcript is empty). Drop any previous
+      // arrival text: the error branch below returns WITHOUT writing, so
+      // otherwise an "Answer ready." from the last question would be left
+      // standing over a request that then fails. Functional form, so an
+      // unchanged value returns the same reference and React provably bails out
+      // instead of committing a render.
+      setSettled((s) => (s === "" ? s : ""));
+    }
+    if (!arrived) return;
+    // A transport failure is already announced by ToastHost's `role="alert"`.
+    // Announcing here too would say "answer ready" over the top of an error.
+    if (arrived.errorKind) {
       setSettled((s) => (s === "" ? s : ""));
       return;
     }
-    if (!armed.current) return;
-    armed.current = false;
-    // A transport failure is already announced by ToastHost's `role="alert"`.
-    // Announcing here too would say "answer ready" over the top of an error.
-    if (last.errorKind) return;
+    const n = arrived.sources?.length ?? 0;
     setSettled(
-      last.refusal
+      arrived.refusal
         ? "No answer. CiteVyn found nothing in the official docs to support one."
-        : `Answer ready.${
-            last.sources?.length
-              ? ` ${last.sources.length} source${last.sources.length === 1 ? "" : "s"} cited.`
-              : ""
-          }`,
+        : `Answer ready.${n ? ` ${n} source${n === 1 ? "" : "s"} cited.` : ""}`,
     );
   }, [messages]);
 

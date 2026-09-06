@@ -1894,8 +1894,11 @@ describe("useLandingState — a landing entry point parks its question rather th
     }
 
     expect(result.current.toasts).toHaveLength(1);
-    // Partner: it really did fire ten times — the draft is untouched and the
-    // question was never parked, so every one of them took the drop branch.
+    // WITNESS: the id. `toHaveLength(1)` plus "the draft is untouched" cannot
+    // tell "ten calls collapsed to one" from "only one call ever happened" —
+    // both leave one toast and an untouched draft. `useToast` mints a fresh id
+    // per call, so `toast-10` can only exist if `addToast` ran ten times.
+    expect(result.current.toasts[0].id).toBe("toast-10");
     expect(result.current.state.chatInput).toBe("my own draft");
   });
 

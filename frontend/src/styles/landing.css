@@ -655,6 +655,28 @@ body {
   font-family: inherit;
 }
 
+/* Lift a KEYBOARD-FOCUSED chip above the marquee's edge fades.
+ *
+ * `.ticker-strip::before/::after` are 80px `linear-gradient(--bg, transparent)`
+ * masks at `z-index: 1`, and a chip is a plain non-positioned <button> in the
+ * tab order — so the fade paints OVER its focus ring. Measured on a natural Tab
+ * walk in light theme: ring contrast 1.85:1 at the FIRST ticker stop, and
+ * 1.47:1 when sampled from a screenshot deeper into the fade (painted ring
+ * rgb(210,209,206) on rgb(251,251,248)) — up to 2x below the 3:1 floor, on a
+ * control an ordinary keyboard user reaches early.
+ *
+ * `:focus-visible` only, so nothing about the resting marquee changes: no
+ * layout shift, no new stacking context at rest, and all 22 visual baselines
+ * still pass unregenerated. z-index 2 clears the fades' 1.
+ *
+ * tests/focus-ring.spec.ts refuses to score a ring under a painting pseudo-
+ * element unless the control is raised like this, so removing either half
+ * turns the sweep red. */
+.ticker-chip:focus-visible {
+  position: relative;
+  z-index: 2;
+}
+
 .ticker-chip:hover {
   border-color: var(--ink);
   box-shadow: 0 2px 10px -6px rgba(0, 0, 0, 0.3);

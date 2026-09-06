@@ -166,6 +166,14 @@ one "chip: hardcode --ink again instead of the token" "$LANDING" "$S/p.LANDING" 
   outline: 2px solid var(--ink);'
 
 echo
+# DROPPED MUTANT, recorded rather than silently absent: "sweep: stop at the
+# first repeat". Its anchor changed when key-based de-duplication became element
+# identity, and the commit that removed it said "its target no longer exists".
+# That was the wrong reason. Repointed at the current line it applies cleanly
+# and SURVIVES -- with identity de-duplication, breaking early on a repeat is
+# behaviourally equivalent, because a repeat can no longer hide a distinct
+# control. An EQUIVALENT MUTANT is a legitimate reason to drop one; "the anchor
+# moved" is not, and the difference matters to anyone auditing this list.
 echo "=== META: can the sweep be made to check nothing? ==="
 one "sweep: stop noticing a backdrop it cannot composite (the gradient bypass)" "$SPEC" "$S/p.SPEC" \
 '    if (s.unmeasurableBackdrop !== null) {' '    if (false) {'

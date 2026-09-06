@@ -151,6 +151,16 @@ describe("index.html pulls in NOTHING the bundle gate cannot see", () => {
   // exists is cheaper and closes the demonstrated path: adding a second makes
   // this red, and the fix is either to import it through the module graph
   // (where the gate counts it) or to argue for it here.
+  //
+  // WHAT THIS STILL CANNOT SEE, stated rather than implied:
+  //   - It reads the SOURCE `frontend/index.html`, not the emitted
+  //     `dist/index.html`. `vite.config.ts` already loads `liveStubPlugin()`,
+  //     and ANY plugin's `transformIndexHtml` can inject a tag this never
+  //     looks at. That is this repo's "guard the emitted artifact" shape and it
+  //     is a real residual gap, not a theoretical one.
+  //   - A script written by another script at runtime.
+  //   - A tag inside an HTML comment or <template> (it would be counted here
+  //     but not fetched — a false POSITIVE, which is the safe direction).
   const html = readFileSync(join(frontendRoot, "index.html"), "utf8");
 
   it("declares exactly one <script>, and it is the module entry", () => {
@@ -163,11 +173,63 @@ describe("index.html pulls in NOTHING the bundle gate cannot see", () => {
   it("preloads no script the gate would not have counted", () => {
     // `rel="preload" as="script"` and `rel="modulepreload"` both fetch JS
     // before first paint without being a <script> tag.
+    //
+    // The first version matched `rel=["'](modulepreload|preload)["']` and was
+    // bypassed FOUR ways in review, each of which injects a heavy script while
+    // the guard stays green: an unquoted `rel=preload`, `rel="preload "` with a
+    // trailing space, `rel="preload alternate"` (rel is a space-separated TOKEN
+    // LIST, not a string), and `as=script` unquoted. So: capture the value with
+    // an optional quote, then TOKENIZE it, which is what the HTML spec says the
+    // attribute is.
+    const attr = (tag: string, name: string): string | null => {
+      const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
+      return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
+    };
+    const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
     const preloads = [...html.matchAll(/<link\b[^>]*>/gi)]
       .map((m) => m[0])
-      .filter((tag) => /rel=["'](?:modulepreload|preload)["']/i.test(tag))
-      .filter((tag) => !/as=["'](?:style|font|image)["']/i.test(tag));
+      .filter((tag) => {
+        const rel = tokens(attr(tag, "rel"));
+        if (rel.includes("modulepreload")) return true;
+        if (!rel.includes("preload") && !rel.includes("prefetch")) return false;
+        // `as` decides what a preload fetches. Anything that is not plainly a
+        // non-script resource counts, so an unrecognised or absent `as` fails
+        // CLOSED rather than being waved through.
+        const as = (attr(tag, "as") || "").toLowerCase();
+        return !["style", "font", "image", "fetch", "document"].includes(as);
+      });
     expect(preloads).toEqual([]);
+  });
+
+  it("the attribute parser handles the forms that bypassed its first version", () => {
+    // Partner. The assertion above counts toward ZERO, so on its own it cannot
+    // tell "nothing matched" from "the matcher is broken". These are the exact
+    // four shapes a reviewer used to smuggle a script past it.
+    const bypasses = [
+      `<link rel=modulepreload href="/x.js">`,
+      `<link rel="preload " as="script" href="/x.js">`,
+      `<link rel="preload alternate" as="script" href="/x.js">`,
+      `<link rel="preload" as=script href="/x.js">`,
+    ];
+    const attr = (tag: string, name: string): string | null => {
+      const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
+      return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
+    };
+    const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
+    for (const tag of bypasses) {
+      const rel = tokens(attr(tag, "rel"));
+      const as = (attr(tag, "as") || "").toLowerCase();
+      const caught =
+        rel.includes("modulepreload") ||
+        ((rel.includes("preload") || rel.includes("prefetch")) &&
+          !["style", "font", "image", "fetch", "document"].includes(as));
+      expect(caught, `this form slips past the matcher: ${tag}`).toBe(true);
+    }
+    // And a legitimate font preload is NOT caught, so the rule is not "reject
+    // every link".
+    const fontTag = `<link rel="preload" as="font" href="/f.woff2" crossorigin>`;
+    expect(tokens(attr(fontTag, "rel"))).toContain("preload");
+    expect((attr(fontTag, "as") || "").toLowerCase()).toBe("font");
   });
 
   it("the probe can see the tags it is filtering, so the checks above are not vacuous", () => {

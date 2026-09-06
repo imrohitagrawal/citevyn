@@ -22,13 +22,25 @@
  * WHAT THIS SWEEP DOES NOT COVER, stated so its green is not read as more than
  * it is. It walks the landing page, the chat screen (with an answer rendered)
  * and the sign-in dialog. It does NOT open `HistoryDrawer`,
- * `ConnectedAccountsDrawer`, `Nudge`, `ToastHost` or the `AccountMenu` popup —
- * all of which need a signed-in session to reach. Those were measured by hand
- * during review (3-8 stops each, worst ratio 13.07:1, both themes) and they
- * inherit the same global rule, so the exposure is a FUTURE control there
- * setting `outline: none`. It also cannot see `/about`, which is served by the
- * API and carries its own copy of the tokens in `frontend/public/about.css`
- * (measured 14.43-17.21:1 by hand, in agreement with the SPA).
+ * `ConnectedAccountsDrawer`, `Nudge`, `AccountMenu`'s popup or `ToastHost`.
+ * The first four need a signed-in session; `ToastHost` does NOT — an earlier
+ * version of this note said it did, and that was the wrong mechanism.
+ * `ToastHost` is unreachable here because it only renders once a toast exists,
+ * and in DEMO mode nothing raises one: `handleApiError` needs a live request,
+ * and `park()` runs only under `if (inFlight.current)`, which `markInFlight`
+ * sets from `sendLive` alone. So the restored parked-question toast, its
+ * `overflowWrap`, the identical-toast collapse and the 3-card cap have NO
+ * coverage in this REQUIRED job — structurally the same demo-mode blind spot
+ * this file's own history is about. They are covered by vitest instead
+ * (`useToast.test.tsx`, `useLandingState.test.tsx`) and the gap is recorded in
+ * docs/BACKLOG.md rather than left to be rediscovered.
+ *
+ * The four signed-in surfaces were measured by hand during review (3-8 stops
+ * each, worst ratio 13.07:1, both themes) and they inherit the same global
+ * rule, so the exposure there is a FUTURE control setting `outline: none`. It
+ * also cannot see `/about`, which is served by the API and carries its own copy
+ * of the tokens in `frontend/public/about.css` (measured 14.43-17.21:1 by hand,
+ * in agreement with the SPA).
  */
 import { test, expect } from "@playwright/test";
 import {
@@ -155,9 +167,36 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
       const backdropOf = (node: HTMLElement): { rgb: number[]; unmeasurable: string | null } => {
         const layers: number[][] = [];
         let unmeasurable: string | null = null;
+        // Is the FOCUSED element lifted into its own stacking position? If it
+        // is, an ancestor's painted pseudo-element cannot cover its ring, so a
+        // painting ::before/::after below is not an occluder and the colour
+        // composite stays honest.
+        const own = getComputedStyle(node);
+        const raised = own.position !== "static" && own.zIndex !== "auto";
         let n: HTMLElement | null = node.parentElement;
         while (n) {
           const cs = getComputedStyle(n);
+          // ::before / ::after are INVISIBLE to getComputedStyle(n) and paint
+          // over descendants when they are positioned above them. This is not
+          // hypothetical: `.ticker-strip::before/::after` are 80px
+          // `linear-gradient(to right, var(--bg), transparent)` fades at
+          // z-index 1, and `.ticker-chip` is a plain non-positioned <button> in
+          // the tab order — so the fade paints OVER its focus ring. Measured on
+          // a natural Tab walk: the guard reported 17.21:1 for a ring painting
+          // at 1.47-1.85:1, i.e. up to 2x BELOW its own 3:1 floor, on the first
+          // ticker stop an ordinary keyboard user reaches.
+          for (const pseudo of ["::before", "::after"]) {
+            const ps = getComputedStyle(n, pseudo);
+            if (!ps.content || ps.content === "none") continue;
+            const paints =
+              (ps.backgroundImage && ps.backgroundImage !== "none") ||
+              paint(ps.backgroundColor)[3] > 0;
+            if (paints && !raised && unmeasurable === null) {
+              unmeasurable =
+                `${n.tagName}.${typeof n.className === "string" ? n.className : ""}${pseudo} ` +
+                `paints over an unraised descendant`;
+            }
+          }
           // A gradient is a background-IMAGE, and this walk composites
           // background-COLOURS. An ancestor painting `linear-gradient(--ink,
           // --ink)` has `backgroundColor: rgba(0,0,0,0)`, so it looked

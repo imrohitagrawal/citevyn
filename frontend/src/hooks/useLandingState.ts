@@ -1243,6 +1243,13 @@ export function useLandingState() {
         isUser: m.role === "user",
         isBot: m.role === "bot",
         domId: `cv-msg-${i}`,
+        // The STABLE id, alongside the index-based domId. ChatView's arrival
+        // announcement needs an identity that survives a wholesale
+        // `RESUME_SESSION`: `domId` is the list POSITION, so a resumed
+        // transcript re-uses `cv-msg-3` for an entirely different message.
+        // `nextMessageId()` is monotonic and resumed messages are assigned
+        // fresh ids too, so this one cannot collide.
+        msgId: m.id,
         userStyle: {
           alignSelf: "flex-end",
           maxWidth: "78%",

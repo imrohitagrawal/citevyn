@@ -15,7 +15,11 @@ type Props = Parameters<typeof ChatView>[0];
 type Msg = Props["messages"][number];
 
 function msg(i: number, isUser: boolean, text: string): Msg {
-  return { isUser, domId: `cv-msg-${i}`, userStyle: {}, text };
+  // `msgId` is the STABLE id the hook assigns; `domId` is the list POSITION.
+  // They are deliberately different values here so a test cannot pass by
+  // confusing the two — the arrival announcement latches on msgId precisely
+  // because a resumed transcript re-uses domId positions.
+  return { isUser, domId: `cv-msg-${i}`, msgId: 1000 + i, userStyle: {}, text };
 }
 
 const MESSAGES: Msg[] = [
@@ -393,6 +397,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     const cited = (i: number, text: string): Msg => ({
       isUser: false,
       domId: `cv-msg-${i}`,
+      msgId: 2000 + i,
       userStyle: {},
       text,
       hasSources: true,
@@ -421,6 +426,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
         {
           isUser: false,
           domId: "cv-msg-1",
+          msgId: 3001,
           userStyle: {},
           text: "Grounded in [9].",
           hasSources: true,
@@ -443,6 +449,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
         {
           isUser: false,
           domId: "cv-msg-1",
+          msgId: 3001,
           userStyle: {},
           text: "A demo answer with no markers.",
           hasSources: true,
@@ -741,6 +748,116 @@ describe("ChatView announces an ARRIVING answer (#356)", () => {
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
     rerender(chat({ pending: false, messages: [...MESSAGES, msg(4, true, "Anyone there?")] }));
     expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  // ---- resumeSession: the transcript is REPLACED under a mounted ChatView ----
+  //
+  // `HistoryDrawer` lives on the chat screen, so `resumeSession` can fire at any
+  // time — #62 gated the composer, not the drawer. A skeptic reproduced both of
+  // these through the real hook against the boolean-latch version, which armed
+  // on "the newest thing is unfinished" and then announced whatever the
+  // replacement transcript happened to end with, WITH ITS SOURCE COUNT. Telling
+  // an assistive-tech user an answer is ready for a question that has none is
+  // precisely the harm this feature exists to prevent.
+  //
+  // The resumed messages carry ids the reader never saw stream, which is what
+  // makes them distinguishable: `resumeSession` assigns fresh ids from the same
+  // monotonic counter, so an id we are waiting on can never be re-used by a
+  // replacement. Dropping the `!last` arm alone does NOT fix this — the second
+  // test below resumes onto a tail that is a USER message and still fires.
+  const resumed: Msg[] = [
+    { ...msg(0, true, "an old question"), msgId: 7000 },
+    {
+      ...msg(1, false, "an old answer"),
+      msgId: 7001,
+      streaming: false,
+      sources: [
+        { n: "1", title: "Old", url: "https://e.co/1" },
+        { n: "2", title: "Older", url: "https://e.co/2" },
+      ],
+    },
+  ];
+
+  it("does not announce a resumed transcript when the chat screen was EMPTY", () => {
+    // The plain path: open the chat screen with no messages, then pick a
+    // conversation from History. `messages` is `[]`, which the old code read as
+    // "something is in progress" and armed on.
+    const { rerender } = renderChat({ pending: false, messages: [], chatEmpty: true });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    rerender(chat({ pending: false, messages: resumed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("does not announce a resumed transcript while the reader's own question is still open", () => {
+    // The mid-flight path: a question is in flight (tail is the user's bubble,
+    // no bot bubble yet) and the reader resumes a different conversation. The
+    // old code announced the RESUMED conversation's answer and its source count
+    // for a question that had not been answered at all.
+    const { rerender } = renderChat({ pending: true, messages: [...MESSAGES, msg(4, true, "my question")] });
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+    rerender(chat({ pending: false, messages: resumed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("still announces an answer that arrives AFTER a resume, so the fix is not just silence", () => {
+    // Partner for both tests above. Latching on identity must not turn the
+    // feature off — a question asked in the resumed conversation still gets its
+    // arrival announced.
+    const { rerender } = renderChat({ pending: false, messages: resumed });
+    const asking = [...resumed, { ...msg(2, true, "a new question"), msgId: 7002 }];
+    rerender(chat({ pending: true, messages: asking }));
+    const streaming = [
+      ...asking,
+      { ...msg(3, false, ""), msgId: 7003, streaming: true, sources: [] },
+    ];
+    rerender(chat({ pending: false, messages: streaming }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    const done = [
+      ...asking,
+      {
+        ...msg(3, false, "a new answer"),
+        msgId: 7003,
+        streaming: false,
+        sources: [{ n: "1", title: "New", url: "https://e.co/n" }],
+      },
+    ];
+    rerender(chat({ pending: false, messages: done }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+  });
+
+  it("announces BOTH answers when two finish out of order", () => {
+    // The tail-position defect: with A2 appended before A1, only
+    // `messages[length - 1]` was ever read, so A2's arrival was announced twice
+    // and A1's never.
+    const q1 = { ...msg(0, true, "q1"), msgId: 8000 };
+    const q2 = { ...msg(1, true, "q2"), msgId: 8001 };
+    const a2streaming = { ...msg(2, false, ""), msgId: 8002, streaming: true, sources: [] };
+    const a1streaming = { ...msg(3, false, ""), msgId: 8003, streaming: true, sources: [] };
+    const { rerender } = renderChat({ messages: [q1, q2, a2streaming, a1streaming] });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    const a2done = {
+      ...a2streaming,
+      text: "second answer",
+      streaming: false,
+      sources: [{ n: "1", title: "Two", url: "https://e.co/2" }],
+    };
+    rerender(chat({ messages: [q1, q2, a2done, a1streaming] }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+
+    const a1done = {
+      ...a1streaming,
+      text: "first answer",
+      streaming: false,
+      sources: [
+        { n: "1", title: "One", url: "https://e.co/1" },
+        { n: "2", title: "Also", url: "https://e.co/1b" },
+      ],
+    };
+    rerender(chat({ messages: [q1, q2, a2done, a1done] }));
+    // The SECOND arrival is announced too, and with its OWN source count — not
+    // the tail's, and not a repeat of the first.
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
   });
 
   it("gives the chat landmark an accessible name", () => {
