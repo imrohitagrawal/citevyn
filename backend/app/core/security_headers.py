@@ -32,10 +32,17 @@ from app.core.config import Settings
 # and the API from one origin by design, see infra/docker/Dockerfile.api) —
 # no third-party API host is called from script.
 #
-# style-src and font-src DO need third-party origins: `frontend/index.html`
-# pulls Google Fonts and Fontshare stylesheets (each `<link rel="stylesheet"
-# href="https://...">` is itself a style-src load) and the font FILES those
-# stylesheets reference come from a DIFFERENT host in each case:
+# style-src and font-src are now 'self' ONLY, and that is a consequence of #365
+# rather than a tightening done for its own sake. Both pages self-host their two
+# faces: `frontend/src/styles/fonts.css` and `frontend/public/about.css` declare
+# the `@font-face` rules and `frontend/public/fonts/*.woff2` holds the bytes, so
+# nothing in either page's critical path is off-origin any more. Nothing is left
+# to permit, so nothing is permitted.
+#
+# WHY THE THIRD-PARTY ENTRIES WERE THERE, kept because the trap they encode is
+# the reason this stays 'self'-only rather than drifting back. A `<link
+# rel="stylesheet" href="https://...">` is itself a style-src load, and the font
+# FILES that stylesheet references come from a DIFFERENT host:
 #
 #     stylesheet                  font files
 #     fonts.googleapis.com   ->   fonts.gstatic.com
@@ -45,22 +52,25 @@ from app.core.config import Settings
 # the browser logged 12 CSP violations on every page load — one per `src` URL
 # across 4 weights x 3 formats — and nothing looked broken. The Google pair
 # beside it was correct, which is exactly why the identical split was missed.
-# (Measured: no pixel changed either way, because no `font-family` uses Satoshi.
+# (Measured: no pixel changed either way, because no `font-family` used Satoshi.
 # The errors were real; the "falls back to a system font" in #306 was not. #316.)
 #
-# A same-origin-only CSP here would silently break the loaded theme — the
-# error is invisible unless you check the browser console, so this is listed
-# explicitly rather than tightened blindly. `test_security_headers.py` pins these
-# exact hosts so a new font/style CDN can't widen the policy unnoticed, and
-# `test_csp_covers_the_pages_real_origins.py` pins the OTHER direction: every
-# origin the page actually loads must be permitted. Note the font-file host
-# cannot be discovered from `index.html` — it only appears inside the fetched
-# stylesheet — so that test declares the mapping rather than parsing for it.
+# So: putting ANY font or style CDN back needs BOTH its hosts here, and it puts
+# a third party back in front of first paint — which is the #365 defect, where a
+# render-blocking third-party stylesheet also blocks `<script type="module">`
+# from executing and leaves the visitor on a blank page. Prefer self-hosting.
+#
+# Both directions are pinned. `test_security_headers.py` pins this constant and
+# the emitted header byte-exact, so a new host cannot widen the policy
+# unnoticed. `test_csp_covers_the_pages_real_origins.py` pins the OTHER
+# direction — it parses `frontend/index.html` AND the rendered `/about` page and
+# fails if either loads an origin this policy does not permit — so re-adding a
+# font CDN to one page and forgetting the other is caught, in either order.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
-    "style-src 'self' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com; "
+    "style-src 'self'; "
+    "font-src 'self'; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "

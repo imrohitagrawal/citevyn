@@ -1,0 +1,88 @@
+/*
+ * Self-hosted @font-face rules for the SPA (#365).
+ *
+ * WHY THIS FILE EXISTS
+ * --------------------
+ * `index.html` used to load these two faces with a plain
+ * `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?...">`.
+ * A render-blocking stylesheet also blocks `<script type="module">` from
+ * EXECUTING, and the whole app is one module entry — so while that third-party
+ * request was slow the visitor got a BLANK page, not an unstyled one. Measured
+ * on this app at f171696: fonts normal 191-323 ms to first rendered UI,
+ * `fonts.googleapis.com` stalled 40 s -> 40 150 ms, blank throughout.
+ *
+ * Serving the faces from our own origin removes the third party from the
+ * critical path entirely. These rules ride in the app's OWN stylesheet, which
+ * Vite already emits and already links — so they add no render-blocking
+ * request at all, and the two .woff2 files they name are fetched the way font
+ * files always are: off the critical path, with `font-display: swap` covering
+ * the swap. If both font files fail outright, the app still mounts and renders
+ * in the fallback stack; `tests/fonts-offline.spec.ts` proves that in a real
+ * browser rather than asserting it here.
+ *
+ * WHY NOT THE USUAL ASYNC-CSS TRICK: `<link media="print" onload="this.media='all'">`
+ * needs an inline event handler, and `backend/app/core/security_headers.py`
+ * sets `script-src 'self'` with no `'unsafe-inline'`. It would be blocked in
+ * production. `rel="preload"` alone does not apply a stylesheet, and there is
+ * no declarative "non-blocking stylesheet" attribute. Self-hosting is not the
+ * convenient option here, it is the only one that keeps the CSP intact.
+ *
+ * WHY `font-display: swap` DID NOT ALREADY SAVE US: it governs what happens
+ * once the @font-face rule is KNOWN — how long the browser blanks or swaps the
+ * text of a face still in flight. It has no say over the fetch of the
+ * stylesheet that declares the rule, and that fetch is what was blocking.
+ *
+ * THE BYTES
+ * ---------
+ * `latin` subsets only, byte-identical to what fonts.gstatic.com serves:
+ * 29,288 B + 31,340 B = 60,628 B, both SIL OFL 1.1 (see public/fonts/OFL.txt).
+ * The full 11-subset set is 136,112 B; latin is what this page actually asks
+ * for — measured by instrumenting a real page load in both themes, which
+ * records exactly these two requests. The one non-latin glyph rendered in the
+ * UI today is the U+2713 check mark in ConnectedAccountsDrawer, which is
+ * outside every subset Google serves for these families and already falls
+ * through to the system stack — unchanged by this file.
+ *
+ * Geist is one VARIABLE face covering 400-700 in a single file. JetBrains Mono
+ * is declared twice (400 and 500) pointing at the SAME file, exactly as Google
+ * declares it — one binary, two weights, no synthesis.
+ *
+ * KEEP IN SYNC WITH `public/about.css`. The About page is server-rendered by
+ * `backend/app/services/about_page.py` and cannot import this file, so it
+ * carries its own copy of these three rules. `src/test/buildGuards.test.ts`
+ * fails if the two drift, and if any `url()` here does not resolve to a real
+ * file under `public/`.
+ */
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/geist-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}

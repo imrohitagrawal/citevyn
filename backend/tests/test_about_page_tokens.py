@@ -196,3 +196,115 @@ def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     urls = re.findall(r"url\(([^)]*)\)", body)
     remote = [u for u in urls if "//" in u or u.strip().strip("'\"").startswith("http")]
     assert not remote, f"about.css loads remote resources the CSP guard cannot see: {remote}"
+
+
+# ---------------------------------------------------------------------------
+# The @font-face copy (#365)
+# ---------------------------------------------------------------------------
+
+FONTS_CSS = REPO_ROOT / "frontend" / "src" / "styles" / "fonts.css"
+PUBLIC_DIR = REPO_ROOT / "frontend" / "public"
+
+_FONT_FACE_RE = re.compile(r"@font-face\s*\{([^}]*)\}", re.DOTALL)
+
+
+def _font_faces(css: str) -> list[dict[str, str]]:
+    """Every ``@font-face`` block, as a normalised ``property -> value`` dict.
+
+    Whitespace inside a value is collapsed so a re-wrapped ``unicode-range``
+    (which prettier will do the moment either file is touched) is not read as a
+    drift. Everything else is compared exactly.
+    """
+    faces = []
+    for body in _FONT_FACE_RE.findall(_strip_comments(css)):
+        decls = {}
+        for part in body.split(";"):
+            if ":" not in part:
+                continue
+            name, _, value = part.partition(":")
+            decls[name.strip().lower()] = " ".join(value.split())
+        faces.append(decls)
+    return faces
+
+
+@pytest.fixture
+def fonts_css() -> str:
+    return FONTS_CSS.read_text(encoding="utf-8")
+
+
+def test_the_font_face_parser_found_real_rules(fonts_css: str, about_css: str) -> None:
+    """Partner for the comparison below, which would pass on two empty lists.
+
+    Both files declare the same three rules: Geist as one variable face
+    covering 400-700, and JetBrains Mono at 400 and 500 pointing at the SAME
+    file — which is how Google declares it, one binary, two weights, no
+    synthesis.
+    """
+    for label, css in (("fonts.css", fonts_css), ("about.css", about_css)):
+        faces = _font_faces(css)
+        assert len(faces) == 3, f"{label} declares {len(faces)} @font-face rules, expected 3"
+        families = {f["font-family"].strip("\"'") for f in faces}
+        assert families == {"Geist", "JetBrains Mono"}, f"{label}: {families}"
+        for face in faces:
+            assert face["font-display"] == "swap", (
+                f"{label}: a face without font-display: swap blanks its text for up to "
+                "3 s while the file is in flight"
+            )
+            assert face["unicode-range"], f"{label}: a face with no unicode-range"
+
+
+def test_the_about_page_font_faces_do_not_drift_from_the_app(
+    fonts_css: str, about_css: str
+) -> None:
+    """``/about`` cannot import the hashed bundle, so it re-declares the faces.
+
+    Same reason the tokens above are copied, and the same treatment: enforced
+    identical rather than hoped identical. A weight, a ``src`` or a
+    ``unicode-range`` diverging here means the two surfaces render in different
+    faces, which nothing else would notice.
+    """
+    app = sorted(_font_faces(fonts_css), key=lambda f: (f["font-family"], f["font-weight"]))
+    about = sorted(_font_faces(about_css), key=lambda f: (f["font-family"], f["font-weight"]))
+    assert app == about, (
+        "the @font-face rules in frontend/public/about.css have drifted from "
+        "frontend/src/styles/fonts.css — /about would render in a different face "
+        "from the app"
+    )
+
+
+def test_every_self_hosted_font_file_actually_ships(fonts_css: str, about_css: str) -> None:
+    """The ``url()`` targets resolve to real files under ``frontend/public/``.
+
+    Nothing else covers this. ``test_frontend_assets.py`` parses ``href``/``src``
+    attributes in ``index.html`` and says in its own header that a CSS ``url()``
+    is out of scope, so before #365 a renamed woff2 would have been a silent
+    404 and a silent fallback face.
+    """
+    srcs = set()
+    for css in (fonts_css, about_css):
+        for face in _font_faces(css):
+            srcs.update(re.findall(r"""url\(\s*["']?([^"')]+)["']?\s*\)""", face["src"]))
+    assert len(srcs) == 2, f"expected two distinct font files, got {sorted(srcs)}"
+    for src in sorted(srcs):
+        assert src.startswith("/"), f"{src} is not a root-relative same-origin path"
+        assert (PUBLIC_DIR / src.lstrip("/")).is_file(), (
+            f"{src} is declared by an @font-face rule but does not exist under "
+            "frontend/public/ — the browser would 404 and fall back silently"
+        )
+
+
+def test_the_redistributed_fonts_carry_their_licence() -> None:
+    """SIL OFL 1.1 requires the licence and copyright notice to travel with the files.
+
+    These are redistributed binaries in a public artifact, not a build-time
+    dependency, so the obligation is ours and it is discharged by shipping
+    ``/fonts/OFL.txt`` beside them. Both copyright lines are quoted from the
+    upstream LICENSE files verbatim.
+    """
+    ofl = (PUBLIC_DIR / "fonts" / "OFL.txt").read_text(encoding="utf-8")
+    assert "SIL OPEN FONT LICENSE Version 1.1" in ofl
+    assert "Copyright (c) 2023 Vercel, in collaboration with basement.studio" in ofl
+    assert "Copyright 2020 The JetBrains Mono Project Authors" in ofl
+    # Partner: the full licence body, not just a header naming it.
+    assert "PERMISSION & CONDITIONS" in ofl
+    assert len(ofl) > 4000, "OFL.txt looks truncated"

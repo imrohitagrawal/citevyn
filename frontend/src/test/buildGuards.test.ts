@@ -255,6 +255,299 @@ describe("the bundle gate is reachable from npm", () => {
 });
 
 /**
+ * #365: nothing in the EMITTED page's render-blocking path may be off-origin.
+ *
+ * WHAT WENT WRONG. `index.html` carried a plain
+ * `rel=stylesheet` link to fonts.googleapis.com. A render-blocking stylesheet
+ * also blocks `<script type="module">` from EXECUTING, and this app is one
+ * module entry — so a slow or unreachable Google left the visitor on a BLANK
+ * page: no spinner, no text, no error. Measured on this app at f171696: 191-323
+ * ms to first rendered UI normally, 40 150 ms with that host stalled 40 s. It
+ * hit CI too (#364, run 34050016261: 30 s of one identical blank video frame).
+ *
+ * WHY THIS READS `dist/`, NOT `index.html`. The guard above it reads the SOURCE
+ * and says so in its own header: "ANY plugin's `transformIndexHtml` can inject a
+ * tag this never looks at ... a real residual gap, not a theoretical one." This
+ * repo has a scar for exactly that shape — a CSP constant pinned byte-exact and
+ * mutation-proved, while a reviewer moved the bypass into the function that
+ * EMITS the header and the full suite stayed green with inline script
+ * executing. So this one builds and asserts what the BROWSER receives.
+ *
+ * It also follows the emitted stylesheet INTO the CSS, because the tag is not
+ * the only way back to a third party: `@import url(https://...)` at the top of
+ * a bundled stylesheet is render-blocking in exactly the same way, and a
+ * `src: url(https://...)` in an `@font-face` puts the font files back on
+ * someone else's network. Neither appears anywhere in `index.html`.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO: strip HTML comments before scanning. A
+ * parser that honours comments can be defeated by a real tag disguised as one,
+ * and counting a commented-out tag is a false POSITIVE — the safe direction.
+ * The cost is that a third-party URL merely MENTIONED in a comment turns this
+ * red; `index.html` carries a note saying so, because the first draft of that
+ * note did exactly that.
+ *
+ * WHAT IT CANNOT SEE, stated rather than implied:
+ *   - a URL assembled at runtime by script, or a stylesheet injected by JS
+ *     (neither is render-blocking for the module entry, which is the defect).
+ *   - lazily-loaded CSS chunks that no eager stylesheet links.
+ *   - whether the app actually MOUNTS when fonts fail. That is
+ *     `tests/fonts-offline.spec.ts`, in a real browser, and it is the half of
+ *     this that a static check cannot supply.
+ */
+describe("the EMITTED page's render-blocking path reaches no third party (#365)", () => {
+  const distDir = join(frontendRoot, "dist");
+  let emittedHtml = "";
+  let emittedCss: { file: string; text: string }[] = [];
+
+  /**
+   * Build the SHIPPING variant, the same way the bundle gate does, and read
+   * what it produced.
+   *
+   * The flags come from the gate's OWN `buildCommand()` rather than being
+   * re-spelled here, so the two cannot drift onto different artifacts — they
+   * are load-bearing (`--config vite.config.ts` in particular: `tsc -b` can
+   * leave a compiled `vite.config.js` that Vite resolves FIRST, so without it
+   * a build can silently measure a stale config).
+   *
+   * It is fetched by RUNNING the module in a child node rather than by
+   * `import`ing it. `scripts/bundle-budget.mjs` is plain JS with no declaration
+   * file, and a direct import fails `tsc -b` with TS7016 — which is a required
+   * CI job, and is how this was caught. Executing it keeps the single source of
+   * truth (this really is the function the gate calls) without adding a type
+   * shim or loosening the project's `allowJs`.
+   */
+  beforeAll(async () => {
+    const probe = spawnSync(
+      "node",
+      [
+        "-e",
+        "import('./scripts/bundle-budget.mjs').then(m => " +
+          "console.log(JSON.stringify(m.buildCommand())))",
+      ],
+      { cwd: frontendRoot, encoding: "utf8" },
+    );
+    if (probe.status !== 0) {
+      throw new Error(`could not read buildCommand() from the bundle gate:\n${probe.stderr ?? ""}`);
+    }
+    const { cmd, args, env } = JSON.parse(probe.stdout) as {
+      cmd: string;
+      args: string[];
+      env: Record<string, string>;
+    };
+    // Fail closed if the gate's command shape changes under us, rather than
+    // building something else and calling the result a guarantee.
+    expect(cmd, "the bundle gate no longer builds with a recognisable command").toBe("npx");
+    expect(args, "the gate's build flags changed shape").toContain("--config");
+    const r = spawnSync(cmd, args, {
+      cwd: frontendRoot,
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+    });
+    // Fail LOUDLY on a broken build. A silent skip here would make every
+    // assertion below vacuous, which is this file's own standing complaint.
+    if (r.status !== 0) {
+      throw new Error(
+        `the production build this guard measures failed (status ${r.status}):\n${r.stderr ?? ""}`,
+      );
+    }
+    emittedHtml = readFileSync(join(distDir, "index.html"), "utf8");
+
+    // Follow only the stylesheets the EMITTED HTML actually links, resolved
+    // from dist/. Globbing dist/assets/*.css instead would also sweep in lazy
+    // chunks nothing render-blocks, and would miss a stylesheet emitted
+    // somewhere else entirely.
+    emittedCss = linkedStylesheetHrefs(emittedHtml)
+      .filter((h) => h.startsWith("/"))
+      .map((h) => {
+        const file = join(distDir, h.replace(/^\//, "").split(/[?#]/)[0]);
+        return { file, text: existsSync(file) ? readFileSync(file, "utf8") : "" };
+      });
+  }, 120_000);
+
+  /** Attribute value with an OPTIONAL quote, per the HTML spec, not `="..."`. */
+  const attr = (tag: string, name: string): string | null => {
+    const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
+    return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
+  };
+  /** `rel` is a space-separated TOKEN LIST. `"stylesheet "` and `"stylesheet alternate"` count. */
+  const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
+
+  function linkedStylesheetHrefs(html: string): string[] {
+    return [...html.matchAll(/<link\b[^>]*>/gi)]
+      .map((m) => m[0])
+      .filter((tag) => tokens(attr(tag, "rel")).includes("stylesheet"))
+      .map((tag) => attr(tag, "href") ?? "")
+      .filter(Boolean);
+  }
+
+  /**
+   * Off-origin means "names a host". Absolute (`https://x/`), scheme-relative
+   * (`//x/`) and any other scheme all qualify; a root-relative `/fonts/x.woff2`
+   * or a bare `x.css` does not. Scheme-relative is the one a `startsWith("http")`
+   * check misses, and it is a perfectly good way to load Google Fonts.
+   */
+  const isOffOrigin = (url: string) => /^([a-z][a-z0-9+.-]*:)?\/\//i.test(url.trim());
+
+  /**
+   * Every URL an emitted stylesheet fetches: `url()` targets and `@import`
+   * targets.
+   *
+   * The `@import` half is parsed as "everything up to the terminating `;`, then
+   * any quoted string in it" rather than as `@import\s+"..."`. That is not
+   * fussiness — it is a bypass this guard actually had, found by mutation:
+   * the source `@import url("https://x.example/a.css");` is MINIFIED by the
+   * build to `@import"https://x.example/a.css";`, with no whitespace and no
+   * `url()` wrapper. A render-blocking third-party @import shipped in
+   * dist/assets/*.css and this guard stayed green. Reading the prelude also
+   * covers the modern `@import layer(base) "x";` and
+   * `@import url(x) supports(...)` forms, where the URL is not the first token.
+   */
+  function cssRefs(text: string): string[] {
+    const raw: string[] = [];
+    for (const m of text.matchAll(/url\(\s*("[^"]*"|'[^']*'|[^)]*)\s*\)/gi)) raw.push(m[1]);
+    for (const m of text.matchAll(/@import\b([^;]*);/gi)) {
+      for (const q of m[1].matchAll(/("[^"]*"|'[^']*')/g)) raw.push(q[1]);
+    }
+    // Deduplicated: `@import url("x")` is matched by BOTH passes above, and a
+    // reader that reported it twice would make the exact-array assertions in
+    // the partner test read as a defect when they are not one.
+    return [...new Set(raw.map((v) => v.replace(/^["']|["']$/g, "").trim()))];
+  }
+
+  it("no stylesheet the emitted HTML links is off-origin", () => {
+    const linked = linkedStylesheetHrefs(emittedHtml);
+    // PARTNER FIRST. The assertion below counts toward zero and an empty or
+    // broken match satisfies it for free. The build always emits exactly one
+    // eager stylesheet link, so seeing none means the probe broke.
+    expect(
+      linked.length,
+      "found no <link rel=stylesheet> in the emitted HTML at all — the probe is " +
+        "broken, so the off-origin check below would be vacuous",
+    ).toBeGreaterThan(0);
+    expect(
+      linked.filter(isOffOrigin),
+      "the emitted dist/index.html render-blocks on a third-party stylesheet. That " +
+        "also blocks <script type=module> from EXECUTING, so a slow or blocked host " +
+        "leaves the visitor on a blank page (#365). Self-host it.",
+    ).toEqual([]);
+  });
+
+  it("nor does anything else the emitted HTML fetches before paint", () => {
+    // Wider than stylesheets on purpose: `preconnect`/`dns-prefetch` to a font
+    // CDN are the fingerprint of the pattern coming back, and an off-origin
+    // `preload`/`modulepreload` is a third-party fetch in the critical path
+    // even though it is not a stylesheet. `href` covers <link>; `src` covers
+    // <script> and <img>.
+    const refs = [...emittedHtml.matchAll(/<(?:link|script|img)\b[^>]*>/gi)]
+      .map((m) => m[0])
+      .flatMap((tag) => [attr(tag, "href"), attr(tag, "src")])
+      .filter((v): v is string => Boolean(v));
+    expect(refs.length, "no href/src found at all — the probe is broken").toBeGreaterThan(3);
+    expect(
+      refs.filter(isOffOrigin),
+      "the emitted dist/index.html references a third-party host in <head> (#365)",
+    ).toEqual([]);
+  });
+
+  it("and the emitted stylesheet pulls nothing off-origin either", () => {
+    expect(
+      emittedCss.length,
+      "resolved no emitted stylesheet from dist/ — the checks below would be vacuous",
+    ).toBeGreaterThan(0);
+    for (const { file, text } of emittedCss) {
+      expect(text.length, `${file} is empty or missing`).toBeGreaterThan(1000);
+      const refs = cssRefs(text);
+      expect(
+        refs.filter(isOffOrigin),
+        `${file} loads a third-party URL. An @import is render-blocking like the ` +
+          `link that caused #365; a font src puts the files back on someone else's ` +
+          `network. Self-host it and keep style-src/font-src at 'self'.`,
+      ).toEqual([]);
+      // Partner for the emptiness above: the file really does contain url()s,
+      // so the filter had something to look at. The self-hosted @font-face
+      // rules guarantee at least two.
+      expect(refs.length, `${file} contains no url() at all — the filter is vacuous`).toBeGreaterThan(
+        1,
+      );
+    }
+  });
+
+  it("the emitted CSS really declares the self-hosted faces, and their files shipped", () => {
+    // The checks above are all "nothing bad is present", which deleting
+    // `fonts.css` satisfies perfectly. This is the positive half: the faces are
+    // declared, they point at this origin, and the bytes are in dist/ where the
+    // StaticFiles mount will find them. `test_frontend_assets.py` covers hrefs
+    // written in index.html; nothing covered a CSS url() before this.
+    const all = emittedCss.map((c) => c.text).join("\n");
+    expect(all).toContain("@font-face");
+    for (const family of ["Geist", "JetBrains Mono"]) {
+      expect(all, `no @font-face declares ${family}`).toContain(family);
+    }
+    const srcs = [...all.matchAll(/url\(\s*("[^"]*"|'[^']*'|[^)]*)\s*\)/gi)]
+      .map((m) => m[1].replace(/^["']|["']$/g, "").trim())
+      .filter((u) => u.endsWith(".woff2"));
+    expect(srcs.length, "the emitted CSS names no .woff2 file").toBeGreaterThan(1);
+    for (const src of srcs) {
+      expect(src.startsWith("/"), `${src} is not a root-relative same-origin path`).toBe(true);
+      const onDisk = join(distDir, src.replace(/^\//, ""));
+      expect(existsSync(onDisk), `${src} is declared but ${onDisk} did not ship`).toBe(true);
+    }
+  });
+
+  it("the matchers catch the forms a naive check would miss", () => {
+    // Partner for four assertions that all count toward zero. Each line below
+    // is a real way to reintroduce the defect while a simpler guard stays
+    // green: an unquoted rel, a trailing space, a rel token LIST, and a
+    // scheme-relative URL that no `startsWith("http")` test sees.
+    const bypasses = [
+      `<link rel=stylesheet href=https://fonts.googleapis.com/css2?family=Geist>`,
+      `<link rel="stylesheet " href="https://fonts.googleapis.com/css2">`,
+      `<link rel="alternate stylesheet" href="//fonts.googleapis.com/css2">`,
+      `<link rel='stylesheet' href='//example.com/a.css'>`,
+    ];
+    for (const tag of bypasses) {
+      const hrefs = linkedStylesheetHrefs(tag);
+      expect(hrefs.length, `not recognised as a stylesheet link: ${tag}`).toBe(1);
+      expect(hrefs.every(isOffOrigin), `not recognised as off-origin: ${tag}`).toBe(true);
+    }
+    // And the shapes that must NOT trip it, so the rule is not "reject everything".
+    expect(isOffOrigin("/fonts/geist-latin.woff2")).toBe(false);
+    expect(isOffOrigin("/assets/index-abc.css")).toBe(false);
+    expect(isOffOrigin("data:font/woff2;base64,AAA")).toBe(false);
+    expect(linkedStylesheetHrefs(`<link rel="preload" as="style" href="//x/a.css">`)).toEqual([]);
+  });
+
+  it("and the CSS reader catches every @import form the MINIFIER can produce", () => {
+    // The bypass this guard actually had. `@import url("https://x/a.css");` in
+    // the source is emitted as `@import"https://x/a.css";` — no whitespace, no
+    // `url()` — so an `@import\s+"..."` matcher missed it and a render-blocking
+    // third-party @import shipped with the suite green. Found by mutation, not
+    // by reading; every line here is a real emitted form.
+    const forms = [
+      '@import"https://x.example/a.css";', // what the minifier writes
+      '@import url("https://x.example/a.css");', // what the source writes
+      "@import url(https://x.example/a.css);", // unquoted url()
+      "@import 'https://x.example/a.css';", // single-quoted
+      '@import layer(base) "https://x.example/a.css";', // URL is not the first token
+    ];
+    for (const css of forms) {
+      expect(cssRefs(css).filter(isOffOrigin), `slips past the CSS reader: ${css}`).toEqual([
+        "https://x.example/a.css",
+      ]);
+    }
+    // The other way back to a third party: the font FILE, not the stylesheet.
+    expect(cssRefs('@font-face{src:url("https://x.example/f.woff2")}').filter(isOffOrigin)).toEqual([
+      "https://x.example/f.woff2",
+    ]);
+    // Same-origin forms must NOT be reported.
+    expect(cssRefs('@font-face{src:url("/fonts/geist-latin.woff2")}').filter(isOffOrigin)).toEqual(
+      [],
+    );
+    expect(cssRefs('@import "/a.css";').filter(isOffOrigin)).toEqual([]);
+  });
+});
+
+/**
  * #343: `tsc -b` must not emit compiled configs into the frontend root.
  *
  * `tsconfig.node.json` is `"composite": true`, and composite FORCES emit. With
@@ -671,15 +964,32 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
   it("the fixture and the fonts it serves are all on disk", () => {
     // The route reads these files at request time; a missing one would surface
     // as a 404 inside the browser rather than as a load error here.
+    //
+    // The .woff2 bytes moved to `public/fonts/` in #365 — they are SHIPPED
+    // assets now, and the fixture reads the same copies rather than a second
+    // set, so the suite renders the face production renders. Only Google's
+    // stylesheet response is still a test-only artifact.
     expect(existsSync(join(testsDir, "fixtures.ts"))).toBe(true);
-    for (const f of [
-      "google-fonts-latin.css",
-      "geist-latin.woff2",
-      "jetbrains-mono-latin.woff2",
-      "OFL.txt",
-    ]) {
-      expect(existsSync(join(testsDir, "fonts", f)), `tests/fonts/${f} is missing`).toBe(true);
+    expect(
+      existsSync(join(testsDir, "fonts", "google-fonts-latin.css")),
+      "tests/fonts/google-fonts-latin.css is missing",
+    ).toBe(true);
+    for (const f of ["geist-latin.woff2", "jetbrains-mono-latin.woff2", "OFL.txt"]) {
+      expect(
+        existsSync(join(frontendRoot, "public", "fonts", f)),
+        `public/fonts/${f} is missing — fixtures.ts reads it from there since #365`,
+      ).toBe(true);
     }
+    // Partner: the paths above are the ones fixtures.ts really resolves, not
+    // two lists that happen to agree. Without this, moving FONT_DIR back to
+    // tests/fonts leaves every assertion above green while the fixture reads a
+    // directory nothing checks.
+    const fixture = readFileSync(join(testsDir, "fixtures.ts"), "utf8");
+    expect(
+      fixture,
+      "fixtures.ts no longer resolves its .woff2 files from ../public/fonts",
+    ).toMatch(/FONT_DIR\s*=\s*join\(\s*HERE\s*,\s*"\.\."\s*,\s*"public"\s*,\s*"fonts"\s*\)/);
+    expect(fixture).toMatch(/CSS_DIR\s*=\s*join\(\s*HERE\s*,\s*"fonts"\s*\)/);
   });
 
   it("the vendored stylesheet carries its marker, so a red harness test means the route", () => {

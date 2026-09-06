@@ -2,7 +2,8 @@ The two .woff2 files in this directory are redistributed under the SIL Open
 Font License, Version 1.1, which requires this notice to travel with them.
 
   geist-latin.woff2
-      Geist — Copyright (c) 2023 Vercel, Inc. (https://github.com/vercel/geist-font)
+      Geist — Copyright (c) 2023 Vercel, in collaboration with basement.studio
+      (https://github.com/vercel/geist-font)
       `latin` subset as served by Google Fonts (fonts.gstatic.com), 29,288 bytes.
 
   jetbrains-mono-latin.woff2
@@ -10,10 +11,23 @@ Font License, Version 1.1, which requires this notice to travel with them.
       (https://github.com/JetBrains/JetBrainsMono)
       `latin` subset as served by Google Fonts (fonts.gstatic.com), 31,340 bytes.
 
-They are TEST FIXTURES only: `tests/fixtures.ts` serves them to the Playwright
-suite in place of fonts.gstatic.com, so the e2e tests render the same faces
-production renders without depending on a third-party network. Nothing here is
-part of the shipped bundle — `frontend/tests/` never enters `dist/`.
+Both copyright lines above are quoted from the upstream LICENSE files, not
+paraphrased — OFL 1.1 §2 requires "the above copyright notice" to travel with
+each copy, so the wording is the licensor's, verbatim. (An earlier revision of
+this file, when these were test fixtures, said "Vercel, Inc."; upstream says
+"Vercel, in collaboration with basement.studio". Verified 2026-09-07 against
+`gh api repos/vercel/geist-font/contents/LICENSE.txt`, whose SPDX id GitHub
+reports as `OFL-1.1`, and against the JetBrains Mono OFL.txt on `master`.)
+
+THESE ARE SHIPPED PRODUCTION ASSETS. Vite copies `frontend/public/` verbatim
+into `dist/`, and the API serves `dist/` from its StaticFiles mount, so these
+files are delivered to every visitor at `/fonts/…` and this notice at
+`/fonts/OFL.txt`. `src/styles/fonts.css` and `public/about.css` carry the
+matching `@font-face` rules. They were test fixtures until #365; serving them
+from our own origin is what removes the render-blocking third-party stylesheet
+that used to leave a visitor on a blank page while fonts.googleapis.com was
+slow. `tests/fixtures.ts` still reads them from here, so there is exactly one
+copy of the bytes and the e2e suite renders what production renders.
 
 The full licence text follows, as published with JetBrains Mono. The same
 version 1.1 covers Geist.

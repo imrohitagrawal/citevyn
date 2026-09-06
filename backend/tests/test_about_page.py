@@ -356,9 +356,23 @@ def test_referenced_assets_are_served_over_http(
         refs = _local_refs(page.text)
         served = {ref: client.get(ref) for ref in refs}
 
-    expected_types = {".css": "text/css", ".js": "javascript", ".svg": "image/svg"}
-    assert {".css", ".js"} <= {Path(ref).suffix for ref in served}, (
-        f"expected the stylesheet and theme script among the page's assets, got {list(served)}"
+    # ``.woff2 -> font/woff2`` is the one worth reading twice. Starlette's
+    # StaticFiles guesses the type from stdlib ``mimetypes``, which has not
+    # always known this extension, and a font served as ``application/octet-stream``
+    # is REJECTED by the browser's font loader — the page silently renders in the
+    # fallback stack with nothing in the console but a font-loading failure.
+    # Since #365 the two faces are self-hosted and this mount is what delivers
+    # them, so the type is now part of the page working at all, and this line is
+    # what proves it end to end rather than by reading the mimetypes table.
+    expected_types = {
+        ".css": "text/css",
+        ".js": "javascript",
+        ".svg": "image/svg",
+        ".woff2": "font/woff2",
+    }
+    assert {".css", ".js", ".woff2"} <= {Path(ref).suffix for ref in served}, (
+        "expected the stylesheet, theme script AND the self-hosted font files among "
+        f"the page's assets, got {list(served)}"
     )
     for ref, response in served.items():
         assert response.status_code == 200, f"{ref} -> {response.status_code}"

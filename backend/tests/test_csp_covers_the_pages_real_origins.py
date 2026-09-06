@@ -1,4 +1,4 @@
-"""The CSP must permit every origin the shipped page actually loads (#306).
+"""The CSP must permit every origin the shipped pages actually load (#306, #365).
 
 WHY THIS FILE EXISTS
 --------------------
@@ -6,7 +6,7 @@ WHY THIS FILE EXISTS
 lives — but Fontshare serves the font *files* from ``cdn.fontshare.com``, so the
 browser logged 12 CSP violations on every page load (one per ``src`` URL across
 4 weights x 3 formats) and nothing looked broken. The Google Fonts pair beside it
-is correct (``fonts.googleapis.com`` CSS -> ``fonts.gstatic.com`` files, both
+was correct (``fonts.googleapis.com`` CSS -> ``fonts.gstatic.com`` files, both
 listed), which is exactly why the identical Fontshare split was missed.
 
 (#306 described this as the page "falling back to a system font". It does not:
@@ -26,7 +26,34 @@ So the font-file host cannot be discovered; it has to be *declared*. The mapping
 below is the load-bearing part of this test, and adding a new webfont provider
 means adding a row to it. That is deliberate: a human stating "this provider
 serves its files from over there" is the only thing that closes this class of
-gap.
+gap. ``/about`` is a second input for the same reason — it is not the SPA shell,
+it declares its own ``<link>`` tags, and review once repointed its font host at
+an origin absent from the CSP while this file stayed green.
+
+WHAT #365 CHANGED, AND WHY THIS FILE GOT LONGER RATHER THAN SHORTER
+-------------------------------------------------------------------
+Both pages now self-host their two faces, so there are NO third-party stylesheet
+origins left and ``_FONT_FILE_ORIGIN`` is empty. That turns the original central
+assertion into ``parsed == set()`` — a check that counts nothing, which this
+repo's house rule says needs a partner proving the thing counted would have been
+found. A broken parser and a clean page look identical to it.
+
+So the parser is now (a) exercised against the exact shapes that would slip past
+it, in ``test_the_parser_catches_the_forms_that_would_slip_past_it``, (b)
+partnered by a check that it is reading real markup with real stylesheet links
+in it, and (c) joined by ``test_the_permission_check_really_rejects_an_unlisted_origin``,
+which feeds the same permission logic a synthetic third-party origin and
+requires it to complain — because the two "every origin is permitted" tests
+below now loop over an empty set and would otherwise pass with the logic
+deleted.
+
+The parser was also FIXED as part of this. It used to match only
+``href="https://..."`` with a quote. That was tolerable while it was looking for
+one known host; it is not tolerable now that its emptiness is the finding. An
+unquoted ``href=https://...`` and a protocol-relative ``href="//host/..."`` are
+both valid HTML that load a third-party stylesheet, and both were invisible to
+it. ``rel`` is a space-separated token list, so ``rel="alternate stylesheet"``
+was invisible too.
 """
 
 from __future__ import annotations
@@ -34,20 +61,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from app.core.security_headers import _CSP
 
 _INDEX_HTML = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
 
 #: Stylesheet origin -> the origin that provider serves its FONT FILES from.
-#: Verified against the live CSS, not assumed:
+#:
+#: EMPTY since #365: both pages self-host Geist and JetBrains Mono from
+#: ``frontend/public/fonts/``, so no third party is in either critical path and
+#: the CSP's ``style-src``/``font-src`` are ``'self'`` only.
+#:
+#: Adding a provider means adding its row here AND its two hosts to
+#: ``app.core.security_headers._CSP`` — and note what that costs: a
+#: render-blocking third-party stylesheet also blocks ``<script type="module">``
+#: from executing, which is the #365 defect (a blank page, not an unstyled one).
+#: Verified against the live CSS when the rows existed, not assumed:
 #:   curl 'https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900'
 #:     -> src: url('//cdn.fontshare.com/wf/...woff2')
 #:   Google Fonts CSS likewise points at fonts.gstatic.com.
-_FONT_FILE_ORIGIN = {
-    "https://fonts.googleapis.com": "https://fonts.gstatic.com",
-}
+_FONT_FILE_ORIGIN: dict[str, str] = {}
 
 
 def _directives() -> dict[str, set[str]]:
@@ -73,7 +105,7 @@ def _rendered_about_page() -> str:
     """The SECOND page this app serves, rendered exactly as ``GET /about`` does.
 
     ``/about`` (#84 item 6) is not the SPA shell: it is built by
-    ``app.services.about_page`` and declares its own external font stylesheet,
+    ``app.services.about_page`` and declares its own ``<link>`` tags,
     independently of ``index.html``. Parsing only ``index.html`` left it
     unguarded — review repointed the About page's font host at an origin absent
     from the CSP and this file stayed GREEN while the page loaded it. That is
@@ -85,56 +117,238 @@ def _rendered_about_page() -> str:
     return render_about_page(_load_documents())
 
 
-def _stylesheet_origins() -> set[str]:
-    """Every external stylesheet origin the app's pages load."""
-    html = _INDEX_HTML.read_text(encoding="utf-8") + _rendered_about_page()
-    links = re.findall(r"<link\b[^>]*>", html, flags=re.IGNORECASE | re.DOTALL)
+def _pages_html() -> str:
+    """Both surfaces this app serves, concatenated.
+
+    Comments are NOT stripped, deliberately. A parser that honours comments can
+    be defeated by a real tag disguised as one, and counting a commented-out tag
+    is a false POSITIVE — the safe direction. ``frontend/index.html`` carries a
+    note telling the next editor to keep third-party URLs out of its comments
+    for exactly this reason.
+    """
+    return _INDEX_HTML.read_text(encoding="utf-8") + _rendered_about_page()
+
+
+def _link_tags(html: str) -> list[str]:
+    return re.findall(r"<link\b[^>]*>", html, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _attr(tag: str, name: str) -> str | None:
+    """One attribute value, with the quote OPTIONAL — which is what HTML says."""
+    m = re.search(
+        rf"""\b{name}\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""",
+        tag,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return m.group(1).strip("\"'").strip() if m else None
+
+
+def _rel_tokens(tag: str) -> set[str]:
+    """``rel`` is a space-separated TOKEN LIST, not a string (HTML spec)."""
+    return set((_attr(tag, "rel") or "").lower().split())
+
+
+def _origin_of(url: str) -> str | None:
+    """The origin a URL names, or ``None`` if it names none (same-origin).
+
+    Handles the protocol-relative ``//host/path`` form, which is a perfectly
+    good way to load a third-party stylesheet and which a ``startswith("http")``
+    check does not see.
+    """
+    url = url.strip()
+    m = re.match(r"^(?:(https?):)?//([^/?#]+)", url, flags=re.IGNORECASE)
+    if not m:
+        return None
+    scheme = (m.group(1) or "https").lower()
+    return f"{scheme}://{m.group(2)}"
+
+
+def _stylesheet_origins_in(html: str) -> set[str]:
+    """Every off-origin stylesheet origin ``html`` loads."""
     origins = set()
-    for tag in links:
-        if not re.search(r'rel\s*=\s*["\']stylesheet["\']', tag, flags=re.IGNORECASE):
+    for tag in _link_tags(html):
+        if "stylesheet" not in _rel_tokens(tag):
             continue
-        href = re.search(r'href\s*=\s*["\'](https://[^"\']+)["\']', tag, flags=re.IGNORECASE)
-        if href:
-            origins.add("https://" + href.group(1).split("/")[2])
+        origin = _origin_of(_attr(tag, "href") or "")
+        if origin:
+            origins.add(origin)
     return origins
 
 
+def _stylesheet_origins() -> set[str]:
+    return _stylesheet_origins_in(_pages_html())
+
+
+def _unpermitted(
+    origins: set[str],
+    directives: dict[str, set[str]],
+    mapping: dict[str, str] | None = None,
+) -> list[str]:
+    """Complaints: every parsed origin that the policy does not actually allow.
+
+    Pure, and ``mapping`` is a PARAMETER rather than a read of the module
+    constant, so a test can feed it a declared provider whose font-file host is
+    missing — the exact #306 split — and prove that specific complaint fires.
+    (It was a closed-over global in the first draft, and the partner test below
+    caught that: it could reach the "no row declared" branch and no other.)
+    The real caller passes ``_FONT_FILE_ORIGIN``.
+    """
+    mapping = _FONT_FILE_ORIGIN if mapping is None else mapping
+    problems = []
+    for origin in sorted(origins):
+        if origin not in directives.get("style-src", set()):
+            problems.append(f"{origin} serves a stylesheet the page loads but is not in style-src")
+        files_from = mapping.get(origin)
+        if files_from is None:
+            problems.append(
+                f"{origin} loads a stylesheet but has no row in _FONT_FILE_ORIGIN, so "
+                "nothing checks where it serves its font FILES from"
+            )
+        elif files_from not in directives.get("font-src", set()):
+            problems.append(
+                f"{origin} serves its font FILES from {files_from}, which is not in "
+                "font-src — every glyph it provides is blocked and the page silently "
+                "falls back to a system font"
+            )
+    return problems
+
+
 def test_the_parser_finds_exactly_the_providers_we_expect() -> None:
-    """Partner assertion, pinned to the exact SET rather than just non-emptiness.
+    """Pinned to the exact SET rather than just non-emptiness.
 
     A non-empty check only catches TOTAL parse failure. Partial loss is the real
-    risk and it is silent: an unquoted attribute (``href=https://...``, valid
-    HTML5) or a protocol-relative ``href="//api.fontshare.com/..."`` makes the
-    regexes below skip that tag, and with the other provider still found the
-    suite stays green while one provider's coverage has evaporated. Comparing the
-    whole set turns that into a failure that names what went missing.
+    risk and it is silent: with one provider still found, the suite stays green
+    while another's coverage has evaporated. Comparing the whole set turns that
+    into a failure that names what went missing.
+
+    Today both sides are empty (#365, everything self-hosted), so the three
+    tests below it are what keep this from being a check that counts nothing.
     """
     assert _stylesheet_origins() == set(_FONT_FILE_ORIGIN), (
         "the stylesheet origins parsed from frontend/index.html AND the rendered "
-        "/about page no longer match "
-        "the declared providers. If you ADDED one, add its font-file origin to "
-        "_FONT_FILE_ORIGIN (check the provider's CSS for the host in its "
-        "@font-face src) and to the CSP. If you REMOVED one, drop it from both — "
-        "and if you changed neither, the parser has stopped seeing a <link> it "
-        "used to see (unquoted attribute? protocol-relative href?), which would "
-        "otherwise silently reduce this file's coverage to nothing."
+        "/about page no longer match the declared providers. If you ADDED one, add "
+        "its font-file origin to _FONT_FILE_ORIGIN (check the provider's CSS for the "
+        "host in its @font-face src) and to the CSP — and read #365 first, because a "
+        "render-blocking third-party stylesheet also blocks the module entry from "
+        "executing and leaves the visitor on a blank page. If you REMOVED one, drop "
+        "it from both."
     )
 
 
-@pytest.mark.parametrize("origin", sorted(_stylesheet_origins()))
-def test_every_stylesheet_origin_is_allowed_by_style_src(origin: str) -> None:
-    assert origin in _directives()["style-src"], (
-        f"{origin} serves a stylesheet the page loads but is not in style-src"
+def test_the_parser_is_reading_real_markup_with_real_stylesheet_links() -> None:
+    """PARTNER for the emptiness above: the parser had something to look at.
+
+    Without this, an empty string, a moved ``index.html`` or an ``/about``
+    renderer that raised and returned nothing would all satisfy the assertion
+    above perfectly.
+    """
+    html = _pages_html()
+    assert len(html) > 4000, "the two pages together are implausibly short"
+    tags = _link_tags(html)
+    assert len(tags) > 5, f"only {len(tags)} <link> tags across both pages"
+    sheets = [t for t in tags if "stylesheet" in _rel_tokens(t)]
+    assert sheets, "neither page links a stylesheet at all — the parser is broken"
+    # Every one of them is same-origin, which is the actual #365 property.
+    assert [t for t in sheets if not _origin_of(_attr(t, "href") or "")] == sheets
+
+
+def test_the_parser_catches_the_forms_that_would_slip_past_it() -> None:
+    """POSITIVE CONTROL. The emptiness above means "nothing there", not "blind".
+
+    Every line here is a real way to load a third-party stylesheet that the
+    pre-#365 parser missed: it required a quoted ``href="https://..."`` and an
+    exactly-quoted ``rel="stylesheet"``.
+    """
+    cases = {
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist">': (
+            "https://fonts.googleapis.com"
+        ),
+        "<link rel=stylesheet href=https://fonts.googleapis.com/css2>": (
+            "https://fonts.googleapis.com"
+        ),
+        '<link rel="stylesheet" href="//cdn.fontshare.com/a.css">': "https://cdn.fontshare.com",
+        '<link rel="alternate stylesheet" href="http://example.com/a.css">': "http://example.com",
+        "<link rel='STYLESHEET' href='https://example.org/a.css'>": "https://example.org",
+        '<link\n  rel="stylesheet"\n  href="https://example.net/a.css"\n>': "https://example.net",
+    }
+    for tag, expected in cases.items():
+        assert _stylesheet_origins_in(tag) == {expected}, f"this form slips past the parser: {tag}"
+
+    # And the shapes that must NOT be reported, so the rule is not "flag every link".
+    for tag in (
+        '<link rel="stylesheet" href="/about.css">',
+        '<link rel="preload" as="style" href="https://example.com/a.css">',
+        '<link rel="preconnect" href="https://example.com">',
+        '<link rel="icon" href="/favicon.svg">',
+    ):
+        assert _stylesheet_origins_in(tag) == set(), f"false positive on: {tag}"
+
+
+def test_every_stylesheet_origin_the_pages_load_is_permitted() -> None:
+    assert _unpermitted(_stylesheet_origins(), _directives()) == []
+
+
+def test_the_permission_check_really_rejects_an_unlisted_origin() -> None:
+    """PARTNER for the test above, which loops over an empty set today.
+
+    Feeds the same logic the same real CSP with a third-party origin the policy
+    does not allow, and requires all three complaints: the stylesheet host is
+    not in ``style-src``, and there is no declared font-file host to check
+    against ``font-src``. Without this, deleting ``_unpermitted``'s body would
+    leave the suite green.
+    """
+    directives = _directives()
+    problems = _unpermitted({"https://fonts.googleapis.com"}, directives)
+    assert any("style-src" in p for p in problems), problems
+    assert any("_FONT_FILE_ORIGIN" in p for p in problems), problems
+
+    # And with a row DECLARED but the file host missing from font-src — the
+    # exact #306 split, which is the branch the other case cannot reach — it
+    # complains about font-src specifically.
+    problems = _unpermitted(
+        {"https://fonts.googleapis.com"},
+        {"style-src": {"https://fonts.googleapis.com"}, "font-src": {"'self'"}},
+        {"https://fonts.googleapis.com": "https://fonts.gstatic.com"},
+    )
+    assert any("font-src" in p for p in problems), problems
+
+    # And a fully-permitted provider produces NO complaint, so the checker is
+    # not simply "always complain".
+    assert (
+        _unpermitted(
+            {"https://fonts.googleapis.com"},
+            {
+                "style-src": {"https://fonts.googleapis.com"},
+                "font-src": {"https://fonts.gstatic.com"},
+            },
+            {"https://fonts.googleapis.com": "https://fonts.gstatic.com"},
+        )
+        == []
     )
 
 
-@pytest.mark.parametrize("origin", sorted(_stylesheet_origins()))
-def test_every_providers_font_file_origin_is_allowed_by_font_src(origin: str) -> None:
-    """The half that was missing. A provider's CSS host being allowed says nothing
-    about where its @font-face rules point."""
-    files_from = _FONT_FILE_ORIGIN[origin]
-    assert files_from in _directives()["font-src"], (
-        f"{origin} serves its font FILES from {files_from}, which is not in "
-        "font-src — every glyph it provides is blocked and the page silently "
-        "falls back to a system font"
+def test_neither_page_puts_a_third_party_in_front_of_first_paint() -> None:
+    """#365, stated directly rather than inferred from the CSP being tight.
+
+    Wider than stylesheets: a ``preconnect``/``dns-prefetch`` to a font CDN is
+    the fingerprint of the pattern coming back, and an off-origin script or
+    preload is a third-party fetch in the critical path even though it is not a
+    stylesheet.
+    """
+    html = _pages_html()
+    tags = re.findall(r"<(?:link|script|img)\b[^>]*>", html, flags=re.IGNORECASE | re.DOTALL)
+    assert len(tags) > 5, "the tag probe found almost nothing — the check below is vacuous"
+    offenders = []
+    for tag in tags:
+        for name in ("href", "src"):
+            origin = _origin_of(_attr(tag, name) or "")
+            if origin:
+                offenders.append(f"{origin} via {tag.strip()[:80]}")
+    assert offenders == [], (
+        "a page references a third-party host before first paint. A render-blocking "
+        "off-origin stylesheet also blocks <script type=module> from EXECUTING, so "
+        "the visitor gets a blank page while that host is slow — that is #365. "
+        "Self-host it. If it genuinely has to be third party, widen the CSP in the "
+        "same change and add its row to _FONT_FILE_ORIGIN. Note this scans HTML "
+        "comments too, so a third-party URL merely mentioned in one fails here."
     )

@@ -107,8 +107,8 @@ def _parse_csp(csp: str) -> dict[str, set[str]]:
 _EXPECTED_CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
-    "style-src 'self' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com; "
+    "style-src 'self'; "
+    "font-src 'self'; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
@@ -164,15 +164,21 @@ def _assert_common_headers(headers: dict[str, str]) -> None:
     assert directives["default-src"] == {"'self'"}
     assert directives["script-src"] == {"'self'"}
     assert directives["frame-ancestors"] == {"'none'"}
-    # The two third-party origins the shipped frontend actually loads
-    # (frontend/index.html): Google Fonts + Fontshare stylesheets, and the
-    # font files those stylesheets reference.
-    assert directives["style-src"] == {"'self'", "https://fonts.googleapis.com"}
-    # Google Fonts only. Fontshare served Satoshi, which no CSS ever referenced,
-    # so both its hosts came out with the link (#316). The `gstatic` host is the
-    # font-FILE origin — listing only the stylesheet host blocked every glyph
-    # once before (#306), which is why the pair is asserted together.
-    assert directives["font-src"] == {"'self'", "https://fonts.gstatic.com"}
+    # SELF ONLY, since #365. Both pages self-host Geist and JetBrains Mono from
+    # frontend/public/fonts/, so no third-party origin is left to permit.
+    #
+    # These two lines are equality, not `'self' in ...`, and that is the point:
+    # widening either one back to a font CDN has to change this file too. The
+    # cost of that is not just an extra origin — a render-blocking third-party
+    # stylesheet ALSO blocks `<script type="module">` from executing, so a slow
+    # host leaves the visitor on a blank page (#365, measured: 40 150 ms to
+    # first paint with the host stalled 40 s, against 191-323 ms normally).
+    #
+    # The pair is still asserted TOGETHER because the trap that produced #306 is
+    # about the pair: a provider's stylesheet host and its font-FILE host are
+    # different, and listing only the first blocks every glyph silently.
+    assert directives["style-src"] == {"'self'"}
+    assert directives["font-src"] == {"'self'"}
 
 
 # ---------------------------------------------------------------------------
