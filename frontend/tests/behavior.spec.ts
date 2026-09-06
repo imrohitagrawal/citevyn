@@ -1369,3 +1369,47 @@ test.describe("Landing hands typed text over to the chat composer (#302)", () =>
     await expect(page.locator(".chat-input")).toHaveValue("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #356 — an arriving answer is announced
+// ---------------------------------------------------------------------------
+test.describe("an arriving answer is announced (#356)", () => {
+  // This is the cover the FIRST version of the feature could not have. It keyed
+  // the announcement on `pending`, which is only ever non-zero on the LIVE path
+  // (`markInFlight` is called only from `sendLive`), so in demo mode — which is
+  // what this REQUIRED job runs — the region never changed and no browser test
+  // could observe it. Keying on the bot bubble's `streaming` going false fixed
+  // the correctness bug AND made it reachable here, driving the real hook, the
+  // real reducer and a real stream rather than a hand-built prop pair.
+  test("the status region names the answer and its source count once the stream ends", async ({
+    page,
+  }) => {
+    await enterChat(page);
+    const status = page.locator(".composer [role='status']");
+    // Partner: empty before, so the assertion below cannot pass on stale text.
+    await expect(status).toHaveText("");
+
+    await page.locator(".chat-input").fill("What is Claude Code?");
+    await page.keyboard.press("Enter");
+
+    // Mid-stream it must still say NOTHING — announcing "answer ready" while
+    // the text is typing out is the exact defect this replaced.
+    await expect(page.locator(".typing-cursor")).toBeVisible({ timeout: 10000 });
+    await expect(status).toHaveText("");
+
+    await waitStreamDone(page);
+    await expect(status).toContainText("Answer ready.");
+    // The source count is the half that was DEAD in production before: the
+    // bubble is appended with `sources: []` and they only arrive at
+    // FINISH_MESSAGE, so anything keyed on the earlier edge read zero.
+    const cards = await page.locator(".sources .source-card").count();
+    expect(cards).toBeGreaterThan(0);
+    await expect(status).toContainText(`${cards} source`);
+  });
+
+  test("the chat landmark has an accessible name", async ({ page }) => {
+    await enterChat(page);
+    // Measured via the AX tree before this: `main` had name="".
+    await expect(page.getByRole("main")).toHaveAccessibleName("Chat");
+  });
+});

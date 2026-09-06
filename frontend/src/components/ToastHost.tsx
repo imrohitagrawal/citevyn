@@ -59,7 +59,12 @@ export function ToastHost({ toasts, onDismiss }: ToastHostProps) {
             lineHeight: 1.45,
           }}
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
+          {/* `overflowWrap: anywhere` because a toast can now carry a string the
+              READER typed (the dropped-question notice quotes the question).
+              The card is a fixed `min(360px, 100vw - 40px)`, so an unbroken
+              paste otherwise runs out of it. `minWidth: 0` alone does not break
+              a word — it only lets the flex item shrink. */}
+          <div style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
             <div style={{ fontWeight: 600, marginBottom: "2px" }}>{toast.title}</div>
             <div style={{ opacity: 0.85 }}>{toast.message}</div>
           </div>

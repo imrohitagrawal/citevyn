@@ -9,8 +9,16 @@
  *
  * WHAT THIS MEASURES: the JS the browser fetches before first paint, taken from
  * VITE'S OWN BUILD MANIFEST (`dist/.vite/manifest.json`) — the entry chunk plus
- * the transitive closure of its STATIC `imports`. `dynamicImports` are excluded,
- * which is precisely the eager/lazy split.
+ * the transitive closure of its STATIC `imports`. `dynamicImports` are excluded.
+ *
+ * That exclusion is the STATIC/DYNAMIC split, and this file used to claim it was
+ * "precisely the eager/lazy split". It is not, and a reviewer landed the
+ * difference: an UNCONDITIONAL module-scope `import()` is filed under
+ * `dynamicImports` and excluded here, while the browser still fetches it on
+ * every single load — an 80,020 B gzip chunk moved this number by 2 B. The two
+ * splits coincide only while every dynamic import sits behind a user action,
+ * which is true of all four of this app's today (AuthModal, HistoryDrawer,
+ * ConnectedAccountsDrawer, Nudge) and is worth re-checking when a fifth lands.
  *
  * WHY THE MANIFEST AND NOT index.html: the first fix for #323 read the entry
  * `<script type="module">` plus every `<link rel="modulepreload">` out of the

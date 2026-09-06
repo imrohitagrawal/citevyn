@@ -433,8 +433,20 @@ export function useLandingState() {
           (document.activeElement as HTMLElement)?.tagName || "",
         )
       ) {
-        e.preventDefault();
-        document.getElementById("hero-input")?.focus();
+        // preventDefault ONLY when there is somewhere for focus to go (#356).
+        // `hero-input` exists on the landing screen only, so on the chat screen
+        // this branch used to swallow the keystroke and do nothing at all —
+        // measured: `defaultPrevented: true`, focus unmoved, no hero input in
+        // the document. The `/` then never reached the page, and never reached
+        // the reader's own text either. Note the INPUT/TEXTAREA guard above
+        // already covers the common chat case (the composer is focused on
+        // mount), so the swallow only bit once focus had left the composer —
+        // the Back button, a citation chip, the account button, or <body>.
+        const target = document.getElementById("hero-input");
+        if (target) {
+          e.preventDefault();
+          target.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -571,10 +583,38 @@ export function useLandingState() {
     heroRef.current?.focus();
   }, []);
 
+  /**
+   * Write the composer's value through the ref as well as the reducer.
+   *
+   * `park()` has to read this value SYNCHRONOUSLY, and `enterChat` defers its
+   * send by 60 ms, so nothing has re-rendered in between. Measured on the
+   * closure-reading version:
+   *   - three landing entry points fired inside that window all shared one
+   *     closure whose `state.chatInput` was still "", so the second parked
+   *     question was silently OVERWRITTEN by the third — a question dropped
+   *     with no DOM change and no announcement;
+   *   - and with a draft in the box that the reader then sent, the toast fired
+   *     60 ms later still claiming "your unsent text is still in the box",
+   *     which by then was empty. A false statement, not just a missing one.
+   *
+   * Exactly the same class as the in-flight gate above, and the same remedy.
+   * Every `SET_CHAT_INPUT` in this file goes through here and nowhere else, so
+   * the two cannot drift; the effect below re-syncs from rendered state anyway,
+   * so a future dispatch added elsewhere self-heals on the next render rather
+   * than rotting silently.
+   */
+  const chatInputRef = useRef(state.chatInput);
+  const setChatInput = useCallback((value: string) => {
+    chatInputRef.current = value;
+    dispatch({ type: "SET_CHAT_INPUT", value });
+  }, []);
+  useEffect(() => {
+    chatInputRef.current = state.chatInput;
+  }, [state.chatInput]);
+
   const onChatInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) =>
-      dispatch({ type: "SET_CHAT_INPUT", value: e.target.value }),
-    [],
+    (e: React.ChangeEvent<HTMLInputElement>) => setChatInput(e.target.value),
+    [setChatInput],
   );
 
   // Create the backend session at most once. On failure the promise
@@ -905,7 +945,7 @@ export function useLandingState() {
           ? ""
           : state.heroInput.trim();
       if (carried) {
-        dispatch({ type: "SET_CHAT_INPUT", value: state.heroInput });
+        setChatInput(state.heroInput);
         dispatch({ type: "SET_HERO_INPUT", value: "" });
       }
       if (q) {
@@ -927,12 +967,25 @@ export function useLandingState() {
           // dropped". It is the recoverable half of the trade: the rail pill
           // or chip that produced it is still one click away on the screen
           // they came from, whereas typed text, once overwritten, is gone.
-          // A toast saying so was written and measured at +62 B gzip, which
-          // would have left 12 B of the 66,000 ceiling; not worth spending
-          // the project's last headroom on, so it is recorded here and in
-          // #356 instead.
-          if (!carried && !state.chatInput) {
-            dispatch({ type: "SET_CHAT_INPUT", value: q });
+          //
+          // Saying so is now DONE rather than deferred. PR #357 cut this toast
+          // for +62 B gzip against 69 B of remaining budget; the ceiling has
+          // since been re-set deliberately (frontend/bundle-budget.json), and a
+          // click that produces literally nothing — no DOM change, no
+          // announcement — is the third silent path in this family, alongside
+          // the two #356 records. ToastHost renders `aria-live="polite"` with
+          // `role="status"` for a non-error kind, so this reaches a screen
+          // reader as well as the screen.
+          // chatInputRef, NOT state.chatInput: this runs inside a 60 ms
+          // timeout, before any re-render, so the closure's copy is stale.
+          if (!carried && !chatInputRef.current) {
+            setChatInput(q);
+          } else {
+            addToast({
+              kind: "info",
+              title: "Kept your draft",
+              message: `Your unsent text is still in the box, so “${q}” was not added. Send or clear the draft, then pick it again.`,
+            });
           }
         };
         if (inFlight.current) {
@@ -948,7 +1001,10 @@ export function useLandingState() {
         setTimeout(() => (inFlight.current ? park() : send(q)), 60);
       }
     },
-    [send, state.heroInput, state.chatInput],
+    // `addToast` belongs here: `park()` calls it, and it is the dependency that
+    // is easiest to forget because `useToast` memoises it with an empty dep
+    // array, so omitting it is invisible until that ever changes.
+    [send, state.heroInput, state.chatInput, addToast],
   );
 
   /**
@@ -1050,7 +1106,7 @@ export function useLandingState() {
     if (inFlight.current) return;
     const t = state.chatInput.trim();
     if (!t) return;
-    dispatch({ type: "SET_CHAT_INPUT", value: "" });
+    setChatInput("");
     send(t);
   }, [state.chatInput, send]);
 
@@ -1187,6 +1243,13 @@ export function useLandingState() {
         isUser: m.role === "user",
         isBot: m.role === "bot",
         domId: `cv-msg-${i}`,
+        // The STABLE id, alongside the index-based domId. ChatView's arrival
+        // announcement needs an identity that survives a wholesale
+        // `RESUME_SESSION`: `domId` is the list POSITION, so a resumed
+        // transcript re-uses `cv-msg-3` for an entirely different message.
+        // `nextMessageId()` is monotonic and resumed messages are assigned
+        // fresh ids too, so this one cannot collide.
+        msgId: m.id,
         userStyle: {
           alignSelf: "flex-end",
           maxWidth: "78%",

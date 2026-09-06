@@ -1268,6 +1268,36 @@ describe("the / shortcut respects an open modal dialog (#331)", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(input);
   });
+
+  // #356 gap 3. `hero-input` exists on the landing screen only. On the chat
+  // screen the handler used to call preventDefault() and then focus nothing, so
+  // the keystroke was consumed and produced no effect anywhere — it never
+  // reached the page and never reached the reader's own text either.
+  it("does not swallow the keystroke when there is no hero input to focus", () => {
+    renderHook(() => useLandingState());
+    // No mountHeroInput() — this is the chat screen, where it does not exist.
+    expect(document.getElementById("hero-input")).toBeNull();
+
+    document.body.focus();
+    const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("still calls preventDefault when it DOES focus the hero input", () => {
+    // Partner. Without it, deleting preventDefault altogether would satisfy the
+    // test above — and a bare `/` would then be typed into the field the
+    // shortcut just focused, which is the behaviour the call exists to stop.
+    renderHook(() => useLandingState());
+    mountHeroInput();
+
+    document.body.focus();
+    const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+  });
 });
 
 /**
@@ -1751,6 +1781,141 @@ describe("useLandingState — a landing entry point parks its question rather th
 
     expect(result.current.state.chatInput).toBe("my own draft");
     expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("SAYS so when the clicked question is dropped for a draft (#356)", async () => {
+    // Restored from PR #357, which cut it for +62 B gzip against 69 B of
+    // budget. Without it the click produces literally nothing the reader can
+    // perceive: the draft stays, the question vanishes, no DOM change, no
+    // announcement. ToastHost renders these in an `aria-live="polite"` region
+    // with `role="status"`, so it reaches assistive tech as well as the screen.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(result.current.toasts).toHaveLength(1);
+    expect(result.current.toasts[0].kind).toBe("info");
+    // It must name the question that was dropped, or the reader cannot tell
+    // WHICH click did nothing.
+    expect(result.current.toasts[0].message).toContain("Second question");
+  });
+
+  it("does not silently overwrite a question already parked in the same 60ms window", async () => {
+    // Reproduced in review: `park()` read `state.chatInput` from the closure,
+    // and `enterChat` defers its send 60 ms, so three landing entry points
+    // fired inside that window all saw "" — the SECOND parked question was
+    // overwritten by the third with no DOM change and no announcement. Measured
+    // before the fix: chatInput "Q3", toasts []. Q2 simply vanished.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      result.current.enterChat("Q1");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.enterChat("Q2");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.enterChat("Q3");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    // Q2 is parked and STAYS parked; Q3 is the one that could not fit, and it
+    // says so rather than clobbering Q2.
+    expect(result.current.state.chatInput).toBe("Q2");
+    expect(result.current.toasts).toHaveLength(1);
+    expect(result.current.toasts[0].message).toContain("Q3");
+    expect(result.current.toasts[0].message).not.toContain("Q2");
+  });
+
+  it("does not claim a draft is 'still in the box' after the reader has sent it", async () => {
+    // The other half of the same stale-closure defect, and the one this change
+    // INTRODUCED before it was fixed. NOTHING is in flight at the start — that
+    // is required, because the #62 gate refuses `submitChat` while a request is
+    // open, so the draft could not be sent at all in that state. The sequence
+    // is: draft in the box, click a landing question (which defers its send
+    // 60 ms), and inside that window the reader presses Enter. `submitChat`
+    // empties the box and starts the request; the deferred `park()` then runs,
+    // and the closure-reading version still asserted "your unsent text is still
+    // in the box" about a box that was empty. A false statement, worse than the
+    // silence it replaced.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    await act(async () => {
+      result.current.enterChat("Clicked question");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    // Partner: the draft really was sent, so the box really was empty when
+    // `park()` ran — otherwise this test would be asserting nothing.
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(mockAskQuestion.mock.calls[0][1]).toBe("my own draft");
+    // The clicked question is therefore PARKED, not dropped, and nothing untrue
+    // is announced.
+    expect(result.current.state.chatInput).toBe("Clicked question");
+    expect(result.current.toasts).toEqual([]);
+  });
+
+  it("collapses repeated identical drop notices instead of stacking them", async () => {
+    // Measured in a real browser before the cap: ten rapid clicks produced ten
+    // byte-identical cards, a 1,385 px column in a 900 px viewport with four of
+    // them above the top of the screen, unreachable and undismissable.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    for (let i = 0; i < 10; i++) {
+      await act(async () => {
+        result.current.enterChat("Same question");
+        await vi.advanceTimersByTimeAsync(100);
+      });
+    }
+
+    expect(result.current.toasts).toHaveLength(1);
+    // WITNESS: the id. `toHaveLength(1)` plus "the draft is untouched" cannot
+    // tell "ten calls collapsed to one" from "only one call ever happened" —
+    // both leave one toast and an untouched draft. `useToast` mints a fresh id
+    // per call, so `toast-10` can only exist if `addToast` ran ten times.
+    expect(result.current.toasts[0].id).toBe("toast-10");
+    expect(result.current.state.chatInput).toBe("my own draft");
+  });
+
+  it("stays quiet when the question was PARKED rather than dropped", async () => {
+    // The partner. A toast on every parked question would fire on the common
+    // path, where nothing was lost and the question is visibly in the composer.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(result.current.state.chatInput).toBe("Second question");
+    expect(result.current.toasts).toEqual([]);
   });
 
   it("parks the second of TWO landing entry points fired inside the 60ms send delay", async () => {

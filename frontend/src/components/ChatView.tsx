@@ -3,7 +3,7 @@
  * sample answers in demo mode.
  */
 
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
 
@@ -11,6 +11,10 @@ interface ChatViewProps {
   messages: Array<{
     isUser: boolean;
     domId: string;
+    /** Stable, monotonic message id — NOT the list position. The arrival
+     *  announcement latches onto this, because `domId` is an index and a
+     *  resumed session re-uses it for an entirely different message. */
+    msgId: number;
     userStyle: React.CSSProperties;
     text: string;
     streaming?: boolean;
@@ -75,6 +79,122 @@ export function ChatView({
   // "the content grew under a reader who is still at the bottom" from "the reader
   // moved the list". `null` until the first pin.
   const lastPinnedTopRef = useRef<number | null>(null);
+
+  // What the persistent status region says once an answer has ARRIVED (#356).
+  //
+  // Measured on the success path: when an answer lands the pending region is
+  // removed, the answer bubble is inserted and `aria-disabled` flips on the send
+  // button — none of it inside a live region, so a screen-reader user was never
+  // told the answer had arrived. The error path already announces, through
+  // ToastHost's `role="alert"`.
+  //
+  // THE EDGE IS `streaming`, NOT `pending`. The first version of this keyed on
+  // `pending` going true→false and was wrong in three ways at once, all three
+  // reproduced in a real browser:
+  //   1. `sendLive` calls `streamBot()` and then `markInFlight(-1)` in the very
+  //      next `finally`, so React batches them: `pending` drops in the SAME
+  //      commit that appends the bubble. `streamBot`'s `ADD_MESSAGE` carries
+  //      `sources: []` (the real citations arrive later, under `finalSources`,
+  //      at `FINISH_MESSAGE`), so `last.sources.length` was 0 every single time
+  //      and the " N sources cited" clause was unreachable in production. Four
+  //      unit tests asserted that string because they hand-built a settled
+  //      message list and drove the prop pair directly — a shape the app never
+  //      produces at that instant.
+  //   2. It therefore announced "Answer ready" as the answer STARTED streaming.
+  //      Measured live: announced at t=865 ms with three citation chips still
+  //      typing out. On a long answer that is several seconds early.
+  //   3. `pending` is only ever non-zero on the LIVE path — `markInFlight` is
+  //      called only from `sendLive`, and the demo branch of `routeQuestion`
+  //      calls `streamBot` directly. So in demo mode the region said nothing at
+  //      all, which is also why no browser test could observe it: the REQUIRED
+  //      Playwright job runs in demo mode.
+  // A bot bubble whose `streaming` has gone false is the moment the answer is
+  // genuinely readable AND the moment `sources` is populated, on both paths.
+  //
+  // It is announced through the region the composer ALREADY renders rather than
+  // by putting `aria-live` on `#chat-list`. A live region on the list would
+  // announce every mutation in it: the bot avatar's literal "CV", the reader's
+  // own echoed question, the refusal badge and the whole source-card list, on
+  // every streamed chunk. That is the same trap documented on the pending
+  // bubble below. Chromium's AX tree confirms this region carries
+  // `live="polite"` and `atomic=true` (implicit on `role="status"`), so a full
+  // text replacement is announced as a whole.
+  const [settled, setSettled] = useState("");
+  // The bubbles we have actually WATCHED stream, by stable id. An answer is
+  // announced only when one of THOSE finishes.
+  //
+  // This was a boolean `armed` flag reading the TAIL of the list. A skeptic
+  // reproduced three defects in that, end to end through the real hook:
+  //   1. `resumeSession` is reachable from the history drawer AT ANY TIME —
+  //      #62 gated the composer, not the drawer — and it replaces the
+  //      transcript wholesale. An armed flag plus a finished tail announced the
+  //      RESUMED conversation's last answer, with ITS source count, while the
+  //      reader's own question was still unanswered. It fired on an EMPTY
+  //      transcript too (`!last` arms), which is the plain path: open the chat
+  //      screen, pick a 3-day-old conversation from History, and a screen
+  //      reader is told "Answer ready. 2 sources cited." A false statement to
+  //      an AT user is exactly what this feature exists to stop.
+  //   2. Two answers finishing out of order announced the first one twice and
+  //      the second never, because only `messages[length - 1]` was read.
+  //   3. The duplicate-question guard appends nothing, so the flag stayed
+  //      latched and mis-attributed the next arrival.
+  // All three are one mistake: tail POSITION is not identity. The set of ids we
+  // have seen streaming is.
+  //
+  // `msgId`, not `domId`: `domId` is `cv-msg-${index}`, and a resumed
+  // transcript re-uses those positions. `msgId` is the hook's monotonic
+  // counter, and `resumeSession` assigns fresh ids to resumed messages too, so
+  // an awaited id can never collide with a replacement's.
+  const watching = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    let arrived: (typeof messages)[number] | null = null;
+    for (const m of messages) {
+      if (m.isUser) continue;
+      if (m.streaming) {
+        watching.current.add(m.msgId);
+      } else if (watching.current.delete(m.msgId)) {
+        // Was streaming when we last looked, is not now. Take the LAST such in
+        // list order, so a commit finishing two announces the newest.
+        arrived = m;
+      }
+    }
+    if (!last || last.isUser || last.streaming) {
+      // A question just went in (or the transcript is empty, or an answer is
+      // still arriving). Drop any previous
+      // arrival text: the error branch below returns WITHOUT writing, so
+      // otherwise an "Answer ready." from the last question would be left
+      // standing over a request that then fails.
+      //
+      // `|| last.streaming` is load-bearing and was MISSING for one commit. In
+      // demo mode `send()` dispatches the user bubble and then
+      // `routeQuestion -> streamBot`'s bot bubble SYNCHRONOUSLY, so React
+      // batches them and the tail is never a user message. Without this clause
+      // the region never returned to "" between two answers — and `role=status`
+      // announces on a text CHANGE, so the SECOND consecutive answer was
+      // announced to nobody. Measured in a real browser: the region took the
+      // values ["", "Answer ready. 1 source cited."] across two questions,
+      // where it should take four. Two consecutive refusals were silent the
+      // same way.
+      //
+      // Both `setSettled` calls can run in one pass; the announcement below is
+      // second and wins, which is why an out-of-order arrival still announces.
+      setSettled((s) => (s === "" ? s : ""));
+    }
+    if (!arrived) return;
+    // A transport failure is already announced by ToastHost's `role="alert"`.
+    // Announcing here too would say "answer ready" over the top of an error.
+    if (arrived.errorKind) {
+      setSettled((s) => (s === "" ? s : ""));
+      return;
+    }
+    const n = arrived.sources?.length ?? 0;
+    setSettled(
+      arrived.refusal
+        ? "No answer. CiteVyn found nothing in the official docs to support one."
+        : `Answer ready.${n ? ` ${n} source${n === 1 ? "" : "s"} cited.` : ""}`,
+    );
+  }, [messages]);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -281,7 +401,12 @@ export function ChatView({
   }, []);
 
   return (
-    <main data-screen-label="Chat">
+    // `aria-label` as well as the data attribute (#356 / the #302 row). Measured
+    // via Chromium's AX tree: this landmark had `name=""`, so a screen-reader
+    // user landing on the only <main> on the page was told nothing about which
+    // screen they were on. The label string was already sitting one attribute
+    // away.
+    <main data-screen-label="Chat" aria-label="Chat">
       <div className="chat-header">
         <button onClick={onBackClick} className="back-button">
           ← Back to landing
@@ -461,7 +586,7 @@ export function ChatView({
         <p className="sr-only" role="status">
           {pending
             ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
-            : ""}
+            : settled}
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}

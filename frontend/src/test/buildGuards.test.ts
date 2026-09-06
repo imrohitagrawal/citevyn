@@ -137,6 +137,109 @@ describe("nothing narrows the test run at the command level", () => {
   });
 });
 
+describe("index.html pulls in NOTHING the bundle gate cannot see", () => {
+  // The gate measures Vite's module graph. A plain `<script src="/thing.js">`
+  // pointing at `frontend/public/` is outside that graph entirely, so it is
+  // render-blocking JS the ceiling cannot see. Reproduced by an adversarial
+  // review: a 73,869 B gzip script in `<head>` took real eager JS to 2.06x the
+  // ceiling while `check:bundle` reported 1,678 B of headroom and every test
+  // stayed green.
+  //
+  // Teaching the gate to parse HTML re-opens a class of hazards its own header
+  // documents (attribute quoting, `data-src` shadowing `src`, comments,
+  // <noscript>/<template>, regex backtracking). Pinning the ONE script tag that
+  // exists is cheaper and closes the demonstrated path: adding a second makes
+  // this red, and the fix is either to import it through the module graph
+  // (where the gate counts it) or to argue for it here.
+  //
+  // WHAT THIS STILL CANNOT SEE, stated rather than implied:
+  //   - It reads the SOURCE `frontend/index.html`, not the emitted
+  //     `dist/index.html`. `vite.config.ts` already loads `liveStubPlugin()`,
+  //     and ANY plugin's `transformIndexHtml` can inject a tag this never
+  //     looks at. That is this repo's "guard the emitted artifact" shape and it
+  //     is a real residual gap, not a theoretical one.
+  //   - A script written by another script at runtime.
+  //   - A tag inside an HTML comment or <template> (it would be counted here
+  //     but not fetched — a false POSITIVE, which is the safe direction).
+  const html = readFileSync(join(frontendRoot, "index.html"), "utf8");
+
+  it("declares exactly one <script>, and it is the module entry", () => {
+    const scripts = [...html.matchAll(/<script\b[^>]*>/gi)].map((m) => m[0]);
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]).toMatch(/type=["']module["']/);
+    expect(scripts[0]).toMatch(/src=["']\/src\/main\.tsx["']/);
+  });
+
+  it("preloads no script the gate would not have counted", () => {
+    // `rel="preload" as="script"` and `rel="modulepreload"` both fetch JS
+    // before first paint without being a <script> tag.
+    //
+    // The first version matched `rel=["'](modulepreload|preload)["']` and was
+    // bypassed FOUR ways in review, each of which injects a heavy script while
+    // the guard stays green: an unquoted `rel=preload`, `rel="preload "` with a
+    // trailing space, `rel="preload alternate"` (rel is a space-separated TOKEN
+    // LIST, not a string), and `as=script` unquoted. So: capture the value with
+    // an optional quote, then TOKENIZE it, which is what the HTML spec says the
+    // attribute is.
+    const attr = (tag: string, name: string): string | null => {
+      const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
+      return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
+    };
+    const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
+    const preloads = [...html.matchAll(/<link\b[^>]*>/gi)]
+      .map((m) => m[0])
+      .filter((tag) => {
+        const rel = tokens(attr(tag, "rel"));
+        if (rel.includes("modulepreload")) return true;
+        if (!rel.includes("preload") && !rel.includes("prefetch")) return false;
+        // `as` decides what a preload fetches. Anything that is not plainly a
+        // non-script resource counts, so an unrecognised or absent `as` fails
+        // CLOSED rather than being waved through.
+        const as = (attr(tag, "as") || "").toLowerCase();
+        return !["style", "font", "image", "fetch", "document"].includes(as);
+      });
+    expect(preloads).toEqual([]);
+  });
+
+  it("the attribute parser handles the forms that bypassed its first version", () => {
+    // Partner. The assertion above counts toward ZERO, so on its own it cannot
+    // tell "nothing matched" from "the matcher is broken". These are the exact
+    // four shapes a reviewer used to smuggle a script past it.
+    const bypasses = [
+      `<link rel=modulepreload href="/x.js">`,
+      `<link rel="preload " as="script" href="/x.js">`,
+      `<link rel="preload alternate" as="script" href="/x.js">`,
+      `<link rel="preload" as=script href="/x.js">`,
+    ];
+    const attr = (tag: string, name: string): string | null => {
+      const m = new RegExp(`\\b${name}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i").exec(tag);
+      return m ? m[1].replace(/^["']|["']$/g, "").trim() : null;
+    };
+    const tokens = (v: string | null) => (v ? v.toLowerCase().split(/\s+/).filter(Boolean) : []);
+    for (const tag of bypasses) {
+      const rel = tokens(attr(tag, "rel"));
+      const as = (attr(tag, "as") || "").toLowerCase();
+      const caught =
+        rel.includes("modulepreload") ||
+        ((rel.includes("preload") || rel.includes("prefetch")) &&
+          !["style", "font", "image", "fetch", "document"].includes(as));
+      expect(caught, `this form slips past the matcher: ${tag}`).toBe(true);
+    }
+    // And a legitimate font preload is NOT caught, so the rule is not "reject
+    // every link".
+    const fontTag = `<link rel="preload" as="font" href="/f.woff2" crossorigin>`;
+    expect(tokens(attr(fontTag, "rel"))).toContain("preload");
+    expect((attr(fontTag, "as") || "").toLowerCase()).toBe("font");
+  });
+
+  it("the probe can see the tags it is filtering, so the checks above are not vacuous", () => {
+    // Partner for two assertions that both count toward zero. Without it, a
+    // regex that matched nothing at all would satisfy both.
+    expect(html).toMatch(/<link\b/i);
+    expect([...html.matchAll(/<link\b[^>]*>/gi)].length).toBeGreaterThan(3);
+  });
+});
+
 describe("the bundle gate is reachable from npm", () => {
   it("package.json defines check:bundle pointing at the real script", () => {
     const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
@@ -348,6 +451,17 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
     // ...and it is the real config, not an empty stand-in that would make the
     // path assertion the only thing holding this up.
     expect(loaded!.config.server?.port).toBe(3000);
+    // The build's ENTRY must stay index.html, which is the file the guard above
+    // reads. A reviewer set `build.rollupOptions.input` to a second HTML file
+    // carrying a `<script src="/heavy.js">` and a 266,669 B `public/heavy.js`:
+    // the build succeeded, `dist/` shipped both, `check:bundle` reported
+    // "headroom 1672 B", and every test stayed green — because the script tag
+    // lived in a file nothing looks at. Pinning "no custom input" is one line
+    // and closes it; changing the entry now has to change this test too.
+    expect(
+      loaded!.config.build?.rollupOptions?.input,
+      "a custom rollup input means index.html is no longer the entry the script guard reads",
+    ).toBeUndefined();
     // 60 s, not the 5 s default: Vite bundles the config through esbuild, and
     // the rest of the suite is running. This is a budget for a genuinely heavy
     // operation in a NEW test, not a raise on an existing one (#344).

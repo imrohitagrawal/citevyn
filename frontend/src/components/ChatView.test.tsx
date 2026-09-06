@@ -15,7 +15,11 @@ type Props = Parameters<typeof ChatView>[0];
 type Msg = Props["messages"][number];
 
 function msg(i: number, isUser: boolean, text: string): Msg {
-  return { isUser, domId: `cv-msg-${i}`, userStyle: {}, text };
+  // `msgId` is the STABLE id the hook assigns; `domId` is the list POSITION.
+  // They are deliberately different values here so a test cannot pass by
+  // confusing the two — the arrival announcement latches on msgId precisely
+  // because a resumed transcript re-uses domId positions.
+  return { isUser, domId: `cv-msg-${i}`, msgId: 1000 + i, userStyle: {}, text };
 }
 
 const MESSAGES: Msg[] = [
@@ -393,6 +397,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     const cited = (i: number, text: string): Msg => ({
       isUser: false,
       domId: `cv-msg-${i}`,
+      msgId: 2000 + i,
       userStyle: {},
       text,
       hasSources: true,
@@ -421,6 +426,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
         {
           isUser: false,
           domId: "cv-msg-1",
+          msgId: 3001,
           userStyle: {},
           text: "Grounded in [9].",
           hasSources: true,
@@ -443,6 +449,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
         {
           isUser: false,
           domId: "cv-msg-1",
+          msgId: 3001,
           userStyle: {},
           text: "A demo answer with no markers.",
           hasSources: true,
@@ -584,5 +591,334 @@ describe("ChatView — composer while an answer is in flight (#62)", () => {
     rerender(chat({ pending: false, onSendClick }));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(onSendClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ChatView announces an ARRIVING answer (#356)", () => {
+  // The gap: when an answer lands, the pending region is removed, the answer
+  // bubble is inserted and `aria-disabled` flips — none of it in a live region,
+  // so a screen-reader user was never told. The error path already announces,
+  // via ToastHost's role="alert".
+  //
+  // THESE TESTS DRIVE THE SHAPE THE APP ACTUALLY PRODUCES, which the first
+  // version did not. `streamBot` appends the bot bubble with `sources: []` and
+  // `streaming: true`; the real citations arrive later, at `FINISH_MESSAGE`.
+  // The first version keyed on `pending` and handed in an already-settled
+  // message list, so it asserted `"Answer ready. 2 sources cited."` — a string
+  // the application could not emit, because at the instant `pending` dropped
+  // the bubble was empty and sourceless. Three reviewers reproduced that
+  // independently, one of them live in a browser. `streaming` going true→false
+  // is the real edge: it is when the answer is readable AND when `sources` is
+  // populated, on the live and demo paths alike.
+  //
+  // `streamed()` / `finished()` below are the two states in that order, so a
+  // test that drives them cannot pass on a shape production never has.
+  const question = msg(4, true, "How much does it cost?");
+  /** What ADD_MESSAGE produces: empty text, streaming, NO sources yet. */
+  const streamed = (over: Partial<Msg> = {}): Msg[] => [
+    ...MESSAGES,
+    question,
+    { ...msg(5, false, ""), streaming: true, sources: [], ...over },
+  ];
+  /** What FINISH_MESSAGE produces: streaming off, sources populated. */
+  const finished = (over: Partial<Msg> = {}): Msg[] => [
+    ...MESSAGES,
+    question,
+    {
+      ...msg(5, false, "It is free during the preview."),
+      streaming: false,
+      sources: [
+        { n: "1", title: "Pricing", url: "https://example.com/pricing" },
+        { n: "2", title: "Plans", url: "https://example.com/plans" },
+      ],
+      ...over,
+    },
+  ];
+
+  it("says the answer is ready, with the source count, once the stream FINISHES", () => {
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+
+    // The answer starts arriving and `pending` drops in the same commit. This
+    // is the instant the old version announced, wrongly.
+    rerender(chat({ pending: false, messages: streamed() }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    rerender(chat({ pending: false, messages: finished() }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("stays silent while the answer is still streaming", () => {
+    // The #2 defect on its own: announcing at stream START told a reader the
+    // answer was ready seconds before its last character rendered.
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("announces on the DEMO path, where `pending` is never set at all", () => {
+    // `markInFlight` is called only from `sendLive`, so in demo mode
+    // `state.pending` is permanently 0. Keying on `pending` meant the region
+    // said nothing to a demo/offline reader — and, because the REQUIRED
+    // Playwright job runs in demo mode, that no browser test could see it.
+    const { rerender } = renderChat({ pending: false, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: finished() }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("says nothing when it mounts onto a transcript that was already finished", () => {
+    // Returning to the chat screen, or resuming a past session, must not
+    // announce an answer that arrived before the reader got here.
+    renderChat({ pending: false, messages: finished() });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("singularises one source rather than saying '1 sources'", () => {
+    const one = finished({
+      sources: [{ n: "1", title: "Pricing", url: "https://e.co/p" }],
+    });
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: one }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+  });
+
+  it("omits the source clause when the answer carries none", () => {
+    const bare = finished({ sources: [] });
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: bare }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready.");
+    expect(screen.getByRole("status").textContent).not.toMatch(/source/);
+  });
+
+  it("announces a REFUSAL as a refusal, not as an answer", () => {
+    const refused = finished({ refusal: true, sources: [] });
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: refused }));
+    expect(screen.getByRole("status")).toHaveTextContent(/No answer\./);
+    expect(screen.getByRole("status").textContent).not.toMatch(/Answer ready/);
+  });
+
+  it("stays silent on a TRANSPORT failure, which ToastHost already announces as an alert", () => {
+    const failed = finished({ errorKind: "error", sources: [] });
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed({ errorKind: "error" }) }));
+    rerender(chat({ pending: false, messages: failed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("does not leave a stale 'answer ready' standing over a FAILED second request", () => {
+    // The load-bearing case for clearing the text when a new request starts.
+    // The error branch RETURNS without writing, so without the clear the region
+    // would still read "Answer ready. 2 sources cited." over an error. The
+    // first version of this test asserted the middle state while `pending` was
+    // true — which the `pending ? … : settled` ternary supplies regardless of
+    // what `settled` holds, so it could not fail. A reviewer deleted the clear
+    // and the whole file stayed green.
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: finished() }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+
+    const q2 = msg(6, true, "And after that?");
+    const failing = [
+      ...finished(),
+      q2,
+      { ...msg(7, false, ""), streaming: true, sources: [], errorKind: "error" as const },
+    ];
+    rerender(chat({ pending: false, messages: failing }));
+    const settledFailure = [
+      ...finished(),
+      q2,
+      {
+        ...msg(7, false, "Something went wrong."),
+        streaming: false,
+        sources: [],
+        errorKind: "error" as const,
+      },
+    ];
+    rerender(chat({ pending: false, messages: settledFailure }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("does not announce when the newest message is the reader's own", () => {
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: [...MESSAGES, msg(4, true, "Anyone there?")] }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  // ---- resumeSession: the transcript is REPLACED under a mounted ChatView ----
+  //
+  // `HistoryDrawer` lives on the chat screen, so `resumeSession` can fire at any
+  // time — #62 gated the composer, not the drawer. A skeptic reproduced both of
+  // these through the real hook against the boolean-latch version, which armed
+  // on "the newest thing is unfinished" and then announced whatever the
+  // replacement transcript happened to end with, WITH ITS SOURCE COUNT. Telling
+  // an assistive-tech user an answer is ready for a question that has none is
+  // precisely the harm this feature exists to prevent.
+  //
+  // The resumed messages carry ids the reader never saw stream, which is what
+  // makes them distinguishable: `resumeSession` assigns fresh ids from the same
+  // monotonic counter, so an id we are waiting on can never be re-used by a
+  // replacement. Dropping the `!last` arm alone does NOT fix this — the second
+  // test below resumes onto a tail that is a USER message and still fires.
+  const resumed: Msg[] = [
+    { ...msg(0, true, "an old question"), msgId: 7000 },
+    {
+      ...msg(1, false, "an old answer"),
+      msgId: 7001,
+      streaming: false,
+      sources: [
+        { n: "1", title: "Old", url: "https://e.co/1" },
+        { n: "2", title: "Older", url: "https://e.co/2" },
+      ],
+    },
+  ];
+
+  it("does not announce a resumed transcript when the chat screen was EMPTY", () => {
+    // The plain path: open the chat screen with no messages, then pick a
+    // conversation from History. `messages` is `[]`, which the old code read as
+    // "something is in progress" and armed on.
+    const { rerender } = renderChat({ pending: false, messages: [], chatEmpty: true });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    rerender(chat({ pending: false, messages: resumed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("does not announce a resumed transcript while the reader's own question is still open", () => {
+    // The mid-flight path: a question is in flight (tail is the user's bubble,
+    // no bot bubble yet) and the reader resumes a different conversation. The
+    // old code announced the RESUMED conversation's answer and its source count
+    // for a question that had not been answered at all.
+    const { rerender } = renderChat({ pending: true, messages: [...MESSAGES, msg(4, true, "my question")] });
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+    rerender(chat({ pending: false, messages: resumed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("still announces an answer that arrives AFTER a resume, so the fix is not just silence", () => {
+    // Partner for both tests above. Latching on identity must not turn the
+    // feature off — a question asked in the resumed conversation still gets its
+    // arrival announced.
+    const { rerender } = renderChat({ pending: false, messages: resumed });
+    const asking = [...resumed, { ...msg(2, true, "a new question"), msgId: 7002 }];
+    rerender(chat({ pending: true, messages: asking }));
+    const streaming = [
+      ...asking,
+      { ...msg(3, false, ""), msgId: 7003, streaming: true, sources: [] },
+    ];
+    rerender(chat({ pending: false, messages: streaming }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+    const done = [
+      ...asking,
+      {
+        ...msg(3, false, "a new answer"),
+        msgId: 7003,
+        streaming: false,
+        sources: [{ n: "1", title: "New", url: "https://e.co/n" }],
+      },
+    ];
+    rerender(chat({ pending: false, messages: done }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+  });
+
+  it("announces BOTH answers when two finish out of order", () => {
+    // The tail-position defect: with A2 appended before A1, only
+    // `messages[length - 1]` was ever read, so A2's arrival was announced twice
+    // and A1's never.
+    const q1 = { ...msg(0, true, "q1"), msgId: 8000 };
+    const q2 = { ...msg(1, true, "q2"), msgId: 8001 };
+    const a2streaming = { ...msg(2, false, ""), msgId: 8002, streaming: true, sources: [] };
+    const a1streaming = { ...msg(3, false, ""), msgId: 8003, streaming: true, sources: [] };
+    const { rerender } = renderChat({ messages: [q1, q2, a2streaming, a1streaming] });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    const a2done = {
+      ...a2streaming,
+      text: "second answer",
+      streaming: false,
+      sources: [{ n: "1", title: "Two", url: "https://e.co/2" }],
+    };
+    rerender(chat({ messages: [q1, q2, a2done, a1streaming] }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+
+    const a1done = {
+      ...a1streaming,
+      text: "first answer",
+      streaming: false,
+      sources: [
+        { n: "1", title: "One", url: "https://e.co/1" },
+        { n: "2", title: "Also", url: "https://e.co/1b" },
+      ],
+    };
+    rerender(chat({ messages: [q1, q2, a2done, a1done] }));
+    // The SECOND arrival is announced too, and with its OWN source count — not
+    // the tail's, and not a repeat of the first.
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("announces the SECOND consecutive answer too, not just the first", () => {
+    // `role="status"` announces on a text CHANGE. If the region never returns
+    // to "" between two answers, the second one is announced to NOBODY because
+    // the string is identical.
+    //
+    // This is not theoretical and it is not caught by any other test here: in
+    // DEMO mode `send()` dispatches the user bubble and then `streamBot`'s bot
+    // bubble synchronously, so React batches them and the tail is NEVER a user
+    // message. A clear keyed only on `!last || last.isUser` therefore never
+    // fires. Measured in a real browser at that commit, the region took the
+    // values ["", "Answer ready. 1 source cited."] across two questions instead
+    // of four. Deleting the clear survived all 40 other tests in this file.
+    const seen: string[] = [];
+    const record = () => {
+      const t = screen.getByRole("status").textContent ?? "";
+      if (seen[seen.length - 1] !== t) seen.push(t);
+    };
+
+    const one = (i: number) => [
+      { ...msg(i, true, `q${i}`), msgId: 6000 + i },
+      { ...msg(i + 1, false, ""), msgId: 6001 + i, streaming: true, sources: [] },
+    ];
+    const done = (i: number, src: string) => [
+      { ...msg(i, true, `q${i}`), msgId: 6000 + i },
+      {
+        ...msg(i + 1, false, "an answer"),
+        msgId: 6001 + i,
+        streaming: false,
+        sources: [{ n: "1", title: src, url: `https://e.co/${src}` }],
+      },
+    ];
+
+    const { rerender } = renderChat({ messages: [] });
+    record();
+    // First question and answer. Both bubbles land in ONE commit, which is what
+    // demo mode really does.
+    rerender(chat({ messages: one(0) }));
+    record();
+    rerender(chat({ messages: done(0, "A") }));
+    record();
+    // Second question and answer, same shape.
+    rerender(chat({ messages: [...done(0, "A"), ...one(10)] }));
+    record();
+    rerender(chat({ messages: [...done(0, "A"), ...done(10, "B")] }));
+    record();
+
+    // The region must have RETURNED to empty in between, or the second
+    // announcement is a no-op string change that no screen reader will read.
+    expect(seen).toEqual([
+      "",
+      "Answer ready. 1 source cited.",
+      "",
+      "Answer ready. 1 source cited.",
+    ]);
+  });
+
+  it("gives the chat landmark an accessible name", () => {
+    // Measured via Chromium's AX tree before this: `AX main: name=""`.
+    renderChat();
+    expect(screen.getByRole("main")).toHaveAccessibleName("Chat");
   });
 });
