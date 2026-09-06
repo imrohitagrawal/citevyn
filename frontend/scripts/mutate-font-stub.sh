@@ -113,7 +113,11 @@ check() {
     fail=$((fail + 1))
   else
     echo "  KILLED   $label"
-    grep -E '^\s*[0-9]+\) |Error: |AssertionError' <<<"$plain" | cut -c1-108 | head -3 |
+    # `grep -v WebServer` first: the dev server logs a proxy ECONNREFUSED for
+    # every /v1/auth/me (expected in demo mode, there is no backend), and those
+    # lines would otherwise crowd out the assertion that actually fired.
+    grep -v 'WebServer' <<<"$plain" |
+      grep -E '^\s*[0-9]+\) |Error: |AssertionError' | cut -c1-108 | head -3 |
       sed 's/^/             /'
     pass=$((pass + 1))
   fi
