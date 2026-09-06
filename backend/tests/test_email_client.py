@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -234,6 +236,21 @@ def test_the_magic_link_limit_is_wired_through_the_in_process_limiter_and_settin
 # ---------------------------------------------------------------------------
 
 
+def _rendered_email_log(caplog: pytest.LogCaptureFixture) -> str:
+    """Every ``citevyn.email`` record, rendered the way production renders it.
+
+    ALL of them, joined -- not ``records[0]``. Review defeated the PII
+    assertion below by emitting one innocuous decoy warning first: the guard
+    read the decoy, found "403" and no address, and passed while the real line
+    printed the recipient's email. A "second mechanism supplying the
+    observation" is one of this repo's five recorded ways a test passes for the
+    wrong reason, and this was exactly it.
+    """
+    return "\n".join(
+        logging.Formatter(LOG_FORMAT).format(r) for r in caplog.records if r.name == "citevyn.email"
+    )
+
+
 def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -258,9 +275,8 @@ def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
     ):
         asyncio.run(_resend(handler).send(_MESSAGE))
 
-    records = [r for r in caplog.records if r.name == "citevyn.email"]
-    assert records, "the failure logged nothing at all"
-    rendered = logging.Formatter(LOG_FORMAT).format(records[0])
+    rendered = _rendered_email_log(caplog)
+    assert rendered, "the failure logged nothing at all"
     assert "resend_send_error" in rendered
     assert "422" in rendered, (
         f"the rendered production log line carries no status code: {rendered!r}"
@@ -291,22 +307,57 @@ def test_the_resend_failure_line_never_carries_the_upstream_body(
     ):
         asyncio.run(_resend(handler).send(_MESSAGE))
 
-    rendered = logging.Formatter(LOG_FORMAT).format(caplog.records[0])
+    rendered = _rendered_email_log(caplog)
+    assert rendered, "the failure logged nothing at all"
     assert "victim@example.com" not in rendered, f"PII leaked into the log line: {rendered!r}"
     assert "403" in rendered
 
 
-def test_the_production_formatter_is_the_one_this_file_asserts_against() -> None:
+_FORMATTER_PROBE = """
+import json, sys
+sys.path.insert(0, %r)
+import logging
+from app.core.logging import LOG_FORMAT, configure_logging
+configure_logging()
+print(json.dumps({
+    "log_format": LOG_FORMAT,
+    "installed": [h.formatter._fmt for h in logging.getLogger().handlers if h.formatter],
+}))
+"""
+
+
+def test_configure_logging_installs_log_format_on_the_root_handler() -> None:
     """Partner: the two tests above are meaningless if LOG_FORMAT drifts.
 
     They render with ``LOG_FORMAT``; production renders with whatever
-    ``configure_logging`` passes to ``basicConfig``. If those stop being the
-    same string, the assertions above would be testing a formatter nobody uses.
+    ``configure_logging`` actually installs. If those stop being the same
+    string, the assertions above would describe a formatter nobody uses.
+
+    This EXECUTES ``configure_logging`` and inspects the emitted formatter
+    rather than grepping ``logging.py`` for ``format=LOG_FORMAT``. The grep
+    version was this repo's recorded "guards that check strings" defect, and
+    review demonstrated two bypasses: keeping the literal in a ``# was:``
+    comment above a changed line, and parking it in an unused function. Both
+    left the partner green while production emitted a different format -- in
+    the comment case, one that dropped the message entirely, a worse version of
+    the very #296 symptom this file exists for.
+
+    A subprocess because ``logging.basicConfig`` is a no-op once the root
+    logger has handlers, and pytest has already given it several -- so an
+    in-process call would assert against pytest's formatter, not production's.
     """
-    src = (Path(__file__).resolve().parents[1] / "app" / "core" / "logging.py").read_text(
-        encoding="utf-8"
+    backend = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "-c", _FORMATTER_PROBE % str(backend)],
+        capture_output=True,
+        text=True,
+        cwd=str(backend),
+        check=True,
     )
-    assert "format=LOG_FORMAT" in src, (
-        "configure_logging no longer formats with LOG_FORMAT, so the rendered-line "
-        "assertions in this file no longer describe production output"
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert data["installed"], "configure_logging() installed no root handler with a formatter"
+    assert data["installed"] == [data["log_format"]], (
+        f"configure_logging installs {data['installed']!r} but this file renders with "
+        f"{data['log_format']!r}; the rendered-line assertions above no longer "
+        f"describe production output."
     )

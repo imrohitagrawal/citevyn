@@ -289,17 +289,21 @@ fly deploy --app citevyn \
 > cannot start. Do not "simplify" it back to an inline `$(…)`: a command
 > substitution has no way to fail on empty.
 
-**Verify after every deploy** (this is §4.4's first step, and it is not
-optional either):
+**Verify after every deploy**, from the repo root, in the same shell (it reuses
+`$DEMO_KEY` from above):
 
 ```bash
 BASE=https://citevyn.stackclimb.com
 CHUNK=$(curl -sS "$BASE/" | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1)
-test -n "$CHUNK" || echo 'FAIL: no entry chunk in the served index.html'
 
-curl -sS "$BASE/$CHUNK" \
+curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app serving the bundle?}" \
   | CITEVYN_DEMO_API_KEY="$DEMO_KEY" ./scripts/check_bundle_key.sh
 ```
+
+> `${CHUNK:?…}` rather than a `test -n … || echo`: an `echo` does not stop the
+> next line, which would then fetch `$BASE/` itself, hand the checker a page of
+> HTML, and report "does not carry the expected demo key" — a misdiagnosis
+> during an incident, when it is least affordable.
 
 > **Why this replaced `grep -c local-demo-key   # must print 0`.** That check
 > asserted the *absence* of the old default, which is the wrong shape twice.
@@ -540,34 +544,48 @@ wrong (each costs a debugging round-trip the first time):
 ```bash
 BASE=https://citevyn.stackclimb.com
 JAR=$(mktemp)
+ANSWER=$(mktemp)
+DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
 
 SID=$(curl -sS -c "$JAR" -X POST "$BASE/v1/sessions" \
-        -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+        -H "Authorization: Bearer ${DEMO_KEY:?empty — the machine is asleep; curl /health first}" \
         -H 'Content-Type: application/json' -d '{}' \
       | jq -r .session_id)
 
-# -b sends the cookie, -c keeps the jar current if the server rotates it.
-curl -sS -b "$JAR" -c "$JAR" -X POST "$BASE/v1/sessions/$SID/messages" \
-  -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+curl -sS -b "$JAR" -c "$JAR" -X POST "$BASE/v1/sessions/${SID:?session was not created — a 401 here means the bearer is wrong}/messages" \
+  -H "Authorization: Bearer $DEMO_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"message":"How does streaming work in the Claude API?"}' > /tmp/answer.json
+  -d '{"message":"How does streaming work in the Claude API?"}' > "$ANSWER"
 
 jq '{strategy: .retrieval_strategy, answered: (.answer | length > 0),
-     n_citations: (.citations | length)}' /tmp/answer.json
+     n_citations: (.citations | length)}' "$ANSWER"
 
-# Every citation must RESOLVE, not merely be present. Two of the six corpus
-# sources cite the relative "/about", which answered a JSON 404 envelope in
-# production until that route existed (#84 item 6) — and no health check
-# noticed, because none of them follow a citation.
-jq -r '.citations[].url' /tmp/answer.json | while read -r u; do
+jq -r '.citations[].url' "$ANSWER" | while read -r u; do
   case "$u" in /*) u="$BASE$u" ;; esac
-  printf '%s %s\n' "$(curl -sS -o /dev/null -w '%{http_code}' "$u")" "$u"
+  printf '%s %s\n' "$(curl -sSL -o /dev/null -w '%{http_code}' "$u")" "$u"
 done
+
+rm -f "$JAR" "$ANSWER"
 ```
 
-A pass is: `retrieval_strategy` is `hybrid_reranked`, `answered` is `true`,
-`n_citations` is greater than 0, and **every** line of the last command starts
-with `200`. `rm -f "$JAR"` when you are done — it holds a live session cookie.
+> **Three things that are easy to get wrong here, all found by running it.**
+> `DEMO_KEY` is assigned in this block — the runbook never exports
+> `CITEVYN_DEMO_API_KEY` into your shell (it is a *Fly* secret), so a snippet
+> referring to it sends `Bearer ` and 401s, and `jq -r .session_id` then yields
+> `null` and the ask 404s for a second reason on top of the cookie one.
+> `-b` sends the cookie and `-c` keeps the jar current if the server rotates
+> it; **both** calls need their flag, since without `-c` on the first there is
+> no jar for the second to send. And the citation loop needs **`-L`**: two
+> `docs.anthropic.com` links answer 301 and `developers.openai.com` answers
+> 308, so without it three of five citations report a redirect on a perfectly
+> healthy deploy and you are told the release failed.
+
+A pass is: `answered` is `true`, `n_citations` is greater than 0, **every**
+line of the last command starts with `200`, and `strategy` is one of
+`hybrid_reranked`, `exact_lookup` or `cache`. `cache` is not a failure — the
+answer cache is on by default, so asking the same question twice legitimately
+returns it; re-ask with different wording if you want to exercise retrieval.
+Both temp files are removed above: the jar holds a live session cookie.
 
 Expect `retrieval_strategy: hybrid_reranked` and a non-empty `citations`
 array. **A refusal is not automatically a bug** — the corpus is six documents,

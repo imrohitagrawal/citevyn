@@ -282,12 +282,24 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     # compose path. Splitting the two needs a live stack to validate, so it is
     # tracked rather than guessed at.
     if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
-        if cat "${REPO_ROOT}/frontend/dist"/assets/*.js 2>/dev/null \
-           | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" >/dev/null 2>&1; then
+        # `find`, not `dist/assets/*.js`: the glob is one directory deep and
+        # .js-only, so a key inlined into index.html or living in a nested
+        # chunk recorded a FAIL on a perfectly good bundle. The presence check
+        # exists to survive exactly that kind of chunk refactor, so it must not
+        # be the thing that breaks on one.
+        if bundle_diagnosis="$(
+            find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
+                -exec cat {} + 2>/dev/null \
+            | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
+        )"; then
             record PASS "frontend bundle carries the current demo key"
         else
+            # The checker distinguishes "carries the PUBLIC DEFAULT" from
+            # "empty fetch" from "key absent", and a missing/non-executable
+            # script from all three. Discarding that with >/dev/null sent the
+            # operator to rebuild a frontend that was fine, so pass it through.
             record FAIL "frontend bundle carries the current demo key" \
-                "frontend/dist does not carry the demo key from .env — every browser request would 401 while this gate's own curl probes pass. Rebuild: make demo-frontend"
+                "${bundle_diagnosis:-check_bundle_key.sh produced no output} (searched frontend/dist for *.js and *.html; every browser request would 401 while this gate's own curl probes pass — rebuild with: make demo-frontend)"
         fi
     fi
 fi

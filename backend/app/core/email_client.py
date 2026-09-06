@@ -146,7 +146,12 @@ class ResendEmailClient:
             # It is also still kept out of the exception message, which is
             # issue #50's invariant.
             _logger.warning(
-                "resend_send_error status_code=%d request_id=%s",
+                # %s, not %d: a %d against a non-int raises inside logging's
+                # own formatting, which DROPS the record and writes
+                # "--- Logging error ---" to stderr. Not reachable today
+                # (httpx guarantees an int) but the failure mode is precisely
+                # the one this line was changed to fix.
+                "resend_send_error status_code=%s request_id=%s",
                 response.status_code,
                 get_current_request_id(),
                 extra={

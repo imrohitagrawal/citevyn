@@ -72,15 +72,45 @@ fi
 
 KEY="${CITEVYN_DEMO_API_KEY:-}"
 
-# ── Partner check: the expected key must exist ─────────────────────────────
-# Without this, the presence grep below degenerates to `grep -F ""`, which
-# matches anything, and the whole gate becomes a no-op that always passes.
-if [[ -z "${KEY}" ]]; then
-    echo "[FAIL] CITEVYN_DEMO_API_KEY is empty or unset." >&2
-    echo "       Nothing to look for, so this check cannot pass. The usual cause" >&2
-    echo "       is that the Fly machine had scaled to zero and" >&2
+# ── Partner check: the expected key must exist AND be a plausible key ──────
+# Without this, the presence test below degenerates towards `index($0, "")`,
+# which matches anything, and the whole gate becomes a no-op that always
+# passes. Three degenerate shapes, all of which reviewers demonstrated:
+#
+#   ""    -- the empty substitution from a machine that has scaled to zero
+#   "  "  -- whitespace only; `-z` is FALSE for it, and a space occurs in
+#            essentially every bundle, so it passed on a bundle baked with ""
+#   "a"   -- one character; matches every bundle ever built
+#
+# The floor is 16 because that is what `Settings._is_weak_secret` already
+# enforces for CITEVYN_DEMO_API_KEY in production, so no key this gate will
+# ever legitimately see is shorter. Borrowing the existing threshold keeps one
+# definition of "too weak to be real" rather than inventing a second.
+_MIN_KEY_LENGTH=16
+_STRIPPED="${KEY//[[:space:]]/}"
+
+if [[ -z "${_STRIPPED}" ]]; then
+    echo "[FAIL] CITEVYN_DEMO_API_KEY is empty, unset, or whitespace only." >&2
+    echo "       Nothing to look for, so this check cannot pass — and a blank" >&2
+    echo "       needle would match almost any bundle, reporting a false PASS." >&2
+    echo "       The usual cause is that the Fly machine had scaled to zero and" >&2
     echo "       'fly ssh console -C printenv' returned nothing — wake it with" >&2
     echo "       'curl -sS https://citevyn.stackclimb.com/health' and retry." >&2
+    exit 1
+fi
+
+# The publicly-known local default is 14 characters and is a LEGITIMATE value
+# on a developer's machine — `make deploy-verify` against a local compose stack
+# whose .env uses it must still pass, exactly as it did before this check
+# existed. It is exempt by name rather than by lowering the floor, because
+# lowering the floor to 14 would be an arbitrary number chosen to fit one
+# string. It cannot be abused in production: Settings refuses to boot with this
+# value when CITEVYN_ENVIRONMENT=production (_reject_default_demo_key_in_production).
+if [[ "${#KEY}" -lt "${_MIN_KEY_LENGTH}" && "${KEY}" != "local-demo-key" ]]; then
+    echo "[FAIL] CITEVYN_DEMO_API_KEY is ${#KEY} characters; production requires at" >&2
+    echo "       least ${_MIN_KEY_LENGTH} (app/core/config.py: _is_weak_secret). A key this short is" >&2
+    echo "       either truncated or not a real key, and a short needle can match a" >&2
+    echo "       bundle by coincidence — which would be a false PASS." >&2
     exit 1
 fi
 

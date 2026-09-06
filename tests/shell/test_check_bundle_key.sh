@@ -70,7 +70,7 @@ fi
 #      empty string; the browser then sends `Authorization: Bearer ` and every
 #      call 401s. The old absence check printed 0 here and reported success.
 OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]]; then
+if [[ ${RC} -eq 1 ]]; then
     pass "a bundle built with an EMPTY build arg FAILS (the #296 blind spot)"
 else
     fail "an empty-key bundle passed — this is the exact hole being fixed"
@@ -85,7 +85,7 @@ fi
 
 # ── 3. The original v6 outage: the arg was not passed at all. ──────────────
 OUT="$(bundle_with "local-demo-key" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]]; then
+if [[ ${RC} -eq 1 ]]; then
     pass "a bundle carrying the public default FAILS (the v6 shape)"
 else
     fail "a default-key bundle passed (rc=${RC})"
@@ -98,7 +98,7 @@ fi
 
 # ── 4. A DIFFERENT non-empty key (rotated secret, wrong app) also fails. ───
 OUT="$(bundle_with "some-other-key-that-is-long-enough-x" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]]; then
+if [[ ${RC} -eq 1 ]]; then
     pass "a bundle carrying a DIFFERENT key FAILS"
 else
     fail "a mismatched key passed (rc=${RC})"
@@ -107,17 +107,44 @@ fi
 # ── 5. The vacuity trap: an empty EXPECTED key must not make the check pass
 #      on everything. `grep -F ""` matches any input, so without the partner
 #      guard this whole gate would be a no-op that always reports success.
-for expected in "" ; do
-    OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="${expected}" "${CHECK}" 2>&1)"; RC=$?
-    if [[ ${RC} -ne 0 ]]; then
-        pass "an EMPTY expected key FAILS instead of matching everything"
-    else
-        fail "an empty expected key passed — the gate is vacuous"
-    fi
-done
+OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 1 ]]; then
+    pass "an EMPTY expected key FAILS instead of matching everything"
+else
+    fail "an empty expected key passed — the gate is vacuous"
+fi
+
+# WHITESPACE-ONLY is not caught by `-z`, and a space occurs in essentially
+# every bundle — so this passed on a bundle baked with "" until the guard
+# stripped whitespace before testing.
+OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="   " "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 1 ]]; then
+    pass "a WHITESPACE-ONLY expected key FAILS (it would match almost anything)"
+else
+    fail "a whitespace-only expected key passed on an empty-arg bundle — vacuous"
+fi
+
+# A one-character key matches every bundle ever built.
+OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="a" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 1 ]]; then
+    pass "a key below the 16-char production floor FAILS"
+else
+    fail "a 1-character expected key passed on an empty-arg bundle — vacuous"
+fi
+# ...but the publicly-known LOCAL DEFAULT is 14 chars and is a legitimate value
+# on a developer's machine. The length floor must not break `make deploy-verify`
+# against a local stack — a regression the first version of that floor caused,
+# caught by tests/shell/test_deploy_verify_bundle_gate.sh.
+OUT="$(bundle_with "local-demo-key" | CITEVYN_DEMO_API_KEY="local-demo-key" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 0 ]]; then
+    pass "the 14-char local default is accepted when it is genuinely the key"
+else
+    fail "the local-dev default was rejected by the length floor (rc=${RC}): ${OUT}"
+fi
+
 # unset, not merely empty
 OUT="$(bundle_with "${GOOD_KEY}" | env -u CITEVYN_DEMO_API_KEY "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]]; then
+if [[ ${RC} -eq 1 ]]; then
     pass "an UNSET expected key FAILS"
 else
     fail "an unset expected key passed — the gate is vacuous"
@@ -126,7 +153,7 @@ fi
 # ── 6. An empty bundle (a 404 fetched into the pipe) must FAIL, not read as
 #      'key absent'... which it also is, but for a reason the operator needs.
 OUT="$(printf '' | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]] && printf '%s' "${OUT}" | grep -q 'empty'; then
+if [[ ${RC} -eq 1 ]] && printf '%s' "${OUT}" | grep -q 'empty'; then
     pass "an empty bundle FAILS and says the fetch produced nothing"
 else
     fail "an empty bundle was not reported as a fetch problem (rc=${RC}): ${OUT}"
@@ -159,7 +186,7 @@ else
     fail "a key with metacharacters was rejected (rc=${RC}): ${OUT}"
 fi
 OUT="$(bundle_with 'aXbYcZdQeWfAgBh-0123456789abcdef' | CITEVYN_DEMO_API_KEY="${META_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -ne 0 ]]; then
+if [[ ${RC} -eq 1 ]]; then
     pass "metacharacters are NOT treated as regex wildcards"
 else
     fail "'.' matched an arbitrary character — the comparison is not literal"
@@ -175,8 +202,13 @@ fi
 
 # ── Non-vacuity: this file must actually have asserted something. A suite
 #    that silently collects zero cases reports green while guarding nothing.
-if [[ ${ASSERTIONS} -lt 14 ]]; then
-    echo "  FAIL — only ${ASSERTIONS} assertions ran; expected at least 14"
+# PINNED EXACTLY, not a floor. Under `>= 14` with 16 running, two whole cases
+# could be deleted and the suite still printed "all passed" — demonstrated in
+# review. Bump this deliberately when you add a case.
+_EXPECTED_ASSERTIONS=19
+if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
+    echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
+    echo "         A case was added or removed: update _EXPECTED_ASSERTIONS on purpose."
     FAILURES=$((FAILURES + 1))
 fi
 

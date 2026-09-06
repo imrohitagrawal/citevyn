@@ -10,7 +10,7 @@ operator copies out of ``docs/DEPLOY_FLY.md`` §4.1.
 
 On 2026-09-02 that list was missing ``VITE_API_DEMO_KEY``. The image built
 fine, ``/health`` stayed green, and every browser call 401'd for about an hour
-(release v6, fixed by v7) — #296.
+(release v6, fixed by v7) -- #296.
 
 Prose cannot hold this. The runbook already *warned* about the failure in three
 separate paragraphs while its own verification snippet was blind to it. This is
@@ -21,18 +21,35 @@ WHY THE REQUIRED SET IS DERIVED, NOT LISTED
 -------------------------------------------
 A hard-coded list of "args that matter" rots exactly like the docs it guards --
 the next argument arrives undocumented and the list still passes. So the set is
-read out of the Dockerfile's ``RUN ... npm run build`` line: anything threaded
-into that command is, by construction, baked into what browsers download and
-therefore must be chosen deliberately at deploy time.
+read out of the Dockerfile's frontend stage.
+
+It is derived from the ``ARG`` DECLARATIONS, not from the ``RUN`` line's env
+prefix. The first version of this file scanned the prefix for the exact
+spelling ``NAME="${NAME}"``, and adversarial review defeated it twice with a
+build arg that is still baked into the bundle: written unbraced as
+``VITE_X="$VITE_X"``, and hoisted to ``ENV VITE_X=${VITE_X}`` (Docker's own
+recommended style). Both left an undocumented baked argument with the suite
+green -- the precise rot this design claims to prevent, reached through a
+different quoting style. An ``ARG`` line has one spelling; a use site has many.
+
+WHY COMMENTS ARE STRIPPED BEFORE EVERY ASSERTION
+------------------------------------------------
+Adversarial review satisfied three assertions in this file with a shell COMMENT
+while the real mechanism was gone -- the runbook still *said* ``-b "$JAR"`` and
+``check_bundle_key.sh`` in a comment above a command that did neither. That is
+the repo's recorded "a guard satisfied by a comment" defect, and it is the same
+shape as the bug this PR fixes. Everything below reads
+:func:`_runnable_bash`, which deletes comment lines and joins backslash
+continuations, so an assertion can only be satisfied by something an operator
+would actually EXECUTE.
 
 WHY `fly.toml` IS NOT ACCEPTED AS AN ALTERNATIVE HOME
 ------------------------------------------------------
 It would be a reasonable place for ``VERSION``, but ``VITE_API_DEMO_KEY`` is a
-credential: ``fly.toml`` is tracked in git, and
-``test_fly_config.py::test_fly_toml_has_no_plaintext_credentials`` already
-forbids putting it there. The CLI argument, read from the running machine, is
-the only correct route -- so the runbook is the only place this can be
-asserted.
+credential: ``fly.toml`` is tracked in git, and ``test_fly_config.py`` already
+forbids putting a plaintext credential there. The CLI argument, read from the
+running machine, is the only correct route -- so the runbook is the only place
+this can be asserted.
 
 SCOPE, STATED HONESTLY
 ----------------------
@@ -55,89 +72,148 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE = _REPO_ROOT / "infra" / "docker" / "Dockerfile.api"
 _RUNBOOK = _REPO_ROOT / "docs" / "DEPLOY_FLY.md"
 
+# Accepted `--build-arg` value shapes. This is a WHITELIST, deliberately.
+#
+# The first version was a blacklist -- it flagged `$(...)` and an unguarded
+# `${...}` and accepted everything else. Two forms walked straight through,
+# each reintroducing the exact defect it exists to prevent: a BACKTICK
+# substitution (which contains neither "$(" nor "${") and a brace-less
+# `"$DEMO_KEY"`. A guard that enumerates the BAD forms only ever catches the
+# ones its author already thought of; enumerating the GOOD forms fails closed
+# on everything else, including the next syntax nobody has thought of yet.
+_BUILD_ARG_RE = re.compile(r'--build-arg ([A-Z][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|\S+)')
 
-def _baked_build_args() -> list[str]:
-    """Build args threaded into the frontend's ``npm run build``.
+# `"${VAR:?message}"` and nothing else -- anchored to the WHOLE value, so a
+# guarded expansion with anything appended (`"${VAR:?x}`evil`"`) is rejected.
+# `[^{}]*` in the message keeps a nested `${OTHER:-default}` out.
+_GUARDED_EXPANSION_RE = re.compile(r'^"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^{}]*\}"$')
 
-    These end up inside the JS every visitor downloads, so each one is a
-    deploy-time decision rather than an implementation detail.
+# A literal with no expansion syntax at all: `true`, `dev`, `1.2.3`.
+_PLAIN_LITERAL_RE = re.compile(r'^"?[A-Za-z0-9_.:/-]*"?$')
 
-    Read out of the Dockerfile text rather than by running docker: the point is
-    the contract between two files an operator reads, and a test that needs a
-    daemon would not run in CI.
+
+def _frontend_stage() -> str:
+    """The Dockerfile text from `AS frontend` up to the next stage.
+
+    Scoped so a `VERSION` ARG in the builder/runtime stages -- which is not
+    baked into the browser bundle and is already handled -- is not swept in.
     """
     src = _DOCKERFILE.read_text(encoding="utf-8")
-    # The RUN command continues across backslash-newlines; join them first so
-    # the whole invocation is one string.
-    joined = re.sub(r"\\\n\s*", " ", src)
-    run_line = next(
-        (
-            line
-            for line in joined.splitlines()
-            if line.startswith("RUN ") and "npm run build" in line
-        ),
-        None,
-    )
-    if run_line is None:
-        return []
-    # `RUN VITE_API_DEMO_KEY="${VITE_API_DEMO_KEY}" VITE_API_LIVE="${...}" npm run build`
-    # -- the env assignments that precede the command.
-    prefix = run_line.split("npm run build")[0]
-    return re.findall(r'\b([A-Z][A-Z0-9_]*)="\$\{\1\}"', prefix)
+    match = re.search(r"^FROM .* AS frontend\n(.*?)(?=^FROM )", src, re.S | re.M)
+    return match.group(1) if match else ""
 
 
-def _deploy_command() -> str:
-    """The ``fly deploy`` shell block from §4.1, and nothing else.
+def _baked_build_args() -> list[str]:
+    """Every ``ARG`` declared in the frontend stage.
 
-    Scoped to the section on purpose. Searching the whole file would pass on a
-    prose mention of the argument (§4.1 has three) and would also scan §6.1's
-    unrelated ``fly deploy --image`` rollback command, which legitimately takes
-    no build arguments because it redeploys an image that is already built.
+    These are, by construction, the knobs the browser bundle can be built
+    against, so each is a deploy-time decision rather than an implementation
+    detail. Read from the Dockerfile text rather than by running docker: the
+    subject is the contract between two files an operator reads, and a test
+    needing a daemon would not run in CI.
+    """
+    return re.findall(r"^ARG ([A-Z][A-Z0-9_]*)", _frontend_stage(), re.M)
+
+
+def _runnable_bash(section: str | None = None) -> str:
+    """Fenced bash the operator would actually execute, comments removed.
+
+    Three transformations, each load-bearing:
+
+    * only ```` ```bash ```` fences -- prose is commentary, and this file must be
+      able to DISCUSS the check it replaced without tripping over the mention.
+      A whole-file substring search cannot: the first version of
+      :func:`test_the_blind_absence_check_has_not_come_back` failed on the very
+      paragraph explaining why the old check was removed.
+    * blockquote markers stripped -- §4.1 nests code inside ``>`` quotes and an
+      operator runs that code just the same.
+    * COMMENT LINES DELETED and backslash continuations joined -- so an
+      assertion is satisfied only by a real command. Review defeated three
+      assertions here by moving the required text into a comment above a
+      command that no longer did the thing.
     """
     text = _RUNBOOK.read_text(encoding="utf-8")
-    section = re.search(r"^### 4\.1 [^\n]*\n(.*?)(?=^#{2,3} )", text, re.S | re.M)
-    if section is None:
-        return ""
-    blocks = re.findall(r"^```bash\n(.*?)^```", section.group(1), re.S | re.M)
-    return next((b for b in blocks if "fly deploy" in b), "")
+    if section is not None:
+        match = re.search(
+            rf"^### {re.escape(section)} [^\n]*\n(.*?)(?=^#{{2,3}} )", text, re.S | re.M
+        )
+        text = match.group(1) if match else ""
+    unquoted = re.sub(r"^> ?", "", text, flags=re.M)
+    blocks = re.findall(r"^```bash\n(.*?)^```", unquoted, re.S | re.M)
+    joined = re.sub(r"\\\n\s*", " ", "\n".join(blocks))
+    return "\n".join(ln for ln in joined.splitlines() if not ln.lstrip().startswith("#"))
+
+
+def _deploy_commands() -> list[str]:
+    """EVERY `fly deploy` command line in §4.1, not just the first.
+
+    Review hid a defective command behind a correct-looking decoy: the old
+    implementation took the first matching block, so adding an illustrative
+    block above the real one let the real one drop ``VITE_API_DEMO_KEY`` with
+    the suite green -- reproducing release v6 in the command an operator
+    copies. Asserting over all of them removes the hiding place.
+    """
+    return [ln for ln in _runnable_bash("4.1").splitlines() if "fly deploy" in ln]
 
 
 # ---------------------------------------------------------------------------
-# Partners. Every assertion below is of the form "X is present in Y". Each one
-# passes trivially if the extraction returns nothing, so the extractions are
-# pinned first -- otherwise a Dockerfile reformat or a heading rename would
-# silently reduce this file to zero guarded cases and still report green.
+# Partners. Every assertion below is "X is present in Y", which passes
+# trivially if the extraction returns nothing. The extractions are pinned
+# first -- otherwise a Dockerfile reformat or a heading rename would silently
+# reduce this file to zero guarded cases and still report green.
 # ---------------------------------------------------------------------------
 
 
 def test_the_dockerfile_extraction_finds_the_baked_args_at_all() -> None:
     args = _baked_build_args()
-    assert len(args) >= 2, f"expected at least 2 baked build args, found {args}"
+    assert _frontend_stage(), "could not locate the `AS frontend` stage in Dockerfile.api"
+    assert len(args) >= 2, f"expected at least 2 ARGs in the frontend stage, found {args}"
     assert "VITE_API_DEMO_KEY" in args, (
         f"VITE_API_DEMO_KEY is the argument whose absence caused #296; if it is no "
-        f"longer threaded into the frontend build this guard has lost its subject. "
+        f"longer declared in the frontend stage this guard has lost its subject. "
         f"Found: {args}"
     )
 
 
+def test_every_declared_arg_is_actually_threaded_into_the_build() -> None:
+    """The ARG list is only the right subject if the args reach Vite.
+
+    Without this, someone could silence a required case by deleting the use
+    site and leaving the declaration -- or, worse, leave a declared-but-unused
+    ARG that this file then demands the runbook pass for no reason.
+    """
+    stage = _frontend_stage()
+    unused = [a for a in _baked_build_args() if stage.count(a) < 2]
+    assert not unused, (
+        f"declared in the frontend stage but never used: {unused}. Either thread them "
+        f"into `npm run build` (or an ENV) or delete the ARG -- a declared-but-unused "
+        f"build arg makes this guard demand a deploy flag that does nothing."
+    )
+
+
 def test_the_runbook_extraction_finds_the_deploy_command_at_all() -> None:
-    cmd = _deploy_command()
-    assert cmd, "no ```bash block containing 'fly deploy' found under '### 4.1'"
-    assert "--build-arg" in cmd, f"§4.1's deploy command passes no build args at all:\n{cmd}"
+    cmds = _deploy_commands()
+    assert cmds, "no runnable `fly deploy` line found under '### 4.1'"
+    assert all("--build-arg" in c for c in cmds), (
+        f"a §4.1 deploy command passes no build args at all:\n{cmds}"
+    )
 
 
 def test_the_extraction_is_scoped_to_section_4_1() -> None:
     """The rollback command in §6.1 must not be what we are reading.
 
-    Without this, a future edit that broadens the section regex would start
-    matching ``fly deploy --image``, which passes no build args -- and the
-    guard would fail confusingly, or worse, pass against the wrong command.
+    Without this, a future edit that broadened the section regex would start
+    matching ``fly deploy --image``, which passes no build args -- so the guard
+    would fail confusingly, or pass against the wrong command.
     """
-    cmd = _deploy_command()
-    assert "--image" not in cmd, (
+    cmds = _deploy_commands()
+    assert not any("--image" in c for c in cmds), (
         "§4.1 extraction picked up the §6.1 rollback command (`fly deploy --image`)"
     )
-    assert "--app citevyn" in cmd
+    # Asserted on the deploy LINE. Review showed a whole-block check was
+    # satisfied by the `fly ssh console --app citevyn` line above it, so
+    # removing `--app` from the deploy command alone stayed green.
+    assert all("--app citevyn" in c for c in cmds), f"a §4.1 deploy command has no --app: {cmds}"
 
 
 # ---------------------------------------------------------------------------
@@ -148,15 +224,15 @@ def test_the_extraction_is_scoped_to_section_4_1() -> None:
 @pytest.mark.parametrize("arg", _baked_build_args() or ["<extraction-failed>"])
 def test_every_baked_build_arg_is_passed_by_the_deploy_command(arg: str) -> None:
     """A prose mention does not count -- it must be an actual `--build-arg`."""
-    cmd = _deploy_command()
-    assert f"--build-arg {arg}=" in cmd, (
-        f"docs/DEPLOY_FLY.md §4.1 does not pass `--build-arg {arg}=`.\n"
-        f"{arg} is threaded into `npm run build` in infra/docker/Dockerfile.api, so "
-        f"its value is baked into the bundle every visitor downloads. Omitting it "
-        f"ships the Dockerfile's default -- which for VITE_API_DEMO_KEY is the "
-        f"publicly-known `local-demo-key`, and production rejects it with 401 on "
-        f"every browser call while /health stays green. That is #296.\n"
-        f"The deploy command found was:\n{cmd}"
+    cmds = _deploy_commands()
+    missing = [c for c in cmds if f"--build-arg {arg}=" not in c]
+    assert cmds and not missing, (
+        f"a docs/DEPLOY_FLY.md §4.1 deploy command does not pass `--build-arg {arg}=`.\n"
+        f"{arg} is declared in Dockerfile.api's frontend stage, so its value is baked "
+        f"into the bundle every visitor downloads. Omitting it ships the Dockerfile's "
+        f"default -- which for VITE_API_DEMO_KEY is the publicly-known "
+        f"`local-demo-key`, and production rejects it with 401 on every browser call "
+        f"while /health stays green. That is #296.\nCommands found:\n" + "\n".join(cmds)
     )
 
 
@@ -173,41 +249,23 @@ def test_no_build_arg_can_silently_receive_an_empty_value() -> None:
     v6. A command substitution has no way to fail on empty; `${VAR:?msg}` exits
     the shell before `fly deploy` runs, in both bash and zsh.
     """
-    cmd = _deploy_command()
-    offenders: list[str] = []
-    for name, value in re.findall(r'--build-arg ([A-Z][A-Z0-9_]*)=("[^"]*"|\S+)', cmd):
-        if "$(" in value:
-            offenders.append(f"{name}: inline command substitution {value} cannot fail on empty")
-        elif "${" in value and ":?" not in value:
-            offenders.append(f"{name}: {value} uses an unguarded expansion; use ${{VAR:?msg}}")
+    offenders = [
+        f"{name}={value}"
+        for cmd in _deploy_commands()
+        for name, value in _BUILD_ARG_RE.findall(cmd)
+        if not _GUARDED_EXPANSION_RE.match(value) and not _PLAIN_LITERAL_RE.match(value)
+    ]
     assert not offenders, (
         "docs/DEPLOY_FLY.md §4.1 can pass an empty build argument:\n  "
         + "\n  ".join(offenders)
-        + "\nAssign to a shell variable first and reference it as "
-        '`"${VAR:?why this is empty}"` so the deploy aborts instead of shipping '
-        "a bundle whose baked value is the empty string (#296)."
+        + "\nA build-arg value must be either a plain literal (no expansion at all) or "
+        'a fully guarded `"${VAR:?why this is empty}"`, so the deploy aborts instead '
+        "of shipping a bundle whose baked value is the empty string (#296)."
     )
 
 
-def _runnable_bash() -> str:
-    """Every fenced bash block in the runbook, concatenated.
-
-    Scoped to fenced blocks because that is what an operator copies and runs.
-    Prose is commentary -- and this file must be able to *discuss* the check it
-    replaced without tripping over the mention, which a whole-file substring
-    search does. That is not hypothetical: the first version of the test below
-    failed on the very paragraph explaining why the old check was removed.
-
-    Blockquote markers are stripped first: §4.1 nests code inside `>` quotes,
-    and an operator runs that code just the same.
-    """
-    text = _RUNBOOK.read_text(encoding="utf-8")
-    unquoted = re.sub(r"^> ?", "", text, flags=re.M)
-    return "\n".join(re.findall(r"^```bash\n(.*?)^```", unquoted, re.S | re.M))
-
-
 def test_the_runbook_has_runnable_bash_blocks_at_all() -> None:
-    """Partner for the two assertions below, which both check for absence."""
+    """Partner for the absence assertions below."""
     blocks = _runnable_bash()
     assert len(blocks) > 500, f"expected substantial runnable bash, got {len(blocks)} chars"
     assert "fly deploy" in blocks
@@ -220,21 +278,29 @@ def test_the_blind_absence_check_has_not_come_back() -> None:
     contains neither the default nor any key, so that check prints 0 and
     reports success on precisely the outage it was added to catch. It was
     replaced by `scripts/check_bundle_key.sh`, which asserts the PRESENCE of
-    the expected non-empty key. This pins the replacement so a future edit does
-    not quietly restore the check that could not see the failure.
+    the expected non-empty key.
+
+    Both halves are structural rather than substring, because review defeated
+    both: quoting the pattern (`grep -c 'local-demo-key'`) walked past a
+    literal search, and demoting the replacement to a COMMENT satisfied its
+    presence check while nothing ran it.
     """
     blocks = _runnable_bash()
-    assert "check_bundle_key.sh" in blocks, (
-        "docs/DEPLOY_FLY.md no longer RUNS scripts/check_bundle_key.sh -- the "
-        "post-deploy bundle verification has been removed, or demoted to prose."
+    # `|` then anything but another pipe (the env-var prefix that passes the key)
+    # then the script -- so it must be a real pipeline TARGET, not a mention.
+    assert re.search(r"\|[^|\n]*\bcheck_bundle_key\.sh\b", blocks), (
+        "docs/DEPLOY_FLY.md does not PIPE a bundle into scripts/check_bundle_key.sh. "
+        "A mention in prose or a comment does not run it."
     )
     assert (_REPO_ROOT / "scripts" / "check_bundle_key.sh").exists(), (
         "the runbook references scripts/check_bundle_key.sh but the script is missing"
     )
-    assert "grep -c local-demo-key" not in blocks, (
-        "the absence-based bundle check is back in docs/DEPLOY_FLY.md. It prints 0 -- "
-        "reports success -- on a bundle built with an empty build arg, which is the "
-        "#296 outage reached through a different string. Use "
+    revived = [ln for ln in blocks.splitlines() if re.search(r"grep\b[^|]*local-demo-key", ln)]
+    assert not revived, (
+        "the absence-based bundle check is back in docs/DEPLOY_FLY.md:\n  "
+        + "\n  ".join(revived)
+        + "\nIt prints 0 -- reports success -- on a bundle built with an empty build "
+        "arg, which is the #296 outage reached through a different string. Use "
         "scripts/check_bundle_key.sh, which asserts the expected key is PRESENT."
     )
 
@@ -248,18 +314,81 @@ def test_the_smoke_call_sends_the_session_cookie() -> None:
     one line earlier comes back 404. The runbook's snippet had no jar and could
     never have worked as written.
     """
-    blocks = _runnable_bash()
-    ask = next(
-        (b for b in blocks.split("\n\n") if "/messages" in b),
+    lines = _runnable_bash().splitlines()
+
+    ask = next((ln for ln in lines if "/messages" in ln and "curl" in ln), "")
+    assert ask, "no runnable curl posting to /messages found in docs/DEPLOY_FLY.md"
+    assert '-b "$JAR"' in ask, (
+        f"the /messages call does not SEND the session cookie (-b). Without it the "
+        f"call returns 404 not_found. Line:\n{ask}"
+    )
+
+    # Selected by EXCLUDING /messages. Review showed that matching on
+    # "/v1/sessions" alone fell through to the /messages line -- which contains
+    # that substring and carries its own -c -- so deleting -c from the create
+    # call left the suite green while no jar was ever saved.
+    create = next(
+        (ln for ln in lines if "/v1/sessions" in ln and "/messages" not in ln and "curl" in ln),
         "",
     )
-    assert ask, "no runnable block posting to /messages found in docs/DEPLOY_FLY.md"
-    assert '-b "$JAR"' in ask, (
-        "the /messages call in docs/DEPLOY_FLY.md does not send the session cookie "
-        f"(-b). Without it the call returns 404 not_found. Block:\n{ask}"
+    assert create, "no runnable curl creating a session (POST /v1/sessions) found"
+    assert '-c "$JAR"' in create, (
+        f"the POST /v1/sessions call does not SAVE a cookie jar (-c), so there is "
+        f"nothing for the /messages call to send back. Line:\n{create}"
     )
-    create = next((b for b in blocks.split("\n\n") if "/v1/sessions" in b and "-c " in b), "")
-    assert create, (
-        "the POST /v1/sessions call does not SAVE a cookie jar (-c), so there is "
-        "nothing for the /messages call to send back."
+
+    # The bearer must come from a variable the runbook actually sets. Review
+    # found §4.4 using $CITEVYN_DEMO_API_KEY, which the runbook never assigns
+    # in the operator's shell -- so the bearer was empty, /v1/sessions 401'd,
+    # and the ask 404'd for a SECOND reason after the cookie fix.
+    # Searched in the RUNNABLE bash, and only as a line that STARTS with the
+    # assignment. Matching the whole document instead accepts
+    # `fly secrets set ... CITEVYN_DEMO_API_KEY=...` from §3 -- which sets a
+    # *Fly* secret, not a variable in the operator's shell. That false negative
+    # is not hypothetical: it let this exact bypass through on the first
+    # attempt at this assertion. Continuations are already joined by
+    # `_runnable_bash`, so the `fly secrets set` block is one line beginning
+    # with `fly`, and cannot satisfy the anchor.
+    # Anchored at COLUMN 0 and excluding continuation lines. §3's block writes
+    # `  CITEVYN_DEMO_API_KEY=... \` as an indented ARGUMENT to `fly secrets
+    # set` -- it sets a Fly secret, not a shell variable, and its trailing `\`
+    # survives the continuation join because a comment follows it. An indented,
+    # backslash-terminated line is an argument; a real assignment the
+    # operator's shell executes starts at column 0.
+    assigned = "\n".join(
+        ln for ln in _runnable_bash().splitlines() if not ln.rstrip().endswith("\\")
     )
+    for line in (ask, create):
+        bearer = re.search(r"Bearer \$\{?([A-Za-z_][A-Za-z0-9_]*)", line)
+        assert bearer, f"no bearer variable in:\n{line}"
+        name = bearer.group(1)
+        assert re.search(rf"^(export )?{name}=", assigned, re.M), (
+            f"the smoke call sends `Bearer ${name}` but no runnable block in "
+            f"docs/DEPLOY_FLY.md ASSIGNS {name} in the operator's shell, so the bearer "
+            f"is empty, POST /v1/sessions 401s, and the ask then 404s for a second "
+            f"reason on top of the cookie one. (A `fly secrets set {name}=` line sets a "
+            f"Fly secret, not a shell variable, and does not count.)"
+        )
+
+
+def test_the_citation_check_follows_redirects() -> None:
+    """Without `-L`, three of five real corpus URLs report 301/308.
+
+    Measured against the live corpus URLs: two `docs.anthropic.com` links
+    answer 301 and `developers.openai.com` answers 308, so a bare
+    `%{http_code}` tells the operator a healthy deploy has failed. That is this
+    PR's own defect -- a check whose verdict does not match reality -- pointed
+    the other way, so it gets a guard rather than a comment.
+    """
+    citation = [
+        ln
+        for ln in _runnable_bash().splitlines()
+        if "curl" in ln and "%{http_code}" in ln and "$u" in ln
+    ]
+    assert citation, "no runnable citation-URL status check found in docs/DEPLOY_FLY.md"
+    for line in citation:
+        assert re.search(r"-[a-zA-Z]*L", line), (
+            f"the citation check does not follow redirects (-L), so a healthy deploy "
+            f"reports 301/308 for docs.anthropic.com and developers.openai.com and the "
+            f"operator is told it failed. Line:\n{line}"
+        )
