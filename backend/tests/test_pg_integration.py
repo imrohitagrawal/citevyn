@@ -599,3 +599,216 @@ def test_auth_sessions_magic_link_verified_at_round_trips_on_postgres(
         assert gone == 0 and kept == 1
     finally:
         engine.dispose()
+
+
+async def test_previous_good_nulls_last_is_load_bearing_on_postgres(pg_schema: str) -> None:
+    """``NULLS LAST`` decides the rollback target on Postgres — and only there (#264).
+
+    Postgres orders NULLs FIRST under ``DESC``, so without the clause a
+    never-promoted ``previous_good`` row outranks every real one and
+    ``GET /health/index`` names it as the rollback target. SQLite already sorts
+    NULLs last under ``DESC``, so the hermetic suite cannot tell the two orderings
+    apart — this is the only place the clause can be seen to matter.
+
+    That state is reachable: ``test_promote_version_recovers_from_dual_active_state``
+    demotes two rows in one promote, and a row marked ``active`` without going
+    through a promote carries ``promoted_at IS NULL``.
+
+    Goes through :func:`resolve_index_partition` — the function ``GET /health/index``
+    actually calls — NOT a hand-written ``ORDER BY``. An earlier draft asserted the
+    raw SQL and passed happily with ``.nulls_last()`` deleted from the resolver,
+    because it was testing Postgres rather than this codebase. A later draft went
+    through ``resolve_previous_good_index``, which was true when written and stopped
+    being true the moment the route moved to the single-statement partition — that
+    function then had no production caller at all and has since been deleted.
+
+    Turns RED if ``.nulls_last()`` is dropped from ``_ORDER_BY`` in
+    ``_ordered_rows_query``: verified by doing exactly that, which flips the result
+    to ``v-never``.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import IndexStatus, IndexVersion
+    from app.services.index_resolution import resolve_index_partition
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        now = datetime.now(UTC)
+        async with maker() as session:
+            session.add_all(
+                [
+                    IndexVersion(
+                        index_version="v-real",
+                        status=IndexStatus.previous_good,
+                        source_version_hash="sha256:real",
+                        created_at=now,
+                        promoted_at=now - timedelta(hours=1),
+                    ),
+                    IndexVersion(
+                        index_version="v-never",
+                        status=IndexStatus.previous_good,
+                        source_version_hash="sha256:never",
+                        created_at=now,
+                        promoted_at=None,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            winner = (await resolve_index_partition(session)).previous_good
+
+            # Partner control: the SAME rows under a plain ``DESC`` hand back the
+            # never-promoted row, so the assertion above is a result of the clause
+            # and not of Postgres agreeing with us by default.
+            from sqlalchemy import text
+
+            plain = (
+                await session.execute(
+                    text(
+                        "SELECT index_version FROM index_versions "
+                        "WHERE status = 'previous_good' "
+                        "ORDER BY promoted_at DESC, index_version DESC LIMIT 1"
+                    )
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+
+    assert winner is not None
+    assert winner.index_version == "v-real"
+    assert plain == "v-never"
+
+
+async def test_health_index_rows_come_from_one_snapshot_on_postgres(pg_schema: str) -> None:
+    """#351: a promote landing mid-poll must not put ONE index in BOTH fields.
+
+    `GET /health/index` answers two questions — which index is active, and which
+    is the rollback target. Answering them with two statements is not atomic:
+    nothing in ``backend/app`` sets an isolation level, so psycopg3's default
+    READ COMMITTED gives each statement its own snapshot, and a promote
+    committing in between makes the outgoing index the answer to both.
+
+    SQLite cannot see this — the hermetic suite runs a single connection with no
+    concurrent writer — which is why this lives here.
+
+    The interleaving is forced DETERMINISTICALLY rather than raced: an
+    ``after_cursor_execute`` listener commits a promote on a separate connection
+    the moment the first ``index_versions`` SELECT returns. Against two
+    statements that lands squarely between them; against one it can only land
+    after everything, which is the whole point.
+
+    The CONTROL runs the two-statement shape this PR replaced and proves the
+    hazard reproduces under this exact mechanism — without it the assertion
+    below would be a check that counts nothing.
+
+    Turns RED if ``resolve_index_partition`` fetches the two rows with separate
+    queries again — verified by doing exactly that, which makes the fix half
+    report the same index twice.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import psycopg
+    from psycopg import sql
+    from sqlalchemy import event
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import IndexStatus, IndexVersion
+    from app.services.index_resolution import (
+        _fetch,
+        partition_index_rows,
+        resolve_index_partition,
+    )
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    reader = create_async_engine(_pg_url_with_schema(pg_schema))
+    writer = create_async_engine(_pg_url_with_schema(pg_schema))
+    make_reader = async_sessionmaker(reader, expire_on_commit=False)
+    make_writer = async_sessionmaker(writer, expire_on_commit=False)
+    dsn = _pg_url().replace("postgresql+psycopg://", "postgresql://")
+
+    async def _seed() -> None:
+        async with make_writer() as s:
+            await s.execute(sa_text("DELETE FROM index_versions"))
+            now = datetime.now(UTC)
+            s.add_all(
+                [
+                    IndexVersion(
+                        index_version="v1",
+                        status=IndexStatus.active,
+                        source_version_hash="sha256:v1",
+                        created_at=now,
+                        promoted_at=now,
+                    ),
+                    IndexVersion(
+                        index_version="v2",
+                        status=IndexStatus.previous_good,
+                        source_version_hash="sha256:v2",
+                        created_at=now,
+                        promoted_at=now - timedelta(hours=1),
+                    ),
+                ]
+            )
+            await s.commit()
+
+    fired = {"n": 0}
+
+    def _promote_between(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001, ANN202
+        """Commit a promote on ANOTHER connection the instant the first read returns."""
+        if "index_versions" not in statement or fired["n"]:
+            return
+        fired["n"] = 1
+        with psycopg.connect(dsn) as c:
+            with c.cursor() as cur:
+                cur.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(pg_schema)))
+                cur.execute(
+                    "UPDATE index_versions SET status='previous_good' WHERE status='active'"
+                )
+                cur.execute(
+                    "UPDATE index_versions SET status='active', promoted_at=now() "
+                    "WHERE index_version='v2'"
+                )
+            c.commit()
+
+    def _names(active, previous):  # noqa: ANN001, ANN202
+        return (
+            active.row.index_version if active.row else None,
+            previous.index_version if previous else None,
+        )
+
+    event.listen(reader.sync_engine, "after_cursor_execute", _promote_between)
+    try:
+        # CONTROL — two statements. The promote lands between them.
+        await _seed()
+        fired["n"] = 0
+        async with make_reader() as s:
+            act = partition_index_rows(await _fetch(s, IndexStatus.active)).active
+            prev = partition_index_rows(await _fetch(s, IndexStatus.previous_good)).previous_good
+        control = _names(act, prev)
+        assert fired["n"] == 1, "the forcing listener never ran; the control proves nothing"
+        assert control[0] is not None and control[0] == control[1], (
+            f"the two-statement shape did NOT reproduce #351 under this mechanism "
+            f"(got {control}), so the assertion below would prove nothing"
+        )
+
+        # THE FIX — one statement. The same promote can only land after it.
+        await _seed()
+        fired["n"] = 0
+        async with make_reader() as s:
+            part = await resolve_index_partition(s)
+        assert fired["n"] == 1, "the forcing listener never ran against the fix"
+        active_name, previous_name = _names(part.active, part.previous_good)
+        assert active_name is not None
+        assert active_name != previous_name, (
+            f"/health/index named {active_name!r} as BOTH the active index and the rollback target"
+        )
+    finally:
+        event.remove(reader.sync_engine, "after_cursor_execute", _promote_between)
+        await reader.dispose()
+        await writer.dispose()

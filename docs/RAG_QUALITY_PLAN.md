@@ -651,7 +651,7 @@ injection 0/2, groundedness 1.000/20, MRR/precision@1 1.000, gate PASSED, zero r
   from the red `error` alert used for server/transport failures. Rate-limit *segmentation*
   (per-endpoint limits) remains a separate ops follow-up.
 - PR4.3 VectorDegrade / dead-embedding health signal. **✅ DONE** — `GET /health/index`
-  carries an additive `vector_arm` block (empty/dead/mismatch/partial/healthy) so an
+  carries an additive `vector_arm` block (ambiguous/empty/dead/mismatch/partial/healthy) so an
   operator can SEE the #97 failure (NULL embeddings) or a Tier-3 mismatch; live-verified
   on Postgres (dead 0/5 → healthy 5/5).
 
