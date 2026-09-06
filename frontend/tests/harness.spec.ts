@@ -50,8 +50,16 @@ async function loadRecording(page: Page) {
   // it can return with an empty recording and make every check below vacuous.
   // `document.fonts.load()` starts the load and resolves when it finishes, so
   // there is nothing to race.
+  //
+  // `allSettled`, not `all`: `document.fonts.load()` REJECTS with a bare
+  // `NetworkError` when a face fails to load, and that rejection would come out
+  // of `page.evaluate` as "page.evaluate: NetworkError: A network error
+  // occurred" — burying every named diagnosis below it. Measured: with the
+  // stylesheet route neutered, all three tests reported that instead of "the
+  // stylesheet reached the network". A failed load is DATA here, not an error;
+  // the assertions are what interpret it.
   const loadedFamilies = await page.evaluate(async () => {
-    await Promise.all([
+    await Promise.allSettled([
       document.fonts.load('400 16px "Geist"'),
       document.fonts.load('400 16px "JetBrains Mono"'),
     ]);

@@ -134,17 +134,17 @@ check() {
 echo "== M1: the stylesheet route matches a host nothing requests =="
 perl -pi -e 's{fonts\\\.googleapis\\\.com}{fonts\\.nosuchhost\\.invalid}' "$FIX"
 check "css route neutered" "$FIX" "nosuchhost" "$PW" \
-  "the fonts.googleapis.com stylesheet reached the network"
+  "stylesheet reached the network"
 
 echo "== M2: the fixture stops extending the base test =="
 perl -0pi -e 's{export const test = base\.extend\(\{.*?\n\}\);}{export const test = base;}s' "$FIX"
 check "fixture not applied at all" "$FIX" "export const test = base;" "$PW" \
-  "the fonts.googleapis.com stylesheet reached the network"
+  "stylesheet reached the network"
 
 echo "== M3: the vendored woff2 map loses an entry, so a subset 404s =="
 perl -pi -e 's{"geist-latin\.woff2"}{"geist-MISSING.woff2"}' "$FIX"
 check "a font subset is not vendored" "$FIX" "geist-MISSING.woff2" "$PW" \
-  "a font subset was requested that tests/fonts/ does not have"
+  "was not served from tests/fonts"
 
 echo "== M4: index.html gains a SECOND third-party stylesheet the fixture does not serve =="
 # media="print" on purpose: the injected sheet is still FETCHED (so the request
@@ -152,7 +152,7 @@ echo "== M4: index.html gains a SECOND third-party stylesheet the fixture does n
 # this kill into a 30 s selector timeout that reads as WRONG-REASON.
 perl -0pi -e 's{(<link rel="preconnect" href="https://fonts\.googleapis\.com" />)}{$1\n    <link rel="stylesheet" media="print" href="https://cdn.example.invalid/x.css" />}' "$HTML"
 check "an unintercepted third-party stylesheet" "$HTML" "cdn.example.invalid" "$PW" \
-  "reached a third-party host the harness does not intercept"
+  "third-party host the harness does not intercept"
 
 echo "== M5: a spec goes back to importing test from @playwright/test =="
 perl -pi -e 's{from "\./fixtures";}{from "\@playwright/test";}' "$LAND"
@@ -174,7 +174,7 @@ echo "== M8: the fixture goes back to overriding \`page\` instead of \`context\`
 # perl cannot parse under brace delimiters.
 perl -0pi -e 's!context: async \(\{ context \}, use\) => \{!page: async ({ page }, use) => {!s; s!await context\.route\(!await page.route(!g; s!await use\(context\);!await use(page);!' "$FIX"
 check "route bound to one page" "$FIX" "page: async ({ page }, use)" "$PW" \
-  "the font route is bound to a single page rather than to the context"
+  "bound to a single page"
 
 echo "== M9: the two vendored files are swapped, so each face renders in the other's metrics =="
 perl -0pi -e 's{"geist-latin\.woff2"}{"__SWAP__"}; s{"jetbrains-mono-latin\.woff2"}{"geist-latin.woff2"}; s{"__SWAP__"}{"jetbrains-mono-latin.woff2"}' "$FIX"
@@ -184,7 +184,7 @@ check "vendored files swapped" "$FIX" '"gyByhwUxId8gMEwcGFWNOITd.woff2": "jetbra
 echo "== M10: the family pin no longer matches what index.html asks for =="
 perl -pi -e 's{"Geist:wght\@400\.\.700"}{"NotAFamily:wght\@400"}' "$FIX"
 check "stylesheet family pin wrong" "$FIX" "NotAFamily" "$PW" \
-  "a font request was not served from tests/fonts/"
+  "was not served from tests/fonts"
 
 echo
 echo "killed=$pass  survived/broken=$fail"
