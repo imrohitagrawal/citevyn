@@ -65,3 +65,33 @@ describe("LandingPage — interactive demo question/answer sync", () => {
     expect(answer?.textContent).toContain("streaming variant");
   });
 });
+
+/**
+ * `state.pending` is a COUNT of in-flight requests; `ChatView` takes a boolean.
+ * The `> 0` at the seam is the only thing between the two, and a count is
+ * always `>= 0` — so a mutation there shows the loader on every chat screen
+ * forever. Demo mode never sets the count, which makes it the clean control.
+ */
+describe("LandingPage — the loading indicator is wired to the COUNT, not to its presence", () => {
+  it("shows no 'Searching the docs…' bubble on a demo-mode chat screen", async () => {
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    const hero = container.querySelector("#hero-input") as HTMLInputElement;
+
+    act(() => {
+      fireEvent.change(hero, { target: { value: "What is Claude Code?" } });
+      fireEvent.keyDown(hero, { key: "Enter" });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    // Partner: we really are on the chat screen with a question in it, so the
+    // absence below is not the absence of the whole view.
+    expect(container.querySelector(".chat-screen")).toBeTruthy();
+    expect(container.querySelector(".message.user-msg")?.textContent).toContain(
+      "What is Claude Code?",
+    );
+    expect(container.querySelector(".pending-bubble")).toBeNull();
+    expect(container.textContent).not.toContain("Searching the docs…");
+  });
+});

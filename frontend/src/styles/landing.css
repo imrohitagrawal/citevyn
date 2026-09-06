@@ -2154,6 +2154,16 @@ a.citation-chip:focus-visible {
   opacity: 0.85;
 }
 
+/* In flight (#62). ARIA-disabled rather than :disabled so the button keeps
+ * focus and its place in the tab order while an answer is on its way; the
+ * click handler is what refuses. The :hover override stops the button
+ * brightening under the cursor while it is refusing to act. */
+.send-button[aria-disabled="true"],
+.send-button[aria-disabled="true"]:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .composer-hint {
   margin: 10px 0 0;
   text-align: center;

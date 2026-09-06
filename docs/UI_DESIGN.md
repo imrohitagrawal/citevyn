@@ -379,7 +379,16 @@ plus "Not covered? It says so — no guessing." line.
 - "Live demo" kicker + "Ask a question." H3 + description
 - 4 selectable question buttons (each with title + mono tag)
 - Active state: `--ink` border + shadow
-- Click selects and streams the answer
+- Click selects and streams the answer. Picking a second question **stops** the
+  first stream (#353) — without that both wrote the same slot, the paragraph
+  flipped identity ~83x/second, and the longer answer could win outright and be
+  left sitting under the other question's header.
+- Leaving the landing screen stops the stream and **snaps the answer to its
+  complete text** (#329). It does not freeze where it was and does not replay
+  from the start: freezing leaves a truncated paragraph under a caret blinking
+  `infinite` (measured stuck at 40 of 298 characters, permanently), and
+  replaying costs a full 3.6s re-stream that runs entirely below the fold. The
+  snapped state is the same shape a first-time visitor already sees.
 
 **Right stage:**
 - Question row: avatar + question text, dashed border separator
@@ -462,6 +471,14 @@ below the 64px header.
 - Streaming: blinking caret (8×16px ink block, `cv-blink 1s steps(1) infinite`)
 - Sources: rendered only after completion, fade-up animation
 - Refusals: amber `⚠ NO SOURCE — REFUSED` badge
+- **Waiting (live only):** a bot bubble holding three pulsing dots
+  (`cv-pending`) and the label "Searching the docs…", inside
+  `role="status"` in an `aria-live="polite"` region, so a screen reader is
+  told the question was accepted. It scrolls with the rest of the list.
+  It is shown while ANY request is in flight — the state is a count, not a
+  flag, so a second unanswered question keeps it up after the first answer
+  lands. It hands over to the answer bubble in a single render (they never
+  both show, and there is never a frame showing neither).
 
 **Answer formatting (#303).** Answers render a deliberately tiny markdown
 subset — `**bold**`, `` `inline code` ``, and `- ` bullet lines — parsed by
@@ -489,6 +506,20 @@ system prompt constrains the model to the same subset.
 - Disclaimer: `JetBrains Mono` 11px, "DEMO — canned responses"
 - Takes focus when the chat screen mounts (`preventScroll: true`, so it cannot
   fight the duplicate-question scroll), so the chat opens ready to type
+- **While a live answer is in flight** (#62) the send button is `aria-disabled`
+  and dimmed to 0.45 opacity with `cursor: not-allowed`; the submit is refused
+  for both routes (Enter and click). Live path only — demo answers are instant
+  and never in flight, so the composer is never gated there.
+  - **Focus does not move, and the input is never disabled.** `aria-disabled`
+    rather than `disabled` because the state flips for the ~1s of a request,
+    while the reader is most likely focused on that very button (they just
+    clicked it): `disabled` would drop focus to `<body>` and the restore a
+    second later would put it nowhere. The reader keeps typing the next
+    question while they wait.
+  - The refusal happens **before** the composer is cleared, so a type-ahead
+    question is held, not eaten.
+  - The reason is announced by the pending indicator's live region below, not
+    by the button.
 
 ---
 
@@ -655,6 +686,10 @@ what is fundamentally a two-view marketing page.
 | 2026-09-06 | The two `LandingPage.authToast` sign-in tests fake `setInterval` only, and type short credentials | #344 — they were the two slowest of 443 tests (2439 ms / 1099 ms; third-slowest 673 ms) and blew vitest's 5 s per-test timeout under load, in the REQUIRED `type-check + unit tests + build` check. The issue blamed inter-keystroke macrotasks; profiling found that was a third of it. The real cost is `useLandingState`'s hero typewriter — a 24 ms `setInterval` dispatching a React state update for as long as the landing screen is mounted — so the bill is proportional to how long a test LIVES, a feedback loop that explains why only the two long tests degrade and why they pass in isolation. Faking `setTimeout` as well deadlocks the file (Testing Library cannot advance vitest's clock inside `waitFor`; all four assertions hung to the full 5 s even when idle), so only the interval is faked. Typing 38 characters cost 2537 ms in one field under load vs 92 ms for 8. Measured, six INTERLEAVED before/after full-suite pairs on the same machine: before red in 4 of 6, after green in 6 of 6, and the after arm was faster in **12 of 12** paired test timings (e.g. 5097→2620 ms, 5069→2017 ms). **No timeout raised and no assertion relaxed** — both tests still fail if `handleAuthenticated` picks the wrong toast copy, verified by mutation in both directions |
 | 2026-09-06 | `useToast` arms auto-dismiss from rendered state and cancels pending timers on unmount | Found while measuring #344, and PRE-EXISTING on `main` (reproduced there in 1 of 6 full-suite runs). The 5 s auto-dismiss `setTimeout` was fire-and-forget, so a tree unmounted inside that window left the callback queued to call `setToasts` on a component that was gone. In the browser that is a wasted wakeup; in a vitest worker it lands after the environment is torn down and **vitest exits 1 while reporting all tests as passed** — the required check going red with a green-looking report. The first fix armed in `addToast` and cleared on unmount; adversarial review MEASURED that this breaks under React StrictMode, which runs effect setup → cleanup → setup on mount: state survives that simulated remount but the cleared timer does not, so a toast added by a mount effect (the `?auth=ok` / `?connect=ok` return trips) kept its state, lost its timer and **sat on screen forever in `npm run dev`** — 2 toasts, 1 timer. Arming from rendered state instead means the next render re-arms anything that lost a timer, and an `addToast` landing after unmount schedules nothing at all because React drops the state update. Four tests, each mutation-proved; the StrictMode one reproduces the reviewer's 2-toasts/1-timer measurement exactly |
 | 2026-09-06 | `tsconfig.node.json` emits to `node_modules/.tmp/tsnode`; ten compiled-config `.gitignore` patterns deleted | #343 — `composite: true` FORCES emit, and with no `outDir` `tsc -b` wrote `vite.config.js` beside `vite.config.ts`. Vite's `DEFAULT_CONFIG_FILES` lists `.js` BEFORE `.ts`, so `npm run dev` and `npm run preview` (neither of which runs `tsc -b` first) loaded the compiled copy — and `npm run dev` is what `playwright.config.ts`'s `webServer.command` runs, making the dev server's port, proxy target and live-stub plugin come from a stale file. Cost real diagnosis time in #323. Contrary to the issue text, **Playwright itself is NOT affected** — `playwright/lib/common/index.js:1535` tries `.ts` first — so those compiled files were inert clutter, not a second instance. Guarded in `buildGuards.test.ts` by asking `ts.getOutputFileNames` (the compiler's own emit-path resolution) and then asking VITE which config it resolves; the first draft spawned a real `tsc -b --force` and was rewritten after measurement showed it pushed the suite from 36 s to 55 s and made #344 WORSE. **No visual change** |
+| 2026-09-06 | The chat composer refuses a submit while a live answer is in flight; the send button is `aria-disabled` + dimmed, the input stays enabled and focus never moves | #62 — the issue's stated mechanism no longer exists (PR #88 replaced the shared `chatTimer` and last-message targeting; its body has been rewritten). What survived is ATTRIBUTION: a user bubble is appended on submit, a bot bubble when its request RESOLVES, so two questions back to back render `[Q1][Q2][A1][A2]` and the reader credits A1 to Q2. Gating the composer makes that unreachable — Q2 cannot be submitted until A1's bubble exists. The guard is a REF, not `state.pending`: two Enter presses inside one React batch both read the state rendered before either ran, and a state guard passes both (measured: 2 requests, gate on). `aria-disabled` over `disabled` because the flip lands while the reader is focused on that button; Playwright's own actionability honours `aria-disabled`, so the e2e cover must force the click or it silently waits 7s and clicks the re-enabled button. **14 mutants, all killed.** |
+| 2026-09-06 | The "Searching the docs…" indicator counts in-flight requests instead of being a flag, and `sendLive` owns its whole lifecycle in one `finally` | #62 — it had TWO owners (`streamBot`'s first chunk, and `sendLive`'s catch), and `streamBot` has no idea which request it belongs to. With two questions overlapping, the first answer's opening chunk cleared the indicator belonging to the second, still-unanswered one. One start, one end: the `finally` also runs after the answer bubble is appended, so React batches them and there is no frame showing neither. `backToLanding`'s reset was REMOVED with it — with the gate reading a ref the reset does not touch, it would have left the loader gone while the gate was still shut and swallowed the next question with nothing on screen explaining why. |
+| 2026-09-06 | Picking a second demo-rail question stops the first stream; leaving the landing screen stops the demo stream and snaps the answer complete | #353 + #329 — `selectDemo` overwrote `timers.current.demoTimer` without stopping it, so the replaced handle was unreachable and BOTH streams wrote `state.demo.text`: measured 100 backward length jumps and 197 attribution flips over 2352 ms, and — the winner being whichever stream finishes last, a pure length race — a second click on a shorter answer under `24 × (ticks₁ − ticks₂)` ms settles on the FIRST answer permanently, under the second question's header (on the `laptop` entry, its amber NO SOURCE — REFUSED badge over a fully cited answer). #329 was the same handle missing from #312's screen-gated cleanup: measured 129 `SET_DEMO` dispatches over 3.1s into an unmounted landing DOM. Gating alone was measured to be WORSE — stuck at 40 of 298 chars with the caret blinking `infinite` — so the cleanup snaps to the full text, the shape the initial state already has. Real-browser walkthrough after the fix: 0 backward jumps, header and answer agree, 32 → 204 chars on return, 0 carets in `#demo`. |
+| 2026-09-06 | `waitStreamDone` (Playwright helper) now waits for the pending bubble to clear as well as the caret | Found by this work: on the live path there is a window between submit and the first chunk in which NO caret exists yet, so the helper returned IMMEDIATELY and its caller typed the next question while the previous one was still in flight. Nothing depended on that until the composer gate did, at which point a live test that "waits for the answer" was shown to have been waiting for nothing. No-op in demo mode, which has no pending bubble. |
 
 ### Future entries
 

@@ -422,7 +422,22 @@ export function ChatView({
             placeholder="Ask about Claude, Codex, Gemini…"
             className="chat-input"
           />
-          <button onClick={onSendClick} className="send-button" aria-label="Send">
+          {/* ARIA-disabled, not natively disabled (#62). `disabled` is right for
+              a permanently inert control — the Enterprise CTA — because leaving
+              the tab order costs nothing there. It is wrong for one that flips
+              busy for the second a request takes: the flip lands while the
+              reader is most likely focused on this very button (they just
+              clicked it), the browser drops focus to <body>, and the restore a
+              second later puts it nowhere. `aria-disabled` announces the same
+              state, keeps focus and the tab order, and the handler below is the
+              actual refusal. The hook refuses too, before it clears the input,
+              so a type-ahead question is held rather than eaten. */}
+          <button
+            onClick={pending ? undefined : onSendClick}
+            aria-disabled={pending}
+            className="send-button"
+            aria-label="Send"
+          >
             ↑
           </button>
         </div>

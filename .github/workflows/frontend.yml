@@ -172,12 +172,17 @@ jobs:
               print(f"::error::selected {selected} tests but the run accounts for "
                     f"{stats['expected']}+{stats['skipped']}+{stats['unexpected']}+{stats['flaky']}")
               sys.exit(1)
-          # Exactly three tests self-skip in demo mode -- the `if (!isLive)` guards in
-          # behavior.spec.ts:466 and answer-format.spec.ts:61,158. Pinning the number
-          # means a NEW skip has to be justified here rather than quietly reducing
-          # what this job asserts.
-          if stats["skipped"] != 3:
-              print(f"::error::{stats['skipped']} skipped, expected exactly 3 "
+          # Exactly four tests self-skip in demo mode -- the `if (!isLive)` guards in
+          # behavior.spec.ts (the pending-bubble indicator, and the #62 composer gate)
+          # and answer-format.spec.ts:61,158. Pinning the number means a NEW skip has
+          # to be justified here rather than quietly reducing what this job asserts.
+          #
+          # 3 -> 4 for the composer gate: `state.pending` is only ever non-zero on the
+          # live path, so in demo mode there is no in-flight state to gate and the test
+          # would assert nothing. It runs for real in the `frontend-live-e2e` workflow,
+          # which drives it against the in-process stub backend's 800ms delay.
+          if stats["skipped"] != 4:
+              print(f"::error::{stats['skipped']} skipped, expected exactly 4 "
                     f"(the `if (!isLive)` guards) — a new skip silently shrinks this job")
               sys.exit(1)
           if stats["unexpected"]:

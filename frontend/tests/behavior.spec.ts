@@ -515,6 +515,78 @@ test.describe("Chat", () => {
     await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 15000 });
   });
 
+  test("composer refuses a second question while one is in flight (live only)", async ({ page }) => {
+    // #62 in a real browser, with real event timing and a real round-trip — the
+    // vitest cover for this runs on fake timers with a mocked transport, so
+    // neither the focus behaviour nor the keypress path is exercised there.
+    // Self-skips in demo mode for the same reason the test above does: demo
+    // mode never sets an in-flight count, so there is nothing to gate. That
+    // intentional skip is why the demo job's pinned skip count is 4, not 3.
+    await enterChat(page);
+    const isLive = await page.evaluate(
+      () => /LIVE/i.test(document.querySelector(".demo-badge")?.textContent || ""),
+    );
+    if (!isLive) {
+      test.skip(true, "The composer gate is a live-path feature; demo mode never sets an in-flight count. Run via: VITE_LIVE_STUB=1 npx playwright test --config=playwright.live.config.ts");
+      return;
+    }
+    // Hold the answer for 6s so the in-flight window is far longer than the
+    // handful of actions below. The stub's own 800ms is NOT enough: the
+    // assertions between the first Enter and the second one cost a few hundred
+    // ms each, the window closed mid-test, and the second question went through
+    // for a reason that had nothing to do with the gate. Measured: `page.route`
+    // DOES intercept the stub's in-process response (1 route hit, indicator held
+    // 4.9s at a 4s delay) — the comment on the test above, which says it cannot,
+    // is wrong.
+    await page.route("**/v1/sessions/*/messages", async (route) => {
+      await new Promise((r) => setTimeout(r, 6000));
+      await route.continue();
+    });
+    const input = page.locator(".chat-input");
+    const send = page.locator(".send-button");
+
+    await input.fill("What is Claude Code?");
+    await input.press("Enter");
+    await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
+
+    // The state is DRAWN and ANNOUNCED, not merely enforced.
+    await expect(send).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator(".pending-bubble")).toHaveAttribute("role", "status");
+    // Not natively disabled: it keeps focus and its place in the tab order.
+    expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
+    expect(await input.evaluate((el: HTMLInputElement) => el.disabled)).toBe(false);
+
+    // Type-ahead, then try both submit routes.
+    await input.fill("How do I install the Codex CLI?");
+    await input.press("Enter");
+    // `force` because Playwright's own actionability check HONOURS
+    // `aria-disabled`: a plain `.click()` here does not fail, it silently waits
+    // for the attribute to clear and then clicks the re-enabled button 7s
+    // later, which is a pass that proves nothing. Measured on this exact test.
+    // Forcing it puts a real click event on the handler while the gate is shut,
+    // which is what needs proving.
+    await send.click({ force: true });
+
+    // The window must still be OPEN, or the refusal below proves nothing — this
+    // is the assertion that stops the test passing for the wrong reason.
+    await expect(page.locator(".pending-bubble")).toBeVisible();
+
+    // No second question entered the transcript, and the typed text was HELD.
+    expect(await page.locator(".message.user-msg").count()).toBe(1);
+    await expect(input).toHaveValue("How do I install the Codex CLI?");
+
+    // The gate is transient: once the answer lands the same keypress works.
+    await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 20000 });
+    await expect(send).not.toHaveAttribute("aria-disabled", "true");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(2, { timeout: 5000 });
+    // Every answer sits under its own question, in order.
+    const roles = await page.locator(".message").evaluateAll((els) =>
+      els.map((e) => (e.classList.contains("user-msg") ? "user" : "bot")),
+    );
+    expect(roles.slice(0, 3)).toEqual(["user", "bot", "user"]);
+  });
+
   test("autoscrolls: list stays pinned to the newest message", async ({ page }) => {
     await enterChat(page);
     const input = page.locator(".chat-input");
