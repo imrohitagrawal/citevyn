@@ -106,6 +106,14 @@ _STATUS_KEY = "status"
 # ambiguity decision and ``active_count`` are therefore exact for any table with
 # 64 or fewer active rows, whatever else it holds.
 #
+# The reverse is NOT guaranteed and is worth saying plainly: with 64 or more
+# ACTIVE rows the cap fills with actives and every ``previous_good`` row is
+# truncated, so ``GET /health/index`` would report ``previous_good_index: null``
+# — "no rollback target" — on the field #351 is about. That state is already
+# ``ambiguous`` and needs a promote to converge before a rollback target means
+# anything, and 64 simultaneously-active rows is far outside what any writer
+# produces, so it is documented rather than defended against.
+#
 # That guarantee is structural on purpose. Arguing it from ``promoted_at``
 # instead — "a demoted row always carries an earlier stamp than the active row
 # that displaced it", which is true of both writers of ``status = active``
@@ -335,29 +343,6 @@ async def resolve_index_partition(session: AsyncSession) -> IndexPartition:
     )
 
 
-async def resolve_previous_good_index(session: AsyncSession) -> ResolvedIndex | None:
-    """The current rollback target: the most recently demoted ``previous_good`` row.
-
-    No count check, unlike the active path: more than one ``previous_good`` row
-    is *normal* (see :func:`_newest_first`), not drift, so ">1" needs a
-    deterministic winner rather than an ``ambiguous`` state a caller would have
-    to handle. ``docs/DEPLOY_FLY.md`` §4.4 makes ``GET /health/index`` the
-    post-deploy check and §6 item 4 makes the previous-good index the rollback
-    target, so naming an arbitrary one of those rows points an incident at the
-    wrong index.
-
-    This is the only place that names ONE ``previous_good`` row.
-    ``GET /v1/admin/index_versions?status=previous_good`` also reads the status,
-    but it returns the whole list (ordered ``created_at`` ascending) rather than
-    claiming a rollback target, so it is a different question and is left alone.
-
-    ``GET /health/index`` does NOT call this — it needs the active row from the
-    same snapshot, so it uses :func:`resolve_index_partition`. This stays for
-    callers that want only the rollback target.
-    """
-    return partition_index_rows(await _fetch(session, IndexStatus.previous_good)).previous_good
-
-
 __all__ = [
     "ActiveIndexResolution",
     "ActiveIndexState",
@@ -366,5 +351,4 @@ __all__ = [
     "partition_index_rows",
     "resolve_active_index",
     "resolve_index_partition",
-    "resolve_previous_good_index",
 ]

@@ -614,20 +614,24 @@ async def test_previous_good_nulls_last_is_load_bearing_on_postgres(pg_schema: s
     demotes two rows in one promote, and a row marked ``active`` without going
     through a promote carries ``promoted_at IS NULL``.
 
-    Goes through :func:`resolve_previous_good_index` — the function the route
+    Goes through :func:`resolve_index_partition` — the function ``GET /health/index``
     actually calls — NOT a hand-written ``ORDER BY``. An earlier draft asserted the
     raw SQL and passed happily with ``.nulls_last()`` deleted from the resolver,
-    because it was testing Postgres rather than this codebase.
+    because it was testing Postgres rather than this codebase. A later draft went
+    through ``resolve_previous_good_index``, which was true when written and stopped
+    being true the moment the route moved to the single-statement partition — that
+    function then had no production caller at all and has since been deleted.
 
-    Turns RED if ``.nulls_last()`` is dropped from ``_newest_first``: verified by
-    doing exactly that, which flips the result to ``v-never``.
+    Turns RED if ``.nulls_last()`` is dropped from ``_ORDER_BY`` in
+    ``_ordered_rows_query``: verified by doing exactly that, which flips the result
+    to ``v-never``.
     """
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.models import IndexStatus, IndexVersion
-    from app.services.index_resolution import resolve_previous_good_index
+    from app.services.index_resolution import resolve_index_partition
 
     alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
 
@@ -656,7 +660,7 @@ async def test_previous_good_nulls_last_is_load_bearing_on_postgres(pg_schema: s
             )
             await session.commit()
 
-            winner = await resolve_previous_good_index(session)
+            winner = (await resolve_index_partition(session)).previous_good
 
             # Partner control: the SAME rows under a plain ``DESC`` hand back the
             # never-promoted row, so the assertion above is a result of the clause

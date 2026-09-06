@@ -30,7 +30,7 @@ from app.services.index_resolution import (
     ActiveIndexState,
     ResolvedIndex,
     resolve_active_index,
-    resolve_previous_good_index,
+    resolve_index_partition,
 )
 from tests.conftest import seed_catalog
 
@@ -122,7 +122,7 @@ async def test_previous_good_tiebreak_is_index_version_descending(
         )
     await session.commit()
 
-    winner = await resolve_previous_good_index(session)
+    winner = (await resolve_index_partition(session)).previous_good
 
     assert winner is not None
     # ``"v2" > "v10"`` lexically — this documents the sort as string, not
