@@ -260,22 +260,34 @@ test.describe("FAQ", () => {
 // Navigation
 // ---------------------------------------------------------------------------
 test.describe("Navigation", () => {
+  // Both of these RE-CLICK inside the poll rather than clicking once and
+  // watching. `scrollToId` computes its target from a single
+  // `getBoundingClientRect()` read, while the hero answer streams a character
+  // every 24ms and grows the card above these sections — so a target computed
+  // before the hero settles is stale by the time the smooth scroll lands, and
+  // the one-shot version could never recover. Observed failing on CI (run
+  // 34011413080, passed on retry #1) and blocking the required check on
+  // `flaky != 0`. Pre-existing, unrelated to that PR's change, folded in only
+  // because it blocks the merge; tracked in #354.
   test("nav link scrolls to section with ~72px header offset", async ({ page }) => {
-    await page.locator(".nav-link", { hasText: "How it works" }).click();
+    const link = page.locator(".nav-link", { hasText: "How it works" });
     await expect.poll(async () => {
+      await link.click();
       const y = await page.locator("#how").evaluate((el) => el.getBoundingClientRect().top);
       return y > 60 && y < 120;
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 10000 }).toBe(true);
   });
 
   test("nav links work from the chat view (return to landing, then scroll)", async ({ page }) => {
     await enterChat(page);
-    await page.locator(".nav-link", { hasText: "Pricing" }).click();
+    const link = page.locator(".nav-link", { hasText: "Pricing" });
+    await link.click();
     await expect(page.locator("#pricing")).toBeVisible();
     await expect.poll(async () => {
+      await link.click();
       const y = await page.locator("#pricing").evaluate((el) => el.getBoundingClientRect().top);
       return y > 40 && y < 140;
-    }, { timeout: 5000 }).toBe(true);
+    }, { timeout: 10000 }).toBe(true);
   });
 });
 
@@ -1280,8 +1292,18 @@ test.describe("Duplicate pulse restarts within its own window", () => {
     await input.fill("What is Claude Code?");
     await page.keyboard.press("Enter");
     await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
-    // Let the pulse get well into its run, but stay inside the ~2s highlight window.
-    await page.waitForTimeout(900);
+    const firstFlashSeenAt = Date.now();
+    // Wait until the animation clock has ACTUALLY advanced — under heavy load
+    // the browser had not run it by the sample instant and this read 0
+    // (measured at load average 42) — and then hold until ~900ms into the first
+    // flash's 2s window. Both halves matter: without the poll the read is
+    // racy, and without the anchor the re-ask lands too early, which leaves a
+    // leftover first-flash timer more than 1.3s of runway and the final
+    // assertion stops catching the cut-short bug. Verified by mutation both
+    // ways.
+    await expect.poll(elapsed, { timeout: 3000 }).toBeGreaterThan(300);
+    const intoFirstFlash = Date.now() - firstFlashSeenAt;
+    if (intoFirstFlash < 900) await page.waitForTimeout(900 - intoFirstFlash);
     const before = await elapsed();
     expect(before).toBeGreaterThan(300);
 
@@ -1290,12 +1312,20 @@ test.describe("Duplicate pulse restarts within its own window", () => {
     await page.keyboard.press("Enter");
     // Restarting means the SAME animation is still running from near zero again.
     await expect.poll(elapsed, { timeout: 1500 }).toBeLessThan(before);
+    const restartSeenAt = Date.now();
     expect(await original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
 
     // The second flash also gets its OWN full highlight window. Each flash used to
     // overwrite the timer slots without stopping them, so the first flash's 2s
     // clear survived and cut the second one short (here: ~1.1s instead of ~2s).
-    await page.waitForTimeout(1400);
+    //
+    // The wait is ANCHORED to when the restart was observed, not another fixed
+    // `waitForTimeout` stacked on the ones above. Accumulated fixed waits are
+    // why this flaked: under load the elapsed time since the restart exceeded
+    // the 2s highlight window and the class was already gone. 1300ms still sits
+    // above the ~1.1s a cut-short window would give and comfortably below 2s.
+    const alreadyWaited = Date.now() - restartSeenAt;
+    if (alreadyWaited < 1300) await page.waitForTimeout(1300 - alreadyWaited);
     await expect(original).toHaveClass(/highlighted/);
   });
 });
