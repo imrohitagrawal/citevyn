@@ -920,13 +920,32 @@ export function useLandingState() {
         // lands in the chat, sees the loader, and finds their question waiting
         // in the composer to send when it clears. A draft already in the box is
         // the reader's own and outranks it.
-        if (inFlight.current) {
+        const park = () => {
+          // A draft already in the box is the reader's own and outranks the
+          // question they just clicked. When one exists the clicked question
+          // IS dropped — say so plainly rather than calling this "never
+          // dropped". It is the recoverable half of the trade: the rail pill
+          // or chip that produced it is still one click away on the screen
+          // they came from, whereas typed text, once overwritten, is gone.
+          // A toast saying so was written and measured at +62 B gzip, which
+          // would have left 12 B of the 66,000 ceiling; not worth spending
+          // the project's last headroom on, so it is recorded here and in
+          // #356 instead.
           if (!carried && !state.chatInput) {
             dispatch({ type: "SET_CHAT_INPUT", value: q });
           }
+        };
+        if (inFlight.current) {
+          park();
           return;
         }
-        setTimeout(() => send(q), 60);
+        // Re-checked INSIDE the timeout, not only here. `markInFlight` runs
+        // when `sendLive` starts — 60 ms after the click — so two landing
+        // entry points fired inside that window both read 0 at this line and
+        // both sent: measured `asks=2` and [Q1][Q2][A2][A1], the very ordering
+        // this is here to prevent. By the time the second timeout fires the
+        // first has already incremented, so the check below closes it.
+        setTimeout(() => (inFlight.current ? park() : send(q)), 60);
       }
     },
     [send, state.heroInput, state.chatInput],

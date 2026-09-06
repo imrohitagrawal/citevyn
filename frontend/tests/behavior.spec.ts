@@ -549,15 +549,51 @@ test.describe("Chat", () => {
     const input = page.locator(".chat-input");
     const send = page.locator(".send-button");
 
+    // Focus the send button BEFORE the flip, so the assertion after it is
+    // about focus SURVIVING the transition — not merely about an
+    // aria-disabled button being focusable, which is a different property and
+    // is what an earlier version of this test settled for. jsdom cannot make
+    // this assertion at all: it does not blur an element when it becomes
+    // disabled, so the vitest equivalent passed even with `disabled={pending}`
+    // and was deleted rather than shipped as false evidence.
     await input.fill("What is Claude Code?");
-    await input.press("Enter");
+    // SUBMIT BY CLICKING, which is what puts focus on the button in the first
+    // place and is the whole scenario the `aria-disabled` choice exists for:
+    // the state flips busy while the reader is focused on the very control
+    // that is flipping. (Pressing Enter on the input would move focus to the
+    // input first and the assertion below would nothing — it failed exactly
+    // that way when this test was first written.)
+    await send.click();
+    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
     await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
+    // Native `disabled` would have dumped focus on <body> right here.
+    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
 
     // The state is DRAWN and ANNOUNCED, not merely enforced. The live region is
     // a PERSISTENT node outside the scrolling list, so it is in the
     // accessibility tree before its text arrives.
     await expect(send).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator("[role='status']")).toContainText("Send is unavailable");
+    // Scoped to the composer: `Nudge` and `AuthModal` are also `role="status"`,
+    // so an unscoped locator would throw a strict-mode violation the moment a
+    // magic-link return or an open modal put one on the page.
+    await expect(page.locator(".composer [role='status']")).toContainText("Send is unavailable");
+    // The AA contrast fix, guarded. `--faint` on `--bg` is 2.77:1 light /
+    // 3.49:1 dark, the same failure #303 already accepted a fix for; nothing
+    // in the unit suite can see CSS (`css: false` in vite.config.ts), so
+    // reverting the token was measured to leave the whole suite green.
+    // Resolved at runtime rather than hardcoded, so a token change moves both.
+    const labelColors = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--muted)";
+      document.body.appendChild(probe);
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        label: getComputedStyle(document.querySelector(".pending-label")!).color,
+        muted,
+      };
+    });
+    expect(labelColors.label).toBe(labelColors.muted);
     // The visible affordance, which is the only signal a mouse user gets. No
     // unit test can see it: vitest runs with `css: false`.
     // Polled, not read once: `.send-button` has `transition: opacity 0.15s`,
@@ -569,11 +605,6 @@ test.describe("Chat", () => {
     expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
     expect(await input.evaluate((el: HTMLInputElement) => el.disabled)).toBe(false);
 
-    // Focus survives the flip. This is the assertion jsdom cannot make — it
-    // does not blur an element when it becomes disabled, so the equivalent
-    // vitest test passed even with `disabled={pending}` and was deleted.
-    await send.focus();
-    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
 
     // Type-ahead, then try both submit routes.
     await input.fill("How do I install the Codex CLI?");
@@ -627,11 +658,29 @@ test.describe("Chat", () => {
     await input.press("Enter");
     await expect(page.locator(".message.user-msg")).toHaveCount(1);
 
-    // Mid-stream, with the caret still blinking, the composer stays live.
+    // ONE synchronous snapshot taken while the caret is on screen. Every
+    // assertion here used to be a separate auto-retrying `expect`, which is
+    // why the first version of this test did not bite: they simply polled
+    // until the ~2s demo stream finished, at which point the gate opens and
+    // they were all satisfied. A skeptic applied the exact mutation this
+    // test's docblock names — re-keying the gate onto
+    // `messages.some(m => m.streaming)` — and the test still PASSED, in a
+    // real browser, taking 5.1s instead of 1.5s. Reading the caret count in
+    // the SAME evaluate is the partner that makes the other two mean
+    // "mid-stream" rather than "eventually".
     await expect(page.locator(".typing-cursor")).toHaveCount(1);
-    await expect(send).not.toHaveAttribute("aria-disabled", "true");
-    expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
-    await expect(page.locator(".pending-bubble")).toHaveCount(0);
+    const midStream = await page.evaluate(() => ({
+      aria: document.querySelector(".send-button")!.getAttribute("aria-disabled"),
+      nativelyDisabled: (document.querySelector(".send-button") as HTMLButtonElement).disabled,
+      cursors: document.querySelectorAll(".typing-cursor").length,
+      loaders: document.querySelectorAll(".pending-bubble").length,
+    }));
+    expect(midStream).toEqual({
+      aria: "false",   // React renders aria-* booleans as strings
+      nativelyDisabled: false,
+      cursors: 1,
+      loaders: 0,
+    });
 
     // ...and a second question really does go through, mid-stream.
     await input.fill("How do I install the Codex CLI?");

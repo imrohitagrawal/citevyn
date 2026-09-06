@@ -1753,6 +1753,42 @@ describe("useLandingState — a landing entry point parks its question rather th
     expect(mockAskQuestion).toHaveBeenCalledTimes(1);
   });
 
+  it("parks the second of TWO landing entry points fired inside the 60ms send delay", async () => {
+    // The gap the first version of this fix left open. `enterChat` reads
+    // `inFlight.current` synchronously, but the send is deferred 60ms and
+    // `markInFlight` only runs once `sendLive` starts — so two entry points
+    // fired inside that window both read 0 and both sent. Measured on the
+    // first fix: asks=2, transcript [Q1][Q2][A2][A1], which is exactly the
+    // attribution defect #62 exists to prevent.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      result.current.enterChat("Question one");
+      await vi.advanceTimersByTimeAsync(30);
+      result.current.enterChat("Question two");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(result.current.state.pending).toBe(1);
+    expect(result.current.state.messages.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(result.current.state.chatInput).toBe("Question two");
+  });
+
+  it("parks the second of two fired in the SAME tick", async () => {
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      result.current.enterChat("Question one");
+      result.current.enterChat("Question two");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+  });
+
   it("still sends normally from a landing entry point when nothing is in flight", async () => {
     // Partner for both tests above: proves the parking branch has not simply
     // disabled the landing entry points.

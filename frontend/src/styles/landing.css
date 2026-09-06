@@ -2333,7 +2333,7 @@ a.citation-chip:focus-visible {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--faint);
+  background: var(--muted);
   display: inline-block;
   animation: cv-pending 1.05s ease-in-out infinite;
 }
