@@ -491,6 +491,38 @@ curl -sS -o /tmp/about.html -w '%{http_code} %{content_type}\n' \
 if grep -q 'source documents for this page are not available' /tmp/about.html; then
   echo 'FAIL: the corpus markdown is missing from the image'
 fi
+
+# The two self-hosted web fonts (#365). They are the ONLY thing standing between
+# a visitor and an unstyled page now that no third party is in the critical
+# path, and nothing else in this runbook would notice them missing: index.html
+# still returns 200, the app still mounts, and the page simply renders in
+# system-ui. They live in frontend/public/, so they reach the image by the same
+# Vite-copies-public -> Dockerfile-copies-dist route as /favicon.svg, and a
+# packaging change is exactly what would drop them.
+#
+# The CONTENT TYPE is checked, not just the status. A font served as
+# application/octet-stream is REJECTED by the browser's font loader — same
+# invisible fallback, with nothing in the console but a font-load failure.
+for f in geist-latin.woff2 jetbrains-mono-latin.woff2; do
+  printf '%s ' "$f"
+  curl -sS -o /dev/null -w '%{http_code} %{content_type} %{size_download}\n' \
+    "https://citevyn.stackclimb.com/fonts/$f"      # expect: 200 font/woff2 29288 / 31340
+done
+
+# And that the shipped index.html really carries no third-party reference. This
+# is the #365 defect stated as a live check: a render-blocking off-origin
+# stylesheet also blocks <script type="module"> from EXECUTING, so its return
+# would show up as a blank page for anyone whose network is slow to that host —
+# a class of visitor no smoke test from here can impersonate.
+#
+# Written as an `if`, for the same reason the /about check above is: `grep -c`
+# EXITS 1 when the count is zero, and zero is the HEALTHY answer here. A bare
+# `curl … | grep -c` would abort a `set -e` runbook exactly when the page is
+# fine. (This block shipped with that bug in its first draft, two paragraphs
+# below the note warning about it.)
+if [ "$(curl -sS https://citevyn.stackclimb.com/ | grep -c 'https://')" -ne 0 ]; then
+  echo 'FAIL: the shipped index.html references a third-party host (#365)'
+fi
 ```
 
 (Written as an `if`, not `grep … && echo`: that form exits 1 on the *healthy*

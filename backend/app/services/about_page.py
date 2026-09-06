@@ -59,14 +59,32 @@ from collections.abc import Iterable, Sequence
 STYLESHEET_URL = "/about.css"
 THEME_SCRIPT_URL = "/about-theme.js"
 
-# Same Google Fonts request the SPA shell makes (``frontend/index.html``), so
-# the page uses the real ``--font-sans`` rather than falling through to
-# ``system-ui`` (#316). Both hosts are already in the CSP's ``style-src`` /
-# ``font-src``; adding any OTHER font host here would need
-# ``app.core.security_headers._CSP`` widened in the same change.
-_FONT_STYLESHEET_URL = (
-    "https://fonts.googleapis.com/css2"
-    "?family=Geist:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap"
+# The two faces this page uses are self-hosted (#365). ``/about.css`` carries
+# the ``@font-face`` rules and ``/fonts/*.woff2`` the bytes, both same-origin.
+#
+# There is DELIBERATELY no font stylesheet constant here any more. This page
+# used to emit two ``preconnect``s and
+#   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?...">
+# the same third-party request the SPA shell made. A render-blocking stylesheet
+# withholds first paint of the whole document until it answers, so a slow or
+# unreachable ``fonts.googleapis.com`` left this page blank as well — and it
+# delayed ``/about-theme.js``, so an arrival could additionally flash the wrong
+# theme. Removing it took both Google hosts out of the critical path, which is
+# what let ``app.core.security_headers._CSP`` drop them from ``style-src`` and
+# ``font-src`` in the same change.
+#
+# Adding ANY third-party font host back here needs ``_CSP`` widened in the same
+# change, and puts a third party back in front of first paint;
+# ``backend/tests/test_csp_covers_the_pages_real_origins.py`` renders this page
+# and fails if the two ever disagree.
+#
+# The preload hints below are optional — they start the two font downloads while
+# ``/about.css`` is still in flight instead of after it parses. ``crossorigin``
+# is required even same-origin: font fetches are CORS-mode, and a preload
+# without it is a second, unshared fetch.
+_FONT_PRELOAD_URLS = (
+    "/fonts/geist-latin.woff2",
+    "/fonts/jetbrains-mono-latin.woff2",
 )
 
 PAGE_TITLE = "About CiteVyn"
@@ -303,10 +321,11 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
         '<meta name="color-scheme" content="light dark">\n'
         f"<title>{html.escape(PAGE_TITLE)} — CiteVyn</title>\n"
         '<link rel="icon" type="image/svg+xml" href="/favicon.svg">\n'
-        '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
-        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
-        f'<link rel="stylesheet" href="{_FONT_STYLESHEET_URL}">\n'
-        f'<link rel="stylesheet" href="{STYLESHEET_URL}">\n'
+        + "".join(
+            f'<link rel="preload" as="font" type="font/woff2" href="{url}" crossorigin>\n'
+            for url in _FONT_PRELOAD_URLS
+        )
+        + f'<link rel="stylesheet" href="{STYLESHEET_URL}">\n'
         f'<script src="{THEME_SCRIPT_URL}"></script>\n'
         "</head>\n"
         "<body>\n"

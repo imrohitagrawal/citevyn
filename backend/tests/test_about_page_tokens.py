@@ -19,6 +19,7 @@ not a behaviour test of the React app, and vitest's ``include`` globs only
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import re
 
@@ -182,6 +183,86 @@ def test_the_theme_key_matches_the_app(about_css: str) -> None:
     )
 
 
+# A hex escape is terminated by ONE optional whitespace character, and CSS
+# counts form feed (\x0c) and CRLF as whitespace — not just space/tab/LF.
+# A backslash before a newline is a LINE CONTINUATION and is removed entirely.
+# Both gaps were live bypasses: `@\\69<FF>mport "/\\<LF>/host/x.css"` reached the
+# network in real Chromium while every backend and frontend test stayed green.
+_CSS_ESCAPE_RE = re.compile(
+    r"\\([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|\\(\r\n|[\n\r\f])|\\([\s\S])"
+)
+
+
+def _unescape_css(text: str) -> str:
+    r"""Resolve CSS escape sequences, so a guard reads what the PARSER reads.
+
+    This is load-bearing, not tidiness. ``@import`` was checked as a plain
+    substring, and review defeated it with one character class CSS explicitly
+    allows in an at-keyword::
+
+        @\69mport "\/\/x.example/a.css";
+
+    ``@\69mport`` is not the substring ``@import``; ``"\/\/x..."`` contains no
+    ``url()`` and does not start with ``http``. Every backend and frontend test
+    stayed green (1946 pytest, 523 vitest) — and served in real Chromium the
+    page issued a render-blocking request to ``http://x.example/a.css``.
+    ``frontend/public/`` is copied verbatim into ``dist/``, so it would have
+    shipped.
+
+    The lesson is the one already in this repo's notes: resolve what the SYSTEM
+    resolved. A guard that matches source bytes is guarding a spelling.
+    """
+
+    def _resolve(m: re.Match[str]) -> str:
+        if m.group(1) is not None:
+            code = int(m.group(1), 16)
+            # CSS maps zero, surrogates and out-of-range code points to U+FFFD.
+            # `chr()` RAISES on the last of those — `\110000` and `\ffffff` are
+            # legal CSS escapes that crashed this reader, which is a poor way to
+            # report a verdict even though it fails closed.
+            if code == 0 or 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+                return "\ufffd"
+            return chr(code)
+        if m.group(2) is not None:
+            return ""  # line continuation: the backslash AND the newline go
+        return m.group(3)
+
+    return _CSS_ESCAPE_RE.sub(_resolve, text)
+
+
+def test_the_css_escape_reader_resolves_what_the_browser_resolves(about_css: str) -> None:
+    """PARTNER for the two absence checks below, which a broken reader satisfies.
+
+    Every line here is a form review actually used to smuggle a third-party
+    request past the substring check.
+    """
+    ff, lf, cr = "\x0c", "\n", "\r"
+    assert _unescape_css(r"@\69mport") == "@import"
+    assert _unescape_css(r"@\49 mport") == "@Import"  # hex is case-insensitive, one trailing space
+    assert _unescape_css(r'"\/\/x.example/a.css"') == '"//x.example/a.css"'
+    assert _unescape_css(r"url(\68 ttps://x)") == "url(https://x)"
+    # FORM FEED as the hex-escape terminator, and a backslash LINE CONTINUATION.
+    # Both were demonstrated bypasses of the first version of this reader, with
+    # the resulting @import verified to hit the network in real Chromium.
+    assert _unescape_css("@\\69" + ff + "mport") == "@import"
+    assert _unescape_css("@\\69" + cr + lf + "mport") == "@import"
+    assert _unescape_css('"/\\' + lf + '/host/x.css"') == '"//host/x.css"'
+    assert _unescape_css('"/\\' + ff + '/host/x.css"') == '"//host/x.css"'
+    assert _unescape_css('"/\\' + cr + lf + '/host/x.css"') == '"//host/x.css"'
+    # Out-of-range, zero and surrogate escapes are legal CSS and must not raise.
+    assert _unescape_css(r"\110000") == "\ufffd"
+    assert _unescape_css(r"\ffffff") == "\ufffd"
+    assert _unescape_css(r"\0") == "\ufffd"
+    assert _unescape_css(r"\d800") == "\ufffd"
+    # And it leaves ordinary CSS alone, so the checks below are not reading
+    # mangled input.
+    assert _unescape_css("@font-face { src: url(/fonts/a.woff2); }") == (
+        "@font-face { src: url(/fonts/a.woff2); }"
+    )
+    # Partner for THAT: the real file survives the transform intact.
+    assert "@font-face" in _unescape_css(about_css)
+
+
 def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     """``@import`` and ``url()`` inside about.css are invisible to page parsing.
 
@@ -190,9 +271,234 @@ def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     is the #306 shape exactly -- the host that broke it existed only inside a
     fetched stylesheet. This page's CSS is expected to reference nothing
     external at all, so the honest guard is to assert that.
+
+    Read through ``_unescape_css`` because the browser does; see its docstring
+    for the bypass that made that necessary.
     """
-    body = _strip_comments(about_css)
-    assert "@import" not in body, "about.css @imports a stylesheet the CSP guard cannot see"
+    # NOT `_strip_comments` first. `/*` inside a CSS STRING is not a comment to
+    # a browser, so wrapping a payload between `content: "/*"` and
+    # `content: "*/"` deleted it from the guard's view while Chromium loaded it
+    # — demonstrated in review with an off-origin `src: url(//fonts.gstatic.com/...)`
+    # request recorded in a real browser and all 85 backend guard tests green.
+    #
+    # So: unescape first, and do not strip comments at all. A third-party URL
+    # merely MENTIONED in a comment now fails here, which is the same false
+    # POSITIVE the HTML guards deliberately accept — the safe direction, and the
+    # file says so at the top.
+    body = _unescape_css(about_css)
+    assert "@import" not in body.lower(), "about.css @imports a stylesheet the CSP guard cannot see"
     urls = re.findall(r"url\(([^)]*)\)", body)
-    remote = [u for u in urls if "//" in u or u.strip().strip("'\"").startswith("http")]
+    quoted = re.findall(r"""["']([^"']*)["']""", body)
+    remote = [
+        u
+        for u in urls + quoted
+        if "//" in u or re.match(r"^\s*[a-z][a-z0-9+.-]*:", u.strip().strip("'\""), re.IGNORECASE)
+    ]
     assert not remote, f"about.css loads remote resources the CSP guard cannot see: {remote}"
+
+
+def test_the_page_s_own_script_pulls_in_no_further_origins() -> None:
+    """``/about``'s theme script can inject a stylesheet at runtime.
+
+    Review demonstrated it: three lines appended to ``about-theme.js`` creating
+    a ``<link rel="stylesheet">`` for fonts.googleapis.com and appending it to
+    ``<head>``. Nothing looked — this file was read only for its
+    ``localStorage`` key and its ``setAttribute`` call, and the HTML-scanning
+    guards see the DOM the server sends, not the DOM the script builds. 1946
+    pytest and 523 vitest tests stayed green.
+
+    ``/about`` is the surface with no browser-level coverage at all: no
+    Playwright spec navigates to it (it needs the real backend, and the demo
+    config runs only the Vite dev server). So this static scan stands in for
+    one.
+
+    WHAT IT CANNOT SEE, stated rather than implied — because an earlier version
+    of this docstring said it "says so rather than implying otherwise" while
+    saying no such thing, which is the overstatement it was warning about:
+
+    * a URL built from PARTS. ``["ht", "tps:", "//", host].join("")`` contains
+      no ``//host`` in any single string literal, and this scan reads string
+      literals. Demonstrated in review: five such lines create the link and
+      Chromium issues the request with this file green. It is kept as a
+      deliberate KNOWN SURVIVOR in ``frontend/scripts/mutate-font-guards.sh``,
+      so the limit is exercised on every run rather than merely written down —
+      and if a future change DOES catch it, that case reports
+      ``UNEXPECTEDLY-KILLED`` and asks for this note to be updated.
+    * ``String.fromCharCode``, ``atob``, or any other runtime construction.
+    * anything a third-party script does, if one is ever added.
+
+    Closing that class properly needs a browser test of ``/about`` against the
+    real backend, which is tracked rather than faked here. What makes the gap
+    tolerable meanwhile is that the CSP fails CLOSED: ``style-src 'self'``
+    blocks such a stylesheet, so the visible result is a console violation and
+    a fallback face (the #306 shape), not #365's blank page.
+    """
+    js = ABOUT_THEME_JS.read_text(encoding="utf-8")
+    # Strip comments so a URL merely discussed in one is not a false red.
+    body = re.sub(r"/\*.*?\*/", "", js, flags=re.DOTALL)
+    body = re.sub(r"^\s*//.*$", "", body, flags=re.MULTILINE)
+    remote = re.findall(r"""["'`]\s*(?:[a-z][a-z0-9+.-]*:)?//[^"'`]+["'`]""", body, re.IGNORECASE)
+    assert not remote, (
+        f"about-theme.js references a third-party host: {remote}. A script-injected "
+        "stylesheet is render-blocking for everything after it and is invisible to "
+        "every HTML-scanning guard here — that is #365's mechanism, one layer down."
+    )
+    # PARTNER: the scan really is looking at the script, and really would find
+    # such a URL. Without this, an empty or mis-read file passes for free.
+    assert len(body) > 200, "about-theme.js is implausibly short — the scan is vacuous"
+    assert re.findall(
+        r"""["'`]\s*(?:[a-z][a-z0-9+.-]*:)?//[^"'`]+["'`]""",
+        'var l="https://fonts.googleapis.com/css2";',
+        re.IGNORECASE,
+    ), "the scan cannot see the very shape it exists to catch"
+
+
+# ---------------------------------------------------------------------------
+# The @font-face copy (#365)
+# ---------------------------------------------------------------------------
+
+FONTS_CSS = REPO_ROOT / "frontend" / "src" / "styles" / "fonts.css"
+PUBLIC_DIR = REPO_ROOT / "frontend" / "public"
+
+_FONT_FACE_RE = re.compile(r"@font-face\s*\{([^}]*)\}", re.DOTALL)
+
+
+def _font_faces(css: str) -> list[dict[str, str]]:
+    """Every ``@font-face`` block, as a normalised ``property -> value`` dict.
+
+    Whitespace inside a value is collapsed so a re-wrapped ``unicode-range``
+    (which prettier will do the moment either file is touched) is not read as a
+    drift. Everything else is compared exactly.
+    """
+    faces = []
+    for body in _FONT_FACE_RE.findall(_strip_comments(css)):
+        decls = {}
+        for part in body.split(";"):
+            if ":" not in part:
+                continue
+            name, _, value = part.partition(":")
+            decls[name.strip().lower()] = " ".join(value.split())
+        faces.append(decls)
+    return faces
+
+
+@pytest.fixture
+def fonts_css() -> str:
+    return FONTS_CSS.read_text(encoding="utf-8")
+
+
+def test_the_font_face_parser_found_real_rules(fonts_css: str, about_css: str) -> None:
+    """Partner for the comparison below, which would pass on two empty lists.
+
+    Both files declare the same three rules: Geist as one variable face
+    covering 400-700, and JetBrains Mono at 400 and 500 pointing at the SAME
+    file — which is how Google declares it, one binary, two weights, no
+    synthesis.
+    """
+    for label, css in (("fonts.css", fonts_css), ("about.css", about_css)):
+        faces = _font_faces(css)
+        assert len(faces) == 3, f"{label} declares {len(faces)} @font-face rules, expected 3"
+        families = {f["font-family"].strip("\"'") for f in faces}
+        assert families == {"Geist", "JetBrains Mono"}, f"{label}: {families}"
+        for face in faces:
+            assert face["font-display"] == "swap", (
+                f"{label}: a face without font-display: swap blanks its text for up to "
+                "3 s while the file is in flight"
+            )
+            assert face["unicode-range"], f"{label}: a face with no unicode-range"
+
+
+def test_the_about_page_font_faces_do_not_drift_from_the_app(
+    fonts_css: str, about_css: str
+) -> None:
+    """``/about`` cannot import the hashed bundle, so it re-declares the faces.
+
+    Same reason the tokens above are copied, and the same treatment: enforced
+    identical rather than hoped identical. A weight, a ``src`` or a
+    ``unicode-range`` diverging here means the two surfaces render in different
+    faces, which nothing else would notice.
+    """
+    app = sorted(_font_faces(fonts_css), key=lambda f: (f["font-family"], f["font-weight"]))
+    about = sorted(_font_faces(about_css), key=lambda f: (f["font-family"], f["font-weight"]))
+    assert app == about, (
+        "the @font-face rules in frontend/public/about.css have drifted from "
+        "frontend/src/styles/fonts.css — /about would render in a different face "
+        "from the app"
+    )
+
+
+def test_every_self_hosted_font_file_actually_ships(fonts_css: str, about_css: str) -> None:
+    """The ``url()`` targets resolve to real files under ``frontend/public/``.
+
+    Nothing else covers this. ``test_frontend_assets.py`` parses ``href``/``src``
+    attributes in ``index.html`` and says in its own header that a CSS ``url()``
+    is out of scope, so before #365 a renamed woff2 would have been a silent
+    404 and a silent fallback face.
+    """
+    srcs = set()
+    for css in (fonts_css, about_css):
+        for face in _font_faces(css):
+            srcs.update(re.findall(r"""url\(\s*["']?([^"')]+)["']?\s*\)""", face["src"]))
+    assert len(srcs) == 2, f"expected two distinct font files, got {sorted(srcs)}"
+    for src in sorted(srcs):
+        assert src.startswith("/"), f"{src} is not a root-relative same-origin path"
+        assert (PUBLIC_DIR / src.lstrip("/")).is_file(), (
+            f"{src} is declared by an @font-face rule but does not exist under "
+            "frontend/public/ — the browser would 404 and fall back silently"
+        )
+
+
+#: sha256 of the two shipped faces, verified byte-for-byte against what
+#: fonts.gstatic.com serves for the `latin` subsets of the exact css2 query
+#: `frontend/index.html` used to make (2026-09-07).
+_FONT_DIGESTS = {
+    "geist-latin.woff2": "9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608",
+    "jetbrains-mono-latin.woff2": (
+        "2c32b9b3ee358c119e210f6f5195f9bd34894d78a785ff2e95d60e718e400af4"
+    ),
+}
+
+
+def test_the_shipped_font_binaries_are_the_bytes_we_vetted() -> None:
+    """Pin the CONTENT, not just the presence, of two redistributed binaries.
+
+    Everything else about these files is checked by existence or by pixels, and
+    neither is enough. A .woff2 renders as ``Bin`` in a diff, so a replacement
+    is unreviewable by eye; and a substituted face designed to render similarly
+    would not move the 22 visual baselines either. These are third-party
+    binaries we now redistribute from our own origin under our own TLS — the
+    one property worth asserting is that they are the exact bytes that were
+    licence-checked and compared against upstream.
+
+    Turns red by changing ONE byte of either file. If it goes red after a
+    deliberate re-download, re-verify the licence and update the digest in the
+    same commit — do not just refresh the constant.
+    """
+    for name, expected in _FONT_DIGESTS.items():
+        path = PUBLIC_DIR / "fonts" / name
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert digest == expected, (
+            f"{name} is not the vetted binary: expected {expected}, got {digest}"
+        )
+    # PARTNER: the loop above is empty-passing if the mapping is ever emptied,
+    # and a digest of nothing is still a digest.
+    assert len(_FONT_DIGESTS) == 2
+    for name in _FONT_DIGESTS:
+        assert (PUBLIC_DIR / "fonts" / name).stat().st_size > 20_000, f"{name} looks truncated"
+
+
+def test_the_redistributed_fonts_carry_their_licence() -> None:
+    """SIL OFL 1.1 requires the licence and copyright notice to travel with the files.
+
+    These are redistributed binaries in a public artifact, not a build-time
+    dependency, so the obligation is ours and it is discharged by shipping
+    ``/fonts/OFL.txt`` beside them. Both copyright lines are quoted from the
+    upstream LICENSE files verbatim.
+    """
+    ofl = (PUBLIC_DIR / "fonts" / "OFL.txt").read_text(encoding="utf-8")
+    assert "SIL OPEN FONT LICENSE Version 1.1" in ofl
+    assert "Copyright (c) 2023 Vercel, in collaboration with basement.studio" in ofl
+    assert "Copyright 2020 The JetBrains Mono Project Authors" in ofl
+    # Partner: the full licence body, not just a header naming it.
+    assert "PERMISSION & CONDITIONS" in ofl
+    assert len(ofl) > 4000, "OFL.txt looks truncated"

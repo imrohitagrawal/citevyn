@@ -31,6 +31,66 @@
  * that matters for this file.
  * ========================================================================== */
 
+/* ----------------------------------------------------------------------------
+ * @font-face — copied from frontend/src/styles/fonts.css (#365).
+ *
+ * /about used to carry its own rel=stylesheet link to a Google Fonts css2 URL,
+ * plus two preconnects, emitted by about_page.py. A render-blocking stylesheet
+ * withholds first paint of the WHOLE document until it answers, so a slow
+ * fonts.googleapis.com left this page blank too — and it also delayed
+ * /about-theme.js, which is the script that picks the theme, so the page could
+ * additionally flash the wrong one on arrival.
+ *
+ * This file is already linked by about_page.py and already render-blocking, so
+ * declaring the faces here costs no extra request. The rules are duplicated
+ * from src/styles/fonts.css for exactly the reason the tokens above are: /about
+ * cannot import a content-hashed bundle. `backend/tests/test_about_page_tokens.py`
+ * parses BOTH files and fails if a family, weight, src, unicode-range or
+ * font-display drifts, so this duplication is enforced-identical.
+ *
+ * NOTE FOR THE NEXT EDITOR: keep third-party URLs out of every comment in this
+ * file. The guard does NOT strip comments before scanning — deliberately, since
+ * `/*` inside a CSS STRING is not a comment to a browser, and a payload wrapped
+ * in a fake comment region was demonstrated to load in real Chromium while the
+ * comment-stripping version of the guard stayed green. Say the host in prose
+ * instead of writing a URL. (This paragraph is the receipt: the line above used
+ * to quote the old tag and turned the guard red the moment it stopped stripping
+ * comments.)
+ * ------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/geist-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   /* --- copied from tokens.css `:root, [data-theme="light"]` --- */
   --bg: #faf9f6;

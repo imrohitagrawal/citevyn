@@ -54,23 +54,43 @@
  * third-party network, and `visual.spec.ts` can use this fixture like everything
  * else rather than needing a carve-out.
  *
- * WHAT THIS DOES NOT FIX
- * ----------------------
- * Real users still meet the same render-blocking link: while
- * `fonts.googleapis.com` is slow, the CiteVyn page is blank, not merely
- * unstyled. That is a production concern with a different fix (self-host the two
- * faces, or load them off the critical path — note `script-src 'self'` in
- * `backend/app/core/security_headers.py` rules out the usual
- * `onload="this.media='all'"` trick), tracked as #365. Nothing here goes red
- * when that lands: `harness.spec.ts` asserts invariants ("no third-party request
- * escapes"), not the presence of the link.
+ * WHAT #365 CHANGED, AND WHY THIS FILE IS STILL HERE
+ * --------------------------------------------------
+ * This block used to read "what this does not fix": real users still met the
+ * render-blocking link, because the harness fix could not reach production.
+ * #365 fixed that half. `index.html` no longer carries a
+ * `fonts.googleapis.com` stylesheet at all — the faces are self-hosted from
+ * `public/fonts/` via `src/styles/fonts.css`, and the CSP's `style-src` /
+ * `font-src` dropped both Google hosts as a result.
+ *
+ * So on `main` today NEITHER route below ever fires. They are kept as a
+ * BACKSTOP, not as live machinery: if a future change reintroduces a
+ * third-party font request, these routes answer it from disk so the suite does
+ * not silently become network-dependent again while someone bisects a flake.
+ * What actually catches the REGRESSION is not here — it is
+ * `src/test/buildGuards.test.ts`, which asserts the EMITTED `dist/index.html`
+ * and the emitted CSS contain no off-origin render-blocking reference, and
+ * `tests/fonts-offline.spec.ts`, which proves in a real browser that the app
+ * mounts with every font request failing. Both are deliberately outside this
+ * fixture: a guard that runs THROUGH the stub cannot see the production path
+ * the stub is hiding.
+ *
+ * The .woff2 bytes moved to `public/fonts/` in #365 and are read from there, so
+ * there is exactly ONE copy of them in the repo and the suite renders the same
+ * face production ships. `fonts/google-fonts-latin.css` stays here: it is
+ * Google's response, which is a test artifact and not something production
+ * serves any more.
  */
 import { test as base, expect } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const FONT_DIR = join(dirname(fileURLToPath(import.meta.url)), "fonts");
+const HERE = dirname(fileURLToPath(import.meta.url));
+/** Google's stylesheet response, vendored. A test artifact; production never serves it. */
+const CSS_DIR = join(HERE, "fonts");
+/** The .woff2 bytes — the SAME files production ships, not a second copy (#365). */
+const FONT_DIR = join(HERE, "..", "public", "fonts");
 
 /** The stylesheet host. `index.html`'s `<link>` points here. */
 export const GOOGLE_FONTS_CSS = /^https:\/\/fonts\.googleapis\.com\//;
@@ -129,7 +149,7 @@ export const test = base.extend({
       }
       return route.fulfill({
         contentType: "text/css",
-        path: join(FONT_DIR, "google-fonts-latin.css"),
+        path: join(CSS_DIR, "google-fonts-latin.css"),
       });
     });
     await context.route(GOOGLE_FONTS_FILES, (route) => {

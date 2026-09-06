@@ -13,8 +13,9 @@ tripwire for that, and it is the reason the renderer is allowed to stay small.
 
 from __future__ import annotations
 
+import pathlib
 import re
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -186,18 +187,49 @@ def test_page_actually_requests_the_typeface_its_css_asks_for() -> None:
     page = render_about_page([("About CiteVyn", "# About CiteVyn\n\nBody.")])
     stylesheets = re.findall(r'<link rel="stylesheet" href="([^"]+)"', page)
     assert stylesheets, "no stylesheet links rendered — this guard would be vacuous"
+
+    # SINCE #365 THE DELIVERER IS THIS ORIGIN, not Google. The page used to
+    # carry its own `fonts.googleapis.com` stylesheet link plus two preconnects;
+    # a render-blocking third-party stylesheet withholds first paint of the whole
+    # document, so a slow host left /about blank too, and delayed
+    # /about-theme.js on top of that. The faces now come from `about.css`'s own
+    # @font-face rules and `/fonts/*.woff2`.
+    #
+    # The guard's PURPOSE is unchanged and still needed: about.css names "Geist"
+    # first, and CSS naming a face nobody fetches falls silently through to
+    # system-ui with no error anywhere (#316). What changed is where to look.
     origins = {f"{u.scheme}://{u.netloc}" for u in map(urlsplit, stylesheets) if u.scheme}
-    assert origins == {"https://fonts.googleapis.com"}, (
-        f"unexpected external stylesheet origins on /about: {sorted(origins)}"
+    assert origins == set(), (
+        f"unexpected external stylesheet origins on /about: {sorted(origins)} — see #365, "
+        "a render-blocking third-party stylesheet is what left this page blank"
     )
-    families = {
-        family for url in stylesheets for family in parse_qs(urlsplit(url).query).get("family", [])
-    }
-    assert any(f.startswith("Geist") for f in families), (
-        f"the page requests no Geist family, so --font-sans falls to system-ui: {families}"
+    assert "/about.css" in stylesheets, (
+        f"the page no longer links about.css, which is what carries the faces: {stylesheets}"
     )
+
+    # The delivery mechanism, asserted where it now lives. `parse_qs`/`family=`
+    # was the old shape and would be vacuously true of any page with no font URL
+    # at all, so this reads the stylesheet the page actually links instead.
+    about_css = (
+        pathlib.Path(__file__).resolve().parents[2] / "frontend" / "public" / "about.css"
+    ).read_text(encoding="utf-8")
+    assert "@font-face" in about_css and "Geist" in about_css, (
+        "about.css declares no Geist face, so --font-sans falls through to system-ui"
+    )
+
+    # And the preloads name the same files, root-relative. `crossorigin` is
+    # required even same-origin — font fetches are CORS-mode, and a preload
+    # without it is a second, unshared fetch rather than a warm cache hit.
+    preloads = re.findall(r'<link rel="preload"[^>]*href="([^"]+)"[^>]*>', page)
+    assert preloads, "the page preloads no font at all"
+    assert all(p.startswith("/fonts/") for p in preloads), f"off-origin font preload: {preloads}"
+    for url in preloads:
+        assert f'href="{url}" crossorigin' in page, f"preload for {url} is missing crossorigin"
+
+    # There is nothing left to preconnect to, and a leftover preconnect to a
+    # font CDN is the fingerprint of this defect coming back.
     preconnects = re.findall(r'<link rel="preconnect" href="([^"]+)"', page)
-    assert {urlsplit(u).netloc for u in preconnects} >= {"fonts.googleapis.com"}
+    assert preconnects == [], f"/about still preconnects to a third party: {preconnects}"
 
 
 def test_table_of_contents_links_resolve_to_real_anchors() -> None:

@@ -100,6 +100,19 @@ describe("the build-tooling test suite is really selected by vitest", () => {
 
   // The partner assertion: proves the probe can see files at all, so the check
   // above cannot pass vacuously on a broken or empty listing.
+  it("selects the #365 emitted-artifact guard, which lives in its own file", () => {
+    // That guard moved to `src/test/emittedArtifact.test.ts` so it could run in
+    // the jsdom environment it needs. Nothing then named it: `npm test` has no
+    // count gate, so DELETING THE WHOLE FILE left the run green at 24 files /
+    // 517 tests — demonstrated in review. This is the membership check the
+    // split lost.
+    expect(
+      selected.some((f) => f.endsWith("src/test/emittedArtifact.test.ts")),
+      "vitest no longer selects src/test/emittedArtifact.test.ts, so the #365 " +
+        "emitted-artifact guard is not running at all",
+    ).toBe(true);
+  });
+
   it("and still selects the app suite, so widening did not replace src/", () => {
     expect(selected).toContain("src/test/buildGuards.test.ts");
     expect(selected.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);
@@ -671,15 +684,32 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
   it("the fixture and the fonts it serves are all on disk", () => {
     // The route reads these files at request time; a missing one would surface
     // as a 404 inside the browser rather than as a load error here.
+    //
+    // The .woff2 bytes moved to `public/fonts/` in #365 — they are SHIPPED
+    // assets now, and the fixture reads the same copies rather than a second
+    // set, so the suite renders the face production renders. Only Google's
+    // stylesheet response is still a test-only artifact.
     expect(existsSync(join(testsDir, "fixtures.ts"))).toBe(true);
-    for (const f of [
-      "google-fonts-latin.css",
-      "geist-latin.woff2",
-      "jetbrains-mono-latin.woff2",
-      "OFL.txt",
-    ]) {
-      expect(existsSync(join(testsDir, "fonts", f)), `tests/fonts/${f} is missing`).toBe(true);
+    expect(
+      existsSync(join(testsDir, "fonts", "google-fonts-latin.css")),
+      "tests/fonts/google-fonts-latin.css is missing",
+    ).toBe(true);
+    for (const f of ["geist-latin.woff2", "jetbrains-mono-latin.woff2", "OFL.txt"]) {
+      expect(
+        existsSync(join(frontendRoot, "public", "fonts", f)),
+        `public/fonts/${f} is missing — fixtures.ts reads it from there since #365`,
+      ).toBe(true);
     }
+    // Partner: the paths above are the ones fixtures.ts really resolves, not
+    // two lists that happen to agree. Without this, moving FONT_DIR back to
+    // tests/fonts leaves every assertion above green while the fixture reads a
+    // directory nothing checks.
+    const fixture = readFileSync(join(testsDir, "fixtures.ts"), "utf8");
+    expect(
+      fixture,
+      "fixtures.ts no longer resolves its .woff2 files from ../public/fonts",
+    ).toMatch(/FONT_DIR\s*=\s*join\(\s*HERE\s*,\s*"\.\."\s*,\s*"public"\s*,\s*"fonts"\s*\)/);
+    expect(fixture).toMatch(/CSS_DIR\s*=\s*join\(\s*HERE\s*,\s*"fonts"\s*\)/);
   });
 
   it("the vendored stylesheet carries its marker, so a red harness test means the route", () => {

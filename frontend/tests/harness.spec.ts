@@ -23,10 +23,32 @@
  *   4. `fixtures.ts` overrides `page` instead of `context`, so a second page
  *      opened by a test is not covered
  *
- * AFTER #365 LANDS (no third-party link at all), 2 and 3 go vacuously green by
- * design — there is nothing left to intercept — while 1 and 4 keep their full
- * force. That is the intended decay, not an oversight; delete `tests/fonts/`,
- * this file's tests 2 and 3, and the routes together at that point.
+ * #365 HAS NOW LANDED, and this is what actually happened to each of them —
+ * recorded because the prediction above was only half right.
+ *
+ *   1. STRENGTHENED, not unchanged. It used to exempt the two font hosts from
+ *      the off-origin check, because the page legitimately asked for them. It
+ *      no longer does, so the exemption is gone and the assertion is now the
+ *      flat "this page reaches NO third party". That makes it the e2e-level
+ *      detector for a reintroduced third-party font link: `fixtures.ts` would
+ *      serve such a link from disk and every other test would stay green, but
+ *      the REQUEST is still recorded, so this one goes red.
+ *   2. Vacuous by design, as predicted: `askedGoogle` is false, so the
+ *      implication is satisfied without reading anything.
+ *   3. HALF vacuous. Its first two assertions decay exactly as predicted. Its
+ *      third does NOT — `loadedFamilies` and the monospaced/proportional shape
+ *      check now prove the SELF-HOSTED faces really arrive and really are the
+ *      right two files, which is a stronger thing than it used to say.
+ *   4. Unchanged and at full force.
+ *
+ * So `tests/fonts/` and the routes are kept as a backstop rather than deleted
+ * (see `fixtures.ts` for why), and test 3 is kept because most of it still
+ * bites. What guards the PRODUCTION path is elsewhere on purpose:
+ * `src/test/buildGuards.test.ts` asserts the emitted `dist/index.html` and the
+ * emitted CSS carry no off-origin render-blocking reference, and
+ * `tests/fonts-offline.spec.ts` proves the app mounts with every font request
+ * failing. Neither runs through this fixture, because a guard that runs THROUGH
+ * the stub cannot see the path the stub is hiding.
  */
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
@@ -79,9 +101,7 @@ async function loadRecording(page: Page) {
 }
 
 test.describe("e2e harness: nothing reaches a third party", () => {
-  test("every off-origin request the page makes is one the fixture serves from disk", async ({
-    page,
-  }) => {
+  test("the page reaches no third-party host at all", async ({ page }) => {
     const { requests, offOrigin } = await loadRecording(page);
 
     // PARTNER, and it has to come first: the assertion below is "this set
@@ -93,11 +113,20 @@ test.describe("e2e harness: nothing reaches a third party", () => {
       "the request recorder saw almost nothing — the check below would be vacuous",
     ).toBeGreaterThan(10);
 
+    // NO font-host exemption (#365). Until the faces were self-hosted this
+    // filtered `FONT_HOSTS` out, because the page legitimately asked Google for
+    // them and the fixture answered from disk. It does not any more, so the
+    // exemption would only ever hide a regression: `fixtures.ts` still answers
+    // those two hosts from disk, which means a reintroduced third-party font
+    // link would leave every other test in the suite green. The REQUEST is
+    // recorded either way, and this is where it fails.
     expect(
-      offOrigin.filter((u) => !FONT_HOSTS.test(u)),
-      "this page reached a third-party host the harness does not intercept, so the " +
-        "app's load now depends on someone else's network again — add it to " +
-        "tests/fixtures.ts or remove it from the page",
+      offOrigin,
+      "this page reached a third-party host, so first paint now depends on someone " +
+        "else's network again — that is the #365 defect (a render-blocking " +
+        "third-party stylesheet also blocks <script type=module> from executing, " +
+        "and the visitor gets a blank page). Self-host it, or argue for it here " +
+        "and widen backend/app/core/security_headers.py's CSP in the same change",
     ).toEqual([]);
   });
 
@@ -139,8 +168,9 @@ test.describe("e2e harness: nothing reaches a third party", () => {
     // pixel measurement in fidelity.spec.ts and visual.spec.ts.
     expect(
       fontResponses.filter((r) => r.status !== 200).map((r) => `${r.status} ${r.url}`),
-      "a font request was not served from tests/fonts/ — vendor it (see the " +
-        "regeneration note in tests/fonts/google-fonts-latin.css)",
+      "a font request to a THIRD-PARTY host was not served from disk — vendor it " +
+        "(see the regeneration note in tests/fonts/google-fonts-latin.css). Since #365 " +
+        "the page asks for no such host, so this is normally vacuous by design.",
     ).toEqual([]);
 
     // PARTNER for that emptiness check, in the same implication form so #365
@@ -157,8 +187,10 @@ test.describe("e2e harness: nothing reaches a third party", () => {
 
     expect(
       loadedFamilies,
-      "the browser did not end up with both faces loaded — a vendored file is " +
-        "missing or truncated",
+      "the browser did not end up with both faces loaded. Since #365 these come " +
+        "from frontend/public/fonts/ over the dev server, NOT from tests/fonts/ — so " +
+        "look there first: a missing, truncated or renamed .woff2, or an @font-face " +
+        "src in src/styles/fonts.css that no longer resolves",
     ).toEqual(expect.arrayContaining(["Geist", "JetBrains Mono"]));
 
     // A 200 only proves bytes arrived, and "loaded" only proves they parsed —
@@ -185,13 +217,15 @@ test.describe("e2e harness: nothing reaches a third party", () => {
     });
     expect(
       shape.monoWide,
-      "the face serving JetBrains Mono is not monospaced — tests/fixtures.ts's " +
-        "VENDORED_FONTS is serving the wrong file for it",
+      "the face serving JetBrains Mono is not monospaced — the two .woff2 files in " +
+        "frontend/public/fonts/ are swapped, or tests/fixtures.ts's VENDORED_FONTS " +
+        "maps the wrong one (public/fonts/ is the likelier of the two since #365)",
     ).toBeCloseTo(shape.monoNarrow, 1);
     expect(
       shape.geistNarrow,
-      "the face serving Geist is monospaced — tests/fixtures.ts's VENDORED_FONTS " +
-        "is serving JetBrains Mono's file under Geist's name",
+      "the face serving Geist is monospaced — JetBrains Mono's bytes are being " +
+        "served under Geist's name. Check frontend/public/fonts/ first, then " +
+        "tests/fixtures.ts's VENDORED_FONTS",
     ).toBeLessThan(shape.geistWide * 0.9);
   });
 
