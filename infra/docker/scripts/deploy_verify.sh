@@ -291,8 +291,12 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         # `pipefail` an unreadable file or subdirectory anywhere under dist made
         # the whole substitution non-zero even when the checker had already
         # printed [PASS] -- the gate then recorded the self-contradictory
-        # "[FAIL] [PASS] the served bundle carries...". The checker is the last
-        # stage, so ${PIPESTATUS} for it is what the verdict must key on.
+        # "[FAIL] [PASS] the served bundle carries...". The verdict therefore
+        # keys on the checker's own printed verdict, which is the only thing in
+        # the pipeline that actually inspected the bundle. (Its output is
+        # captured, so its exit status is not directly available here; the
+        # prefix is checked instead, and tests/shell/test_deploy_verify_bundle_gate.sh
+        # covers a bundle whose CONTENT and whose FILENAME both say [PASS].)
         bundle_diagnosis="$(
             { find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
                 -exec cat {} + 2>/dev/null || true; } \

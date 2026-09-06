@@ -557,8 +557,7 @@ curl -sS -b "$JAR" -c "$JAR" -X POST "$BASE/v1/sessions/${SID:?session was not c
   -H 'Content-Type: application/json' \
   -d '{"message":"How does streaming work in the Claude API?"}' > "$ANSWER"
 
-jq '{strategy: .retrieval_strategy, answered: (.answer | length > 0),
-     n_citations: (.citations | length)}' "$ANSWER"
+jq '{strategy: .retrieval_strategy, answered: (.answer|length > 0), n_citations: (.citations|length)}' "$ANSWER"
 
 jq -r '.citations[].url' "$ANSWER" | while read -r u; do
   case "$u" in /*) u="$BASE$u" ;; esac

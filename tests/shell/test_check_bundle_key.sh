@@ -121,10 +121,25 @@ fi
 # whitespace guard itself. With a 3-char value the floor caught it first and
 # the whitespace guard could be deleted with the suite still green.
 OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="                    " "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -eq 1 ]]; then
-    pass "a WHITESPACE-ONLY expected key FAILS (it would match almost anything)"
+# The REASON is asserted, not just rc=1. Review deleted the whitespace-strip
+# from the checker and this case still printed ok: the mutant exited 1 too, for
+# the unrelated reason "key not found in bundle". A case that cannot tell those
+# apart is not testing the guard it names — and the mutant DID produce a false
+# PASS on an indented index.html, which the gate now cats.
+if [[ ${RC} -eq 1 ]] && printf '%s' "${OUT}" | grep -q 'whitespace only'; then
+    pass "a WHITESPACE-ONLY expected key FAILS, and says why"
 else
-    fail "a whitespace-only expected key passed on an empty-arg bundle — vacuous"
+    fail "a whitespace-only expected key was not rejected by the whitespace guard (rc=${RC}): ${OUT}"
+fi
+
+# The same key against a bundle that CONTAINS runs of spaces — an indented
+# index.html, which deploy_verify.sh now cats. Without the whitespace guard
+# this is a false PASS, not merely a right answer for the wrong reason.
+OUT="$(printf '<html>\n                    <body>x</body>\n</html>' | CITEVYN_DEMO_API_KEY="                    " "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 1 ]]; then
+    pass "a whitespace key does NOT match an indented HTML bundle"
+else
+    fail "a whitespace-only key matched indented HTML — false PASS (rc=${RC})"
 fi
 
 # A one-character key matches every bundle ever built.
@@ -208,7 +223,7 @@ fi
 # PINNED EXACTLY, not a floor. Under `>= 14` with 16 running, two whole cases
 # could be deleted and the suite still printed "all passed" — demonstrated in
 # review. Bump this deliberately when you add a case.
-_EXPECTED_ASSERTIONS=19
+_EXPECTED_ASSERTIONS=20
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
     echo "         A case was added or removed: update _EXPECTED_ASSERTIONS on purpose."

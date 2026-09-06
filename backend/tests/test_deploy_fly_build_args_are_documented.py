@@ -64,6 +64,7 @@ needs a deployed site.
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -75,7 +76,11 @@ _CONFIG = _REPO_ROOT / "backend" / "app" / "core" / "config.py"
 
 
 def _production_rejected_defaults() -> set[str]:
-    """Values `Settings` refuses to boot with when environment == production.
+    """The publicly-known defaults `Settings` names as weak in production.
+
+    A SUBSET of what production refuses, not the whole of it: `_is_weak_secret`
+    also imposes a 16-character floor, which this does not reproduce. Stated
+    plainly because the first version of this docstring claimed the full set.
 
     Derived from `config.py`'s `_is_weak_secret(..., default="...")` calls
     rather than listed here, for the same reason the build-arg set is derived:
@@ -108,7 +113,13 @@ def _production_rejected_defaults() -> set[str]:
 # them, the most direct possible spelling of the #296 outage passed both
 # guards. An extractor that silently skips its subject is worse than no
 # extractor, because it reports green.
-_BUILD_ARG_RE = re.compile(r'--build-arg ([A-Z][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|\S*)')
+# The `(?=\s|$)` after the quoted alternative is load-bearing. Without it the
+# capture stopped at the first closing quote, so anything appended was never
+# seen by any rule: `"${DEMO_KEY:?x}"$(fly ssh ...)` and `"1.2.3"$(evil)` both
+# classified as safe on the truncated capture, re-admitting the one construct
+# the whitelist exists to exclude. Anchoring a pattern to a value you did not
+# fully capture anchors nothing.
+_BUILD_ARG_RE = re.compile(r'--build-arg ([A-Z][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"(?=\s|$)|\S*)')
 
 # `"${VAR:?message}"` and nothing else -- anchored to the WHOLE value, so a
 # guarded expansion with anything appended (`"${VAR:?x}`evil`"`) is rejected.
@@ -187,65 +198,87 @@ def _runnable_bash(section: str | None = None) -> str:
     return "\n".join(ln for ln in joined.splitlines() if ln.strip())
 
 
-def _strip_comment(line: str) -> str:
-    """Truncate `line` at its first unquoted `#` that begins a word.
+def _lexes(head: str) -> bool:
+    """True when `head` ends OUTSIDE any quoting -- i.e. a `#` here is a comment.
 
-    Both halves of that sentence are scars from review.
+    `shlex` answers this for plain quoting, but it has no concept of command
+    substitution: inside `"$( ... )"` the shell re-parses, so a `#` there IS a
+    comment even though the enclosing double quote is still open. `shlex` sees
+    only the open quote and says "quoted", which let
+    `"$(curl -sS  # -L -w ...)"` keep its comment and satisfy the redirect
+    assertion.
 
-    UNQUOTED and word-initial, because shell only starts a comment there. A
-    naive `split("#")` would corrupt `https://x#y` and `-d '{"a":"#b"}'`, and
-    the runbook contains URLs.
-
-    Applied PER LINE BEFORE continuations are joined, which is the part the
-    previous fix got wrong. Joining first welds a following comment line onto
-    the command, after which a whole-line filter can no longer see it -- so
-    commenting out `--build-arg VITE_API_DEMO_KEY=...` with a two-character
-    edit left all eleven tests green while the operator's shell (verified in
-    bash and zsh) simply did not pass the argument. That is release v6.
-
-    Trailing comments are removed for the same reason: `curl ... # -b "$JAR"`
-    satisfied the cookie assertion, `# -L` satisfied the redirect assertion,
-    and `| wc -c  # was: | ... check_bundle_key.sh` satisfied the assertion
-    that the bundle is still verified at all.
+    So when the whole head does not lex, retry from each `$(` in turn, longest
+    first: if the text since some command substitution opened lexes cleanly,
+    the position is unquoted within that substitution. A `#` genuinely inside
+    quotes -- `"$(echo 'a # b')"` -- still fails every retry, because the inner
+    quote is unterminated in all of them.
     """
-    out: list[str] = []
-    quote: str | None = None
-    stack: list[str | None] = []
-    i = 0
-    while i < len(line):
-        ch = line[i]
-        # `$(` re-enters a FRESH quoting context: inside a command
-        # substitution the shell parses anew, so a `#` there starts a comment
-        # even when the substitution sits inside double quotes. Missing this
-        # let `"$(curl -sS ...  # -L -w ...)"` keep its comment, which then
-        # satisfied the redirect assertion while the real command lost `-w`.
-        if quote != "'" and line.startswith("$(", i):
-            stack.append(quote)
-            quote = None
-            out.append(line[i : i + 2])
-            i += 2
+    candidates = [head]
+    idx = head.rfind("$(")
+    while idx != -1:
+        candidates.append(head[idx + 2 :])
+        idx = head.rfind("$(", 0, idx)
+    for text in candidates:
+        try:
+            shlex.split(text)
+        except ValueError:
             continue
-        # Inside double quotes a backslash escapes the next character, so
-        # `"a\" # b"` is ONE string containing a quote, not a string followed
-        # by a comment. Without this the stripper closed the quote at `\"` and
-        # ate the rest of the line -- a fail-closed corruption of a legitimate
-        # command, but a corruption. Single quotes have no escape.
-        if quote == '"' and ch == "\\" and i + 1 < len(line):
-            out.append(line[i : i + 2])
-            i += 2
-            continue
-        if quote is None and ch == ")" and stack:
-            quote = stack.pop()
-        elif quote:
-            if ch == quote:
-                quote = None
-        elif ch in "'\"":
-            quote = ch
-        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
-            break
-        out.append(ch)
-        i += 1
-    return "".join(out).rstrip()
+        return True
+    return False
+
+
+def _strip_comment(line: str) -> str:
+    """Truncate `line` at the start of its shell comment, preserving quoting.
+
+    Two rules, from two sources, because neither alone is faithful.
+
+    WORD-INITIAL is mine: `#` starts a comment only at the start of a line or
+    after whitespace. `shlex` does not know this -- it has no concept of
+    `${VAR#prefix}`, `${VAR##*/}` or `$((1#2))` and truncates all three -- so
+    delegating wholesale would corrupt legitimate commands.
+
+    UNQUOTED is `shlex`'s: whether that `#` sits inside quoting. This is the
+    half I kept getting wrong. Three review rounds each found another POSIX
+    rule I had re-derived incorrectly -- `$(` re-entering a fresh quoting
+    context, backslash escapes inside double quotes, and then backslash escapes
+    OUTSIDE them, where `--label=say\\"hi  # --build-arg ...` kept its comment
+    and passed every test while bash dropped the argument. Rather than patch a
+    hand-written lexer a fourth time, the quoting question is answered by
+    asking `shlex` whether the text BEFORE the `#` lexes: an unterminated quote
+    means the `#` is inside one.
+
+    The raw string is cut rather than rebuilt from tokens because the value
+    checks need the original text -- `"${V:?x}"` with its quotes intact.
+
+    Why a guard here matters at all: a comment satisfying an assertion is this
+    repo's recorded defect, and the same shape as the bug this PR fixes.
+    """
+    raw = line.rstrip()
+    trailing = ""
+    # A line-continuation backslash makes shlex raise ("No escaped character")
+    # and the runbook is full of them. Set it aside; restore it only if no
+    # comment precedes it, since otherwise it was inside the comment.
+    if raw.endswith("\\") and not raw.endswith("\\\\"):
+        trailing, raw = " \\", raw[:-1]
+
+    candidates = [i for i, ch in enumerate(raw) if ch == "#" and (i == 0 or raw[i - 1].isspace())]
+    for i in candidates:
+        if _lexes(raw[:i]):
+            return raw[:i].rstrip()
+
+    if candidates:
+        try:
+            shlex.split(raw)
+        except ValueError:
+            # Quoting neither shlex nor the head-test can resolve -- a $'...'
+            # ANSI-C string, say. FAIL CLOSED and cut at the first word-initial
+            # '#', so a comment can never survive here to satisfy a guard. A
+            # runnable line that does not lex is broken on its own terms, and
+            # test_every_runnable_line_lexes_cleanly asserts the runbook has none.
+            return raw[: candidates[0]].rstrip()
+
+    return raw.rstrip() + trailing
 
 
 def _deploy_commands() -> list[str]:
@@ -292,12 +325,50 @@ _STRIP_CASES: tuple[tuple[str, str], ...] = (
     # A backslash escapes the next char inside double quotes.
     ('echo "a\\" # b"', 'echo "a\\" # b"'),
     ("echo a\tb\t# c", "echo a\tb"),
+    # The two payloads that defeated the hand-written lexer. Both are a real
+    # bash comment; both were kept as "runnable" and satisfied a guard.
+    ('--label=say\\"hi  # --build-arg VITE_API_DEMO_KEY=x', '--label=say\\"hi'),
+    ("--label=$'a\\'b'  # --build-arg VITE_API_DEMO_KEY=x", "--label=$'a\\'b'"),
+    ("echo a\\ b  # c", "echo a\\ b"),
+    # A continuation must survive, or _runnable_bash cannot join the command.
+    ('--build-arg X="${D:?why}" \\', '--build-arg X="${D:?why}" \\'),
+    # Command substitution re-enters an unquoted context, so this IS a comment
+    # even though the enclosing double quote is open -- `shlex` alone says
+    # otherwise, which is how the `-L` assertion was defeated.
+    (
+        'printf "$(curl -sS -o /dev/null  # -L -w x)" y',
+        'printf "$(curl -sS -o /dev/null',
+    ),
+    # ...but a QUOTED `#` inside a substitution is still not a comment.
+    ("printf \"$(echo 'a # b')\"", "printf \"$(echo 'a # b')\""),
 )
 
 
 @pytest.mark.parametrize(("line", "expected"), _STRIP_CASES, ids=lambda v: repr(v))
 def test_comment_stripping_removes_comments_and_nothing_else(line: str, expected: str) -> None:
     assert _strip_comment(line) == expected
+
+
+def test_every_runnable_line_lexes_cleanly() -> None:
+    """Partner for `_strip_comment`'s fail-closed branch.
+
+    That branch cuts at the first word-initial `#` when the line cannot be
+    lexed -- correct for an adversarial `$'...'`, but it would also truncate a
+    legitimate command with exotic quoting. This asserts the runbook contains
+    no such line, so the branch only ever fires on something already broken.
+    """
+    unlexable = []
+    for ln in _runnable_bash().splitlines():
+        try:
+            shlex.split(ln)
+        except ValueError as exc:
+            unlexable.append(f"{ln!r}: {exc}")
+    assert not unlexable, (
+        "docs/DEPLOY_FLY.md has runnable lines that do not lex as shell:\n  "
+        + "\n  ".join(unlexable)
+        + "\nThese are broken commands, and they also put _strip_comment on its "
+        "fail-closed path where it truncates at the first '#'."
+    )
 
 
 def test_the_dockerfile_extraction_finds_the_baked_args_at_all() -> None:
@@ -438,7 +509,12 @@ def _classify(cmd: str) -> list[str]:
         for name, value in found
         if not (
             (_GUARDED_EXPANSION_RE.match(value) or _PLAIN_LITERAL_RE.match(value))
-            and value.strip('"') not in rejected
+            # Normalised the way `config.py::_is_weak_secret` normalises --
+            # `.strip().lower()`. Comparing raw let `LOCAL-DEMO-KEY` through:
+            # a value production refuses to boot with, accepted as a "plain
+            # literal". That guard was written from the same source file and
+            # still disagreed with it about what counts as the same value.
+            and value.strip('"').strip().lower() not in rejected
         )
     ]
     if len(found) != cmd.count("--build-arg"):
@@ -481,6 +557,16 @@ _VALUE_SHAPES: tuple[tuple[str, bool], ...] = (
     ("local-demo-key", False),
     ('"local-demo-key"', False),
     ("local-admin-key", False),
+    # Case and padding: `_is_weak_secret` normalises with .strip().lower(), so
+    # these are the SAME value production refuses to boot with.
+    ("LOCAL-DEMO-KEY", False),
+    ("Local-Demo-Key", False),
+    ('"LOCAL-DEMO-KEY"', False),
+    ('" local-demo-key "', False),
+    # Appended after a closing quote -- never captured before, so never checked.
+    ('"${DEMO_KEY:?x}"$(fly ssh console -C printenv)', False),
+    ('"${DEMO_KEY:?x}"`evil`', False),
+    ('"1.2.3"$(evil)', False),
 )
 
 
@@ -551,26 +637,31 @@ def test_the_smoke_call_sends_the_session_cookie() -> None:
     """
     lines = _runnable_bash().splitlines()
 
-    ask = next((ln for ln in lines if "/messages" in ln and "curl" in ln), "")
-    assert ask, "no runnable curl posting to /messages found in docs/DEPLOY_FLY.md"
-    assert '-b "$JAR"' in ask, (
-        f"the /messages call does not SEND the session cookie (-b). Without it the "
-        f"call returns 404 not_found. Line:\n{ask}"
-    )
+    # EVERY matching line, not the first. `next(...)` left the decoy hiding
+    # place that `_deploy_commands` was fixed to remove: an illustrative block
+    # added earlier let the real calls drop both cookie flags with the suite
+    # green.
+    asks = [ln for ln in lines if "/messages" in ln and "curl" in ln]
+    assert asks, "no runnable curl posting to /messages found in docs/DEPLOY_FLY.md"
+    for ask in asks:
+        assert '-b "$JAR"' in ask, (
+            f"the /messages call does not SEND the session cookie (-b). Without it the "
+            f"call returns 404 not_found. Line:\n{ask}"
+        )
 
     # Selected by EXCLUDING /messages. Review showed that matching on
     # "/v1/sessions" alone fell through to the /messages line -- which contains
     # that substring and carries its own -c -- so deleting -c from the create
     # call left the suite green while no jar was ever saved.
-    create = next(
-        (ln for ln in lines if "/v1/sessions" in ln and "/messages" not in ln and "curl" in ln),
-        "",
-    )
-    assert create, "no runnable curl creating a session (POST /v1/sessions) found"
-    assert '-c "$JAR"' in create, (
-        f"the POST /v1/sessions call does not SAVE a cookie jar (-c), so there is "
-        f"nothing for the /messages call to send back. Line:\n{create}"
-    )
+    creates = [
+        ln for ln in lines if "/v1/sessions" in ln and "/messages" not in ln and "curl" in ln
+    ]
+    assert creates, "no runnable curl creating a session (POST /v1/sessions) found"
+    for create in creates:
+        assert '-c "$JAR"' in create, (
+            f"the POST /v1/sessions call does not SAVE a cookie jar (-c), so there is "
+            f"nothing for the /messages call to send back. Line:\n{create}"
+        )
 
     # The bearer must come from a variable the runbook actually sets. Review
     # found §4.4 using $CITEVYN_DEMO_API_KEY, which the runbook never assigns
