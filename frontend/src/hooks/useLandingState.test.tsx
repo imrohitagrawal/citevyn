@@ -1268,6 +1268,36 @@ describe("the / shortcut respects an open modal dialog (#331)", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(input);
   });
+
+  // #356 gap 3. `hero-input` exists on the landing screen only. On the chat
+  // screen the handler used to call preventDefault() and then focus nothing, so
+  // the keystroke was consumed and produced no effect anywhere — it never
+  // reached the page and never reached the reader's own text either.
+  it("does not swallow the keystroke when there is no hero input to focus", () => {
+    renderHook(() => useLandingState());
+    // No mountHeroInput() — this is the chat screen, where it does not exist.
+    expect(document.getElementById("hero-input")).toBeNull();
+
+    document.body.focus();
+    const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("still calls preventDefault when it DOES focus the hero input", () => {
+    // Partner. Without it, deleting preventDefault altogether would satisfy the
+    // test above — and a bare `/` would then be typed into the field the
+    // shortcut just focused, which is the behaviour the call exists to stop.
+    renderHook(() => useLandingState());
+    mountHeroInput();
+
+    document.body.focus();
+    const event = new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true });
+    window.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+  });
 });
 
 /**
@@ -1751,6 +1781,49 @@ describe("useLandingState — a landing entry point parks its question rather th
 
     expect(result.current.state.chatInput).toBe("my own draft");
     expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("SAYS so when the clicked question is dropped for a draft (#356)", async () => {
+    // Restored from PR #357, which cut it for +62 B gzip against 69 B of
+    // budget. Without it the click produces literally nothing the reader can
+    // perceive: the draft stays, the question vanishes, no DOM change, no
+    // announcement. ToastHost renders these in an `aria-live="polite"` region
+    // with `role="status"`, so it reaches assistive tech as well as the screen.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(result.current.toasts).toHaveLength(1);
+    expect(result.current.toasts[0].kind).toBe("info");
+    // It must name the question that was dropped, or the reader cannot tell
+    // WHICH click did nothing.
+    expect(result.current.toasts[0].message).toContain("Second question");
+  });
+
+  it("stays quiet when the question was PARKED rather than dropped", async () => {
+    // The partner. A toast on every parked question would fire on the common
+    // path, where nothing was lost and the question is visibly in the composer.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(result.current.state.chatInput).toBe("Second question");
+    expect(result.current.toasts).toEqual([]);
   });
 
   it("parks the second of TWO landing entry points fired inside the 60ms send delay", async () => {

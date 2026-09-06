@@ -64,6 +64,28 @@
   --border-inverse: rgba(239, 236, 228, 0.12);
   --border-focus: #ffd75e;
 
+  /* The keyboard focus ring (#355). Declared ONCE, here, and deliberately NOT
+   * repeated in the dark / prefers-color-scheme blocks: this selector is
+   * `:root, [data-theme="light"]`, so the `:root` half matches <html> whatever
+   * its data-theme is, and `var(--ink)` substitutes the value --ink has
+   * CASCADED to on that same element. Flipping the theme therefore flips the
+   * ring for free. Verified in real Chromium in BOTH themes, not reasoned about
+   * — tests/focus-ring.spec.ts resolves it after driving the real toggle.
+   *
+   * --ink, NOT --border-focus. Measured: the yellow --border-focus is 1.32:1 on
+   * --bg and 1.39:1 on --surface in light mode, i.e. WORSE than the browser's
+   * own default ring, which is the trap the /about work caught first
+   * (frontend/public/about.css). --ink measures 16.35:1 light / 15.69:1 dark on
+   * the page canvas and >= 9.35:1 on every other surface in the app.
+   *
+   * It is a TOKEN rather than a literal because one flat colour is not enough:
+   * `.cta-banner` paints --ink as its BACKGROUND, and a --ink ring measured
+   * 1.00:1 there — invisible on the one surface it is drawn over. That panel
+   * re-declares --focus-ring locally (landing.css) and the whole subtree
+   * inherits it. Any future inverted surface does the same, one line, without
+   * touching reset.css. */
+  --focus-ring: var(--ink);
+
   /* ----- Semantic ----- */
   --color-success: #1c9a5f;
   --color-success-soft: rgba(28, 154, 95, 0.12);

@@ -94,6 +94,61 @@ on `background` and `color`.
 }
 ```
 
+Declared once, in `landing.css`. `reset.css` used to carry a second, dead copy
+pointing at `--accent` (see Focus below); it was removed rather than repointed,
+so there is one selection rule instead of two that must agree.
+
+#### Focus
+
+```css
+/* tokens.css, on bare :root */
+--focus-ring: var(--ink);
+
+/* reset.css */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+```
+
+`--focus-ring` is declared **once**, in the `:root, [data-theme="light"]` block.
+The `:root` half matches `<html>` whatever its `data-theme` is, and `var(--ink)`
+substitutes the value `--ink` has *cascaded to* on that same element — so the
+theme flip carries the ring for free and the dark blocks do not repeat it.
+
+**Why `--ink` and not `--border-focus`.** Measured in real Chromium:
+
+| Ring | `--bg` | `--surface` | `--surface-2` | `--code` | `--hl` | `--ink` |
+|---|---|---|---|---|---|---|
+| `--ink` light `#1c1b19` | 16.35 | 17.21 | 15.23 | 14.58 | 12.40 | **1.00** |
+| `--ink` dark `#f0efe9` | 15.69 | 14.43 | 13.07 | 12.38 | 1.41 | **1.00** |
+| `--border-focus` light `#ffd75e` | **1.32** | **1.39** | **1.23** | **1.18** | **1.00** | 12.40 |
+
+The yellow `--border-focus` is *worse than the browser's own default ring* in
+light mode, which is the trap the `/about` work caught first
+(`frontend/public/about.css`). `--border-focus` remains declared in `tokens.css`
+and is consumed by nothing.
+
+**Why it is a token and not a literal.** One flat colour is not enough.
+`.cta-banner` paints `--ink` as its **background**, and a `--ink` ring measured
+**1.00:1** on `.cta-pill` there — invisible on the one surface it is drawn over.
+That panel re-declares `--focus-ring: var(--bg)` and the whole subtree inherits
+it. Any future inverted surface does the same in one line, without reset.css
+knowing anything about it.
+
+**Two deliberate exemptions.** `#hero-input` and `.chat-input` carry
+`outline: none` and signal focus through a `:focus-within` border on their box
+(`.hero-input-box` / `.composer-box`, both `border-color: var(--ink)`). The
+exemption list lives in `tests/focus-ring.spec.ts` and both exempted boxes are
+asserted separately, in both directions — adding an `outline: none` anywhere
+else turns the sweep red.
+
+The guard is a Playwright spec, not a unit test: vitest runs with `css: false`,
+so nothing in the unit suite can observe a computed style, and a guard asserting
+the CSS *text* would not have caught #355 either — the declaration was present
+the whole time and simply did not compute.
+
 ### 1.2 Typography
 
 Fonts are loaded from Google Fonts in `main.tsx`.
@@ -576,8 +631,14 @@ system prompt constrains the model to the same subset.
 - Offset: `-72px` for the sticky header (implemented via `scroll-margin-top: 76px` on sections)
 
 ### Hero Input (`/` shortcut)
-- Pressing `/` anywhere focuses the hero input
+- Pressing `/` on the landing screen focuses the hero input
 - Ignored when another input already has focus
+- Ignored while a modal dialog is open (#331) — the shortcut is a `window`
+  listener the dialog's focus trap never sees, so without this it focused the
+  hero input *behind* the backdrop
+- On the chat screen there is no `hero-input`, so the handler focuses nothing —
+  and, since #356, calls no `preventDefault()` either. It used to consume the
+  keystroke and do nothing with it
 - The `/` badge is clickable as a fallback
 - Enter or "Ask →" button enters chat with typed question
 - Empty submit: input shakes, border turns amber, 3s inline warning appears
@@ -719,6 +780,11 @@ what is fundamentally a two-view marketing page.
 | 2026-09-06 | The in-flight count is now MIRRORED from its ref rather than tracked by parallel deltas, and a persistent `role="status"` region does the announcing | The reducer applied a delta and the ref applied a delta — two sources of truth held in step by convention, and the hook exports `dispatch`, so the convention was already breakable from outside (this change's own test broke it). Assigning the ref's value makes drift structurally impossible, lets a stray dispatch self-heal, and is fewer bytes. The clamp moved onto the REF, which is the half the gate reads: a negative ref is TRUTHY, so clamping only the rendered copy was backwards. It is an unreachable backstop and is the one mutant of 23 that survives — recorded here rather than papered over with a test that cannot fail. The live region is now persistent and empty when idle: one created together with its own text is unreliable across screen readers, it sat inside the scrolling list where a scrolled-up reader could not see it, and the avatar's literal "CV" was inside it and got announced. |
 | 2026-09-06 | Deleted a vitest test that could not fail, and pinned the `state.pending > 0` seam | Found by the test-quality reviewer, both are the repo's own recorded traps. The focus test passed with the whole #62 change absent AND with `disabled={pending}` — the exact design its docblock said it rejected — because jsdom does not blur an element when it becomes disabled; the property is real, so it moved to the live browser test. Separately, `pending={false}` and `state.pending > 1` — cutting the seam entirely, and never showing the loader — both survived the full suite, because the only test on that seam asserted an ABSENCE. A positive test now drives a held request and watches the loader appear and clear. The demo-rail sampler's two hidden preconditions (`300 % 24 == 12`, and FIRST longer than SECOND) are asserted rather than assumed: with two incidental constants changed it went green on broken code. |
 | 2026-09-06 | Skeptic round: the demo-mode negative control now bites, the landing-entry-point parking closed a 60 ms race, and the AA contrast fix got a guard | An adversarial pass over the FIX diff, because in this repo the last three packages each hid their next defect inside a review fix. It found two. **(1) The demo negative control reported green on the exact mutation its own docblock named** — re-keying the gate onto `messages.some(m => m.streaming)` — because every assertion in it was an auto-retrying `expect` that simply polled until the ~2 s demo stream ended and the gate opened; measured in a real browser at 5.1 s instead of 1.5 s, still passing. It now takes ONE synchronous snapshot with the caret count read in the same `evaluate`, which is the partner that makes the other fields mean "mid-stream". Re-run against that mutant: red. This mattered more than it looks — it is the only cover for #62 on the REQUIRED check, since the live e2e is advisory. **(2) The parking fix left a 60 ms hole:** `enterChat` read the in-flight count synchronously but defers the send 60 ms, and the count only rises when the request starts, so two entry points inside that window both sent — `asks=2`, [Q1][Q2][A2][A1]. Re-checking inside the deferred callback closes it. Also: the focus assertion was testing that an aria-disabled button is focusable, not that focus SURVIVES the flip — it now submits by clicking, which is the actual scenario, and it failed the first time it was written correctly. `.pending-label`'s token change had no guard at all (vitest runs `css: false`, so reverting it left the whole suite green); the live test now resolves `--muted` at runtime and compares. `.pending-dot` moved to `--muted` too — it was left at 2.77:1, the same finding half-fixed. |
+| 2026-09-06 | `:focus-visible` draws a real ring again, through a new `--focus-ring` token; the inverted CTA panel re-points it; the hero box gains the `:focus-within` border it already had a transition for; reset.css's dead `::selection` removed | #355 — `reset.css` asked for `var(--accent)`, which is defined ONLY under the three `[data-style]` skins nothing can activate. The var was undefined, the `outline` shorthand was invalid at computed-value time, every longhand became `unset`, `outline-style` computed to `none` — and because an author rule outranks the UA stylesheet, the declaration **removed** Chrome's default ring rather than replacing it. Reproduced in real Chromium on `main` by driving real Tab presses: **24 consecutive keyboard stops in light mode and 17 in dark, every one matching `:focus-visible`, every one `outline-style: none`** (WCAG 2.4.7 AA, site-wide). The naive fix repeats the defect: `--ink` is right on every surface (16.35:1 light / 15.69:1 dark on `--bg`, ≥ 9.35:1 everywhere else) EXCEPT `.cta-banner`, which paints `--ink` as its background — a flat `--ink` ring measured **1.00:1** on `.cta-pill` in both themes, invisible on the one surface it is drawn over. So the ring is a TOKEN: `--focus-ring: var(--ink)` on bare `:root`, re-declared as `var(--bg)` on `.cta-banner`, inherited by the subtree. Declared once, not per-theme: the `:root` half of `:root, [data-theme="light"]` matches `<html>` whatever its theme, and `var()` substitutes the CASCADED `--ink` — verified in a real browser in both themes rather than reasoned about. `--border-focus`, the token that looks like the answer, measures 1.32:1 on `--bg` in light mode, WORSE than the default ring it would replace; it is still consumed by nothing. Two controls stay exempt and are asserted separately in both directions: `#hero-input` and `.chat-input` carry `outline: none` and signal through their box's `:focus-within` border — the hero box had declared `transition: border-color` since the design port for a focus state that was never written, and now has it. Guarded by `tests/focus-ring.spec.ts` in the REQUIRED demo-e2e job, which drives real Tab presses, reads resolved `outline-style`/`outline-color`, composites the actual painted backdrop through a canvas (a naive `rgb()` regex returns null for the header's `color-mix` and would have scored it 0), and computes the ratio. Nothing in it reads a stylesheet — vitest runs `css: false`, so no unit test could ever see this, and a string guard would not have caught it because the declaration was there all along. **11 mutants, all killed** (`frontend/scripts/mutate-focus-ring.sh`), including three META-mutants proving the sweep cannot be made vacuous. **Zero pixels changed at rest** — focus states only |
+| 2026-09-06 | An arriving answer is announced, through the persistent `role="status"` region the composer already renders | #356 gap 1 — measured on the success path, a settling request removes the pending region, inserts the answer bubble and flips `aria-disabled`, none of it in a live region, so a screen-reader user was never told the answer had come back. The error path already announced, via ToastHost's `role="alert"`. Deliberately NOT `aria-live` on `#chat-list`: a live region on the scrolling list announces every mutation in it — the bot avatar's literal "CV", the reader's own echoed question, the refusal badge and the whole source-card list, on every streamed chunk. That is the exact trap already documented on the pending bubble. It is EDGE-triggered on `pending` true→false, so returning to a finished transcript announces nothing, and it stays silent on a transport failure so an error is not narrated twice with "answer ready" over the top. A refusal is announced as a refusal. Eight tests, each driving the real prop transition rather than rendering the end state — a test that only rendered `pending: false` passes with the whole change absent. **+197 B gzip, measured by building with this change alone removed** |
+| 2026-09-06 | The toast PR #357 cut for 62 bytes is back: clicking a landing question while your own draft sits in the composer now says the question was dropped | #356 — the draft outranks the clicked question, correctly, but the click then produced literally nothing a reader could perceive: no DOM change, no announcement, the question simply gone. ToastHost renders `aria-live="polite"` / `role="status"`, so this reaches assistive tech as well as the screen. It names the dropped question, or the reader cannot tell which click did nothing. Restored because the ceiling it was traded against has been re-set deliberately, not because the trade was close: a budget that makes WCAG work the thing you give up is measuring the wrong quantity. Costs **+104 B gzip measured**, not the 62 B the PR body quoted — the message is longer, and this time that is a copy decision rather than a byte decision. Partnered by a test proving the common path (question PARKED into an empty composer) stays quiet |
+| 2026-09-06 | `/` no longer swallows the keystroke when there is nothing to focus | #356 gap 3 — `preventDefault()` ran before the lookup, so on the chat screen (where `hero-input` does not exist) the key was consumed and did nothing at all: it reached neither the page nor the reader's own text. Now `preventDefault()` only runs when a target exists. Narrower than the issue states, and worth knowing before writing a test: the handler already bails when `activeElement` is an INPUT, and the composer is focused on mount, so this only bit once focus had left the composer — the Back button, a citation chip, the account button, or `<body>`. The `isModalDialogOpen()` guard from #331 is untouched. Partnered by a test asserting `preventDefault` IS still called on the landing screen, without which deleting the call outright would satisfy the fix and let a bare `/` be typed into the field it just focused. **+5 B gzip measured** |
+| 2026-09-06 | The eager-bundle ceiling re-set from 66,000 to 68,000 B, with the reasoning written into `frontend/bundle-budget.json` | Not a raise-because-we-hit-it. 66,000 was never chosen — it was the last raise, and against a 65,931 B graph it left **69 B, 0.10%**, so every frontend change had become a budget negotiation. The cost was real: PR #357 cut an accessibility announcement because it measured +62 B. The graph was audited first, by decoding the build's own sourcemap: it is ONE file (no `manualChunks`, the entry declares no static `imports`), of which **react-dom is 130,102 B raw / ~41.9 kB gzip — 63.6%** — and ALL application code is 59,276 B raw / ~19 kB gzip. Five lazy-loading variants were BUILT and measured, not estimated: ChatView −2,903 B, the whole below-Hero landing strip −4,669 B, AccountMenu −865 B, ToastHost −390 B. **None was taken**, for product reasons rather than byte reasons — ChatView is the primary CTA's target and deferring it needs a prefetch added purely to serve a number; the landing strip IS defensible but the measured variant also moved `QuestionTicker`/`SourcesStrip` from just under the Hero, so the honest version needs the file split, an IntersectionObserver, and its own pass over the 22 visual baselines (tracked, with these numbers, in `docs/BACKLOG.md`); AccountMenu pops in inside the header; ToastHost would add a round-trip to show the error toast that fires when the network is already unhappy. 68,000 leaves 1,763 B (2.7%) against the 66,237 B this PR ships — about five more changes the size of this one, and smaller than any new eagerly-imported surface (the app's existing lazy chunks are 1.2–2.9 kB gzip), which is exactly the step change the gate exists to force a conversation about. The gate is re-proven to bite at the new number: a real oversize build fails (`headroom -3138 B`), a mistyped budget key fails loudly rather than passing silently (#323's actual defect), and the repo's own harness reports **43/43 mutants killed** |
 
 ### Future entries
 

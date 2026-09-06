@@ -433,8 +433,20 @@ export function useLandingState() {
           (document.activeElement as HTMLElement)?.tagName || "",
         )
       ) {
-        e.preventDefault();
-        document.getElementById("hero-input")?.focus();
+        // preventDefault ONLY when there is somewhere for focus to go (#356).
+        // `hero-input` exists on the landing screen only, so on the chat screen
+        // this branch used to swallow the keystroke and do nothing at all —
+        // measured: `defaultPrevented: true`, focus unmoved, no hero input in
+        // the document. The `/` then never reached the page, and never reached
+        // the reader's own text either. Note the INPUT/TEXTAREA guard above
+        // already covers the common chat case (the composer is focused on
+        // mount), so the swallow only bit once focus had left the composer —
+        // the Back button, a citation chip, the account button, or <body>.
+        const target = document.getElementById("hero-input");
+        if (target) {
+          e.preventDefault();
+          target.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -927,12 +939,23 @@ export function useLandingState() {
           // dropped". It is the recoverable half of the trade: the rail pill
           // or chip that produced it is still one click away on the screen
           // they came from, whereas typed text, once overwritten, is gone.
-          // A toast saying so was written and measured at +62 B gzip, which
-          // would have left 12 B of the 66,000 ceiling; not worth spending
-          // the project's last headroom on, so it is recorded here and in
-          // #356 instead.
+          //
+          // Saying so is now DONE rather than deferred. PR #357 cut this toast
+          // for +62 B gzip against 69 B of remaining budget; the ceiling has
+          // since been re-set deliberately (frontend/bundle-budget.json), and a
+          // click that produces literally nothing — no DOM change, no
+          // announcement — is the third silent path in this family, alongside
+          // the two #356 records. ToastHost renders `aria-live="polite"` with
+          // `role="status"` for a non-error kind, so this reaches a screen
+          // reader as well as the screen.
           if (!carried && !state.chatInput) {
             dispatch({ type: "SET_CHAT_INPUT", value: q });
+          } else {
+            addToast({
+              kind: "info",
+              title: "Kept your draft",
+              message: `Your unsent text is still in the box, so “${q}” was not added. Send or clear the draft, then pick it again.`,
+            });
           }
         };
         if (inFlight.current) {
@@ -948,7 +971,10 @@ export function useLandingState() {
         setTimeout(() => (inFlight.current ? park() : send(q)), 60);
       }
     },
-    [send, state.heroInput, state.chatInput],
+    // `addToast` belongs here: `park()` calls it, and it is the dependency that
+    // is easiest to forget because `useToast` memoises it with an empty dep
+    // array, so omitting it is invisible until that ever changes.
+    [send, state.heroInput, state.chatInput, addToast],
   );
 
   /**

@@ -198,3 +198,31 @@ export async function waitStreamDone(page: Page, timeout = 12000) {
     { timeout },
   );
 }
+
+// ---------------------------------------------------------------------------
+// WCAG contrast
+// ---------------------------------------------------------------------------
+
+/**
+ * WCAG 2.x relative luminance of an 8-bit sRGB triple.
+ *
+ * Kept here rather than inlined in a spec so the focus-ring guard and any
+ * future colour assertion share ONE implementation. The threshold constant
+ * that matters for a focus indicator is 3:1 (WCAG 2.4.11 Focus Appearance),
+ * not the 4.5:1 that applies to body text.
+ */
+export function relativeLuminance([r, g, b]: readonly number[]): number {
+  const lin = (c: number) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/** WCAG 2.x contrast ratio between two opaque 8-bit sRGB triples (1..21). */
+export function contrastRatio(a: readonly number[], b: readonly number[]): number {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}

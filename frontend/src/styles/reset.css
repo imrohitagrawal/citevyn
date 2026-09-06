@@ -74,15 +74,32 @@ a:hover {
   text-decoration: none;
 }
 
+/* The site-wide keyboard focus ring.
+ *
+ * This used to read `var(--accent)`, and --accent is defined ONLY under the
+ * three `[data-style]` skins, which nothing in the app can activate. So in the
+ * shipping theme the var() was undefined, the `outline` shorthand was invalid
+ * at computed-value time, every longhand became `unset`, `outline-style`
+ * computed to `none` — and because an author rule outranks the UA stylesheet,
+ * this rule REMOVED Chrome's default ring rather than replacing it. Measured in
+ * real Chromium on `main`: 24 consecutive Tab stops on the landing page, all
+ * matching `:focus-visible`, all `outline-style: none` (#355, WCAG 2.4.7 AA).
+ *
+ * --focus-ring is defined on bare `:root` in tokens.css, where the reasoning
+ * for the colour lives. `outline-offset` is load-bearing: it puts the ring 2px
+ * OUTSIDE the border box, so on a control that paints --ink itself (the send
+ * button, the filled CTA) the ring sits on the parent surface rather than on
+ * the button, and stays visible.
+ *
+ * The dead `::selection` rule that sat here read `var(--accent)` /
+ * `var(--accent-ink)` too — the same defect, one rule down. It was inert:
+ * landing.css declares `::selection` with --hl / --hl-ink and imports later, so
+ * that is what has always painted. Removed rather than repointed, so there is
+ * one selection rule in the codebase instead of two that must agree. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
-}
-
-::selection {
-  background: var(--accent);
-  color: var(--accent-ink);
 }
 
 @media (prefers-reduced-motion: reduce) {

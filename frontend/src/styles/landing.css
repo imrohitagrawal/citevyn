@@ -274,6 +274,16 @@ body {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
+/* The hero input carries an inline `outline: none` (Hero.tsx), so the shared
+ * :focus-visible ring cannot reach it and a keyboard user had NO focus signal
+ * on the page's most prominent control — the one the `/` shortcut targets.
+ * `.hero-input-box` has declared `transition: border-color` since the design
+ * port, for a focus state that was never written. This is that state, and it is
+ * exactly the treatment `.composer-box:focus-within` already uses. */
+.hero-input-box:focus-within {
+  border-color: var(--ink);
+}
+
 .hero-input-box.shake {
   animation: cv-shake 0.4s ease;
   border-color: var(--color-warning) !important;
@@ -1708,6 +1718,13 @@ body {
    ========================================================================= */
 
 .cta-banner {
+  /* The one INVERTED surface in the app: it paints --ink, so the default
+   * --focus-ring (which IS --ink) measured 1.00:1 on `.cta-pill` in real
+   * Chromium — a focus ring drawn in the background's own colour. Re-declaring
+   * the token here re-points every ring in this subtree without reset.css
+   * knowing anything about it; --bg on --ink measures 16.35:1 light /
+   * 15.69:1 dark. tests/focus-ring.spec.ts pins this case specifically. */
+  --focus-ring: var(--bg);
   background: var(--ink);
   border-radius: 24px;
   padding: 56px 40px;

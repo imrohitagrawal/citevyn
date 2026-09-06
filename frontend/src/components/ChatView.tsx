@@ -3,7 +3,7 @@
  * sample answers in demo mode.
  */
 
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
 
@@ -75,6 +75,50 @@ export function ChatView({
   // "the content grew under a reader who is still at the bottom" from "the reader
   // moved the list". `null` until the first pin.
   const lastPinnedTopRef = useRef<number | null>(null);
+
+  // What the persistent status region says once a request has SETTLED (#356).
+  //
+  // Measured on the success path: when a request settles the pending region is
+  // removed, the answer bubble is inserted and `aria-disabled` flips on the send
+  // button — none of it inside a live region, so a screen-reader user was never
+  // told the answer had arrived. The error path already announces, through
+  // ToastHost's `role="alert"`.
+  //
+  // It is announced through the region the composer ALREADY renders rather than
+  // by putting `aria-live` on `#chat-list`. A live region on the list would
+  // announce every mutation in it: the bot avatar's literal "CV", the reader's
+  // own echoed question, the refusal badge and the whole source-card list, on
+  // every streamed chunk. That is the same trap documented on the pending
+  // bubble below.
+  const [settled, setSettled] = useState("");
+  const wasPending = useRef(false);
+  useEffect(() => {
+    if (pending) {
+      wasPending.current = true;
+      // Clear as the NEXT request starts, so a stale "answer ready" is never
+      // sitting in the region while a new question is in flight.
+      setSettled("");
+      return;
+    }
+    // Edge-triggered: only a true→false transition is an arrival. Without this
+    // the effect would fire on mount and on every unrelated `messages` change.
+    if (!wasPending.current) return;
+    wasPending.current = false;
+    const last = messages[messages.length - 1];
+    if (!last || last.isUser) return;
+    // A transport failure is already announced by ToastHost's `role="alert"`.
+    // Announcing here too would say "answer ready" over the top of an error.
+    if (last.errorKind) return;
+    setSettled(
+      last.refusal
+        ? "No answer. CiteVyn found nothing in the official docs to support one."
+        : `Answer ready.${
+            last.sources?.length
+              ? ` ${last.sources.length} source${last.sources.length === 1 ? "" : "s"} cited.`
+              : ""
+          }`,
+    );
+  }, [pending, messages]);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -461,7 +505,7 @@ export function ChatView({
         <p className="sr-only" role="status">
           {pending
             ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
-            : ""}
+            : settled}
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}

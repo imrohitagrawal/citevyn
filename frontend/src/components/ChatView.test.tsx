@@ -586,3 +586,97 @@ describe("ChatView — composer while an answer is in flight (#62)", () => {
     expect(onSendClick).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ChatView announces an ARRIVING answer (#356)", () => {
+  // The gap: on the success path a settled request removes the pending region,
+  // inserts the answer bubble and flips `aria-disabled` — none of it in a live
+  // region, so a screen-reader user was never told the answer had arrived. The
+  // error path already announces, via ToastHost's role="alert".
+  //
+  // These drive the real prop transition (pending true -> false) rather than
+  // rendering the end state, because the announcement is EDGE-triggered; a test
+  // that only rendered `pending: false` would pass with the whole change absent.
+  const answered: Msg[] = [
+    ...MESSAGES,
+    msg(4, true, "How much does it cost?"),
+    { ...msg(5, false, "It is free during the preview."), sources: [
+      { n: "1", title: "Pricing", url: "https://example.com/pricing" },
+      { n: "2", title: "Plans", url: "https://example.com/plans" },
+    ] },
+  ];
+
+  it("says the answer is ready, with the source count, once the request settles", () => {
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+
+    rerender(chat({ pending: false, messages: answered }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("says nothing at all until a request has actually been in flight", () => {
+    // Partner for the edge-trigger. Mounting straight into `pending: false` —
+    // which is what returning to a finished transcript does — must not announce
+    // an answer that arrived before the reader got here.
+    renderChat({ pending: false, messages: answered });
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("singularises one source rather than saying '1 sources'", () => {
+    const one: Msg[] = [
+      ...MESSAGES,
+      { ...msg(4, false, "Yes."), sources: [{ n: "1", title: "Pricing", url: "https://e.co/p" }] },
+    ];
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: one }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+  });
+
+  it("omits the source clause when the answer carries none", () => {
+    const bare: Msg[] = [...MESSAGES, msg(4, false, "Yes.")];
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: bare }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready.");
+    expect(screen.getByRole("status").textContent).not.toMatch(/source/);
+  });
+
+  it("announces a REFUSAL as a refusal, not as an answer", () => {
+    const refused: Msg[] = [...MESSAGES, { ...msg(4, false, "No source."), refusal: true }];
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: refused }));
+    expect(screen.getByRole("status")).toHaveTextContent(/No answer\./);
+    expect(screen.getByRole("status").textContent).not.toMatch(/Answer ready/);
+  });
+
+  it("stays silent on a TRANSPORT failure, which ToastHost already announces as an alert", () => {
+    // Two announcements of the same event, one of them saying "answer ready"
+    // over the top of an error, is worse than one.
+    const failed: Msg[] = [
+      ...MESSAGES,
+      { ...msg(4, false, "Something went wrong."), errorKind: "error" },
+    ];
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: failed }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("clears the arrival text when the NEXT question goes in flight", () => {
+    // A stale "answer ready" sitting in the region while a new question is
+    // running would be read back as the state of the wrong request.
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: answered }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+    rerender(chat({ pending: true, messages: answered }));
+    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
+    rerender(chat({ pending: false, messages: answered }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("does not announce when the request settles with the reader's own message last", () => {
+    // Partner proving the announcement is keyed on an ANSWER existing, not
+    // merely on the flag dropping: a request that ends without appending a bot
+    // bubble has nothing to report.
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: [...MESSAGES, msg(4, true, "Anyone there?")] }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+});
