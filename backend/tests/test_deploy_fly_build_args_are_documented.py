@@ -71,6 +71,24 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE = _REPO_ROOT / "infra" / "docker" / "Dockerfile.api"
 _RUNBOOK = _REPO_ROOT / "docs" / "DEPLOY_FLY.md"
+_CONFIG = _REPO_ROOT / "backend" / "app" / "core" / "config.py"
+
+
+def _production_rejected_defaults() -> set[str]:
+    """Values `Settings` refuses to boot with when environment == production.
+
+    Derived from `config.py`'s `_is_weak_secret(..., default="...")` calls
+    rather than listed here, for the same reason the build-arg set is derived:
+    a hand-kept copy rots, and the next publicly-known default would be
+    accepted.
+
+    A build arg may not be passed as a LITERAL equal to one of these. Review
+    wrote `--build-arg VITE_API_DEMO_KEY=local-demo-key` into §4.1 and every
+    test stayed green -- a "plain literal with no expansion", and also the
+    exact value that produced release v6.
+    """
+    return set(re.findall(r'default="(local-[a-z-]+)"', _CONFIG.read_text(encoding="utf-8")))
+
 
 # Accepted `--build-arg` value shapes. This is a WHITELIST, deliberately.
 #
@@ -117,7 +135,10 @@ def _frontend_stage() -> str:
     baked into the browser bundle and is already handled -- is not swept in.
     """
     src = _DOCKERFILE.read_text(encoding="utf-8")
-    match = re.search(r"^FROM .* AS frontend\n(.*?)(?=^FROM )", src, re.S | re.M)
+    # Case-insensitive (`as frontend` is legal Docker) and `\Z`-terminated, so
+    # the extraction does not silently empty out if the frontend stage ever
+    # becomes the last stage in the file.
+    match = re.search(r"^FROM .*\bAS\s+frontend\s*$\n(.*?)(?=^FROM |\Z)", src, re.S | re.M | re.I)
     return match.group(1) if match else ""
 
 
@@ -130,7 +151,10 @@ def _baked_build_args() -> list[str]:
     subject is the contract between two files an operator reads, and a test
     needing a daemon would not run in CI.
     """
-    return re.findall(r"^ARG ([A-Z][A-Z0-9_]*)", _frontend_stage(), re.M)
+    # `\s+`, not a single space: `ARG  NAME` and `ARG\tNAME` are identical to
+    # Docker, and review slipped a new baked argument past the one-space form
+    # -- the same rot this derivation exists to prevent, through whitespace.
+    return re.findall(r"^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)", _frontend_stage(), re.M)
 
 
 def _runnable_bash(section: str | None = None) -> str:
@@ -158,8 +182,61 @@ def _runnable_bash(section: str | None = None) -> str:
         text = match.group(1) if match else ""
     unquoted = re.sub(r"^> ?", "", text, flags=re.M)
     blocks = re.findall(r"^```bash\n(.*?)^```", unquoted, re.S | re.M)
-    joined = re.sub(r"\\\n\s*", " ", "\n".join(blocks))
-    return "\n".join(ln for ln in joined.splitlines() if not ln.lstrip().startswith("#"))
+    stripped = [_strip_comment(ln) for ln in "\n".join(blocks).splitlines()]
+    joined = re.sub(r"\\\n\s*", " ", "\n".join(stripped))
+    return "\n".join(ln for ln in joined.splitlines() if ln.strip())
+
+
+def _strip_comment(line: str) -> str:
+    """Truncate `line` at its first unquoted `#` that begins a word.
+
+    Both halves of that sentence are scars from review.
+
+    UNQUOTED and word-initial, because shell only starts a comment there. A
+    naive `split("#")` would corrupt `https://x#y` and `-d '{"a":"#b"}'`, and
+    the runbook contains URLs.
+
+    Applied PER LINE BEFORE continuations are joined, which is the part the
+    previous fix got wrong. Joining first welds a following comment line onto
+    the command, after which a whole-line filter can no longer see it -- so
+    commenting out `--build-arg VITE_API_DEMO_KEY=...` with a two-character
+    edit left all eleven tests green while the operator's shell (verified in
+    bash and zsh) simply did not pass the argument. That is release v6.
+
+    Trailing comments are removed for the same reason: `curl ... # -b "$JAR"`
+    satisfied the cookie assertion, `# -L` satisfied the redirect assertion,
+    and `| wc -c  # was: | ... check_bundle_key.sh` satisfied the assertion
+    that the bundle is still verified at all.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    stack: list[str | None] = []
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        # `$(` re-enters a FRESH quoting context: inside a command
+        # substitution the shell parses anew, so a `#` there starts a comment
+        # even when the substitution sits inside double quotes. Missing this
+        # let `"$(curl -sS ...  # -L -w ...)"` keep its comment, which then
+        # satisfied the redirect assertion while the real command lost `-w`.
+        if quote != "'" and line.startswith("$(", i):
+            stack.append(quote)
+            quote = None
+            out.append(line[i : i + 2])
+            i += 2
+            continue
+        if quote is None and ch == ")" and stack:
+            quote = stack.pop()
+        elif quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out).rstrip()
 
 
 def _deploy_commands() -> list[str]:
@@ -182,6 +259,31 @@ def _deploy_commands() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# Comment stripping is load-bearing for EVERY assertion in this file -- review
+# satisfied four of them with a comment -- so it is pinned directly rather than
+# only through the assertions that depend on it. Half these cases guard against
+# the stripper being too EAGER: a `#` inside quotes, or inside a URL fragment,
+# is not a comment, and eating it would corrupt a legitimate command and make
+# this file fail for a reason that has nothing to do with deploys.
+_STRIP_CASES: tuple[tuple[str, str], ...] = (
+    ("echo hi  # trailing", "echo hi"),
+    ("# whole line", ""),
+    ("  # indented whole line", ""),
+    ("curl 'https://x#frag'", "curl 'https://x#frag'"),
+    ('curl "https://x#frag"', 'curl "https://x#frag"'),
+    ("curl https://x#frag", "curl https://x#frag"),
+    ("""curl -d '{"a":"#b"}'""", """curl -d '{"a":"#b"}'"""),
+    # `$(` re-enters an unquoted context, so this IS a comment to the shell.
+    ('printf "$(curl -sS  # c', 'printf "$(curl -sS'),
+    ('printf "$(curl -sSL -w x)"  # c', 'printf "$(curl -sSL -w x)"'),
+)
+
+
+@pytest.mark.parametrize(("line", "expected"), _STRIP_CASES, ids=lambda v: repr(v))
+def test_comment_stripping_removes_comments_and_nothing_else(line: str, expected: str) -> None:
+    assert _strip_comment(line) == expected
+
+
 def test_the_dockerfile_extraction_finds_the_baked_args_at_all() -> None:
     args = _baked_build_args()
     assert _frontend_stage(), "could not locate the `AS frontend` stage in Dockerfile.api"
@@ -190,6 +292,25 @@ def test_the_dockerfile_extraction_finds_the_baked_args_at_all() -> None:
         f"VITE_API_DEMO_KEY is the argument whose absence caused #296; if it is no "
         f"longer declared in the frontend stage this guard has lost its subject. "
         f"Found: {args}"
+    )
+
+
+def test_every_arg_line_in_the_frontend_stage_was_parsed() -> None:
+    """An ARG the regex cannot read disappears instead of failing.
+
+    `_baked_build_args` drives a parametrised test, so a declaration it does
+    not match produces no case at all -- silently one fewer guarded argument,
+    with the suite green. Counting the raw `ARG` lines and requiring the parse
+    to account for all of them turns "invisible" into "red".
+    """
+    stage = "\n".join(
+        ln for ln in _frontend_stage().splitlines() if not ln.lstrip().startswith("#")
+    )
+    declared = len(re.findall(r"^\s*ARG\s", stage, re.M))
+    parsed = len(_baked_build_args())
+    assert declared and parsed == declared, (
+        f"{declared} ARG lines in the frontend stage but only {parsed} parsed. An "
+        f"unparsed declaration silently drops a guarded build argument."
     )
 
 
@@ -273,12 +394,7 @@ def test_no_build_arg_can_silently_receive_an_empty_value() -> None:
     v6. A command substitution has no way to fail on empty; `${VAR:?msg}` exits
     the shell before `fly deploy` runs, in both bash and zsh.
     """
-    offenders = [
-        f"{name}={value}"
-        for cmd in _deploy_commands()
-        for name, value in _BUILD_ARG_RE.findall(cmd)
-        if not _GUARDED_EXPANSION_RE.match(value) and not _PLAIN_LITERAL_RE.match(value)
-    ]
+    offenders = [o for cmd in _deploy_commands() for o in _classify(cmd)]
     assert not offenders, (
         "docs/DEPLOY_FLY.md §4.1 can pass an empty build argument:\n  "
         + "\n  ".join(offenders)
@@ -289,12 +405,32 @@ def test_no_build_arg_can_silently_receive_an_empty_value() -> None:
 
 
 def _classify(cmd: str) -> list[str]:
-    """The offender list :func:`test_no_build_arg...` computes, for one command."""
-    return [
+    """Offending `--build-arg` values in one command.
+
+    Three rejection rules, each a scar:
+      * not a guarded expansion and not a non-empty plain literal;
+      * a literal equal to a default production refuses to boot with, so
+        `--build-arg VITE_API_DEMO_KEY=local-demo-key` -- release v6 written
+        into the runbook -- cannot pass as a "plain literal";
+      * an unparsed `--build-arg` occurrence, because an extractor that skips
+        its subject reports green rather than red.
+    """
+    rejected = _production_rejected_defaults()
+    found = _BUILD_ARG_RE.findall(cmd)
+    offenders = [
         f"{name}={value}"
-        for name, value in _BUILD_ARG_RE.findall(cmd)
-        if not _GUARDED_EXPANSION_RE.match(value) and not _PLAIN_LITERAL_RE.match(value)
+        for name, value in found
+        if not (
+            (_GUARDED_EXPANSION_RE.match(value) or _PLAIN_LITERAL_RE.match(value))
+            and value.strip('"') not in rejected
+        )
     ]
+    if len(found) != cmd.count("--build-arg"):
+        offenders.append(
+            f"{cmd.count('--build-arg') - len(found)} --build-arg occurrence(s) could not "
+            f"be parsed and were therefore never checked"
+        )
+    return offenders
 
 
 # Every value shape that has ever been proposed for this argument, and whether
@@ -325,6 +461,10 @@ _VALUE_SHAPES: tuple[tuple[str, bool], ...] = (
     ('"${DEMO_KEY:-local-demo-key}"', False),
     ('"${DEMO_KEY:?x}`evil`"', False),
     ('"${DEMO_KEY:?${OTHER:-x}}"', False),
+    # Release v6 written into the runbook as a plain literal.
+    ("local-demo-key", False),
+    ('"local-demo-key"', False),
+    ("local-admin-key", False),
 )
 
 
@@ -466,7 +606,11 @@ def test_the_citation_check_follows_redirects() -> None:
     ]
     assert citation, "no runnable citation-URL status check found in docs/DEPLOY_FLY.md"
     for line in citation:
-        assert re.search(r"-[a-zA-Z]*L", line), (
+        # A TOKEN, not a substring. `-[a-zA-Z]*L` matched any hyphenated word
+        # containing a capital L, so it was a proxy for the flag rather than
+        # the flag -- and this file is about guards that watch the wrong thing.
+        flags = [t for t in line.split() if t.startswith("-")]
+        assert any(t == "--location" or re.fullmatch(r"-[a-zA-Z]*L[a-zA-Z]*", t) for t in flags), (
             f"the citation check does not follow redirects (-L), so a healthy deploy "
             f"reports 301/308 for docs.anthropic.com and developers.openai.com and the "
             f"operator is told it failed. Line:\n{line}"

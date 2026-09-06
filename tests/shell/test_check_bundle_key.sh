@@ -117,7 +117,10 @@ fi
 # WHITESPACE-ONLY is not caught by `-z`, and a space occurs in essentially
 # every bundle — so this passed on a bundle baked with "" until the guard
 # stripped whitespace before testing.
-OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="   " "${CHECK}" 2>&1)"; RC=$?
+# 20 spaces: long enough to clear the 16-char floor, so this reaches the
+# whitespace guard itself. With a 3-char value the floor caught it first and
+# the whitespace guard could be deleted with the suite still green.
+OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="                    " "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a WHITESPACE-ONLY expected key FAILS (it would match almost anything)"
 else

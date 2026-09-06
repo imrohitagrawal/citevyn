@@ -287,11 +287,18 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         # chunk recorded a FAIL on a perfectly good bundle. The presence check
         # exists to survive exactly that kind of chunk refactor, so it must not
         # be the thing that breaks on one.
-        if bundle_diagnosis="$(
-            find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
-                -exec cat {} + 2>/dev/null \
+        # `find`'s own exit status is deliberately discarded (`|| true`). Under
+        # `pipefail` an unreadable file or subdirectory anywhere under dist made
+        # the whole substitution non-zero even when the checker had already
+        # printed [PASS] -- the gate then recorded the self-contradictory
+        # "[FAIL] [PASS] the served bundle carries...". The checker is the last
+        # stage, so ${PIPESTATUS} for it is what the verdict must key on.
+        bundle_diagnosis="$(
+            { find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
+                -exec cat {} + 2>/dev/null || true; } \
             | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
-        )"; then
+        )"
+        if [[ "${bundle_diagnosis}" == "[PASS]"* ]]; then
             record PASS "frontend bundle carries the current demo key"
         else
             # The checker distinguishes "carries the PUBLIC DEFAULT" from

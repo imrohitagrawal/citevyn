@@ -237,18 +237,24 @@ def test_the_magic_link_limit_is_wired_through_the_in_process_limiter_and_settin
 
 
 def _rendered_email_log(caplog: pytest.LogCaptureFixture) -> str:
-    """Every ``citevyn.email`` record, rendered the way production renders it.
+    """Every captured record, rendered the way production renders it.
 
-    ALL of them, joined -- not ``records[0]``. Review defeated the PII
-    assertion below by emitting one innocuous decoy warning first: the guard
-    read the decoy, found "403" and no address, and passed while the real line
-    printed the recipient's email. A "second mechanism supplying the
-    observation" is one of this repo's five recorded ways a test passes for the
-    wrong reason, and this was exactly it.
+    ALL of them, joined -- not ``records[0]``, and NOT filtered by logger name.
+
+    Two review findings, one after the other. First, reading ``records[0]`` let
+    a decoy warning emitted just before the real one satisfy the PII assertion
+    while the real line printed the recipient's address -- a "second mechanism
+    supplying the observation", one of this repo's five recorded ways a test
+    passes for the wrong reason.
+
+    Then the fix for that kept an ``r.name == "citevyn.email"`` filter, and the
+    next round leaked the same body on ``citevyn.http`` instead: the address
+    reached a production log line and all 1889 backend tests stayed green. The
+    upstream body is PII-bearing whichever logger emits it, so this looks at
+    every record the test captured. The "did it log anything at all" partner
+    still checks the email logger specifically.
     """
-    return "\n".join(
-        logging.Formatter(LOG_FORMAT).format(r) for r in caplog.records if r.name == "citevyn.email"
-    )
+    return "\n".join(logging.Formatter(LOG_FORMAT).format(r) for r in caplog.records)
 
 
 def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
@@ -275,8 +281,10 @@ def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
     ):
         asyncio.run(_resend(handler).send(_MESSAGE))
 
+    assert any(r.name == "citevyn.email" for r in caplog.records), (
+        "the failure logged nothing on the email logger at all"
+    )
     rendered = _rendered_email_log(caplog)
-    assert rendered, "the failure logged nothing at all"
     assert "resend_send_error" in rendered
     assert "422" in rendered, (
         f"the rendered production log line carries no status code: {rendered!r}"
