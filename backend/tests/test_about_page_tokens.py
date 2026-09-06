@@ -215,7 +215,14 @@ def _unescape_css(text: str) -> str:
 
     def _resolve(m: re.Match[str]) -> str:
         if m.group(1) is not None:
-            return chr(int(m.group(1), 16))
+            code = int(m.group(1), 16)
+            # CSS maps zero, surrogates and out-of-range code points to U+FFFD.
+            # `chr()` RAISES on the last of those — `\110000` and `\ffffff` are
+            # legal CSS escapes that crashed this reader, which is a poor way to
+            # report a verdict even though it fails closed.
+            if code == 0 or 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+                return "\ufffd"
+            return chr(code)
         if m.group(2) is not None:
             return ""  # line continuation: the backslash AND the newline go
         return m.group(3)
@@ -242,6 +249,11 @@ def test_the_css_escape_reader_resolves_what_the_browser_resolves(about_css: str
     assert _unescape_css('"/\\' + lf + '/host/x.css"') == '"//host/x.css"'
     assert _unescape_css('"/\\' + ff + '/host/x.css"') == '"//host/x.css"'
     assert _unescape_css('"/\\' + cr + lf + '/host/x.css"') == '"//host/x.css"'
+    # Out-of-range, zero and surrogate escapes are legal CSS and must not raise.
+    assert _unescape_css(r"\110000") == "\ufffd"
+    assert _unescape_css(r"\ffffff") == "\ufffd"
+    assert _unescape_css(r"\0") == "\ufffd"
+    assert _unescape_css(r"\d800") == "\ufffd"
     # And it leaves ordinary CSS alone, so the checks below are not reading
     # mangled input.
     assert _unescape_css("@font-face { src: url(/fonts/a.woff2); }") == (
@@ -263,7 +275,17 @@ def test_the_stylesheet_pulls_in_no_further_origins(about_css: str) -> None:
     Read through ``_unescape_css`` because the browser does; see its docstring
     for the bypass that made that necessary.
     """
-    body = _unescape_css(_strip_comments(about_css))
+    # NOT `_strip_comments` first. `/*` inside a CSS STRING is not a comment to
+    # a browser, so wrapping a payload between `content: "/*"` and
+    # `content: "*/"` deleted it from the guard's view while Chromium loaded it
+    # — demonstrated in review with an off-origin `src: url(//fonts.gstatic.com/...)`
+    # request recorded in a real browser and all 85 backend guard tests green.
+    #
+    # So: unescape first, and do not strip comments at all. A third-party URL
+    # merely MENTIONED in a comment now fails here, which is the same false
+    # POSITIVE the HTML guards deliberately accept — the safe direction, and the
+    # file says so at the top.
+    body = _unescape_css(about_css)
     assert "@import" not in body.lower(), "about.css @imports a stylesheet the CSP guard cannot see"
     urls = re.findall(r"url\(([^)]*)\)", body)
     quoted = re.findall(r"""["']([^"']*)["']""", body)

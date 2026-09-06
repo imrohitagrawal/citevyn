@@ -204,50 +204,58 @@ def _rel_tokens(attrs: dict[str, str]) -> set[str]:
 #: and leading/trailing C0-or-space is stripped before parsing. Both were used
 #: to walk a third-party stylesheet straight past the previous matcher while
 #: Chromium fetched it — measured, with the request in the server log.
+#: The scheme the shipped pages are served over. Only relevant to the
+#: single-slash case; see ``_origin_of``.
+_PAGE_SCHEME = "https"
+
 _URL_STRIP_ANYWHERE = str.maketrans("", "", "\t\n\r")
 
 
 def _origin_of(url: str) -> str | None:
-    """The origin a URL names, or ``None`` if it names none (same-origin).
+    r"""The origin a URL names, or ``None`` if it names none (same-origin).
 
     Normalised the way the WHATWG URL parser normalises, because that is what
-    decides where the browser actually sends the request:
+    decides where the browser actually sends the request: leading/trailing C0
+    controls and spaces are stripped, ASCII tab/LF/CR are removed from anywhere
+    in the string, and a backslash is equivalent to ``/`` after a special
+    scheme.
 
-    * leading/trailing C0 controls and spaces are stripped,
-    * ASCII tab/LF/CR are removed from anywhere in the string,
-    * a backslash is equivalent to ``/`` after a special scheme, and a run of
-      slashes after the scheme collapses.
+    WHY THE "ONE SLASH" RULE IS NOT UNCONDITIONAL — this is the part two
+    successive revisions got wrong in opposite directions. ``https:/host`` goes
+    to relative state and keeps the BASE's host **only when the scheme matches
+    the document's**. When the scheme DIFFERS, WHATWG goes to
+    special-authority-slashes and the host IS reached: measured,
+    ``new URL("http:/evil.example/x", "https://citevyn.example/")`` is
+    ``http://evil.example``. So a single slash is reported off-origin whenever
+    the scheme is not the page's, and ``None`` only for the page's own scheme.
 
-    ONE slash-or-backslash after a special scheme does NOT reach a new host —
-    it goes to relative state and keeps the base's host. An earlier revision of
-    this file claimed the opposite and asserted it as a test; ``new URL(
-    "https:\\host", base)`` returns the BASE's origin. Two or more reach a
-    new authority. The corpus in
-    ``test_the_parser_catches_the_forms_that_would_slip_past_it`` is taken from
-    a real URL parser, not from memory.
+    The page's scheme is HTTPS in production, which is what ``_PAGE_SCHEME``
+    encodes. Getting it wrong in the other direction only ever ADDS an origin
+    the policy must list, which fails closed.
 
-    The scheme reported for the protocol-relative ``//host`` form is a guess —
-    a browser inherits the DOCUMENT's scheme. Production is HTTPS-only, and the
-    direction of any error is "report an origin the policy must list", which
-    fails closed.
+    Non-HTTP schemes (``data:``, ``blob:``, ``about:``, ``javascript:``) name no
+    host and are reported as ``None``, matching the JS side — an earlier version
+    returned nonsense like ``data://text``.
     """
     url = url.translate(_URL_STRIP_ANYWHERE)
     url = url.strip("".join(chr(c) for c in range(0x21)))
-    m = re.match(r"^(?:([a-z][a-z0-9+.-]*):)?([/\\]*)([^/\\?#]+)", url, flags=re.IGNORECASE)
+    m = re.match(r"^(?:([a-z][a-z0-9+.-]*):)?([/\\]*)([^/\\?#]*)", url, flags=re.IGNORECASE)
     if not m:
         return None
     scheme, slashes, host = m.group(1), m.group(2), m.group(3)
-    if scheme is None:
-        # No scheme: only ``//host`` (two or more) names a host.
-        if len(slashes) < 2:
-            return None
-        return f"https://{host}"
-    # With a scheme, ONE slash is relative-state and keeps the base's host.
-    if len(slashes) == 1:
+    if not host:
         return None
-    # ``scheme:host/path`` with no slashes still names a host to a browser when
-    # the base scheme differs, so it is reported.
-    return f"{scheme.lower()}://{host}"
+    if scheme is None:
+        # No scheme: only ``//host`` (two or more slashes) names a host.
+        return f"{_PAGE_SCHEME}://{host.lower()}" if len(slashes) >= 2 else None
+    scheme = scheme.lower()
+    # Only http(s) can name a host worth listing in a CSP source expression.
+    if scheme not in ("http", "https"):
+        return None
+    if len(slashes) == 1 and scheme == _PAGE_SCHEME:
+        # Same scheme as the page, one slash -> relative state, base's host.
+        return None
+    return f"{scheme}://{host.lower()}"
 
 
 def _stylesheet_origins_in(html: str) -> set[str]:
@@ -341,7 +349,7 @@ def test_the_parser_is_reading_real_markup_with_real_stylesheet_links() -> None:
 
 
 def test_the_parser_catches_the_forms_that_would_slip_past_it() -> None:
-    """POSITIVE CONTROL. The emptiness above means "nothing there", not "blind".
+    r"""POSITIVE CONTROL. The emptiness above means "nothing there", not "blind".
 
     Every entry is a real way to load a third-party stylesheet, and the expected
     origin of each was taken from a REAL URL PARSER (``new URL(form, base)``),
@@ -409,6 +417,65 @@ def test_the_parser_catches_the_forms_that_would_slip_past_it() -> None:
 
     # The parser reads adjacent tags as two, not one.
     assert len(_parsed_tags('<link rel="a"><link rel="b">')) == 2
+
+
+def test_the_origin_reader_agrees_with_a_real_url_parser() -> None:
+    r"""DIFFERENTIAL. The JS guard uses ``new URL(...).origin``; this one cannot.
+
+    ``backend/`` has no WHATWG URL parser, so ``_origin_of`` is a hand-rolled
+    normalisation — and hand-rolled parsing of URL semantics is precisely what
+    three review rounds broke. So the expectations below are not reasoning: each
+    was taken from ``new URL(form, "https://citevyn.example/")`` in node, and
+    ``frontend/scripts/mutate-font-guards.sh`` re-derives them.
+
+    The three at the top FAILED OPEN in an earlier revision — this parser said
+    "same-origin" while a browser reached a third-party host.
+    """
+    tab, lf, cr, c0, bs = "\t", "\n", "\r", "\x01", "\\"
+    off_origin = {
+        # Scheme DIFFERS from the page's, one slash -> the host IS reached.
+        "http:/evil.example/x": "http://evil.example",
+        f"http:{bs}evil.example/x": "http://evil.example",
+        "HTTP:/evil.example/x": "http://evil.example",
+        # Two or more slashes/backslashes always reach a new authority.
+        "https://evil.example/x": "https://evil.example",
+        "//evil.example/x": "https://evil.example",
+        f"https:{bs}{bs}evil.example/x": "https://evil.example",
+        "https:////evil.example/x": "https://evil.example",
+        f"{bs}{bs}evil.example/x": "https://evil.example",
+        # Removed-anywhere whitespace and stripped leading controls.
+        f"http:{tab}//evil.example/x": "http://evil.example",
+        f"http:{lf}//evil.example/x": "http://evil.example",
+        f"http:{cr}//evil.example/x": "http://evil.example",
+        f"ht{tab}tp://evil.example/x": "http://evil.example",
+        f"{c0}http://evil.example/x": "http://evil.example",
+        f"/{lf}/evil.example/x": "https://evil.example",
+        # A scheme with no slashes still names a host when the scheme differs.
+        "http:evil.example/x": "http://evil.example",
+        # Host case is normalised, so it can be compared to a CSP entry.
+        "https://EVIL.EXAMPLE/x": "https://evil.example",
+    }
+    for href, expected in off_origin.items():
+        assert _origin_of(href) == expected, f"{href!r} -> {_origin_of(href)!r}"
+
+    same_origin = [
+        "/about.css",
+        "about.css",
+        "/fonts/geist-latin.woff2",
+        "",
+        "#anchor",
+        "?q=1",
+        # The page's OWN scheme with one slash IS relative state.
+        "https:/about.css",
+        f"https:{bs}about.css",
+        # No host to reach.
+        "data:font/woff2;base64,AAA",
+        "blob:https://citevyn.example/8f2c",
+        "about:blank",
+        "javascript:void(0)",
+    ]
+    for href in same_origin:
+        assert _origin_of(href) is None, f"false positive: {href!r} -> {_origin_of(href)!r}"
 
 
 def test_every_stylesheet_origin_the_pages_load_is_permitted() -> None:

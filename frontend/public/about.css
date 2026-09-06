@@ -34,8 +34,7 @@
 /* ----------------------------------------------------------------------------
  * @font-face — copied from frontend/src/styles/fonts.css (#365).
  *
- * /about used to carry its own
- *   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?...">
+ * /about used to carry its own rel=stylesheet link to a Google Fonts css2 URL,
  * plus two preconnects, emitted by about_page.py. A render-blocking stylesheet
  * withholds first paint of the WHOLE document until it answers, so a slow
  * fonts.googleapis.com left this page blank too — and it also delayed
@@ -48,6 +47,15 @@
  * cannot import a content-hashed bundle. `backend/tests/test_about_page_tokens.py`
  * parses BOTH files and fails if a family, weight, src, unicode-range or
  * font-display drifts, so this duplication is enforced-identical.
+ *
+ * NOTE FOR THE NEXT EDITOR: keep third-party URLs out of every comment in this
+ * file. The guard does NOT strip comments before scanning — deliberately, since
+ * `/*` inside a CSS STRING is not a comment to a browser, and a payload wrapped
+ * in a fake comment region was demonstrated to load in real Chromium while the
+ * comment-stripping version of the guard stayed green. Say the host in prose
+ * instead of writing a URL. (This paragraph is the receipt: the line above used
+ * to quote the old tag and turned the guard red the moment it stopped stripping
+ * comments.)
  * ------------------------------------------------------------------------- */
 
 @font-face {

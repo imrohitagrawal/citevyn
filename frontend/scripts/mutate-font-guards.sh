@@ -422,14 +422,36 @@ run_case "the image stops building via the pinned npm script" "$REPO/infra/docke
 cat > "$M/ab.py" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p, encoding="utf8").read()
-char34, char39 = chr(34), chr(39)
+q = chr(34)
 # A build plugin that hides from the guard by branching on vitest's own env.
-plugin = '    {\n      name: "smuggle",\n      apply: "build",\n      transformIndexHtml(html) {\n        if (process.env.VITEST) return html;\n        return html.replace(\n          "</head>",\n          [char34, "<link rel=", char39, "stylesheet", char39,\n           " href=", char39, "https://fonts.googleapis.com/css2", char39,\n           "></head>", char34].join(""),\n        );\n      },\n    },\n'
+#
+# THIS MUST TYPE-CHECK. The first version of this mutator injected the helper
+# names `char34`/`char39` as literal TypeScript identifiers, so `tsc -b` failed,
+# `npm run build` exited non-zero, `beforeAll` threw, all 8 tests SKIPPED, and
+# the exit-status oracle reported KILLED — while the env-parity assertion never
+# ran. A false kill dressed as the headline result. Review caught it; the guard
+# was sound and its evidence was not.
+plugin = (
+    "function smuggle() {" + chr(10)
+    + "  return {" + chr(10)
+    + "    name: " + q + "smuggle" + q + "," + chr(10)
+    + "    apply: " + q + "build" + q + " as const," + chr(10)
+    + "    transformIndexHtml(html: string) {" + chr(10)
+    + "      if (process.env.VITEST) return html;" + chr(10)
+    + "      return html.replace(" + chr(10)
+    + "        " + q + "</head>" + q + "," + chr(10)
+    + "        " + q + "<link rel=" + chr(92) + q + "stylesheet" + chr(92) + q
+    + " href=" + chr(92) + q + "https://fonts.googleapis.com/css2" + chr(92) + q
+    + "></head>" + q + "," + chr(10)
+    + "      );" + chr(10)
+    + "    }," + chr(10)
+    + "  };" + chr(10)
+    + "}" + chr(10)
+)
 old = "plugins: [react(), liveStubPlugin()],"
-assert old in s
+assert old in s, "plugins anchor missing"
 new = "plugins: [react(), liveStubPlugin(), smuggle()],"
-fn = "function smuggle() { return " + plugin.strip().rstrip(",") + "; }" + chr(10)
-open(p, "w", encoding="utf8").write(fn + s.replace(old, new, 1))
+open(p, "w", encoding="utf8").write(plugin + s.replace(old, new, 1))
 PY
 run_case "a build plugin branching on the vitest environment" "$FRONTEND/vite.config.ts" \
   "$M/ab.py" "$VITEST"
@@ -480,9 +502,9 @@ echo "KILLED: $killed   SURVIVED/NOT-APPLIED: $survived"
 # repo would make it unusable exactly when it is most useful. What matters is
 # that the run left NOTHING BEHIND — that the diff is unchanged either way.
 cd "$REPO"
-if ! diff -q <(printf '%s\n' "$STATUS_BEFORE") <(git status --porcelain) >/dev/null; then
+if ! diff -q <(printf '%s' "$STATUS_BEFORE") <(git status --porcelain) >/dev/null; then
   echo "THE RUN CHANGED THE TREE — a restore failed. Before vs after:" >&2
-  diff <(printf '%s\n' "$STATUS_BEFORE") <(git status --porcelain) >&2 || true
+  diff <(printf '%s' "$STATUS_BEFORE") <(git status --porcelain) >&2 || true
   exit 2
 fi
 echo "tree unchanged by the run"

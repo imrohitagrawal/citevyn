@@ -159,43 +159,85 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
     // leaving the words "npm run build" in a COMMENT above it kept the guard
     // green with the image building something else entirely.
     const stage = frontendStageOf(dockerfileText());
+    const buildIndex = stage.runCommands.findIndex((c) => /\bnpm\s+run\s+build\b/.test(c));
     expect(
-      stage.runCommands.join(" && "),
+      buildIndex,
       "Dockerfile.api's frontend stage no longer runs `npm run build`, so this guard " +
         "measures an artifact the image does not ship",
-    ).toMatch(/\bnpm run build\b/);
+    ).toBeGreaterThan(-1);
+
+    // ...and NOTHING AFTER IT touches `dist`. This is the assertion the first
+    // version was missing, and it needed no trickery to exploit: leave the
+    // pinned `RUN npm run build` exactly as it is, then add
+    // `RUN sed -i 's#</head>#<link rel=stylesheet href=https://...></head>#' dist/index.html`
+    // and the #365 tag is in the shipped image with the guard green.
+    const after = stage.runCommands.slice(buildIndex + 1);
     expect(
-      stage.runCommands.some((c) => /\bvite build\b/.test(c)),
+      after.filter((c) => /\bdist\b/.test(c) && !/^\s*test\s+-f\s+dist\//.test(c)),
+      "a RUN after the pinned `npm run build` touches dist/, so the image can ship " +
+        "something this guard never saw",
+    ).toEqual([]);
+    expect(
+      stage.runCommands.some((c) => /\bvite\s+build\b/.test(c)),
       "the frontend stage calls `vite build` directly, bypassing the `build` script " +
         "this guard pins",
     ).toBe(false);
+    // `SHELL` and heredoc `RUN <<EOF` both change what a RUN line means, and
+    // this parser reads neither. Refuse them rather than mis-parse them.
+    expect(
+      stage.lines.filter((l) => /^\s*(SHELL|ONBUILD)\b/i.test(l)),
+      "the frontend stage uses SHELL/ONBUILD, which changes what its RUN lines do — " +
+        "this parser cannot read that, so it must not pretend to",
+    ).toEqual([]);
+    expect(
+      stage.runCommands.filter((c) => /<<-?\s*['"]?[A-Za-z_]/.test(c)),
+      "the frontend stage uses a heredoc RUN, which this parser cannot read",
+    ).toEqual([]);
 
-    // ...and it copies THAT stage's dist into the image, otherwise the pin is
-    // about a build whose output goes nowhere.
-    expect(dockerfileText()).toMatch(
-      /COPY --from=frontend[^\n]*\/fe\/dist\s+\/app\/frontend_dist/,
+    // ...and it copies THAT stage's dist into the image. Read from non-comment
+    // lines: the pinned string surviving only in a COMMENT was a demonstrated
+    // bypass of the raw-text version of this check.
+    const copies = nonCommentLines(dockerfileText()).filter((l) =>
+      /^\s*COPY\b[^\n]*\/app\/frontend_dist/.test(l),
     );
+    expect(copies.length, "nothing copies a dist into /app/frontend_dist").toBe(1);
+    expect(
+      copies[0],
+      "/app/frontend_dist is populated from a stage other than `frontend`, so the " +
+        "image ships an artifact this guard never built",
+    ).toMatch(/COPY --from=frontend[^\n]*\/fe\/dist/);
 
     // THE PIN, half two: the ENVIRONMENT the Dockerfile builds under. The
-    // values this guard passes must be the ARG defaults that file declares.
+    // values this guard passes must be the ARG defaults that file declares —
+    // and the DECLARATIONS are read, not any mention of them.
+    const args = new Map(
+      stage.lines
+        .map((l) => /^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(l))
+        .filter((m): m is RegExpExecArray => m !== null)
+        .map((m) => [m[1], m[2].trim()] as const),
+    );
     for (const [name, value] of Object.entries({
       VITE_API_DEMO_KEY: "local-demo-key",
       VITE_API_LIVE: "true",
     })) {
       expect(
-        dockerfileText(),
-        `Dockerfile.api no longer declares ARG ${name}=${value}, so SHIPPED_BUILD_ENV is stale`,
-      ).toMatch(new RegExp(`ARG\\s+${name}=${value}\\b`));
+        args.get(name),
+        `Dockerfile.api's frontend stage no longer declares ARG ${name}=${value}, so ` +
+          "SHIPPED_BUILD_ENV is stale and this guard builds under the wrong environment",
+      ).toBe(value);
       expect(SHIPPED_BUILD_ENV[name]).toBe(value);
     }
   });
 
   it("and the build does not depend on anything the image will not have", () => {
-    // The assertion the previous two rounds were missing. Pinning the argv and
-    // then pinning the env are both still PROXIES — what actually matters is
-    // that the output does not vary with the parent process. So: build twice
-    // under deliberately different, hostile parent environments and require
-    // byte-identical HTML.
+    // Pinning the argv and then pinning the env are both PROXIES; this is a
+    // step closer to the property, though it is honestly still a two-sample
+    // one. What it proves: the output does not vary between THESE TWO named
+    // environments. What it cannot prove: independence from anything the two
+    // share — cwd, PATH, HOME, the filesystem. Demonstrated in review, a plugin
+    // gated on `existsSync("/.dockerenv")` injects only inside a Docker build
+    // and passes here. Closing that needs the image itself to be diffed, which
+    // is `image build+boot smoke`'s territory, not a unit test's.
     //
     // The second env carries exactly the variables review used to smuggle a tag
     // past this guard (`VITEST`, `VITEST_WORKER_ID`, `NODE_ENV=test`) plus a
@@ -228,7 +270,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
     // inherited vitest's `NODE_ENV=test`, so it was measuring a different
     // bundle from the one that ships, quite apart from the injected-tag
     // bypass.
-    const maskHashes = (html: string) => html.replace(/-[A-Za-z0-9_-]{8}\.(js|css)/g, "-HASH.$1");
+    // Narrowed to `/assets/`: the loose form also masked
+    // `https://evil.example/t-AAAAAAAA.js`, so two builds injecting different
+    // hash-shaped third-party filenames would have compared equal.
+    const maskHashes = (html: string) =>
+      html.replace(/\/assets\/([A-Za-z0-9_.-]+)-[A-Za-z0-9_-]{8}\.(js|css)/g, "/assets/$1-HASH.$2");
     expect(
       maskHashes(underVitest),
       "the emitted HTML changes with the parent environment, so what this guard reads " +
@@ -241,6 +287,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
     // an injected tag. Prove it changes ONLY hash-shaped filenames.
     expect(maskHashes('<link href="https://evil.example/a.css">')).toBe(
       '<link href="https://evil.example/a.css">',
+    );
+    // An off-origin URL that merely LOOKS like a hashed asset must survive
+    // masking, or two builds injecting different ones would compare equal.
+    expect(maskHashes('<script src="https://evil.example/t-AAAAAAAA.js">')).toBe(
+      '<script src="https://evil.example/t-AAAAAAAA.js">',
     );
     expect(maskHashes('<script src="/assets/index-BVQztSHY.js">')).toBe(
       '<script src="/assets/index-HASH.js">',
@@ -281,7 +332,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
    *     vitest already runs in the `jsdom` environment, so this costs nothing.
    *     `querySelectorAll` reads the DOM the browser would build, which settles
    *     tag boundaries, attribute quoting, character references, comments,
-   *     `<template>`/`<noscript>` and case-insensitivity in one move.
+   *     `<template>` and case-insensitivity in one move. (`<noscript>` is the
+   *     one place jsdom and Chromium differ — jsdom parses it as markup because
+   *     scripting is off, Chromium as raw text. jsdom therefore sees MORE, which
+   *     fails closed. Measured across an 18-form corpus: that is the only
+   *     divergence.)
    *   - `new URL(href, BASE).origin` decides off-origin. That is literally the
    *     algorithm the browser uses to pick a host, so it cannot disagree with
    *     the browser about one.
@@ -309,7 +364,7 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
    * actually ran `npx vite build --manifest --mode staging`, and the check
    * stayed green.
    */
-  function frontendStageOf(text: string): { runCommands: string[] } {
+  function frontendStageOf(text: string): { runCommands: string[]; lines: string[] } {
     const lines = text.split("\n");
     const start = lines.findIndex((l) => /^FROM\s+\S+\s+AS\s+frontend\s*$/i.test(l.trim()));
     expect(start, "Dockerfile.api has no `FROM ... AS frontend` stage any more").toBeGreaterThan(-1);
@@ -335,7 +390,23 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
       else runCommands.push(m[1].trim());
     }
     expect(runCommands.length, "parsed no RUN command from the frontend stage").toBeGreaterThan(0);
-    return { runCommands };
+    // Non-comment, non-blank lines of the stage. The ARG and COPY pins read
+    // THIS rather than the raw file: review kept the pinned strings alive in
+    // COMMENTS while the real directives said something else, and all three of
+    // those assertions stayed green.
+    const lines2 = lines
+      .slice(start, end)
+      .filter((l) => !/^\s*#/.test(l) && l.trim() !== "")
+      .map((l) => l.replace(/\s+#.*$/, ""));
+    return { runCommands, lines: lines2 };
+  }
+
+  /** Every line of the file that is not a whole-line comment. */
+  function nonCommentLines(text: string): string[] {
+    return text
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l) && l.trim() !== "")
+      .map((l) => l.replace(/\s+#.*$/, ""));
   }
 
   /**

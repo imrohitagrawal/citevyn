@@ -100,6 +100,19 @@ describe("the build-tooling test suite is really selected by vitest", () => {
 
   // The partner assertion: proves the probe can see files at all, so the check
   // above cannot pass vacuously on a broken or empty listing.
+  it("selects the #365 emitted-artifact guard, which lives in its own file", () => {
+    // That guard moved to `src/test/emittedArtifact.test.ts` so it could run in
+    // the jsdom environment it needs. Nothing then named it: `npm test` has no
+    // count gate, so DELETING THE WHOLE FILE left the run green at 24 files /
+    // 517 tests — demonstrated in review. This is the membership check the
+    // split lost.
+    expect(
+      selected.some((f) => f.endsWith("src/test/emittedArtifact.test.ts")),
+      "vitest no longer selects src/test/emittedArtifact.test.ts, so the #365 " +
+        "emitted-artifact guard is not running at all",
+    ).toBe(true);
+  });
+
   it("and still selects the app suite, so widening did not replace src/", () => {
     expect(selected).toContain("src/test/buildGuards.test.ts");
     expect(selected.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);
