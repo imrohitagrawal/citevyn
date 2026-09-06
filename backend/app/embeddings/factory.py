@@ -108,13 +108,15 @@ def is_index_embedder_mismatch(
     reuses it for ``GET /health/index``. Any second implementation of this
     comparison is a bug.
 
-    Shared comparison is not the same as an identical verdict, and the two
-    callers do NOT currently agree in every state: they differ in how each
-    *resolves* which index to compare. The health route picks one ``active`` row
-    with no ordering and no count check, so it can never construct the ambiguous
-    case and reports a clean verdict on a dual-active database while the read
-    path fails closed. Tracked as #264 — do not read the reuse here as a parity
-    guarantee until that lands.
+    Shared comparison is not the same as an identical verdict — the two callers
+    also have to *resolve* the same index before comparing anything. They used
+    not to: the health route picked one ``active`` row with no ordering and no
+    count check, so it could never construct the ambiguous case and reported a
+    clean verdict on a dual-active database while the read path failed closed
+    (#264). Both now resolve through :mod:`app.services.index_resolution`, so the
+    reuse here IS a parity guarantee for the dual-active state: the route feeds
+    this function the same :attr:`IndexStampStatus.ambiguous` sentinel the
+    retrieval gate does, and gets the same answer.
 
     The three answers, in the order they are decided:
 

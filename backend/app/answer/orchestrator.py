@@ -279,9 +279,11 @@ async def _retrieve_active_index(
     # (the caller's ``or None``) so retrieval still runs rather than 500-ing
     # the request; the WARNING is the operator-visible signal that this DB
     # is in an inconsistent state and needs ``promote_version`` to converge.
-    # It is emitted HERE and not inside the resolver: this event name and the
-    # ``citevyn.answer`` logger it lands on are both asserted by tests, as is
-    # the retrieval layer's differently-named one.
+    # It is emitted HERE and not inside the resolver: this event name is asserted
+    # by ``test_orchestrator_active_index_emits_warning_on_dual_active``, and the
+    # retrieval layer emits a differently-named one that its own test pins to the
+    # ``citevyn.retrieval`` logger. (This test reads ``caplog.records``, which
+    # collects from root, so it pins the event name but not the logger name.)
     if resolution.state is ActiveIndexState.ambiguous:
         _logger.warning(
             "orchestrator_multiple_active_indexes",

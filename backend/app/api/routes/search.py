@@ -205,9 +205,17 @@ async def health_index(
             "active_index": None,
             "previous_good_index": _index_payload(previous) if previous else None,
             "vector_arm": ambiguous_vector_health(settings, active_count=resolution.active_count),
+            # NOT "promote one of them": ``promote_version`` returns early and
+            # writes nothing when the target is already ``active``, so promoting
+            # one of the N leaves the database exactly as dual-active as it was.
+            # Converging means promoting a version that is NOT currently active,
+            # which demotes every active row — and that version will usually need
+            # ``?force=true``, because it has no passing evaluation run either.
             "message": (
-                f"{resolution.active_count} index versions are marked active; "
-                "promote one to converge."
+                f"{resolution.active_count} index versions are marked active. "
+                "Promote a version that is NOT currently active to converge "
+                "(add ?force=true if it has no passing evaluation run); "
+                "promoting an already-active version is a no-op."
             ),
         }
 

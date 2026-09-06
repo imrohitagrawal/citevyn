@@ -599,3 +599,82 @@ def test_auth_sessions_magic_link_verified_at_round_trips_on_postgres(
         assert gone == 0 and kept == 1
     finally:
         engine.dispose()
+
+
+async def test_previous_good_nulls_last_is_load_bearing_on_postgres(pg_schema: str) -> None:
+    """``NULLS LAST`` decides the rollback target on Postgres — and only there (#264).
+
+    Postgres orders NULLs FIRST under ``DESC``, so without the clause a
+    never-promoted ``previous_good`` row outranks every real one and
+    ``GET /health/index`` names it as the rollback target. SQLite already sorts
+    NULLs last under ``DESC``, so the hermetic suite cannot tell the two orderings
+    apart — this is the only place the clause can be seen to matter.
+
+    That state is reachable: ``test_promote_version_recovers_from_dual_active_state``
+    demotes two rows in one promote, and a row marked ``active`` without going
+    through a promote carries ``promoted_at IS NULL``.
+
+    Goes through :func:`resolve_previous_good_index` — the function the route
+    actually calls — NOT a hand-written ``ORDER BY``. An earlier draft asserted the
+    raw SQL and passed happily with ``.nulls_last()`` deleted from the resolver,
+    because it was testing Postgres rather than this codebase.
+
+    Turns RED if ``.nulls_last()`` is dropped from ``_newest_first``: verified by
+    doing exactly that, which flips the result to ``v-never``.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import IndexStatus, IndexVersion
+    from app.services.index_resolution import resolve_previous_good_index
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        now = datetime.now(UTC)
+        async with maker() as session:
+            session.add_all(
+                [
+                    IndexVersion(
+                        index_version="v-real",
+                        status=IndexStatus.previous_good,
+                        source_version_hash="sha256:real",
+                        created_at=now,
+                        promoted_at=now - timedelta(hours=1),
+                    ),
+                    IndexVersion(
+                        index_version="v-never",
+                        status=IndexStatus.previous_good,
+                        source_version_hash="sha256:never",
+                        created_at=now,
+                        promoted_at=None,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            winner = await resolve_previous_good_index(session)
+
+            # Partner control: the SAME rows under a plain ``DESC`` hand back the
+            # never-promoted row, so the assertion above is a result of the clause
+            # and not of Postgres agreeing with us by default.
+            from sqlalchemy import text
+
+            plain = (
+                await session.execute(
+                    text(
+                        "SELECT index_version FROM index_versions "
+                        "WHERE status = 'previous_good' "
+                        "ORDER BY promoted_at DESC, index_version DESC LIMIT 1"
+                    )
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+
+    assert winner is not None
+    assert winner.index_version == "v-real"
+    assert plain == "v-never"

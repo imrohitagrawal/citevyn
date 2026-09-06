@@ -1,7 +1,7 @@
 """The single source of truth for "which :class:`IndexVersion` is active?" (#264).
 
-Three call sites need this answer and, before this module, each computed it
-itself:
+Three call sites need to name a SINGLE active row, and before this module each
+computed it itself:
 
 * :meth:`app.retrieval.hybrid.HybridRetriever._active_index_stamp` — the Tier-3
   provenance gate (#57/#226),
@@ -19,19 +19,30 @@ The divergence was documented as a known hazard inside
 module removes it: one query, one ordering, one definition of "ambiguous", and
 the three callers differ only in what they project out of the answer.
 
+A fourth site reads the same column for a different question:
+:func:`app.services.exact_lookup.exact_lookup` filters documents on
+``index_version IN (SELECT ... WHERE status == active)``. That is set membership,
+not a single-row pick, so it cannot produce the #264 coin flip and this resolver
+would be the wrong tool for it — but it does mean "which index is active?" still
+has a second, unrelated answer in the codebase. Tracked separately.
+
 Deliberately **not** in this module:
 
 * **Logging.** Each caller emits its own event name
   (``retrieval_multiple_active_indexes`` on ``citevyn.retrieval`` /
-  ``orchestrator_multiple_active_indexes`` on ``citevyn.answer``) and both names
-  AND both logger names are asserted by tests. Worse, two of those assertions are
-  negative (``assert not any(...)``), so a WARN moved in here would make them
-  pass *vacuously* — green for the wrong reason — while only the positive ones
-  went red. The resolver stays silent; the callers log.
-* **A WARN on the health route.** That route is polled by the load balancer, by
-  ``.github/workflows/uptime.yml`` on a schedule and by
-  ``infra/docker/scripts/deploy_verify.sh``. Logging per probe would flood; the
-  read path already records the condition once per request.
+  ``orchestrator_multiple_active_indexes`` on ``citevyn.answer``), and moving
+  either into a shared logger here would turn its test red — measured, not
+  assumed. Precisely: ``test_retrieval.py``'s ``_capture_retrieval_logs``
+  attaches a handler to the concrete ``citevyn.retrieval`` logger, so it pins the
+  event name AND the logger; ``test_admin_services.py``'s orchestrator test reads
+  ``caplog.records``, which collects from root, so it pins the event name only.
+  Two different event names on two different loggers is also simply more useful
+  in production than one shared event would be.
+* **A WARN on the health route.** ``.github/workflows/uptime.yml`` polls it every
+  30 minutes and ``infra/docker/scripts/deploy_verify.sh`` on every deploy;
+  logging per probe would add noise for a condition the read path already records
+  once per request. (The Fly load balancer polls ``/health``, not this route —
+  see ``infra/fly/fly.toml`` — so this is a scheduled probe, not a hot path.)
 * **The read-path *policy* for zero active rows.** What the arms should do when
   nothing is active is #265, deliberately owner-gated. This module reports the
   state (:attr:`ActiveIndexState.none`); it does not decide what anyone does
@@ -124,7 +135,10 @@ class ActiveIndexResolution:
 
     state: ActiveIndexState
     active_count: int
-    row: ResolvedIndex | None = None
+    # No default: ``state=one`` with a forgotten row is a representable illegal
+    # state, so every construction has to say what the row is, even when it is
+    # ``None``.
+    row: ResolvedIndex | None
 
 
 def _newest_first(status: IndexStatus):
@@ -151,7 +165,17 @@ def _newest_first(status: IndexStatus):
     because any test can observe it.
 
     ``NULLS LAST`` is load-bearing on Postgres, which orders NULLs *first* under
-    ``DESC`` by default: a never-promoted row must not outrank a real one.
+    ``DESC`` by default: a never-promoted row must not outrank a real one. SQLite
+    already sorts NULLs last under ``DESC``, so the clause is a no-op there and
+    the hermetic suite cannot see it — ``test_pg_integration`` carries the
+    Postgres-marked test that can.
+
+    The ``index_version`` tiebreak is a **string** sort, so ``v2`` outranks
+    ``v10``. It never decides anything today: on the ``active`` path the count
+    guard fires first, and on the ``previous_good`` path a tie needs two rows
+    with identical ``promoted_at`` — and both writers of ``status = active``
+    (``promote_version`` and the seed's ``_promote``) stamp ``promoted_at`` in
+    the same statement, each from its own ``datetime.now(UTC)``.
     """
     return (
         select(*_INDEX_COLUMNS)
@@ -165,10 +189,27 @@ def _newest_first(status: IndexStatus):
 
 
 async def _newest(session: AsyncSession, status: IndexStatus) -> ResolvedIndex | None:
-    row = (await session.execute(_newest_first(status))).first()
+    row = (await session.execute(_newest_first(status))).mappings().first()
     if row is None:
         return None
-    return ResolvedIndex(*row)
+    # Keyed by NAME, not position. ``ResolvedIndex(*row)`` is correct today and
+    # would stay SILENT tomorrow: ``created_at`` and ``promoted_at`` are adjacent
+    # and both ``datetime | None``, so reordering ``_INDEX_COLUMNS`` swaps them
+    # with no error, no pyright complaint (a column ``select`` erases to ``Any``)
+    # and no failing test — measured — and this route is where an operator reads
+    # the promotion time during a rollback.
+    #
+    # Precisely what each form buys, because the difference is easy to overstate:
+    # keying by name makes a REORDER a no-op (the values still land in the right
+    # fields) and turns an added, removed or renamed column into a ``TypeError``
+    # on the first request. It does NOT make a reorder raise — there is nothing
+    # left to raise about. ``test_resolved_index_fields_match_the_projection``
+    # is what pins the reorder case, at import time.
+    #
+    # ``.mappings()`` rather than ``row._mapping``: same object, public accessor.
+    # The underscore attribute trips pyright's ``reportPrivateUsage`` under this
+    # repo's strict mode, which is a CI gate.
+    return ResolvedIndex(**row)
 
 
 async def count_active_indexes(session: AsyncSession) -> int:
@@ -187,6 +228,13 @@ async def resolve_active_index(session: AsyncSession) -> ActiveIndexResolution:
     deterministically-ordered ``LIMIT 1``. Collapsing them into a single
     ``LIMIT 2`` would save a roundtrip but reduce ``active_count`` to "1 or more
     than 1", losing the number those payloads report.
+
+    Two statements means this is **not atomic**: under READ COMMITTED each takes
+    its own snapshot, so a promote committing in between can yield
+    ``state=one`` for a database that now has two active rows. That window is
+    carried over unchanged from the pre-#264 code — both read-path resolvers
+    already ran exactly this COUNT-then-SELECT pair — and it self-corrects on the
+    next call.
     """
     active_count = await count_active_indexes(session)
     if active_count > 1:
@@ -209,6 +257,11 @@ async def resolve_previous_good_index(session: AsyncSession) -> ResolvedIndex | 
     post-deploy check and §6 item 4 makes the previous-good index the rollback
     target, so naming an arbitrary one of those rows points an incident at the
     wrong index.
+
+    This is the only place that names ONE ``previous_good`` row.
+    ``GET /v1/admin/index_versions?status=previous_good`` also reads the status,
+    but it returns the whole list (ordered ``created_at`` ascending) rather than
+    claiming a rollback target, so it is a different question and is left alone.
     """
     return await _newest(session, IndexStatus.previous_good)
 

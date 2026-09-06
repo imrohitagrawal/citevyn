@@ -373,7 +373,9 @@ async def test_db_seed_stub_index_reports_a_dead_vector_arm_to_operators(monkeyp
             factory = async_sessionmaker(engine, expire_on_commit=False)
             async with factory() as session:
                 iv = (await session.execute(select(IndexVersion))).scalars().one()
-                health = await active_index_vector_health(session, iv, Settings(_env_file=None))
+                health = await active_index_vector_health(
+                    session, iv, Settings(_env_file=None), active_count=1
+                )
         finally:
             await engine.dispose()
 

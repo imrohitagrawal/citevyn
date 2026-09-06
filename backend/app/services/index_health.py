@@ -132,11 +132,13 @@ def ambiguous_vector_health(settings: Settings, *, active_count: int) -> dict[st
     """
     configured = configured_embedder_identity(settings)
     mismatch = is_index_embedder_mismatch(configured, IndexStampStatus.ambiguous)
-    # Through the pure classifier, NOT a literal ``STATUS_AMBIGUOUS``: the
-    # precedence table there is the single place that decides what a vector arm
-    # is called, and a literal here would leave its ``ambiguous`` branch
-    # unreachable from production — the branch's own unit tests would then pass
-    # while proving nothing about what this route emits.
+    # Through the pure classifier, NOT a literal ``STATUS_AMBIGUOUS``, so the
+    # precedence table stays the single place that decides what a vector arm is
+    # called. This direction of the coupling IS observable: deleting the
+    # classifier's ``ambiguous`` branch reddens the route tests too, not just the
+    # classifier's own. The reverse is not — swapping this call for the literal
+    # survives the suite — so read it as "one source of truth for the name",
+    # not as something a test enforces.
     status = derive_vector_arm_status(
         chunks_total=0, chunks_embedded=0, mismatch=mismatch, ambiguous=True
     )
@@ -158,7 +160,7 @@ async def active_index_vector_health(
     active_index: StampedIndex,
     settings: Settings,
     *,
-    active_count: int = 1,
+    active_count: int,
 ) -> dict[str, Any]:
     """Compute the vector-arm health block for ``active_index``.
 
@@ -170,10 +172,14 @@ async def active_index_vector_health(
     ``active_count`` is reported verbatim as ``active_index_count`` so the field
     is present in every ``vector_arm`` block rather than only the ambiguous one,
     and a consumer never has to infer "how many active rows?" from the absence
-    of a key. It defaults to ``1`` because this function is only reachable once
-    :func:`app.services.index_resolution.resolve_active_index` has resolved to
-    exactly one row — anything else routes to
-    :func:`ambiguous_vector_health` instead.
+    of a key. It is **required and load-bearing**, not decorative: it is fed to
+    the classifier's ``ambiguous`` flag, so this function cannot report
+    ``healthy`` about one row while announcing that seven are active. It had a
+    ``= 1`` default and no such check in an earlier revision, and a review
+    produced exactly that payload — ``{"status": "healthy", "healthy": true,
+    "active_index_count": 7}`` — which is #264 restated inside a single response.
+    The route's early return to :func:`ambiguous_vector_health` is now a fast
+    path, not the only thing holding the invariant up.
     """
     index_stamp = EmbedderIdentity(
         provider=active_index.embedding_provider,
@@ -193,7 +199,10 @@ async def active_index_vector_health(
     chunks_embedded = int((await db.execute(base.where(Chunk.embedding.is_not(None)))).scalar_one())
 
     status = derive_vector_arm_status(
-        chunks_total=chunks_total, chunks_embedded=chunks_embedded, mismatch=mismatch
+        chunks_total=chunks_total,
+        chunks_embedded=chunks_embedded,
+        mismatch=mismatch,
+        ambiguous=active_count > 1,
     )
     return {
         "status": status,

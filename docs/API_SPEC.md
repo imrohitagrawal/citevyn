@@ -825,9 +825,12 @@ the shape previously documented (bare index-name strings, `status: "healthy"`,
 `degraded` (only a previous-good index remains). `vector_arm` is additive and does
 not change `status` — read it for the vector-arm verdict.
 
-`vector_arm.status` is one of `empty`, `dead`, `mismatch`, `partial`, `healthy` or
-`ambiguous`, decided in that precedence order. Every block also carries
-`active_index_count` (#264).
+`vector_arm.status` is one of `ambiguous`, `empty`, `dead`, `mismatch`, `partial`
+or `healthy`, decided in that precedence order — `ambiguous` is checked **first**,
+because with more than one active row none of the other inputs can be measured.
+Every `vector_arm` block carries `active_index_count` (#264); the `pre_index` and
+`degraded` responses have no block at all (`vector_arm: null`), so the field is
+absent there rather than zero.
 
 `previous_good_index` names the **most recently demoted** index — the rollback
 target for §13's promote API. More than one row can carry `previous_good` at once:
@@ -862,7 +865,7 @@ reports the same verdict rather than describing one arbitrarily-chosen row:
     "configured_query_embedder": { "provider": "gemini", "model": "...", "dim": 1536 },
     "active_index_count": 2
   },
-  "message": "2 index versions are marked active; promote one to converge."
+  "message": "2 index versions are marked active. Promote a version that is NOT currently active to converge (add ?force=true if it has no passing evaluation run); promoting an already-active version is a no-op."
 }
 ```
 
@@ -879,8 +882,12 @@ reports the same verdict rather than describing one arbitrarily-chosen row:
 - `embedder_match` is `false` because that is what
   `is_index_embedder_mismatch` returns for the ambiguous sentinel — the same
   predicate the vector arm gates on, not a second implementation of it (#71).
-- Recovery is a promote: `POST /v1/admin/index_versions/{version}/promote`
-  demotes every other `active` row.
+- Recovery is a promote of a version that is **not** one of the active ones:
+  `POST /v1/admin/index_versions/{version}/promote` demotes every `active` row it
+  finds. Promoting one of the N active rows does nothing — §13's promote is
+  idempotent on an already-active target and returns 200 without writing, so the
+  database stays dual-active. The version you promote will usually need
+  `?force=true`, because it has no passing evaluation run either.
 
 `evaluation_run_id` names the newest **terminal** `EvaluationRun` for that index —
 the run `citevyn-worker evaluate --index-version <v>` wrote (#216, #229). It means

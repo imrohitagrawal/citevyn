@@ -441,9 +441,9 @@ class HybridRetriever:
         # in ``app.services.index_resolution`` (#264) — the health route resolved
         # the active index differently and so reported a clean verdict at the very
         # moment this method fails closed. The WARN stays here rather than moving
-        # into the resolver: this event name and the ``citevyn.retrieval`` logger
-        # are asserted by tests, including two NEGATIVE assertions that a shared
-        # logger would satisfy vacuously.
+        # into the resolver: ``_capture_retrieval_logs`` attaches a handler to
+        # the concrete ``citevyn.retrieval`` logger, so this call site pins the
+        # event name AND the logger it lands on.
         resolution = await resolve_active_index(self._session)
         if resolution.state is ActiveIndexState.ambiguous:
             _logger.warning(

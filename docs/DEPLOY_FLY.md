@@ -465,10 +465,19 @@ degrade to lexical matching. Fix the embedding provider/key and re-seed.
 
 `vector_arm.status: "ambiguous"` means more than one row is marked `active`
 (`active_index_count` says how many). The read path fails closed on that, so the
-vector arm is off for the same practical reason. Recovery is §4.3: promote one
-version — that demotes every other active row. Assert `healthy`, not "not dead":
-`ambiguous` and `mismatch` both mean the arm is off while `status` still reads
-`"dead" != status`.
+vector arm is off for the same practical reason.
+
+Recovery is §4.3, with one trap: promote a version that is **not** currently
+active. A promote demotes every `active` row it finds, but it is idempotent on an
+already-active target — so promoting one of the two active rows returns 200,
+writes nothing, and leaves the database exactly as it was. The version you
+promote will usually need `?force=true`, because it has no passing evaluation run
+either.
+
+Assert `vector_arm.healthy`, not "not dead": `ambiguous`, `mismatch` and
+`partial` all mean the arm is degraded or off while `status != "dead"` still
+holds. `infra/docker/scripts/deploy_verify.sh` has always asserted
+`"healthy": true`; this line now agrees with it.
 
 Then ask a real question and confirm it comes back **grounded and cited**. A
 200 is not a passing demo.

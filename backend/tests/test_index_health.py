@@ -42,20 +42,6 @@ def test_derive_vector_arm_status(total: int, embedded: int, mismatch: bool, exp
     )
 
 
-def test_derive_vector_arm_status_defaults_to_not_ambiguous() -> None:
-    """The ``ambiguous`` keyword is optional and defaults to "one active row" (#264).
-
-    Partner to the cases below: without this, they could pass because the
-    parameter is somehow always truthy. This pins that the six cases above —
-    which do not pass ``ambiguous`` at all — are genuinely the non-ambiguous
-    branch.
-    """
-    assert (
-        derive_vector_arm_status(chunks_total=5, chunks_embedded=5, mismatch=False)
-        == STATUS_HEALTHY
-    )
-
-
 @pytest.mark.parametrize(
     ("total", "embedded", "mismatch"),
     [
@@ -85,3 +71,48 @@ def test_ambiguous_outranks_every_other_vector_arm_state(
         )
         == STATUS_AMBIGUOUS
     )
+
+
+@pytest.mark.asyncio
+async def test_vector_health_cannot_report_healthy_while_announcing_many_active(
+    session,
+) -> None:
+    """``active_index_vector_health`` holds the #264 invariant itself, not just its caller.
+
+    An earlier revision took ``active_count`` only to echo it into the payload
+    and never fed it to the classifier, so a review produced
+    ``{"status": "healthy", "healthy": true, "active_index_count": 7}`` from this
+    function directly — #264 restated inside a single response, with the only
+    thing preventing it in production being an ``if`` in the route.
+
+    Both directions, so neither half is vacuous: the SAME index and the SAME
+    chunks read ``healthy`` at ``active_count=1`` and ``ambiguous`` above it.
+
+    Turns RED if the ``ambiguous=active_count > 1`` argument is dropped from the
+    ``derive_vector_arm_status`` call.
+    """
+    from app.core.config import Settings
+    from app.embeddings import configured_embedder_identity
+    from app.embeddings.stub import StubEmbedder
+    from app.models import IndexStatus, IndexVersion
+    from app.services.index_health import active_index_vector_health
+    from tests.conftest import seed_catalog
+
+    settings = Settings(_env_file=None)
+    identity = configured_embedder_identity(settings)
+    await seed_catalog(session, embedder=StubEmbedder(dim=identity.dim), embedder_identity=identity)
+    active = await session.get(IndexVersion, "v1")
+    assert active is not None and active.status is IndexStatus.active
+
+    single = await active_index_vector_health(session, active, settings, active_count=1)
+    many = await active_index_vector_health(session, active, settings, active_count=7)
+
+    # The control: this index genuinely IS healthy, so the flip below is caused
+    # by the count and not by a broken seed.
+    assert single["status"] == STATUS_HEALTHY
+    assert single["healthy"] is True
+    assert single["chunks_total"] > 0
+
+    assert many["status"] == STATUS_AMBIGUOUS
+    assert many["healthy"] is False
+    assert many["active_index_count"] == 7

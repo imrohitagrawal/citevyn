@@ -571,9 +571,11 @@ def test_health_index_reports_ambiguous_when_two_rows_are_active(
     true}``. The dashboard read green at the exact moment semantic recall was
     off.
 
-    Turns RED if the route drops the ``active_count > 1`` check: the seed is the
-    one the control test above proves reads ``healthy``, so with the check gone
-    this reports ``healthy`` again.
+    Turns RED if the route drops the ``active_count > 1`` check. Measured, so the
+    claim is not stronger than the evidence: with the check gone the route falls
+    through and names ``a2``, which has no documents of its own, so it reports
+    ``empty`` — still not ``ambiguous``, and still a verdict about one
+    arbitrarily-resolved row while the arm is off.
     """
     identity = _healthy_seed(session)
     _add_index(
@@ -617,9 +619,13 @@ def test_health_index_agrees_with_the_read_path_on_the_same_dual_active_session(
     path and the route was left behind. Here one session drives both, so the
     test fails if either half changes its mind independently.
 
-    Turns RED if the route stops resolving through the shared resolver: the
-    control test above proves this seed reads ``healthy``, while
-    ``_vector_arm_enabled`` has failed closed on dual-active since #226.
+    Turns RED if the route stops resolving through the shared resolver.
+
+    The ``status == "ambiguous"`` assertion is the load-bearing one. ``healthy is
+    False`` alone would pass for the wrong reason: with the count guard removed
+    the route names ``a2``, whose chunk count is zero, so it returns ``empty``
+    and ``healthy`` is false anyway. Only the status distinguishes "no single
+    active index" from "an index with nothing in it".
     """
     import asyncio
 
@@ -644,6 +650,10 @@ def test_health_index_agrees_with_the_read_path_on_the_same_dual_active_session(
     assert body["vector_arm"]["healthy"] is False, (
         "the route reported the vector arm healthy while retrieval had it OFF — #264"
     )
+    assert body["vector_arm"]["status"] == "ambiguous", (
+        "the route must say WHY the arm is off; 'empty' or 'dead' here would be a "
+        "verdict about one arbitrarily-resolved row"
+    )
 
 
 def test_health_index_declines_to_name_an_active_row_when_ambiguous(
@@ -665,6 +675,15 @@ def test_health_index_declines_to_name_an_active_row_when_ambiguous(
         promoted_at=datetime.now(UTC) + timedelta(minutes=5),
         identity=identity,
     )
+    # A rollback target exists too: ambiguity about the ACTIVE index must not
+    # blank out the previous-good row, which is the field an operator reads
+    # during exactly this kind of incident (DEPLOY_FLY §6 item 4).
+    _add_index(
+        session,
+        version="pg1",
+        status=IndexStatus.previous_good,
+        promoted_at=datetime.now(UTC) - timedelta(hours=1),
+    )
 
     with TestClient(app_with_seeded_session) as client:
         body = client.get("/health/index").json()
@@ -674,6 +693,13 @@ def test_health_index_declines_to_name_an_active_row_when_ambiguous(
     # refusal and not "there was nothing to name".
     assert body["vector_arm"]["active_index_count"] == 2
     assert "2 index versions are marked active" in body["message"]
+    # Turns RED if the ambiguous branch hard-codes ``previous_good_index: None``.
+    assert body["previous_good_index"]["index_version"] == "pg1"
+    # The recovery instruction has to be actionable: ``promote_version`` returns
+    # early and writes nothing on an already-active target, so "promote one of
+    # them" would leave the operator stuck. Pinned because it is guidance shipped
+    # for a state that only occurs mid-incident.
+    assert "NOT currently active" in body["message"]
 
 
 def test_health_index_previous_good_names_the_real_rollback_target(
