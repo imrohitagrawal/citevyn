@@ -571,11 +571,15 @@ def test_health_index_reports_ambiguous_when_two_rows_are_active(
     true}``. The dashboard read green at the exact moment semantic recall was
     off.
 
-    Turns RED if the route drops the ``active_count > 1`` check. Measured, so the
-    claim is not stronger than the evidence: with the check gone the route falls
-    through and names ``a2``, which has no documents of its own, so it reports
-    ``empty`` — still not ``ambiguous``, and still a verdict about one
-    arbitrarily-resolved row while the arm is off.
+    Turns RED if the shared ``active_count > 1`` guard is weakened. Measured, so
+    the claim is not stronger than the evidence — weakening it to ``> 2`` gives:
+
+        assert va["status"] == "ambiguous"
+        E  AssertionError: assert 'empty' == 'ambiguous'
+
+    The route falls through and names ``a2``, which has no documents of its own,
+    so it reports ``empty``: still not ``ambiguous``, and still a verdict about
+    one arbitrarily-resolved row while the arm is off.
     """
     identity = _healthy_seed(session)
     _add_index(
@@ -619,13 +623,23 @@ def test_health_index_agrees_with_the_read_path_on_the_same_dual_active_session(
     path and the route was left behind. Here one session drives both, so the
     test fails if either half changes its mind independently.
 
-    Turns RED if the route stops resolving through the shared resolver.
+    Which line actually turns RED, measured rather than assumed — because a
+    reviewer was right that it is not the one you would guess:
 
-    The ``status == "ambiguous"`` assertion is the load-bearing one. ``healthy is
-    False`` alone would pass for the wrong reason: with the count guard removed
-    the route names ``a2``, whose chunk count is zero, so it returns ``empty``
-    and ``healthy`` is false anyway. Only the status distinguishes "no single
-    active index" from "an index with nothing in it".
+    * weaken the shared count guard (``> 1`` becomes ``> 2``) and this dies on
+      the **precondition**, ``assert arm_enabled is False``, not on either route
+      assertion. That is the shared resolver working as intended: one guard feeds
+      both paths, so weakening it re-opens the read path too.
+    * delete the route's ambiguous branch and this dies on the ``vector_arm``
+      lookup, because the resolver reports no row and the route falls through to
+      ``pre_index``, where ``vector_arm`` is ``None``.
+
+    So the two route assertions below are **defence in depth, not the bite** —
+    no single-point mutation of this codebase isolates them, because the
+    classifier also refuses to say ``healthy`` when it is told the count is
+    above one. They are kept because the pairing is the whole claim of #264: the
+    route and the read path must not disagree, and a future change that
+    separates the two guards should not be able to break the route half quietly.
     """
     import asyncio
 

@@ -107,11 +107,13 @@ jobs:
               # built the index: retrieval compares vectors from two different
               # spaces. See docs/ADR/0003.
               #
-              # Suppressed under `ambiguous`: there the route reports the read
-              # path's own fail-closed verdict, so `embedder_match` is False
-              # while the embedders actually AGREE. Left in, the alert would
-              # carry a true diagnosis and a false one side by side and send the
-              # operator to ADR-0003 instead of to promote_version.
+              # Suppressed under `ambiguous`: there NOTHING WAS COMPARED. The
+              # route feeds the shared predicate the ambiguous sentinel rather
+              # than a stamp, and that returns True unconditionally, so
+              # `embedder_match` is False whatever the real identities are — it
+              # carries no mismatch signal at all in that state. Left in, the
+              # alert would pair a true diagnosis with a meaningless one and send
+              # the operator to ADR-0003 instead of to promote_version.
               problems.append("embedder_match is False — query/index embedders disagree")
 
           if problems:

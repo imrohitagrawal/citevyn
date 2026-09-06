@@ -30,14 +30,15 @@ Deliberately **not** in this module:
 
 * **Logging.** Each caller emits its own event name
   (``retrieval_multiple_active_indexes`` on ``citevyn.retrieval`` /
-  ``orchestrator_multiple_active_indexes`` on ``citevyn.answer``), and moving
-  either into a shared logger here would turn its test red — measured, not
-  assumed. Precisely: ``test_retrieval.py``'s ``_capture_retrieval_logs``
-  attaches a handler to the concrete ``citevyn.retrieval`` logger, so it pins the
-  event name AND the logger; ``test_admin_services.py``'s orchestrator test reads
-  ``caplog.records``, which collects from root, so it pins the event name only.
-  Two different event names on two different loggers is also simply more useful
-  in production than one shared event would be.
+  ``orchestrator_multiple_active_indexes`` on ``citevyn.answer``). Moving the
+  RETRIEVAL one in here would turn its test red — ``test_retrieval.py``'s
+  ``_capture_retrieval_logs`` attaches a handler to the concrete
+  ``citevyn.retrieval`` logger, so it pins the event name AND the logger. The
+  orchestrator's would NOT: that test reads ``caplog.records``, which collects
+  from root, so a resolver-level logger keeping the same event name leaves it
+  green. Measured. So one of the two is genuinely enforced and the other rests on
+  the argument that two named events on two loggers tell an operator more than
+  one shared event would.
 * **A WARN on the health route.** ``.github/workflows/uptime.yml`` polls it every
   30 minutes and ``infra/docker/scripts/deploy_verify.sh`` on every deploy;
   logging per probe would add noise for a condition the read path already records

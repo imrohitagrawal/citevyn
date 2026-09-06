@@ -39,12 +39,12 @@ def test_resolved_index_fields_match_the_projection() -> None:
 
     Why the reorder matters: ``created_at`` and ``promoted_at`` are adjacent and
     both ``datetime | None``. Under the positional construction this replaced,
-    swapping them was measured to change nothing observable — same suite result
-    (``6 failed, 1833 passed`` either way, the 6 being the known ``backend/.env``
-    set), pyright green (a column ``select`` erases to ``Any``), ruff green. No
-    test asserts ``created_at`` on the ``/health/index`` payload, and the seed
-    sets it equal to ``promoted_at``. An operator reading the promotion time
-    during a rollback would have been handed the creation time.
+    swapping them was measured to change nothing observable — the suite result
+    was byte-identical with and without the swap, pyright stayed green (a column
+    ``select`` erases to ``Any``) and so did ruff. No test asserts ``created_at``
+    on the ``/health/index`` payload, and the seed sets it equal to
+    ``promoted_at``. An operator reading the promotion time during a rollback
+    would have been handed the creation time.
 
     Turns RED if a column is added to, removed from, or reordered in
     ``_INDEX_COLUMNS`` without the same change to ``ResolvedIndex``.
