@@ -583,10 +583,38 @@ export function useLandingState() {
     heroRef.current?.focus();
   }, []);
 
+  /**
+   * Write the composer's value through the ref as well as the reducer.
+   *
+   * `park()` has to read this value SYNCHRONOUSLY, and `enterChat` defers its
+   * send by 60 ms, so nothing has re-rendered in between. Measured on the
+   * closure-reading version:
+   *   - three landing entry points fired inside that window all shared one
+   *     closure whose `state.chatInput` was still "", so the second parked
+   *     question was silently OVERWRITTEN by the third — a question dropped
+   *     with no DOM change and no announcement;
+   *   - and with a draft in the box that the reader then sent, the toast fired
+   *     60 ms later still claiming "your unsent text is still in the box",
+   *     which by then was empty. A false statement, not just a missing one.
+   *
+   * Exactly the same class as the in-flight gate above, and the same remedy.
+   * Every `SET_CHAT_INPUT` in this file goes through here and nowhere else, so
+   * the two cannot drift; the effect below re-syncs from rendered state anyway,
+   * so a future dispatch added elsewhere self-heals on the next render rather
+   * than rotting silently.
+   */
+  const chatInputRef = useRef(state.chatInput);
+  const setChatInput = useCallback((value: string) => {
+    chatInputRef.current = value;
+    dispatch({ type: "SET_CHAT_INPUT", value });
+  }, []);
+  useEffect(() => {
+    chatInputRef.current = state.chatInput;
+  }, [state.chatInput]);
+
   const onChatInput = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) =>
-      dispatch({ type: "SET_CHAT_INPUT", value: e.target.value }),
-    [],
+    (e: React.ChangeEvent<HTMLInputElement>) => setChatInput(e.target.value),
+    [setChatInput],
   );
 
   // Create the backend session at most once. On failure the promise
@@ -917,7 +945,7 @@ export function useLandingState() {
           ? ""
           : state.heroInput.trim();
       if (carried) {
-        dispatch({ type: "SET_CHAT_INPUT", value: state.heroInput });
+        setChatInput(state.heroInput);
         dispatch({ type: "SET_HERO_INPUT", value: "" });
       }
       if (q) {
@@ -948,8 +976,10 @@ export function useLandingState() {
           // the two #356 records. ToastHost renders `aria-live="polite"` with
           // `role="status"` for a non-error kind, so this reaches a screen
           // reader as well as the screen.
-          if (!carried && !state.chatInput) {
-            dispatch({ type: "SET_CHAT_INPUT", value: q });
+          // chatInputRef, NOT state.chatInput: this runs inside a 60 ms
+          // timeout, before any re-render, so the closure's copy is stale.
+          if (!carried && !chatInputRef.current) {
+            setChatInput(q);
           } else {
             addToast({
               kind: "info",
@@ -1076,7 +1106,7 @@ export function useLandingState() {
     if (inFlight.current) return;
     const t = state.chatInput.trim();
     if (!t) return;
-    dispatch({ type: "SET_CHAT_INPUT", value: "" });
+    setChatInput("");
     send(t);
   }, [state.chatInput, send]);
 

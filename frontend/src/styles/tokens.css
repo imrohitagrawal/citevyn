@@ -76,7 +76,13 @@
    * --bg and 1.39:1 on --surface in light mode, i.e. WORSE than the browser's
    * own default ring, which is the trap the /about work caught first
    * (frontend/public/about.css). --ink measures 16.35:1 light / 15.69:1 dark on
-   * the page canvas and >= 9.35:1 on every other surface in the app.
+   * the page canvas and >= 9.35:1 on every surface a ring is actually DRAWN OVER. Not every
+   * token: --ink on --hl is 1.41:1, and the docs table says so. The ring is
+   * never drawn over --hl, because `outline-offset` puts it on the PARENT of
+   * the control, and the two focusable elements painting --hl (.citation-chip,
+   * .cta-pill) sit on --surface and on the re-pointed .cta-banner. The earlier
+   * wording said "every other surface" and was contradicted by this file's own
+   * table one section away.
    *
    * It is a TOKEN rather than a literal because one flat colour is not enough:
    * `.cta-banner` paints --ink as its BACKGROUND, and a --ink ring measured

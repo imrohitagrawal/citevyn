@@ -18,15 +18,35 @@
  * computes the WCAG contrast ratio. Nothing here reads a stylesheet.
  *
  * It runs under `playwright.demo-ci.config.ts`, which is a REQUIRED check.
+ *
+ * WHAT THIS SWEEP DOES NOT COVER, stated so its green is not read as more than
+ * it is. It walks the landing page, the chat screen (with an answer rendered)
+ * and the sign-in dialog. It does NOT open `HistoryDrawer`,
+ * `ConnectedAccountsDrawer`, `Nudge`, `ToastHost` or the `AccountMenu` popup —
+ * all of which need a signed-in session to reach. Those were measured by hand
+ * during review (3-8 stops each, worst ratio 13.07:1, both themes) and they
+ * inherit the same global rule, so the exposure is a FUTURE control there
+ * setting `outline: none`. It also cannot see `/about`, which is served by the
+ * API and carries its own copy of the tokens in `frontend/public/about.css`
+ * (measured 14.43-17.21:1 by hand, in agreement with the SPA).
  */
 import { test, expect } from "@playwright/test";
-import { gotoApp, ensureTheme, enterChat, contrastRatio, type ThemeName } from "./helpers";
+import {
+  gotoApp,
+  ensureTheme,
+  enterChat,
+  waitStreamDone,
+  contrastRatio,
+  type ThemeName,
+} from "./helpers";
 
 /**
  * WCAG 2.4.11 Focus Appearance asks for 3:1 between the indicator and adjacent
- * colours. `--ink` measures 9.35:1 or better on every real surface in this app
- * (see docs/UI_DESIGN.md §1.1); the floor is set at the standard's number, not
- * at ours, so a future token change has room to be different without being bad.
+ * colours. `--ink` measures 9.35:1 or better on every surface a ring is actually
+ * drawn over in this app (see docs/UI_DESIGN.md §1.1 — NOT every token: --ink on
+ * --hl is 1.41:1, and the ring is never drawn over --hl because `outline-offset`
+ * puts it on the parent). The floor is set at the standard's number, not at
+ * ours, so a future token change has room to be different without being bad.
  */
 const MIN_RING_CONTRAST = 3;
 
@@ -35,9 +55,13 @@ const MIN_RING_CONTRAST = 3;
  * input inside a box that shows a `:focus-within` border instead, and each is
  * asserted separately below — the exemption is not a free pass. Adding an
  * `outline: none` anywhere else makes the sweep fail, which is the point.
+ *
+ * A SELECTOR, not a set of class tokens. The first version matched any element
+ * carrying `chat-input` among its classes, so a future control that happened to
+ * share that token — a second input, a styled wrapper — would have been
+ * exempted wholesale and never measured. `matches()` pins the element itself.
  */
-const OUTLINE_EXEMPT_IDS = new Set(["hero-input"]);
-const OUTLINE_EXEMPT_CLASSES = new Set(["chat-input"]);
+const OUTLINE_EXEMPT_SELECTOR = "#hero-input, input.chat-input";
 
 type Stop = {
   id: string;
@@ -49,6 +73,17 @@ type Stop = {
   inInverted: boolean;
   /** True when the control sits inside a modal dialog. */
   inDialog: boolean;
+  /** This exact ELEMENT was already visited earlier in the walk. */
+  seenBefore: boolean;
+  /** Matches OUTLINE_EXEMPT_SELECTOR — decided in the page, on the element. */
+  exempt: boolean;
+  /**
+   * Set when an ancestor paints a `background-image` (a gradient) before any
+   * opaque `background-color` is found. `backdropOf` composites COLOURS only,
+   * so in that case it does not know what is actually behind the ring and must
+   * say so rather than return a confident wrong answer.
+   */
+  unmeasurableBackdrop: string | null;
   outlineStyle: string;
   outlineWidth: number;
   /** Resolved through a canvas, so `color-mix()` / `color(srgb …)` normalise. */
@@ -69,10 +104,14 @@ type Stop = {
  */
 async function tabWalk(page: import("@playwright/test").Page, max: number): Promise<Stop[]> {
   const stops: Stop[] = [];
-  const seen = new Set<string>();
+  // Clear any stamps a previous walk in this same page left behind, so two
+  // sweeps in one test do not silently measure nothing the second time.
+  await page.evaluate(() =>
+    document.querySelectorAll("[data-fr-seen]").forEach((n) => n.removeAttribute("data-fr-seen")),
+  );
   for (let i = 0; i < max; i++) {
     await page.keyboard.press("Tab");
-    const stop = await page.evaluate(() => {
+    const stop = await page.evaluate((EXEMPT_SELECTOR) => {
       const el = document.activeElement as HTMLElement | null;
       if (!el || el === document.body || el === document.documentElement) return null;
 
@@ -86,14 +125,20 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
         c.width = c.height = 1;
         const ctx = c.getContext("2d")!;
         ctx.clearRect(0, 0, 1, 1);
-        // Sentinel first: canvas silently IGNORES an unparseable fillStyle and
-        // keeps the previous one, which would hand back a confident wrong
-        // colour. If the sentinel survives an assignment of something that is
-        // not itself magenta, the parse failed.
+        // Sentinel: canvas silently IGNORES an unparseable fillStyle and keeps
+        // the previous one, which would hand back a confident wrong colour.
+        // The first version of this only SET the sentinel and never compared
+        // against it — a comment standing in for a check, which is worse than
+        // nothing here: an unparseable colour would have come back magenta,
+        // and magenta measures 5.77:1 against the dark --bg, so it would have
+        // PASSED the 3:1 floor. Now it throws.
         ctx.fillStyle = "#ff00ff";
         ctx.fillStyle = col;
         ctx.fillRect(0, 0, 1, 1);
         const d = ctx.getImageData(0, 0, 1, 1).data;
+        if (d[0] === 255 && d[1] === 0 && d[2] === 255 && !/^#ff00ff$/i.test(col.trim())) {
+          throw new Error(`focus-ring guard: canvas could not parse the colour ${col}`);
+        }
         return [d[0], d[1], d[2], d[3] / 255];
       };
 
@@ -107,11 +152,25 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
       // The ring is drawn at `outline-offset: 2px`, i.e. OUTSIDE the border
       // box, so what sits behind it is the ancestor chain's paint, not the
       // control's own background. Start at the parent for exactly that reason.
-      const backdropOf = (node: HTMLElement): number[] => {
+      const backdropOf = (node: HTMLElement): { rgb: number[]; unmeasurable: string | null } => {
         const layers: number[][] = [];
+        let unmeasurable: string | null = null;
         let n: HTMLElement | null = node.parentElement;
         while (n) {
-          const c = paint(getComputedStyle(n).backgroundColor);
+          const cs = getComputedStyle(n);
+          // A gradient is a background-IMAGE, and this walk composites
+          // background-COLOURS. An ancestor painting `linear-gradient(--ink,
+          // --ink)` has `backgroundColor: rgba(0,0,0,0)`, so it looked
+          // TRANSPARENT to the first version of this walk and the composite
+          // fell through to the page canvas: the guard measured 16.35:1 for a
+          // ring that a reviewer measured at 1.00:1 in the same pixel. That is
+          // the .cta-banner defect again, one CSS property over. Rather than
+          // guess, record that this backdrop cannot be composited and let
+          // assertRings fail loudly with the element named.
+          if (cs.backgroundImage && cs.backgroundImage !== "none" && unmeasurable === null) {
+            unmeasurable = `${n.tagName}.${typeof n.className === "string" ? n.className : ""} paints ${cs.backgroundImage.slice(0, 60)}`;
+          }
+          const c = paint(cs.backgroundColor);
           if (c[3] > 0) {
             layers.push(c);
             if (c[3] >= 1) break;
@@ -122,12 +181,22 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
         // which is white unless html/body says otherwise (they do here).
         let acc = [255, 255, 255];
         for (let i = layers.length - 1; i >= 0; i--) acc = over(layers[i], acc);
-        return acc;
+        return { rgb: acc, unmeasurable };
       };
 
       const cs = getComputedStyle(el);
       const backdrop = backdropOf(el);
+      // TRUE identity, stamped on the element itself. The first version keyed
+      // de-duplication on `tag.class#id|label`, which is not an identity: a
+      // reviewer put a SECOND `.cta-pill` with `outline: none` next to the real
+      // one, and because the twin collapsed onto the same key it was never
+      // measured and the sweep stayed green on a genuinely broken control.
+      const seenBefore = el.hasAttribute("data-fr-seen");
+      el.setAttribute("data-fr-seen", "");
       return {
+        seenBefore,
+        exempt: el.matches(EXEMPT_SELECTOR),
+        unmeasurableBackdrop: backdrop.unmeasurable,
         id: el.id || "",
         tag: el.tagName,
         cls: typeof el.className === "string" ? el.className : "",
@@ -139,29 +208,27 @@ async function tabWalk(page: import("@playwright/test").Page, max: number): Prom
         outlineWidth: parseFloat(cs.outlineWidth) || 0,
         outlineRGBA: paint(cs.outlineColor),
         outlineRaw: cs.outlineColor,
-        backdropRGB: backdrop,
+        backdropRGB: backdrop.rgb,
         backdropRaw: getComputedStyle(el.parentElement ?? el).backgroundColor,
       };
-    });
+    }, OUTLINE_EXEMPT_SELECTOR);
     // A null stop means focus left the document (headless Chromium re-enters
     // from the top on the next press). CONTINUE rather than break: an early
     // break here silently truncated the sweep at the marquee — the ticker
     // duplicates its chips, so a de-dupe-and-break walk stopped 24 controls in
     // and never reached the inverted CTA banner further down the page.
     if (stop === null) continue;
-    const key = `${stop.tag}.${stop.cls}#${stop.id}|${stop.label}`;
-    if (seen.has(key)) continue; // same control again — report it once
-    seen.add(key);
+    if (stop.seenBefore) continue; // this exact element again — report it once
     stops.push(stop as Stop);
   }
+  await page.evaluate(() =>
+    document.querySelectorAll("[data-fr-seen]").forEach((n) => n.removeAttribute("data-fr-seen")),
+  );
   return stops;
 }
 
 function isExempt(s: Stop) {
-  return (
-    OUTLINE_EXEMPT_IDS.has(s.id) ||
-    s.cls.split(/\s+/).some((c) => OUTLINE_EXEMPT_CLASSES.has(c))
-  );
+  return s.exempt;
 }
 
 /** Assert every keyboard stop in `stops` renders a ring a human can see. */
@@ -180,6 +247,17 @@ function assertRings(stops: Stop[], where: string) {
       failures.push(
         `${who} — outline-style: ${s.outlineStyle}, outline-width: ${s.outlineWidth}px ` +
           `(no visible ring; this is #355's exact signature)`,
+      );
+      continue;
+    }
+    if (s.unmeasurableBackdrop !== null) {
+      // NOT skipped. A backdrop this sweep cannot composite is a backdrop it
+      // cannot vouch for, and staying quiet about it is how a guard reports
+      // green on something it never looked at.
+      failures.push(
+        `${who} — the paint behind this ring cannot be composited from ` +
+          `background-color alone (${s.unmeasurableBackdrop}); the ring's real ` +
+          `contrast is unknown, so this sweep refuses to pass it`,
       );
       continue;
     }
@@ -224,8 +302,28 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
 
     test("every keyboard stop on the chat screen renders a ring at >= 3:1", async ({ page }) => {
       await enterChat(page);
+      // Ask something first. An empty chat screen has four controls and NO
+      // answer, so the sweep would otherwise never walk anything an answer
+      // renders. Demo mode answers from the built-in KB, no backend needed.
+      //
+      // What this still does NOT reach: `a.citation-chip`. Chips come from `[n]`
+      // markers, which only the LIVE path emits — measured in demo mode:
+      // `chips=0, cards=2`. A live-only test here would self-skip, and the
+      // required job pins `stats["skipped"] == 4`, so the chip's own rule is
+      // covered by the injected-element test below instead.
+      await page.locator(".chat-input").fill("What is Claude Code?");
+      await page.keyboard.press("Enter");
+      await waitStreamDone(page);
+      const rendered = await page.evaluate(() => ({
+        cards: document.querySelectorAll(".sources .source-card").length,
+        chips: document.querySelectorAll("a.citation-chip").length,
+      }));
+      // Partner: proves the sweep below had a rendered answer to walk. Without
+      // it, an answer that failed to render would leave the sweep measuring the
+      // same four empty-screen controls and still reporting green.
+      expect(rendered.cards, "the demo answer must render source cards").toBeGreaterThan(0);
       const stops = await tabWalk(page, 40);
-      expect(stops.length, "keyboard stops reached on the chat screen").toBeGreaterThanOrEqual(4);
+      expect(stops.length, "keyboard stops reached on the chat screen").toBeGreaterThanOrEqual(5);
       assertRings(stops, `chat/${theme}`);
     });
 
@@ -291,6 +389,126 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
         ratio,
         `ring ${m.ringRaw} on the inverted banner ${m.bannerRaw} measured ${ratio.toFixed(2)}:1`,
       ).toBeGreaterThanOrEqual(MIN_RING_CONTRAST);
+    });
+
+    test("refuses to vouch for a ring whose backdrop it cannot composite", async ({ page }) => {
+      // The bite-proof for the gradient blind spot. `backdropOf` composites
+      // background-COLOURS; a panel painting --ink via a GRADIENT reports
+      // `backgroundColor: rgba(0,0,0,0)`, so the walk used to fall through to
+      // the page canvas and score a 1.00:1 ring as 16.35:1 — reproduced by a
+      // reviewer, and it is the .cta-banner defect one CSS property over.
+      //
+      // Injected at runtime rather than shipped in the app: the point is to
+      // prove the DETECTION fires, not to add an inverted panel to the page.
+      await page.evaluate(() => {
+        const panel = document.createElement("div");
+        panel.id = "fr-gradient-probe";
+        panel.style.backgroundImage = "linear-gradient(var(--ink), var(--ink))";
+        panel.style.padding = "24px";
+        const btn = document.createElement("button");
+        btn.className = "fr-gradient-pill";
+        btn.textContent = "Gradient probe";
+        panel.appendChild(btn);
+        document.body.appendChild(panel);
+      });
+      const stops = await tabWalk(page, 140);
+      const probe = stops.filter((s) => s.cls.includes("fr-gradient-pill"));
+      // Partner: the sweep must actually have REACHED the probe, or the
+      // assertion below would pass on an empty list.
+      expect(probe.length, "the sweep must reach the injected probe").toBe(1);
+      expect(
+        probe[0].unmeasurableBackdrop,
+        "a gradient-painted ancestor must be reported as unmeasurable",
+      ).not.toBeNull();
+      // And it must FAIL the sweep rather than being quietly skipped.
+      expect(() => assertRings(probe, "probe")).toThrow(/cannot be composited/);
+      await page.evaluate(() => document.getElementById("fr-gradient-probe")?.remove());
+    });
+
+    test("a citation chip's ring follows --focus-ring, not a hardcoded --ink", async ({
+      page,
+    }) => {
+      // `a.citation-chip:focus-visible` has its OWN declaration at a specificity
+      // the shared rule cannot reach, so it used to hardcode `var(--ink)` and
+      // silently opt out of the token. Today that is invisible — outside
+      // `.cta-banner` the two resolve to the same colour — which is exactly why
+      // it needs proving rather than eyeballing: re-point `--focus-ring` on an
+      // ancestor and the chip's ring must follow, or a chip inside a future
+      // inverted surface is a 1.00:1 ring again.
+      //
+      // The chip is INJECTED rather than driven through the app: chips are
+      // rendered from `[n]` markers, which only the live path emits (measured in
+      // demo mode: chips=0, cards=2), and a live-only test would self-skip and
+      // break the required job's `skipped == 4` pin. What is under test is the
+      // CSS rule, and an `<a class="citation-chip">` is what that rule selects.
+      await enterChat(page);
+      const ring = await page.evaluate(() => {
+        const host = document.querySelector("#chat-list") as HTMLElement;
+        const chip = document.createElement("a");
+        chip.className = "citation-chip";
+        chip.href = "#";
+        chip.textContent = "[1]";
+        host.appendChild(chip);
+        // Read the rule directly: `:focus-visible` needs keyboard modality, so
+        // resolve the declared value instead of faking a focus state.
+        const declared = getComputedStyle(chip).getPropertyValue("--focus-ring").trim();
+        host.style.setProperty("--focus-ring", "rgb(1, 2, 3)");
+        const repointed = getComputedStyle(chip).getPropertyValue("--focus-ring").trim();
+        // And prove the RULE consumes it, by applying the same declaration the
+        // stylesheet does and reading what it computes to.
+        chip.style.outline = "2px solid var(--focus-ring)";
+        const outline = getComputedStyle(chip).outlineColor;
+        host.style.removeProperty("--focus-ring");
+        chip.remove();
+        return { declared, repointed, outline };
+      });
+      // Partner: the token really was something else first, so the change below
+      // is a change and not a coincidence.
+      expect(ring.declared).not.toBe("rgb(1, 2, 3)");
+      expect(ring.repointed).toBe("rgb(1, 2, 3)");
+      expect(ring.outline, "the chip's ring must resolve through --focus-ring").toBe(
+        "rgb(1, 2, 3)",
+      );
+      // And the stylesheet rule itself must be the token, not a hardcoded --ink.
+      const rule = await page.evaluate(() => {
+        for (const sheet of Array.from(document.styleSheets)) {
+          let rules: CSSRuleList;
+          try {
+            rules = sheet.cssRules;
+          } catch {
+            continue; // cross-origin sheet
+          }
+          for (const r of Array.from(rules)) {
+            if (r instanceof CSSStyleRule && r.selectorText === "a.citation-chip:focus-visible") {
+              return r.style.getPropertyValue("outline");
+            }
+          }
+        }
+        return null;
+      });
+      expect(rule, "a.citation-chip:focus-visible must exist as its own rule").not.toBeNull();
+      expect(rule).toContain("var(--focus-ring)");
+    });
+
+    test("a broken TWIN of a compliant control is still measured", async ({ page }) => {
+      // The bite-proof for element identity. De-duplication used to key on
+      // `tag.class#id|label`, which is not an identity: a reviewer put a second
+      // `.cta-pill` with `outline: none` beside the real one, the twin
+      // collapsed onto the same key, was never measured, and the sweep reported
+      // 10/10 green on a genuinely unringed, keyboard-reachable control.
+      await page.evaluate(() => {
+        const real = document.querySelector(".cta-pill") as HTMLElement;
+        const twin = real.cloneNode(true) as HTMLElement;
+        twin.style.outline = "none";
+        twin.setAttribute("data-fr-twin", "");
+        real.after(twin);
+      });
+      const stops = await tabWalk(page, 140);
+      const pills = stops.filter((s) => s.cls.includes("cta-pill"));
+      // Partner: BOTH must be walked, or the assertion below is vacuous.
+      expect(pills.length, "both the real pill and its twin must be measured").toBe(2);
+      expect(() => assertRings(stops, "twin")).toThrow(/no visible ring/);
+      await page.evaluate(() => document.querySelector("[data-fr-twin]")?.remove());
     });
 
     test("the two outline-exempt text inputs show a focus-within border instead", async ({

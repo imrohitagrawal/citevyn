@@ -37,7 +37,18 @@ set -u
 cd "$(dirname "$0")/.." || exit 99
 PW_CONFIG=${PW_CONFIG:-playwright.demo-ci.config.ts}
 S=$(mktemp -d)
-trap 'rm -rf "$S"' EXIT
+# Restore on INT/TERM as well as EXIT. With only an EXIT trap, Ctrl-C during a
+# ~20 s Playwright run left a MUTATION in the tree and then deleted the pristine
+# copies on the way out — so the header's "restores them" was untrue in exactly
+# the situation where you most need it. `restore_all` is idempotent and runs
+# before the temp dir goes.
+restore_all () {
+  for f in TOKENS RESET LANDING SPEC; do
+    eval "t=\$$f"
+    [ -f "$S/p.$f" ] && cp "$S/p.$f" "$t" 2>/dev/null
+  done
+}
+trap 'restore_all; rm -rf "$S"' EXIT INT TERM
 
 TOKENS=src/styles/tokens.css
 RESET=src/styles/reset.css
@@ -60,6 +71,14 @@ run () {
   echo $?
 }
 
+# WHICH tests died, not just "something did". A mutant killed by an unrelated
+# test is a mutant that proves nothing about the guard you were aiming at — a
+# reviewer made exactly that point about the exit-code-only version of this
+# harness, having done the per-test attribution by hand.
+killers () {
+  grep -oE '›[^›]+$' "$S/out" 2>/dev/null | sed 's/^› *//' | sort -u | head -4 | tr '\n' ';'
+}
+
 one () {  # label file pristine old new
   local label="$1" t="$2" p="$3"
   OLD="$4" NEW="$5" T="$t" python3 -c "
@@ -69,11 +88,28 @@ s=open(t).read()
 if old not in s: sys.exit(3)
 open(t,'w').write(s.replace(old,new,1))
 "
-  if [ $? -ne 0 ]; then echo "!! ANCHOR MISSING: $label"; cp "$p" "$t"; SV=$((SV+1)); return; fi
-  if cmp -s "$t" "$p"; then echo "!! NO-OP: $label"; cp "$p" "$t"; SV=$((SV+1)); return; fi
-  local c; c=$(run)
+  # Both early returns verify the restore too. They used to `cp` and trust it,
+  # unlike the main path, so a failed restore on an anchor typo would have left
+  # the tree dirty and been reported as a mere harness warning.
+  if [ $? -ne 0 ]; then
+    echo "!! ANCHOR MISSING: $label"; cp "$p" "$t"
+    cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after anchor miss: $label"; exit 98; }
+    SV=$((SV+1)); return
+  fi
+  if cmp -s "$t" "$p"; then
+    echo "!! NO-OP: $label"; cp "$p" "$t"
+    cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after no-op: $label"; exit 98; }
+    SV=$((SV+1)); return
+  fi
+  local c who; c=$(run); who=$(killers)
   cp "$p" "$t"; cmp -s "$t" "$p" || { echo "!! RESTORE FAILED: $label"; exit 98; }
-  if [ "$c" -ne 0 ]; then echo "KILLED    <- $label"; K=$((K+1)); else echo "SURVIVED! <- $label"; SV=$((SV+1)); fi
+  if [ "$c" -ne 0 ]; then
+    echo "KILLED    <- $label"
+    echo "             by: ${who:-<no test named; check $S/out>}"
+    K=$((K+1))
+  else
+    echo "SURVIVED! <- $label"; SV=$((SV+1))
+  fi
 }
 
 # A control run FIRST. Without it, a harness in which every run fails for an
@@ -123,7 +159,21 @@ one "composer: drop the :focus-within border" "$LANDING" "$S/p.LANDING" \
 }' ''
 
 echo
+echo "=== the citation chip, which has its own rule at a higher specificity ==="
+one "chip: hardcode --ink again instead of the token" "$LANDING" "$S/p.LANDING" \
+'a.citation-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);' 'a.citation-chip:focus-visible {
+  outline: 2px solid var(--ink);'
+
+echo
 echo "=== META: can the sweep be made to check nothing? ==="
+one "sweep: stop noticing a backdrop it cannot composite (the gradient bypass)" "$SPEC" "$S/p.SPEC" \
+'    if (s.unmeasurableBackdrop !== null) {' '    if (false) {'
+one "sweep: de-duplicate on a KEY again, so a broken twin hides" "$SPEC" "$S/p.SPEC" \
+'      const seenBefore = el.hasAttribute("data-fr-seen");' \
+'      const seenBefore = !!document.querySelector(
+        `[data-fr-seen]${el.className && typeof el.className === "string" ? "." + el.className.trim().split(/\\s+/).join(".") : ""}`,
+      );' 
 # Every one of these was a live way to make the guard vacuous while it still
 # reported green, which is this repo's most-repeated failure mode.
 one "sweep: walk only 5 controls (the >= 20 stop count must bite)" "$SPEC" "$S/p.SPEC" \
@@ -138,7 +188,12 @@ one "sweep: stop at the first repeat (never reaches the inverted panel)" "$SPEC"
 echo
 echo "=== KILLED: $K   SURVIVED/ERROR: $SV ==="
 ok=1
-for f in TOKENS RESET LANDING SPEC; do eval "cmp -s \$$f $S/p.\$f" || { echo "DIRTY: $f"; ok=0; }; done
+# Quoted: an unquoted "$S" inside eval mis-parses if TMPDIR contains a space and
+# then reports every file DIRTY for a reason that has nothing to do with the run.
+for f in TOKENS RESET LANDING SPEC; do
+  eval "t=\$$f"
+  cmp -s "$t" "$S/p.$f" || { echo "DIRTY: $f"; ok=0; }
+done
 [ $ok -eq 1 ] && echo "all restored byte-identical"
 
 [ "$SV" -eq 0 ]

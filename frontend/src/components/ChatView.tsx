@@ -76,36 +76,68 @@ export function ChatView({
   // moved the list". `null` until the first pin.
   const lastPinnedTopRef = useRef<number | null>(null);
 
-  // What the persistent status region says once a request has SETTLED (#356).
+  // What the persistent status region says once an answer has ARRIVED (#356).
   //
-  // Measured on the success path: when a request settles the pending region is
+  // Measured on the success path: when an answer lands the pending region is
   // removed, the answer bubble is inserted and `aria-disabled` flips on the send
   // button — none of it inside a live region, so a screen-reader user was never
   // told the answer had arrived. The error path already announces, through
   // ToastHost's `role="alert"`.
+  //
+  // THE EDGE IS `streaming`, NOT `pending`. The first version of this keyed on
+  // `pending` going true→false and was wrong in three ways at once, all three
+  // reproduced in a real browser:
+  //   1. `sendLive` calls `streamBot()` and then `markInFlight(-1)` in the very
+  //      next `finally`, so React batches them: `pending` drops in the SAME
+  //      commit that appends the bubble. `streamBot`'s `ADD_MESSAGE` carries
+  //      `sources: []` (the real citations arrive later, under `finalSources`,
+  //      at `FINISH_MESSAGE`), so `last.sources.length` was 0 every single time
+  //      and the " N sources cited" clause was unreachable in production. Four
+  //      unit tests asserted that string because they hand-built a settled
+  //      message list and drove the prop pair directly — a shape the app never
+  //      produces at that instant.
+  //   2. It therefore announced "Answer ready" as the answer STARTED streaming.
+  //      Measured live: announced at t=865 ms with three citation chips still
+  //      typing out. On a long answer that is several seconds early.
+  //   3. `pending` is only ever non-zero on the LIVE path — `markInFlight` is
+  //      called only from `sendLive`, and the demo branch of `routeQuestion`
+  //      calls `streamBot` directly. So in demo mode the region said nothing at
+  //      all, which is also why no browser test could observe it: the REQUIRED
+  //      Playwright job runs in demo mode.
+  // A bot bubble whose `streaming` has gone false is the moment the answer is
+  // genuinely readable AND the moment `sources` is populated, on both paths.
   //
   // It is announced through the region the composer ALREADY renders rather than
   // by putting `aria-live` on `#chat-list`. A live region on the list would
   // announce every mutation in it: the bot avatar's literal "CV", the reader's
   // own echoed question, the refusal badge and the whole source-card list, on
   // every streamed chunk. That is the same trap documented on the pending
-  // bubble below.
+  // bubble below. Chromium's AX tree confirms this region carries
+  // `live="polite"` and `atomic=true` (implicit on `role="status"`), so a full
+  // text replacement is announced as a whole.
   const [settled, setSettled] = useState("");
-  const wasPending = useRef(false);
+  // Armed once the newest thing in the transcript is unfinished — the reader's
+  // own question, or an answer still streaming. Only THEN does a finished bot
+  // bubble count as an arrival, which is what stops a transcript that was
+  // already complete when this mounted (returning to the chat screen, or a
+  // resumed session) from being announced as if it had just come back.
+  const armed = useRef(false);
   useEffect(() => {
-    if (pending) {
-      wasPending.current = true;
-      // Clear as the NEXT request starts, so a stale "answer ready" is never
-      // sitting in the region while a new question is in flight.
-      setSettled("");
+    const last = messages[messages.length - 1];
+    const inProgress = !last || last.isUser || last.streaming;
+    if (inProgress) {
+      armed.current = true;
+      // Drop any previous arrival text. Load-bearing in a way that is easy to
+      // miss: the error branch below returns WITHOUT writing, so without this
+      // clear a "Answer ready. 2 sources cited." from the previous question
+      // would still be standing in the region over a request that then failed.
+      // Written functionally so an unchanged value returns the same reference
+      // and React provably bails out rather than committing a render.
+      setSettled((s) => (s === "" ? s : ""));
       return;
     }
-    // Edge-triggered: only a true→false transition is an arrival. Without this
-    // the effect would fire on mount and on every unrelated `messages` change.
-    if (!wasPending.current) return;
-    wasPending.current = false;
-    const last = messages[messages.length - 1];
-    if (!last || last.isUser) return;
+    if (!armed.current) return;
+    armed.current = false;
     // A transport failure is already announced by ToastHost's `role="alert"`.
     // Announcing here too would say "answer ready" over the top of an error.
     if (last.errorKind) return;
@@ -118,7 +150,7 @@ export function ChatView({
               : ""
           }`,
     );
-  }, [pending, messages]);
+  }, [messages]);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -325,7 +357,12 @@ export function ChatView({
   }, []);
 
   return (
-    <main data-screen-label="Chat">
+    // `aria-label` as well as the data attribute (#356 / the #302 row). Measured
+    // via Chromium's AX tree: this landmark had `name=""`, so a screen-reader
+    // user landing on the only <main> on the page was told nothing about which
+    // screen they were on. The label string was already sitting one attribute
+    // away.
+    <main data-screen-label="Chat" aria-label="Chat">
       <div className="chat-header">
         <button onClick={onBackClick} className="back-button">
           ← Back to landing

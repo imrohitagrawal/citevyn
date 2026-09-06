@@ -9,6 +9,15 @@ export interface Toast {
 
 const DISMISS_AFTER_MS = 5000;
 
+/**
+ * How many toast cards may be on screen at once. `ToastHost` is a
+ * `position: fixed` column with no scroll, so cards past this point render
+ * above the top of the viewport where they can be neither read nor dismissed.
+ * Three fits the 129 px card this app actually produces in a 900 px viewport
+ * with room to spare.
+ */
+const MAX_VISIBLE_TOASTS = 3;
+
 export function useToast() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const counter = useRef(0);
@@ -16,7 +25,25 @@ export function useToast() {
 
   const addToast = useCallback((toast: Omit<Toast, "id">) => {
     const id = `toast-${++counter.current}`;
-    setToasts((prev) => [...prev, { ...toast, id }]);
+    setToasts((prev) => {
+      // COLLAPSE an identical toast rather than stacking it, and re-arm its
+      // timer by giving it a new id. Measured in a real browser: ten rapid
+      // clicks on one landing question with a draft in the composer produced
+      // ten byte-identical cards — a 1,385 px column in a 900 px viewport, with
+      // FOUR of them above the top of the screen and therefore unreachable and
+      // undismissable, covering the right-hand column for five seconds.
+      const rest = prev.filter(
+        (t) =>
+          !(t.kind === toast.kind && t.title === toast.title && t.message === toast.message),
+      );
+      // Hard cap for DISTINCT toasts, which dedupe cannot help with (an error
+      // storm on a flaky connection is the realistic case). `ToastHost` is
+      // `position: fixed` with no scroll, so anything past a few cards is off
+      // screen. Oldest goes first: the newest is the one the reader just
+      // caused. The auto-dismiss effect below drops the timer for any toast
+      // that leaves the list, so this cannot leak.
+      return [...rest, { ...toast, id }].slice(-MAX_VISIBLE_TOASTS);
+    });
   }, []);
 
   const removeToast = useCallback((id: string) => {

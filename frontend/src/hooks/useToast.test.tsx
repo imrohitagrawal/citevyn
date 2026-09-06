@@ -95,10 +95,22 @@ describe("useToast auto-dismiss timers", () => {
 
     // Partner: StrictMode really did double-invoke, so this is the hostile
     // case and not a quiet single-mount run.
-    expect(seen.toasts.length).toBe(2);
+    //
+    // This used to assert `toasts.length === 2`, because the double-invoke
+    // produced two identical cards. `addToast` now COLLAPSES an identical toast
+    // (ten rapid clicks otherwise stacked ten of them off the top of the
+    // viewport), so the double-invoke yields ONE card — and a length of 1 is
+    // what a single invoke would give too, which would make the old partner
+    // vacuous. The id is the witness instead: the counter reaching `toast-2`
+    // can only happen if `addToast` was called twice.
+    expect(seen.toasts).toHaveLength(1);
+    expect(seen.toasts[0].id).toBe("toast-2");
     // Every toast on screen must own a live timer — that is the invariant the
-    // arm-in-addToast version broke (it had 2 toasts and 1 timer).
+    // arm-in-addToast version broke (it had 2 toasts and 1 timer, and with the
+    // collapse it would now be 1 toast and 0 timers: still red, still for the
+    // same reason).
     expect(vi.getTimerCount()).toBe(seen.toasts.length);
+    expect(vi.getTimerCount()).toBe(1);
 
     act(() => {
       vi.advanceTimersByTime(5000);
@@ -123,5 +135,46 @@ describe("useToast auto-dismiss timers", () => {
 
     expect(result.current.toasts).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+/**
+ * Stacking limits. `ToastHost` is a `position: fixed` column with no scroll, so
+ * a card pushed past the top of the viewport can be neither read nor
+ * dismissed. Measured in a real browser before these: ten rapid clicks on one
+ * landing question produced ten byte-identical cards, a 1,385 px column in a
+ * 900 px viewport, FOUR of them off the top of the screen.
+ */
+describe("useToast stacking limits", () => {
+  // RED if the dedupe filter in addToast is removed: length becomes 5.
+  it("collapses an identical toast instead of stacking it, and re-arms its timer", () => {
+    const { result } = renderHook(() => useToast());
+    for (let i = 0; i < 5; i++) {
+      act(() => result.current.addToast({ kind: "info", title: "T", message: "M" }));
+    }
+    expect(result.current.toasts).toHaveLength(1);
+    // A NEW id each time, which is what re-arms the 5 s dismissal — a repeated
+    // action must not inherit the first one's nearly-expired timer.
+    expect(result.current.toasts[0].id).toBe("toast-5");
+  });
+
+  // RED if `.slice(-MAX_VISIBLE_TOASTS)` is removed: length becomes 6.
+  // This is the partner the dedupe test cannot be: identical toasts collapse to
+  // one and never reach the cap, so without DISTINCT toasts the cap is untested.
+  it("caps DISTINCT toasts, keeping the newest", () => {
+    const { result } = renderHook(() => useToast());
+    for (let i = 0; i < 6; i++) {
+      act(() => result.current.addToast({ kind: "info", title: `T${i}`, message: `M${i}` }));
+    }
+    expect(result.current.toasts).toHaveLength(3);
+    expect(result.current.toasts.map((t) => t.title)).toEqual(["T3", "T4", "T5"]);
+  });
+
+  // RED if the cap drops the NEWEST instead of the oldest (`.slice(0, N)`).
+  it("keeps fewer than the cap untouched, so the cap is not a floor", () => {
+    const { result } = renderHook(() => useToast());
+    act(() => result.current.addToast({ kind: "error", title: "A", message: "a" }));
+    act(() => result.current.addToast({ kind: "error", title: "B", message: "b" }));
+    expect(result.current.toasts.map((t) => t.title)).toEqual(["A", "B"]);
   });
 });

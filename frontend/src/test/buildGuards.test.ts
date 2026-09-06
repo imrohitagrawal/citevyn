@@ -137,6 +137,47 @@ describe("nothing narrows the test run at the command level", () => {
   });
 });
 
+describe("index.html pulls in NOTHING the bundle gate cannot see", () => {
+  // The gate measures Vite's module graph. A plain `<script src="/thing.js">`
+  // pointing at `frontend/public/` is outside that graph entirely, so it is
+  // render-blocking JS the ceiling cannot see. Reproduced by an adversarial
+  // review: a 73,869 B gzip script in `<head>` took real eager JS to 2.06x the
+  // ceiling while `check:bundle` reported 1,678 B of headroom and every test
+  // stayed green.
+  //
+  // Teaching the gate to parse HTML re-opens a class of hazards its own header
+  // documents (attribute quoting, `data-src` shadowing `src`, comments,
+  // <noscript>/<template>, regex backtracking). Pinning the ONE script tag that
+  // exists is cheaper and closes the demonstrated path: adding a second makes
+  // this red, and the fix is either to import it through the module graph
+  // (where the gate counts it) or to argue for it here.
+  const html = readFileSync(join(frontendRoot, "index.html"), "utf8");
+
+  it("declares exactly one <script>, and it is the module entry", () => {
+    const scripts = [...html.matchAll(/<script\b[^>]*>/gi)].map((m) => m[0]);
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0]).toMatch(/type=["']module["']/);
+    expect(scripts[0]).toMatch(/src=["']\/src\/main\.tsx["']/);
+  });
+
+  it("preloads no script the gate would not have counted", () => {
+    // `rel="preload" as="script"` and `rel="modulepreload"` both fetch JS
+    // before first paint without being a <script> tag.
+    const preloads = [...html.matchAll(/<link\b[^>]*>/gi)]
+      .map((m) => m[0])
+      .filter((tag) => /rel=["'](?:modulepreload|preload)["']/i.test(tag))
+      .filter((tag) => !/as=["'](?:style|font|image)["']/i.test(tag));
+    expect(preloads).toEqual([]);
+  });
+
+  it("the probe can see the tags it is filtering, so the checks above are not vacuous", () => {
+    // Partner for two assertions that both count toward zero. Without it, a
+    // regex that matched nothing at all would satisfy both.
+    expect(html).toMatch(/<link\b/i);
+    expect([...html.matchAll(/<link\b[^>]*>/gi)].length).toBeGreaterThan(3);
+  });
+});
+
 describe("the bundle gate is reachable from npm", () => {
   it("package.json defines check:bundle pointing at the real script", () => {
     const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));

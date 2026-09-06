@@ -588,95 +588,164 @@ describe("ChatView — composer while an answer is in flight (#62)", () => {
 });
 
 describe("ChatView announces an ARRIVING answer (#356)", () => {
-  // The gap: on the success path a settled request removes the pending region,
-  // inserts the answer bubble and flips `aria-disabled` — none of it in a live
-  // region, so a screen-reader user was never told the answer had arrived. The
-  // error path already announces, via ToastHost's role="alert".
+  // The gap: when an answer lands, the pending region is removed, the answer
+  // bubble is inserted and `aria-disabled` flips — none of it in a live region,
+  // so a screen-reader user was never told. The error path already announces,
+  // via ToastHost's role="alert".
   //
-  // These drive the real prop transition (pending true -> false) rather than
-  // rendering the end state, because the announcement is EDGE-triggered; a test
-  // that only rendered `pending: false` would pass with the whole change absent.
-  const answered: Msg[] = [
+  // THESE TESTS DRIVE THE SHAPE THE APP ACTUALLY PRODUCES, which the first
+  // version did not. `streamBot` appends the bot bubble with `sources: []` and
+  // `streaming: true`; the real citations arrive later, at `FINISH_MESSAGE`.
+  // The first version keyed on `pending` and handed in an already-settled
+  // message list, so it asserted `"Answer ready. 2 sources cited."` — a string
+  // the application could not emit, because at the instant `pending` dropped
+  // the bubble was empty and sourceless. Three reviewers reproduced that
+  // independently, one of them live in a browser. `streaming` going true→false
+  // is the real edge: it is when the answer is readable AND when `sources` is
+  // populated, on the live and demo paths alike.
+  //
+  // `streamed()` / `finished()` below are the two states in that order, so a
+  // test that drives them cannot pass on a shape production never has.
+  const question = msg(4, true, "How much does it cost?");
+  /** What ADD_MESSAGE produces: empty text, streaming, NO sources yet. */
+  const streamed = (over: Partial<Msg> = {}): Msg[] => [
     ...MESSAGES,
-    msg(4, true, "How much does it cost?"),
-    { ...msg(5, false, "It is free during the preview."), sources: [
-      { n: "1", title: "Pricing", url: "https://example.com/pricing" },
-      { n: "2", title: "Plans", url: "https://example.com/plans" },
-    ] },
+    question,
+    { ...msg(5, false, ""), streaming: true, sources: [], ...over },
+  ];
+  /** What FINISH_MESSAGE produces: streaming off, sources populated. */
+  const finished = (over: Partial<Msg> = {}): Msg[] => [
+    ...MESSAGES,
+    question,
+    {
+      ...msg(5, false, "It is free during the preview."),
+      streaming: false,
+      sources: [
+        { n: "1", title: "Pricing", url: "https://example.com/pricing" },
+        { n: "2", title: "Plans", url: "https://example.com/plans" },
+      ],
+      ...over,
+    },
   ];
 
-  it("says the answer is ready, with the source count, once the request settles", () => {
+  it("says the answer is ready, with the source count, once the stream FINISHES", () => {
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
     expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
 
-    rerender(chat({ pending: false, messages: answered }));
+    // The answer starts arriving and `pending` drops in the same commit. This
+    // is the instant the old version announced, wrongly.
+    rerender(chat({ pending: false, messages: streamed() }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    rerender(chat({ pending: false, messages: finished() }));
     expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
   });
 
-  it("says nothing at all until a request has actually been in flight", () => {
-    // Partner for the edge-trigger. Mounting straight into `pending: false` —
-    // which is what returning to a finished transcript does — must not announce
-    // an answer that arrived before the reader got here.
-    renderChat({ pending: false, messages: answered });
+  it("stays silent while the answer is still streaming", () => {
+    // The #2 defect on its own: announcing at stream START told a reader the
+    // answer was ready seconds before its last character rendered.
+    const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("announces on the DEMO path, where `pending` is never set at all", () => {
+    // `markInFlight` is called only from `sendLive`, so in demo mode
+    // `state.pending` is permanently 0. Keying on `pending` meant the region
+    // said nothing to a demo/offline reader — and, because the REQUIRED
+    // Playwright job runs in demo mode, that no browser test could see it.
+    const { rerender } = renderChat({ pending: false, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: finished() }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+  });
+
+  it("says nothing when it mounts onto a transcript that was already finished", () => {
+    // Returning to the chat screen, or resuming a past session, must not
+    // announce an answer that arrived before the reader got here.
+    renderChat({ pending: false, messages: finished() });
     expect(screen.getByRole("status")).toHaveTextContent("");
   });
 
   it("singularises one source rather than saying '1 sources'", () => {
-    const one: Msg[] = [
-      ...MESSAGES,
-      { ...msg(4, false, "Yes."), sources: [{ n: "1", title: "Pricing", url: "https://e.co/p" }] },
-    ];
+    const one = finished({
+      sources: [{ n: "1", title: "Pricing", url: "https://e.co/p" }],
+    });
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
     rerender(chat({ pending: false, messages: one }));
     expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
   });
 
   it("omits the source clause when the answer carries none", () => {
-    const bare: Msg[] = [...MESSAGES, msg(4, false, "Yes.")];
+    const bare = finished({ sources: [] });
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
     rerender(chat({ pending: false, messages: bare }));
     expect(screen.getByRole("status")).toHaveTextContent("Answer ready.");
     expect(screen.getByRole("status").textContent).not.toMatch(/source/);
   });
 
   it("announces a REFUSAL as a refusal, not as an answer", () => {
-    const refused: Msg[] = [...MESSAGES, { ...msg(4, false, "No source."), refusal: true }];
+    const refused = finished({ refusal: true, sources: [] });
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed() }));
     rerender(chat({ pending: false, messages: refused }));
     expect(screen.getByRole("status")).toHaveTextContent(/No answer\./);
     expect(screen.getByRole("status").textContent).not.toMatch(/Answer ready/);
   });
 
   it("stays silent on a TRANSPORT failure, which ToastHost already announces as an alert", () => {
-    // Two announcements of the same event, one of them saying "answer ready"
-    // over the top of an error, is worse than one.
-    const failed: Msg[] = [
-      ...MESSAGES,
-      { ...msg(4, false, "Something went wrong."), errorKind: "error" },
-    ];
+    const failed = finished({ errorKind: "error", sources: [] });
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
+    rerender(chat({ pending: false, messages: streamed({ errorKind: "error" }) }));
     rerender(chat({ pending: false, messages: failed }));
     expect(screen.getByRole("status")).toHaveTextContent("");
   });
 
-  it("clears the arrival text when the NEXT question goes in flight", () => {
-    // A stale "answer ready" sitting in the region while a new question is
-    // running would be read back as the state of the wrong request.
+  it("does not leave a stale 'answer ready' standing over a FAILED second request", () => {
+    // The load-bearing case for clearing the text when a new request starts.
+    // The error branch RETURNS without writing, so without the clear the region
+    // would still read "Answer ready. 2 sources cited." over an error. The
+    // first version of this test asserted the middle state while `pending` was
+    // true — which the `pending ? … : settled` ternary supplies regardless of
+    // what `settled` holds, so it could not fail. A reviewer deleted the clear
+    // and the whole file stayed green.
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
-    rerender(chat({ pending: false, messages: answered }));
+    rerender(chat({ pending: false, messages: streamed() }));
+    rerender(chat({ pending: false, messages: finished() }));
     expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
-    rerender(chat({ pending: true, messages: answered }));
-    expect(screen.getByRole("status")).toHaveTextContent(/Searching the docs/);
-    rerender(chat({ pending: false, messages: answered }));
-    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 2 sources cited.");
+
+    const q2 = msg(6, true, "And after that?");
+    const failing = [
+      ...finished(),
+      q2,
+      { ...msg(7, false, ""), streaming: true, sources: [], errorKind: "error" as const },
+    ];
+    rerender(chat({ pending: false, messages: failing }));
+    const settledFailure = [
+      ...finished(),
+      q2,
+      {
+        ...msg(7, false, "Something went wrong."),
+        streaming: false,
+        sources: [],
+        errorKind: "error" as const,
+      },
+    ];
+    rerender(chat({ pending: false, messages: settledFailure }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
   });
 
-  it("does not announce when the request settles with the reader's own message last", () => {
-    // Partner proving the announcement is keyed on an ANSWER existing, not
-    // merely on the flag dropping: a request that ends without appending a bot
-    // bubble has nothing to report.
+  it("does not announce when the newest message is the reader's own", () => {
     const { rerender } = renderChat({ pending: true, messages: MESSAGES });
     rerender(chat({ pending: false, messages: [...MESSAGES, msg(4, true, "Anyone there?")] }));
     expect(screen.getByRole("status")).toHaveTextContent("");
+  });
+
+  it("gives the chat landmark an accessible name", () => {
+    // Measured via Chromium's AX tree before this: `AX main: name=""`.
+    renderChat();
+    expect(screen.getByRole("main")).toHaveAccessibleName("Chat");
   });
 });

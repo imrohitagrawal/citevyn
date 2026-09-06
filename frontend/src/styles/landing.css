@@ -2078,9 +2078,22 @@ a.citation-chip {
 }
 
 .citation-chip.is-active,
-a.citation-chip:hover,
-a.citation-chip:focus-visible {
+a.citation-chip:hover {
   outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* Split OUT of the hover/active block above, for two reasons found in review.
+ * (1) It hard-coded --ink at a specificity the shared :focus-visible rule
+ * cannot reach, so a chip rendered inside an inverted surface would be a
+ * 1.00:1 ring again — the exact defect --focus-ring exists to prevent, and it
+ * made tokens.css's "one line, without touching reset.css" claim untrue for
+ * this one control. (2) Sharing one declaration with :hover meant a keyboard
+ * user could not tell focus from hover: identical treatment, different state.
+ * The offset stays 1px — chips are small and inline, and 2px collides with the
+ * neighbouring text. */
+a.citation-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 

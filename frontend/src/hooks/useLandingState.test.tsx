@@ -1810,6 +1810,95 @@ describe("useLandingState — a landing entry point parks its question rather th
     expect(result.current.toasts[0].message).toContain("Second question");
   });
 
+  it("does not silently overwrite a question already parked in the same 60ms window", async () => {
+    // Reproduced in review: `park()` read `state.chatInput` from the closure,
+    // and `enterChat` defers its send 60 ms, so three landing entry points
+    // fired inside that window all saw "" — the SECOND parked question was
+    // overwritten by the third with no DOM change and no announcement. Measured
+    // before the fix: chatInput "Q3", toasts []. Q2 simply vanished.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      result.current.enterChat("Q1");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.enterChat("Q2");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.enterChat("Q3");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    // Q2 is parked and STAYS parked; Q3 is the one that could not fit, and it
+    // says so rather than clobbering Q2.
+    expect(result.current.state.chatInput).toBe("Q2");
+    expect(result.current.toasts).toHaveLength(1);
+    expect(result.current.toasts[0].message).toContain("Q3");
+    expect(result.current.toasts[0].message).not.toContain("Q2");
+  });
+
+  it("does not claim a draft is 'still in the box' after the reader has sent it", async () => {
+    // The other half of the same stale-closure defect, and the one this change
+    // INTRODUCED before it was fixed. NOTHING is in flight at the start — that
+    // is required, because the #62 gate refuses `submitChat` while a request is
+    // open, so the draft could not be sent at all in that state. The sequence
+    // is: draft in the box, click a landing question (which defers its send
+    // 60 ms), and inside that window the reader presses Enter. `submitChat`
+    // empties the box and starts the request; the deferred `park()` then runs,
+    // and the closure-reading version still asserted "your unsent text is still
+    // in the box" about a box that was empty. A false statement, worse than the
+    // silence it replaced.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    await act(async () => {
+      result.current.enterChat("Clicked question");
+      await vi.advanceTimersByTimeAsync(20);
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    // Partner: the draft really was sent, so the box really was empty when
+    // `park()` ran — otherwise this test would be asserting nothing.
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(mockAskQuestion.mock.calls[0][1]).toBe("my own draft");
+    // The clicked question is therefore PARKED, not dropped, and nothing untrue
+    // is announced.
+    expect(result.current.state.chatInput).toBe("Clicked question");
+    expect(result.current.toasts).toEqual([]);
+  });
+
+  it("collapses repeated identical drop notices instead of stacking them", async () => {
+    // Measured in a real browser before the cap: ten rapid clicks produced ten
+    // byte-identical cards, a 1,385 px column in a 900 px viewport with four of
+    // them above the top of the screen, unreachable and undismissable.
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    for (let i = 0; i < 10; i++) {
+      await act(async () => {
+        result.current.enterChat("Same question");
+        await vi.advanceTimersByTimeAsync(100);
+      });
+    }
+
+    expect(result.current.toasts).toHaveLength(1);
+    // Partner: it really did fire ten times — the draft is untouched and the
+    // question was never parked, so every one of them took the drop branch.
+    expect(result.current.state.chatInput).toBe("my own draft");
+  });
+
   it("stays quiet when the question was PARKED rather than dropped", async () => {
     // The partner. A toast on every parked question would fire on the common
     // path, where nothing was lost and the question is visibly in the composer.
