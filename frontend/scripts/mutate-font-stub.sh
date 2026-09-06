@@ -64,7 +64,14 @@ check() {
   local status=$?
   restore "$file"
   if [ $status -ne 0 ]; then
+    # Print WHAT went red, not just that something did. A mutant that dies for
+    # an unrelated reason (a syntax error, a crashed runner, another guard
+    # tripping first) is a false kill, and an exit code alone cannot tell the
+    # difference. This repo has been burned by exactly that.
     echo "  KILLED   $label"
+    sed $'s/\033\\[[0-9;]*m//g' "$S/out.txt" |
+      grep -E '^\s*[0-9]+\) |Error: |AssertionError|^\s*(×|✘|FAIL) ' |
+      cut -c1-110 | head -4 | sed 's/^/             /'
     pass=$((pass + 1))
   else
     echo "  SURVIVED $label  <-- nothing bites; this guard is decorative"
