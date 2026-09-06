@@ -225,6 +225,15 @@ def _strip_comment(line: str) -> str:
             out.append(line[i : i + 2])
             i += 2
             continue
+        # Inside double quotes a backslash escapes the next character, so
+        # `"a\" # b"` is ONE string containing a quote, not a string followed
+        # by a comment. Without this the stripper closed the quote at `\"` and
+        # ate the rest of the line -- a fail-closed corruption of a legitimate
+        # command, but a corruption. Single quotes have no escape.
+        if quote == '"' and ch == "\\" and i + 1 < len(line):
+            out.append(line[i : i + 2])
+            i += 2
+            continue
         if quote is None and ch == ")" and stack:
             quote = stack.pop()
         elif quote:
@@ -276,6 +285,13 @@ _STRIP_CASES: tuple[tuple[str, str], ...] = (
     # `$(` re-enters an unquoted context, so this IS a comment to the shell.
     ('printf "$(curl -sS  # c', 'printf "$(curl -sS'),
     ('printf "$(curl -sSL -w x)"  # c', 'printf "$(curl -sSL -w x)"'),
+    # `#` preceded by a non-space is not a comment: parameter expansion.
+    ("echo ${VAR#prefix}", "echo ${VAR#prefix}"),
+    ("echo ${VAR##*/}", "echo ${VAR##*/}"),
+    ("echo $((1#2))", "echo $((1#2))"),
+    # A backslash escapes the next char inside double quotes.
+    ('echo "a\\" # b"', 'echo "a\\" # b"'),
+    ("echo a\tb\t# c", "echo a\tb"),
 )
 
 
