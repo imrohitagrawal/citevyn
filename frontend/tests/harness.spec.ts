@@ -123,16 +123,6 @@ test.describe("e2e harness: nothing reaches a third party", () => {
   test("every font request was served, and both faces really ended up loaded", async ({ page }) => {
     const { fontResponses, loadedFamilies, askedGoogle } = await loadRecording(page);
 
-    // PARTNER for the emptiness check below, in the same implication form so
-    // #365 leaves it green: while the page still asks Google, the recording
-    // must contain the stylesheet AND both font files.
-    expect(
-      !askedGoogle || fontResponses.length >= 3,
-      `only ${fontResponses.length} font responses were recorded while the page still ` +
-        "asks fonts.googleapis.com — expected the stylesheet plus two woff2 files, so " +
-        "the check below would be vacuous",
-    ).toBe(true);
-
     // tests/fixtures.ts answers an unvendored subset, or an unexpected
     // `family=`, with 404 rather than letting it reach the network. That is the
     // signal this reads: needing latin-ext/cyrillic/greek/vietnamese, or adding
@@ -144,6 +134,18 @@ test.describe("e2e harness: nothing reaches a third party", () => {
       "a font request was not served from tests/fonts/ — vendor it (see the " +
         "regeneration note in tests/fonts/google-fonts-latin.css)",
     ).toEqual([]);
+
+    // PARTNER for that emptiness check, in the same implication form so #365
+    // leaves it green: while the page still asks Google, the recording must
+    // hold the stylesheet AND both woff2 files. It comes AFTER on purpose —
+    // when a request really did fail, the check above names which one, and
+    // seeing "404 .../css2?..." beats seeing "only 1 response recorded".
+    expect(
+      !askedGoogle || fontResponses.length >= 3,
+      `only ${fontResponses.length} font responses were recorded while the page still ` +
+        "asks fonts.googleapis.com — expected the stylesheet plus two woff2 files, so " +
+        "the check above was vacuous",
+    ).toBe(true);
 
     expect(
       loadedFamilies,

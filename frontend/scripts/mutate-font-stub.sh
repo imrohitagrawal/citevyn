@@ -170,9 +170,9 @@ check "spec list no longer resolved" "$GUARD" 'specs = ["landing.spec.ts"];' "$V
   "to include 'visual.spec.ts'"
 
 echo "== M8: the fixture goes back to overriding \`page\` instead of \`context\` =="
-perl -0pi -e 's{context: async \(\{ context \}, use\) => \{}{page: async ({ page }, use) => {}s;
-             s{await context\.route\(}{await page.route(}g;
-             s{await use\(context\);}{await use(page);}' "$FIX"
+# `!` delimiters, not `{}`: the replacement contains an unbalanced `{`, which
+# perl cannot parse under brace delimiters.
+perl -0pi -e 's!context: async \(\{ context \}, use\) => \{!page: async ({ page }, use) => {!s; s!await context\.route\(!await page.route(!g; s!await use\(context\);!await use(page);!' "$FIX"
 check "route bound to one page" "$FIX" "page: async ({ page }, use)" "$PW" \
   "the font route is bound to a single page rather than to the context"
 
