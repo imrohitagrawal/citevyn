@@ -832,6 +832,14 @@ Every `vector_arm` block carries `active_index_count` (#264); the `pre_index` an
 `degraded` responses have no block at all (`vector_arm: null`), so the field is
 absent there rather than zero.
 
+Both index rows are read in a **single statement**, so they come from one
+database snapshot (#351). That matters because the two are reported together:
+resolving them with separate queries let a promote commit in between and name
+the same index as both the active index and the rollback target — reproduced on
+Postgres, where READ COMMITTED gives every statement its own snapshot. A caller
+can rely on `active_index` and `previous_good_index` being mutually consistent
+within one response.
+
 `previous_good_index` names the **most recently demoted** index — the rollback
 target for §13's promote API. More than one row can carry `previous_good` at once:
 `promote_version` demotes every `active` row it finds and never clears the

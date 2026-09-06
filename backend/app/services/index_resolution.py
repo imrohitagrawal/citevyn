@@ -66,11 +66,13 @@ sees.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import IndexStatus, IndexVersion
@@ -86,6 +88,33 @@ _INDEX_COLUMNS = (
     IndexVersion.embedding_provider,
     IndexVersion.embedding_model,
     IndexVersion.embedding_dim,
+)
+
+# ``status`` rides along so the partition can be done in Python, but it is not a
+# ``ResolvedIndex`` field — it is the thing being partitioned ON, not a property
+# of the resolved row.
+_STATUS_KEY = "status"
+
+# Safety bound on the fetch. ``index_versions`` grows by one per ingest and is
+# admin-controlled (production has ONE row), so this is a guard against a
+# pathological table rather than a working limit — but an unbounded ``SELECT``
+# is a thing ``code_review.md`` blocks on, so it is stated rather than assumed.
+#
+# What the cap can and cannot distort: ``previous_good`` rows always carry an
+# EARLIER ``promoted_at`` than the active row that displaced them (a promote
+# stamps the new active in the same statement it demotes the old one), so under
+# the ordering below every ``active`` row sorts ahead of every ``previous_good``
+# row. Truncation therefore drops the OLDEST previous-good rows first and cannot
+# hide an active row, so the ambiguity decision is exact in any state the two
+# writers of ``status = active`` can produce. Above the cap ``active_count``
+# would become a floor; the state would still be ``ambiguous``.
+_MAX_INDEX_ROWS = 64
+
+# ONE ordering, shared by every status and every caller. Two call sites sorting
+# differently is the divergence #264 is about.
+_ORDER_BY = (
+    IndexVersion.promoted_at.desc().nulls_last(),
+    IndexVersion.index_version.desc(),
 )
 
 
@@ -142,8 +171,79 @@ class ActiveIndexResolution:
     row: ResolvedIndex | None
 
 
-def _newest_first(status: IndexStatus):
-    """``status``-filtered query for the single newest row, deterministically ordered.
+@dataclass(frozen=True)
+class IndexPartition:
+    """Both answers ``GET /health/index`` needs, taken from ONE set of rows.
+
+    Returning them together is the point: resolving them separately meant two
+    statements, and under READ COMMITTED each statement takes its own snapshot,
+    so a promote committing between them could make the same index appear as
+    both the active index and the rollback target (#351 — reproduced on real
+    Postgres with two concurrent connections).
+    """
+
+    active: ActiveIndexResolution
+    previous_good: ResolvedIndex | None
+
+
+def _row_to_resolved(row: Mapping[Any, Any]) -> ResolvedIndex:
+    """Build a :class:`ResolvedIndex` from a projected row, keyed by NAME.
+
+    Everything but ``status`` is passed through as a keyword, so a column added
+    to, removed from, or renamed in ``_INDEX_COLUMNS`` raises ``TypeError`` here
+    rather than silently mis-populating a field. (A REORDER is a no-op under
+    keyword construction; ``test_resolved_index_fields_match_the_projection``
+    is what pins that case, at import time.)
+    """
+    return ResolvedIndex(**{k: v for k, v in row.items() if k != _STATUS_KEY})
+
+
+def partition_index_rows(rows: Sequence[Mapping[Any, Any]]) -> IndexPartition:
+    """THE shared rule, as a pure function over already-fetched rows (#264/#351).
+
+    This is the single guard the three call sites share. It used to be welded to
+    the database access — a ``COUNT`` statement plus an ordered ``LIMIT 1`` — and
+    that welding is what made the health route need three statements, and hence
+    three snapshots, to answer two questions. Splitting the *rule* from the
+    *fetch* lets every caller run exactly one query and still share one
+    definition of "more than one active row means ambiguous".
+
+    ``rows`` MUST already be ordered by :data:`_ORDER_BY`; the caller's single
+    ``SELECT`` does that, so "first row of a status" is "newest row of that
+    status" and this function does no sorting of its own. Pure and total: no
+    session, no I/O, no clock.
+
+    Deleting the ``> 1`` comparison below must turn the health-route, retrieval
+    AND orchestrator tests red together —
+    ``test_partition_rule_is_shared_by_all_three_call_sites`` re-proves that,
+    because it is the property #264 exists to establish.
+    """
+    active = [r for r in rows if r[_STATUS_KEY] is IndexStatus.active]
+    previous = next(
+        (_row_to_resolved(r) for r in rows if r[_STATUS_KEY] is IndexStatus.previous_good),
+        None,
+    )
+
+    if len(active) > 1:
+        resolution = ActiveIndexResolution(
+            state=ActiveIndexState.ambiguous, active_count=len(active), row=None
+        )
+    elif not active:
+        resolution = ActiveIndexResolution(state=ActiveIndexState.none, active_count=0, row=None)
+    else:
+        resolution = ActiveIndexResolution(
+            state=ActiveIndexState.one, active_count=1, row=_row_to_resolved(active[0])
+        )
+    return IndexPartition(active=resolution, previous_good=previous)
+
+
+def _ordered_rows_query(*statuses: IndexStatus):
+    """ONE deterministically-ordered query over the given statuses.
+
+    One statement means one snapshot, which is what closes #351 — and it also
+    closes the COUNT-then-SELECT window the pre-#264 read-path resolvers carried,
+    because the count is now taken from the same rows the winner is picked from
+    rather than from a separate earlier statement.
 
     ``promoted_at DESC NULLS LAST`` then ``index_version DESC`` — the ordering
     the retrieval gate and the orchestrator have always used, lifted here
@@ -158,12 +258,10 @@ def _newest_first(status: IndexStatus):
     demoted row keeps from when it was active) says which one is the current
     rollback target.
 
-    On the ``active`` path the ordering is defensive and **unreachable by
-    construction**: :func:`resolve_active_index` returns ``ambiguous`` before it
-    runs whenever more than one row qualifies, so there is never more than one
-    row left to order. It is kept because deleting it would leave the three
-    callers' SQL non-identical again, which is the divergence #264 is about — not
-    because any test can observe it.
+    On the ``active`` path the ordering only decides anything when exactly one
+    active row survives the partition, so it is defensive there. It is kept
+    because it is the SAME ordering constant for both statuses — the divergence
+    #264 is about was two call sites sorting differently.
 
     ``NULLS LAST`` is load-bearing on Postgres, which orders NULLs *first* under
     ``DESC`` by default: a never-promoted row must not outrank a real one. SQLite
@@ -172,80 +270,55 @@ def _newest_first(status: IndexStatus):
     Postgres-marked test that can.
 
     The ``index_version`` tiebreak is a **string** sort, so ``v2`` outranks
-    ``v10``. It never decides anything today: on the ``active`` path the count
-    guard fires first, and on the ``previous_good`` path a tie needs two rows
-    with identical ``promoted_at`` — and both writers of ``status = active``
+    ``v10``. It never decides anything today: a tie needs two rows with identical
+    ``promoted_at``, and both writers of ``status = active``
     (``promote_version`` and the seed's ``_promote``) stamp ``promoted_at`` in
     the same statement, each from its own ``datetime.now(UTC)``.
     """
     return (
-        select(*_INDEX_COLUMNS)
-        .where(IndexVersion.status == status)
-        .order_by(
-            IndexVersion.promoted_at.desc().nulls_last(),
-            IndexVersion.index_version.desc(),
-        )
-        .limit(1)
+        select(*_INDEX_COLUMNS, IndexVersion.status)
+        .where(IndexVersion.status.in_(statuses))
+        .order_by(*_ORDER_BY)
+        .limit(_MAX_INDEX_ROWS)
     )
 
 
-async def _newest(session: AsyncSession, status: IndexStatus) -> ResolvedIndex | None:
-    row = (await session.execute(_newest_first(status))).mappings().first()
-    if row is None:
-        return None
-    # Keyed by NAME, not position. ``ResolvedIndex(*row)`` is correct today and
-    # would stay SILENT tomorrow: ``created_at`` and ``promoted_at`` are adjacent
-    # and both ``datetime | None``, so reordering ``_INDEX_COLUMNS`` swaps them
-    # with no error, no pyright complaint (a column ``select`` erases to ``Any``)
-    # and no failing test — measured — and this route is where an operator reads
-    # the promotion time during a rollback.
-    #
-    # Precisely what each form buys, because the difference is easy to overstate:
-    # keying by name makes a REORDER a no-op (the values still land in the right
-    # fields) and turns an added, removed or renamed column into a ``TypeError``
-    # on the first request. It does NOT make a reorder raise — there is nothing
-    # left to raise about. ``test_resolved_index_fields_match_the_projection``
-    # is what pins the reorder case, at import time.
-    #
-    # ``.mappings()`` rather than ``row._mapping``: same object, public accessor.
-    # The underscore attribute trips pyright's ``reportPrivateUsage`` under this
-    # repo's strict mode, which is a CI gate.
-    return ResolvedIndex(**row)
-
-
-async def count_active_indexes(session: AsyncSession) -> int:
-    """How many rows currently carry ``status = active``."""
-    stmt = select(func.count(IndexVersion.index_version)).where(
-        IndexVersion.status == IndexStatus.active
-    )
-    return int((await session.execute(stmt)).scalar_one())
+async def _fetch(session: AsyncSession, *statuses: IndexStatus) -> Sequence[Mapping[Any, Any]]:
+    """Run the single ordered query and hand the rows to the pure partitioner."""
+    return list((await session.execute(_ordered_rows_query(*statuses))).mappings().all())
 
 
 async def resolve_active_index(session: AsyncSession) -> ActiveIndexResolution:
     """Resolve the active index into exactly one of three states.
 
-    Two queries, matching what the retrieval gate and the orchestrator already
-    ran: a ``COUNT`` (whose exact value both of their WARN payloads carry) and a
-    deterministically-ordered ``LIMIT 1``. Collapsing them into a single
-    ``LIMIT 2`` would save a roundtrip but reduce ``active_count`` to "1 or more
-    than 1", losing the number those payloads report.
+    **ONE statement**, so one snapshot. This used to be a ``COUNT`` followed by
+    an ordered ``LIMIT 1``, which is the shape both read-path resolvers had
+    before #264 — and that pair is not atomic: under READ COMMITTED each
+    statement takes its own snapshot, so a promote committing in between could
+    return ``state=one`` for a database that already had two active rows. That
+    window was carried over unchanged by the #264 refactor and is now closed,
+    because the count and the winner come from the same rows.
 
-    Two statements means this is **not atomic**: under READ COMMITTED each takes
-    its own snapshot, so a promote committing in between can yield
-    ``state=one`` for a database that now has two active rows. That window is
-    carried over unchanged from the pre-#264 code — both read-path resolvers
-    already ran exactly this COUNT-then-SELECT pair — and it self-corrects on the
-    next call.
+    The cost of closing it is that ``active_count`` is now ``len(rows)`` rather
+    than a ``COUNT(*)``, i.e. capped at :data:`_MAX_INDEX_ROWS`. Both WARN
+    payloads still carry a real number, and above the cap it would be a floor on
+    a database that is already ``ambiguous``.
     """
-    active_count = await count_active_indexes(session)
-    if active_count > 1:
-        return ActiveIndexResolution(
-            state=ActiveIndexState.ambiguous, active_count=active_count, row=None
-        )
-    row = await _newest(session, IndexStatus.active)
-    if row is None:
-        return ActiveIndexResolution(state=ActiveIndexState.none, active_count=0, row=None)
-    return ActiveIndexResolution(state=ActiveIndexState.one, active_count=1, row=row)
+    return partition_index_rows(await _fetch(session, IndexStatus.active)).active
+
+
+async def resolve_index_partition(session: AsyncSession) -> IndexPartition:
+    """Both rows ``GET /health/index`` reports, from ONE statement (#351).
+
+    The route asks two questions — which index is active, and which is the
+    rollback target — and answering them with separate statements let a promote
+    land in between and put the same index in both answers. One ordered
+    ``status IN (active, previous_good)`` query plus the pure partitioner
+    answers both from a single snapshot.
+    """
+    return partition_index_rows(
+        await _fetch(session, IndexStatus.active, IndexStatus.previous_good)
+    )
 
 
 async def resolve_previous_good_index(session: AsyncSession) -> ResolvedIndex | None:
@@ -263,15 +336,21 @@ async def resolve_previous_good_index(session: AsyncSession) -> ResolvedIndex | 
     ``GET /v1/admin/index_versions?status=previous_good`` also reads the status,
     but it returns the whole list (ordered ``created_at`` ascending) rather than
     claiming a rollback target, so it is a different question and is left alone.
+
+    ``GET /health/index`` does NOT call this — it needs the active row from the
+    same snapshot, so it uses :func:`resolve_index_partition`. This stays for
+    callers that want only the rollback target.
     """
-    return await _newest(session, IndexStatus.previous_good)
+    return partition_index_rows(await _fetch(session, IndexStatus.previous_good)).previous_good
 
 
 __all__ = [
     "ActiveIndexResolution",
     "ActiveIndexState",
+    "IndexPartition",
     "ResolvedIndex",
-    "count_active_indexes",
+    "partition_index_rows",
     "resolve_active_index",
+    "resolve_index_partition",
     "resolve_previous_good_index",
 ]

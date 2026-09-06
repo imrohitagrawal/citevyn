@@ -35,8 +35,7 @@ from app.services.index_health import active_index_vector_health, ambiguous_vect
 from app.services.index_resolution import (
     ActiveIndexState,
     ResolvedIndex,
-    resolve_active_index,
-    resolve_previous_good_index,
+    resolve_index_partition,
 )
 
 router = APIRouter(tags=["search"])
@@ -184,8 +183,14 @@ async def health_index(
     # to run one unordered ``status IN (active, previous_good)`` query and take
     # whichever row came back first, which meant no ordering and — worse — no
     # way to notice a second active row at all.
-    resolution = await resolve_active_index(db)
-    previous = await resolve_previous_good_index(db)
+    # ONE query, so ONE snapshot (#351). Resolving the two rows separately meant
+    # two statements, and under READ COMMITTED each takes its own snapshot — a
+    # promote committing between them could report the same index as both the
+    # active index and the rollback target, which is the field an operator reads
+    # during exactly the kind of incident that makes them poll this route.
+    partition = await resolve_index_partition(db)
+    resolution = partition.active
+    previous = partition.previous_good
 
     # Dual-active (#58/#264). The read path fails closed here — the provenance
     # gate resolves to ``IndexStampStatus.ambiguous`` and the vector arm is

@@ -14,8 +14,14 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import db as db_module
+from app.core.config import get_settings
+from app.embeddings import IndexStampStatus, configured_embedder_identity
+from app.embeddings.stub import StubEmbedder
+from app.main import create_app
 from app.models.enums import IndexStatus
 from app.models.index_versions import IndexVersion
 from app.services.index_resolution import (
@@ -26,6 +32,36 @@ from app.services.index_resolution import (
     resolve_previous_good_index,
 )
 from tests.conftest import seed_catalog
+
+
+@pytest.fixture
+def app_with_seeded_session_for_resolution(session: AsyncSession):
+    """A FastAPI app whose ``get_session`` yields this test's session."""
+    app = create_app()
+
+    async def _override():
+        yield session
+
+    app.dependency_overrides[db_module.get_session] = _override
+    try:
+        yield app
+    finally:
+        app.dependency_overrides.clear()
+
+
+def _add_index(session, *, version: str, status: IndexStatus, promoted_at) -> None:
+    import asyncio
+
+    session.add(
+        IndexVersion(
+            index_version=version,
+            status=status,
+            source_version_hash=f"sha256:{version}",
+            created_at=datetime.now(UTC),
+            promoted_at=promoted_at,
+        )
+    )
+    asyncio.get_event_loop().run_until_complete(session.commit())
 
 
 def test_resolved_index_fields_match_the_projection() -> None:
@@ -151,3 +187,200 @@ async def test_promoting_an_already_active_version_does_not_resolve_ambiguity(
         "now true, /health/index's recovery message is wrong"
     )
     assert after.active_count == 2
+
+
+# ---------------------------------------------------------------------------
+# The pure partitioner (#264 rule, #351 single-snapshot fetch)
+# ---------------------------------------------------------------------------
+
+
+def _row(version: str, status: IndexStatus, promoted_at=None) -> dict:
+    """A projected row shaped like the one the shared query returns."""
+    return {
+        "index_version": version,
+        "source_version_hash": f"sha256:{version}",
+        "created_at": None,
+        "promoted_at": promoted_at,
+        "evaluation_run_id": None,
+        "embedding_provider": None,
+        "embedding_model": None,
+        "embedding_dim": None,
+        "status": status,
+    }
+
+
+def test_partition_is_pure_and_takes_the_first_row_of_each_status() -> None:
+    """The rule is a pure function over PRE-ORDERED rows — no session, no sorting.
+
+    That purity is what let the fetch collapse to one statement (#351): the
+    ">1 active means ambiguous" rule no longer has to be welded to a ``COUNT``
+    query, so both of the health route's questions can be answered from a single
+    snapshot.
+
+    The input deliberately lists a LATER row first for each status, because the
+    caller's ``ORDER BY`` has already run — this function must not re-sort, or
+    the shared ordering constant would be silently bypassed.
+    """
+    from app.services.index_resolution import partition_index_rows
+
+    rows = [
+        _row("a-newest", IndexStatus.active),
+        _row("pg-newest", IndexStatus.previous_good),
+        _row("pg-older", IndexStatus.previous_good),
+    ]
+    part = partition_index_rows(rows)
+
+    assert part.active.state is ActiveIndexState.one
+    assert part.active.active_count == 1
+    assert part.active.row is not None and part.active.row.index_version == "a-newest"
+    assert part.previous_good is not None
+    assert part.previous_good.index_version == "pg-newest"
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected_state", "expected_count"),
+    [
+        ([], ActiveIndexState.none, 0),
+        ([IndexStatus.previous_good], ActiveIndexState.none, 0),
+        ([IndexStatus.active], ActiveIndexState.one, 1),
+        ([IndexStatus.active, IndexStatus.active], ActiveIndexState.ambiguous, 2),
+        ([IndexStatus.active] * 5, ActiveIndexState.ambiguous, 5),
+    ],
+)
+def test_partition_counts_actives_from_the_rows_it_is_given(
+    statuses: list[IndexStatus], expected_state: ActiveIndexState, expected_count: int
+) -> None:
+    """The count comes from the SAME rows the winner is picked from (#351).
+
+    It used to come from a separate ``COUNT`` statement, which is what made the
+    resolver non-atomic: two statements, two snapshots, so a promote landing
+    between them could report ``one`` for a database that already had two.
+
+    Turns RED if the ``len(active) > 1`` comparison is weakened or the count
+    stops being derived from the row list.
+    """
+    from app.services.index_resolution import partition_index_rows
+
+    part = partition_index_rows([_row(f"v{i}", s) for i, s in enumerate(statuses)])
+    assert part.active.state is expected_state
+    assert part.active.active_count == expected_count
+    # Ambiguity never hands back a row to treat as the answer.
+    if expected_state is ActiveIndexState.ambiguous:
+        assert part.active.row is None
+
+
+def test_partition_rule_is_shared_by_all_three_call_sites(
+    app_with_seeded_session_for_resolution, session, monkeypatch
+) -> None:
+    """All three callers must go through the ONE pure rule (#264).
+
+    This is the property the whole package exists to establish, re-proved after
+    #351 moved the rule out of the query layer: replacing
+    ``partition_index_rows`` with a stub that always says ``ambiguous`` must
+    change what the health route, the retrieval provenance gate AND the
+    orchestrator all do — on a database with exactly ONE active row, where the
+    real rule would say ``one``.
+
+    A mutation test shows the same thing by deleting the guard; this asserts it
+    executably, so the property cannot quietly decay between review rounds.
+
+    Turns RED if any call site stops routing through the shared function.
+    """
+    import asyncio
+
+    from app.answer.orchestrator import _retrieve_active_index
+    from app.retrieval.hybrid import HybridRetriever
+    from app.services import index_resolution
+
+    identity = configured_embedder_identity(get_settings())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(
+        seed_catalog(session, embedder=StubEmbedder(dim=identity.dim), embedder_identity=identity)
+    )
+
+    # Control: with the real rule, one active row resolves to ``one`` everywhere.
+    assert loop.run_until_complete(index_resolution.resolve_active_index(session)).state is (
+        ActiveIndexState.one
+    )
+
+    def _always_ambiguous(rows):
+        return index_resolution.IndexPartition(
+            active=index_resolution.ActiveIndexResolution(
+                state=ActiveIndexState.ambiguous, active_count=99, row=None
+            ),
+            previous_good=None,
+        )
+
+    monkeypatch.setattr(index_resolution, "partition_index_rows", _always_ambiguous)
+
+    with TestClient(app_with_seeded_session_for_resolution) as client:
+        body = client.get("/health/index").json()
+    assert body["vector_arm"]["status"] == "ambiguous", "the health route bypassed the shared rule"
+    assert body["vector_arm"]["active_index_count"] == 99
+
+    stamp = loop.run_until_complete(
+        HybridRetriever(
+            session, active_index_version=None, embedder_identity=identity
+        )._active_index_stamp()
+    )
+    assert stamp is IndexStampStatus.ambiguous, "the retrieval gate bypassed the shared rule"
+
+    assert loop.run_until_complete(_retrieve_active_index(session)) == ("", ""), (
+        "the orchestrator bypassed the shared rule"
+    )
+
+
+def test_health_index_reads_the_index_table_in_exactly_one_statement(
+    app_with_seeded_session_for_resolution, session
+) -> None:
+    """#351: two questions, ONE snapshot.
+
+    The route asks which index is active and which is the rollback target.
+    Answering them in separate statements let a promote commit in between and
+    put the same index in both answers — reproduced on real Postgres with two
+    concurrent connections. One ordered query over both statuses closes it.
+
+    Counting statements is a structural proxy that SQLite can check; the
+    Postgres-marked test in ``test_pg_integration.py`` proves the actual
+    concurrent behaviour, which this cannot see.
+
+    Turns RED if either row is fetched with its own query again.
+    """
+    import asyncio
+
+    from sqlalchemy import event
+
+    identity = configured_embedder_identity(get_settings())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(
+        seed_catalog(session, embedder=StubEmbedder(dim=identity.dim), embedder_identity=identity)
+    )
+    _add_index(
+        session,
+        version="pg1",
+        status=IndexStatus.previous_good,
+        promoted_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    seen: list[str] = []
+
+    engine = session.get_bind()
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        if "index_versions" in statement:
+            seen.append(statement)
+
+    try:
+        with TestClient(app_with_seeded_session_for_resolution) as client:
+            body = client.get("/health/index").json()
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert len(seen) == 1, f"expected ONE index_versions query, got {len(seen)}:\n" + "\n".join(
+        seen
+    )
+    # Partner: the single query really did answer BOTH questions, so the count
+    # above is not 1 because the route stopped reporting something.
+    assert body["active_index"]["index_version"] == "v1"
+    assert body["previous_good_index"]["index_version"] == "pg1"
