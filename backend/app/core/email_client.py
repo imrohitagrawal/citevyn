@@ -125,11 +125,35 @@ class ResendEmailClient:
             raise EmailDeliveryError(f"resend transport error: {exc.__class__.__name__}") from exc
 
         if response.status_code >= 400:
-            # Upstream error text is logged server-side only (never the
-            # request headers, which hold the API key) and kept out of the
-            # exception message so it cannot leak to a caller.
+            # The status code goes in the MESSAGE STRING, not in `extra=`.
+            #
+            # `configure_logging` formats with `LOG_FORMAT` == "%(message)s", so
+            # every `extra=` field is dropped before it reaches stdout. This line
+            # used to pass status and body that way, and production printed the
+            # bare word `resend_send_error` -- an unverified sending domain, a
+            # revoked API key and a rate limit were indistinguishable in
+            # `fly logs` (#296). The status code is the whole diagnosis: 403
+            # unverified domain, 401 bad key, 422 malformed, 429 throttled.
+            #
+            # The upstream BODY is deliberately not here. Resend echoes the
+            # recipient's address in some 4xx bodies ("You can only send testing
+            # emails to <address>"), and `redact_value` does not catch it -- the
+            # key "body" matches no entry in RAW_TEXT_KEYS or SECRET_KEY_PARTS,
+            # and an email address does not trip the 32-character entropy sweep.
+            # Promoting it into the message string would convert a dropped log
+            # into a PII leak. It stays in `extra=` -- invisible today, and
+            # redacted rather than exposed whenever the formatter is fixed.
+            # It is also still kept out of the exception message, which is
+            # issue #50's invariant.
             _logger.warning(
-                "resend_send_error",
+                # %s, not %d: a %d against a non-int raises inside logging's
+                # own formatting, which DROPS the record and writes
+                # "--- Logging error ---" to stderr. Not reachable today
+                # (httpx guarantees an int) but the failure mode is precisely
+                # the one this line was changed to fix.
+                "resend_send_error status_code=%s request_id=%s",
+                response.status_code,
+                get_current_request_id(),
                 extra={
                     "request_id": get_current_request_id(),
                     "status_code": response.status_code,

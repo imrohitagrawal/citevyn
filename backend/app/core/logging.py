@@ -71,8 +71,22 @@ class RedactQueryCredentialsFilter(logging.Filter):
         return True
 
 
+# The production log format, named so tests can render a record exactly the way
+# an operator reading `fly logs` receives it.
+#
+# It is `%(message)s` and nothing else, which has a consequence worth stating
+# where someone will read it: **anything passed as `extra=` is DROPPED.** A
+# `_logger.warning("x", extra={"status_code": 422})` prints the single word `x`
+# in production. ~30 call sites currently do this; making the formatter emit
+# extras is the real fix, but it cannot be a one-line change -- `redact_value`
+# leaves an email address and a Resend-shaped key intact in a `body` field, so
+# a naive version would turn a dropped log into a PII leak. Tracked separately;
+# until then, put anything an operator needs into the message string itself.
+LOG_FORMAT = "%(message)s"
+
+
 def configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
     # Installed on the logger uvicorn writes access lines to. Idempotent:
     # create_app() may run more than once per process (tests).
     access_logger = logging.getLogger("uvicorn.access")

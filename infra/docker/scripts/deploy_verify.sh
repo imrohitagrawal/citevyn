@@ -265,13 +265,52 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     # itself. Rebuild with `make demo-frontend`, which now threads the key
     # through. (The prod compose stack serves no frontend at all; the bundle is
     # built out of band, which is exactly why nothing else notices.)
+    #
+    # This asserts PRESENCE of the expected key, not ABSENCE of the old
+    # default. The absence form was blind to a second failure with the same
+    # symptom: a bundle built with an EMPTY `--build-arg VITE_API_DEMO_KEY`
+    # contains neither the default nor any key (measured -- docker leaves the
+    # arg empty rather than defaulting, and Vite bakes `""`), so
+    # `grep -F local-demo-key` finds nothing and the gate reports PASS over a
+    # bundle whose every request 401s. Same reasoning, and the same script, as
+    # docs/DEPLOY_FLY.md §4.1 -- see scripts/check_bundle_key.sh.
+    #
+    # KNOWN GAP, deliberately not closed here: the `-d` test has no `else`, so
+    # an absent frontend/dist records neither PASS nor FAIL and vanishes from
+    # the tally. That is correct for the Fly path (the bundle is built inside
+    # the image and never lands in the host's frontend/dist) and wrong for the
+    # compose path. Splitting the two needs a live stack to validate, so it is
+    # tracked rather than guessed at.
     if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
-        if grep -rqF 'local-demo-key' "${REPO_ROOT}/frontend/dist" 2>/dev/null \
-           && [[ "${DEMO_KEY}" != "local-demo-key" ]]; then
-            record FAIL "frontend bundle carries the current demo key" \
-                "frontend/dist has the DEFAULT 'local-demo-key' baked in but .env uses a different key — every browser request would 401. Rebuild: make demo-frontend"
-        else
+        # `find`, not `dist/assets/*.js`: the glob is one directory deep and
+        # .js-only, so a key inlined into index.html or living in a nested
+        # chunk recorded a FAIL on a perfectly good bundle. The presence check
+        # exists to survive exactly that kind of chunk refactor, so it must not
+        # be the thing that breaks on one.
+        # `find`'s own exit status is deliberately discarded (`|| true`). Under
+        # `pipefail` an unreadable file or subdirectory anywhere under dist made
+        # the whole substitution non-zero even when the checker had already
+        # printed [PASS] -- the gate then recorded the self-contradictory
+        # "[FAIL] [PASS] the served bundle carries...". The verdict therefore
+        # keys on the checker's own printed verdict, which is the only thing in
+        # the pipeline that actually inspected the bundle. (Its output is
+        # captured, so its exit status is not directly available here; the
+        # prefix is checked instead, and tests/shell/test_deploy_verify_bundle_gate.sh
+        # covers a bundle whose CONTENT and whose FILENAME both say [PASS].)
+        bundle_diagnosis="$(
+            { find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
+                -exec cat {} + 2>/dev/null || true; } \
+            | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
+        )"
+        if [[ "${bundle_diagnosis}" == "[PASS]"* ]]; then
             record PASS "frontend bundle carries the current demo key"
+        else
+            # The checker distinguishes "carries the PUBLIC DEFAULT" from
+            # "empty fetch" from "key absent", and a missing/non-executable
+            # script from all three. Discarding that with >/dev/null sent the
+            # operator to rebuild a frontend that was fine, so pass it through.
+            record FAIL "frontend bundle carries the current demo key" \
+                "${bundle_diagnosis:-check_bundle_key.sh produced no output} (searched frontend/dist for *.js and *.html; every browser request would 401 while this gate's own curl probes pass — rebuild with: make demo-frontend)"
         fi
     fi
 fi

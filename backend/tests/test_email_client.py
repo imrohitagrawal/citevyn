@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -24,6 +27,7 @@ from app.core.email_client import (
     FileOutboxEmailClient,
     ResendEmailClient,
 )
+from app.core.logging import LOG_FORMAT
 
 _MESSAGE = EmailMessage(
     to_addr="someone@example.com",
@@ -225,3 +229,143 @@ def test_the_magic_link_limit_is_wired_through_the_in_process_limiter_and_settin
         RateLimiter(
             window_seconds=60, demo_user_per_window=1, admin_per_window=1, magic_link_per_window=0
         )
+
+
+# ---------------------------------------------------------------------------
+# What production actually PRINTS on a delivery failure (#296)
+# ---------------------------------------------------------------------------
+
+
+def _rendered_email_log(caplog: pytest.LogCaptureFixture) -> str:
+    """Every captured record, rendered the way production renders it.
+
+    ALL of them, joined -- not ``records[0]``, and NOT filtered by logger name.
+
+    Two review findings, one after the other. First, reading ``records[0]`` let
+    a decoy warning emitted just before the real one satisfy the PII assertion
+    while the real line printed the recipient's address -- a "second mechanism
+    supplying the observation", one of this repo's five recorded ways a test
+    passes for the wrong reason.
+
+    Then the fix for that kept an ``r.name == "citevyn.email"`` filter, and the
+    next round leaked the same body on ``citevyn.http`` instead: the address
+    reached a production log line and all 1889 backend tests stayed green. The
+    upstream body is PII-bearing whichever logger emits it, so this looks at
+    every record the test captured. The "did it log anything at all" partner
+    still checks the email logger specifically.
+    """
+    return "\n".join(logging.Formatter(LOG_FORMAT).format(r) for r in caplog.records)
+
+
+def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log line must be actionable through ``configure_logging``'s formatter.
+
+    NOT via ``record.__dict__``. ``configure_logging`` formats with
+    ``%(message)s``, so anything passed as ``extra=`` is DROPPED before it
+    reaches stdout -- a `fly logs` reader saw the bare string
+    ``resend_send_error`` and could not tell an unverified sending domain from
+    a bad API key from a rate limit. This asserts the rendered line, which is
+    what the operator receives.
+
+    RED if the status code lives only in ``extra=``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"message": "The domain is not verified."})
+
+    with (
+        caplog.at_level(logging.WARNING, logger="citevyn.email"),
+        pytest.raises(EmailDeliveryError),
+    ):
+        asyncio.run(_resend(handler).send(_MESSAGE))
+
+    assert any(r.name == "citevyn.email" for r in caplog.records), (
+        "the failure logged nothing on the email logger at all"
+    )
+    rendered = _rendered_email_log(caplog)
+    assert "resend_send_error" in rendered
+    assert "422" in rendered, (
+        f"the rendered production log line carries no status code: {rendered!r}"
+    )
+
+
+def test_the_resend_failure_line_never_carries_the_upstream_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Resend echoes the RECIPIENT'S EMAIL ADDRESS in some 4xx bodies.
+
+    Measured: ``redact_value("body", ...)`` returns an email address unchanged
+    (``body`` matches no entry in ``RAW_TEXT_KEYS`` or ``SECRET_KEY_PARTS``, and
+    the 32-char entropy sweep does not fire on an address). So the body must not
+    be promoted into the message string -- the status code is the actionable
+    part. RED if a future edit folds ``response.text`` into the rendered line.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={"message": "You can only send testing emails to victim@example.com."},
+        )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="citevyn.email"),
+        pytest.raises(EmailDeliveryError),
+    ):
+        asyncio.run(_resend(handler).send(_MESSAGE))
+
+    rendered = _rendered_email_log(caplog)
+    assert rendered, "the failure logged nothing at all"
+    assert "victim@example.com" not in rendered, f"PII leaked into the log line: {rendered!r}"
+    assert "403" in rendered
+
+
+_FORMATTER_PROBE = """
+import json, sys
+sys.path.insert(0, %r)
+import logging
+from app.core.logging import LOG_FORMAT, configure_logging
+configure_logging()
+print(json.dumps({
+    "log_format": LOG_FORMAT,
+    "installed": [h.formatter._fmt for h in logging.getLogger().handlers if h.formatter],
+}))
+"""
+
+
+def test_configure_logging_installs_log_format_on_the_root_handler() -> None:
+    """Partner: the two tests above are meaningless if LOG_FORMAT drifts.
+
+    They render with ``LOG_FORMAT``; production renders with whatever
+    ``configure_logging`` actually installs. If those stop being the same
+    string, the assertions above would describe a formatter nobody uses.
+
+    This EXECUTES ``configure_logging`` and inspects the emitted formatter
+    rather than grepping ``logging.py`` for ``format=LOG_FORMAT``. The grep
+    version was this repo's recorded "guards that check strings" defect, and
+    review demonstrated two bypasses: keeping the literal in a ``# was:``
+    comment above a changed line, and parking it in an unused function. Both
+    left the partner green while production emitted a different format -- in
+    the comment case, one that dropped the message entirely, a worse version of
+    the very #296 symptom this file exists for.
+
+    A subprocess because ``logging.basicConfig`` is a no-op once the root
+    logger has handlers, and pytest has already given it several -- so an
+    in-process call would assert against pytest's formatter, not production's.
+    """
+    backend = Path(__file__).resolve().parents[1]
+    proc = subprocess.run(
+        [sys.executable, "-c", _FORMATTER_PROBE % str(backend)],
+        capture_output=True,
+        text=True,
+        cwd=str(backend),
+        check=True,
+    )
+    data = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert data["installed"], "configure_logging() installed no root handler with a formatter"
+    assert data["installed"] == [data["log_format"]], (
+        f"configure_logging installs {data['installed']!r} but this file renders with "
+        f"{data['log_format']!r}; the rendered-line assertions above no longer "
+        f"describe production output."
+    )
