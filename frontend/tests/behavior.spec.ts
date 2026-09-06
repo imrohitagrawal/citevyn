@@ -486,8 +486,12 @@ test.describe("Chat", () => {
     // Two modes:
     //   - stub mode (VITE_LIVE_STUB=1): the dev server's vite.liveStub
     //     plugin serves /v1/sessions/*/messages in-process with a
-    //     canned 800ms delay, so page.route() never matches (the
-    //     request is answered by the dev server, not the network).
+    //     canned 800ms delay, so this test does not need its own throttle.
+    //     (An earlier version of this comment said page.route() "never
+    //     matches" in stub mode. That is WRONG and was measured wrong: the
+    //     route intercepts in the browser, before the dev server sees it —
+    //     1 route hit, indicator held 4.9s at a 4s delay. The #62 test below
+    //     relies on it.)
     //   - real-backend mode (VITE_API_LIVE=true without the stub):
     //     we delay the response at the browser level so the bubble
     //     becomes observable.
@@ -549,12 +553,27 @@ test.describe("Chat", () => {
     await input.press("Enter");
     await expect(page.locator(".pending-bubble")).toBeVisible({ timeout: 3000 });
 
-    // The state is DRAWN and ANNOUNCED, not merely enforced.
+    // The state is DRAWN and ANNOUNCED, not merely enforced. The live region is
+    // a PERSISTENT node outside the scrolling list, so it is in the
+    // accessibility tree before its text arrives.
     await expect(send).toHaveAttribute("aria-disabled", "true");
-    await expect(page.locator(".pending-bubble")).toHaveAttribute("role", "status");
+    await expect(page.locator("[role='status']")).toContainText("Send is unavailable");
+    // The visible affordance, which is the only signal a mouse user gets. No
+    // unit test can see it: vitest runs with `css: false`.
+    // Polled, not read once: `.send-button` has `transition: opacity 0.15s`,
+    // so a single read lands mid-transition (measured 0.710126).
+    await expect
+      .poll(() => send.evaluate((el) => getComputedStyle(el).opacity))
+      .toBe("0.7");
     // Not natively disabled: it keeps focus and its place in the tab order.
     expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
     expect(await input.evaluate((el: HTMLInputElement) => el.disabled)).toBe(false);
+
+    // Focus survives the flip. This is the assertion jsdom cannot make — it
+    // does not blur an element when it becomes disabled, so the equivalent
+    // vitest test passed even with `disabled={pending}` and was deleted.
+    await send.focus();
+    expect(await send.evaluate((el) => el === document.activeElement)).toBe(true);
 
     // Type-ahead, then try both submit routes.
     await input.fill("How do I install the Codex CLI?");
@@ -567,12 +586,19 @@ test.describe("Chat", () => {
     // which is what needs proving.
     await send.click({ force: true });
 
-    // The window must still be OPEN, or the refusal below proves nothing — this
-    // is the assertion that stops the test passing for the wrong reason.
-    await expect(page.locator(".pending-bubble")).toBeVisible();
+    // The FIRST request must still be open, or the refusal below proves
+    // nothing. Asserting "a pending bubble is visible" is NOT that — a second
+    // request would have its own bubble, so that assertion is satisfiable by
+    // the very bug it is meant to exclude. Assert by identity instead: exactly
+    // one message in the list, and it is the user's, so no answer has arrived.
+    // (The loader is itself a `.message`, so counting `.message` would read 2.
+    // The identity that matters is that no ANSWER bubble exists yet.)
+    await expect(page.locator(".message.bot-msg:not(.pending-msg)")).toHaveCount(0);
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+    await expect(page.locator(".pending-msg")).toHaveCount(1);
 
     // No second question entered the transcript, and the typed text was HELD.
-    expect(await page.locator(".message.user-msg").count()).toBe(1);
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
     await expect(input).toHaveValue("How do I install the Codex CLI?");
 
     // The gate is transient: once the answer lands the same keypress works.
@@ -585,6 +611,32 @@ test.describe("Chat", () => {
       els.map((e) => (e.classList.contains("user-msg") ? "user" : "bot")),
     );
     expect(roles.slice(0, 3)).toEqual(["user", "bot", "user"]);
+  });
+
+  test("the composer is never gated in demo mode", async ({ page }) => {
+    // Negative control for #62, and it runs on the REQUIRED demo job rather
+    // than self-skipping. Demo answers are instant, so there is no in-flight
+    // state to wait on and gating here would only break the five demo specs
+    // that deliberately send mid-stream. It bites if anyone re-keys the gate on
+    // something demo mode DOES set — `streaming`, say, instead of the in-flight
+    // count.
+    await enterChat(page);
+    const input = page.locator(".chat-input");
+    const send = page.locator(".send-button");
+    await input.fill("What is Claude Code?");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(1);
+
+    // Mid-stream, with the caret still blinking, the composer stays live.
+    await expect(page.locator(".typing-cursor")).toHaveCount(1);
+    await expect(send).not.toHaveAttribute("aria-disabled", "true");
+    expect(await send.evaluate((el: HTMLButtonElement) => el.disabled)).toBe(false);
+    await expect(page.locator(".pending-bubble")).toHaveCount(0);
+
+    // ...and a second question really does go through, mid-stream.
+    await input.fill("How do I install the Codex CLI?");
+    await input.press("Enter");
+    await expect(page.locator(".message.user-msg")).toHaveCount(2);
   });
 
   test("autoscrolls: list stays pinned to the newest message", async ({ page }) => {

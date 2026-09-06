@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSession, exactSearch, askQuestion, getHealth, getSession, listMySessions } from "./api";
+import { apiFetch, createSession, exactSearch, askQuestion, getHealth, getSession, listMySessions } from "./api";
 import { ApiClientError } from "./types";
 
 /**
@@ -232,5 +232,103 @@ describe("session history (ADR-0004 PR 10)", () => {
     const { url } = lastCall();
     expect(url).toContain("/v1/sessions/sess_1");
     expect(resp.session_id).toBe("sess_1");
+  });
+});
+
+/**
+ * The request timeout has to cover the BODY read, not just the headers.
+ *
+ * `clearTimeout` used to run between the two awaits, so a server that sent
+ * headers and then stalled the body left `response.text()` pending with the
+ * timer already cancelled and nothing left to abort it. That was a stuck
+ * spinner until #62 gated the composer on the request finishing — at which
+ * point it wedges the composer shut for the rest of the session, with no
+ * recovery short of a page reload.
+ */
+describe("apiFetch — the timeout covers the whole response, body included", () => {
+  /**
+   * A fetch stub that models the part of the spec this test is about: aborting
+   * the signal rejects the outstanding fetch AND errors the response body, so
+   * a pending `text()` rejects too. A stub whose `text()` ignored the signal
+   * would leave this test pending for ever and report the fix as broken — it
+   * did, on the first attempt.
+   */
+  function abortableFetch(impl: (signal: AbortSignal) => Promise<Partial<Response>>) {
+    return vi.fn((_url: string, init: RequestInit) =>
+      new Promise((resolve, reject) => {
+        const s = init.signal!;
+        const abortErr = () =>
+          Object.assign(new Error("aborted"), { name: "AbortError" });
+        if (s.aborted) return reject(abortErr());
+        s.addEventListener("abort", () => reject(abortErr()), { once: true });
+        impl(s).then((r) => {
+          const text = r.text!;
+          resolve({
+            ...r,
+            text: () =>
+              new Promise<string>((res, rej) => {
+                if (s.aborted) return rej(abortErr());
+                s.addEventListener("abort", () => rej(abortErr()), { once: true });
+                void text.call(r).then(res, rej);
+              }),
+          });
+        }, reject);
+      }),
+    );
+  }
+
+  it("rejects when the BODY stalls after the headers arrive", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        abortableFetch(async () => ({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          text: () => new Promise<string>(() => {}), // body never arrives
+        })),
+      );
+      let settled = "pending";
+      void apiFetch("/v1/x", {}, { timeoutMs: 50 }).then(
+        () => (settled = "resolved"),
+        (e: unknown) => (settled = `rejected: ${(e as Error).message}`),
+      );
+      await vi.advanceTimersByTimeAsync(120000);
+      expect(settled).toContain("timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("PARTNER: rejects when the HEADERS stall, so the test above is not passing because timeouts are broken generally", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", abortableFetch(() => new Promise(() => {})));
+      let settled = "pending";
+      void apiFetch("/v1/x", {}, { timeoutMs: 50 }).then(
+        () => (settled = "resolved"),
+        (e: unknown) => (settled = `rejected: ${(e as Error).message}`),
+      );
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(settled).toContain("timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("PARTNER: a body that DOES arrive still resolves normally", async () => {
+    // Without this, the two tests above would pass on an apiFetch that
+    // rejected unconditionally.
+    vi.stubGlobal(
+      "fetch",
+      abortableFetch(async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: async () => JSON.stringify({ ok: 1 }),
+      })),
+    );
+    await expect(apiFetch("/v1/x", {}, { timeoutMs: 50 })).resolves.toEqual({ ok: 1 });
   });
 });

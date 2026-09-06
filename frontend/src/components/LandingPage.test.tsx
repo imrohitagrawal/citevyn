@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { LandingPage } from "./LandingPage";
 import { KB } from "../data/knowledgeBase";
 import { isLiveMode, createSession, askQuestion } from "../lib/api";
+import type { AskResponse } from "../lib/types";
 
 // The interactive demo answers from the built-in KB (no network), but the hook
 // still imports the api module — mock it so nothing tries to reach a backend and
@@ -93,5 +94,62 @@ describe("LandingPage — the loading indicator is wired to the COUNT, not to it
     );
     expect(container.querySelector(".pending-bubble")).toBeNull();
     expect(container.textContent).not.toContain("Searching the docs…");
+  });
+});
+
+/**
+ * The POSITIVE half of the seam. The demo-mode test above only proves the
+ * loader is absent when it should be; on its own, `pending={false}` — cutting
+ * the wire entirely — and `state.pending > 1` both survived the whole suite.
+ * This proves the loader can actually reach the screen through that seam.
+ */
+describe("LandingPage — the loading indicator reaches the screen in live mode", () => {
+  it("shows 'Searching the docs…' while the request is open, and clears it when the answer lands", async () => {
+    vi.mocked(isLiveMode).mockReturnValue(true);
+    vi.mocked(createSession).mockResolvedValue({
+      request_id: "r",
+      session_id: "s",
+      expires_at: "2026-07-11T12:00:00Z",
+    });
+    let release: (r: AskResponse) => void = () => {};
+    vi.mocked(askQuestion).mockImplementation(
+      () => new Promise<AskResponse>((resolve) => { release = resolve; }),
+    );
+
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    const hero = container.querySelector("#hero-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(hero, { target: { value: "What is Claude Code?" } });
+      fireEvent.keyDown(hero, { key: "Enter" });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(container.querySelector(".pending-bubble")).not.toBeNull();
+    expect(container.textContent).toContain("Searching the docs…");
+    expect(container.querySelector(".send-button")?.getAttribute("aria-disabled")).toBe("true");
+
+    await act(async () => {
+      release({
+        request_id: "r2",
+        message_id: "m",
+        answer: "Claude Code is an agentic coding tool.",
+        citations: [],
+        domain: "claude_code",
+        intent: "how_to",
+        confidence: "high",
+        cache_hit: false,
+        retrieval_strategy: "hybrid_reranked",
+        unsupported: false,
+        no_answer: false,
+        source_version_hash: "h",
+        answer_policy_version: "v1",
+      });
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(container.querySelector(".pending-bubble")).toBeNull();
+    expect(container.querySelector(".send-button")?.getAttribute("aria-disabled")).not.toBe("true");
   });
 });

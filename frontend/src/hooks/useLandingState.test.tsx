@@ -1490,16 +1490,31 @@ describe("useLandingState — the demo rail stream (#329 + the overlap it sits o
     expect(result.current.state.demo.text.length).toBeGreaterThan(0);
     expect(result.current.state.demo.text.length).toBeLessThan(KB[FIRST].a.length);
 
+    // The detector's preconditions, asserted so a future edit fails loudly
+    // instead of silently disarming this test.
+    expect(300 % 24).toBe(12);
+    expect(KB[FIRST].a.length).toBeGreaterThan(KB[SECOND].a.length);
+
     act(() => {
       result.current.selectDemo(SECOND);
     });
     // Sample every 12ms, not every 24ms. The two streams tick on the same 24ms
-    // grid 12ms apart, so a 24ms sample window always contains one tick of EACH
-    // and React batches them into one render — the sampler would then only ever
-    // observe the second one and the interleave would be invisible. This test
-    // passes on the broken code at 24ms. Measured.
+    // grid 12ms apart, so a 24ms window contains one tick of EACH and React
+    // batches them into one render — the `backwards` check below then observes
+    // only the second and goes blind. (At 24ms the test still FAILS, on the
+    // prefix assertion rather than this one; an earlier version of this comment
+    // claimed it passed, which was wrong.)
+    //
+    // Both facts the detector rests on are asserted above rather than left
+    // implicit, because either can be edited away by a change that looks
+    // unrelated: the warm-up must be out of phase with the tick grid, and the
+    // FIRST answer must be longer than the SECOND so the wrong stream wins the
+    // length race.
+    //
+    // 240 samples x 12ms = 2880ms, comfortably past the SECOND answer's
+    // 102 x 24ms = 2448ms, so the final-sample assertion below is reachable.
     const samples: string[] = [];
-    for (let i = 0; i < 400; i += 1) {
+    for (let i = 0; i < 240; i += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(12);
       });
@@ -1585,19 +1600,34 @@ describe("useLandingState — the demo rail stream (#329 + the overlap it sits o
  * make that safe, and the one that a reset would break.
  */
 describe("useLandingState — the in-flight count cannot drift", () => {
-  it("never goes negative", async () => {
+  it("self-heals a SET_PENDING dispatched from outside markInFlight", async () => {
+    // The hook exports `dispatch`, so "markInFlight is the only writer" is a
+    // convention, not an invariant. Mirroring the ref rather than accumulating
+    // a delta means a stray write is CORRECTED by the next real transition
+    // instead of drifting for the rest of the session.
     const { result } = renderHook(() => useLandingState());
     act(() => {
-      result.current.dispatch({ type: "SET_PENDING", delta: -1 });
+      result.current.dispatch({ type: "SET_PENDING", value: 7 });
+    });
+    // Partner: the stray write really did land, so the heal below is a heal
+    // and not a reducer that ignores this action.
+    expect(result.current.state.pending).toBe(7);
+
+    await act(async () => {
+      result.current.send("A question");
+      await vi.advanceTimersByTimeAsync(4000);
     });
     expect(result.current.state.pending).toBe(0);
+  });
 
-    // Partner: it is clamped, not frozen. Without this, a reducer that ignored
-    // SET_PENDING entirely would pass the assertion above.
-    act(() => {
-      result.current.dispatch({ type: "SET_PENDING", delta: 1 });
-    });
-    expect(result.current.state.pending).toBe(1);
+  it("starts with a demo that is NOT streaming, which is what makes SNAP_DEMO safe on mount", async () => {
+    // React 18 StrictMode runs the landing effect's cleanup once on mount. That
+    // cleanup dispatches SNAP_DEMO, so if the initial demo were ever seeded
+    // mid-stream (the hero IS seeded `streaming: true`) the rail would arrive
+    // pre-snapped and never animate in dev. Nothing else pins this literal.
+    const { result } = renderHook(() => useLandingState());
+    expect(result.current.state.demo.streaming).toBe(false);
+    expect(result.current.state.demo.done).toBe(true);
   });
 
   it("survives a trip out to the landing screen and back", async () => {
@@ -1654,5 +1684,91 @@ describe("useLandingState — the in-flight count cannot drift", () => {
     });
 
     expect(result.current.state.demo).toBe(before);
+  });
+});
+
+/**
+ * #62's residual, closed. The composer gate only ever covered `submitChat`;
+ * every LANDING entry point (hero box, hero chips, marquee pills, persona
+ * buttons, "Get Pro") reaches `send` through `enterChat` and was ungated. Four
+ * independent reviewers reproduced the same three-click path — ask, Back, ask
+ * again — and measured the answers arriving as [Q1][Q2][A2][A1], i.e. the
+ * reader credits the SECOND answer to the FIRST question.
+ */
+describe("useLandingState — a landing entry point parks its question rather than racing one in flight (#62)", () => {
+  async function askAndLeave(result: { current: ReturnType<typeof useLandingState> }) {
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "First question" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+    await act(async () => {
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    await act(async () => {
+      result.current.backToLanding();
+      await vi.advanceTimersByTimeAsync(200);
+    });
+  }
+
+  it("parks the question in the composer instead of sending a second request", async () => {
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    // Partner: the first request really is still open, or there would be
+    // nothing to park behind.
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(result.current.state.pending).toBe(1);
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    // Not dropped: it is sitting in the composer, on the chat screen, under a
+    // loader that says why it has not gone yet.
+    expect(result.current.state.chatInput).toBe("Second question");
+    expect(result.current.state.screen).toBe("chat");
+    expect(result.current.state.messages.filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("never clobbers a draft the reader already has in the composer", async () => {
+    mockAskQuestion.mockImplementation(() => new Promise<AskResponse>(() => {}));
+    const { result } = renderHook(() => useLandingState());
+    await askAndLeave(result);
+    act(() => {
+      result.current.onChatInput({
+        target: { value: "my own draft" },
+      } as React.ChangeEvent<HTMLInputElement>);
+    });
+
+    await act(async () => {
+      result.current.enterChat("Second question");
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(result.current.state.chatInput).toBe("my own draft");
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("still sends normally from a landing entry point when nothing is in flight", async () => {
+    // Partner for both tests above: proves the parking branch has not simply
+    // disabled the landing entry points.
+    mockAskQuestion.mockResolvedValue(askResponse({ answer: "Landing answer." }));
+    const { result } = renderHook(() => useLandingState());
+
+    await act(async () => {
+      result.current.enterChat("A landing question");
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(result.current.state.messages.map((m) => m.text)).toEqual([
+      "A landing question",
+      "Landing answer.",
+    ]);
+    expect(result.current.state.chatInput).toBe("");
   });
 });

@@ -180,7 +180,12 @@ jobs:
           # 3 -> 4 for the composer gate: `state.pending` is only ever non-zero on the
           # live path, so in demo mode there is no in-flight state to gate and the test
           # would assert nothing. It runs for real in the `frontend-live-e2e` workflow,
-          # which drives it against the in-process stub backend's 800ms delay.
+          # against a 6s `page.route` delay the test installs itself (the stub's own
+          # 800ms is too short for the assertions between the two submits).
+          #
+          # The demo side is NOT left uncovered: "the composer is never gated in demo
+          # mode" runs HERE, unskipped, and is what catches a gate re-keyed onto
+          # something demo mode does set.
           if stats["skipped"] != 4:
               print(f"::error::{stats['skipped']} skipped, expected exactly 4 "
                     f"(the `if (!isLive)` guards) — a new skip silently shrinks this job")

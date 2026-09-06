@@ -109,7 +109,7 @@ type Action =
       suggestions?: Suggestion[];
     }
   | { type: "SET_SCREEN"; screen: "landing" | "chat" }
-  | { type: "SET_PENDING"; delta: number }
+  | { type: "SET_PENDING"; value: number }
   | { type: "SNAP_DEMO" }
   | { type: "BUMP_SEND_TICK" }
   | { type: "RESUME_SESSION"; messages: ChatMessage[] };
@@ -201,10 +201,13 @@ function reducer(state: AppState, action: Action): AppState {
       // and a stale one scrolls the next mount to an unrelated message (#302 review).
       return { ...state, screen: action.screen, highlight: -1 };
     case "SET_PENDING":
-      // Clamped rather than trusted. A decrement that outlives its increment
-      // (an unmount mid-request, say) must not drive the count negative and
-      // wedge the loader off for every question after it.
-      return { ...state, pending: Math.max(0, state.pending + action.delta) };
+      // MIRRORS the ref; it does not track it in parallel. An earlier version
+      // applied a delta here and a delta to the ref, which is two sources of
+      // truth held in step by convention — and the hook exports `dispatch`, so
+      // the convention was already breakable from outside. Assigning the ref's
+      // value makes drift structurally impossible and lets any stray dispatch
+      // self-heal on the next real transition.
+      return { ...state, pending: action.value };
     case "SNAP_DEMO":
       // Leaving the landing screen stops the demo stream (#329). Stopping it is
       // only half the job: `landing-sections.tsx` renders the caret on
@@ -389,9 +392,15 @@ export function useLandingState() {
   // before `sendLive`'s first await. Ref and state move together here, and
   // nowhere else, so they cannot drift.
   const inFlight = useRef(0);
-  const markInFlight = useCallback((delta: number) => {
-    inFlight.current += delta;
-    dispatch({ type: "SET_PENDING", delta });
+  const markInFlight = useCallback((delta: 1 | -1) => {
+    // Clamped on the REF, which is the half the gate reads. Clamping only the
+    // rendered copy would have been backwards: a negative ref is TRUTHY, so an
+    // unpaired decrement would wedge the composer shut while hiding the loader
+    // that explains it. Unreachable today — this is the only writer and every
+    // increment is `finally`-paired — and no test can reach it, which is
+    // exactly why it is one call rather than a branch.
+    inFlight.current = Math.max(0, inFlight.current + delta);
+    dispatch({ type: "SET_PENDING", value: inFlight.current });
   }, []);
 
   // Normalized questions whose last live attempt FAILED. The dedup guard
@@ -498,8 +507,10 @@ export function useLandingState() {
       timers.current.heroPause?.stop();
       timers.current.placeholderTimer?.stop();
       // #329: the demo rail's stream was the one landing timer #312 left out —
-      // measured 129 SET_DEMO dispatches over 3.1s into an unmounted landing
-      // DOM. SNAP_DEMO is what makes stopping it safe; see the reducer.
+      // measured 129 SET_DEMO dispatches over 3096 ms into an unmounted landing
+      // DOM for the 298-char `claude-code` answer (85 for the shorter
+      // `codex-flag` one — the count scales with answer length; both go to 0).
+      // SNAP_DEMO is what makes stopping it safe; see the reducer.
       timers.current.demoTimer?.stop();
       timers.current.heroLoop = null;
       timers.current.heroPause = null;
@@ -898,6 +909,23 @@ export function useLandingState() {
         dispatch({ type: "SET_HERO_INPUT", value: "" });
       }
       if (q) {
+        // #62. A landing entry point (hero box, hero chips, marquee pills,
+        // persona buttons, "Get Pro") reaches `send` directly, so gating only
+        // the composer left the attribution defect reachable in three clicks:
+        // ask, Back, ask again. Four reviewers reproduced it, and the answers
+        // came back in the WORSE order — [Q1][Q2][A2][A1], so the reader
+        // credits the second answer to the first question.
+        //
+        // PARK it rather than drop it or fire a second request: the reader
+        // lands in the chat, sees the loader, and finds their question waiting
+        // in the composer to send when it clears. A draft already in the box is
+        // the reader's own and outranks it.
+        if (inFlight.current) {
+          if (!carried && !state.chatInput) {
+            dispatch({ type: "SET_CHAT_INPUT", value: q });
+          }
+          return;
+        }
         setTimeout(() => send(q), 60);
       }
     },
@@ -993,8 +1021,13 @@ export function useLandingState() {
     // cleared, so a type-ahead question is held rather than eaten. A bot bubble
     // is appended when its request RESOLVES while the user bubble is appended
     // on submit, so two questions sent back to back read as [Q1][Q2][A1][A2]
-    // and the reader attributes A1 to Q2. Q2 cannot be submitted until A1's
-    // bubble exists, so the transcript is [Q1][A1][Q2][A2] by construction.
+    // and the reader attributes A1 to Q2.
+    //
+    // This guard covers the COMPOSER. The landing entry points reach `send`
+    // through `enterChat`, which parks instead (see there) — an earlier version
+    // of this comment claimed the good ordering held "by construction" on the
+    // strength of this line alone, and four reviewers disproved it in three
+    // clicks.
     if (inFlight.current) return;
     const t = state.chatInput.trim();
     if (!t) return;
