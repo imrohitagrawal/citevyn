@@ -77,6 +77,20 @@ RED BITE (each assertion, and the one change that turns it red)
   ``_declared_names`` to a substring search.
 * ``test_every_exemption_is_a_real_settings_field`` -- delete or rename an
   exempted field without removing its entry.
+* ``test_every_exemption_is_actually_dead_config`` -- put a LIVE setting in
+  ``_EXEMPT`` (adversarial review's finding: a reviewer pointed out that
+  ``test_every_exemption_carries_a_reason`` only measures string LENGTH, so
+  forty characters of plausible prose could silence this guard for a real knob).
+  Measured: exempting ``environment`` now fails naming all eleven of its read
+  sites. The reason is a checked fact, not a sentence.
+* ``test_the_read_site_scanner_finds_real_readers`` -- make ``_app_read_sites``
+  return ``[]``. This is the partner for the assertion above, which checks an
+  ABSENCE: a blind scanner would declare every field dead and bless any
+  exemption at all.
+* ``test_no_boolean_field_is_silently_dropped_from_the_round_trip`` -- change
+  any bool field to ``bool | None``. ``field.annotation is bool`` is an exact
+  type test, so such a field would otherwise vanish from the behavioural
+  round-trip while the suite stayed green.
 * ``test_an_exempted_field_is_not_also_documented`` -- document an exempted
   field without deleting the (now false) exemption.
 * ``test_no_env_example_declares_a_variable_that_does_not_exist`` -- write a
@@ -161,6 +175,32 @@ _NON_SETTINGS_VARS: dict[str, str] = {
 }
 
 
+_APP_ROOT = _REPO_ROOT / "backend" / "app"
+_CONFIG_MODULE = _APP_ROOT / "core" / "config.py"
+
+
+def _app_read_sites(field_name: str) -> list[str]:
+    """Every place under ``backend/app`` that reads ``settings.<field_name>``.
+
+    ``config.py`` itself is excluded: it DECLARES the field, and its validators
+    referring to a sibling is not a consumer reading configuration.
+
+    This exists so an exemption is a CHECKED FACT rather than a sentence.
+    Every entry in ``_EXEMPT`` claims "nothing reads it"; without this the only
+    thing standing between the guard and a developer silencing it is a string
+    long enough to pass a length check.
+    """
+    pattern = re.compile(rf"\.{re.escape(field_name)}\b")
+    hits: list[str] = []
+    for path in sorted(_APP_ROOT.rglob("*.py")):
+        if path == _CONFIG_MODULE:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                hits.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
+    return hits
+
+
 def _resolved_env_names() -> dict[str, str]:
     """field name -> the environment variable ``Settings`` will actually read.
 
@@ -193,7 +233,9 @@ def _declared_names(path: Path) -> set[str]:
     if not path.exists():
         return set()
     text = path.read_text(encoding="utf-8")
-    return set(re.findall(r"^[ \t]*#?[ \t]*(CITEVYN_[A-Z0-9_]+)[ \t]*=", text, re.M))
+    return set(
+        re.findall(r"^[ \t]*#?[ \t]*(?:export[ \t]+)?(CITEVYN_[A-Z0-9_]+)[ \t]*=", text, re.M)
+    )
 
 
 def _readme_table_names() -> set[str]:
@@ -248,6 +290,27 @@ _BOOL_FIELDS: tuple[str, ...] = tuple(
     for name, field in Settings.model_fields.items()
     if field.annotation is bool  # noqa: E721 - exact type, not a subclass
 )
+
+
+def test_no_boolean_field_is_silently_dropped_from_the_round_trip() -> None:
+    """``field.annotation is bool`` is an EXACT type test, and that is a trap.
+
+    A future ``bool | None`` or ``Annotated[bool, ...]`` field would not match,
+    so it would vanish from the one test that proves name resolution against a
+    real ``Settings()`` -- silently, with the suite still green. Rather than
+    guess at every annotation shape, this asserts that no field mentions ``bool``
+    without being in the round-tripped set, so such a field arrives with a red
+    test explaining itself instead of slipping past.
+    """
+    bool_ish = {
+        name for name, field in Settings.model_fields.items() if "bool" in str(field.annotation)
+    }
+    missed = sorted(bool_ish - set(_BOOL_FIELDS))
+    assert not missed, (
+        f"boolean-ish field(s) {missed} are not covered by the round-trip, because "
+        f"`field.annotation is bool` is an exact type match. Widen _BOOL_FIELDS to "
+        f"include them, or the resolver is never behaviourally proved for them."
+    )
 
 
 def test_there_are_bool_fields_to_round_trip() -> None:
@@ -376,8 +439,55 @@ def test_every_exemption_is_a_real_settings_field() -> None:
 
 
 def test_every_exemption_carries_a_reason() -> None:
+    """Weak on its own -- a length check cannot read prose.
+
+    Kept only to catch an empty or one-word entry. The assertion that actually
+    holds the exemption list honest is the next one, which checks the CLAIM
+    rather than the sentence.
+    """
     for field, reason in _EXEMPT.items():
         assert len(reason) >= 40, f"{field}: an exemption needs a real reason, got {reason!r}"
+
+
+@pytest.mark.parametrize("field_name", sorted(_EXEMPT))
+def test_every_exemption_is_actually_dead_config(field_name: str) -> None:
+    """An exempted field must genuinely have NO reader under ``backend/app``.
+
+    Every entry in ``_EXEMPT`` justifies itself with "nothing reads it". This
+    turns that sentence into a checked fact, which is the difference between an
+    exemption list and an off switch: a developer cannot quiet this guard for a
+    LIVE setting by writing forty characters of plausible prose, because a live
+    setting has read sites and this goes red naming them.
+
+    Turns red when: any of the six exempted fields gains a reader (which is
+    exactly when it stops being dead config and starts deserving an env-example
+    entry), or when #378 wires one of them up without removing its exemption.
+    """
+    hits = _app_read_sites(field_name)
+    assert not hits, (
+        f"Settings.{field_name} is exempted from documentation on the grounds that "
+        f"nothing reads it, but it is read at {hits}. Either the exemption is wrong "
+        f"and the field needs an env-example entry, or the read site is new -- "
+        f"in both cases document it and delete the _EXEMPT entry."
+    )
+
+
+def test_the_read_site_scanner_finds_real_readers() -> None:
+    """Partner: without this, a scanner returning [] declares everything dead.
+
+    ``test_every_exemption_is_actually_dead_config`` asserts an ABSENCE, so it
+    passes trivially if ``_app_read_sites`` is broken -- and it would then bless
+    an exemption for a heavily-used setting. These two fields are read all over
+    the app; if the scanner cannot see them it cannot see anything.
+    """
+    env_hits = _app_read_sites("environment")
+    assert len(env_hits) >= 8, f"scanner found only {env_hits} readers of Settings.environment"
+    assert any("main.py" in h for h in env_hits)
+    assert any("auth_sessions.py" in h for h in env_hits)
+    # A second, differently-shaped field, so the partner does not rest on one name.
+    assert len(_app_read_sites("cost_budget_enabled")) >= 1
+    # And the scanner must EXCLUDE config.py, or every field looks "read".
+    assert not any("core/config.py" in h for h in env_hits)
 
 
 def test_an_exempted_field_is_not_also_documented() -> None:

@@ -129,13 +129,15 @@ the full workflow.
 
 All knobs live in environment variables (loaded from `.env` for
 local dev, or passed via `docker compose --env-file` in production).
-The full list is documented in [`.env.example`](.env.example); the
-production subset lives in
+Every knob is documented in [`.env.example`](.env.example) — or, for the
+handful that nothing reads, exempted by name with a reason in
+`backend/tests/test_settings_env_vars_are_documented.py`, which fails the
+build if a new setting arrives in neither. The production subset lives in
 [`infra/docker/prod.env.example`](infra/docker/prod.env.example).
 
 | Var                              | Required        | Purpose                                           |
 |----------------------------------|-----------------|---------------------------------------------------|
-| `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or weak secret. `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
+| `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or under-16-character demo/admin key (those two keys only). `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
 | `CITEVYN_DATABASE_URL`           | yes             | Async SQLAlchemy URL (Postgres or SQLite)         |
 | `CITEVYN_DEMO_API_KEY`           | yes             | `Authorization: Bearer` token for `/v1/*` demo routes |
 | `CITEVYN_ADMIN_API_KEY`          | yes             | `X-Admin-API-Key` header value for `/v1/admin/*` (not bearer) |

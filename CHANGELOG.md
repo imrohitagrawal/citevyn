@@ -23,10 +23,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which was written down nowhere despite being the single flag that turns on HSTS,
   the `Secure` and `__Host-` session cookie, withdrawal of `/docs` and the OpenAPI
   schema, refusal of a `stub` LLM or embedding provider, and refusal of a default
-  or under-16-character secret — 11 read sites. Anyone starting the service by a
-  path other than `fly.toml` or `docker-compose.yml` (a bare `uvicorn`, another
-  orchestrator) got development-mode behaviour with no error and no warning. It is
-  documented in `.env.example` and the README env table, and deliberately **not**
+  or under-16-character demo/admin key (those two keys only; the OAuth,
+  Resend and LLM keys are never strength-checked). Consulted in 19 places:
+  10 read sites outside `config.py` plus 9 startup validators inside it —
+  counted precisely, because an earlier draft of this entry said "11" by
+  counting a line that turned out to be a docstring. Anyone
+  starting the service by a path other than `fly.toml` or `docker-compose.yml`
+  (a bare `uvicorn`, another orchestrator) got development-mode behaviour with
+  no error and no warning. It is documented in `.env.example` and the README
+  env table, and deliberately **not**
   as a settable line in `infra/docker/prod.env.example`: `docker-compose.yml` pins
   it in its `environment:` block, which overrides `env_file:` (verified with
   `docker compose config`), so a line there would have been inert — which is the
@@ -37,7 +42,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retrieval/memory/embedding tuning knobs.
 
   **The guard is the deliverable; the documentation is the smaller half.**
-  `backend/tests/test_settings_env_vars_are_documented.py` (23 tests) asserts
+  `backend/tests/test_settings_env_vars_are_documented.py` (31 tests) asserts
   coverage, exact-match declaration (a mention in prose does not count — that hole
   made the first #289 guard pass while the variable it guarded was gone), a
   **reverse** rule that no documented name is fictional, non-vacuity partners on
@@ -47,7 +52,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   credentials, wrong for a retrieval-tuning float nobody puts in a Fly secrets
   block.
 
-  Mutation-tested with 7 mutants; 6 killed. The 7th **survived**, and was worth
+  An adversarial review round found the exemption list was weaker than its own
+  docstring claimed: `test_every_exemption_carries_a_reason` measured string
+  LENGTH, so forty characters of plausible prose could have silenced the guard
+  for a live setting. `test_every_exemption_is_actually_dead_config` now checks
+  the CLAIM instead — an exempted field must have no reader under `backend/app`
+  — with a partner proving the read-site scanner is not blind. Exempting
+  `environment` now fails naming all eleven of its read sites.
+
+  Mutation-tested with 10 mutants; 9 killed. One **survived**, and was worth
   more than the six that died: hand-building `"CITEVYN_" + field.upper()` turns
   nothing red while `env_prefix` is `CITEVYN_`, because for that one field the two
   methods coincide. A documented red-bite line claiming otherwise was therefore
