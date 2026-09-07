@@ -193,7 +193,14 @@ async def drive(
     elif failed == 0:
         logger.info(
             "source_version_hash_not_advanced_partial_run",
-            extra={"index_version": index_version, "ingested": sorted(s.name for s in sources)},
+            # `source` (a joined string), not `ingested` (a list): the formatter
+            # summarises any container to `<list n=3>`, and WHICH sources landed
+            # is the whole diagnosis for a partial run. Source names come from
+            # the static `SourceSpec` allowlist, so the value is bounded (#361).
+            extra={
+                "index_version": index_version,
+                "source": ",".join(sorted(s.name for s in sources)),
+            },
         )
 
     return 0 if failed == 0 else 2
@@ -350,7 +357,14 @@ def content_version_hash(
         except FetchError as exc:
             logger.warning(
                 "source_version_hash_source_unfetchable",
-                extra={"source": spec.name, "error": str(exc)},
+                # `error_type` is printed; `error` (a `str(exc)` that can carry
+                # a local path or a decode dump) renders as a shape summary
+                # (#361).
+                extra={
+                    "source": spec.name,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
             )
             text = _UNFETCHABLE_SENTINEL
         digest.update(spec.name.encode("utf-8"))

@@ -548,6 +548,17 @@ Assert `vector_arm.healthy`, not "not dead": `ambiguous`, `mismatch` and
 holds. `infra/docker/scripts/deploy_verify.sh` has always asserted
 `"healthy": true`; this line now agrees with it.
 
+If you ever point that gate at a Fly deploy, pass **`--frontend-built-in-image`**.
+The gate's bundle-vs-demo-key probe reads the host's `frontend/dist`, and on this
+path there is no such directory: the browser bundle is built in stage 0 of
+`infra/docker/Dockerfile.api` and lives only inside the image. Without the flag
+the probe records a **FAIL** telling you to run `make demo-frontend`, which would
+be the wrong instruction; with it the probe records a **SKIP** carrying that
+reason, visible in the summary and counted separately from passes and failures.
+The flag is required rather than inferred — nothing in the script or in
+`infra/docker/.env` distinguishes a Fly run from a compose run, and a gate that
+guesses which artifact it is grading is a gate that asserts nothing (#362).
+
 Then ask a real question and confirm it comes back **grounded and cited**. A
 200 is not a passing demo.
 

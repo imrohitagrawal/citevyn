@@ -248,15 +248,24 @@ async def _orchestrator_error_handler(request: Request, exc: OrchestratorError) 
     The orchestrator wraps an :class:`LLMUnavailable` whose message can
     carry upstream LLM-provider detail (provider identity, raw error
     text). That must not reach the caller, so the client-facing
-    ``error.details.reason`` is a fixed generic string; the full cause
-    chain is logged SERVER-SIDE (keyed by ``request_id``) so an SRE can
-    still correlate the response with the failure.
+    ``error.details.reason`` is a fixed generic string.
+
+    SERVER-SIDE, keyed by ``request_id``, the log line carries the
+    exception CLASS (``cause_type``) and the SIZE of its message, not the
+    message text. #361 corrected an older docstring here that promised
+    "the full cause chain is logged" -- it was not logged at all
+    (``LOG_FORMAT`` dropped every ``extra=`` field), and now that extras
+    do render, the text is deliberately withheld: it is the one field on
+    this path that can interpolate raw upstream provider output, which
+    ``code_review.md`` blocks shipping. The class name plus the
+    ``request_id`` is what an SRE correlates on.
     """
     _logger.warning(
         "orchestrator_error",
         extra={
             "request_id": _resolve_request_id(request),
             "path": request.url.path,
+            "cause_type": exc.__class__.__name__,
             "cause": str(exc),
         },
     )
