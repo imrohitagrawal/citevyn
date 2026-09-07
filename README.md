@@ -135,12 +135,13 @@ production subset lives in
 
 | Var                              | Required        | Purpose                                           |
 |----------------------------------|-----------------|---------------------------------------------------|
+| `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or weak secret. `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
 | `CITEVYN_DATABASE_URL`           | yes             | Async SQLAlchemy URL (Postgres or SQLite)         |
 | `CITEVYN_DEMO_API_KEY`           | yes             | `Authorization: Bearer` token for `/v1/*` demo routes |
 | `CITEVYN_ADMIN_API_KEY`          | yes             | `X-Admin-API-Key` header value for `/v1/admin/*` (not bearer) |
 | `CITEVYN_REDIS_URL`              | recommended     | Enables the Redis rate limiter (production)       |
 | `CITEVYN_LLM_PROVIDER`           | optional        | `stub` (default) or `anthropic`                   |
-| `CITEVYN_LLM_API_KEY`            | if `anthropic`  | Live answer generation                            |
+| `CITEVYN_ANTHROPIC_API_KEY`      | if `anthropic`  | Live answer generation. (Until #332 this row named a CITEVYN_LLM_API_KEY that is not a `Settings` field and was read by nothing — setting it did nothing at all) |
 | `CITEVYN_LLM_MODEL`              | if `anthropic`  | Model id, e.g. `claude-opus-4-8`                  |
 | `CITEVYN_RATE_LIMIT_*`           | optional        | Sliding-window knobs; defaults are production-safe|
 | `CITEVYN_RESEND_API_KEY`         | for magic links | Resend API key; without it magic-link login is off in production (local dev writes emails to a file outbox instead) |
@@ -298,7 +299,7 @@ shape, refusal envelope, and rate-limit headers are normative.
 # 1. On the host, prepare the env file
 cd infra/docker
 cp prod.env.example .env
-$EDITOR .env                       # set POSTGRES_PASSWORD, CITEVYN_ADMIN_API_KEY, CITEVYN_LLM_API_KEY
+$EDITOR .env                       # set POSTGRES_PASSWORD, CITEVYN_ADMIN_API_KEY, CITEVYN_ANTHROPIC_API_KEY
 
 # 2. First-time cold start (creates db volume, runs migrations, seeds admin)
 make deploy
