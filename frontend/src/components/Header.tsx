@@ -2,6 +2,7 @@
  * Header — Sticky navigation bar.
  */
 import { AccountMenu } from "./AccountMenu";
+import { NAV_SECTIONS } from "../data/navSections";
 
 interface HeaderProps {
   themeLabel: string;
@@ -36,14 +37,20 @@ export function Header({
         </a>
 
         <nav>
-          {["who", "how", "demo", "pricing", "faq"].map((id, i) => (
+          {/*
+            Rendered FROM ../data/navSections, which also derives the set of
+            ids that live in the lazily-loaded strip (#358). Two hand-kept
+            lists here and in LandingPage let a new nav link silently become a
+            dead link -- reproduced in review.
+          */}
+          {NAV_SECTIONS.map((section) => (
             <a
-              key={id}
-              href={`#${id}`}
-              onClick={(e) => onNavClick(e, id)}
+              key={section.id}
+              href={`#${section.id}`}
+              onClick={(e) => onNavClick(e, section.id)}
               className="nav-link"
             >
-              {["Who it's for", "How it works", "Demo", "Pricing", "FAQ"][i]}
+              {section.label}
             </a>
           ))}
         </nav>

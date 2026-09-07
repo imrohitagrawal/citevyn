@@ -877,6 +877,17 @@ test.describe("Mobile", () => {
   });
 
   test("every interactive control clears the 44px touch-target floor on mobile", async ({ page }) => {
+    // `.faq-toggle` lives in the below-the-fold strip, which is fetched on
+    // scroll since #358 — on this phone viewport the sentinel starts outside
+    // the observer's lead margin, so at load the control genuinely is not in
+    // the DOM and this test timed out waiting for it. Scroll to the bottom
+    // first, then back to the top so the measurements below are taken in the
+    // same layout as before. (tests/lazy-strip.spec.ts is where the deferral
+    // itself is asserted; here it is only a precondition.)
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await expect(page.locator(".faq-toggle").first()).toBeAttached({ timeout: 10_000 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+
     // Landing-view controls.
     for (const sel of [".nav-link", ".faq-toggle", ".ticker-chip", ".demo-question"]) {
       const h = await page.locator(sel).first().evaluate((el) => el.getBoundingClientRect().height);
