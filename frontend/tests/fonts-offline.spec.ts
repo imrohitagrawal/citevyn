@@ -42,8 +42,9 @@
  *   4. the in-test routes stop taking precedence, which would make 1-3 vacuous
  *
  * REVERTING THE FIX turns 1 red: put the third-party stylesheet link back in
- * `index.html` and test 1 stalls on it for the full `STALL_MS` and blows its
- * budget — verified by doing exactly that before this file was committed.
+ * `index.html` and test 1 stalls on it — `stalling()` never answers the route,
+ * so the wait is unbounded — and blows `MOUNT_BUDGET_MS` — verified by doing
+ * exactly that before this file was committed.
  */
 import { test, expect } from "./fixtures";
 import type { Page, Route } from "@playwright/test";
@@ -52,13 +53,6 @@ import type { Page, Route } from "@playwright/test";
 const OFF_ORIGIN = /^https?:\/\/(?!localhost|127\.0\.0\.1)/i;
 /** The self-hosted faces, as `src/styles/fonts.css` names them. */
 const LOCAL_FONTS = "**/fonts/*.woff2";
-
-/**
- * Long enough that a mount which waits on one of these is unmistakable, and far
- * longer than the budget below, so the two can never be confused for jitter.
- * The healthy path never waits at all — no request is made.
- */
-const STALL_MS = 60_000;
 
 /**
  * The budget. Healthy mount is ~200-350 ms measured; the defect is the full

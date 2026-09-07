@@ -536,53 +536,65 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
  *     assertion below reports `["./helpers"]` and goes red — but the message
  *     names the wrong culprit.
  */
+/**
+ * The spec files Playwright ACTUALLY selects, straight from Playwright.
+ * `--list` resolves testDir/testMatch/testIgnore exactly as a real run does
+ * but executes nothing, and (unlike a real run) starts no web server — which
+ * is why `frontend.yml` can call it twice before the suite.
+ *
+ * The DEFAULT config is used, not `playwright.demo-ci.config.ts`: it is the
+ * superset (demo-ci is the same set minus `visual.spec.ts`), so a spec cannot
+ * hide from this by being excluded from CI.
+ *
+ * 120 s, not vitest's 5 s default: this spawns a whole Playwright process
+ * while the rest of the suite is running. A slow probe must not read as a
+ * broken guard (#344). MEMOISED for the same reason — two describe blocks
+ * (#364 and #366) need the same answer and a second spawn is ~2 s of the
+ * required job for nothing.
+ */
+let playwrightSpecsCache: string[] | null = null;
+function playwrightSelectedSpecs(): string[] {
+  if (playwrightSpecsCache) return playwrightSpecsCache;
+  const r = spawnSync(
+    "npx",
+    ["playwright", "test", "-c", "playwright.config.ts", "--list", "--reporter=json"],
+    {
+      cwd: frontendRoot,
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 32 * 1024 * 1024,
+      // PLAYWRIGHT_JSON_OUTPUT_NAME redirects the JSON reporter to a FILE and
+      // leaves stdout empty, so an exported one turns this into a JSON.parse
+      // crash with no hint why. CI does not export it (frontend.yml scopes it
+      // to the demo-e2e run step) but a developer easily might.
+      env: (() => {
+        const e = { ...process.env };
+        delete e.PLAYWRIGHT_JSON_OUTPUT_NAME;
+        return e;
+      })(),
+    },
+  );
+  // Fail loudly rather than returning []: an empty list would make "no spec
+  // bypasses the fixture" and "the probe broke" indistinguishable, and only
+  // one of those is a real defect.
+  if (r.status !== 0) {
+    throw new Error(`playwright --list failed (status ${r.status}): ${r.stderr || r.stdout}`);
+  }
+  const parsed = JSON.parse(r.stdout) as { suites?: { file?: string }[] };
+  const found = [
+    ...new Set((parsed.suites ?? []).map((s) => s.file).filter((f): f is string => !!f)),
+  ].sort();
+  if (found.length === 0) throw new Error(`playwright --list selected no files: ${r.stdout}`);
+  playwrightSpecsCache = found;
+  return found;
+}
+
 describe("every e2e spec is insulated from the third-party font stylesheet (#364)", () => {
   const testsDir = join(frontendRoot, "tests");
   let specs: string[] = [];
 
-  /**
-   * The spec files Playwright ACTUALLY selects, straight from Playwright.
-   * `--list` resolves testDir/testMatch/testIgnore exactly as a real run does
-   * but executes nothing, and (unlike a real run) starts no web server — which
-   * is why `frontend.yml` can call it twice before the suite.
-   *
-   * The DEFAULT config is used, not `playwright.demo-ci.config.ts`: it is the
-   * superset (demo-ci is the same set minus `visual.spec.ts`), so a spec cannot
-   * hide from this by being excluded from CI.
-   *
-   * 120 s, not vitest's 5 s default: this spawns a whole Playwright process
-   * while the rest of the suite is running. A slow probe must not read as a
-   * broken guard (#344).
-   */
   beforeAll(() => {
-    const r = spawnSync(
-      "npx",
-      ["playwright", "test", "-c", "playwright.config.ts", "--list", "--reporter=json"],
-      {
-        cwd: frontendRoot,
-        encoding: "utf8",
-        timeout: 120_000,
-        maxBuffer: 32 * 1024 * 1024,
-        // PLAYWRIGHT_JSON_OUTPUT_NAME redirects the JSON reporter to a FILE and
-        // leaves stdout empty, so an exported one turns this into a JSON.parse
-        // crash with no hint why. CI does not export it (frontend.yml scopes it
-        // to the demo-e2e run step) but a developer easily might.
-        env: (() => {
-          const e = { ...process.env };
-          delete e.PLAYWRIGHT_JSON_OUTPUT_NAME;
-          return e;
-        })(),
-      },
-    );
-    // Fail loudly rather than returning []: an empty list would make "no spec
-    // bypasses the fixture" and "the probe broke" indistinguishable, and only
-    // one of those is a real defect.
-    if (r.status !== 0) {
-      throw new Error(`playwright --list failed (status ${r.status}): ${r.stderr || r.stdout}`);
-    }
-    const parsed = JSON.parse(r.stdout) as { suites?: { file?: string }[] };
-    specs = [...new Set((parsed.suites ?? []).map((s) => s.file).filter((f): f is string => !!f))].sort();
-    if (specs.length === 0) throw new Error(`playwright --list selected no files: ${r.stdout}`);
+    specs = playwrightSelectedSpecs();
   }, 120_000);
 
   /**
@@ -742,5 +754,156 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     expect(css).toContain("@font-face");
     expect(css).toContain("font-family: 'Geist'");
     expect(css).toContain("font-family: 'JetBrains Mono'");
+  });
+});
+
+/**
+ * #366: `npm run type-check` must actually LOAD the Playwright specs.
+ *
+ * `frontend/tsconfig.json` said `"include": ["src", "e2e"]` and there has never
+ * been a `frontend/e2e/`. tsc ignores an `include` entry that matches nothing
+ * SILENTLY — no warning, no error — so the required `type-check + unit tests +
+ * build` job was green while loading ZERO of the specs, `helpers.ts` and
+ * `fixtures.ts`. Playwright transpiles with esbuild, which erases types without
+ * checking them, so nothing else looked either. Turning it on surfaced seven
+ * pre-existing errors, one of them an object that did not match its own
+ * declared return type.
+ *
+ * WHY IT ASKS THE COMPILER INSTEAD OF READING THE `include` LINE
+ * -------------------------------------------------------------
+ * `expect(tsconfigText).toContain("tests")` is defeated by every shape that
+ * matters: `"tests-old"`, `"tests/helpers.ts"` (one file, no specs), the word
+ * inside a comment, an `exclude` that takes it all back, or a `files` array
+ * that overrides `include` entirely. So this runs
+ * `ts.parseJsonConfigFileContent` — the compiler's own include/exclude/files
+ * resolution, the same call the #343 block above uses — and compares its answer
+ * against the list PLAYWRIGHT resolves. Two systems, each authoritative for its
+ * own half. That is this file's standing lesson, learned twice already: resolve
+ * what the system resolved, do not grep for a string that suggests it.
+ *
+ * WHAT IT CANNOT SEE, stated rather than implied:
+ *   - whether the type-check is RUN. `frontend.yml`'s `Type-check` step is
+ *     pinned by the workflow guard at the top of this file.
+ *   - whether the specs are type-CORRECT. That is `tsc` itself, in that step;
+ *     this guard only proves it is looking at them.
+ */
+describe("tsc type-checks the Playwright specs (#366)", () => {
+  const testsDir = join(frontendRoot, "tests");
+  const srcDir = join(frontendRoot, "src");
+  const configPath = join(frontendRoot, "tsconfig.json");
+
+  const read = ts.readConfigFile(configPath, (f) => ts.sys.readFile(f));
+  // Same trap the #343 block documents: a bad read returns an EMPTY config and
+  // every assertion below would then inspect tsc's DEFAULTS instead of the file.
+  if (read.error) {
+    throw new Error(
+      `could not read ${configPath}: ${ts.flattenDiagnosticMessageText(read.error.messageText, " ")}`,
+    );
+  }
+  const parsed = ts.parseJsonConfigFileContent(
+    read.config,
+    ts.sys,
+    frontendRoot,
+    undefined,
+    configPath,
+  );
+  if (parsed.errors.length) {
+    throw new Error(
+      `tsconfig.json did not parse: ${parsed.errors
+        .map((e) => ts.flattenDiagnosticMessageText(e.messageText, " "))
+        .join("; ")}`,
+    );
+  }
+  const loaded = new Set(parsed.fileNames.map((f) => resolvePath(f)));
+
+  let specs: string[] = [];
+  beforeAll(() => {
+    specs = playwrightSelectedSpecs();
+  }, 120_000);
+
+  // THE PARTNER. Every assertion below is of the form "nothing is missing", and
+  // an empty spec list satisfies all of them. This proves the population being
+  // checked exists, and that the config resolved to real files rather than to
+  // tsc's defaults.
+  it("Playwright selects real specs and tsc resolves a real file list", () => {
+    expect(specs.length).toBeGreaterThanOrEqual(7);
+    expect(parsed.fileNames.length).toBeGreaterThan(50);
+  });
+
+  it("every spec Playwright runs is a file tsc loads", () => {
+    const missing = specs.filter((s) => !loaded.has(resolvePath(join(testsDir, s))));
+    expect(
+      missing,
+      "these specs are outside the type-check — a type error in them reaches CI " +
+        "only if Playwright happens to execute the line",
+    ).toEqual([]);
+  });
+
+  it("the modules every spec imports are type-checked too", () => {
+    // `helpers.ts` and `fixtures.ts` are not specs, so `playwright --list` never
+    // names them; #366 was FOUND while adding `fixtures.ts` and discovering that
+    // "type-check is clean" said nothing about it.
+    for (const f of ["helpers.ts", "fixtures.ts"]) {
+      const p = join(testsDir, f);
+      expect(existsSync(p), `${p} is gone — this expectation is now vacuous`).toBe(true);
+      expect(loaded.has(p), `${f} is not type-checked`).toBe(true);
+    }
+  });
+
+  it("src/ is still covered — swapping one for the other is not a fix", () => {
+    const fromSrc = [...loaded].filter((f) => f.startsWith(srcDir + "/"));
+    expect(
+      fromSrc.length,
+      "the app's own sources dropped out of the type-check",
+    ).toBeGreaterThan(40);
+  });
+
+  /**
+   * THE DEFECT ITSELF, guarded by shape rather than by name. A phantom entry is
+   * not an error to tsc, it is a no-op — which is why `"e2e"` survived long
+   * enough to be quoted in a comment. Asking each entry to contribute at least
+   * one file catches a re-added `"e2e"`, a typo'd `"test"`, and a directory
+   * renamed out from under this config, without hardcoding any of them.
+   */
+  it("no `include` entry resolves to nothing", () => {
+    const includes = (read.config.include ?? []) as string[];
+    expect(includes.length, "tsconfig.json has no `include` at all").toBeGreaterThan(0);
+    for (const entry of includes) {
+      const solo = ts.parseJsonConfigFileContent(
+        { ...read.config, include: [entry], references: [] },
+        ts.sys,
+        frontendRoot,
+        undefined,
+        configPath,
+      );
+      expect(
+        solo.fileNames.length,
+        `tsconfig.json include entry "${entry}" matches no file. tsc ignores that ` +
+          "SILENTLY, which is exactly how #366 stayed invisible",
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * Widening this project must not re-open #343. It is `noEmit`, so there is
+   * nothing for `tsc -b` to write beside a source — but `noEmit: false` plus
+   * `composite` would make every one of the ~78 files it now loads an emit
+   * candidate, and `tests/` sits one directory from the frontend root Vite
+   * resolves its config from. Both halves are asserted: the option, and the
+   * artifact.
+   */
+  it("widening the project emits nothing next to a source", () => {
+    expect(parsed.options.noEmit).toBe(true);
+    expect(parsed.options.composite ?? false).toBe(false);
+    for (const src of parsed.fileNames) {
+      for (const ext of [".js", ".d.ts"]) {
+        const stray = src.replace(/\.tsx?$/, ext);
+        if (stray === src) continue;
+        expect(
+          existsSync(stray),
+          `${stray} exists — this project is emitting beside its sources (#343)`,
+        ).toBe(false);
+      }
+    }
   });
 });

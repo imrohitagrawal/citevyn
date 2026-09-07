@@ -168,6 +168,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that Node 20/22/26 produce a byte-identical bundle.
 
 ### Fixed
+- **`npm run type-check` type-checked no Playwright spec at all (#366).**
+  `frontend/tsconfig.json` said `"include": ["src", "e2e"]` and there has never
+  been a `frontend/e2e/`. tsc ignores an `include` entry that matches nothing
+  **silently** — no warning, no error, exit 0 — so the required `type-check +
+  unit tests + build` job was green while loading zero of the 9 spec files,
+  `helpers.ts` and `fixtures.ts`. Playwright transpiles with esbuild, which
+  erases types without checking them, so nothing else was looking either.
+  Measured with `npx tsc -p tsconfig.json --noEmit --listFiles` filtered to
+  `/frontend/tests/`: **0 files before, 11 after**, with `src/` unchanged at 67.
+  Proved by the consumer rather than by the config — a deliberate type error in
+  `tests/visual.spec.ts` turns `npm run type-check` red and its removal turns it
+  green. Turning it on surfaced **seven** pre-existing errors (the issue lists
+  six; `tests/fonts-offline.spec.ts` arrived with #365 afterwards), all cleared:
+  five dead locals, a `Set` inferred with a literal-union type where the value
+  tested is a computed style read out of the browser, and
+  `measureFocusIndicator`'s `adjacent === null` early return omitting
+  `strongPixels` — a type gap rather than a live defect, because
+  `focus-ring.spec.ts` checks `ratio === null` three lines before the
+  `undefined < 8` that would otherwise have failed the focus sweep open.
+  Deliberately **one** `noEmit` project rather than a second referenced one: a
+  referenced project needs `composite: true`, which forbids `noEmit` (TS6310)
+  and forces emit — measured, it writes 22 `.js`/`.d.ts` files into
+  `frontend/tests/`, and Playwright's default `testMatch` matches `.js`, so
+  every spec would run twice with half of it from a stale snapshot. That is
+  #343 with a bigger blast radius. Guarded in `src/test/buildGuards.test.ts` by
+  asking `ts.parseJsonConfigFileContent` which files the config resolves to and
+  comparing against the list `playwright --list` selects; the mutants that prove
+  it bites are in `frontend/scripts/mutate-typecheck-guard.sh`.
+
 - **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
   and failed open on a dual-active database (#226).** `_active_index_stamp`
   resolved the active row by `status == active` rather than by

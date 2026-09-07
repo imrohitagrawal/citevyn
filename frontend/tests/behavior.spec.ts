@@ -665,7 +665,8 @@ test.describe("Chat", () => {
     // count.
     await enterChat(page);
     const input = page.locator(".chat-input");
-    const send = page.locator(".send-button");
+    // No `send` locator here: every read of the button below happens inside the
+    // ONE `page.evaluate` snapshot, for the reason its comment gives.
     await input.fill("What is Claude Code?");
     await input.press("Enter");
     await expect(page.locator(".message.user-msg")).toHaveCount(1);
