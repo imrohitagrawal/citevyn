@@ -566,13 +566,32 @@ def test_confirm_post_claims_with_one_conditional_delete(magic_app: Path) -> Non
     assert "TOKEN_ID" in claim and "SECRET_HASH" in claim
 
 
-def test_confirm_post_fails_closed_when_the_user_row_is_gone(magic_app: Path) -> None:
-    """Defense in depth (step 4 of the claim): the FK cascade normally takes
-    the token with the user, but SQLite's FK enforcement is off here (#286),
-    which conveniently models the delete/claim race. RED if the missing-user
-    guard is removed: on Postgres ``claim_and_login`` would 500 on the FK; on
-    this SQLite harness it would mint a ghost session for a deleted user
-    (302 ``/?auth=ok``) -- either way not the ``/?auth=error`` asserted here."""
+def test_confirm_post_fails_closed_when_the_user_row_is_gone(
+    magic_app: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense in depth (step 4 of the claim): the user is deleted inside the
+    window the guard's own comment names, and the request fails closed.
+
+    The window is real on Postgres and this test now reproduces it faithfully.
+    ``_claim_token`` COMMITS the ``DELETE ... RETURNING`` before the route
+    reads ``db.get(User, row.user_id)``, so a concurrent delete landing
+    between those two statements leaves the route holding a detached row
+    whose owner no longer exists. Nothing about that contradicts the
+    ``ON DELETE CASCADE`` on ``magic_link_tokens.user_id`` -- by then the
+    token row is already gone, claimed by this very request.
+
+    It used to delete the user BEFORE confirming and assert the token row
+    survived. That precondition was a fiction: migration 0012 declares the
+    foreign key ``ON DELETE CASCADE``, so on Postgres the token can never
+    outlive its user. The assertion only ever passed because SQLite was not
+    enforcing foreign keys (#286) -- the test's own docstring said so. It
+    proved nothing about a race that cannot happen in that shape.
+
+    RED if the missing-user guard is removed: ``claim_and_login`` then
+    inserts an ``auth_sessions`` row for a user id that is gone, which is a
+    ``ForeignKeyViolation`` on Postgres and, now that the pragma is on, on
+    SQLite too -- either way not the ``/?auth=error`` asserted here.
+    """
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")
     token = _latest_token(magic_app)
@@ -586,9 +605,24 @@ def test_confirm_post_fails_closed_when_the_user_row_is_gone(magic_app: Path) ->
             await session.delete(user)
             await session.commit()
 
-    _run(_delete_user())
-    assert len(_query_all(MagicLinkToken)) == 1, "precondition: the token row outlived the user"
+    real_claim = magic_link_module._claim_token
+    raced: list[bool] = []
+
+    async def _claim_then_delete_user(db, token_id, secret):
+        row = await real_claim(db, token_id, secret)
+        if row is not None:
+            # The concurrent transaction lands here: after the claim's
+            # commit, before the route's User lookup.
+            await _delete_user()
+            raced.append(True)
+        return row
+
+    monkeypatch.setattr(magic_link_module, "_claim_token", _claim_then_delete_user)
+
+    assert len(_query_all(MagicLinkToken)) == 1, "precondition: the token is live before the claim"
     response = _confirm_post(_client(), token)
+    assert raced == [True], "the race window never opened; the guard was not exercised"
+    assert _query_all(User) == [], "precondition: the owning user really is gone"
     assert response.status_code == 302
     assert response.headers["location"] == "/?auth=error"
 

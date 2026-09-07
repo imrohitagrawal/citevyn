@@ -79,7 +79,19 @@ def other_users_session(
 
     async def _seed() -> None:
         async with factory() as db:
+            # One flush per level, parent first. ``sessions.user_id`` and
+            # ``messages.session_id`` are foreign keys, but no ORM
+            # ``relationship()`` links these mapped classes, so a single
+            # combined flush is NOT ordered by them -- SQLAlchemy emitted the
+            # ``sessions`` insert first and it failed the key (#286). Same
+            # trap as the ``_mint_principal`` production bug.
+            #
+            # This is ordering only. ``OTHER_USER_ID`` stays a genuinely
+            # distinct principal from the demo caller's, which is the whole
+            # point of the file: collapsing the two identities would make
+            # every 404 assertion below vacuously true.
             db.add(User(user_id=OTHER_USER_ID, role=UserRole.demo_user, created_at=now))
+            await db.flush()
             db.add(
                 Session(
                     session_id=session_id,
@@ -89,6 +101,7 @@ def other_users_session(
                     expires_at=now + timedelta(hours=2),
                 )
             )
+            await db.flush()
             db.add(
                 Message(
                     message_id=message_id,

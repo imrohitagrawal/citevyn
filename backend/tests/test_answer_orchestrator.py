@@ -2028,6 +2028,53 @@ async def test_orchestrator_creates_session_and_user_when_missing(
     assert response["message_id"] is not None
 
 
+async def test_ensure_user_writes_the_user_row_before_the_session_row(
+    session: Any,
+) -> None:
+    """#286 regression: the parent ``users`` row is inserted FIRST.
+
+    ``sessions.user_id`` is a foreign key onto ``users``, and this codebase
+    declares no ORM ``relationship()`` between the two mapped classes -- only
+    the raw column -- so SQLAlchemy does not order a combined flush by it.
+    ``_ensure_user`` used to add the ``Session`` and flush it, THEN create the
+    ``User``. On real Postgres that is a ``ForeignKeyViolation`` on the very
+    first chat message against a database where ``demo_user`` is not already
+    seeded; the identical shape 500'd every first-time anonymous visitor in
+    ``auth_sessions._mint_principal``.
+
+    The assertion is on the SQL the database actually received, not on the
+    end state. Both orders leave the same two rows behind once the flush
+    completes, so a row-existence check (the test above) passes either way on
+    a database with ``demo_user`` already present -- it cannot tell the bug
+    from the fix. RED with the old ordering: the ``sessions`` INSERT arrives
+    first.
+    """
+    from sqlalchemy import event
+
+    from app.answer.orchestrator import Orchestrator as _Orch
+
+    inserts: list[str] = []
+    sync_engine = session.get_bind()
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        head = statement.strip().upper()
+        if head.startswith("INSERT INTO"):
+            inserts.append(statement.split()[2].strip('"'))
+
+    event.listen(sync_engine, "before_cursor_execute", _record)
+    try:
+        orchestrator = _Orch(_settings(), session, retriever=_FakeRetriever([]))
+        await orchestrator._ensure_user(uuid.uuid4())
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _record)
+
+    assert "users" in inserts, "no users row was written at all"
+    assert "sessions" in inserts, "no sessions row was written at all"
+    assert inserts.index("users") < inserts.index("sessions"), (
+        f"the child row was inserted before its parent: {inserts}"
+    )
+
+
 def _hit_with_type(rtype: RetrievalType) -> EvidenceHit:
     """One evidence hit tagged with a specific retrieval_type.
 

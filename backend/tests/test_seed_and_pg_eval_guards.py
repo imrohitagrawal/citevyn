@@ -27,7 +27,7 @@ from app.core.config import Settings
 from app.embeddings.factory import EmbedderIdentity
 from app.models import Base, Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
 from app.worker.allowlist import MVP_SOURCES, SourceSpec
-from tests.conftest import seed_catalog
+from tests.conftest import seed_catalog, seed_index_version
 from tests.eval.retrieval import PostgresEvalError, postgres_session
 
 # The ``db`` package lives at the repo root; pytest's pythonpath is ``backend/``.
@@ -715,6 +715,11 @@ async def test_db_seed_retires_a_pre_178_hand_written_catalog(monkeypatch) -> No
         engine = create_async_engine(url)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         async with factory() as session:
+            # The pre-#178 production database this simulates always had the
+            # active index_versions row -- ``documents.index_version`` is a
+            # foreign key onto it, so no such database could exist without
+            # one (#286).
+            await seed_index_version(session, seedmod.INDEX_VERSION, status=IndexStatus.active)
             legacy_doc = Document(
                 document_id=uuid.uuid4(),
                 index_version=seedmod.INDEX_VERSION,
