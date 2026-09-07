@@ -14,9 +14,10 @@ contrast ratio and mutation result the row existed to carry.
 
 It is not hypothetical and it is not once-off: the same defect was reintroduced
 by the very edit that fixed it, four commits later, in a sentence about a
-different bug. Fifteen pre-existing rows still carry it -- three in the open
-follow-ups table and twelve in the 2-column table of resolved items -- and they
-are enumerated below rather than silently fixed here or silently tolerated.
+different bug. Fifteen pre-existing rows carried it when this guard was written
+-- three in the open follow-ups table and twelve in the 2-column table of
+resolved items. **All fifteen were repaired in #360**, so ``KNOWN_BROKEN`` below
+is now empty; see the note on it for what "repaired" meant in each shape.
 
 This lives in pytest rather than the frontend suite because `docs/` is
 repo-level and this job already runs on every PR.
@@ -26,8 +27,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import pytest
 
 BACKLOG = Path(__file__).resolve().parents[2] / "docs" / "BACKLOG.md"
 
@@ -39,30 +38,22 @@ CELL_SPLIT = re.compile(r"(?<!\\)\|")
 # Rows that predate this guard and still lose content, enumerated rather than
 # waved at. Fixing one means deleting it from here; adding a NEW broken row
 # FAILS rather than quietly joining the list, which is the whole point.
+KNOWN_BROKEN: set[str] = set()
+# EMPTY, and that is the finished state, not an oversight. All fifteen rows the
+# docstring above enumerates were repaired in the #360 sweep: three in the
+# 5-column table had literal pipes inside their Origin cell (escaped to \| ),
+# and twelve in the 2-column archive table were carrying the 5-column schema
+# (Issue | Title | Area | Priority | Origin) after being pasted across when they
+# closed -- GFM was discarding Area, Priority and Origin from every one of them.
+# Those three columns are now folded into the "Why it matters" cell, so nothing
+# was dropped to make this set empty.
 #
-# Twelve of these sit in the 2-column "Issue | Why it matters" table of closed
-# items, where a single ``|`` in prose is enough. Repairing them is a docs sweep
-# with no bearing on this change, so it is tracked as its own item rather than
-# folded in here -- see docs/BACKLOG.md.
-KNOWN_BROKEN = {
-    # 5-column "Open follow-ups" table
-    "#300",
-    "#316",
-    "#308",
-    # 2-column table of resolved items
-    "#208",
-    "#221",
-    "#231",
-    "#229",
-    "#226",
-    "#215",
-    "#216",
-    "#217",
-    "#210",
-    "#237",
-    "#236",
-    "#234",
-}
+# An empty exemption set makes the old parametrized staleness partner VACUOUS --
+# pytest reports "got empty parameter set" and the check asserts nothing, which
+# is the failure mode tracked as #381 elsewhere in this repo. It is replaced
+# below by test_the_detector_actually_detects, which proves the parser still
+# finds a broken row by feeding it one, and therefore keeps meaning something no
+# matter how many rows are exempted.
 
 
 def _cell_count(line: str) -> int:
@@ -121,21 +112,65 @@ def test_no_backlog_row_loses_cells_to_an_unescaped_pipe() -> None:
     assert not offenders, "\n".join(offenders)
 
 
-@pytest.mark.parametrize("tag", sorted(KNOWN_BROKEN))
-def test_known_broken_rows_are_still_broken(tag: str) -> None:
-    """The partner for the exemption list.
+def test_no_exemption_is_stale() -> None:
+    """Staleness partner for ``KNOWN_BROKEN``.
 
-    Without this, fixing one of those rows would leave a stale entry in
-    ``KNOWN_BROKEN`` that silently exempts the next row to reuse that issue
-    number -- and an exemption nobody can see is how a guard stops guarding.
-    Fix a row, delete it from the set, and this turns green again.
+    A tag left here after its row is fixed silently shelters the next row to
+    reuse that issue number. Iterating (rather than parametrizing) keeps this
+    test EXECUTED when the set is empty instead of collapsing to "got empty
+    parameter set", which would assert nothing at all.
     """
     text = BACKLOG.read_text(encoding="utf-8")
-    for _, cols, rows in _tables(text):
-        for _, row in rows:
-            if f"[{tag}]" in row and _cell_count(row) > cols:
-                return
-    pytest.fail(
-        f"{tag} no longer over-runs its header -- remove it from KNOWN_BROKEN "
-        f"in this file so the exemption cannot shelter a future row."
+    still_broken = {
+        tag
+        for tag in KNOWN_BROKEN
+        for _, cols, rows in _tables(text)
+        for _, row in rows
+        if f"[{tag}]" in row and _cell_count(row) > cols
+    }
+    stale = sorted(KNOWN_BROKEN - still_broken)
+    assert not stale, (
+        f"{stale} no longer over-run their header -- remove them from "
+        f"KNOWN_BROKEN in this file so the exemption cannot shelter a future row."
+    )
+
+
+def test_the_detector_actually_detects() -> None:
+    """The non-vacuity partner, and the reason an empty KNOWN_BROKEN is safe.
+
+    ``test_no_backlog_row_loses_cells_to_an_unescaped_pipe`` now passes with an
+    empty exemption list. That is indistinguishable, from the outside, from a
+    parser that has stopped finding rows at all -- so this feeds the parser a
+    table it MUST flag, in both shapes the #360 sweep repaired.
+    """
+    five_col = (
+        "| Issue | Title | Area | Priority | Origin |\n"
+        "|---|---|---|---|---|\n"
+        "| [#1](u) | t | a | p | prose with a | stray pipe |\n"
+    )
+    two_col = (
+        "| Issue | Why it matters |\n|---|---|\n| [#2](u) | title | area | priority | origin |\n"
+    )
+    for name, doc, cols in (("5-column", five_col, 5), ("2-column", two_col, 2)):
+        tables = _tables(doc)
+        assert len(tables) == 1, f"{name}: parser found {len(tables)} tables, want 1"
+        _, got_cols, rows = tables[0]
+        assert got_cols == cols, f"{name}: header read as {got_cols} columns, want {cols}"
+        assert len(rows) == 1, f"{name}: parser found {len(rows)} rows, want 1"
+        assert _cell_count(rows[0][1]) > cols, (
+            f"{name}: the deliberately-broken row was NOT flagged as over-running "
+            f"its header -- the detector has stopped detecting."
+        )
+
+    # And the inverse, so the detector is not simply flagging everything: a
+    # correctly-escaped row must NOT be flagged.
+    escaped = (
+        "| Issue | Title | Area | Priority | Origin |\n"
+        "|---|---|---|---|---|\n"
+        "| [#3](u) | t | a | p | prose with an escaped \\| pipe |\n"
+    )
+    _, cols, rows = _tables(escaped)[0]
+    assert _cell_count(rows[0][1]) == cols, (
+        "an escaped pipe was counted as a cell split -- the guard would report "
+        "false failures on correctly-written rows."
     )
