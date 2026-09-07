@@ -178,13 +178,35 @@ describe("the deferred landing strip (#358)", () => {
     },
   );
 
-  it("covers every deferred nav link, so the loop above cannot silently shrink", () => {
-    // PARTNER for the derived it.each: a filter that matched nothing would run
-    // ZERO tests and the file would still be green.
+  it("covers every nav link, so neither derived loop can silently shrink", () => {
+    // PARTNER for both derived it.each blocks: a filter that matched nothing
+    // would run ZERO tests and the file would still be green. Review proved the
+    // eager half open — deleting the one `deferred: false` entry removed the
+    // header link, ran zero eager tests, and left everything green.
     const deferred = NAV_SECTIONS.filter((s) => s.deferred);
+    const eager = NAV_SECTIONS.filter((s) => !s.deferred);
     expect(deferred.length).toBeGreaterThanOrEqual(4);
-    // And every one of them really is in the set LandingPage consults.
+    expect(eager.length).toBeGreaterThanOrEqual(1);
+
+    // And the split matches what LandingPage actually consults, both ways: a
+    // deferred id missing from the set is a DEAD LINK, an eager id inside it
+    // costs a pointless reveal.
     for (const s of deferred) expect(DEFERRED_SECTION_IDS.has(s.id)).toBe(true);
+    for (const s of eager) expect(DEFERRED_SECTION_IDS.has(s.id)).toBe(false);
+  });
+
+  it("renders one header link per nav entry, in order", () => {
+    installObserver();
+    renderPage();
+
+    // Pins the nav itself, not just the click behaviour. Without this, deleting
+    // an entry from NAV_SECTIONS removes a link from the product and every
+    // derived loop simply runs one fewer case.
+    const labels = screen
+      .getAllByRole("link")
+      .map((a) => a.textContent?.trim())
+      .filter((t) => NAV_SECTIONS.some((s) => s.label === t));
+    expect(labels).toEqual(NAV_SECTIONS.map((s) => s.label));
   });
 
   it.each(NAV_SECTIONS.filter((s) => !s.deferred).map((s) => [s.label, s.id] as const))(

@@ -800,7 +800,9 @@ test:
 1. **The nav still works.** Four of the five header links (`#who`, `#how`,
    `#pricing`, `#faq`) point into the deferred chunk, and `scrollToId` used to
    do `if (!el) return` — a silent no-op that made those links look dead.
-   `scrollToSection` now reveals the strip and retries for a bounded ~120 frames.
+   `LandingPage` reveals the strip on the click and `scrollToSection` waits for the
+   target to be inserted (a `MutationObserver`, bounded by a 10 s clock — an
+   earlier frame counter was reproduced failing at a 3 s chunk delay).
 2. **A deep link still lands.** `/#pricing` reveals the strip and scrolls once.
 3. **No IntersectionObserver means SHOW, never hide.** `useDeferredReveal` starts
    revealed when the API is absent — jsdom implements none, and neither do old

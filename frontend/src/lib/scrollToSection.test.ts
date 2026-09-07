@@ -19,7 +19,11 @@ let scrollTo: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   scrollTo = vi.fn();
   vi.stubGlobal("scrollTo", scrollTo);
-  document.body.innerHTML = "";
+  // Built HERE, not lazily inside addSection: if the first section of a test
+  // also created the host, that insertion would mutate document.body's own
+  // childList and fire even without `subtree`, so the very first wait in each
+  // test would survive the mutation.
+  document.body.innerHTML = '<div id="test-root"><main></main></div>';
 });
 
 afterEach(() => {
@@ -28,10 +32,23 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+/**
+ * Appends the section NESTED, the way the app does — `body > #root > … > main >
+ * section#id` — not as a direct child of body.
+ *
+ * Load-bearing. With a flat `document.body.appendChild`, dropping `subtree:
+ * true` from the MutationObserver options survived every test in this file,
+ * because a direct child of body still shows up in body's own childList. In the
+ * real DOM nothing would ever fire and all four deferred nav links would go
+ * dead again. Found in review.
+ */
 function addSection(id: string) {
   const el = document.createElement("section");
   el.id = id;
-  document.body.appendChild(el);
+  // Into the pre-built nest, never into document.body — see the note above and
+  // the beforeEach, which builds the host BEFORE any test runs so that no
+  // insertion is ever a direct child of body.
+  document.querySelector("#test-root main")!.appendChild(el);
   return el;
 }
 

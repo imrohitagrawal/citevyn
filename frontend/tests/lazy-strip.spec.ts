@@ -65,15 +65,10 @@ test.describe("the deferred landing strip (#358)", () => {
     // behaviour, so this attaches the number to the report instead.
     const deferredOnThisViewport = geometry.sentinelTop! >= geometry.viewportHeight + LEAD_MARGIN_PX;
 
-    // The one-directional guard that DOES belong here: whichever side of the
-    // margin the sentinel falls on, the desktop reader must end up with the
-    // content. That fails only when something is broken, never when it improves.
-    await expect(page.locator(DEFERRED)).toBeVisible({ timeout: 10_000 });
-
     // ASSERT THE THING, NOT A PROXY. Geometry only PREDICTS whether the chunk
     // is fetched on first paint; the request count IS the fact the budget file
-    // reasons about. Recorded, not asserted in a direction, for the same reason
-    // the inequality is not: fetching it later would be an improvement.
+    // reasons about. Sampled BEFORE any scrolling, and only recorded — which
+    // way it falls is a property of the current layout, not a requirement.
     await testInfo.attach("desktop-first-paint", {
       body: JSON.stringify(
         {
@@ -87,11 +82,20 @@ test.describe("the deferred landing strip (#358)", () => {
       ),
       contentType: "application/json",
     });
-    // Geometry and network must at least AGREE. If the sentinel is inside the
-    // lead margin the chunk must have been requested, and vice versa — a
-    // mismatch means the gate is not doing what the docs say it does, whichever
-    // way round it is.
-    expect(requested.length > 0).toBe(!deferredOnThisViewport);
+
+    // The one-directional guard, and it has to come AFTER a scroll to deserve
+    // the name. An earlier draft asserted `#pricing` visible with no scroll and
+    // called that improvement-safe; review showed it is the opposite — a taller
+    // Hero would start deferring on desktop (the improvement) and the assertion
+    // would time out. It also made the network check self-satisfying: reached
+    // only once the strip had loaded, `requested.length > 0` was always true.
+    //
+    // Scrolling first makes this true on BOTH sides of the margin: however the
+    // chunk is scheduled, a desktop reader who scrolls must end up with the
+    // content. That fails only when something is broken.
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await expect(page.locator(DEFERRED)).toBeAttached({ timeout: 10_000 });
+    await expect(page.locator("footer")).toBeAttached();
   });
 
   test("defers the strip on a phone-sized viewport until the reader scrolls", async ({ page }) => {
@@ -197,6 +201,32 @@ test.describe("the deferred landing strip (#358)", () => {
 
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await expect(page.locator(DEFERRED)).toBeAttached({ timeout: 10_000 });
+  });
+
+  test("a chunk that never arrives costs the strip, not the whole page", async ({ page }) => {
+    // THE WIRING, not the component. LazyChunkBoundary has its own unit tests,
+    // but those build their own boundary — they say nothing about LandingPage
+    // actually using one. Review established that deleting both wrappers from
+    // LandingPage left 566 unit tests and 197 e2e green while reinstating a
+    // full white screen, so this is the test that watches the seam.
+    //
+    // Before the boundary: a rejected lazy() unmounts the React root, because
+    // Suspense handles the PENDING state and not the REJECTED one.
+    await page.route("**/landing-strip*", (route) => route.fulfill({ status: 404, body: "" }));
+    await page.setViewportSize(PHONE);
+    await gotoApp(page);
+
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    // Give the failed fetch time to reject and React time to unwind.
+    await page.waitForTimeout(1_000);
+
+    // The strip is gone — that is the cost, and it is the expected one.
+    await expect(page.locator(DEFERRED)).toHaveCount(0);
+    // But everything eager survived. Each of these is zero on a white screen.
+    await expect(page.locator(EAGER)).toBeAttached();
+    await expect(page.locator(".theme-toggle")).toBeAttached();
+    await expect(page.locator(".sources-strip")).toBeAttached();
+    expect(await page.evaluate(() => document.body.innerText.length)).toBeGreaterThan(500);
   });
 
   test("a deep link to a deferred section lands on it", async ({ page }) => {

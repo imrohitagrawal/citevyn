@@ -111,9 +111,10 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     sentinelRef: stripSentinelRef,
   } = useDeferredReveal();
 
-  // A nav click whose target is inside the strip must mount it before
-  // `goSection` scrolls; `scrollToId` retries for ~2 s, which covers the
-  // re-render plus the chunk fetch.
+  // A nav click whose target is inside the strip must reveal it here, before
+  // `goSection` scrolls. `scrollToSection` then waits for the element to be
+  // inserted rather than giving up, which covers the re-render plus the chunk
+  // fetch however long that takes.
   const onNavClick = useCallback(
     (e: React.MouseEvent, id: string) => {
       if (DEFERRED_SECTION_IDS.has(id)) revealStrip();

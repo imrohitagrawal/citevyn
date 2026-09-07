@@ -26,8 +26,15 @@
  * the middle of, so a reload is the honest recovery and inventing a
  * "something went wrong" panel below the fold would be louder than the loss.
  *
- * It logs once via console.error so the failure is visible in a session replay
- * or a bug report rather than being silently swallowed.
+ * It logs via console.error so the failure is visible in a session replay or a
+ * bug report rather than being silently swallowed. Note that ONE chunk failure
+ * produces TWO log lines in LandingPage: the deferred sections are not
+ * contiguous in the DOM, so they mount behind two boundary instances.
+ *
+ * It also catches a render-time throw from INSIDE a section (a real bug in
+ * Pricing, say) and reports it under a label that says "chunk failed". The
+ * containment is still what you want there — the rest of the page survives —
+ * but read the logged error, not the label, when diagnosing.
  *
  * SCOPE. Applied to the #358 strip only. The four older lazy surfaces
  * (AuthModal, HistoryDrawer, ConnectedAccountsDrawer, Nudge) have the same
