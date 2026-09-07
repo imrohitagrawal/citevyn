@@ -70,11 +70,19 @@ def _load_documents() -> list[tuple[str, str]]:
     ``read_text`` escapes it and would have 500'd this page — the exact reader
     experience #84 exists to remove.
 
-    Logged through :func:`build_log_event`, not ``extra=``: the app's log
-    format is ``%(message)s`` (``app/core/logging.py``), so an ``extra`` dict is
-    DROPPED and the line would have read ``about_page_source_unreadable`` with
-    no indication of which source failed or why. Same trap already recorded
-    against the email-failure log line in #296.
+    Logged through :func:`build_log_event`. That was originally a workaround --
+    ``LOG_FORMAT`` is ``%(message)s`` and DROPPED every ``extra=`` field, so the
+    line would have read ``about_page_source_unreadable`` and nothing else, the
+    same trap recorded against the email-failure line in #296.
+
+    #361 fixed the formatter, so ``extra=`` now renders too. This site keeps
+    ``build_log_event`` because the two paths differ in one way that matters
+    here: ``build_log_event`` has no allowlist, so ``error=str(exc)`` prints in
+    full, whereas through ``extra=`` it would render as ``error=<str len=N>``.
+    That is deliberate and safe on THIS path -- the value is an ``OSError``
+    string over a repo-local corpus file, never upstream provider output -- but
+    it is the one place in the codebase where free text still reaches a log
+    line, so it is written down rather than left to be discovered.
     """
     documents: list[tuple[str, str]] = []
     for spec in about_sources():

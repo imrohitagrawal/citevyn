@@ -27,7 +27,7 @@ from app.core.email_client import (
     FileOutboxEmailClient,
     ResendEmailClient,
 )
-from app.core.logging import LOG_FORMAT
+from app.core.logging import build_log_formatter
 
 _MESSAGE = EmailMessage(
     to_addr="someone@example.com",
@@ -253,23 +253,34 @@ def _rendered_email_log(caplog: pytest.LogCaptureFixture) -> str:
     upstream body is PII-bearing whichever logger emits it, so this looks at
     every record the test captured. The "did it log anything at all" partner
     still checks the email logger specifically.
+
+    Rendered with ``build_log_formatter()``, the formatter object production
+    installs -- not ``logging.Formatter(LOG_FORMAT)``. Since #361 those differ:
+    production's subclass APPENDS the ``extra=`` fields, so a plain
+    ``logging.Formatter`` would silently drop exactly the ``body`` field these
+    assertions exist to police, and the PII test below would pass by asserting
+    against output nobody receives.
     """
-    return "\n".join(logging.Formatter(LOG_FORMAT).format(r) for r in caplog.records)
+    formatter = build_log_formatter()
+    return "\n".join(formatter.format(r) for r in caplog.records)
 
 
 def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The log line must be actionable through ``configure_logging``'s formatter.
+    """The status code must be in the MESSAGE STRING, not only in ``extra=``.
 
-    NOT via ``record.__dict__``. ``configure_logging`` formats with
-    ``%(message)s``, so anything passed as ``extra=`` is DROPPED before it
-    reaches stdout -- a `fly logs` reader saw the bare string
-    ``resend_send_error`` and could not tell an unverified sending domain from
-    a bad API key from a rate limit. This asserts the rendered line, which is
-    what the operator receives.
+    Asserted on ``record.getMessage()``, deliberately -- NOT on the rendered
+    line. Since #361 made the formatter emit ``extra=`` fields, the rendered
+    line carries the status code TWICE, so an assertion on it is satisfied by
+    either mechanism and pins neither. Review demonstrated exactly that: with
+    ``status_code=%s`` deleted from the message string the whole file stayed
+    green, and the docstring's old "RED if the status code lives only in
+    ``extra=``" was therefore false. The message-string copy is #296's fix and
+    the deliberate second mechanism; this is what holds it in place.
 
-    RED if the status code lives only in ``extra=``.
+    RED if ``status_code`` is removed from the message-string arguments. The
+    ``extra=`` copy has its own assertion in the PII test below.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -281,14 +292,13 @@ def test_a_resend_failure_logs_the_status_code_in_the_message_itself(
     ):
         asyncio.run(_resend(handler).send(_MESSAGE))
 
-    assert any(r.name == "citevyn.email" for r in caplog.records), (
-        "the failure logged nothing on the email logger at all"
-    )
-    rendered = _rendered_email_log(caplog)
-    assert "resend_send_error" in rendered
-    assert "422" in rendered, (
-        f"the rendered production log line carries no status code: {rendered!r}"
-    )
+    email_records = [r for r in caplog.records if r.name == "citevyn.email"]
+    assert email_records, "the failure logged nothing on the email logger at all"
+    # `getMessage()` is the `%`-interpolated MESSAGE only; `extra=` never
+    # reaches it, so this isolates the mechanism under test.
+    messages = "\n".join(r.getMessage() for r in email_records)
+    assert "resend_send_error" in messages
+    assert "422" in messages, f"the message string itself carries no status code: {messages!r}"
 
 
 def test_the_resend_failure_line_never_carries_the_upstream_body(
@@ -319,17 +329,37 @@ def test_the_resend_failure_line_never_carries_the_upstream_body(
     assert rendered, "the failure logged nothing at all"
     assert "victim@example.com" not in rendered, f"PII leaked into the log line: {rendered!r}"
     assert "403" in rendered
+    # PARTNER, and the fix for a vacuity review found here: without this the
+    # "address is absent" assertion holds trivially if the `extra=` dict is
+    # deleted from the call site altogether -- proved by deleting it and
+    # watching all 1999 backend tests stay green. This asserts the body IS
+    # passed and IS suppressed, which is the actual claim.
+    assert "body=<str len=" in rendered, (
+        f"the call site no longer passes the upstream body, so the redaction "
+        f"assertion above proves nothing: {rendered!r}"
+    )
 
 
 _FORMATTER_PROBE = """
 import json, sys
 sys.path.insert(0, %r)
 import logging
-from app.core.logging import LOG_FORMAT, configure_logging
+from app.core.logging import LOG_FORMAT, build_log_formatter, configure_logging
 configure_logging()
+installed = [h.formatter for h in logging.getLogger().handlers if h.formatter]
+# The record an operator would actually receive: one bounded field, one
+# PII-bearing upstream body, rendered by the INSTALLED formatter object.
+record = logging.LogRecord(
+    "citevyn.email", logging.WARNING, "email_client.py", 1, "resend_send_error", None, None
+)
+record.status_code = 403
+record.body = "You can only send testing emails to victim@example.com."
 print(json.dumps({
     "log_format": LOG_FORMAT,
-    "installed": [h.formatter._fmt for h in logging.getLogger().handlers if h.formatter],
+    "fmts": [f._fmt for f in installed],
+    "classes": [type(f).__name__ for f in installed],
+    "expected_class": type(build_log_formatter()).__name__,
+    "lines": [f.format(record) for f in installed],
 }))
 """
 
@@ -353,6 +383,17 @@ def test_configure_logging_installs_log_format_on_the_root_handler() -> None:
     A subprocess because ``logging.basicConfig`` is a no-op once the root
     logger has handlers, and pytest has already given it several -- so an
     in-process call would assert against pytest's formatter, not production's.
+
+    Since #361 the format STRING is no longer sufficient on its own: the extras
+    are appended by a Formatter SUBCLASS, not by a ``%``-placeholder, so a
+    matching ``_fmt`` on a plain ``logging.Formatter`` would drop every
+    ``extra=`` field while this assertion stayed green. So the probe also
+    renders a real record THROUGH THE INSTALLED OBJECT and asserts on the
+    resulting line.
+
+    RED if ``configure_logging`` goes back to ``basicConfig(format=...)``, if
+    the installed class stops being ``build_log_formatter()``'s, or if the
+    ``body`` field's content reaches the emitted line.
     """
     backend = Path(__file__).resolve().parents[1]
     proc = subprocess.run(
@@ -363,9 +404,25 @@ def test_configure_logging_installs_log_format_on_the_root_handler() -> None:
         check=True,
     )
     data = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert data["installed"], "configure_logging() installed no root handler with a formatter"
-    assert data["installed"] == [data["log_format"]], (
-        f"configure_logging installs {data['installed']!r} but this file renders with "
+    assert data["fmts"], "configure_logging() installed no root handler with a formatter"
+    assert data["fmts"] == [data["log_format"]], (
+        f"configure_logging installs {data['fmts']!r} but this file renders with "
         f"{data['log_format']!r}; the rendered-line assertions above no longer "
         f"describe production output."
+    )
+    assert data["classes"] == [data["expected_class"]], (
+        f"configure_logging installs {data['classes']!r}, but this file renders through "
+        f"{data['expected_class']!r}. A plain logging.Formatter with the same _fmt drops "
+        f"every extra= field, which is exactly the #361 defect."
+    )
+    (line,) = data["lines"]
+    # Positive half: the operator gets the diagnosis.
+    assert "resend_send_error" in line and "status_code=403" in line, (
+        f"the installed formatter dropped the extra= fields: {line!r}"
+    )
+    # Negative half: the upstream body's CONTENT never reaches the line.
+    assert "victim@example.com" not in line, f"PII leaked into production output: {line!r}"
+    assert "body=<str len=" in line, (
+        f"the suppressed body must still be visibly ACCOUNTED FOR, not silently "
+        f"dropped -- got {line!r}"
     )

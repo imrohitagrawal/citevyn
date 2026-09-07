@@ -435,8 +435,29 @@ def test_orchestrator_error_does_not_leak_upstream_body_to_client(
     assert "us-east-1" not in reason
     assert "500" not in reason
 
-    # The full cause is preserved SERVER-SIDE so an SRE can still debug it.
-    logged = "\n".join(
-        rec.getMessage() + str(rec.__dict__.get("cause", "")) for rec in caplog.records
+    # WHAT THE OPERATOR ACTUALLY RECEIVES (#361). This block used to read
+    # ``rec.__dict__["cause"]`` and claim "the full cause is preserved
+    # SERVER-SIDE so an SRE can still debug it". That attribute was never
+    # rendered -- ``LOG_FORMAT`` dropped every ``extra=`` field -- so the test
+    # proved a promise production did not keep. The formatter now emits extras,
+    # and the free text is DELIBERATELY still withheld (it is the one field on
+    # this path that interpolates raw upstream provider output). What the SRE
+    # gets is the exception class plus the request id.
+    #
+    # RED if ``main.py`` stops passing ``cause_type``, or if ``cause``'s text
+    # starts reaching the emitted line.
+    from app.core.logging import build_log_formatter
+
+    emitted = "\n".join(build_log_formatter().format(rec) for rec in caplog.records)
+    assert "orchestrator_error" in emitted, emitted
+    assert "cause_type=" in emitted, (
+        f"the log line names no exception class, so the SRE has nothing to go on: {emitted!r}"
     )
-    assert _LEAKY_UPSTREAM_MESSAGE in logged
+    assert _LEAKY_UPSTREAM_MESSAGE not in emitted, (
+        f"raw upstream provider text reached the log line: {emitted!r}"
+    )
+    # Partner: the record still CARRIES the cause, so the assertion above is
+    # about suppression at render time, not about the field having vanished.
+    assert any(
+        _LEAKY_UPSTREAM_MESSAGE in str(rec.__dict__.get("cause", "")) for rec in caplog.records
+    )
