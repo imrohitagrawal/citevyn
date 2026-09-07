@@ -42,9 +42,20 @@ echo "test_deploy_verify_bundle_gate.sh"
 GOOD_KEY="tEsTkEy_0123456789abcdefghijklmnopqrstuvwxyz"
 
 # ── Extract the block under test straight out of the shipped script. ───────
-# Anchored on the real `if [[ -d ... ]]` line so this can never test a stale
-# transcription of the logic.
-BLOCK="$(awk '/^    if \[\[ -d "\$\{REPO_ROOT\}\/frontend\/dist" \]\]; then$/,/^    fi$/' "${GATE}")"
+# Anchored on the real `if [[ "${FRONTEND_IN_IMAGE}" ... ]]` line so this can
+# never test a stale transcription of the logic. That is the FIRST of the three
+# branches #362 introduced; the range runs to the block's closing `fi`, so all
+# three (SKIP / check / FAIL) are under test.
+#
+# KNOWN LIMIT, stated: the anchor IS the line under test. Editing that condition
+# (say, to `== "999"`, which silently makes the flag a no-op) aborts this file
+# with "the anchor moved" after one assertion, instead of failing the
+# behavioural case that names the defect. It still goes red and the message is
+# honest — no false green — but it misdirects, and the sibling file
+# (test_deploy_verify_skip_state.sh) deliberately picks a body-stable marker for
+# exactly this reason. A stabler anchor here would have to sit outside the
+# block, which would then not prove the block was extracted at all.
+BLOCK="$(awk '/^    if \[\[ "\$\{FRONTEND_IN_IMAGE\}" == "1" \]\]; then$/,/^    fi$/' "${GATE}")"
 
 if [[ -n "${BLOCK}" ]] && printf '%s' "${BLOCK}" | grep -q 'check_bundle_key.sh'; then
     pass "the bundle-check block was located in deploy_verify.sh"
@@ -54,16 +65,26 @@ else
     exit 1
 fi
 
+# Non-vacuity for the extraction itself: a range that stopped at the first `fi`
+# of an inner branch would silently drop the #362 cases below, and every one of
+# them would then fail for the wrong reason.
+if printf '%s' "${BLOCK}" | grep -q 'frontend/dist does not exist'; then
+    pass "the extracted block reaches the absent-dist branch"
+else
+    fail "the extracted block is truncated before the absent-dist branch"
+fi
+
 # ── Harness: a fixture repo root with a stub `record`, running the REAL block.
-run_gate() {  # run_gate <demo-key> ; fixture dist already built at $WORK/root
+run_gate() {  # run_gate <demo-key> [frontend-in-image] ; fixture at $WORK/root
     cat > "${WORK}/harness.sh" <<EOF
 set -uo pipefail
 REPO_ROOT="${WORK}/root"
 DEMO_KEY="\$1"
+FRONTEND_IN_IMAGE="\$2"
 record() { echo "[\$1]\${3:+ \$3}"; }
 ${BLOCK}
 EOF
-    bash "${WORK}/harness.sh" "$1" 2>&1
+    bash "${WORK}/harness.sh" "$1" "${2:-0}" 2>&1
 }
 
 new_fixture() {  # new_fixture — empty dist tree, symlink the real scripts dir
@@ -79,7 +100,7 @@ bundle() {  # bundle <baked-value> [relative-path]
         > "${WORK}/root/${path}"
 }
 
-expect() {  # expect <PASS|FAIL> <label> <output>
+expect() {  # expect <PASS|FAIL|SKIP> <label> <output>
     if printf '%s' "$3" | grep -q "^\[$1\]"; then
         pass "$2"
     else
@@ -147,12 +168,51 @@ OUT="$(
 set -uo pipefail
 REPO_ROOT="${WORK}/ro ot\\\$x"
 DEMO_KEY="\$1"
+FRONTEND_IN_IMAGE=0
 record() { echo "[\$1]\${3:+ \$3}"; }
 ${BLOCK}
 EOF
     bash "${WORK}/h2.sh" "${GOOD_KEY}" 2>&1
 )"
 expect PASS "a REPO_ROOT containing spaces and \$ still records PASS" "${OUT}"
+
+# ── 7b. #362 — THE SILENT THIRD STATE. An absent frontend/dist used to record
+#      neither PASS nor FAIL: no row, no counter, gone from the summary. Every
+#      branch must now write a row.
+new_fixture; rm -rf "${WORK}/root/frontend"
+OUT="$(run_gate "${GOOD_KEY}" 0)"
+expect FAIL "an ABSENT frontend/dist records FAIL on the compose path" "${OUT}"
+if printf '%s' "${OUT}" | grep -q 'make demo-frontend'; then
+    pass "the absent-dist FAIL tells the operator how to fix it"
+else
+    fail "the absent-dist FAIL has no actionable detail: ${OUT}"
+fi
+
+# The Fly-shaped context: the bundle lives inside the image, so grading the
+# host tree is meaningless. SKIP — explicitly, with a reason — never silence,
+# and never a FAIL that would block every run of that path.
+new_fixture; rm -rf "${WORK}/root/frontend"
+OUT="$(run_gate "${GOOD_KEY}" 1)"
+expect SKIP "an absent dist under --frontend-built-in-image records SKIP" "${OUT}"
+if printf '%s' "${OUT}" | grep -q 'Dockerfile.api'; then
+    pass "the SKIP states WHY it was skipped"
+else
+    fail "the SKIP carries no reason — that is the silent state again: ${OUT}"
+fi
+
+# PARTNER (non-vacuity): the SKIP is driven by the FLAG, not by the dist being
+# missing. A present-but-stale dist under the flag must also SKIP rather than
+# grade the wrong artifact — otherwise the flag would be a no-op whenever a
+# developer happens to have a local build lying around.
+new_fixture; bundle "local-demo-key"
+OUT="$(run_gate "${GOOD_KEY}" 1)"
+expect SKIP "a PRESENT but wrong dist still SKIPs under --frontend-built-in-image" "${OUT}"
+
+# PARTNER: and the flag is not simply "always SKIP" — with the flag off, the
+# very same fixture records FAIL. Without this, a hard-coded `record SKIP`
+# would satisfy both cases above.
+OUT="$(run_gate "${GOOD_KEY}" 0)"
+expect FAIL "the same wrong dist records FAIL when the flag is off" "${OUT}"
 
 # ── 8. The script parses at all. ──────────────────────────────────────────
 if bash -n "${GATE}" 2>/dev/null; then
@@ -163,7 +223,7 @@ fi
 
 # ── Non-vacuity, pinned exactly. A slack floor lets a whole case be deleted
 #    silently; bump this deliberately when you add one.
-_EXPECTED_ASSERTIONS=13
+_EXPECTED_ASSERTIONS=20
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
     FAILURES=$((FAILURES + 1))

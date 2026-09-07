@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from app.core.logging import QUERY_CREDENTIAL_RE, SECRET_VALUE
+
 if TYPE_CHECKING:
     import redis.asyncio as redis_async
 
@@ -145,13 +147,25 @@ def reset_redis_client() -> None:
 
 
 def _redact_url(url: str) -> str:
-    """Strip user:password from a redis URL for log lines.
+    """Strip the credential from a redis URL for log lines.
 
     The full DSN is sensitive (it may carry a password) and we never
     want it in a log file. Returns the scheme + host + db suffix.
+
+    TWO credential forms, because redis-py accepts both. The userinfo form
+    (``redis://user:pass@host``) is peeled below. The QUERY form
+    (``redis://host:6379/0?password=…``) has no ``@`` at all, so the peel never
+    saw it and the old version returned the DSN untouched -- and once #361 made
+    ``extra=`` fields render, that printed the password in full at INFO on every
+    boot. Found by adversarial review, not in production. ``redis-py`` does
+    honour that form (``Redis.from_url(...).connection_pool.connection_kwargs``
+    carries the password), including over ``rediss://``.
     """
-    if not url or "@" not in url:
-        return url or ""
+    if not url:
+        return ""
+    url = QUERY_CREDENTIAL_RE.sub(rf"\g<1>{SECRET_VALUE}", url)
+    if "@" not in url:
+        return url
     scheme_userinfo, host_part = url.rsplit("@", 1)
     scheme = scheme_userinfo.split("://", 1)[0]
     return f"{scheme}://***@{host_part}"

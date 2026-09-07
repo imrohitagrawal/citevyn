@@ -49,6 +49,20 @@
 #                                                      # SAY SO in the summary
 #                                                      # (blocker 9 stays PARTIAL)
 #   ./scripts/deploy_verify.sh --dry-run               # print the plan, change nothing
+#   ./scripts/deploy_verify.sh --frontend-built-in-image
+#                                                      # the browser bundle is
+#                                                      # built inside the API
+#                                                      # image, not into the
+#                                                      # host's frontend/dist;
+#                                                      # the bundle-vs-demo-key
+#                                                      # probe records SKIP with
+#                                                      # that reason instead of
+#                                                      # grading the wrong file
+#
+# Probe verdicts: PASS, FAIL, and SKIP. A SKIP is NOT a pass — it moves neither
+# counter and never changes the exit code — but it DOES appear in the summary
+# with the reason it was skipped, so the operator can never read a green gate
+# that quietly ran fewer probes than they think (#362).
 #
 # Env:
 #   VERSION        release TAG to deploy+verify (default: tag at HEAD; must be a tag)
@@ -68,12 +82,14 @@ SKIP_ROLLBACK=0
 DRY_RUN=0
 VERIFY_ONLY=0
 DATA_ROLLBACK_ONLY=0
+FRONTEND_IN_IMAGE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-rollback-drill) SKIP_ROLLBACK=1; shift ;;
         --data-rollback-only)  DATA_ROLLBACK_ONLY=1; shift ;;
         --verify-only)         VERIFY_ONLY=1; shift ;;
+        --frontend-built-in-image) FRONTEND_IN_IMAGE=1; shift ;;
         --dry-run)             DRY_RUN=1; shift ;;
         # Print the header block up to its closing rule. A hard-coded end line
         # (it was '2,43p') silently truncates --help every time the header grows.
@@ -89,15 +105,32 @@ cd "${REPO_ROOT}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
+SKIP_COUNT=0
 RESULTS=()
 
-record() {  # record <PASS|FAIL> <name> [detail]
+# record <PASS|FAIL|SKIP> <name> [detail]
+#
+# SKIP exists because of #362. A probe that neither passed nor failed used to be
+# invisible: the branch simply did not call `record`, so it left no row, moved
+# no counter, and vanished from the summary — the operator read a green gate
+# with one fewer probe than they thought they ran, and nothing said so.
+#
+# A SKIP row is NOT a pass. It never touches PASS_COUNT or FAIL_COUNT and never
+# changes the exit code; it exists so the summary can state, in the operator's
+# own line-by-line list, that the probe was deliberately not run AND WHY. Every
+# SKIP therefore requires a `detail` — a reason nobody supplied is the silent
+# state coming back through the front door.
+record() {
     local status="$1" name="$2" detail="${3:-}"
-    if [[ "${status}" == "PASS" ]]; then
-        PASS_COUNT=$((PASS_COUNT + 1)); echo "    [PASS] ${name}"
-    else
-        FAIL_COUNT=$((FAIL_COUNT + 1)); echo "    [FAIL] ${name}${detail:+ — ${detail}}" >&2
-    fi
+    case "${status}" in
+        PASS) PASS_COUNT=$((PASS_COUNT + 1)); echo "    [PASS] ${name}" ;;
+        SKIP)
+            if [[ -z "${detail}" ]]; then
+                detail="no reason given — this is a bug in deploy_verify.sh"
+            fi
+            SKIP_COUNT=$((SKIP_COUNT + 1)); echo "    [SKIP] ${name} — ${detail}" ;;
+        *)  FAIL_COUNT=$((FAIL_COUNT + 1)); echo "    [FAIL] ${name}${detail:+ — ${detail}}" >&2 ;;
+    esac
     RESULTS+=("${status}|${name}|${detail}")
 }
 
@@ -251,7 +284,8 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     "${REPO_ROOT}/scripts/check_budget.sh"
     case $? in
         0) record PASS "provider key has budget remaining" ;;
-        2) echo "    [WARN] provider budget could not be checked (no key found)" >&2 ;;
+        2) record SKIP "provider key has budget remaining" \
+               "check_budget.sh found no key to query; a deploy that does not use OpenRouter is fine, one that does is UNCHECKED" ;;
         *) record FAIL "provider key budget" "below threshold or unreadable"
            die "refusing to deploy on an exhausted provider key (see docs/COST_CONTROLS.md §0)" ;;
     esac
@@ -275,13 +309,32 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     # bundle whose every request 401s. Same reasoning, and the same script, as
     # docs/DEPLOY_FLY.md §4.1 -- see scripts/check_bundle_key.sh.
     #
-    # KNOWN GAP, deliberately not closed here: the `-d` test has no `else`, so
-    # an absent frontend/dist records neither PASS nor FAIL and vanishes from
-    # the tally. That is correct for the Fly path (the bundle is built inside
-    # the image and never lands in the host's frontend/dist) and wrong for the
-    # compose path. Splitting the two needs a live stack to validate, so it is
-    # tracked rather than guessed at.
-    if [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
+    # #362: an absent frontend/dist used to record NEITHER pass nor fail. Three
+    # branches now, one per real invocation context, and every one of them
+    # writes a row:
+    #
+    #   --frontend-built-in-image → SKIP. The Fly image builds the browser
+    #     bundle in stage 0 of infra/docker/Dockerfile.api, so it never lands in
+    #     the host's frontend/dist. Whatever is (or is not) in the host tree is
+    #     a DIFFERENT artifact from the one being served, so checking it would
+    #     grade the wrong file — a false FAIL when the tree is empty, and a
+    #     false PASS off a stale local build when it is not. The flag is
+    #     required, not inferred: nothing in the script or in .env distinguishes
+    #     the two deploy paths, and guessing which one is being verified is how
+    #     a gate ends up asserting nothing. (The Fly runbook does not invoke
+    #     this script at all today — docs/DEPLOY_FLY.md — so this branch is the
+    #     honest answer for whoever wires it up, not a live path being served.)
+    #
+    #   dist present → the real bundle check, unchanged.
+    #
+    #   dist absent → FAIL. This is the compose path, where the bundle is built
+    #     out of band by `make demo-frontend` and the prod stack serves it
+    #     separately. No dist means the operator never built one, which is the
+    #     v6 outage's exact precondition; it is a real gap and the gate says so.
+    if [[ "${FRONTEND_IN_IMAGE}" == "1" ]]; then
+        record SKIP "frontend bundle carries the current demo key" \
+            "--frontend-built-in-image: the bundle is built inside Dockerfile.api stage 0, so the host's frontend/dist is not the artifact being served and grading it would be meaningless"
+    elif [[ -d "${REPO_ROOT}/frontend/dist" ]]; then
         # `find`, not `dist/assets/*.js`: the glob is one directory deep and
         # .js-only, so a key inlined into index.html or living in a nested
         # chunk recorded a FAIL on a perfectly good bundle. The presence check
@@ -312,7 +365,24 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
             record FAIL "frontend bundle carries the current demo key" \
                 "${bundle_diagnosis:-check_bundle_key.sh produced no output} (searched frontend/dist for *.js and *.html; every browser request would 401 while this gate's own curl probes pass — rebuild with: make demo-frontend)"
         fi
+    else
+        record FAIL "frontend bundle carries the current demo key" \
+            "frontend/dist does not exist, so no browser bundle was built for this release — rebuild with: make demo-frontend (or pass --frontend-built-in-image if the bundle ships inside the API image)"
     fi
+else
+    # #362: --verify-only deliberately skips the whole of §1b (it probes an
+    # already-running stack and deploys nothing), but it used to skip it
+    # SILENTLY — two probes gone from the tally with no line saying so. Both
+    # are recorded as SKIP now: the exit code is unchanged, the summary is not.
+    #
+    # --verify-only subsumes --frontend-built-in-image: the bundle probe is
+    # skipped either way, so the reason printed here is the --verify-only one
+    # even when both flags are given. No duplicate row, no contradiction — just
+    # the coarser reason winning, which is why it is written down.
+    record SKIP "provider key has budget remaining" \
+        "--verify-only: §1b runs only on a deploying run"
+    record SKIP "frontend bundle carries the current demo key" \
+        "--verify-only: §1b runs only on a deploying run"
 fi
 
 # shellcheck disable=SC2206  # deliberate word-splitting of operator-supplied flags
@@ -521,9 +591,13 @@ if [[ "${VERIFY_ONLY}" == "1" ]]; then
         done
     fi
     echo "────────────────────────────────────────────────────────────────"
-    echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}"
-    # A run that recorded NOTHING is a broken harness, not a pass.
-    if [[ "${#RESULTS[@]}" -eq 0 ]]; then
+    echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}   skipped: ${SKIP_COUNT}"
+    # A run that EXECUTED nothing is a broken harness, not a pass. Counted on
+    # PASS+FAIL, not on ${#RESULTS[@]} (#362): SKIP rows now populate RESULTS,
+    # so a row count would make this guard unfireable — a run where every probe
+    # skipped would read as a pass, which is the exact defect the guard exists
+    # to catch, restored by the fix for its sibling.
+    if [[ $((PASS_COUNT + FAIL_COUNT)) -eq 0 ]]; then
         echo " RESULT: ✗ no probes executed — the harness is broken, not the stack."
         exit 1
     fi
@@ -675,7 +749,15 @@ if [[ "${#RESULTS[@]}" -gt 0 ]]; then
     done
 fi
 echo "────────────────────────────────────────────────────────────────"
-echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}"
+echo " passed: ${PASS_COUNT}   failed: ${FAIL_COUNT}   skipped: ${SKIP_COUNT}"
+
+# The same zero-probe guard --verify-only has carried since #195. The full gate
+# never had one (#362): a run in which every probe skipped would have printed
+# "passed: 0   failed: 0" and then walked into the PASSED branch.
+if [[ $((PASS_COUNT + FAIL_COUNT)) -eq 0 ]]; then
+    echo " RESULT: ✗ no probes executed — the harness is broken, not the stack."
+    exit 1
+fi
 
 # Production state is reported UNCONDITIONALLY, and from a real probe rather
 # than from a variable that tracks intent. This block used to fire only when

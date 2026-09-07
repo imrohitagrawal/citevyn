@@ -168,6 +168,124 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that Node 20/22/26 produce a byte-identical bundle.
 
 ### Fixed
+- **Production logs print their `extra=` fields again, without leaking the
+  upstream bodies those fields carry (#361).** `configure_logging` formatted
+  with `LOG_FORMAT = "%(message)s"`, so every field passed as `extra=` was
+  discarded before it reached stdout — **31 logging call sites across 18 files**
+  (counted with an AST walk, not a grep; the raw `grep -rn "extra="` count of 41
+  includes comments, `SettingsConfigDict(extra="ignore")`, and two DB-audit
+  kwargs that share the keyword). `_logger.warning("resend_send_error",
+  extra={"status_code": 422})` printed the single word `resend_send_error`, and
+  an operator reading `fly logs` could not tell an unverified sending domain
+  from a revoked key from a rate limit.
+
+  Simply emitting the fields would have converted a dropped log into a **PII
+  leak**, so it was not a one-line change. Two shapes were *measured* to survive
+  `redact_value`: an email address nested inside an upstream `body` field (the
+  redactor matches on the KEY NAME, and `body` is in neither `SECRET_KEY_PARTS`
+  nor `RAW_TEXT_KEYS`), and a Resend-shaped `re_` + 24-character key, which at 27
+  characters is under `HIGH_ENTROPY_RE`'s 32-character floor. Five call sites
+  log an upstream response body, including the magic-link path (the user's own
+  address) and the OAuth token exchange (which can echo the `code`).
+
+  The safety is therefore **structural, not pattern-based** — a denylist of
+  secret shapes cannot be made complete, because every added regex is a guess
+  about the next provider's key format. `RedactingExtraFormatter` fails closed:
+  a bool/int/float/None is bounded by construction and always prints; a string
+  prints verbatim only if its key is on an explicit, reviewed allowlist
+  (`EMITTED_TEXT_KEYS`) *and* still survives `redact_value`; everything else
+  becomes a shape summary — `body=<str len=57>`. The summary is the point: an
+  unlisted field is **visibly suppressed rather than silently dropped**, so an
+  operator can see the field exists and ask for it, and adding a key becomes a
+  conscious review decision instead of an accident. Free text from an upstream
+  provider cannot reach the log line at all, whatever shape the secret inside it
+  takes. `RESERVED_RECORD_ATTRS` is derived from a real `LogRecord` on the
+  running interpreter rather than hard-coded — a stale list would have appended
+  `taskName=None` (3.12+) to every production line.
+
+  Three call sites that passed a free-text `str(exc)` now pass a bounded
+  `cause_type`/`error_type` beside it (`main.py`, `llm/fallback.py`,
+  `worker/cli.py`), which is what an SRE actually correlates on. `main.py`'s
+  `_orchestrator_error_handler` docstring promised "the full cause chain is
+  logged SERVER-SIDE"; it was logged nowhere, and the docstring now says what is
+  really emitted and why the text is withheld.
+
+  Every test renders a real `LogRecord` through the formatter object
+  `configure_logging` **installs** and asserts on the output string — never on
+  `LOG_FORMAT`'s contents, a dict key, or "was `redact_value` called". Both
+  measured leak shapes have a test, each with a partner proving the redaction is
+  not vacuous (a `status_code` and a `provider` that must survive intact, so a
+  "redact everything" implementation fails). Twelve mutants killed, including
+  installing a plain `logging.Formatter` with an identical `_fmt` — which the
+  old partner test would have accepted while every `extra=` field vanished.
+
+  Two blockers found by review, after the first version was green:
+
+  * **`request_id` printed as `[REDACTED]` on every line.** A real id is
+    `f"req_{uuid.uuid4().hex}"` — 36 characters, all inside `HIGH_ENTROPY_RE`'s
+    class — so the entropy sweep ate it whole, while the API handed the caller
+    that same id to grep the logs with. The test missed it because it used
+    `req_abc123`, a value the application never produces. `OPAQUE_ID_KEYS`
+    (`request_id`, `index_version`, `source_version_hash`, matched on the whole
+    key, never as a substring) now skips the entropy sweep and keeps the
+    `Bearer` sweep. The same fix repairs the per-request `request_completed`
+    line, which had been broken on `main` before any of this.
+  * **A Redis password reached the log.** `_redact_url` peeled only the
+    `user:pass@host` form; redis-py also honours
+    `redis://host:6379/0?password=…`, which has no `@`, so that DSN printed in
+    full at INFO on every boot once extras rendered.
+    `QUERY_CREDENTIAL_RE` gained `password`/`auth`/`secret`/`api_key` and
+    `_redact_url` applies it first.
+
+  Three latent bypasses closed with them — none reachable at any current call
+  site, each falsifying the module's own stated invariant: a container under an
+  allowlisted key printed its contents (the allowlist branch is `str`-only now),
+  an `int` subclass with a hostile `__str__` printed verbatim under any key
+  (scalars are exact types now), and an `extra=` KEY containing a newline could
+  forge a log line (`repr` guarded the value, not the key).
+
+- **`deploy_verify.sh` records a verdict for every probe; there is no silent
+  third state (#362).** The frontend-bundle check sat inside
+  `if [[ -d "${REPO_ROOT}/frontend/dist" ]]` with no `else`, and `record` is the
+  only thing that moves `PASS_COUNT`/`FAIL_COUNT` — so an absent `dist` left no
+  row, moved no counter and vanished from the summary. The operator read a green
+  gate that had quietly run one fewer probe than they thought.
+
+  `record` gains a third verdict, `SKIP`. It is **not** a pass: it moves neither
+  counter and never changes the exit code, but it appears in the summary with
+  the reason it was skipped, and a `SKIP` with no reason is labelled a bug in
+  the output rather than printed blank. The three branches are now explicit —
+  the new `--frontend-built-in-image` flag records SKIP (the Fly image builds the
+  bundle in `Dockerfile.api` stage 0, so the host tree is a different artifact
+  and grading it would be meaningless in both directions); a present `dist` runs
+  the real check unchanged; an absent `dist` records FAIL with the
+  `make demo-frontend` instruction, which is the correct answer on the compose
+  path this gate actually serves. The flag is required rather than inferred:
+  nothing in the script or `.env` distinguishes the two deploy paths.
+
+  Two sibling silent skips named in the same issue are closed the same way: the
+  provider-budget "could not be checked" branch, and the whole of §1b under
+  `--verify-only`. Both summaries now print `skipped:` alongside the counts.
+
+  The zero-probe guard ("no probes executed — the harness is broken") moved from
+  `${#RESULTS[@]} -eq 0` to `$((PASS_COUNT + FAIL_COUNT)) -eq 0`, because SKIP
+  rows populate `RESULTS` and a row count would have made that guard unfireable
+  — restoring the exact defect its sibling fix was closing. The **main** summary
+  never had that guard at all and now does. It is exercised by extracting it
+  from the shipped script and running it against fabricated tallies, so what is
+  asserted is the exit code an operator gets.
+
+  Review then found that three of these — the `--verify-only` SKIPs, the
+  `skipped:` tally, and the `SKIP_COUNT=0` initialisation (fatal on bash 3.2
+  under `set -u`) — survived every extraction-based assertion, i.e. half of what
+  the fix claims had no test. The suite now drives the shipped script end to end
+  under `--verify-only` against a dead port — hermetic, no docker, one refused
+  connection to `127.0.0.1:1` — and asserts both SKIP rows, their reasons and
+  the printed count. Verified on bash 3.2.57, the macOS CI leg; shellcheck
+  reports no new findings; the new zero-probe guard was proved unable to fire on
+  a legitimate run (minimum 7 executed probes at the main summary, 5 under
+  `--verify-only`).
+
 - **SQLite foreign-key enforcement is on, and it caught a production bug in the
   chat hot path (#286).** SQLite ships with `PRAGMA foreign_keys` OFF, per
   connection, and nothing in this codebase ever turned it on — so for the whole

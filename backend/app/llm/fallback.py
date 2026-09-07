@@ -48,7 +48,11 @@ class FallbackLLMClient:
             # the fallback is observable without leaking evidence text.
             _logger.warning(
                 "llm_primary_unavailable_falling_back",
-                extra={"cause": exc.__class__.__name__},
+                # `cause_type`, not `cause`: the formatter prints a `*_type`
+                # field verbatim precisely because a class name is bounded,
+                # while a bare `cause` is `str(exc)` elsewhere and is
+                # suppressed to a shape summary (#361).
+                extra={"cause_type": exc.__class__.__name__},
             )
             return await self._secondary.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
