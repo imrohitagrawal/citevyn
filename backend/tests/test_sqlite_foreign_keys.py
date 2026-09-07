@@ -298,3 +298,81 @@ async def test_the_predicate_agrees_with_the_connection_the_hook_really_sees() -
 
     assert captured, "the Engine connect event never fired"
     assert is_sqlite_dbapi_connection(captured[0]) is True
+
+
+# ---------------------------------------------------------------------------
+# 4. Which entry points the hook actually reaches
+# ---------------------------------------------------------------------------
+
+
+def _loads_app_core_db(module: str) -> bool:
+    """Import ``module`` in a clean interpreter and report whether that pulled
+    in ``app.core.db`` (and therefore registered the pragma listener)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1]
+    script = (
+        "import sys, importlib\n"
+        f"importlib.import_module({module!r})\n"
+        "print('app.core.db' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=backend.parent,
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": str(backend), "PATH": "/usr/bin:/bin"},
+        check=True,
+    )
+    return result.stdout.strip().splitlines()[-1] == "True"
+
+
+@pytest.mark.parametrize("module", ["app.worker.cli", "db.seed.seed_catalog"])
+async def test_the_entry_points_that_write_child_rows_load_the_hook(module: str) -> None:
+    """The listener only exists in a process that imported ``app.core.db``.
+
+    Registering on the ``Engine`` class is process-wide but not magic: an
+    entry point that never imports this module gets no enforcement at all.
+    These two build engines and write rows carrying foreign keys, so they
+    must load it. RED if an import is refactored away and enforcement
+    silently disappears for the ingest or seed path.
+    """
+    assert _loads_app_core_db(module) is True
+
+
+async def test_the_documented_uncovered_entry_point_is_still_uncovered() -> None:
+    """The other half of the boundary drawn in ``app/core/db.py``'s docstring.
+
+    Without this, the COVERED list above is satisfiable by everything loading
+    the hook, and the docstring's boundary would be prose nobody checks.
+    ``seed_users`` writes only ``users`` rows, which carry no foreign keys of
+    their own, so it has nothing to enforce -- if that ever changes, this
+    fails and the docstring gets revisited instead of quietly going stale.
+
+    ``db/env.py`` (alembic) belongs on this list too but cannot be imported
+    outside an alembic run, so it is covered by the test below instead.
+    """
+    assert _loads_app_core_db("db.seed.seed_users") is False
+
+
+async def test_batch_alter_table_migrations_still_exist() -> None:
+    """The partner to the test above.
+
+    That one asserts an ABSENCE -- alembic does not load the hook -- which
+    proves nothing on its own unless the reason for the absence is real. Four
+    migrations use ``op.batch_alter_table``, whose SQLite implementation is
+    create-new-table / copy / drop / rename, and SQLite's own documentation
+    says to run that with foreign keys OFF. If no migration used it any more,
+    excluding alembic would be an unexamined gap rather than a decision, and
+    this test says so.
+    """
+    from pathlib import Path
+
+    versions = Path(__file__).resolve().parents[2] / "db" / "versions"
+    assert versions.is_dir(), f"migration directory not found at {versions}"
+    using_batch = sorted(
+        p.name for p in versions.glob("*.py") if "batch_alter_table" in p.read_text()
+    )
+    assert using_batch, "no migration uses batch_alter_table; revisit the alembic exclusion"

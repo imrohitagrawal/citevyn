@@ -67,16 +67,34 @@ def is_sqlite_dbapi_connection(dbapi_connection: Any) -> bool:
 def enable_sqlite_foreign_keys(dbapi_connection: Any, connection_record: Any) -> None:
     """Turn on ``PRAGMA foreign_keys`` for every new SQLite connection.
 
-    Registered against the ``Engine`` *class*, so it fires for every
-    engine in the process — including the several test modules that call
-    ``create_async_engine`` directly rather than going through
-    :func:`build_engine`, and the worker/seed/alembic entry points. An
-    engine-instance listener in :func:`build_engine` would cover none of
-    those.
+    Registered against the ``Engine`` *class*, so it fires for every engine
+    in whatever process has imported this module — including the ~30 test
+    modules that call ``create_async_engine`` directly instead of going
+    through :func:`build_engine`. An engine-instance listener inside
+    :func:`build_engine` would cover none of those, which is the whole
+    reason for the class-level registration.
+
+    Scope, measured rather than assumed (``"app.core.db" in sys.modules``
+    after importing each entry point) — see
+    ``tests/test_sqlite_foreign_keys.py``:
+
+    * COVERED: the FastAPI app, ``app.worker.cli``, ``db.seed.seed_catalog``,
+      and the whole test suite (``tests/conftest.py`` imports this module).
+    * NOT covered: ``db/env.py`` (alembic) and ``db.seed.seed_users``, which
+      import ``app.core.config`` and ``app.models`` but never this module.
+
+    Leaving alembic out is deliberate, not an oversight. Four migrations use
+    ``op.batch_alter_table``, which on SQLite is implemented as
+    create-new-table / copy-rows / drop-old / rename — and SQLite's own
+    documentation says to run that with foreign keys OFF, because the
+    intermediate states are legitimately inconsistent. ``seed_users`` writes
+    only ``users`` rows, which have no foreign keys of their own, so it has
+    nothing to enforce.
 
     SQLite scopes this pragma to the connection, so it has to be re-issued
-    on each one; there is no database-level setting. On Postgres this is a
-    single string comparison and no SQL.
+    on each one; there is no database-level setting, and no way to set it
+    once per engine. On Postgres this is a single string comparison and no
+    SQL at all.
     """
     if not is_sqlite_dbapi_connection(dbapi_connection):
         return
