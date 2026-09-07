@@ -59,7 +59,15 @@ HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{32,}\b")
 # -- it discloses none of our secrets -- the ``Bearer`` sweep below still runs on
 # it, and the formatter's ``repr`` stops it forging a second log line. Losing
 # every correlation id is the far worse trade.
+#
+# It IS capped, though. Before this exemption the entropy sweep collapsed a long
+# value to ``[REDACTED]``, so nothing else bounded the length -- and a client
+# sending a 4 kB ``X-Request-ID`` would then have written a 4 kB line into a
+# metered log pipeline, on the ``build_log_event`` path where
+# ``MAX_EMITTED_TEXT`` does not reach. No real id comes close to the cap: the
+# longest is a 128-character ``source_version_hash``.
 OPAQUE_ID_KEYS = frozenset({"request_id", "index_version", "source_version_hash"})
+MAX_OPAQUE_ID = 160
 
 
 # Query-string parameters that ARE credentials. uvicorn's access log records
@@ -147,6 +155,15 @@ RESERVED_RECORD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", None, None
 # vanishes), and adding a key here is then a conscious review decision rather
 # than an accident. Free text from an upstream provider cannot reach the log
 # line at all, whatever shape the secret inside it takes.
+#
+# SCOPE, because the sentence above is otherwise stronger than the evidence:
+# this governs the ``extra=`` path only. ``build_log_event`` below has NO
+# allowlist -- it redacts by key name and returns a dict the caller logs as the
+# message -- so a caller passing free text there still prints it in full. One
+# site does (``api/routes/about.py``, an OSError string over a repo-local file,
+# never upstream output) and says so in its own docstring. Routing
+# ``build_log_event`` through this allowlist would change the three sites that
+# use it and is deliberately not done here.
 EMITTED_TEXT_KEYS = frozenset(
     {
         # Correlation + routing.
@@ -311,6 +328,8 @@ def redact_value(key: str, value: Any) -> Any:
         # sweep, which would otherwise blank the whole value -- see
         # OPAQUE_ID_KEYS for the measurement and the tradeoff.
         if key_lower in OPAQUE_ID_KEYS:
+            if len(redacted) > MAX_OPAQUE_ID:
+                return redacted[:MAX_OPAQUE_ID] + "…<truncated>"
             return redacted
         return HIGH_ENTROPY_RE.sub(SECRET_VALUE, redacted)
 

@@ -279,9 +279,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `skipped:` tally, and the `SKIP_COUNT=0` initialisation (fatal on bash 3.2
   under `set -u`) — survived every extraction-based assertion, i.e. half of what
   the fix claims had no test. The suite now drives the shipped script end to end
-  under `--verify-only` against a dead port — hermetic, no docker, one refused
-  connection to `127.0.0.1:1` — and asserts both SKIP rows, their reasons and
-  the printed count. Verified on bash 3.2.57, the macOS CI leg; shellcheck
+  under `--verify-only` against a dead port — one refused connection to
+  `127.0.0.1:1`, and a stubbed `docker` binary on PATH, because the gate's
+  preflight requires that binary to exist and the macOS CI leg ships none; an
+  earlier version of this case omitted the stub and would have reddened that leg
+  on arrival, with two of its assertions passing for the wrong reason. It
+  asserts both SKIP rows, their reasons and the printed count. Verified on bash 3.2.57, the macOS CI leg; shellcheck
   reports no new findings; the new zero-probe guard was proved unable to fire on
   a legitimate run (minimum 7 executed probes at the main summary, 5 under
   `--verify-only`).

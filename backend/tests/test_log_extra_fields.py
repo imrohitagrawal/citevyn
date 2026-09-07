@@ -259,6 +259,25 @@ def test_an_opaque_id_still_loses_a_bearer_token() -> None:
     assert "Bearer [REDACTED]" in line, line
 
 
+def test_a_pathological_client_supplied_request_id_is_capped() -> None:
+    """``RequestIDMiddleware`` honours an inbound ``X-Request-ID`` with no length
+    validation. Before ``OPAQUE_ID_KEYS`` the entropy sweep collapsed a long one
+    to ``[REDACTED]``, so exempting these keys removed the only bound — and on
+    the ``build_log_event`` path ``MAX_EMITTED_TEXT`` does not reach, so a 4 kB
+    header would have written a 4 kB line into a metered pipeline.
+
+    RED if ``MAX_OPAQUE_ID`` stops being applied in ``redact_value``.
+    """
+    from app.core.logging import MAX_OPAQUE_ID, redact_value
+
+    rendered = redact_value("request_id", "z" * 4000)
+    assert len(rendered) < MAX_OPAQUE_ID + 40, len(rendered)
+    assert rendered.endswith("…<truncated>")
+    # PARTNER: a real id is nowhere near the cap and survives whole, so this is
+    # not "ids are always truncated".
+    assert redact_value("request_id", REAL_REQUEST_ID) == REAL_REQUEST_ID
+
+
 def test_the_opaque_id_exemption_is_exact_not_substring() -> None:
     """PARTNER: ``SECRET_KEY_PARTS`` and ``RAW_TEXT_KEYS`` match as SUBSTRINGS,
     which is this module's recorded footgun. ``OPAQUE_ID_KEYS`` deliberately
@@ -331,6 +350,50 @@ def test_a_newline_in_an_extra_KEY_cannot_forge_a_second_line() -> None:
     assert "\n" not in line, f"an extra KEY forged a second log line: {line!r}"
     # PARTNER: an ordinary key is untouched, so this is not "all keys mangled".
     assert render("evt", status_code=1) == "evt status_code=1"
+
+
+def test_the_allowlist_is_consulted_with_the_RAW_key_not_the_sanitised_one() -> None:
+    """The sanitiser is for DISPLAY only. If the sanitised name were used for the
+    allowlist lookup too, a key like ``"request id"`` (a space) would sanitise
+    into ``request_id`` and buy itself verbatim printing it was never granted.
+
+    Review found this direction correct but unpinned — swapping the two
+    arguments survived the entire suite.
+
+    RED if ``render_extras`` passes ``safe_key`` to ``render_extra_value``.
+    """
+    secret = "would-be-printed-verbatim"
+    line = render("evt", **{"request id": secret})
+    assert f"request_id=<str len={len(secret)}>" in line, line
+    assert secret not in line, line
+    # PARTNER: the genuinely-named key IS printed verbatim, so this is not
+    # "nothing is ever allowlisted".
+    assert render("evt", request_id="abc") == "evt request_id='abc'"
+
+
+def test_a_record_dict_that_grows_during_formatting_does_not_drop_the_line() -> None:
+    """``render_extras`` snapshots ``record.__dict__`` with ``list(...)`` because
+    iterating it live raises ``RuntimeError: dictionary changed size during
+    iteration`` OUTSIDE the per-field guard — the one remaining way this
+    function could drop a line, which its docstring says it cannot.
+
+    RED if the ``list(...)`` snapshot is removed. (The mutation-tester's report
+    that this survived is why the test exists.)
+    """
+
+    class GrowsOnStr:
+        def __init__(self, record: logging.LogRecord) -> None:
+            self._record = record
+
+        def __str__(self) -> str:
+            self._record.__dict__[f"added_{len(self._record.__dict__)}"] = 1
+            return "grew"
+
+    record = logging.LogRecord("t", logging.WARNING, __file__, 1, "evt", None, None)
+    record.provider = GrowsOnStr(record)
+    line = build_log_formatter().format(record)
+    assert line.startswith("evt "), line
+    assert "provider=" in line, line
 
 
 def test_an_unlisted_string_field_is_suppressed_but_visible() -> None:

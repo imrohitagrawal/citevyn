@@ -129,7 +129,14 @@ record() {
                 detail="no reason given — this is a bug in deploy_verify.sh"
             fi
             SKIP_COUNT=$((SKIP_COUNT + 1)); echo "    [SKIP] ${name} — ${detail}" ;;
-        *)  FAIL_COUNT=$((FAIL_COUNT + 1)); echo "    [FAIL] ${name}${detail:+ — ${detail}}" >&2 ;;
+        # An unrecognised verdict counts as a FAIL, and is NORMALISED to the
+        # string "FAIL" before it is recorded. Review found the raw value going
+        # into RESULTS, so a typo'd `record PASSED …` incremented FAIL_COUNT but
+        # the summary — which prints "[${status}]" verbatim — showed the
+        # operator "[PASSED]". A summary that misreads is the exact class of
+        # defect #362 is about.
+        *)  status="FAIL"
+            FAIL_COUNT=$((FAIL_COUNT + 1)); echo "    [FAIL] ${name}${detail:+ — ${detail}}" >&2 ;;
     esac
     RESULTS+=("${status}|${name}|${detail}")
 }

@@ -127,6 +127,11 @@ has "ROW SKIP|mystery|no reason given" \
 #      what a typo does, and "counts as PASS" would be the worst answer.
 OUT="$(drive 'record PASSED "typo"')"
 has "pass=0 fail=1" "an unrecognised verdict is treated as a FAIL, never a pass" "${OUT}"
+# …and the SUMMARY must say so too. The counters were right while the recorded
+# row still carried the raw word, so the operator's line-by-line list read
+# "[PASSED]" on a probe that had failed.
+has "ROW FAIL|typo|" "an unrecognised verdict is NORMALISED in the summary row" "${OUT}"
+hasnt "ROW PASSED|" "the raw typo never reaches the summary" "${OUT}"
 
 # ── 6. The zero-probe guard counts EXECUTED probes, not rows. Now that SKIP
 #      rows populate RESULTS, a `${#RESULTS[@]} -eq 0` guard could never fire
@@ -141,6 +146,7 @@ if [[ "${GUARDS}" -eq 2 ]]; then
 else
     fail "expected 2 executed-probe guards (verify-only + main summary), found ${GUARDS}"
 fi
+# shellcheck disable=SC2016  # single quotes are deliberate: this is a grep pattern
 if grep -q '\${#RESULTS\[@\]}" -eq 0' "${GATE}"; then
     fail "a row-count zero-probe guard survives; SKIP rows make it unfireable"
 else
@@ -193,6 +199,37 @@ has "REACHED_SUMMARY_END" "the summary continues when a probe actually ran" "${O
 OUT="$(run_guard 0 1 0)"
 hasnt "no probes executed" "one FAIL also counts as an executed probe" "${OUT}"
 
+# ── 7b. The SAME guard in the --verify-only summary, extracted and executed
+#      SEPARATELY. Counting matching lines is blind to the COMPARISON: review
+#      changed `-eq 0` to `-eq 99999` in this one — a guard that can never fire —
+#      and every assertion in both suites stayed green, because the line still
+#      matched the count pattern and case 9b below always has PASS+FAIL > 0.
+#      Two guards, two executions.
+VGUARD="$(awk '/^    # A run that EXECUTED nothing is a broken harness, not a pass\. Counted on$/,/^    fi$/' "${GATE}")"
+if [[ -n "${VGUARD}" ]] && printf '%s' "${VGUARD}" | grep -q 'no probes executed'; then
+    pass "the --verify-only summary's zero-probe guard was located"
+else
+    fail "could not extract the --verify-only zero-probe guard — the anchor moved"
+fi
+
+run_vguard() {  # run_vguard <pass> <fail>
+    cat > "${WORK}/vg.sh" <<EOF
+set -uo pipefail
+PASS_COUNT=$1
+FAIL_COUNT=$2
+${VGUARD}
+echo "REACHED_SUMMARY_END"
+EOF
+    bash "${WORK}/vg.sh" 2>&1; echo "RC=$?"
+}
+
+OUT="$(run_vguard 0 0)"
+has "no probes executed" "the --verify-only guard fires on a zero-executed run" "${OUT}"
+has "RC=1" "the --verify-only guard exits non-zero" "${OUT}"
+# PARTNER: it stands down on a real run, so it is not an unconditional exit 1.
+OUT="$(run_vguard 5 0)"
+has "REACHED_SUMMARY_END" "the --verify-only guard stands down when probes ran" "${OUT}"
+
 cp "${GATE}" "${WORK}/gate.sh"
 
 # ── 8. --frontend-built-in-image is a REAL flag, not silently ignored. An
@@ -241,8 +278,29 @@ cp "${REPO_ROOT}/infra/docker/scripts/_env_guard.sh" "${FIX}/infra/docker/script
 cp "${REPO_ROOT}/scripts/check_budget.sh" "${FIX}/scripts/" 2>/dev/null || true
 cp "${REPO_ROOT}/scripts/check_bundle_key.sh" "${FIX}/scripts/" 2>/dev/null || true
 
-OUT="$(BASE_URL="http://127.0.0.1:1" CITEVYN_DEMO_API_KEY="fixturekey" \
+# STUB `docker`, do not assume it. `deploy_verify.sh` runs
+# `command -v docker || die` and that check sits BELOW the --dry-run early exit,
+# so --verify-only reaches it. The macos-latest CI leg ships no docker CLI at
+# all — the gate's own comment records that leg going red for exactly this
+# reason — so without the stub this case would fail on arrival in CI, and worse,
+# two of the assertions below would then "pass" for the wrong reason (the
+# absent-string and non-zero-exit checks are both satisfied by dying at
+# preflight). A no-op stub is enough: --verify-only never invokes docker, it
+# only requires the binary to exist.
+mkdir -p "${FIX}/bin"
+printf '#!/bin/sh\nexit 0\n' > "${FIX}/bin/docker"
+chmod +x "${FIX}/bin/docker"
+
+OUT="$(PATH="${FIX}/bin:${PATH}" BASE_URL="http://127.0.0.1:1" \
+    CITEVYN_DEMO_API_KEY="fixturekey" \
     "${FIX}/infra/docker/scripts/deploy_verify.sh" --verify-only 2>&1)"; RC=$?
+
+# PARTNER, and the thing that makes the four assertions below non-vacuous: the
+# run must have got PAST preflight. Without this, a future preflight check the
+# fixture does not satisfy would silently turn every case below into a
+# passes-for-the-wrong-reason.
+hasnt "not found on PATH" "the run cleared preflight (it did not die on a missing tool)" "${OUT}"
+has "probing" "the run reached the --verify-only probe stage" "${OUT}"
 
 has "[SKIP] provider key has budget remaining" \
     "--verify-only RECORDS its skipped budget probe (it used to skip silently)" "${OUT}"
@@ -270,7 +328,7 @@ fi
 
 # ── Non-vacuity, pinned exactly. A slack floor lets a whole case be deleted
 #    silently; bump this deliberately when you add one.
-_EXPECTED_ASSERTIONS=31
+_EXPECTED_ASSERTIONS=39
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
     FAILURES=$((FAILURES + 1))
