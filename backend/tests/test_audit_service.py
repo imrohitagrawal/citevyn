@@ -21,12 +21,19 @@ from app.services.audit import (
     record_ask_question,
     record_audit_event,
 )
+from tests.conftest import seed_user
 
 
 @pytest.mark.asyncio
 async def test_record_audit_event_writes_full_row(session) -> None:
     """The full row shape matches the model contract."""
     user_id = "user-123"
+    # ``audit_events.user_id`` is a foreign key onto ``users``. In
+    # production the actor id always names a real row -- an admin from
+    # ``db/seed/seed_users.py`` or a chat principal from
+    # ``Orchestrator._ensure_user`` -- so seeding it is what makes the
+    # fixture match production, not a workaround (#286).
+    await seed_user(session, user_id)
 
     await record_audit_event(
         session,
@@ -92,6 +99,7 @@ async def test_record_ask_question_stamps_envelope(session) -> None:
     """
     session_id = uuid.uuid4()
     message_id = uuid.uuid4()
+    await seed_user(session, "user-7")  # audit_events.user_id -> users (#286)
     await record_ask_question(
         session,
         user_id="user-7",
@@ -138,6 +146,7 @@ async def test_record_ask_question_extra_overrides_envelope_keys(
     """
     session_id = uuid.uuid4()
     message_id = uuid.uuid4()
+    await seed_user(session, "user-7")  # audit_events.user_id -> users (#286)
     await record_ask_question(
         session,
         user_id="user-7",
@@ -169,6 +178,7 @@ async def test_record_admin_action_sets_admin_role_and_actor(
     greppable by ``role='admin'``; the test pins that contract
     so a future refactor can't accidentally drop the role.
     """
+    await seed_user(session, "admin-1", role=UserRole.admin)  # FK -> users (#286)
     await record_admin_action(
         session,
         admin_user_id="admin-1",
@@ -201,6 +211,7 @@ async def test_record_admin_action_does_not_clobber_explicit_actor(
     explicitly pass one — useful when an on-behalf-of admin
     action records the human who initiated the call.
     """
+    await seed_user(session, "admin-1", role=UserRole.admin)  # FK -> users (#286)
     await record_admin_action(
         session,
         admin_user_id="admin-1",

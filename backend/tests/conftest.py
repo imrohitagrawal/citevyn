@@ -403,6 +403,67 @@ async def seed_catalog(
     return {"docs": docs, "chunks": chunks, "exact_terms": exact_terms}
 
 
+async def seed_user(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    role: UserRole = UserRole.demo_user,
+) -> None:
+    """Persist a ``users`` row if absent, in its own flush.
+
+    ``audit_events.user_id`` and ``sessions.user_id`` are foreign keys onto
+    ``users``, and no ORM ``relationship()`` connects those mapped classes.
+    That has two consequences a test has to respect, both of which this
+    helper handles (#286):
+
+    * an actor id the test invents (``"user-123"``, ``"admin-1"``) has no
+      parent row unless someone inserts one;
+    * even adding the right ``User`` is not enough if it goes in the SAME
+      flush as the child — SQLAlchemy's unit of work orders inserts by
+      declared relationships, not by raw foreign-key columns, and has been
+      observed to emit ``audit_events`` before ``users``. The dedicated
+      flush here is what makes the order deterministic.
+
+    In production these ids always name a real row: the admin actor is the
+    constant ``ADMIN_USER_ID`` seeded by ``db/seed/seed_users.py``, and a
+    chat actor comes from ``Orchestrator._ensure_user``.
+    """
+    if await session.get(User, user_id) is None:
+        session.add(User(user_id=user_id, role=role, created_at=datetime.now(UTC)))
+        await session.flush()
+
+
+async def seed_index_version(
+    session: AsyncSession,
+    index_version: str,
+    *,
+    status: IndexStatus = IndexStatus.candidate,
+) -> None:
+    """Persist an ``index_versions`` row if absent, in its own flush.
+
+    ``documents.index_version`` and ``evaluation_runs.index_version`` are
+    foreign keys onto it. Defaults to ``candidate`` so a caller that only
+    needs the parent to exist does not accidentally hand a test a second
+    active index.
+
+    Same one-flush-per-parent rule as :func:`seed_user`, and here the
+    ordering trap is sharper: ``IndexVersion.evaluation_run_id`` DOES have a
+    ``relationship()`` back to ``EvaluationRun``, so a combined flush is
+    ordered ``evaluation_runs`` first — exactly backwards for the other,
+    relationship-less foreign key.
+    """
+    if await session.get(IndexVersion, index_version) is None:
+        session.add(
+            IndexVersion(
+                index_version=index_version,
+                status=status,
+                source_version_hash=f"sha256:{index_version}",
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.flush()
+
+
 async def seed_chat_session(
     session: AsyncSession,
     session_id: uuid.UUID,
@@ -426,9 +487,7 @@ async def seed_chat_session(
     Existing rows are left alone, so repeat calls are safe.
     """
     now = datetime.now(UTC)
-    if await session.get(User, user_id) is None:
-        session.add(User(user_id=user_id, role=UserRole.demo_user, created_at=now))
-        await session.flush()
+    await seed_user(session, user_id)
     if await session.get(SessionModel, session_id) is None:
         session.add(
             SessionModel(
@@ -471,16 +530,7 @@ async def seed_evidence_chunks(
     exactly what it did before.
     """
     now = datetime.now(UTC)
-    if await session.get(IndexVersion, index_version) is None:
-        session.add(
-            IndexVersion(
-                index_version=index_version,
-                status=IndexStatus.candidate,
-                source_version_hash=f"sha256:{index_version}",
-                created_at=now,
-            )
-        )
-        await session.flush()
+    await seed_index_version(session, index_version)
 
     for order, hit in enumerate(hits):
         if await session.get(Document, hit.document_id) is None:

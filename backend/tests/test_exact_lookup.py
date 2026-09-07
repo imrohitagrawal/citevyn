@@ -8,8 +8,6 @@ also creates an active :class:`IndexVersion` row).
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from app.models.enums import IndexStatus, TermType
@@ -310,13 +308,34 @@ async def test_exact_lookup_pins_to_specific_index_version(session) -> None:
     session.add(doc_old)
     await session.flush()
 
+    # ``exact_terms.chunk_id`` is a foreign key onto ``chunks``; the
+    # ingestion pipeline only ever mints a term from a chunk it just wrote,
+    # so a real chunk row is the production shape (#286). The same file
+    # already does this correctly a few tests up.
+    from app.models.chunks import Chunk
+
+    chunk_old = Chunk(
+        document_id=doc_old.document_id,
+        product_area="replay",
+        section_path="flags",
+        heading="flags",
+        parent_heading=None,
+        chunk_text="The --replay-flag replays a run.",
+        context_summary="--replay-flag in replay.",
+        chunk_order=0,
+        content_checksum="chk_replay_old_0",
+        exact_terms=[],
+    )
+    session.add(chunk_old)
+    await session.flush()
+
     session.add(
         ExactTerm(
             term_text="--replay-flag",
             product_area="replay",
             term_type=TermType.flag,
             document_id=doc_old.document_id,
-            chunk_id=uuid.uuid4(),
+            chunk_id=chunk_old.chunk_id,
         )
     )
     await session.flush()
@@ -392,13 +411,31 @@ async def test_exact_lookup_pinned_version_skips_active_filter(session) -> None:
     session.add(doc)
     await session.flush()
 
+    # Real ``chunks`` parent for the term's foreign key (#286).
+    from app.models.chunks import Chunk
+
+    chunk = Chunk(
+        document_id=doc.document_id,
+        product_area="cand",
+        section_path="flags",
+        heading="flags",
+        parent_heading=None,
+        chunk_text="The --cand-only flag is candidate-only.",
+        context_summary="--cand-only in cand.",
+        chunk_order=0,
+        content_checksum="chk_cand_only_0",
+        exact_terms=[],
+    )
+    session.add(chunk)
+    await session.flush()
+
     session.add(
         ExactTerm(
             term_text="--cand-only",
             product_area="cand",
             term_type=TermType.flag,
             document_id=doc.document_id,
-            chunk_id=uuid.uuid4(),
+            chunk_id=chunk.chunk_id,
         )
     )
     await session.flush()

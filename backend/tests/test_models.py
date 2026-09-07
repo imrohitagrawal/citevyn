@@ -384,6 +384,13 @@ async def test_evaluation_case_and_run_round_trip(db_session: AsyncSession) -> N
 
 async def test_audit_event_round_trip(db_session: AsyncSession) -> None:
     db_session.add(User(user_id="demo_user", role=UserRole.demo_user, created_at=_now()))
+    # The parent needs its OWN flush. ``audit_events.user_id`` is a foreign
+    # key onto ``users``, but no ORM ``relationship()`` links the two mapped
+    # classes, so SQLAlchemy's unit of work does not order a single combined
+    # flush by it -- it has been observed emitting ``audit_events`` first.
+    # Same trap as the ``_mint_principal`` / ``_ensure_user`` production bugs
+    # (#286).
+    await db_session.flush()
     event = AuditEvent(
         user_id="demo_user",
         role=UserRole.demo_user,

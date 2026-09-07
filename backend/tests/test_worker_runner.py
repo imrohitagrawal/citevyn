@@ -49,6 +49,28 @@ def runner() -> IngestionRunner:
     )
 
 
+async def _run(runner: IngestionRunner, session: AsyncSession, source: object) -> object:
+    """Ingest one source the way production does.
+
+    ``app/worker/cli.py``'s ``drive()`` calls ``ensure_index_version`` and
+    COMMITS it before the per-source loop ever reaches ``runner.run()``,
+    because ``documents.index_version`` is a foreign key onto
+    ``index_versions``. These tests drive the runner directly and used to
+    skip that step -- invisible until SQLite foreign keys were turned on
+    (#286), and it turned every affected test's job row into
+    ``JobStatus.failed`` rather than a visible IntegrityError, because
+    ``IngestionRunner.run`` records the exception on the job and returns.
+
+    Idempotent, so a test that already made the row is unaffected.
+    """
+    await ensure_index_version(
+        session,
+        index_version=runner._index_version,
+        source_version_hash=runner._source_version_hash,
+    )
+    return await runner.run(session, source=source)
+
+
 async def _index_version_count(session: AsyncSession) -> int:
     stmt = select(IndexVersion)
     result = await session.execute(stmt)
@@ -69,7 +91,7 @@ async def _ingestion_job_count(session: AsyncSession) -> int:
 @pytest.mark.asyncio
 async def test_run_completes_full_pipeline(session: AsyncSession, runner: IngestionRunner) -> None:
     """A complete run produces a Document, Chunks, and ExactTerm rows."""
-    result = await runner.run(session, source=get_source("claude_api"))
+    result = await _run(runner, session, source=get_source("claude_api"))
     assert result.status is JobStatus.completed
     assert result.chunk_count >= 1
     assert result.document_id is not None
@@ -101,7 +123,7 @@ async def test_run_completes_full_pipeline(session: AsyncSession, runner: Ingest
 async def test_run_writes_ingestion_job_row(session: AsyncSession, runner: IngestionRunner) -> None:
     """A single :class:`IngestionJob` row is written for the run."""
     assert await _ingestion_job_count(session) == 0
-    await runner.run(session, source=get_source("codex"))
+    await _run(runner, session, source=get_source("codex"))
     assert await _ingestion_job_count(session) == 1
     job = (await session.execute(select(IngestionJob))).scalars().one()
     assert job.source_name == "codex"
@@ -115,7 +137,7 @@ async def test_run_writes_ingestion_job_row(session: AsyncSession, runner: Inges
 @pytest.mark.asyncio
 async def test_run_advances_stages_in_order(session: AsyncSession, runner: IngestionRunner) -> None:
     """The job's final stage is ``indexing`` (the last stage of the pipeline)."""
-    await runner.run(session, source=get_source("claude_code"))
+    await _run(runner, session, source=get_source("claude_code"))
     job = (await session.execute(select(IngestionJob))).scalars().one()
     assert job.stage is JobStage.indexing
 
@@ -123,7 +145,7 @@ async def test_run_advances_stages_in_order(session: AsyncSession, runner: Inges
 @pytest.mark.asyncio
 async def test_run_extracts_exact_terms(session: AsyncSession, runner: IngestionRunner) -> None:
     """The Claude API fixture's flags and env vars surface as :class:`ExactTerm` rows."""
-    await runner.run(session, source=get_source("claude_api"))
+    await _run(runner, session, source=get_source("claude_api"))
     terms = (
         (await session.execute(select(ExactTerm).where(ExactTerm.product_area == "claude_api")))
         .scalars()
@@ -149,9 +171,9 @@ async def test_run_is_idempotent_on_existing_document(
     session: AsyncSession, runner: IngestionRunner
 ) -> None:
     """A second run for the same (source, index_version) reuses the document."""
-    first = await runner.run(session, source=get_source("gemini_api"))
+    first = await _run(runner, session, source=get_source("gemini_api"))
     assert first.chunk_count >= 1
-    second = await runner.run(session, source=get_source("gemini_api"))
+    second = await _run(runner, session, source=get_source("gemini_api"))
     assert second.chunk_count == first.chunk_count
 
     docs = (
@@ -184,7 +206,7 @@ async def test_run_marks_job_failed_on_fetch_error(
         embedder=StubEmbedder(dim=8),
         source_version_hash="sha256:test-snapshot",
     )
-    result = await runner.run(session, source=bad_spec)
+    result = await _run(runner, session, source=bad_spec)
     assert result.status is JobStatus.failed
     assert result.error_type == "FetchError"
 
@@ -273,7 +295,7 @@ async def test_run_all_mvp_sources(
         index_version="v-all",
     )
     for source in MVP_SOURCES:
-        result = await runner.run(session, source=source)
+        result = await _run(runner, session, source=source)
         assert result.status is JobStatus.completed, (
             f"source {source.name!r} failed: {result.error_type}: {result.error_message}"
         )
@@ -299,11 +321,11 @@ async def test_reingest_replaces_chunks_instead_of_appending(
     wording. That silently defeats any content correction.
     """
     source = get_source("claude_api")
-    first = await runner.run(session, source=source)
+    first = await _run(runner, session, source=source)
     after_one = (await session.execute(select(Chunk))).scalars().all()
     assert len(after_one) == first.chunk_count
 
-    second = await runner.run(session, source=source)
+    second = await _run(runner, session, source=source)
     after_two = (await session.execute(select(Chunk))).scalars().all()
 
     assert second.status is JobStatus.completed
@@ -320,8 +342,8 @@ async def test_reingest_drops_the_previous_generations_exact_terms(
 ) -> None:
     """Exact terms are rebuilt with the chunks, so they cannot accumulate either."""
     source = get_source("codex")
-    first = await runner.run(session, source=source)
-    second = await runner.run(session, source=source)
+    first = await _run(runner, session, source=source)
+    second = await _run(runner, session, source=source)
     terms = (await session.execute(select(ExactTerm))).scalars().all()
     assert first.term_count == second.term_count
     assert len(terms) == second.term_count
@@ -353,8 +375,8 @@ async def test_reingest_refreshes_document_title_and_source_url(session: AsyncSe
         source_version_hash="sha256:test-snapshot",
         index_version="v-retitle",
     )
-    await runner.run(session, source=old)
-    await runner.run(session, source=spec)
+    await _run(runner, session, source=old)
+    await _run(runner, session, source=spec)
 
     docs = (await session.execute(select(Document))).scalars().all()
     assert len(docs) == 1
@@ -381,7 +403,7 @@ async def test_document_identity_checksum_hashes_identity_not_content(
         source_version_hash="sha256:test-snapshot",
         index_version="v-identity",
     )
-    await runner.run(session, source=spec)
+    await _run(runner, session, source=spec)
 
     document = (await session.execute(select(Document))).scalars().one()
     assert document.identity_checksum == _checksum(spec.name + spec.title)
@@ -416,10 +438,10 @@ async def test_identity_checksum_tracks_retitle_and_ignores_body_edits(
         source_version_hash="sha256:test-snapshot",
         index_version="v-retitle-checksum",
     )
-    await runner.run(session, source=spec)
+    await _run(runner, session, source=spec)
     before = (await session.execute(select(Document))).scalars().one().identity_checksum
 
-    await runner.run(session, source=renamed)
+    await _run(runner, session, source=renamed)
     after = (await session.execute(select(Document))).scalars().one().identity_checksum
     assert after != before, "a retitle must move the identity checksum"
 
@@ -435,7 +457,7 @@ async def test_identity_checksum_tracks_retitle_and_ignores_body_edits(
         source_version_hash="sha256:test-snapshot",
         index_version="v-retitle-checksum",
     )
-    await edited_runner.run(session, source=renamed)
+    await _run(edited_runner, session, source=renamed)
     unmoved = (await session.execute(select(Document))).scalars().one().identity_checksum
     assert unmoved == after, "a body edit must NOT move an identity checksum"
 
