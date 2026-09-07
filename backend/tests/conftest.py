@@ -11,8 +11,8 @@ means individual test files do not have to re-seed the same catalog.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Generator
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Generator, Sequence
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -33,7 +33,11 @@ from app.models import (
     IndexStatus,
     IndexVersion,
     TermType,
+    User,
+    UserRole,
 )
+from app.models import Session as SessionModel
+from app.retrieval.types import EvidenceHit
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -397,6 +401,219 @@ async def seed_catalog(
     if commit:
         await session.commit()
     return {"docs": docs, "chunks": chunks, "exact_terms": exact_terms}
+
+
+async def seed_user(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    role: UserRole | None = None,
+) -> None:
+    """Persist a ``users`` row if absent, in its own flush.
+
+    ``audit_events.user_id`` and ``sessions.user_id`` are foreign keys onto
+    ``users``, and no ORM ``relationship()`` connects those mapped classes.
+    That has two consequences a test has to respect, both of which this
+    helper handles (#286):
+
+    * an actor id the test invents (``"user-123"``, ``"admin-1"``) has no
+      parent row unless someone inserts one;
+    * even adding the right ``User`` is not enough if it goes in the SAME
+      flush as the child — SQLAlchemy's unit of work orders inserts by
+      declared relationships, not by raw foreign-key columns, and has been
+      observed to emit ``audit_events`` before ``users``. The dedicated
+      flush here is what makes the order deterministic.
+
+    In production these ids always name a real row: the admin actor is the
+    constant ``ADMIN_USER_ID`` seeded by ``db/seed/seed_users.py``, and a
+    chat actor comes from ``Orchestrator._ensure_user``.
+
+    ``role=None`` (the default) means "I just need the row to exist": absent,
+    it is created as ``demo_user``; present, it is accepted whatever role it
+    has. That matters because :func:`seed_chat_session` calls this purely to
+    satisfy a foreign key and must not care — an admin with a chat session is
+    an ordinary shape (``db/seed/seed_users.py`` seeds one).
+
+    Passing an explicit ``role`` means "I need THIS role", and a row already
+    seeded with another raises instead of quietly handing back the old one. A
+    silent no-op there would let a test believe it was acting as an admin
+    while the row said ``demo_user`` — the same invisible wrongness this
+    change exists to end.
+    """
+    existing = await session.get(User, user_id)
+    if existing is not None:
+        # ``==`` not ``is``: the StrEnum round-trips through
+        # ``StrEnumType.process_result_value`` back to the canonical member
+        # today, but a pending object built from a raw string would compare
+        # False by identity and raise here for no reason.
+        if role is not None and existing.role != role:
+            raise AssertionError(
+                f"user {user_id!r} was already seeded with role {existing.role}, "
+                f"not the requested {role}; seed it once with the role the "
+                f"test needs"
+            )
+        return
+    session.add(
+        User(
+            user_id=user_id,
+            role=UserRole.demo_user if role is None else role,
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+
+async def seed_index_version(
+    session: AsyncSession,
+    index_version: str,
+    *,
+    status: IndexStatus | None = None,
+) -> None:
+    """Persist an ``index_versions`` row if absent, in its own flush.
+
+    ``documents.index_version`` and ``evaluation_runs.index_version`` are
+    foreign keys onto it.
+
+    ``status=None`` (the default) means "I just need the parent to exist":
+    an absent row is created as ``candidate`` — never ``active``, so a
+    caller that only wants the foreign key satisfied cannot accidentally
+    hand a test a second active index — and an existing row is accepted
+    whatever state it is in.
+
+    Passing an explicit ``status`` means "I need it in THIS state", and a
+    row already seeded in a different one raises instead of quietly handing
+    back the old one. A silent no-op there would let a test believe it was
+    running against an active index while the row said ``candidate`` — the
+    same shape of invisible wrongness this whole change exists to end.
+
+    Same one-flush-per-parent rule as :func:`seed_user`, and here the
+    ordering trap is sharper: ``IndexVersion.evaluation_run_id`` DOES have a
+    ``relationship()`` back to ``EvaluationRun``, so a combined flush is
+    ordered ``evaluation_runs`` first — exactly backwards for the other,
+    relationship-less foreign key.
+    """
+    existing = await session.get(IndexVersion, index_version)
+    if existing is not None:
+        if status is not None and existing.status != status:
+            raise AssertionError(
+                f"index version {index_version!r} was already seeded as "
+                f"{existing.status}, not the requested {status}; seed it once "
+                f"with the status the test needs"
+            )
+        return
+    session.add(
+        IndexVersion(
+            index_version=index_version,
+            status=IndexStatus.candidate if status is None else status,
+            source_version_hash=f"sha256:{index_version}",
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+
+async def seed_chat_session(
+    session: AsyncSession,
+    session_id: uuid.UUID,
+    *,
+    user_id: str = "demo_user",
+    channel: str = "chat",
+) -> None:
+    """Persist the ``users`` + ``sessions`` rows a ``messages`` row needs.
+
+    ``messages.session_id`` is a foreign key onto ``sessions``, and
+    ``sessions.user_id`` onto ``users``. A test that inserts a bare
+    ``Message`` against a freshly minted UUID names a session that does not
+    exist — accepted only because SQLite foreign-key enforcement was off
+    (#286). In production a message is always written against a session the
+    route (or ``Orchestrator._ensure_user``) already created.
+
+    Parent first, child second, each in its own flush: this codebase
+    declares no ORM ``relationship()`` between ``User`` and ``Session``, so
+    a single combined flush is not ordered by the foreign key — the exact
+    trap that produced the ``_mint_principal`` and ``_ensure_user`` bugs.
+    Existing rows are left alone, so repeat calls are safe.
+    """
+    now = datetime.now(UTC)
+    await seed_user(session, user_id)
+    if await session.get(SessionModel, session_id) is None:
+        session.add(
+            SessionModel(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                created_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+        await session.flush()
+
+
+async def seed_evidence_chunks(
+    session: AsyncSession,
+    hits: Sequence[EvidenceHit],
+    *,
+    index_version: str = "index_v1",
+) -> None:
+    """Persist the ``documents`` + ``chunks`` rows a fake ``EvidenceHit`` references.
+
+    A test that hands the orchestrator a stub retriever gets hits whose
+    ``chunk_id`` / ``document_id`` are freshly minted UUIDs naming nothing.
+    The orchestrator then writes ``retrieved_evidence`` rows pointing at
+    them, which violates ``retrieved_evidence.chunk_id -> chunks.chunk_id``.
+    SQLite silently accepted that for the whole life of this suite (#286);
+    Postgres never would.
+
+    In production every ``EvidenceHit`` is built from a row the retriever
+    SELECTed out of ``chunks``, so its parents exist by construction — the
+    application code is right and only the fake is wrong. This helper
+    restores that invariant for the fake.
+
+    Rows already present are left alone, so it is safe to call more than
+    once and safe to call after :func:`seed_catalog`. The ``index_versions``
+    parent that ``documents.index_version`` requires is created as
+    ``candidate``, never ``active`` and with ``promoted_at`` left NULL, so a
+    test that deliberately runs with no active index
+    (``test_ask_no_active_index_still_answers_status_only``) keeps proving
+    exactly what it did before.
+    """
+    now = datetime.now(UTC)
+    await seed_index_version(session, index_version)
+
+    for order, hit in enumerate(hits):
+        if await session.get(Document, hit.document_id) is None:
+            session.add(
+                Document(
+                    document_id=hit.document_id,
+                    index_version=index_version,
+                    source_name=hit.source_name,
+                    product_area=hit.product_area,
+                    source_url=hit.source_url,
+                    title=hit.document_title,
+                    identity_checksum=f"sha256:{hit.document_id}",
+                    last_fetched_at=now,
+                    last_indexed_at=now,
+                    status=DocumentStatus.active,
+                )
+            )
+            await session.flush()
+        if await session.get(Chunk, hit.chunk_id) is None:
+            session.add(
+                Chunk(
+                    chunk_id=hit.chunk_id,
+                    document_id=hit.document_id,
+                    product_area=hit.product_area,
+                    section_path=hit.section_path,
+                    heading=hit.heading,
+                    parent_heading=hit.parent_heading,
+                    chunk_text=hit.chunk_text,
+                    context_summary=hit.context_summary,
+                    exact_terms=[],
+                    chunk_order=order,
+                    content_checksum=f"sha256:{hit.chunk_id}",
+                )
+            )
+            await session.flush()
 
 
 @pytest_asyncio.fixture

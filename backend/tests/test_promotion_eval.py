@@ -27,10 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core import db as db_module
 from app.core.config import get_settings
+from app.core.security import ADMIN_USER_ID
 from app.embeddings.factory import EmbedderIdentity
 from app.main import create_app
 from app.models import Base
-from app.models.enums import EvaluationStatus, IndexStatus
+from app.models.enums import EvaluationStatus, IndexStatus, UserRole
 from app.models.evaluation import EvaluationRun
 from app.models.index_versions import IndexVersion
 from app.retrieval.types import RetrievalResult, VectorDegrade
@@ -48,6 +49,7 @@ from app.worker.promotion_eval import (
     load_cases,
 )
 from app.worker.runner import ensure_index_version
+from tests.conftest import seed_user
 
 CANDIDATE = "cand-216"
 
@@ -80,6 +82,12 @@ async def _ingest_real_corpus(session: AsyncSession, index_version: str) -> None
 @pytest.fixture
 async def candidate_session(session: AsyncSession) -> AsyncSession:
     """A session whose database holds a freshly-ingested CANDIDATE index."""
+    # The admin actor's ``users`` row, which ``audit_events.user_id``
+    # references when ``promote_version`` records the promotion. Deploying
+    # runs ``python -m db.seed.seed_users`` right after
+    # ``alembic upgrade head``, so production always has it; the bare engine
+    # this fixture builds does not (#286).
+    await seed_user(session, ADMIN_USER_ID, role=UserRole.admin)
     await _ingest_real_corpus(session, CANDIDATE)
     return session
 
@@ -797,6 +805,11 @@ class TestEvaluationRunLinkage:
         at all — the cross-index leak is impossible by construction rather than
         by discipline.
         """
+        # The parent index version needs its own flush before the run that
+        # references it. ``evaluation_runs.index_version`` is a foreign key
+        # onto ``index_versions``, but the declared ``relationship()`` runs
+        # the OTHER way (``IndexVersion.evaluation_run_id``), so a combined
+        # flush is ordered runs-first -- backwards for this key (#286).
         candidate_session.add(
             IndexVersion(
                 index_version="other-index",
@@ -806,6 +819,7 @@ class TestEvaluationRunLinkage:
                 promoted_at=None,
             )
         )
+        await candidate_session.flush()
         run = EvaluationRun(
             suite_name=SUITE_NAME,
             index_version="other-index",

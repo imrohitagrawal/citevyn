@@ -54,7 +54,7 @@ from app.models.enums import (
 )
 from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
-from tests.conftest import seed_catalog
+from tests.conftest import seed_catalog, seed_chat_session, seed_evidence_chunks
 
 pytestmark = pytest.mark.asyncio
 
@@ -84,14 +84,27 @@ def _settings(**overrides: Any) -> Settings:
     return Settings(**base)
 
 
-def _evidence(*, count: int, score: float = 1.0) -> list[EvidenceHit]:
-    """Build a deterministic list of evidence bullets.
+async def _evidence(session: Any, *, count: int, score: float = 1.0) -> list[EvidenceHit]:
+    """Build an evidence list AND persist the rows it references.
 
-    The chunks reference random UUIDs; the orchestrator only uses
-    them to look up the chunk_id and to populate
-    :class:`RetrievedEvidence`. Real Chunk rows are not required
-    because the tests do not need the FK to resolve.
+    The orchestrator writes a ``retrieved_evidence`` row per hit, whose
+    ``chunk_id`` is a foreign key onto ``chunks``. Until #286 this helper
+    minted bare UUIDs and its docstring said "Real Chunk rows are not
+    required because the tests do not need the FK to resolve" — true only
+    because SQLite foreign-key enforcement was off. Postgres rejects it.
+    A real retriever only ever yields hits it SELECTed out of ``chunks``,
+    so seeding the parents is what makes the fake match production.
+
+    Use :func:`_evidence_hits` for the hits alone when the test never
+    reaches persistence.
     """
+    hits = _evidence_hits(count=count, score=score)
+    await seed_evidence_chunks(session, hits)
+    return hits
+
+
+def _evidence_hits(*, count: int, score: float = 1.0) -> list[EvidenceHit]:
+    """Build a deterministic list of evidence bullets, persisting nothing."""
     out: list[EvidenceHit] = []
     for i in range(count):
         out.append(
@@ -207,7 +220,7 @@ async def test_grounded_answer_persists_messages_and_evidence_and_caches(
     persistence rows."""
     settings = _settings()
     source_version_hash = await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -293,7 +306,7 @@ async def test_cache_hit_skips_retrieval_and_llm(session: Any) -> None:
     must not be made."""
     source_version_hash = await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     # Wrap the LLM in a spy so we can assert it was not called.
     llm = StubLLMClient()
     llm_spy = AsyncMock(wraps=llm)
@@ -456,7 +469,7 @@ async def test_llm_refusal_with_evidence_records_runtime_strategy(
 
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     refusing_llm = AsyncMock()
     refusing_llm.complete.return_value = LLMResult(
         text=NO_ANSWER_REFUSAL,
@@ -555,6 +568,7 @@ async def test_content_noun_pivot_rewrite_never_hijacks_routing_to_scoped(sessio
     settings = _settings(llm_provider="router")
     # A prior product turn so recent_user_questions is non-empty and the rewrite fires.
     session_id = uuid.uuid4()
+    await seed_chat_session(session, session_id)
     session.add(
         Message(
             session_id=session_id,
@@ -591,7 +605,7 @@ async def test_multihop_question_routes_to_retrieve_multi(session: Any) -> None:
     not the single first-match domain (Phase 3)."""
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -639,7 +653,7 @@ async def test_single_product_question_still_routes_to_retrieve(session: Any) ->
     """A single-product question uses the normal single-domain retrieve, not multi."""
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     await orchestrator.ask(
@@ -659,7 +673,7 @@ async def test_answer_when_grounded_flag_off_restores_refuse_early(
     unsupported-routed question refuses BEFORE any retrieval (the pre-Phase-2
     behavior) — no retrieval, no LLM, no cache. Guards the rollback path."""
     settings = _settings(answer_when_grounded=False)
-    retriever = _FakeRetriever(_evidence(count=2))  # would answer if consulted
+    retriever = _FakeRetriever(await _evidence(session, count=2))  # would answer if consulted
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
 
@@ -685,7 +699,9 @@ async def test_unsupported_but_grounded_question_answers_globally(
     grounded". The retriever is called with product_area=None."""
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))  # confident evidence survives the gate
+    retriever = _FakeRetriever(
+        await _evidence(session, count=2)
+    )  # confident evidence survives the gate
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -712,7 +728,7 @@ async def test_followup_resolves_against_prior_turn(session: Any) -> None:
     product), NOT the global unsupported arm it would hit single-turn."""
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, retriever=retriever)
 
@@ -754,7 +770,7 @@ async def test_offtopic_followup_is_not_hijacked_into_prior_product(session: Any
     orch = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
 
     # Turn 1 — a product question (would be the hijack antecedent).
-    scoped_retriever = _FakeRetriever(_evidence(count=2))
+    scoped_retriever = _FakeRetriever(await _evidence(session, count=2))
     orch_t1 = Orchestrator(settings, session, retriever=scoped_retriever)
     await orch_t1.ask(
         question="What is the rate limit for the Claude API?",
@@ -781,7 +797,7 @@ async def test_followup_cache_key_differs_by_prior_topic(session: Any) -> None:
     cached answer."""
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid_a, sid_b = uuid.uuid4(), uuid.uuid4()
     orch = Orchestrator(settings, session, retriever=retriever)
 
@@ -826,7 +842,7 @@ async def test_anaphoric_pivot_followup_still_declines_when_llm_refuses(session:
     await _seed_index_version(session)
     settings = _settings()
     # The rewrite routes the pivot to claude_api and retrieves the prior chunk...
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     # ...but the grounding-refusal net declines it (no support for the new topic).
     refusing_llm = AsyncMock()
     refusing_llm.complete.return_value = LLMResult(
@@ -859,7 +875,7 @@ async def test_no_answer_with_evidence_surfaces_nearest_doc_suggestions(session:
 
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     refusing_llm = AsyncMock()
     refusing_llm.complete.return_value = LLMResult(
         text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
@@ -909,7 +925,7 @@ async def test_offcorpus_declined_with_evidence_has_no_suggestions(session: Any)
     await _seed_index_version(session)
     settings = _settings()
     # The global arm surfaced a nearest chunk (evidence non-empty)...
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     # ...but the grounding-refusal net declines the off-corpus question.
     refusing_llm = AsyncMock()
     refusing_llm.complete.return_value = LLMResult(
@@ -933,7 +949,7 @@ async def test_conversation_memory_flag_off_disables_rewrite(session: Any) -> No
     — it stays unsupported (global arm), the pre-Phase-3b behavior."""
     await _seed_index_version(session)
     settings = _settings(conversation_memory=False)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, retriever=retriever)
 
@@ -1008,7 +1024,7 @@ async def _codex_followup(
     """Drive the canonical two-turn Codex chain and return (retriever, turn-2 response)."""
     await _seed_index_version(session)
     settings = _settings(llm_provider="router", **settings_overrides)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
     await orch.ask(question="What is Codex CLI?", request_id="c1", session_id=sid)
@@ -1090,7 +1106,7 @@ async def test_stub_provider_keeps_the_concatenation_unchanged(session: Any) -> 
     """The stub's canned text is not a rewrite, so the condenser stays off under
     ``llm_provider='stub'`` — every hermetic stub-based test keeps its existing behaviour."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
@@ -1105,7 +1121,7 @@ async def test_single_turn_never_calls_the_condenser(session: Any) -> None:
     no condense call, no rewrite, no extra LLM spend."""
     await _seed_index_version(session)
     settings = _settings(llm_provider="router")
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm = _CondensingLLM()
     orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
 
@@ -1125,7 +1141,7 @@ async def test_self_contained_midsession_question_never_calls_the_condenser(
     not pay an LLM round-trip per turn for a rewrite the condenser would decline anyway."""
     await _seed_index_version(session)
     settings = _settings(llm_provider="router")
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm = _CondensingLLM()
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
@@ -1154,7 +1170,7 @@ async def test_alias_is_canonicalized_before_retrieval(session: Any) -> None:
     """The query handed to the retriever must carry the canonical name, not the
     mangled one. Deleting the call site in ``ask`` must fail HERE."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     await orch.ask(
@@ -1171,7 +1187,7 @@ async def test_alias_canonicalization_reaches_the_generator(session: Any) -> Non
     """Generation sees the canonical name too — otherwise the LLM is asked about a
     product whose name appears in none of the evidence it was handed."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
 
@@ -1189,7 +1205,7 @@ async def test_alias_canonicalization_does_not_rewrite_the_persisted_message(
     ``retrieval_query``; rebinding ``question`` instead would garble the persisted
     message, the audit trail, and the prior turns conversation memory reads back."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     await orch.ask(question="what is sitewin?", request_id="alias_3", session_id=uuid.uuid4())
@@ -1206,7 +1222,7 @@ async def test_non_alias_question_is_not_rewritten(session: Any) -> None:
     """Regression guard: canonicalization is a no-op for every question that contains
     no alias, so no existing single-turn path changes."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     await orch.ask(
@@ -1231,7 +1247,7 @@ async def test_alias_canonicalization_does_not_trigger_the_condenser(session: An
     """
     await _seed_index_version(session)
     settings = _settings(llm_provider="router")
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm = _CondensingLLM()
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
@@ -1274,7 +1290,7 @@ async def test_self_referential_question_retrieves_from_the_citevyn_area(
     Deleting the ``canonicalize_self_reference`` call site in ``ask`` fails HERE.
     """
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     response = await orch.ask(question=question, request_id="selfref_1", session_id=uuid.uuid4())
@@ -1290,7 +1306,7 @@ async def test_self_referential_question_is_not_refused_off_domain(session: Any)
     """End-to-end shape of the bug report: "who are you?" answers with citations
     instead of the unsupported refusal."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     response = await orch.ask(
@@ -1307,7 +1323,7 @@ async def test_self_reference_rewrite_reaches_the_generator(session: Any) -> Non
     """Generation sees the canonical question, not the bare "who are you?" — otherwise
     the LLM is asked a question the evidence it was handed does not answer."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orch = Orchestrator(_settings(), session, llm=llm_spy, retriever=retriever)
 
@@ -1323,7 +1339,7 @@ async def test_self_reference_rewrite_does_not_rewrite_the_persisted_message(
 ) -> None:
     """The transcript must show what the user actually typed."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     await orch.ask(question="who are you?", request_id="selfref_4", session_id=uuid.uuid4())
@@ -1340,7 +1356,7 @@ async def test_codex_maintainers_question_still_routes_to_codex(session: Any) ->
     """The issue's named negative. "who are the Codex maintainers?" opens with a listed
     phrasing but is a real Codex question — it must not be hijacked to CiteVyn."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     await orch.ask(
@@ -1370,7 +1386,7 @@ async def test_self_reference_does_not_inherit_the_prior_turn_topic(session: Any
     product domain when the ordering is wrong.
     """
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
@@ -1405,7 +1421,7 @@ async def test_self_reference_survives_an_elliptical_opener_mid_session(
     that reorder — "who are you?" carries no anaphor — which is why this case exists.)
     """
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     sid = uuid.uuid4()
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
@@ -1429,7 +1445,7 @@ async def test_self_reference_rewrite_does_not_trigger_the_condenser(session: An
     """
     await _seed_index_version(session)
     settings = _settings(llm_provider="router")
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm = _CondensingLLM()
     sid = uuid.uuid4()
     orch = Orchestrator(settings, session, llm=llm, retriever=retriever)
@@ -1448,7 +1464,7 @@ async def test_greeting_still_wins_over_the_self_reference_rewrite(session: Any)
     so a greeting must still cost no retrieval and no LLM call.
     """
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(_settings(), session, retriever=retriever)
 
     response = await orch.ask(question="hello", request_id="selfref_8", session_id=uuid.uuid4())
@@ -1490,7 +1506,7 @@ class _IntentLLM:
 
 async def _ask_ambiguous(session: Any, llm: Any, question: str, **over: Any) -> Any:
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orch = Orchestrator(
         _settings(llm_provider="router", **over), session, llm=llm, retriever=retriever
     )
@@ -1610,7 +1626,7 @@ async def test_stub_provider_never_calls_the_intent_llm(session: Any) -> None:
     LLM call — and the pre-existing ordinary-English test would begin exercising a path it
     was never written for."""
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm = _IntentLLM(verdict="YES")
     orch = Orchestrator(_settings(), session, llm=llm, retriever=retriever)  # stub provider
 
@@ -1678,7 +1694,10 @@ async def test_uncited_answer_is_not_returned_with_every_chunk_attached(
         provider="stub",
     )
     orch = Orchestrator(
-        _settings(), session, llm=uncited, retriever=_FakeRetriever(_evidence(count=5))
+        _settings(),
+        session,
+        llm=uncited,
+        retriever=_FakeRetriever(await _evidence(session, count=5)),
     )
 
     response = await orch.ask(
@@ -1719,7 +1738,10 @@ async def test_refusal_paragraph_is_still_recorded_as_a_plain_no_answer(
         text=NO_ANSWER_REFUSAL, input_tokens=1, output_tokens=1, model="stub", provider="stub"
     )
     orch = Orchestrator(
-        _settings(), session, llm=refusing, retriever=_FakeRetriever(_evidence(count=5))
+        _settings(),
+        session,
+        llm=refusing,
+        retriever=_FakeRetriever(await _evidence(session, count=5)),
     )
 
     await orch.ask(
@@ -1753,7 +1775,7 @@ async def test_cited_answer_still_shows_only_the_chunks_it_referenced(
         provider="stub",
     )
     orch = Orchestrator(
-        _settings(), session, llm=cited, retriever=_FakeRetriever(_evidence(count=5))
+        _settings(), session, llm=cited, retriever=_FakeRetriever(await _evidence(session, count=5))
     )
 
     response = await orch.ask(
@@ -1796,7 +1818,7 @@ async def test_gapped_citations_survive_with_their_original_markers(
     )
     # Hold ONE evidence list: ``_evidence`` mints fresh UUIDs per call, so the
     # retriever and the assertions must be looking at the same objects.
-    evidence = _evidence(count=6)
+    evidence = await _evidence(session, count=6)
     orch = Orchestrator(_settings(), session, llm=gapped, retriever=_FakeRetriever(evidence))
 
     response = await orch.ask(
@@ -1839,7 +1861,10 @@ async def test_gapped_citation_markers_survive_the_cache_round_trip(
     )
     question = "What are the rate limits on the Claude API?"
     orch = Orchestrator(
-        _settings(), session, llm=gapped, retriever=_FakeRetriever(_evidence(count=6))
+        _settings(),
+        session,
+        llm=gapped,
+        retriever=_FakeRetriever(await _evidence(session, count=6)),
     )
 
     miss = await orch.ask(question=question, request_id="m1", session_id=uuid.uuid4())
@@ -1908,7 +1933,7 @@ async def test_citation_validation_failure_returns_no_answer_with_audit(
         async def aclose(self) -> None:
             return None
 
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, llm=_BadLLM(), retriever=retriever)
 
     response = await orchestrator.ask(
@@ -1959,7 +1984,7 @@ async def test_llm_unavailable_raises_orchestrator_error(session: Any) -> None:
         async def aclose(self) -> None:
             return None
 
-    retriever = _FakeRetriever(_evidence(count=1))
+    retriever = _FakeRetriever(await _evidence(session, count=1))
     orchestrator = Orchestrator(settings, session, llm=_DownLLM(), retriever=retriever)
 
     with pytest.raises(OrchestratorError):
@@ -1984,7 +2009,7 @@ async def test_orchestrator_creates_session_and_user_when_missing(
 
     await _seed_index_version(session)
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=1))
+    retriever = _FakeRetriever(await _evidence(session, count=1))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     session_id = uuid.uuid4()
@@ -2003,9 +2028,65 @@ async def test_orchestrator_creates_session_and_user_when_missing(
     assert response["message_id"] is not None
 
 
+async def test_ensure_user_writes_the_user_row_before_the_session_row(
+    session: Any,
+) -> None:
+    """#286 regression: the parent ``users`` row is inserted FIRST.
+
+    ``sessions.user_id`` is a foreign key onto ``users``, and this codebase
+    declares no ORM ``relationship()`` between the two mapped classes -- only
+    the raw column -- so SQLAlchemy does not order a combined flush by it.
+    ``_ensure_user`` used to add the ``Session`` and flush it, THEN create the
+    ``User``. On real Postgres that is a ``ForeignKeyViolation`` on the very
+    first chat message against a database where ``demo_user`` is not already
+    seeded; the identical shape 500'd every first-time anonymous visitor in
+    ``auth_sessions._mint_principal``.
+
+    The assertion is on the SQL the database actually received, not on the
+    end state. Both orders leave the same two rows behind once the flush
+    completes, so a row-existence check cannot distinguish them on its own --
+    the test above only catches this because foreign keys are now enforced,
+    and it would go green again the moment enforcement lapsed. This one stays
+    RED on the ordering itself, whatever the engine is doing.
+
+    Measured: restoring the pre-#286 body turns 91 of the 120 tests in this
+    file red, this one among them, with the ``sessions`` INSERT arriving
+    first.
+    """
+    from sqlalchemy import event
+
+    from app.answer.orchestrator import Orchestrator as _Orch
+
+    inserts: list[str] = []
+    sync_engine = session.get_bind()
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        head = statement.strip().upper()
+        if head.startswith("INSERT INTO"):
+            inserts.append(statement.split()[2].strip('"'))
+
+    event.listen(sync_engine, "before_cursor_execute", _record)
+    try:
+        orchestrator = _Orch(_settings(), session, retriever=_FakeRetriever([]))
+        await orchestrator._ensure_user(uuid.uuid4())
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _record)
+
+    assert "users" in inserts, "no users row was written at all"
+    assert "sessions" in inserts, "no sessions row was written at all"
+    assert inserts.index("users") < inserts.index("sessions"), (
+        f"the child row was inserted before its parent: {inserts}"
+    )
+
+
 def _hit_with_type(rtype: RetrievalType) -> EvidenceHit:
-    """One evidence hit tagged with a specific retrieval_type."""
-    return _evidence(count=1)[0].model_copy(update={"retrieval_type": rtype})
+    """One evidence hit tagged with a specific retrieval_type.
+
+    ``_strategy_for`` is a pure classmethod over the hit list — it never
+    touches the database — so this deliberately uses the unpersisted
+    builder and needs no ``chunks`` rows.
+    """
+    return _evidence_hits(count=1)[0].model_copy(update={"retrieval_type": rtype})
 
 
 async def test_strategy_for_labels_from_evidence_not_intent() -> None:
@@ -2239,7 +2320,9 @@ async def test_ask_skips_cache_write_on_embedder_mismatch(
     await _seed_stamped_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
     # The real hybrid retriever degrades the vector arm on this mismatch and reports
     # it back; the injected double mirrors that so the runtime-gated write is skipped.
-    retriever = _FakeRetriever(_evidence(count=2), vector_degrade=VectorDegrade.mismatch)
+    retriever = _FakeRetriever(
+        await _evidence(session, count=2), vector_degrade=VectorDegrade.mismatch
+    )
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
@@ -2268,7 +2351,7 @@ async def test_ask_caches_when_embedder_matches(session: Any) -> None:
     active index stamp, the vector arm is live and the answer caches normally."""
     settings = _settings(embedding_provider="gemini")
     await _seed_stamped_index(session, provider="gemini", model="gemini-embedding-001", dim=1536)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     await orchestrator.ask(
@@ -2290,7 +2373,7 @@ async def test_ask_caches_when_index_stamp_is_null(session: Any) -> None:
     the cache or crash on a NULL stamp."""
     settings = _settings(embedding_provider="stub")
     await _seed_stamped_index(session, provider=None, model=None, dim=None)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     await orchestrator.ask(
@@ -2319,7 +2402,7 @@ async def test_cache_key_partitions_by_configured_embedder(session: Any) -> None
     await Orchestrator(
         _settings(embedding_provider="stub"),
         session,
-        retriever=_FakeRetriever(_evidence(count=2)),
+        retriever=_FakeRetriever(await _evidence(session, count=2)),
     ).ask(question=question, request_id="req_stub", session_id=uuid.uuid4())
 
     # Flip the index stamp to gemini and the config to gemini → match again, but
@@ -2330,7 +2413,7 @@ async def test_cache_key_partitions_by_configured_embedder(session: Any) -> None
     await Orchestrator(
         _settings(embedding_provider="gemini"),
         session,
-        retriever=_FakeRetriever(_evidence(count=2)),
+        retriever=_FakeRetriever(await _evidence(session, count=2)),
     ).ask(question=question, request_id="req_gemini", session_id=uuid.uuid4())
 
     keys = {row.cache_key for row in (await session.execute(select(AnswerCache))).scalars()}
@@ -2371,7 +2454,9 @@ async def test_ask_skips_cache_write_on_transient_embedder_unavailable(
     wrote the row)."""
     settings = _settings(embedding_provider="stub")
     await _seed_stamped_index(session, provider="stub", model="stub", dim=1536)
-    retriever = _FakeRetriever(_evidence(count=2), vector_degrade=VectorDegrade.unavailable)
+    retriever = _FakeRetriever(
+        await _evidence(session, count=2), vector_degrade=VectorDegrade.unavailable
+    )
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     question = "How do I configure Claude Code permissions?"
@@ -2574,7 +2659,7 @@ async def test_greeting_returns_friendly_reply_without_retrieval_or_llm(
     from app.answer.orchestrator import GREETING_RESPONSE
 
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     llm_spy = AsyncMock(wraps=StubLLMClient())
     orchestrator = Orchestrator(settings, session, llm=llm_spy, retriever=retriever)
 
@@ -2616,7 +2701,7 @@ async def test_greeting_addressed_to_citevyn_preserves_domain(session: Any) -> N
     """ "hello CiteVyn" is still a greeting; the classified citevyn domain rides
     the trace but the greeting flags (not the domain) are the signal."""
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -2637,7 +2722,7 @@ async def test_greeting_prefixed_real_question_still_answers(session: Any) -> No
     the normal retrieval + generation pipeline."""
     settings = _settings()
     await _seed_index_version(session)
-    retriever = _FakeRetriever(_evidence(count=2))
+    retriever = _FakeRetriever(await _evidence(session, count=2))
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
     response = await orchestrator.ask(
@@ -2713,7 +2798,7 @@ async def test_code_block_index_does_not_become_a_source_card(session: Any) -> N
     )
     # Hold ONE evidence list: ``_evidence`` mints fresh UUIDs per call, so the
     # retriever and the chunk-id assertion must see the same objects.
-    evidence = _evidence(count=3)
+    evidence = await _evidence(session, count=3)
     orch = Orchestrator(_settings(), session, llm=fenced, retriever=_FakeRetriever(evidence))
 
     response = await orch.ask(
@@ -2778,7 +2863,7 @@ async def test_citation_only_inside_a_fence_costs_no_second_llm_call(
         model="stub",
         provider="stub",
     )
-    evidence = _evidence(count=1)
+    evidence = await _evidence(session, count=1)
     for hit in evidence:
         hit.retrieval_type = RetrievalType.exact
     orch = Orchestrator(_settings(), session, llm=fenced, retriever=_FakeRetriever(evidence))

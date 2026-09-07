@@ -217,8 +217,13 @@ async def _mint_principal(
     ``AuthSession`` insert run before the ``User`` insert and fail with a
     foreign-key violation on EVERY first-time anonymous visitor. Invisible
     to the hermetic SQLite test suite because SQLite foreign-key enforcement
-    is off for this app's engine (no ``PRAGMA foreign_keys=ON`` anywhere in
-    ``app.core.db``) — found only by live-testing against real Postgres.
+    WAS off for this app's engine — found only by live-testing against real
+    Postgres.
+
+    That gap is now closed: ``app.core.db`` issues ``PRAGMA foreign_keys=ON``
+    on every SQLite connection (#286), so the hermetic suite would catch a
+    regression here on its own. Turning it on immediately caught a second
+    instance of exactly this bug in ``Orchestrator._ensure_user``.
     """
     principal_id = f"{ANONYMOUS_USER_PREFIX}{uuid.uuid4().hex}"
     db.add(User(user_id=principal_id, role=UserRole.demo_user, created_at=_now()))

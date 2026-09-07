@@ -444,7 +444,14 @@ def test_health_index_never_credits_one_index_with_anothers_run(
         metrics={"pass_rate": 1.0, "cases_total": 4, "cases_passed": 4},
         failure_summary={},
     )
-    session.add_all([other, run])
+    # Two flushes, parent first. ``evaluation_runs.index_version`` is a
+    # foreign key onto ``index_versions``, but the OTHER direction
+    # (``index_versions.evaluation_run_id``) is the one with a declared
+    # ``relationship()``, so a combined ``add_all`` flush is ordered
+    # runs-first -- exactly backwards for the key being enforced (#286).
+    session.add(other)
+    asyncio.get_event_loop().run_until_complete(session.flush())
+    session.add(run)
     asyncio.get_event_loop().run_until_complete(session.flush())
     other.evaluation_run_id = run.run_id
     asyncio.get_event_loop().run_until_complete(session.commit())

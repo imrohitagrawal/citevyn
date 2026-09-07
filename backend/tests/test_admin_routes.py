@@ -20,17 +20,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import db as db_module
+from app.core.security import ADMIN_USER_ID
 from app.main import create_app
 from app.models.enums import (
     EvaluationStatus,
     IndexStatus,
     JobStage,
     JobStatus,
+    UserRole,
 )
 from app.models.evaluation import EvaluationRun
 from app.models.index_versions import IndexVersion
 from app.models.ingestion_jobs import IngestionJob
-from tests.conftest import seed_catalog
+from tests.conftest import seed_catalog, seed_index_version, seed_user
 
 ADMIN_KEY = "local-admin-key"
 ADMIN_HEADER = "X-Admin-API-Key"
@@ -44,6 +46,16 @@ ADMIN_HEADER = "X-Admin-API-Key"
 @pytest.fixture
 def admin_app(session: AsyncSession):
     """Build a FastAPI app whose ``get_session`` is the per-test session."""
+    import asyncio
+
+    # Every admin route stamps ``audit_events.user_id`` with the constant
+    # ``ADMIN_USER_ID``, a foreign key onto ``users``. Production always has
+    # that row (``db/seed/seed_users.py`` seeds ``("admin", admin)`` before
+    # the app serves traffic), so seeding it restores the real precondition
+    # rather than papering over a missing one (#286).
+    asyncio.get_event_loop().run_until_complete(
+        seed_user(session, ADMIN_USER_ID, role=UserRole.admin)
+    )
     app = create_app()
 
     async def _override():
@@ -473,6 +485,12 @@ def test_list_evaluations_filters_by_index_version(admin_app, session) -> None:
     import asyncio
 
     asyncio.get_event_loop().run_until_complete(seed_catalog(session))
+    # ``evaluation_runs.index_version`` is a foreign key onto
+    # ``index_versions``; ``seed_catalog`` only creates ``v1`` (#286).
+    # It must be its OWN flush: ``IndexVersion.evaluation_run_id`` has a
+    # ``relationship()`` back to ``EvaluationRun``, so a combined flush is
+    # ordered runs-first -- backwards for this foreign key.
+    asyncio.get_event_loop().run_until_complete(seed_index_version(session, "v2"))
     now = datetime.now(UTC)
     session.add_all(
         [

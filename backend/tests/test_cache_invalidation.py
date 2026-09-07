@@ -40,6 +40,7 @@ from app.models import (
 )
 from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
+from tests.conftest import seed_evidence_chunks
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,7 +56,13 @@ def _settings(**overrides: Any) -> Settings:
     return Settings(**base)
 
 
-def _evidence(*, count: int) -> list[EvidenceHit]:
+async def _evidence(session: Any, *, count: int) -> list[EvidenceHit]:
+    """Build evidence AND persist the ``chunks`` rows it references.
+
+    ``retrieved_evidence.chunk_id`` is a foreign key onto ``chunks``; a
+    fabricated UUID names nothing and Postgres rejects the insert. Only
+    SQLite's foreign keys being off ever let this pass (#286).
+    """
     out: list[EvidenceHit] = []
     for i in range(count):
         out.append(
@@ -76,6 +83,7 @@ def _evidence(*, count: int) -> list[EvidenceHit]:
                 rank=i + 1,
             )
         )
+    await seed_evidence_chunks(session, out)
     return out
 
 
@@ -123,7 +131,7 @@ async def test_source_version_hash_bump_invalidates_cache(session: Any) -> None:
     stays in the table but is no longer reachable."""
     await _upsert_active_index(session, hash_value="sha256:old")
     settings = _settings()
-    retriever = _FakeRetriever(_evidence(count=1))
+    retriever = _FakeRetriever(await _evidence(session, count=1))
 
     orchestrator = Orchestrator(settings, session, retriever=retriever)
 
@@ -206,7 +214,7 @@ async def test_cache_disabled_short_circuits_reads_and_writes(
     store and verify neither ``get`` nor ``put`` was called."""
     await _upsert_active_index(session, hash_value="sha256:abc")
     settings = _settings(cache_enabled=False)
-    retriever = _FakeRetriever(_evidence(count=1))
+    retriever = _FakeRetriever(await _evidence(session, count=1))
     # ``build_answer_cache_store`` returns a NoOp when disabled.
     cache = build_answer_cache_store(settings, session)
     assert isinstance(cache, NoOpAnswerCacheStore)

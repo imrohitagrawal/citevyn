@@ -477,10 +477,13 @@ async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_po
     first-time anonymous visitor.
 
     This was INVISIBLE to the hermetic SQLite suite (1500+ passing tests)
-    because SQLite foreign-key enforcement is off for this app's engine (no
-    ``PRAGMA foreign_keys=ON`` anywhere in ``app.core.db``) -- only a live
-    Postgres run ever exercised the real constraint. Fixed by flushing the
-    ``User`` row on its own before adding the ``AuthSession`` row.
+    because SQLite foreign-key enforcement WAS off for this app's engine --
+    only a live Postgres run ever exercised the real constraint. Fixed by
+    flushing the ``User`` row on its own before adding the ``AuthSession``
+    row. ``app.core.db`` now issues ``PRAGMA foreign_keys=ON`` for every
+    SQLite connection (#286), so the hermetic suite would catch this class of
+    bug on its own -- turning it on immediately found a second instance in
+    ``Orchestrator._ensure_user`` (see the test below).
     """
     from fastapi import Response
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -501,6 +504,58 @@ async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_po
 
         assert principal_id.startswith("anon_")
         assert auth_session_id is not None
+    finally:
+        await engine.dispose()
+
+
+async def test_ensure_user_on_a_fresh_database_does_not_violate_the_fk_on_postgres(
+    pg_schema: str,
+) -> None:
+    """The sibling bug to the one above, found by #286 and living in the chat
+    hot path: ``Orchestrator._ensure_user`` added the ``Session`` row and
+    flushed it BEFORE creating the ``users`` row its foreign key names.
+
+    It never fired in production only because ``demo_user`` happens to be
+    seeded (``db/seed/seed_users.py``) on every deploy. This test runs
+    against a migrated but UNSEEDED schema, which is the state a fresh
+    database is in -- exactly where the first chat message would 500.
+
+    Deliberately a Postgres test even though SQLite now enforces foreign
+    keys too: SQLite's ``PRAGMA foreign_keys`` is a close proxy for
+    Postgres, not the same engine, and this is the dialect that ships.
+    RED with the pre-#286 ordering: ``ForeignKeyViolation`` on
+    ``sessions_user_id_fkey``.
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import select as _select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.answer.orchestrator import Orchestrator
+    from app.core.config import Settings
+    from app.models import Session as SessionModel
+    from app.models import User as UserModel
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with maker() as session:
+            # Precondition: nobody has seeded anything. Without this the test
+            # could pass on a database where ``demo_user`` already exists,
+            # which is precisely the condition that hid the bug.
+            assert (await session.execute(_select(UserModel))).scalars().first() is None
+
+            orchestrator = Orchestrator(Settings(), session)
+            session_id = _uuid.uuid4()
+            user_id = await orchestrator._ensure_user(session_id)
+            await session.commit()  # must not raise ForeignKeyViolation
+
+        async with maker() as verify:
+            assert await verify.get(UserModel, user_id) is not None
+            row = await verify.get(SessionModel, session_id)
+            assert row is not None and row.user_id == user_id
     finally:
         await engine.dispose()
 

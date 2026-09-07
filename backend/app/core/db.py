@@ -10,6 +10,10 @@ The engine is created lazily via :func:`get_engine` and reused across the
 application lifetime. Sessions are obtained through :func:`get_session`,
 which is a FastAPI dependency that yields a session and rolls back on
 exception.
+
+SQLite ships with foreign-key enforcement OFF by default, per connection.
+This module turns it back on (see :func:`enable_sqlite_foreign_keys`) so
+the SQLite dialect honours the same referential integrity Postgres does.
 """
 
 from __future__ import annotations
@@ -18,6 +22,9 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -25,11 +32,81 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import ConnectionPoolEntry
 
 from app.core.config import Settings, get_settings
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+
+def is_sqlite_dbapi_connection(dbapi_connection: DBAPIConnection) -> bool:
+    """Return True when ``dbapi_connection`` is a SQLite DBAPI handle.
+
+    The check is a substring match on the connection class's *module*,
+    which is the only dialect signal available inside a pool ``connect``
+    event (the pool's connection record carries no dialect).
+
+    The two shapes that occur in this codebase:
+
+    * ``sqlite3`` — the stdlib synchronous driver (alembic, seed scripts).
+    * ``sqlalchemy.dialects.sqlite.aiosqlite`` — the async adapter class
+      SQLAlchemy wraps ``aiosqlite`` in. Note this is NOT ``sqlite3``:
+      a ``startswith("sqlite3")`` test silently misses every async engine,
+      which is every engine the app and the test suite actually use.
+
+    A deliberately broad substring, because the failure modes are not
+    symmetric: matching an unknown *future* SQLite driver costs nothing,
+    while missing one silently restores the exact gap this closes. No
+    non-SQLite driver in the dependency set has "sqlite" anywhere in its
+    module path (psycopg is ``psycopg`` /
+    ``sqlalchemy.dialects.postgresql.psycopg``).
+    """
+    return "sqlite" in type(dbapi_connection).__module__
+
+
+@event.listens_for(Engine, "connect")
+def enable_sqlite_foreign_keys(
+    dbapi_connection: DBAPIConnection, connection_record: ConnectionPoolEntry
+) -> None:
+    """Turn on ``PRAGMA foreign_keys`` for every new SQLite connection.
+
+    Registered against the ``Engine`` *class*, so it fires for every engine
+    in whatever process has imported this module — including the ~30 test
+    modules that call ``create_async_engine`` directly instead of going
+    through :func:`build_engine`. An engine-instance listener inside
+    :func:`build_engine` would cover none of those, which is the whole
+    reason for the class-level registration.
+
+    Scope, measured rather than assumed (``"app.core.db" in sys.modules``
+    after importing each entry point) — see
+    ``tests/test_sqlite_foreign_keys.py``:
+
+    * COVERED: the FastAPI app, ``app.worker.cli``, ``db.seed.seed_catalog``,
+      and the whole test suite (``tests/conftest.py`` imports this module).
+    * NOT covered: ``db/env.py`` (alembic) and ``db.seed.seed_users``, which
+      import ``app.core.config`` and ``app.models`` but never this module.
+
+    Leaving alembic out is deliberate, not an oversight. Four migrations use
+    ``op.batch_alter_table``, which on SQLite is implemented as
+    create-new-table / copy-rows / drop-old / rename — and SQLite's own
+    documentation says to run that with foreign keys OFF, because the
+    intermediate states are legitimately inconsistent. ``seed_users`` writes
+    only ``users`` rows, which have no foreign keys of their own, so it has
+    nothing to enforce.
+
+    SQLite scopes this pragma to the connection, so it has to be re-issued
+    on each one; there is no database-level setting, and no way to set it
+    once per engine. On Postgres this is a single string comparison and no
+    SQL at all.
+    """
+    if not is_sqlite_dbapi_connection(dbapi_connection):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 
 def _engine_kwargs(settings: Settings) -> dict[str, Any]:
