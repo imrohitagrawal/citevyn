@@ -189,6 +189,15 @@ def _app_read_sites(field_name: str) -> list[str]:
     Every entry in ``_EXEMPT`` claims "nothing reads it"; without this the only
     thing standing between the guard and a developer silencing it is a string
     long enough to pass a length check.
+
+    WHAT IT CANNOT SEE, stated rather than implied. It matches the literal
+    ``.<field>`` attribute access, so a read through ``getattr(settings, name)``
+    with a computed name is invisible to it. That is not hypothetical here --
+    ``app/api/routes/oauth.py:250`` resolves its credential fields exactly that
+    way. None of the six currently-exempted fields is read through that idiom
+    (checked), so today's exemptions are sound; but a future exemption could be
+    wrong in a way this cannot catch, so treat a zero result as strong evidence
+    rather than proof, and grep by hand before adding an entry.
     """
     pattern = re.compile(rf"\.{re.escape(field_name)}\b")
     hits: list[str] = []
