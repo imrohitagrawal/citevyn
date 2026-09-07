@@ -621,6 +621,13 @@ test.describe("Chat", () => {
     // Type-ahead, then try both submit routes.
     await input.fill("How do I install the Codex CLI?");
     await input.press("Enter");
+    // #356 gap 2, on the ENTER path, in a real browser. Before this the refusal
+    // was measured as ZERO DOM mutations over the whole body — a screen-reader
+    // user pressed Enter and nothing whatsoever happened. The region carried the
+    // in-flight sentence a moment ago, so this is a genuine text CHANGE, which
+    // is what `role="status"` announces on.
+    await expect(page.locator(".composer [role='status']")).toContainText("Not sent");
+    await expect(page.locator(".composer [role='status']")).toContainText("kept");
     // `force` because Playwright's own actionability check HONOURS
     // `aria-disabled`: a plain `.click()` here does not fail, it silently waits
     // for the attribute to clear and then clicks the re-enabled button 7s
@@ -647,8 +654,58 @@ test.describe("Chat", () => {
     // The gate is transient: once the answer lands the same keypress works.
     await expect(page.locator(".pending-bubble")).toHaveCount(0, { timeout: 20000 });
     await expect(send).not.toHaveAttribute("aria-disabled", "true");
+    // The refusal does not outlive its window: the region hands back to the
+    // arrival announcement. Without this the reader would be left being told
+    // their question was not sent while the answer sat on screen — and, because
+    // `role="status"` fires on a text CHANGE, the NEXT window's first refusal
+    // would then be announced to nobody (#356 gap 2).
+    await expect(page.locator(".composer [role='status']")).not.toContainText("Not sent");
+    // 15 s, not the 5 s default: the region says "Answer ready" only when the
+    // bubble finishes STREAMING (~26 ms per token), which is later than the
+    // pending bubble disappearing. The stub always answers with citations and
+    // `no_answer: false`, so this is "Answer ready", never the refusal string.
+    await expect(page.locator(".composer [role='status']")).toContainText("Answer ready", {
+      timeout: 15000,
+    });
     await input.press("Enter");
     await expect(page.locator(".message.user-msg")).toHaveCount(2, { timeout: 5000 });
+
+    // A SECOND in-flight window, which is what makes the two checks below
+    // possible in one test (#356 gap 2).
+    //
+    // First: the region really did return to the in-flight sentence, so this
+    // window's refusal is a text CHANGE and not a repeat. `role="status"`
+    // announces on a change alone — if the refusal text were left standing from
+    // the previous window, the refusal below would be announced to NOBODY. That
+    // is the same defect the arrival announcement was measured making across two
+    // consecutive answers.
+    const status = page.locator(".composer [role='status']");
+    await expect(status).toContainText("Send is unavailable");
+
+    // Second: the CLICK path, refused as the FIRST refusal of its window, so
+    // the announcement below is attributable to the click and to nothing else.
+    // This is the route that needed a product change: the send button was
+    // `onClick={pending ? undefined : onSendClick}`, so a click while gated
+    // never reached the hook at all and no signal could exist. Its unit-level
+    // bite is `ChatView.test.tsx`'s "routes the click to the hook in BOTH
+    // states"; this is the same claim against a real browser and real timing.
+    // The window really is still open. This is a PRECONDITION, weaker than
+    // window 1's assertion above — that one is by IDENTITY (no answer bubble
+    // exists AND exactly one user bubble), because there it has to exclude the
+    // very bug it guards. Here the refusal below is the assertion and this only
+    // has to establish that the gate is shut. Without it, a window that expired
+    // early would send the third question for real and the FIRST failure would
+    // be `toContainText("Not sent")` — which reads as "the refusal is not
+    // announced", a product bug that is not there. A wrong bite-line is worse
+    // than none.
+    await expect(page.locator(".pending-msg")).toHaveCount(1);
+    await expect(send).toHaveAttribute("aria-disabled", "true");
+    await input.fill("A third question");
+    await send.click({ force: true });
+    await expect(status).toContainText("Not sent");
+    await expect(page.locator(".message.user-msg")).toHaveCount(2);
+    await expect(input).toHaveValue("A third question");
+
     // Every answer sits under its own question, in order.
     const roles = await page.locator(".message").evaluateAll((els) =>
       els.map((e) => (e.classList.contains("user-msg") ? "user" : "bot")),
@@ -665,7 +722,8 @@ test.describe("Chat", () => {
     // count.
     await enterChat(page);
     const input = page.locator(".chat-input");
-    const send = page.locator(".send-button");
+    // No `send` locator here: every read of the button below happens inside the
+    // ONE `page.evaluate` snapshot, for the reason its comment gives.
     await input.fill("What is Claude Code?");
     await input.press("Enter");
     await expect(page.locator(".message.user-msg")).toHaveCount(1);

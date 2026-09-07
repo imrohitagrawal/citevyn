@@ -46,6 +46,12 @@ interface ChatViewProps {
       here force-scrolls the just-asked question into view even if the reader had
       scrolled up — an explicit send must always be followed. */
   sendTick?: number;
+  /** True while a composer submit has been REFUSED in the currently open
+      in-flight window (#356 gap 2). Owned by the same reducer as `pending`, set
+      from the hook's `inFlight` REF and cleared by the same action that clears
+      `pending`, so the two cannot disagree. Rendered directly — this component
+      keeps no copy of it, which is what makes a stale refusal unrepresentable. */
+  refusedInFlight: boolean;
 }
 
 export function ChatView({
@@ -61,6 +67,7 @@ export function ChatView({
   pending = false,
   highlightedIndex = -1,
   sendTick = 0,
+  refusedInFlight,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLInputElement>(null);
@@ -195,6 +202,57 @@ export function ChatView({
         : `Answer ready.${n ? ` ${n} source${n === 1 ? "" : "s"} cited.` : ""}`,
     );
   }, [messages]);
+
+  // The region says the refusal itself, not only the state (#356 gap 2).
+  //
+  // The refusal used to be a bare `return` in `submitChat`: measured with a
+  // MutationObserver over the whole body, ZERO DOM mutations on both the Enter
+  // path and the click path. The reader pressed Enter and nothing at all
+  // happened — not even to a screen reader, because `role="status"` announces on
+  // a text CHANGE and no text changed.
+  //
+  // THERE IS NO LOCAL STATE FOR THIS, deliberately. The first shipped version
+  // was a monotonic tick prop, a `useState` latch, a `useRef` seeded on mount to
+  // suppress a remount, and a `useEffect` keyed on `pending` transitioning to
+  // clear it. Review reproduced a defect in each of its two forms:
+  //   - latching plainly: a refusal recorded in a commit where `pending` was
+  //     already false was never cleared, because the clear effect only ran on a
+  //     TRANSITION — so it masked `settled` for the rest of the mount and
+  //     silently disabled the arrival announcement, this region's main job.
+  //   - gating the render on `pending` instead: that only HID it. The latch
+  //     stayed set, and the next genuine request flipping `pending` true turned
+  //     the region's text from "" to "Not sent…" — announcing a false statement
+  //     about a question that had been sent. Strictly worse than the bug it was
+  //     meant to fix, and the same `pending`-derived coupling the hook forbids
+  //     in writing.
+  // Both are gone because there is nothing here to go stale: `refusedInFlight`
+  // is reducer state beside `pending`, and `SET_PENDING(0)` clears it in the
+  // same state object. A mid-flight remount re-renders it, which is correct —
+  // the refusal is still true of a window that is still open, and the reader's
+  // text is still in the box.
+  //
+  // ONE region, not a second one beside it. A second `role="status"` inside
+  // `.composer` breaks every `getByRole("status")` in ChatView.test.tsx
+  // (`getByRole` throws on multiple matches) and the live e2e's
+  // `.composer [role='status']` locator, for no gain: the refusal copy is a
+  // SUPERSET of the in-flight sentence ("still answering", "your text is kept"),
+  // so nothing is lost by it taking the region while its window is open.
+  //
+  // STATED LIMITATION: a second refusal inside the SAME window is silent,
+  // because the state does not change and `role="status"` fires on change. That
+  // is the right behaviour rather than a gap to paper over — the reader has
+  // already been told and nothing about the situation is different. A refusal in
+  // a LATER window does announce, because the flag returns to false in between.
+  // Covered both ways in ChatView.test.tsx and useLandingState.test.tsx.
+  const REFUSED_TEXT =
+    // A full stop, not an em dash, and "previous" rather than "last". NVDA's
+    // `locale/en/symbols.dic` gives `—` the level `most`, above the default
+    // `some`, so it is silent at the default setting — but a reader running
+    // punctuation at "most" or "all" hears "Not sent em dash CiteVyn…", and
+    // every other sr-only string on this screen already uses a full stop.
+    // "last question" is momentarily ambiguous with "the question you just
+    // tried to send", which is the one thing this sentence is NOT about.
+    "Not sent. CiteVyn is still answering your previous question. Your text is kept.";
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -566,9 +624,33 @@ export function ChatView({
               second later puts it nowhere. `aria-disabled` announces the same
               state, keeps focus and the tab order, and the handler below is the
               actual refusal. The hook refuses too, before it clears the input,
-              so a type-ahead question is held rather than eaten. */}
+              so a type-ahead question is held rather than eaten.
+
+              The handler is now wired UNCONDITIONALLY, and the refusal lives
+              entirely in `submitChat` (#356 gap 2). `onClick={pending ?
+              undefined : onSendClick}` made the click path unobservable: it
+              never reached the hook, so nothing could announce it, and no prop
+              this component has could tell a refused click from no click.
+              Routing it through also makes the REF the single gate — `pending`
+              is a render behind `inFlight.current` by construction (#62), so
+              the two could disagree in either direction and the view was the
+              less accurate of the pair. What the reader gets is unchanged: the
+              hook refuses before it clears the input, the button still carries
+              `aria-disabled` (which Playwright's actionability honours) and the
+              0.7 dim, and no second request starts.
+
+              One honest caveat, since the ref and the rendered `pending` cannot
+              be simultaneous: in the sub-frame window where `markInFlight(-1)`
+              has run but React has not yet committed `pending: false`, a click
+              now SENDS while the button still renders as unavailable, where
+              before it did nothing. The request has genuinely finished by then,
+              so the send is correct and the #62 ordering invariant holds
+              (`streamBot` dispatches the answer bubble BEFORE that decrement);
+              what is briefly wrong is the button's own advertisement. The
+              opposite skew — ref busy, `pending` not yet true — used to be a
+              SILENT refusal and is now an announced one. */}
           <button
-            onClick={pending ? undefined : onSendClick}
+            onClick={onSendClick}
             aria-disabled={pending}
             className="send-button"
             aria-label="Send"
@@ -584,9 +666,11 @@ export function ChatView({
             not: a reader who has scrolled up had the only explanation of the
             refusal off-screen. */}
         <p className="sr-only" role="status">
-          {pending
-            ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
-            : settled}
+          {refusedInFlight
+            ? REFUSED_TEXT
+            : pending
+              ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
+              : settled}
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}

@@ -10,12 +10,6 @@ import { test, expect } from "./fixtures";
 
 const DARK_INK = "rgb(240, 239, 233)"; // #f0efe9 — --ink in dark mode
 
-function hexToRgb(hex: string): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgb(${r}, ${g}, ${b})`;
-}
 
 // Contrast ratio: simplified WCAG formula for text on background
 function contrastRatio(c1: [number, number, number], c2: [number, number, number]): number {
@@ -355,7 +349,9 @@ test.describe("CiteVyn Landing Page", () => {
       await page.waitForTimeout(300);
 
       const chatInput = page.locator(".chat-input");
-      const chatList = page.locator("#chat-list");
+      // The list itself is read inside the `page.evaluate` below, by id; the
+      // unused locator that sat here read as a dependency this test does not
+      // have.
 
       // Ask multiple questions
       for (const q of ["What is Claude Code?", "How does it install?", "What models does it use?"]) {
