@@ -168,6 +168,32 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that Node 20/22/26 produce a byte-identical bundle.
 
 ### Fixed
+- **A refused composer submit produced no observable change at all (#356 gap
+  2).** With an answer in flight the composer correctly refuses a second
+  question and correctly keeps the typed text — but measured with a
+  MutationObserver over the whole body, the refusal produced **zero DOM
+  mutations**, on the Enter path and the click path alike. A screen-reader user
+  pressed Enter and nothing whatsoever happened. The persistent `role="status"`
+  region beside the composer now says "Not sent — CiteVyn is still answering
+  your last question. Your text is kept." The signal is a counter bumped at the
+  `inFlight` **ref** inside `submitChat`, never derived from the rendered
+  `pending`: `pending` is a render behind the ref by construction (#62), so a
+  `pending`-derived announcement would announce refusals that never happened
+  and miss ones that did — pinned by the two-submits-in-one-React-batch test.
+  One region rather than two: the refusal copy is a superset of the in-flight
+  sentence, so nothing is lost while it holds the region, and the window closes
+  on its own when the answer lands, at which point the arrival announcement
+  takes over — no restore timer to get wrong. The send button's handler is now
+  wired unconditionally, because `onClick={pending ? undefined : onSendClick}`
+  meant a click while gated never reached the hook and no signal could exist;
+  `aria-disabled` and the 0.7 dim still carry the state, and the hook stays the
+  single gate. Stated limitation, pinned as a test: a *second* refusal inside
+  the *same* in-flight window is silent, since `role="status"` fires on a text
+  change and nothing changed; a refusal in a *later* window does announce. An
+  empty submit is never announced — "your text is kept" about an empty box is a
+  false statement. +122 B gzip, measured. This closes #356; gaps 1 and 3 shipped
+  in #359.
+
 - **`npm run type-check` type-checked no Playwright spec at all (#366).**
   `frontend/tsconfig.json` said `"include": ["src", "e2e"]` and there has never
   been a `frontend/e2e/`. tsc ignores an `include` entry that matches nothing

@@ -46,6 +46,11 @@ interface ChatViewProps {
       here force-scrolls the just-asked question into view even if the reader had
       scrolled up — an explicit send must always be followed. */
   sendTick?: number;
+  /** Monotonic counter bumped by the hook every time a composer submit is
+      REFUSED because an answer is still in flight (#356 gap 2). A change here
+      puts the refusal into the persistent status region below. It comes from
+      the hook's `inFlight` REF, never from `pending`. */
+  refusalTick?: number;
 }
 
 export function ChatView({
@@ -61,6 +66,7 @@ export function ChatView({
   pending = false,
   highlightedIndex = -1,
   sendTick = 0,
+  refusalTick = 0,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLInputElement>(null);
@@ -195,6 +201,50 @@ export function ChatView({
         : `Answer ready.${n ? ` ${n} source${n === 1 ? "" : "s"} cited.` : ""}`,
     );
   }, [messages]);
+
+  // What the region says when a submit is REFUSED (#356 gap 2).
+  //
+  // The refusal used to be a bare `return` in `submitChat`: measured with a
+  // MutationObserver over the whole body, ZERO DOM mutations on both the Enter
+  // path and the click path. The reader pressed Enter and nothing at all
+  // happened — not even to a screen reader, because `role="status"` announces on
+  // a text CHANGE and no text changed.
+  //
+  // ONE region, not a second one beside it. The BACKLOG framed the choice as
+  // "replace the in-flight sentence and restore it, or add a second region";
+  // this is a third shape, and it is cheaper than both. A second `role="status"`
+  // inside `.composer` breaks every `getByRole("status")` in ChatView.test.tsx
+  // (29 of them — `getByRole` throws on multiple matches) and the live e2e's
+  // `.composer [role='status']` locator, for no gain: the refusal copy is a
+  // SUPERSET of the in-flight sentence ("still answering", "your text is kept"),
+  // so nothing is lost by it taking over the region while its window is open.
+  // And there is no restore timer to get wrong — the window closes on its own
+  // when `pending` drops, at which point `settled` takes the region and is
+  // announced as the arrival.
+  //
+  // STATED LIMITATION: a second refusal inside the SAME in-flight window is
+  // silent, because the text does not change and `role="status"` fires on
+  // change. That is the right behaviour rather than a gap to paper over — the
+  // state has not changed and the reader has already been told — and forcing a
+  // re-announcement means clearing and re-setting across two commits, which is a
+  // timer and a flake. A refusal in a LATER window does announce: `refused`
+  // returns to "" when `pending` goes false, so the next one is a change again.
+  // Covered both ways in ChatView.test.tsx.
+  const [refused, setRefused] = useState("");
+  // Seeded from the CURRENT value, exactly like `seenSendTickRef` below, so this
+  // fires on a CHANGE and never on mount — a remount mid-flight must not
+  // announce a refusal that happened before it.
+  const seenRefusalTickRef = useRef(refusalTick);
+  useEffect(() => {
+    if (refusalTick === seenRefusalTickRef.current) return;
+    seenRefusalTickRef.current = refusalTick;
+    setRefused("Not sent — CiteVyn is still answering your last question. Your text is kept.");
+  }, [refusalTick]);
+  useEffect(() => {
+    // The window closed. Clearing to "" is silent (there is nothing to
+    // announce), and it re-arms the region for the next window's first refusal.
+    if (!pending) setRefused((s) => (s === "" ? s : ""));
+  }, [pending]);
 
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
@@ -566,9 +616,22 @@ export function ChatView({
               second later puts it nowhere. `aria-disabled` announces the same
               state, keeps focus and the tab order, and the handler below is the
               actual refusal. The hook refuses too, before it clears the input,
-              so a type-ahead question is held rather than eaten. */}
+              so a type-ahead question is held rather than eaten.
+
+              The handler is now wired UNCONDITIONALLY, and the refusal lives
+              entirely in `submitChat` (#356 gap 2). `onClick={pending ?
+              undefined : onSendClick}` made the click path unobservable: it
+              never reached the hook, so nothing could announce it, and no prop
+              this component has could tell a refused click from no click.
+              Routing it through also makes the REF the single gate — `pending`
+              is a render behind `inFlight.current` by construction (#62), so
+              the two could disagree in either direction and the view was the
+              less accurate of the pair. What the reader gets is unchanged: the
+              hook refuses before it clears the input, the button still carries
+              `aria-disabled` (which Playwright's actionability honours) and the
+              0.7 dim, and no second request starts. */}
           <button
-            onClick={pending ? undefined : onSendClick}
+            onClick={onSendClick}
             aria-disabled={pending}
             className="send-button"
             aria-label="Send"
@@ -584,9 +647,10 @@ export function ChatView({
             not: a reader who has scrolled up had the only explanation of the
             refusal off-screen. */}
         <p className="sr-only" role="status">
-          {pending
-            ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
-            : settled}
+          {refused ||
+            (pending
+              ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
+              : settled)}
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}

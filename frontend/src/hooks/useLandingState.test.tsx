@@ -1362,6 +1362,13 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     // worse bug than the one being fixed.
     expect(result.current.state.chatInput).toBe("Second question");
     expect(result.current.state.messages.filter((m) => m.role === "user")).toHaveLength(1);
+    // ...and it must not be SILENT either (#356 gap 2). Every other assertion
+    // in this test is an absence — nothing sent, nothing appended, nothing
+    // cleared — which is exactly the shape a screen-reader user experienced:
+    // measured with a MutationObserver over the whole body, zero DOM mutations.
+    // The tick is the one positive fact, and it is what `ChatView` turns into
+    // announced text.
+    expect(result.current.state.refusalTick).toBe(1);
 
     // Once the answer lands the composer takes it — the gate is transient.
     mockAskQuestion.mockResolvedValue(askResponse({ answer: "Second answer." }));
@@ -1400,6 +1407,60 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     });
 
     expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    // The refusal announcement rides the SAME ref, so it is correct in exactly
+    // the case a `state.pending` guard is wrong (#356 gap 2). Both calls read
+    // `pending === 0`; only the ref knows the first one already started. A
+    // `pending`-derived signal would have bumped zero times here — and would
+    // have bumped on submits that were never refused.
+    expect(result.current.state.refusalTick).toBe(1);
+  });
+
+  it("does not announce a refusal for a submit that was never refused", () => {
+    // The partner. `refusalTick` must count REFUSALS, not submits — a tick that
+    // bumps on every Enter would satisfy every positive assertion above while
+    // telling a screen-reader user their question was dropped when it was sent.
+    mockAskQuestion.mockResolvedValue(askResponse({ answer: "An answer." }));
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "A question");
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusalTick).toBe(0);
+  });
+
+  it("does not announce a refusal for an EMPTY submit while in flight", async () => {
+    // Enter on an empty box is not a refused question, it is nothing. The empty
+    // check therefore runs BEFORE the in-flight gate; announcing here would say
+    // "your text is kept" about a box with no text — the same class of false
+    // statement to an AT user that the parked-question toast had to be fixed for.
+    mockAskQuestion.mockImplementationOnce(
+      () => new Promise<AskResponse>(() => {}),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "First question");
+    await act(async () => {
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    // Partner: a request really is in flight, so the absence below is not
+    // passing because the gate was never reached.
+    expect(result.current.state.pending).toBeTruthy();
+    expect(result.current.state.chatInput).toBe("");
+
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusalTick).toBe(0);
+
+    // ...and the very next submit WITH text does announce, so the assertion
+    // above is about emptiness and not about the gate being broken.
+    type(result, "Second question");
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusalTick).toBe(1);
   });
 
   it("re-opens the composer after a FAILED request, not just a successful one", async () => {
