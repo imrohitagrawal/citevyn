@@ -124,6 +124,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that Node 20/22/26 produce a byte-identical bundle.
 
 ### Fixed
+- **SQLite foreign-key enforcement is on, and it caught a production bug in the
+  chat hot path (#286).** SQLite ships with `PRAGMA foreign_keys` OFF, per
+  connection, and nothing in this codebase ever turned it on — so for the whole
+  life of the suite, ~1900 hermetic tests silently accepted child rows pointing
+  at parents that did not exist, while real Postgres always rejected them. A
+  `PRAGMA foreign_keys=ON` hook now fires on the SQLAlchemy `Engine` *class*
+  (`app/core/db.py`), which is what reaches the ~30 test modules that build
+  their own `create_async_engine` as well as the worker, seed and alembic entry
+  points; an engine-instance listener inside `build_engine` would cover none of
+  them. The SQLite check is a deliberately broad substring on the DBAPI
+  connection's module, because under aiosqlite that class lives in
+  `sqlalchemy.dialects.sqlite.aiosqlite`, **not** `sqlite3` — a
+  `startswith("sqlite3")` test silently misses every async engine, which is
+  every engine this app uses.
+
+  Turning it on surfaced 147 failures and 4 errors. One was a real production
+  bug: `Orchestrator._ensure_user` inserted the `sessions` row — which carries
+  a foreign key onto `users` — and flushed it **before** creating the `users`
+  row it points at. That is the same shape as the `_mint_principal` bug this
+  issue was filed from, in the path every chat message takes. It has never
+  fired in production only because `demo_user` happens to be seeded
+  (`db/seed/seed_users.py`); a fresh, unseeded Postgres 500s on the first
+  message. The remaining 146 were test-fixture debt of two shapes — a
+  fabricated id whose parent row was never inserted, and (more interesting) a
+  test that inserted the *correct* parent but in the same flush as its child.
+  SQLAlchemy's unit of work orders inserts by declared `relationship()`s, not
+  by raw foreign-key columns, and this schema declares none between `User` and
+  its dependents — so those tests were reproducing the very defect they should
+  have caught. No assertion was weakened to make anything pass; one test in
+  `test_magic_link_routes.py` that asserted a `magic_link_tokens` row outlived
+  a deleted user was rewritten, because migration 0012 declares that key
+  `ON DELETE CASCADE` and it had only ever passed by exploiting this gap.
+  Backend: 1964 passed / 23 skipped, foreign keys enforced.
+
 - **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
   and failed open on a dual-active database (#226).** `_active_index_stamp`
   resolved the active row by `status == active` rather than by

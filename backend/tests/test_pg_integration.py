@@ -505,6 +505,58 @@ async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_po
         await engine.dispose()
 
 
+async def test_ensure_user_on_a_fresh_database_does_not_violate_the_fk_on_postgres(
+    pg_schema: str,
+) -> None:
+    """The sibling bug to the one above, found by #286 and living in the chat
+    hot path: ``Orchestrator._ensure_user`` added the ``Session`` row and
+    flushed it BEFORE creating the ``users`` row its foreign key names.
+
+    It never fired in production only because ``demo_user`` happens to be
+    seeded (``db/seed/seed_users.py``) on every deploy. This test runs
+    against a migrated but UNSEEDED schema, which is the state a fresh
+    database is in -- exactly where the first chat message would 500.
+
+    Deliberately a Postgres test even though SQLite now enforces foreign
+    keys too: SQLite's ``PRAGMA foreign_keys`` is a close proxy for
+    Postgres, not the same engine, and this is the dialect that ships.
+    RED with the pre-#286 ordering: ``ForeignKeyViolation`` on
+    ``sessions_user_id_fkey``.
+    """
+    import uuid as _uuid
+
+    from sqlalchemy import select as _select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.answer.orchestrator import Orchestrator
+    from app.core.config import Settings
+    from app.models import Session as SessionModel
+    from app.models import User as UserModel
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with maker() as session:
+            # Precondition: nobody has seeded anything. Without this the test
+            # could pass on a database where ``demo_user`` already exists,
+            # which is precisely the condition that hid the bug.
+            assert (await session.execute(_select(UserModel))).scalars().first() is None
+
+            orchestrator = Orchestrator(Settings(), session)
+            session_id = _uuid.uuid4()
+            user_id = await orchestrator._ensure_user(session_id)
+            await session.commit()  # must not raise ForeignKeyViolation
+
+        async with maker() as verify:
+            assert await verify.get(UserModel, user_id) is not None
+            row = await verify.get(SessionModel, session_id)
+            assert row is not None and row.user_id == user_id
+    finally:
+        await engine.dispose()
+
+
 def test_magic_link_tokens_cascade_on_user_delete_on_postgres(
     alembic_pg_config: AlembicConfig, pg_schema: str
 ) -> None:
