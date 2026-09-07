@@ -23,6 +23,7 @@ import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
 import { getAuthSnapshot } from "../lib/authStore";
 import { isModalDialogOpen } from "../lib/dialogStack";
+import { scrollToSection } from "../lib/scrollToSection";
 import {
   ApiClientError,
   type StoredMessage,
@@ -322,13 +323,6 @@ function streamText(
   };
 }
 
-/** Smooth-scroll the section with `id` into view below the ~72px fixed header. */
-function scrollToId(id: string) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  const y = el.getBoundingClientRect().top + window.pageYOffset - 72;
-  window.scrollTo({ top: y, behavior: "smooth" });
-}
 
 // ---------------------------------------------------------------------------
 // Hook
@@ -1153,9 +1147,9 @@ export function useLandingState() {
         stopFlash();
         dispatch({ type: "SET_SCREEN", screen: "landing" });
         window.scrollTo({ top: 0 });
-        setTimeout(() => scrollToId(id), 80);
+        setTimeout(() => scrollToSection(id), 80);
       } else {
-        scrollToId(id);
+        scrollToSection(id);
       }
     },
     [state.screen, stopFlash],

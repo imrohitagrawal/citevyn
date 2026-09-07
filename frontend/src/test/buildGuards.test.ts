@@ -113,6 +113,19 @@ describe("the build-tooling test suite is really selected by vitest", () => {
     ).toBe(true);
   });
 
+  it("selects the #358 lazy-landing-strip guard", () => {
+    // Same failure mode as the #365 guard above, and the same fix: this file is
+    // the only thing proving the below-the-fold strip really left the eager
+    // bundle, and `npm test` has no count gate, so deleting it would leave the
+    // run green while the split silently regressed.
+    expect(
+      selected.some((f) => f.endsWith("scripts/lazy-landing-strip.test.mjs")),
+      "vitest no longer selects scripts/lazy-landing-strip.test.mjs, so the " +
+        "#358 eager-graph guard is not running at all",
+    ).toBe(true);
+    expect(existsSync(join(frontendRoot, "scripts", "lazy-landing-strip.test.mjs"))).toBe(true);
+  });
+
   it("and still selects the app suite, so widening did not replace src/", () => {
     expect(selected).toContain("src/test/buildGuards.test.ts");
     expect(selected.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);

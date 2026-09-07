@@ -746,8 +746,12 @@ frontend/src/
 │   ├── Header.tsx                   # Sticky header with nav + controls
 │   ├── Hero.tsx                     # Hero section with input + auto-play card
 │   ├── ChatView.tsx                 # Full-screen demo chat
-│   ├── landing-sections.tsx         # Ticker, Sources, Personas, HowItWorks, etc.
+│   ├── landing-sections.tsx         # EAGER sections: Ticker, Sources, InteractiveDemo
+│   ├── landing-strip.tsx            # LAZY below-the-fold strip (#358), one chunk
 │   └── LandingPage.tsx              # Orchestrator for the landing view
+├── lib/
+│   ├── useDeferredReveal.ts         # IntersectionObserver gate for the lazy strip
+│   └── scrollToSection.ts           # Anchor scroll that waits for a lazy target
 ├── styles/
 │   ├── tokens.css                   # Design tokens (light + dark themes)
 │   ├── reset.css                    # Minimal CSS reset
@@ -764,6 +768,99 @@ the two files above are the only way it can be styled: everything under `src/` i
 content-hashed by Vite, and the app-wide CSP forbids inline `<style>`/`<script>`.
 `backend/tests/test_about_page_tokens.py` fails if `about.css` drifts from
 `tokens.css`.
+
+### 5.1 The deferred marketing strip (#358)
+
+The landing sections are split across two modules by WHEN THEY MUST BE ON SCREEN,
+not by what they are about. Rollup chunks per module, so the split has to be
+physical — `React.lazy` over named exports of one module frees nothing.
+
+| module | sections | loaded |
+|---|---|---|
+| `landing-sections.tsx` | QuestionTicker, SourcesStrip, InteractiveDemo | eager, in the entry chunk |
+| `landing-strip.tsx` | Personas, HowItWorks, WhyDifferent, Pricing, FAQ, CTABanner, Footer | one chunk, on scroll |
+
+Measured on the shipping build (`npm run check:bundle`): the eager graph goes
+**66,394 B → 62,873 B gzip (−3,521 B)**, and `frontend/bundle-budget.json` was
+ratcheted 68,000 → 64,479 in the same change so the win is not spent silently.
+
+`QuestionTicker` and `SourcesStrip` stay eager because they sit immediately under
+the Hero, where a `fallback={null}` boundary is a visible jump on first paint.
+`InteractiveDemo` stays eager because it is the product demo, the target of the
+header's "Demo" link, and — decisively — it sits BETWEEN the two deferred DOM
+runs, so keeping it put is what lets the deferred half be one module mounted at
+two points. Measured cost of that choice: **406 B** — two throwaway variants
+built back to back before implementation, `InteractiveDemo` deferred 61,878 B vs
+`InteractiveDemo` eager 62,284 B. (Neither figure is the shipped one: both
+predate the gate itself, which costs a further ~242 B.)
+
+**Three things had to be true for this not to be a regression**, and each has a
+test:
+
+1. **The nav still works.** Four of the five header links (`#who`, `#how`,
+   `#pricing`, `#faq`) point into the deferred chunk, and `scrollToId` used to
+   do `if (!el) return` — a silent no-op that made those links look dead.
+   `LandingPage` reveals the strip on the click and `scrollToSection` waits for the
+   target to be inserted (a `MutationObserver`, bounded by a 10 s clock — an
+   earlier frame counter was reproduced failing at a 3 s chunk delay).
+2. **A deep link still lands.** `/#pricing` reveals the strip and scrolls once.
+3. **No IntersectionObserver means SHOW, never hide.** `useDeferredReveal` starts
+   revealed when the API is absent — jsdom implements none, and neither do old
+   browsers. "Cannot observe" must never mean "hide the page".
+
+**An honest limit, measured, not assumed. On desktop this change makes first-paint
+JS BIGGER.** The lead margin is 400 px and the sentinel sits at 854 px on Desktop
+Chrome 1280×720 — inside `720 + 400` — so a desktop reader's observer fires on
+first paint and the chunk is fetched right away. Adding what that reader actually
+downloads:
+
+| | entry | + strip | first-paint total |
+|---|---|---|---|
+| before | 66,394 | — | **66,394 B** |
+| after | 62,873 | 4,721 | **67,594 B (+1,200 B)** |
+
+So on desktop the 3,521 B is a *reallocation*, not a saving: the entry chunk
+parses and paints sooner and the strip arrives on a second, non-blocking request,
+but the byte total moves the wrong way by 1,200 B. The real byte win is on
+phone-sized viewports, where the sentinel is at 1458 px — outside `844 + 400` —
+and a reader who does not scroll never fetches the 4,721 B at all. That is the
+right place to want it, and it is the trade this change makes deliberately.
+
+`frontend/tests/lazy-strip.spec.ts` pins the phone side as an assertion (the
+sentinel must start outside the lead margin, and no chunk request may happen
+before the scroll) and *records* the desktop geometry as a test attachment
+rather than asserting it — asserting `sentinelTop < viewportHeight + 400` would
+go red if a taller Hero made desktop start deferring too, which is an
+improvement, and a check that fails when the behaviour gets better locks in the
+weaker behaviour.
+
+**Accessibility, measured.** Nothing becomes unreachable: any viewport scroll of
+~214 px or more mounts the strip, and a real keyboard walk at 390×844 reaches
+every deferred control in the right order (45 tab stops, strip mounts at stop 15).
+Measured CLS is 0.0001 with the chunk instant and 0.0001 with it delayed 3 s —
+the browser's scroll anchoring absorbs the ~5,150 px inserted above the viewport,
+and 13 sampled viewport rows are byte-identical across the mount. Two honest
+costs remain, both phone-only:
+
+- **Heading navigation can skip.** At 390×844 the DOM holds 2 headings at load
+  and 21 once mounted. The 12 inserted by `LandingStripTop` land *above* the
+  eager demo's heading, so a virtual cursor already parked on the demo when the
+  insertion happens will not announce them on the next "next heading" (shift+H
+  recovers). The mitigation, if this is ever judged worse than the bytes, is to
+  move the sentinel above `SourcesStrip` so the strip mounts before a cursor can
+  reach the insertion point.
+- **Find-in-page** cannot match deferred copy until the reader scrolls.
+
+**If a section's chunk never arrives**, `LazyChunkBoundary` renders nothing in its
+place and the rest of the page keeps working. Without it a rejected `lazy()` —
+a 404 after a deploy swaps the hashed assets, or a dropped connection — unmounts
+the whole React root: reproduced as a white screen on the ordinary scroll path.
+`Suspense` does not catch that; it handles the pending state, not the rejected one.
+
+**One coupling to know about.** Roughly 30 assertions in `behavior.spec.ts` and
+`fidelity.spec.ts` touch deferred sections without scrolling first, and pass only
+because the desktop sentinel currently sits inside the lead margin. If the Hero
+grows past ~320 px they will red for a reason that does not name #358.
 
 ---
 

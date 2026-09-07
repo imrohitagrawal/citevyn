@@ -331,6 +331,21 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
   test.describe(`focus ring — ${theme} theme (#355)`, () => {
     test.beforeEach(async ({ page }) => {
       await gotoApp(page);
+      // `.cta-banner` moved into the lazily-loaded strip (#358), and the
+      // coverage partner below REQUIRES the sweep to reach it. Waiting for it
+      // makes the dependency explicit instead of leaving a focus-ring test to
+      // red for a lazy-loading reason.
+      //
+      // SCROLL, don't just wait. At 1280x720 the observer happens to fire on
+      // first paint, so a bare wait passes today — but only by that accident.
+      // If the Hero ever grows enough to push the sentinel past the lead margin,
+      // desktop starts deferring and a bare wait would time out here, reddening
+      // an accessibility spec for a reason that names neither. Scrolling to the
+      // bottom and back reaches the banner either way, and leaves the page at
+      // the top so the tab walk below starts where it always did.
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await expect(page.locator(".cta-banner")).toBeAttached({ timeout: 15_000 });
+      await page.evaluate(() => window.scrollTo(0, 0));
       await ensureTheme(page, theme);
     });
 
