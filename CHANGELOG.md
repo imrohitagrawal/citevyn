@@ -7,6 +7,68 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Every `Settings` field is now declared in an env example, or exempted by
+  name with a reason — enforced by a test (#332).** The issue's headline said 29
+  of 84 fields were undocumented; the real number is **23**. The 29 came from a
+  substring search, which counts `CITEVYN_FOO` as documented when only
+  `CITEVYN_FOO_BAR=` appears. Re-measured with exact `NAME=` declaration parsing
+  and with each variable's environment name **asked of pydantic-settings rather
+  than hand-built** — that second part is not pedantry: `env_prefix` is
+  `CITEVYN_` and one field is named `citevyn_alias_intent_check`, so its variable
+  is `CITEVYN_CITEVYN_ALIAS_INTENT_CHECK`, and because `model_config` uses
+  `extra="ignore"` an operator who writes the intuitive `CITEVYN_ALIAS_INTENT_CHECK`
+  gets no error, changes nothing, and believes the feature is off.
+
+  17 fields documented, 6 exempted. The headline is **`CITEVYN_ENVIRONMENT`**,
+  which was written down nowhere despite being the single flag that turns on HSTS,
+  the `Secure` and `__Host-` session cookie, withdrawal of `/docs` and the OpenAPI
+  schema, refusal of a `stub` LLM or embedding provider, and refusal of a default
+  or under-16-character demo/admin key (those two keys only; the OAuth,
+  Resend and LLM keys are never strength-checked). Consulted in 19 places:
+  10 read sites outside `config.py` plus 9 startup validators inside it —
+  counted precisely, because an earlier draft of this entry said "11" by
+  counting a line that turned out to be a docstring. Anyone
+  starting the service by a path other than `fly.toml` or `docker-compose.yml`
+  (a bare `uvicorn`, another orchestrator) got development-mode behaviour with
+  no error and no warning. It is documented in `.env.example` and the README
+  env table, and deliberately **not**
+  as a settable line in `infra/docker/prod.env.example`: `docker-compose.yml` pins
+  it in its `environment:` block, which overrides `env_file:` (verified with
+  `docker compose config`), so a line there would have been inert — which is the
+  precise failure this change exists to stop. The prod template gets a prose note
+  saying so instead. Also newly written down: the registered-user and
+  auth-login rate limits, all three cost-control switches beside the dollar
+  ceilings they gate, the index-promotion pass-rate gate, session TTL, and the
+  retrieval/memory/embedding tuning knobs.
+
+  **The guard is the deliverable; the documentation is the smaller half.**
+  `backend/tests/test_settings_env_vars_are_documented.py` (31 tests) asserts
+  coverage, exact-match declaration (a mention in prose does not count — that hole
+  made the first #289 guard pass while the variable it guarded was gone), a
+  **reverse** rule that no documented name is fictional, non-vacuity partners on
+  every collector, and that no exemption is stale or contradicted by the docs. It
+  is a separate file rather than a widening of the OAuth guard, because that one
+  demands a declaration in all four operator-facing files — right for six
+  credentials, wrong for a retrieval-tuning float nobody puts in a Fly secrets
+  block.
+
+  An adversarial review round found the exemption list was weaker than its own
+  docstring claimed: `test_every_exemption_carries_a_reason` measured string
+  LENGTH, so forty characters of plausible prose could have silenced the guard
+  for a live setting. `test_every_exemption_is_actually_dead_config` now checks
+  the CLAIM instead — an exempted field must have no reader under `backend/app`
+  — with a partner proving the read-site scanner is not blind. Exempting
+  `environment` now fails naming all eleven of its read sites.
+
+  Mutation-tested with 10 mutants; 9 killed. One **survived**, and was worth
+  more than the six that died: hand-building `"CITEVYN_" + field.upper()` turns
+  nothing red while `env_prefix` is `CITEVYN_`, because for that one field the two
+  methods coincide. A documented red-bite line claiming otherwise was therefore
+  false and was corrected. The mutant that does bite is a changed `env_prefix`,
+  under which the coverage rule goes **green** — blind, still blessing
+  documentation for variables the app no longer reads — and only the behavioural
+  `Settings()` round-trip goes red.
+
 - **Password hashing module, no routes yet (ADR-0004 PR 4).**
   `app.core.passwords` wraps `argon2-cffi` (Argon2id, OWASP baseline
   `m=19456 KiB, t=2, p=1` — `p=1` because the production machine is Fly's
@@ -168,6 +230,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that Node 20/22/26 produce a byte-identical bundle.
 
 ### Fixed
+- **The README told operators to set a variable that does nothing (#332).** The
+  configuration table and the production walkthrough both named a
+  `CITEVYN_LLM_API_KEY`, which is not a `Settings` field and is read by nothing
+  anywhere in the repo; the field that actually gates the `anthropic` provider is
+  `CITEVYN_ANTHROPIC_API_KEY`. A wrong name is worse than a missing one, because
+  `extra="ignore"` means the operator is never told: they set it, and believe live
+  answer generation is configured. The new reverse guard fails on any recurrence,
+  and caught this instance on its first run — including on the replacement
+  wording, which had backticked the dead name while explaining it.
+
 - **Production logs print their `extra=` fields again, without leaking the
   upstream bodies those fields carry (#361).** `configure_logging` formatted
   with `LOG_FORMAT = "%(message)s"`, so every field passed as `extra=` was
