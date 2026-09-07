@@ -407,7 +407,7 @@ async def seed_user(
     session: AsyncSession,
     user_id: str,
     *,
-    role: UserRole = UserRole.demo_user,
+    role: UserRole | None = None,
 ) -> None:
     """Persist a ``users`` row if absent, in its own flush.
 
@@ -428,21 +428,38 @@ async def seed_user(
     constant ``ADMIN_USER_ID`` seeded by ``db/seed/seed_users.py``, and a
     chat actor comes from ``Orchestrator._ensure_user``.
 
-    Idempotent, but LOUD about a conflict: asking for a role the existing row
-    does not have raises rather than silently handing back the old one. A
-    quiet no-op there would let a test believe it was running as an admin
-    while the row said ``demo_user`` — the same shape of invisible wrongness
-    this whole change exists to end.
+    ``role=None`` (the default) means "I just need the row to exist": absent,
+    it is created as ``demo_user``; present, it is accepted whatever role it
+    has. That matters because :func:`seed_chat_session` calls this purely to
+    satisfy a foreign key and must not care — an admin with a chat session is
+    an ordinary shape (``db/seed/seed_users.py`` seeds one).
+
+    Passing an explicit ``role`` means "I need THIS role", and a row already
+    seeded with another raises instead of quietly handing back the old one. A
+    silent no-op there would let a test believe it was acting as an admin
+    while the row said ``demo_user`` — the same invisible wrongness this
+    change exists to end.
     """
     existing = await session.get(User, user_id)
     if existing is not None:
-        if existing.role is not role:
+        # ``==`` not ``is``: the StrEnum round-trips through
+        # ``StrEnumType.process_result_value`` back to the canonical member
+        # today, but a pending object built from a raw string would compare
+        # False by identity and raise here for no reason.
+        if role is not None and existing.role != role:
             raise AssertionError(
                 f"user {user_id!r} was already seeded with role {existing.role}, "
-                f"not {role}; seed it once with the role the test needs"
+                f"not the requested {role}; seed it once with the role the "
+                f"test needs"
             )
         return
-    session.add(User(user_id=user_id, role=role, created_at=datetime.now(UTC)))
+    session.add(
+        User(
+            user_id=user_id,
+            role=UserRole.demo_user if role is None else role,
+            created_at=datetime.now(UTC),
+        )
+    )
     await session.flush()
 
 
@@ -477,7 +494,7 @@ async def seed_index_version(
     """
     existing = await session.get(IndexVersion, index_version)
     if existing is not None:
-        if status is not None and existing.status is not status:
+        if status is not None and existing.status != status:
             raise AssertionError(
                 f"index version {index_version!r} was already seeded as "
                 f"{existing.status}, not the requested {status}; seed it once "
@@ -487,7 +504,7 @@ async def seed_index_version(
     session.add(
         IndexVersion(
             index_version=index_version,
-            status=status or IndexStatus.candidate,
+            status=IndexStatus.candidate if status is None else status,
             source_version_hash=f"sha256:{index_version}",
             created_at=datetime.now(UTC),
         )

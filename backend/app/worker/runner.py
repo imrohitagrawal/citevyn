@@ -401,8 +401,11 @@ class IngestionRunner:
 
         The original reason for that was that the hermetic SQLite engine did
         not enforce foreign keys at all, which made the cascade a no-op in
-        tests. That is no longer true — ``app.core.db`` turns the pragma on for
-        every SQLite connection (#286), and this module is inside its reach.
+        tests. No longer true: ``app.core.db`` turns the pragma on for every
+        SQLite connection (#286), and every entry point that DRIVES this
+        runner — ``app.worker.cli`` and ``db.seed.seed_catalog`` — imports it,
+        so the cascade is live. (Reach is a per-PROCESS property; this module
+        on its own does not import ``app.core.db``.)
         The explicit deletes are kept regardless: they are what the tests
         actually assert on, and an emitted DELETE is easier to reason about
         than a cascade nobody can see.

@@ -17,7 +17,9 @@ immediately discards.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -305,18 +307,35 @@ async def test_the_predicate_agrees_with_the_connection_the_hook_really_sees() -
 # ---------------------------------------------------------------------------
 
 
-def _loads_app_core_db(module: str) -> bool:
-    """Import ``module`` in a clean interpreter and report whether that pulled
-    in ``app.core.db`` (and therefore registered the pragma listener)."""
+def _import_probe(names: Sequence[str]) -> tuple[bool, list[str]]:
+    """Import every name in ``names`` in ONE clean interpreter.
+
+    Returns ``(app.core.db ended up in sys.modules, the names that imported)``.
+
+    Names that are not modules are skipped rather than fatal: an AST walk over
+    a ``from x import y`` cannot tell a submodule from an attribute, and only
+    the submodule case can load anything. The caller is handed the list that
+    DID import so it can refuse to draw a conclusion from a probe where
+    nothing resolved -- otherwise a renamed module would turn this guard
+    vacuous while it stayed green.
+    """
+    import json
     import subprocess
     import sys
-    from pathlib import Path
 
     backend = Path(__file__).resolve().parents[1]
     script = (
-        "import sys, importlib\n"
-        f"importlib.import_module({module!r})\n"
-        "print('app.core.db' in sys.modules)\n"
+        "import sys, json, importlib\n"
+        f"names = {list(names)!r}\n"
+        "imported = []\n"
+        "for name in names:\n"
+        "    try:\n"
+        "        importlib.import_module(name)\n"
+        "    except ModuleNotFoundError:\n"
+        "        continue\n"
+        "    imported.append(name)\n"
+        "print(json.dumps({'loaded': 'app.core.db' in sys.modules, "
+        "'imported': imported}))\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -326,7 +345,15 @@ def _loads_app_core_db(module: str) -> bool:
         env={"PYTHONPATH": str(backend), "PATH": "/usr/bin:/bin"},
         check=True,
     )
-    return result.stdout.strip().splitlines()[-1] == "True"
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    return payload["loaded"], payload["imported"]
+
+
+def _loads_app_core_db(module: str) -> bool:
+    """Whether importing ``module`` registers the pragma listener."""
+    loaded, imported = _import_probe([module])
+    assert imported == [module], f"{module!r} did not import at all; probe is meaningless"
+    return loaded
 
 
 @pytest.mark.parametrize("module", ["app.worker.cli", "db.seed.seed_catalog"])
@@ -358,32 +385,75 @@ async def test_the_documented_uncovered_entry_point_is_still_uncovered() -> None
     assert _loads_app_core_db("db.seed.seed_users") is False
 
 
+def _modules_imported_by(path: Path) -> list[str]:
+    """Every module name ``path`` imports, read from its AST.
+
+    ``db/env.py`` cannot be imported directly (it calls ``alembic.context``
+    at module scope and dies with ``AttributeError`` outside an alembic run),
+    so its imports are parsed instead of executed.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text())
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            # ``from app.core import db`` imports ``app.core.db``; a plain
+            # ``from app.core.config import X`` imports ``app.core.config``.
+            names.append(node.module)
+            names.extend(f"{node.module}.{alias.name}" for alias in node.names)
+    return sorted(set(names))
+
+
 async def test_alembic_does_not_load_the_hook_and_still_needs_not_to() -> None:
     """Alembic's exclusion is deliberate, and both halves of that are checked.
 
-    ``db/env.py`` cannot be imported outside an alembic run, so its exclusion
-    is asserted the only way available: its import list. That alone would be a
-    bare absence, so the second half asserts the REASON is still real --
-    ``op.batch_alter_table`` is still in use. On SQLite that is implemented as
-    create-new-table / copy-rows / drop-old / rename, and SQLite's own
-    documentation says to run that sequence with foreign keys OFF, because its
-    intermediate states are legitimately inconsistent.
+    Half one: nothing ``db/env.py`` imports drags in ``app.core.db``. This
+    RESOLVES each import in a clean interpreter rather than grepping the file
+    for a string. A string check is not a guard here -- a skeptic demonstrated
+    two ways past one: ``from app.core import db as db_module`` (the exact
+    idiom ``tests/conftest.py`` uses) never spells ``app.core.db``, and
+    ``from app.worker.cli import ...`` pulls the hook in transitively with no
+    mention of it at all. Both left the string check green while the hook was
+    loaded. It also went RED on a comment that merely said the words.
 
-    RED if someone adds ``app.core.db`` to ``db/env.py``, and red the other
-    way if every batch migration disappears -- at which point the exclusion
-    would be an unexamined gap rather than a decision, and worth revisiting.
-    The match is on ``op.batch_alter_table(`` so a passing mention in a
-    comment does not satisfy it.
+    Half two: the REASON for the exclusion is still real, because a bare
+    absence assertion proves nothing on its own. ``op.batch_alter_table`` is
+    still in use; on SQLite that is create-new-table / copy-rows / drop-old /
+    rename, and SQLite's own documentation says to run that with foreign keys
+    OFF, since its intermediate states are legitimately inconsistent. Matching
+    ``op.batch_alter_table(`` rather than the bare name keeps a passing
+    mention in a comment from satisfying it.
+
+    RED if any import of ``db/env.py`` starts loading ``app.core.db``, by any
+    spelling or transitively; red the other way if every batch migration
+    disappears, at which point the exclusion is an unexamined gap rather than
+    a decision.
     """
-    from pathlib import Path
-
     db_dir = Path(__file__).resolve().parents[2] / "db"
     env_py = db_dir / "env.py"
     assert env_py.is_file(), f"alembic env not found at {env_py}"
-    assert "app.core.db" not in env_py.read_text(), (
-        "db/env.py now imports app.core.db, so alembic runs with foreign keys "
-        "ON -- which breaks op.batch_alter_table on SQLite. Either revert the "
-        "import or update app/core/db.py's documented boundary."
+
+    candidates = _modules_imported_by(env_py)
+    assert candidates, f"parsed no imports at all from {env_py}; the AST walk is broken"
+    app_candidates = [name for name in candidates if name.split(".")[0] in {"app", "db"}]
+    assert app_candidates, (
+        "db/env.py imports nothing from app/ or db/ any more, so this guard "
+        "resolves nothing; re-check what it is meant to cover"
+    )
+
+    loaded, imported = _import_probe(app_candidates)
+    assert imported, (
+        f"none of {app_candidates} imported, so the probe proves nothing -- a "
+        "renamed module would leave this guard green while enforcement changed"
+    )
+    assert not loaded, (
+        f"importing what db/env.py imports ({imported}) now loads app.core.db, "
+        "so alembic runs with foreign keys ON -- that breaks "
+        "op.batch_alter_table on SQLite. Either revert the import or update "
+        "app/core/db.py's documented boundary."
     )
 
     versions = db_dir / "versions"
@@ -392,6 +462,33 @@ async def test_alembic_does_not_load_the_hook_and_still_needs_not_to() -> None:
         p.name for p in versions.glob("*.py") if "op.batch_alter_table(" in p.read_text()
     )
     assert using_batch, "no migration uses batch_alter_table; revisit the alembic exclusion"
+
+
+async def test_the_alembic_import_guard_resolves_imports_it_cannot_see_textually() -> None:
+    """Partner: the guard above asserts an ABSENCE, so prove it can find one.
+
+    Feeds ``_modules_imported_by`` + ``_loads_app_core_db`` a synthetic module
+    that imports ``app.worker.cli`` -- which loads ``app.core.db``
+    transitively, without the string ``app.core.db`` appearing anywhere. If
+    this comes back empty, the guard above is vacuous and would stay green
+    through exactly the change it exists to catch.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe_env.py"
+        probe.write_text("from app.worker.cli import build_runner\n")
+        candidates = _modules_imported_by(probe)
+
+    assert "app.worker.cli" in candidates, candidates
+    assert "app.core.db" not in "".join(candidates), (
+        "the probe is supposed to hide the string; it did not, so this test "
+        "no longer proves the guard sees past textual matching"
+    )
+
+    loaded, imported = _import_probe(candidates)
+    assert imported, "the probe imported nothing; it proves nothing"
+    assert loaded, "the guard's resolver failed to notice a transitive load of app.core.db"
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +509,7 @@ async def test_seeding_a_user_twice_with_a_different_role_raises(
     from app.models import UserRole
     from tests.conftest import seed_user
 
-    await seed_user(fk_session, "dual_role")
+    await seed_user(fk_session, "dual_role", role=UserRole.demo_user)
     with pytest.raises(AssertionError, match="already seeded with role"):
         await seed_user(fk_session, "dual_role", role=UserRole.admin)
 
@@ -426,12 +523,17 @@ async def test_seeding_a_user_twice_with_the_same_role_is_a_quiet_no_op(
     EVERY repeat call -- which would break every fixture that legitimately
     seeds the same id twice, and would then be caught only by the full suite
     rather than here.
+
+    The third call passes no role at all: that is the shape
+    ``seed_chat_session`` uses, and it must stay a no-op against an admin row
+    or an admin can never own a chat session.
     """
     from app.models import UserRole
     from tests.conftest import seed_user
 
     await seed_user(fk_session, "same_role", role=UserRole.admin)
     await seed_user(fk_session, "same_role", role=UserRole.admin)  # no raise
+    await seed_user(fk_session, "same_role")  # status-agnostic, also no raise
 
     stored = await fk_session.get(User, "same_role")
     assert stored is not None and stored.role is UserRole.admin
