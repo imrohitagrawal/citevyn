@@ -13,7 +13,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Generator, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -38,6 +37,7 @@ from app.models import (
     UserRole,
 )
 from app.models import Session as SessionModel
+from app.retrieval.types import EvidenceHit
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -427,24 +427,47 @@ async def seed_user(
     In production these ids always name a real row: the admin actor is the
     constant ``ADMIN_USER_ID`` seeded by ``db/seed/seed_users.py``, and a
     chat actor comes from ``Orchestrator._ensure_user``.
+
+    Idempotent, but LOUD about a conflict: asking for a role the existing row
+    does not have raises rather than silently handing back the old one. A
+    quiet no-op there would let a test believe it was running as an admin
+    while the row said ``demo_user`` — the same shape of invisible wrongness
+    this whole change exists to end.
     """
-    if await session.get(User, user_id) is None:
-        session.add(User(user_id=user_id, role=role, created_at=datetime.now(UTC)))
-        await session.flush()
+    existing = await session.get(User, user_id)
+    if existing is not None:
+        if existing.role is not role:
+            raise AssertionError(
+                f"user {user_id!r} was already seeded with role {existing.role}, "
+                f"not {role}; seed it once with the role the test needs"
+            )
+        return
+    session.add(User(user_id=user_id, role=role, created_at=datetime.now(UTC)))
+    await session.flush()
 
 
 async def seed_index_version(
     session: AsyncSession,
     index_version: str,
     *,
-    status: IndexStatus = IndexStatus.candidate,
+    status: IndexStatus | None = None,
 ) -> None:
     """Persist an ``index_versions`` row if absent, in its own flush.
 
     ``documents.index_version`` and ``evaluation_runs.index_version`` are
-    foreign keys onto it. Defaults to ``candidate`` so a caller that only
-    needs the parent to exist does not accidentally hand a test a second
-    active index.
+    foreign keys onto it.
+
+    ``status=None`` (the default) means "I just need the parent to exist":
+    an absent row is created as ``candidate`` — never ``active``, so a
+    caller that only wants the foreign key satisfied cannot accidentally
+    hand a test a second active index — and an existing row is accepted
+    whatever state it is in.
+
+    Passing an explicit ``status`` means "I need it in THIS state", and a
+    row already seeded in a different one raises instead of quietly handing
+    back the old one. A silent no-op there would let a test believe it was
+    running against an active index while the row said ``candidate`` — the
+    same shape of invisible wrongness this whole change exists to end.
 
     Same one-flush-per-parent rule as :func:`seed_user`, and here the
     ordering trap is sharper: ``IndexVersion.evaluation_run_id`` DOES have a
@@ -452,16 +475,24 @@ async def seed_index_version(
     ordered ``evaluation_runs`` first — exactly backwards for the other,
     relationship-less foreign key.
     """
-    if await session.get(IndexVersion, index_version) is None:
-        session.add(
-            IndexVersion(
-                index_version=index_version,
-                status=status,
-                source_version_hash=f"sha256:{index_version}",
-                created_at=datetime.now(UTC),
+    existing = await session.get(IndexVersion, index_version)
+    if existing is not None:
+        if status is not None and existing.status is not status:
+            raise AssertionError(
+                f"index version {index_version!r} was already seeded as "
+                f"{existing.status}, not the requested {status}; seed it once "
+                f"with the status the test needs"
             )
+        return
+    session.add(
+        IndexVersion(
+            index_version=index_version,
+            status=status or IndexStatus.candidate,
+            source_version_hash=f"sha256:{index_version}",
+            created_at=datetime.now(UTC),
         )
-        await session.flush()
+    )
+    await session.flush()
 
 
 async def seed_chat_session(
@@ -503,7 +534,7 @@ async def seed_chat_session(
 
 async def seed_evidence_chunks(
     session: AsyncSession,
-    hits: Sequence[Any],
+    hits: Sequence[EvidenceHit],
     *,
     index_version: str = "index_v1",
 ) -> None:

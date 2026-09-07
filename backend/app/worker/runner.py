@@ -145,6 +145,17 @@ class IngestionRunner:
         return self._source_version_hash
 
     @property
+    def index_version(self) -> str:
+        """Public read-only view of the index version this runner writes into.
+
+        Symmetric with :attr:`source_version_hash`. A caller has to know it to
+        create the ``index_versions`` row that ``documents.index_version``
+        references before ``run()`` inserts anything -- which is exactly what
+        ``app.worker.cli.drive`` does, and what the test harness mirrors (#286).
+        """
+        return self._index_version
+
+    @property
     def embedding_provider(self) -> str | None:
         """The embedding provider stamped onto the index (or ``None``)."""
         return self._embedding_provider
@@ -383,10 +394,18 @@ class IngestionRunner:
     ) -> None:
         """Delete the previous generation of chunks (and their exact terms).
 
-        :class:`ExactTerm` declares ``ondelete="CASCADE"`` on both FKs, but the
-        hermetic SQLite test engine does not enforce foreign keys by default, so
-        the terms are deleted explicitly first. That keeps the behaviour
-        identical on SQLite and Postgres instead of depending on a PRAGMA.
+        :class:`ExactTerm` declares ``ondelete="CASCADE"`` on both FKs, and the
+        terms are still deleted explicitly first anyway, so the statements this
+        emits are identical on SQLite and Postgres rather than differing by
+        dialect.
+
+        The original reason for that was that the hermetic SQLite engine did
+        not enforce foreign keys at all, which made the cascade a no-op in
+        tests. That is no longer true — ``app.core.db`` turns the pragma on for
+        every SQLite connection (#286), and this module is inside its reach.
+        The explicit deletes are kept regardless: they are what the tests
+        actually assert on, and an emitted DELETE is easier to reason about
+        than a cascade nobody can see.
         """
         document_id = document.document_id
         await session.execute(delete(ExactTerm).where(ExactTerm.document_id == document_id))

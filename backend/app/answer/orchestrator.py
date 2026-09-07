@@ -1381,10 +1381,14 @@ class Orchestrator:
         bare ``session_id``. Returns the ``user_id`` to attach to
         audit events.
 
-        Raises ``RuntimeError`` if a real session row exists but
-        references a user that the orchestrator cannot resolve —
-        that means the orchestrator was handed a stale session id
-        and the route layer should retry.
+        This used to claim it raises ``RuntimeError`` when a session row
+        references an unresolvable user. It never did — there is no ``raise``
+        here, no caller catches one, and no route retries on it. The real
+        behaviour is the opposite: the missing ``users`` row is created and
+        the caller proceeds. Corrected rather than implemented, because
+        under #286's foreign-key enforcement that branch is now unreachable
+        anyway: ``sessions.user_id`` is ``ON DELETE CASCADE``, so a session
+        cannot outlive its user.
         """
         session = await self._session.get(Session, session_id)
         user_id = session.user_id if session is not None else "demo_user"

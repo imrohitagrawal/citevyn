@@ -78,12 +78,20 @@ class _IntentAwareRetriever:
     def __init__(self, *, exact: list[EvidenceHit], hybrid: list[EvidenceHit]) -> None:
         self._exact = exact
         self._hybrid = hybrid
-        # Read-only views for :func:`_ask`, which persists the ``chunks``
-        # rows these hits reference before the orchestrator runs (#286).
-        self.exact_hits = exact
-        self.hybrid_hits = hybrid
         self.calls: list[Intent] = []
         self.multi_calls: list[Intent] = []
+
+    @property
+    def seed_targets(self) -> list[EvidenceHit]:
+        """Every hit this retriever can return, from either arm.
+
+        :func:`_ask` persists the ``chunks`` rows these reference before the
+        orchestrator runs, because ``retrieved_evidence.chunk_id`` is a
+        foreign key onto them (#286). One property rather than two public
+        aliases of ``_exact``/``_hybrid``, since the only caller wants them
+        concatenated.
+        """
+        return [*self._exact, *self._hybrid]
 
     async def retrieve(
         self,
@@ -185,7 +193,7 @@ async def _ask(session: Any, *, question: str, retriever: Any, llm: Any) -> Any:
     # makes the fake match production rather than a workaround (#286).
     # Seeding here (not in :func:`_hit`) keeps every test body unchanged and
     # covers both arms, including hits an assertion-only test never retrieves.
-    await seed_evidence_chunks(session, [*retriever.exact_hits, *retriever.hybrid_hits])
+    await seed_evidence_chunks(session, retriever.seed_targets)
     orchestrator = Orchestrator(_settings(), session, llm=llm, retriever=retriever)
     return await orchestrator.ask(
         question=question,

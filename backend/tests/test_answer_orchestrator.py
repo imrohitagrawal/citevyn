@@ -2044,9 +2044,13 @@ async def test_ensure_user_writes_the_user_row_before_the_session_row(
 
     The assertion is on the SQL the database actually received, not on the
     end state. Both orders leave the same two rows behind once the flush
-    completes, so a row-existence check (the test above) passes either way on
-    a database with ``demo_user`` already present -- it cannot tell the bug
-    from the fix. RED with the old ordering: the ``sessions`` INSERT arrives
+    completes, so a row-existence check cannot distinguish them on its own --
+    the test above only catches this because foreign keys are now enforced,
+    and it would go green again the moment enforcement lapsed. This one stays
+    RED on the ordering itself, whatever the engine is doing.
+
+    Measured: restoring the pre-#286 body turns 91 of the 120 tests in this
+    file red, this one among them, with the ``sessions`` INSERT arriving
     first.
     """
     from sqlalchemy import event

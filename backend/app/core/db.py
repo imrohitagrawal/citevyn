@@ -24,6 +24,7 @@ from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import ConnectionPoolEntry
 
 from app.core.config import Settings, get_settings
 
@@ -38,7 +40,7 @@ _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
-def is_sqlite_dbapi_connection(dbapi_connection: Any) -> bool:
+def is_sqlite_dbapi_connection(dbapi_connection: DBAPIConnection) -> bool:
     """Return True when ``dbapi_connection`` is a SQLite DBAPI handle.
 
     The check is a substring match on the connection class's *module*,
@@ -64,7 +66,9 @@ def is_sqlite_dbapi_connection(dbapi_connection: Any) -> bool:
 
 
 @event.listens_for(Engine, "connect")
-def enable_sqlite_foreign_keys(dbapi_connection: Any, connection_record: Any) -> None:
+def enable_sqlite_foreign_keys(
+    dbapi_connection: DBAPIConnection, connection_record: ConnectionPoolEntry
+) -> None:
     """Turn on ``PRAGMA foreign_keys`` for every new SQLite connection.
 
     Registered against the ``Engine`` *class*, so it fires for every engine

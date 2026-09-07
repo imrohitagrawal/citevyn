@@ -156,7 +156,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `test_magic_link_routes.py` that asserted a `magic_link_tokens` row outlived
   a deleted user was rewritten, because migration 0012 declares that key
   `ON DELETE CASCADE` and it had only ever passed by exploiting this gap.
-  Backend: 1964 passed / 23 skipped, foreign keys enforced.
+  Backend: 1973 passed / 23 skipped, foreign keys enforced.
 
 - **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
   and failed open on a dual-active database (#226).** `_active_index_stamp`

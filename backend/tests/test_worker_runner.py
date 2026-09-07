@@ -65,8 +65,8 @@ async def _run(runner: IngestionRunner, session: AsyncSession, source: object) -
     """
     await ensure_index_version(
         session,
-        index_version=runner._index_version,
-        source_version_hash=runner._source_version_hash,
+        index_version=runner.index_version,
+        source_version_hash=runner.source_version_hash,
     )
     return await runner.run(session, source=source)
 

@@ -587,10 +587,13 @@ def test_confirm_post_fails_closed_when_the_user_row_is_gone(
     enforcing foreign keys (#286) -- the test's own docstring said so. It
     proved nothing about a race that cannot happen in that shape.
 
-    RED if the missing-user guard is removed: ``claim_and_login`` then
-    inserts an ``auth_sessions`` row for a user id that is gone, which is a
-    ``ForeignKeyViolation`` on Postgres and, now that the pragma is on, on
-    SQLite too -- either way not the ``/?auth=error`` asserted here.
+    RED if the missing-user guard is removed -- measured, not assumed: the
+    request then dies on ``AttributeError: 'NoneType' object has no attribute
+    'user_id'`` at the ``claim_and_login`` call below, because control never
+    reaches the login tail with a usable row. (A variant that synthesises a
+    ``User`` instead of dereferencing ``None`` gets one step further and dies
+    on the ``auth_sessions`` foreign key.) Either way, not the
+    ``/?auth=error`` asserted here.
     """
     _register(_client(), "real@example.com")
     _request_link(_client(), "real@example.com")

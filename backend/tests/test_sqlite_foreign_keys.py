@@ -351,28 +351,126 @@ async def test_the_documented_uncovered_entry_point_is_still_uncovered() -> None
     their own, so it has nothing to enforce -- if that ever changes, this
     fails and the docstring gets revisited instead of quietly going stale.
 
-    ``db/env.py`` (alembic) belongs on this list too but cannot be imported
-    outside an alembic run, so it is covered by the test below instead.
+    Its partner is ``test_the_entry_points_that_write_child_rows_load_the_hook``
+    above: together they prove ``_loads_app_core_db`` discriminates at all,
+    rather than returning False for everything.
     """
     assert _loads_app_core_db("db.seed.seed_users") is False
 
 
-async def test_batch_alter_table_migrations_still_exist() -> None:
-    """The partner to the test above.
+async def test_alembic_does_not_load_the_hook_and_still_needs_not_to() -> None:
+    """Alembic's exclusion is deliberate, and both halves of that are checked.
 
-    That one asserts an ABSENCE -- alembic does not load the hook -- which
-    proves nothing on its own unless the reason for the absence is real. Four
-    migrations use ``op.batch_alter_table``, whose SQLite implementation is
-    create-new-table / copy / drop / rename, and SQLite's own documentation
-    says to run that with foreign keys OFF. If no migration used it any more,
-    excluding alembic would be an unexamined gap rather than a decision, and
-    this test says so.
+    ``db/env.py`` cannot be imported outside an alembic run, so its exclusion
+    is asserted the only way available: its import list. That alone would be a
+    bare absence, so the second half asserts the REASON is still real --
+    ``op.batch_alter_table`` is still in use. On SQLite that is implemented as
+    create-new-table / copy-rows / drop-old / rename, and SQLite's own
+    documentation says to run that sequence with foreign keys OFF, because its
+    intermediate states are legitimately inconsistent.
+
+    RED if someone adds ``app.core.db`` to ``db/env.py``, and red the other
+    way if every batch migration disappears -- at which point the exclusion
+    would be an unexamined gap rather than a decision, and worth revisiting.
+    The match is on ``op.batch_alter_table(`` so a passing mention in a
+    comment does not satisfy it.
     """
     from pathlib import Path
 
-    versions = Path(__file__).resolve().parents[2] / "db" / "versions"
+    db_dir = Path(__file__).resolve().parents[2] / "db"
+    env_py = db_dir / "env.py"
+    assert env_py.is_file(), f"alembic env not found at {env_py}"
+    assert "app.core.db" not in env_py.read_text(), (
+        "db/env.py now imports app.core.db, so alembic runs with foreign keys "
+        "ON -- which breaks op.batch_alter_table on SQLite. Either revert the "
+        "import or update app/core/db.py's documented boundary."
+    )
+
+    versions = db_dir / "versions"
     assert versions.is_dir(), f"migration directory not found at {versions}"
     using_batch = sorted(
-        p.name for p in versions.glob("*.py") if "batch_alter_table" in p.read_text()
+        p.name for p in versions.glob("*.py") if "op.batch_alter_table(" in p.read_text()
     )
     assert using_batch, "no migration uses batch_alter_table; revisit the alembic exclusion"
+
+
+# ---------------------------------------------------------------------------
+# 5. The seed helpers refuse to hand back a row in the wrong state
+# ---------------------------------------------------------------------------
+
+
+async def test_seeding_a_user_twice_with_a_different_role_raises(
+    fk_session: AsyncSession,
+) -> None:
+    """``seed_user`` is idempotent but not silent.
+
+    A quiet no-op would let a test believe it was acting as an admin while
+    the row said ``demo_user`` -- invisible wrongness of exactly the kind
+    this file exists to end. RED if the conflict check is dropped: the second
+    call returns and the role silently stays ``demo_user``.
+    """
+    from app.models import UserRole
+    from tests.conftest import seed_user
+
+    await seed_user(fk_session, "dual_role")
+    with pytest.raises(AssertionError, match="already seeded with role"):
+        await seed_user(fk_session, "dual_role", role=UserRole.admin)
+
+
+async def test_seeding_a_user_twice_with_the_same_role_is_a_quiet_no_op(
+    fk_session: AsyncSession,
+) -> None:
+    """Partner to the test above.
+
+    Without it, "it raises" is also satisfied by a helper that raises on
+    EVERY repeat call -- which would break every fixture that legitimately
+    seeds the same id twice, and would then be caught only by the full suite
+    rather than here.
+    """
+    from app.models import UserRole
+    from tests.conftest import seed_user
+
+    await seed_user(fk_session, "same_role", role=UserRole.admin)
+    await seed_user(fk_session, "same_role", role=UserRole.admin)  # no raise
+
+    stored = await fk_session.get(User, "same_role")
+    assert stored is not None and stored.role is UserRole.admin
+
+
+async def test_requesting_an_index_status_that_conflicts_raises(
+    fk_session: AsyncSession,
+) -> None:
+    """``seed_index_version`` polices only a status the caller ASKED for.
+
+    ``seed_evidence_chunks`` calls it with no status, because it just needs
+    the foreign-key parent to exist. A caller that explicitly wants ``active``
+    must not silently receive the ``candidate`` row that call created and then
+    assert against the wrong branch. RED if the conflict check is dropped.
+    """
+    from app.models import IndexStatus
+    from tests.conftest import seed_index_version
+
+    await seed_index_version(fk_session, "idx_conflict")  # implicit candidate
+    with pytest.raises(AssertionError, match="already seeded as"):
+        await seed_index_version(fk_session, "idx_conflict", status=IndexStatus.active)
+
+
+async def test_not_asking_for_a_status_accepts_whatever_row_exists(
+    fk_session: AsyncSession,
+) -> None:
+    """The partner, and the reason the status argument is optional at all.
+
+    A status-agnostic call must stay a no-op against an existing row whatever
+    its state. Without this, the check above is also satisfied by a helper
+    that raises on any repeat call -- which breaks ``seed_evidence_chunks``
+    on every test that seeded an active index first. Not hypothetical: the
+    first version of this guard did exactly that and turned 93 tests red.
+    """
+    from app.models import IndexStatus, IndexVersion
+    from tests.conftest import seed_index_version
+
+    await seed_index_version(fk_session, "idx_active", status=IndexStatus.active)
+    await seed_index_version(fk_session, "idx_active")  # no raise
+
+    stored = await fk_session.get(IndexVersion, "idx_active")
+    assert stored is not None and stored.status is IndexStatus.active

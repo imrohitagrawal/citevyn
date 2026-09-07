@@ -477,10 +477,13 @@ async def test_minting_a_fresh_anonymous_principal_does_not_violate_the_fk_on_po
     first-time anonymous visitor.
 
     This was INVISIBLE to the hermetic SQLite suite (1500+ passing tests)
-    because SQLite foreign-key enforcement is off for this app's engine (no
-    ``PRAGMA foreign_keys=ON`` anywhere in ``app.core.db``) -- only a live
-    Postgres run ever exercised the real constraint. Fixed by flushing the
-    ``User`` row on its own before adding the ``AuthSession`` row.
+    because SQLite foreign-key enforcement WAS off for this app's engine --
+    only a live Postgres run ever exercised the real constraint. Fixed by
+    flushing the ``User`` row on its own before adding the ``AuthSession``
+    row. ``app.core.db`` now issues ``PRAGMA foreign_keys=ON`` for every
+    SQLite connection (#286), so the hermetic suite would catch this class of
+    bug on its own -- turning it on immediately found a second instance in
+    ``Orchestrator._ensure_user`` (see the test below).
     """
     from fastapi import Response
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
