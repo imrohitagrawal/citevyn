@@ -1362,6 +1362,13 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     // worse bug than the one being fixed.
     expect(result.current.state.chatInput).toBe("Second question");
     expect(result.current.state.messages.filter((m) => m.role === "user")).toHaveLength(1);
+    // ...and it must not be SILENT either (#356 gap 2). Every other assertion
+    // in this test is an absence — nothing sent, nothing appended, nothing
+    // cleared — which is exactly the shape a screen-reader user experienced:
+    // measured with a MutationObserver over the whole body, zero DOM mutations.
+    // The flag is the one positive fact, and it is what `ChatView` turns into
+    // announced text.
+    expect(result.current.state.refusedInFlight).toBe(true);
 
     // Once the answer lands the composer takes it — the gate is transient.
     mockAskQuestion.mockResolvedValue(askResponse({ answer: "Second answer." }));
@@ -1400,6 +1407,132 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     });
 
     expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    // The refusal announcement rides the SAME ref, so it is correct in exactly
+    // the case a `state.pending` guard is wrong (#356 gap 2). Both calls read
+    // `pending === 0`; only the ref knows the first one already started. A
+    // `pending`-derived signal would have stayed false here — and would have
+    // fired on submits that were never refused.
+    expect(result.current.state.refusedInFlight).toBe(true);
+  });
+
+  it("clears the refusal when the window closes, in the SAME state as `pending`", async () => {
+    // The root-cause property, asserted rather than assumed. A skeptic broke two
+    // successive view-side attempts at bounding the refusal's lifetime: latching
+    // it left a stale refusal masking the arrival announcement for the rest of
+    // the mount, and gating the render on `pending` only hid the latch, so the
+    // NEXT genuine request flipped the region to "Not sent" about a question
+    // that WAS sent. Both are unrepresentable now because one reducer action
+    // clears both fields at once — this is the test that says so.
+    let release: (r: AskResponse) => void = () => {};
+    mockAskQuestion.mockImplementationOnce(
+      () => new Promise<AskResponse>((resolve) => { release = resolve; }),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "First question");
+    await act(async () => {
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    type(result, "Second question");
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusedInFlight).toBe(true);
+    // Partner: the window really was open, so the clear below is a transition
+    // and not a flag that was never set.
+    expect(result.current.state.pending).toBeTruthy();
+
+    await act(async () => {
+      release(askResponse({ answer: "First answer." }));
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(result.current.state.pending).toBeFalsy();
+    expect(result.current.state.refusedInFlight).toBe(false);
+  });
+
+  it("leaves the refusal flag set for a SECOND refusal in the same window", async () => {
+    // The hook half of the stated limitation: a repeat refusal is deliberately
+    // silent because nothing changes. Asserted so that "silent" is a recorded
+    // decision rather than an accident of the view.
+    mockAskQuestion.mockImplementationOnce(
+      () => new Promise<AskResponse>(() => {}),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "First question");
+    await act(async () => {
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    type(result, "Second question");
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusedInFlight).toBe(true);
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusedInFlight).toBe(true);
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not announce a refusal for a submit that was never refused", async () => {
+    // The partner. `refusedInFlight` must mean REFUSED, not submitted — a flag
+    // set on every Enter would satisfy every positive assertion above while
+    // telling a screen-reader user their question was dropped when it was sent.
+    mockAskQuestion.mockResolvedValue(askResponse({ answer: "An answer." }));
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "A question");
+    await act(async () => {
+      result.current.submitChat();
+      // Past the awaited `ensureSession()` the call has to clear before it
+      // reaches `askQuestion` — the partner below reads 0 on the same tick
+      // whether or not the submit went through, which is how the first version
+      // of this test managed to fail while the product was correct.
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    // THE PARTNER. Without it this passes for the wrong reason: review measured
+    // it staying green with `submitChat` made entirely inert, because "the tick
+    // did not move" is satisfied by a submit that did nothing at all. This is
+    // what makes the absence below mean "sent, and not announced as refused".
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
+    expect(result.current.state.refusedInFlight).toBe(false);
+  });
+
+  it("does not announce a refusal for an EMPTY submit while in flight", async () => {
+    // Enter on an empty box is not a refused question, it is nothing. The empty
+    // check therefore runs BEFORE the in-flight gate; announcing here would say
+    // "your text is kept" about a box with no text — the same class of false
+    // statement to an AT user that the parked-question toast had to be fixed for.
+    mockAskQuestion.mockImplementationOnce(
+      () => new Promise<AskResponse>(() => {}),
+    );
+    const { result } = renderHook(() => useLandingState());
+
+    type(result, "First question");
+    await act(async () => {
+      result.current.submitChat();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    // Partner: a request really is in flight, so the absence below is not
+    // passing because the gate was never reached.
+    expect(result.current.state.pending).toBeTruthy();
+    expect(result.current.state.chatInput).toBe("");
+
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusedInFlight).toBe(false);
+
+    // ...and the very next submit WITH text does announce, so the assertion
+    // above is about emptiness and not about the gate being broken.
+    type(result, "Second question");
+    act(() => {
+      result.current.submitChat();
+    });
+    expect(result.current.state.refusedInFlight).toBe(true);
   });
 
   it("re-opens the composer after a FAILED request, not just a successful one", async () => {

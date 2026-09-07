@@ -395,6 +395,72 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ON DELETE CASCADE` and it had only ever passed by exploiting this gap.
   Backend: 1974 passed / 23 skipped, foreign keys enforced.
 
+- **A refused composer submit produced no observable change at all (#356 gap
+  2).** With an answer in flight the composer correctly refuses a second
+  question and correctly keeps the typed text — but measured with a
+  MutationObserver over the whole body, the refusal produced **zero DOM
+  mutations**, on the Enter path and the click path alike. A screen-reader user
+  pressed Enter and nothing whatsoever happened. The persistent `role="status"`
+  region beside the composer now says "Not sent. CiteVyn is still answering
+  your previous question. Your text is kept." A full stop rather than an em
+  dash: NVDA's `symbols.dic` files `—` at level `most`, above the default, so a
+  reader running punctuation at "most" or "all" hears the words "em dash" — and
+  every other sr-only string on this screen already ends its clauses with a full
+  stop. The signal is `refusedInFlight`, set at the
+  `inFlight` **ref** inside `submitChat`, never derived from the rendered
+  `pending`: `pending` is a render behind the ref by construction (#62), so a
+  `pending`-derived announcement would announce refusals that never happened
+  and miss ones that did — pinned by the two-submits-in-one-React-batch test.
+  The flag lives in the reducer beside `pending` and is cleared by the same
+  `SET_PENDING(0)` action, in the same state object, so the two cannot
+  disagree; the view keeps no copy of it and has no effect for it. Two
+  view-side shapes were tried first and an adversarial round broke both: a
+  latch cleared by an effect keyed on `pending` transitioning left a stale
+  refusal masking the arrival announcement for the rest of the mount, and
+  gating the render on `pending` only hid that latch, so the next genuine
+  request announced "Not sent" about a question that was sent. One region
+  rather than two: the refusal copy is a superset of the in-flight sentence, so
+  nothing is lost while it holds the region, and the window closes on its own
+  when the answer lands, at which point the arrival announcement takes over. The send button's handler is now
+  wired unconditionally, because `onClick={pending ? undefined : onSendClick}`
+  meant a click while gated never reached the hook and no signal could exist;
+  `aria-disabled` and the 0.7 dim still carry the state, and the hook stays the
+  single gate. Stated limitation, pinned as a test: a *second* refusal inside
+  the *same* in-flight window is silent, since `role="status"` fires on a text
+  change and nothing changed; a refusal in a *later* window does announce. An
+  empty submit is never announced — "your text is kept" about an empty box is a
+  false statement. +101 B gzip, measured (62,873 -> 62,974 against a 64,479 budget, headroom 1,505). This closes #356; gaps 1 and 3 shipped
+  in #359.
+
+- **`npm run type-check` type-checked no Playwright spec at all (#366).**
+  `frontend/tsconfig.json` said `"include": ["src", "e2e"]` and there has never
+  been a `frontend/e2e/`. tsc ignores an `include` entry that matches nothing
+  **silently** — no warning, no error, exit 0 — so the required `type-check +
+  unit tests + build` job was green while loading zero of the 9 spec files,
+  `helpers.ts` and `fixtures.ts`. Playwright transpiles with esbuild, which
+  erases types without checking them, so nothing else was looking either.
+  Measured with `npx tsc -p tsconfig.json --noEmit --listFiles` filtered to
+  `/frontend/tests/`: **0 files before, 11 after**, with `src/` unchanged at 67.
+  Proved by the consumer rather than by the config — a deliberate type error in
+  `tests/visual.spec.ts` turns `npm run type-check` red and its removal turns it
+  green. Turning it on surfaced **seven** pre-existing errors (the issue lists
+  six; `tests/fonts-offline.spec.ts` arrived with #365 afterwards), all cleared:
+  five dead locals, a `Set` inferred with a literal-union type where the value
+  tested is a computed style read out of the browser, and
+  `measureFocusIndicator`'s `adjacent === null` early return omitting
+  `strongPixels` — a type gap rather than a live defect, because
+  `focus-ring.spec.ts` checks `ratio === null` three lines before the
+  `undefined < 8` that would otherwise have failed the focus sweep open.
+  Deliberately **one** `noEmit` project rather than a second referenced one: a
+  referenced project needs `composite: true`, which forbids `noEmit` (TS6310)
+  and forces emit — measured, it writes 22 `.js`/`.d.ts` files into
+  `frontend/tests/`, and Playwright's default `testMatch` matches `.js`, so
+  every spec would run twice with half of it from a stale snapshot. That is
+  #343 with a bigger blast radius. Guarded in `src/test/buildGuards.test.ts` by
+  asking `ts.parseJsonConfigFileContent` which files the config resolves to and
+  comparing against the list `playwright --list` selects; the mutants that prove
+  it bites are in `frontend/scripts/mutate-typecheck-guard.sh`.
+
 - **Retrieval's Tier-3 provenance check could read a stamp for the wrong index,
   and failed open on a dual-active database (#226).** `_active_index_stamp`
   resolved the active row by `status == active` rather than by

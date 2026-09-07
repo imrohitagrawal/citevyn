@@ -77,6 +77,7 @@ function chat(props: Partial<Props> = {}) {
       onChatKey={() => {}}
       onSendClick={() => {}}
       onBackClick={() => {}}
+      refusedInFlight={false}
       {...props}
     />
   );
@@ -93,6 +94,7 @@ function renderChat(props: Partial<Props> = {}) {
       onChatKey={() => {}}
       onSendClick={() => {}}
       onBackClick={() => {}}
+      refusedInFlight={false}
       {...props}
     />
   );
@@ -181,6 +183,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     rerender(
       <ChatView
+        refusedInFlight={false}
         messages={MESSAGES}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -208,6 +211,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     const withHighlight = (messages: Msg[]) => (
       <ChatView
+        refusedInFlight={false}
         messages={messages}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -237,6 +241,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     rerender(
       <ChatView
+        refusedInFlight={false}
         messages={MESSAGES}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -579,18 +584,157 @@ describe("ChatView — composer while an answer is in flight (#62)", () => {
   // and is asserted in a real browser instead, in the live-only Playwright test
   // in tests/behavior.spec.ts.
 
-  it("refuses the click while in flight, and takes it again once the flight ends", () => {
+  it("routes the click to the hook in BOTH states — the refusal is the hook's, not the view's", () => {
+    // This test asserted `onSendClick` was NOT called while pending, back when
+    // the button was `onClick={pending ? undefined : onSendClick}`. That made
+    // the click path unobservable (#356 gap 2): it never reached the hook, so
+    // nothing could announce the refusal, and no prop this component has could
+    // tell a refused click from no click at all.
+    //
+    // It also made the view a SECOND gate keyed on `pending`, which is a render
+    // behind `inFlight.current` by construction (#62) — the less accurate of the
+    // two. The gate is now the ref alone, in `submitChat`, which is where
+    // `useLandingState.test.tsx` asserts no second request starts.
+    //
+    // What the reader gets is unchanged, and both halves are pinned here: the
+    // control still announces itself unavailable, and no message is appended by
+    // the click.
     const onSendClick = vi.fn();
     const { rerender } = renderChat({ pending: true, onSendClick });
     const send = screen.getByRole("button", { name: "Send" });
 
+    expect(send).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(send);
-    expect(onSendClick).not.toHaveBeenCalled();
-
-    // Partner: the button is not simply dead — the wiring still works.
-    rerender(chat({ pending: false, onSendClick }));
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(onSendClick).toHaveBeenCalledTimes(1);
+
+    // Partner: the wiring is not simply "always calls" because `pending` is
+    // ignored — the attribute really does track it.
+    rerender(chat({ pending: false, onSendClick }));
+    const idle = screen.getByRole("button", { name: "Send" });
+    expect(idle).toHaveAttribute("aria-disabled", "false");
+    fireEvent.click(idle);
+    expect(onSendClick).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * #356 gap 2: a refused submit produced ZERO observable change.
+ *
+ * Measured on the shipping build with a MutationObserver over the whole body:
+ * pressing Enter while an answer was in flight mutated nothing, on either the
+ * Enter path or the click path. The gate was a bare `return` inside `submitChat`
+ * and no signal reached the view, so `role="status"` had no text change to
+ * announce.
+ *
+ * The signal is `refusedInFlight`, set at the `inFlight.current` ref itself. It
+ * takes over the region the composer already renders rather than adding a second
+ * one — the refusal copy is a superset of the in-flight sentence, `getByRole`
+ * throws on two matching nodes, and there is no restore timer to get wrong: the
+ * window closes on its own when `pending` drops.
+ *
+ * These tests drive the tick the way the hook drives it — a bump WHILE pending
+ * is true — rather than setting the string directly. A test that renders the
+ * refusal text and asserts it is present would pass with the whole feature
+ * absent, which is the exact mistake the arrival announcement above had to be
+ * rewritten to stop making.
+ */
+describe("ChatView announces a REFUSED submit (#356 gap 2)", () => {
+  const REFUSED = /Not sent/;
+  const INFLIGHT = /Searching the docs/;
+
+  // The two shapes the app really produces, in order — the same discipline the
+  // arrival block below had to be rewritten to follow. `ADD_MESSAGE` appends a
+  // streaming bubble with NO sources; `FINISH_MESSAGE` fills them in.
+  const question = msg(4, true, "How much does it cost?");
+  const streaming: Msg[] = [
+    ...MESSAGES,
+    question,
+    { ...msg(5, false, ""), streaming: true, sources: [] },
+  ];
+  const done: Msg[] = [
+    ...MESSAGES,
+    question,
+    {
+      ...msg(5, false, "It is free during the preview."),
+      streaming: false,
+      sources: [{ n: "1", title: "Pricing", url: "https://example.com/pricing" }],
+    },
+  ];
+
+  it("says the in-flight sentence while nothing has been refused", () => {
+    renderChat({ pending: true, refusedInFlight: false });
+    expect(screen.getByRole("status")).toHaveTextContent(INFLIGHT);
+    expect(screen.getByRole("status").textContent).not.toMatch(REFUSED);
+  });
+
+  it("announces the refusal, with the two facts the reader needs", () => {
+    const { rerender } = renderChat({ pending: true, refusedInFlight: false });
+    expect(screen.getByRole("status")).toHaveTextContent(INFLIGHT);
+
+    rerender(chat({ pending: true, refusedInFlight: true }));
+    expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+    // Or it is a beep: WHY it was refused, and that their typing survived.
+    expect(screen.getByRole("status")).toHaveTextContent(/still answering/);
+    expect(screen.getByRole("status")).toHaveTextContent(/kept/);
+  });
+
+  it("renders the refusal on a mid-flight MOUNT, because it is still true", () => {
+    // The earlier tick-plus-ref design suppressed this, to stop a remount
+    // re-announcing a refusal that predated the component. That suppression was
+    // the wrong half of the trade once the flag moved into the reducer: the flag
+    // is only ever set for a window that is STILL OPEN, so on a landing -> chat
+    // remount the reader's text really is still unsent and the answer really is
+    // still coming. Saying so is truthful; staying silent leaves an AT user who
+    // just navigated back with no explanation for the gated composer.
+    renderChat({ pending: true, refusedInFlight: true });
+    expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+  });
+
+  it("hands the region back to the arrival when the answer lands", () => {
+    const { rerender } = renderChat({ pending: true, refusedInFlight: false });
+    rerender(chat({ pending: true, refusedInFlight: true }));
+    expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+
+    // The window closes. `SET_PENDING(0)` clears BOTH fields in one state
+    // object, so this is the only pair of props the hook can produce here —
+    // `pending: false` with `refusedInFlight` still true is unrepresentable.
+    rerender(chat({ pending: false, refusedInFlight: false, messages: streaming }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    rerender(chat({ pending: false, refusedInFlight: false, messages: done }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
+    expect(screen.getByRole("status").textContent).not.toMatch(REFUSED);
+  });
+
+  it("announces a refusal in a LATER in-flight window too", () => {
+    // The partner for the stated limitation below. `role="status"` fires on a
+    // text CHANGE, so the region must leave the refusal between windows or the
+    // second window's first refusal is announced to nobody — the same defect the
+    // arrival announcement was measured making across two answers.
+    const { rerender } = renderChat({ pending: true, refusedInFlight: true });
+    expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+
+    rerender(chat({ pending: false, refusedInFlight: false }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    rerender(chat({ pending: true, refusedInFlight: false }));
+    expect(screen.getByRole("status")).toHaveTextContent(INFLIGHT);
+
+    rerender(chat({ pending: true, refusedInFlight: true }));
+    expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+  });
+
+  it("STATED LIMITATION: a second refusal in the SAME window does not re-announce", () => {
+    // Pinned as a test rather than left as prose, so it is a decision and not a
+    // surprise. The flag is already true, so a second refusal changes no text
+    // and `role="status"` says nothing — correct, because the state has not
+    // changed and the reader has already been told. Its hook-side half is
+    // "leaves the refusal flag set for a SECOND refusal in the same window".
+    const { rerender } = renderChat({ pending: true, refusedInFlight: true });
+    const before = screen.getByRole("status").textContent;
+    expect(before).toMatch(REFUSED);
+    rerender(chat({ pending: true, refusedInFlight: true }));
+    expect(screen.getByRole("status").textContent).toBe(before);
   });
 });
 

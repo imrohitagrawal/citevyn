@@ -89,6 +89,35 @@ interface AppState {
       scrolled up — an explicit send must always be followed, unlike a passive stream
       append which respects the reader's scroll position. */
   sendTick: number;
+  /** True when a composer submit has been REFUSED in the CURRENTLY OPEN
+      in-flight window and the answer has not landed yet (#356 gap 2). Its only
+      consumer is `ChatView`'s persistent `role="status"` region: without a
+      signal the refusal was literally unobservable — measured with a
+      MutationObserver over the whole body, zero DOM mutations on both the Enter
+      path and the click path.
+
+      It lives HERE, beside `pending`, and not as a latch inside `ChatView`,
+      because the two must never be able to disagree. The first shipped shape was
+      a monotonic tick plus a `useState` latch and a `useEffect` keyed on
+      `pending` transitioning — and review reproduced both halves of what that
+      buys you: a refusal recorded while `pending` was already false was never
+      cleared and MASKED the arrival announcement for the rest of the mount; and
+      gating the render on `pending` instead only hid it, so the latch fired at
+      the START of the next genuine request and announced "Not sent" about a
+      question that WAS sent. One reducer owns both fields, `SET_PENDING(0)`
+      clears this in the same state object that clears `pending`, and neither
+      failure is expressible.
+
+      SET from the REF (`submitChat`'s `inFlight.current` gate), never from the
+      rendered `pending`: two Enter presses inside one React batch both read the
+      state rendered before either ran (#62), so a `pending`-derived signal would
+      announce refusals that never happened and miss ones that did.
+
+      A boolean, not a counter. A second refusal inside the same window is
+      deliberately silent — `role="status"` announces on a text CHANGE, the state
+      has not changed, and the reader has already been told — so there is no
+      second event for a counter to carry. */
+  refusedInFlight: boolean;
 }
 
 type Action =
@@ -113,6 +142,7 @@ type Action =
   | { type: "SET_PENDING"; value: number }
   | { type: "SNAP_DEMO" }
   | { type: "BUMP_SEND_TICK" }
+  | { type: "REFUSED_SUBMIT" }
   | { type: "RESUME_SESSION"; messages: ChatMessage[] };
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
@@ -141,6 +171,7 @@ const initialState: AppState = {
   screen: "landing",
   pending: 0,
   sendTick: 0,
+  refusedInFlight: false,
 };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -208,7 +239,17 @@ function reducer(state: AppState, action: Action): AppState {
       // the convention was already breakable from outside. Assigning the ref's
       // value makes drift structurally impossible and lets any stray dispatch
       // self-heal on the next real transition.
-      return { ...state, pending: action.value };
+      //
+      // It also clears `refusedInFlight` when the count reaches zero, in the
+      // SAME state object. That is the whole point of keeping the flag here: a
+      // refusal is only true of the window that produced it, and the window
+      // closing is exactly this transition. A separate clear — a `useEffect` in
+      // the view keyed on `pending` — was the shape review broke twice.
+      return {
+        ...state,
+        pending: action.value,
+        refusedInFlight: action.value === 0 ? false : state.refusedInFlight,
+      };
     case "SNAP_DEMO":
       // Leaving the landing screen stops the demo stream (#329). Stopping it is
       // only half the job: `landing-sections.tsx` renders the caret on
@@ -230,6 +271,8 @@ function reducer(state: AppState, action: Action): AppState {
         : state;
     case "BUMP_SEND_TICK":
       return { ...state, sendTick: state.sendTick + 1 };
+    case "REFUSED_SUBMIT":
+      return { ...state, refusedInFlight: true };
     default:
       return state;
   }
@@ -1097,9 +1140,29 @@ export function useLandingState() {
     // of this comment claimed the good ordering held "by construction" on the
     // strength of this line alone, and four reviewers disproved it in three
     // clicks.
-    if (inFlight.current) return;
+    //
+    // The EMPTY check runs first, ahead of the gate, so the refusal signal
+    // below means "we had a question and would not take it" rather than
+    // "Enter was pressed on an empty box". Neither order changes what is sent:
+    // an empty submit was already a no-op on both sides of the gate.
     const t = state.chatInput.trim();
     if (!t) return;
+    if (inFlight.current) {
+      // #356 gap 2. The refusal used to be a bare `return`: measured with a
+      // MutationObserver over the whole body, it produced ZERO DOM mutations on
+      // both the Enter path and the click path, so a screen-reader user pressed
+      // Enter and nothing whatsoever happened. The tick is the only signal that
+      // crosses from here into the view; `ChatView` turns it into text in the
+      // persistent `role="status"` region beside the composer.
+      //
+      // Recorded HERE, at the ref, not derived from `pending` in the view — the
+      // whole reason this gate is a ref is that `pending` is a render behind it
+      // (#62), so a `pending`-derived announcement would announce refusals that
+      // never happened and miss ones that did. The reducer clears it again when
+      // the in-flight count returns to zero.
+      dispatch({ type: "REFUSED_SUBMIT" });
+      return;
+    }
     setChatInput("");
     send(t);
   }, [state.chatInput, send]);

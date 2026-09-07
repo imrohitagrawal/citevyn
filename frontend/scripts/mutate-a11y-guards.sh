@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Mutation harness for the #356 announcement, the parked-question notice and the
-# toast stacking limits.
+# Mutation harness for the #356 announcements (an arriving answer, and a REFUSED
+# submit), the parked-question notice and the toast stacking limits.
 #
 #     bash frontend/scripts/mutate-a11y-guards.sh
 #
@@ -135,6 +135,39 @@ one "landmark: drop the accessible name" "$CV" "$S/p.CV" \
 # for a reason that says nothing about the guard, which is exactly the kind of
 # number that makes a mutation score dishonest.
 echo
+echo "=== the REFUSED-submit announcement (#356 gap 2) ==="
+# THE DEFECT ITSELF: the gate was a bare `return`. Measured with a
+# MutationObserver over the whole body, ZERO DOM mutations on both the Enter
+# path and the click path.
+one "refusal: drop the signal, back to a silent return" "$LS" "$S/p.LS" \
+'      dispatch({ type: "REFUSED_SUBMIT" });' '      void 0;'
+# The trap docs/BACKLOG.md names explicitly: `pending` is a render behind the
+# ref, so two Enter presses in ONE React batch both read 0.
+one "refusal: derive it from \`pending\` instead of the ref" "$LS" "$S/p.LS" \
+'    if (!t) return;
+    if (inFlight.current) {' '    if (!t) return;
+    if (state.pending) {'
+# Announcing an EMPTY submit would tell an AT user "your text is kept" about a
+# box with no text — the same class of false statement the parked-question
+# toast had to be fixed for.
+one "refusal: announce an empty submit too" "$LS" "$S/p.LS" \
+'    if (!t) return;' '    if (false) return;'
+# THE ROOT-CAUSE PROPERTY, and the one two successive view-side designs got
+# wrong: the flag must be cleared by the SAME reducer action that clears
+# `pending`. Latching it in the view left a stale refusal masking the arrival
+# announcement; gating the render on `pending` only hid the latch, so the next
+# genuine request announced "Not sent" about a question that WAS sent.
+one "refusal: never clear the flag when the window closes" "$LS" "$S/p.LS" \
+'        refusedInFlight: action.value === 0 ? false : state.refusedInFlight,' \
+'        refusedInFlight: state.refusedInFlight,'
+# The button was `onClick={pending ? undefined : onSendClick}`, so a click while
+# gated never reached the hook and NO prop this component has could tell a
+# refused click from no click.
+one "refusal: re-gate the click in the view, so it never reaches the hook" "$CV" "$S/p.CV" \
+'            onClick={onSendClick}' '            onClick={pending ? undefined : onSendClick}'
+one "refusal: render the region without it" "$CV" "$S/p.CV" \
+'          {refusedInFlight' '          {false'
+
 echo "=== the parked-question notice, and its stale-closure trap ==="
 one "park: read the STALE closure value again" "$LS" "$S/p.LS" \
 '          if (!carried && !chatInputRef.current) {' '          if (!carried && !state.chatInput) {'

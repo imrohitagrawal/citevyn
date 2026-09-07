@@ -265,11 +265,12 @@ export const MIN_PERCEIVABLE_RATIO = 3;
 
 export async function measureFocusIndicator(
   page: Page,
-  {
-    pad = 8,
-    minChangedPixels = 12,
-    minStrongPixels = 8,
-  }: { pad?: number; minChangedPixels?: number; minStrongPixels?: number } = {},
+  // No `minStrongPixels` option. It was accepted and never read — the floor is
+  // applied by the CALLER (`focus-ring.spec.ts`'s `s.pixels.strongPixels < 8`),
+  // because that is where the failure message is built. Passing one would have
+  // done nothing, silently, which is worse than not offering it; tsc only said
+  // so once it could see this file (#366).
+  { pad = 8, minChangedPixels = 12 }: { pad?: number; minChangedPixels?: number } = {},
 ): Promise<{
   changedPixels: number;
   strongPixels: number;
@@ -384,7 +385,26 @@ export async function measureFocusIndicator(
     return false;
   };
   const adjacent = mean(touchesChanged);
-  if (!adjacent) return { changedPixels, ratio: null, indicator: null, adjacent: null };
+  // `strongPixels: 0`, like the `minChangedPixels` early return above. It was
+  // omitted, so this branch returned an object the declared type says it cannot
+  // — invisible until #366 let tsc read this file.
+  //
+  // The branch IS reachable: `adjacent` is null when no pixel is both unchanged
+  // and within 2px of a changed one, which is what the `filter: invert(0.5)` and
+  // `backdrop-filter: contrast(0)` occluder probes in `focus-ring.spec.ts`
+  // deliberately produce. But it was not a live defect, and both read sites were
+  // checked rather than one:
+  //   - `focus-ring.spec.ts:312` (`s.pixels.strongPixels < 8`) is the one that
+  //     would have failed OPEN, since `undefined < 8` is false. It is shielded:
+  //     line 304 sees the `ratio: null` this branch sets and `continue`s first.
+  //   - `focus-ring.spec.ts:565` reads it with no ratio gate, but
+  //     `expect(undefined).toBeGreaterThanOrEqual(8)` throws — fails closed.
+  // The shield is incidental, so this is still worth fixing: reordering those
+  // two checks would turn it into a real fail-open. `0` is also the honest
+  // value — with no adjacent pixels, no pixel can be SHOWN to clear the bar.
+  if (!adjacent) {
+    return { changedPixels, strongPixels: 0, ratio: null, indicator: null, adjacent: null };
+  }
 
   // Judge the indicator by its STRONGEST pixels, not by the mean of everything
   // that moved.
@@ -398,8 +418,8 @@ export async function measureFocusIndicator(
   //
   // WCAG 2.4.11 asks whether a perceivable indicator EXISTS against adjacent
   // colour, so count the pixels that clear the bar rather than averaging them
-  // away. `minStrongPixels` stops a couple of stray antialiased pixels
-  // qualifying: a real 2px ring around even a small control contributes
+  // away. The caller's floor on that count stops a couple of stray antialiased
+  // pixels qualifying: a real 2px ring around even a small control contributes
   // hundreds.
   let best = 1;
   let bestPx: number[] | null = null;

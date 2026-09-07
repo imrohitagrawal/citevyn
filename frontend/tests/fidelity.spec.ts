@@ -66,7 +66,11 @@ for (const theme of THEMES) {
       // Every major region either sets its own themed bg or inherits the page
       // canvas. Walk the ancestor chain to the first painted background and
       // assert it is a known theme token — never transparent-all-the-way-up.
-      const THEMED = new Set([T.bg, T.surface, T.surface2]);
+      // `Set<string>`, not the inferred `Set<"rgb(250, 249, 246)" | …>`: the
+      // value tested against it is a computed style read out of the browser,
+      // which is a plain `string`. The literal-typed Set made `.has()` a type
+      // error the moment tsc could see this file (#366).
+      const THEMED = new Set<string>([T.bg, T.surface, T.surface2]);
       const regions = [".hero", ".ticker-strip", "#who", "#how", "#why", "#demo", "#pricing"];
       for (const sel of regions) {
         const effective = await page.locator(sel).first().evaluate((start) => {
