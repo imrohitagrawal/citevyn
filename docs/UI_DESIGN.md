@@ -746,8 +746,12 @@ frontend/src/
 │   ├── Header.tsx                   # Sticky header with nav + controls
 │   ├── Hero.tsx                     # Hero section with input + auto-play card
 │   ├── ChatView.tsx                 # Full-screen demo chat
-│   ├── landing-sections.tsx         # Ticker, Sources, Personas, HowItWorks, etc.
+│   ├── landing-sections.tsx         # EAGER sections: Ticker, Sources, InteractiveDemo
+│   ├── landing-strip.tsx            # LAZY below-the-fold strip (#358), one chunk
 │   └── LandingPage.tsx              # Orchestrator for the landing view
+├── lib/
+│   ├── useDeferredReveal.ts         # IntersectionObserver gate for the lazy strip
+│   └── scrollToSection.ts           # Anchor scroll that waits for a lazy target
 ├── styles/
 │   ├── tokens.css                   # Design tokens (light + dark themes)
 │   ├── reset.css                    # Minimal CSS reset
@@ -764,6 +768,52 @@ the two files above are the only way it can be styled: everything under `src/` i
 content-hashed by Vite, and the app-wide CSP forbids inline `<style>`/`<script>`.
 `backend/tests/test_about_page_tokens.py` fails if `about.css` drifts from
 `tokens.css`.
+
+### 5.1 The deferred marketing strip (#358)
+
+The landing sections are split across two modules by WHEN THEY MUST BE ON SCREEN,
+not by what they are about. Rollup chunks per module, so the split has to be
+physical — `React.lazy` over named exports of one module frees nothing.
+
+| module | sections | loaded |
+|---|---|---|
+| `landing-sections.tsx` | QuestionTicker, SourcesStrip, InteractiveDemo | eager, in the entry chunk |
+| `landing-strip.tsx` | Personas, HowItWorks, WhyDifferent, Pricing, FAQ, CTABanner, Footer | one chunk, on scroll |
+
+Measured on the shipping build (`npm run check:bundle`): the eager graph goes
+**66,394 B → 62,526 B gzip (−3,868 B)**, and `frontend/bundle-budget.json` was
+ratcheted 68,000 → 64,132 in the same change so the win is not spent silently.
+
+`QuestionTicker` and `SourcesStrip` stay eager because they sit immediately under
+the Hero, where a `fallback={null}` boundary is a visible jump on first paint.
+`InteractiveDemo` stays eager because it is the product demo, the target of the
+header's "Demo" link, and — decisively — it sits BETWEEN the two deferred DOM
+runs, so keeping it put is what lets the deferred half be one module mounted at
+two points. Measured cost of that choice: **406 B** — two throwaway variants
+built back to back before implementation, `InteractiveDemo` deferred 61,878 B vs
+`InteractiveDemo` eager 62,284 B. (Neither figure is the shipped one: both
+predate the gate itself, which costs a further ~242 B.)
+
+**Three things had to be true for this not to be a regression**, and each has a
+test:
+
+1. **The nav still works.** Four of the five header links (`#who`, `#how`,
+   `#pricing`, `#faq`) point into the deferred chunk, and `scrollToId` used to
+   do `if (!el) return` — a silent no-op that made those links look dead.
+   `scrollToSection` now reveals the strip and retries for a bounded ~120 frames.
+2. **A deep link still lands.** `/#pricing` reveals the strip and scrolls once.
+3. **No IntersectionObserver means SHOW, never hide.** `useDeferredReveal` starts
+   revealed when the API is absent — jsdom implements none, and neither do old
+   browsers. "Cannot observe" must never mean "hide the page".
+
+**An honest limit, measured, not assumed.** The lead margin is 400 px, and the
+sentinel sits at 854 px on Desktop Chrome 1280×720 — inside `720 + 400`, so a
+desktop reader's observer fires on first paint and the chunk is fetched right
+away. The saving there is that it is off the critical rendering path, not that
+the bytes are never sent. On a 390×844 phone the sentinel is at 1458 px, outside
+`844 + 400`, and the deferral is real. Both numbers are asserted in
+`frontend/tests/lazy-strip.spec.ts`, so a layout change that flips either one
+goes red instead of quietly invalidating this paragraph.
 
 ---
 

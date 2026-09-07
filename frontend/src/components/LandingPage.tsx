@@ -5,29 +5,39 @@
  * Replaces the old multi-style architecture with a single unified page.
  */
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useLandingState } from "../hooks/useLandingState";
+import { useDeferredReveal } from "../lib/useDeferredReveal";
+import { scrollToSection } from "../lib/scrollToSection";
 import { KB } from "../data/knowledgeBase";
 import { Header } from "./Header";
 import { Hero } from "./Hero";
-import {
-  QuestionTicker,
-  SourcesStrip,
-  Personas,
-  HowItWorks,
-  WhyDifferent,
-  InteractiveDemo,
-  Pricing,
-  FAQ,
-  CTABanner,
-  Footer,
-} from "./landing-sections";
+import { QuestionTicker, SourcesStrip, InteractiveDemo } from "./landing-sections";
 import { ChatView } from "./ChatView";
 import { ToastHost } from "./ToastHost";
 
 // ADR-0004 PR 14: mounted only on the ?auth=ok return trip, and lazy, so the
 // eager bundle carries just this line and the mount condition below.
 const PasswordNudge = lazy(() => import("./Nudge"));
+
+// #358: the below-the-fold marketing strip, deferred until the reader scrolls
+// toward it. In DOM order these two are NOT adjacent — the eager InteractiveDemo
+// sits between them — but both come from the SAME module, so the reader pays one
+// request, and both mount off one shared gate so they are never half-shown.
+const LandingStripTop = lazy(() => import("./landing-strip"));
+const LandingStripBottom = lazy(() =>
+  import("./landing-strip").then((m) => ({ default: m.LandingStripBottom })),
+);
+
+/**
+ * Section ids that live inside the deferred strip. A nav click or an on-load
+ * `#hash` naming one of these has to REVEAL the strip first: `scrollToId`
+ * cannot scroll to an element that has not been fetched yet.
+ *
+ * "demo" is deliberately absent — InteractiveDemo stays eager, so its anchor is
+ * always in the DOM. "top" is on <main>, also eager.
+ */
+const DEFERRED_SECTION_IDS: ReadonlySet<string> = new Set(["who", "how", "why", "pricing", "faq"]);
 
 // ---------------------------------------------------------------------------
 // Component
@@ -95,6 +105,33 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   } = useLandingState();
 
   const dark = theme === "dark";
+
+  // #358: gate for the deferred marketing strip. The sentinel is a zero-height
+  // div sitting where the first deferred section will go; `useDeferredReveal`
+  // starts already-revealed when IntersectionObserver is absent, so jsdom and
+  // any browser without it get the whole page.
+  const stripSentinel = useRef<HTMLDivElement | null>(null);
+  const { revealed: stripRevealed, reveal: revealStrip } = useDeferredReveal(stripSentinel);
+
+  // A nav click whose target is inside the strip must mount it before
+  // `goSection` scrolls; `scrollToId` retries for ~2 s, which covers the
+  // re-render plus the chunk fetch.
+  const onNavClick = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      if (DEFERRED_SECTION_IDS.has(id)) revealStrip();
+      goSection(e, id);
+    },
+    [goSection, revealStrip],
+  );
+
+  // A deep link (`/#pricing`) lands on a section that is not in the DOM yet, so
+  // the browser's own anchor scroll finds nothing. Reveal, then scroll once.
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (!DEFERRED_SECTION_IDS.has(id)) return;
+    revealStrip();
+    scrollToSection(id);
+  }, [revealStrip]);
   // Captured ONCE, before the effect below strips the app's own query keys
   // (a lazy initializer, so it survives the replaceState). A magic-link or
   // OAuth login both land on ?auth=ok; whether to actually show the nudge is
@@ -186,7 +223,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             themeGlyph={dark ? "☀" : "☾"}
             onThemeToggle={() => onThemeChange(dark ? "light" : "dark")}
             onAskClick={() => enterChat(null)}
-            onNavClick={goSection}
+            onNavClick={onNavClick}
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}
@@ -219,11 +256,19 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
 
         <SourcesStrip />
 
-        <Personas onAsk={(q) => enterChat(q)} />
+        {/*
+          #358: zero-height sentinel marking where the deferred strip begins.
+          <main> has no CSS rule of its own (default block flow, no flex gap),
+          so an empty div here adds nothing to the layout. aria-hidden and no
+          text content, so it is invisible to assistive tech too.
+        */}
+        <div ref={stripSentinel} aria-hidden="true" data-strip-sentinel="" />
 
-        <HowItWorks />
-
-        <WhyDifferent />
+        {stripRevealed && (
+          <Suspense fallback={null}>
+            <LandingStripTop onAsk={(q) => enterChat(q)} />
+          </Suspense>
+        )}
 
         <InteractiveDemo
           demoQuestions={demoQuestions}
@@ -245,13 +290,16 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
           onOpenChat={() => enterChat(null)}
         />
 
-        <Pricing onGetPro={getPro} onOpenChat={() => enterChat(null)} />
-
-        <FAQ openFaq={openFaq} toggleFaq={toggleFaq} />
-
-        <CTABanner onOpenChat={() => enterChat(null)} />
-
-        <Footer />
+        {stripRevealed && (
+          <Suspense fallback={null}>
+            <LandingStripBottom
+              onGetPro={getPro}
+              onOpenChat={() => enterChat(null)}
+              openFaq={openFaq}
+              toggleFaq={toggleFaq}
+            />
+          </Suspense>
+        )}
       </main>
         </>
       )}
@@ -269,7 +317,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             themeGlyph={dark ? "☀" : "☾"}
             onThemeToggle={() => onThemeChange(dark ? "light" : "dark")}
             onAskClick={() => enterChat(null)}
-            onNavClick={goSection}
+            onNavClick={onNavClick}
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}

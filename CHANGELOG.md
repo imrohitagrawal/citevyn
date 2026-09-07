@@ -114,6 +114,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sequence can create a second real principal.
 
 ### Changed
+- **Below-the-fold marketing strip is fetched on scroll (#358).**
+  `landing-sections.tsx` split in two: `QuestionTicker`, `SourcesStrip` and
+  `InteractiveDemo` stay eager; `Personas` → `Footer` move to
+  `landing-strip.tsx`, one chunk mounted behind an `IntersectionObserver`.
+  Eager graph **66,394 → 62,526 B gzip (−3,868 B)**, measured with
+  `npm run check:bundle` on the shipping variant, and
+  `frontend/bundle-budget.json` ratcheted 68,000 → 64,132 in the same change so
+  the win is banked rather than spent — headroom held at exactly the 1,606 B the
+  previous decision chose. The issue's headline −4,669 B was for the whole strip
+  including the two at-the-fold sections and does not apply to what shipped.
+  Three regressions the split would otherwise have caused are fixed with it:
+  `scrollToSection` now waits for a lazy target instead of returning silently
+  (four of the five header nav links point into the deferred chunk and would
+  have looked dead), a `/#pricing` deep link reveals the strip, and the reveal
+  gate fails OPEN where `IntersectionObserver` is absent so the page is never
+  hidden by a missing API. Honest limit, measured: on a 1280×720 desktop the
+  sentinel sits inside the 400 px lead margin, so the chunk is still fetched on
+  first paint — deferred off the critical path, not skipped; the real deferral
+  is on phone-sized viewports. All 22 visual baselines pass unchanged.
+
 - **Frontend base image Node 22 → 26 (#227).** Moved deliberately, not as a
   routine bump: all three pins (`frontend/.nvmrc`, `package.json`
   `engines.node`, `Dockerfile.api`'s `FROM`) together, per the #231 guard's

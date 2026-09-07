@@ -1,0 +1,148 @@
+/**
+ * #358 — proves the below-the-fold marketing strip really left the eager
+ * bundle, by reading the BUILD OUTPUT rather than the source.
+ *
+ * Why not assert on the source. `lazy(() => import("./landing-strip"))` being
+ * present in LandingPage.tsx proves nothing about what the browser downloads:
+ * rollup chunks per MODULE, so a stray eager `import { Footer } from
+ * "./landing-strip"` anywhere else pulls the whole module back into the entry
+ * chunk while every `lazy(` call site still reads exactly as it does today. The
+ * only honest witness is the emitted graph, which is what this file inspects —
+ * the same rule src/test/emittedArtifact.test.ts follows for the #365 guard.
+ *
+ * Two independent witnesses, because either alone can pass for a wrong reason:
+ *
+ *   1. STRUCTURE — Vite's own manifest must file landing-strip.tsx under the
+ *      entry's `dynamicImports` and NOT anywhere in the transitive closure of
+ *      its static `imports`. That is exactly the split scripts/bundle-budget.mjs
+ *      measures, so this pins the thing the budget gate is counting.
+ *
+ *   2. CONTENT — the eager chunk's actual bytes must not contain the deferred
+ *      sections' copy, and the lazy chunk's bytes must. A structural check
+ *      alone would still pass if the module were duplicated into both chunks.
+ *
+ * And a PARTNER for every absence check (an "is not present" assertion that
+ * counts nothing passes trivially once the string is renamed): each string
+ * asserted absent from the eager chunk is asserted PRESENT in the lazy chunk,
+ * and vice versa. If a marketing string is reworded, this file goes red rather
+ * than quietly measuring nothing.
+ *
+ * BUILDS INTO ITS OWN OUTPUT DIRECTORY. src/test/emittedArtifact.test.ts runs
+ * `npm run build` into frontend/dist, and vitest runs test files in parallel
+ * (nothing in vite.config.ts sets fileParallelism:false), so sharing dist/
+ * would be a race — one file's build deleting the other's output mid-read.
+ * Reproduced while writing this: after a full `npm test` run, dist/ held a
+ * manifest-less build. Hence mkdtemp + --outDir.
+ */
+import { execFileSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildCommand, eagerChunkFilesFromManifest } from "./bundle-budget.mjs";
+
+const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** The module that must be lazy, as Vite names it in the manifest. */
+const STRIP_MODULE = "src/components/landing-strip.tsx";
+
+/**
+ * Copy that lives in the DEFERRED strip, and copy that must stay EAGER.
+ * Short, distinctive literals that minification cannot rewrite (they are string
+ * contents, not identifiers). Kept deliberately few: each one is a maintenance
+ * cost when the marketing copy changes, and three is enough to distinguish a
+ * real split from a duplicated module.
+ */
+const DEFERRED_COPY = [
+  "Questions, answered.", // FAQ  <h2>
+  "Answers from official docs only.", // Footer
+  "01 · JUST CURIOUS", // Personas card tag
+];
+const EAGER_COPY = [
+  "sources-strip-inner", // SourcesStrip — sits under the Hero, must not move
+  "demo-q-btn", // InteractiveDemo — deliberately kept eager (#358)
+];
+
+let outDir = "";
+let manifest;
+let eagerText = "";
+let eagerBytes = 0;
+let stripFile = "";
+let stripGzip = 0;
+
+beforeAll(() => {
+  outDir = mkdtempSync(join(tmpdir(), "citevyn-strip-guard-"));
+  const { cmd, args, env } = buildCommand();
+  // --emptyOutDir because the directory is outside the project root, where Vite
+  // otherwise refuses to clean and prints a warning instead of building.
+  execFileSync(cmd, [...args, "--outDir", outDir, "--emptyOutDir"], {
+    cwd: frontendRoot,
+    stdio: "pipe",
+    env: { ...process.env, ...env },
+  });
+
+  manifest = JSON.parse(readFileSync(join(outDir, ".vite", "manifest.json"), "utf8"));
+
+  const eagerFiles = eagerChunkFilesFromManifest(manifest);
+  const eagerBuffers = eagerFiles.map((f) => readFileSync(join(outDir, f)));
+  eagerText = eagerBuffers.map((b) => b.toString("utf8")).join("\n");
+  eagerBytes = eagerBuffers.reduce((n, b) => n + gzipSync(b).length, 0);
+
+  stripFile = manifest[STRIP_MODULE]?.file ?? "";
+  if (stripFile) stripGzip = gzipSync(readFileSync(join(outDir, stripFile))).length;
+}, 180_000);
+
+afterAll(() => {
+  if (outDir) rmSync(outDir, { recursive: true, force: true });
+});
+
+describe("the below-the-fold landing strip is not in the eager bundle (#358)", () => {
+  it("is a chunk of its own, reached only through a dynamic import", () => {
+    // Fails if landing-strip.tsx is inlined back into the entry (no manifest
+    // record of its own) — i.e. if the physical split is undone.
+    expect(manifest[STRIP_MODULE], `manifest has no record for ${STRIP_MODULE}`).toBeDefined();
+    expect(stripFile).toMatch(/^assets\/landing-strip-[^/]+\.js$/);
+    expect(existsSync(join(outDir, stripFile))).toBe(true);
+
+    const entryKeys = Object.keys(manifest).filter((k) => manifest[k].isEntry === true);
+    expect(entryKeys).toHaveLength(1);
+    expect(manifest[entryKeys[0]].dynamicImports ?? []).toContain(STRIP_MODULE);
+  });
+
+  it("is absent from the eager graph the bundle gate measures", () => {
+    // The exact set scripts/bundle-budget.mjs counts: entry + transitive static
+    // imports, dynamicImports NOT followed. If someone adds a plain
+    // `import { Footer } from "./landing-strip"` anywhere in the eager half,
+    // rollup folds the module in and this goes red.
+    const eagerFiles = eagerChunkFilesFromManifest(manifest);
+    expect(eagerFiles).not.toContain(stripFile);
+
+    // PARTNER for that absence: the eager graph is not empty, and the file the
+    // assertion above says is missing genuinely exists and is worth deferring.
+    expect(eagerFiles.length).toBeGreaterThan(0);
+    expect(eagerBytes).toBeGreaterThan(50_000);
+    expect(stripGzip).toBeGreaterThan(3_000);
+  });
+
+  it("keeps the deferred sections' copy out of the bytes the browser downloads first", () => {
+    // `.includes(...)` compared as a BOOLEAN, not `.toContain` on the text: a
+    // failing toContain prints the whole 190 kB chunk as its diff.
+    const stripText = readFileSync(join(outDir, stripFile), "utf8");
+    for (const phrase of DEFERRED_COPY) {
+      // PARTNER FIRST: prove the phrase still exists in this build at all, so
+      // a reworded string cannot turn the absence check below into a no-op.
+      expect(stripText.includes(phrase), `"${phrase}" is not in the lazy chunk — has the copy changed?`).toBe(true);
+      expect(eagerText.includes(phrase), `"${phrase}" is still in the eager chunk`).toBe(false);
+    }
+  });
+
+  it("keeps the at-the-fold sections eager, so the split did not overshoot", () => {
+    const stripText = readFileSync(join(outDir, stripFile), "utf8");
+    for (const phrase of EAGER_COPY) {
+      expect(eagerText.includes(phrase), `"${phrase}" left the eager chunk`).toBe(true);
+      expect(stripText.includes(phrase), `"${phrase}" was duplicated into the lazy chunk`).toBe(false);
+    }
+  });
+});
