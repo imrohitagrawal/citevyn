@@ -17,15 +17,18 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import ADMIN_USER_ID
 from app.models.documents import Document
 from app.models.enums import (
     DocumentStatus,
     IndexStatus,
     JobStage,
     JobStatus,
+    UserRole,
 )
 from app.models.evaluation import EvaluationRun, EvaluationStatus
 from app.models.index_versions import IndexVersion
@@ -33,7 +36,23 @@ from app.models.ingestion_jobs import IngestionJob
 from app.services import evaluations as evaluation_service
 from app.services import index_versions as index_version_service
 from app.services import ingestion_jobs as ingestion_job_service
-from tests.conftest import seed_catalog
+from tests.conftest import seed_catalog, seed_index_version, seed_user
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _seed_admin_actor(session: AsyncSession) -> None:
+    """Give the admin actor a real ``users`` row for every test in this file.
+
+    ``record_admin_action`` stamps ``audit_events.user_id`` with the constant
+    ``app.core.security.ADMIN_USER_ID`` ("admin"), a foreign key onto
+    ``users``. Production always has that row -- ``db/seed/seed_users.py``
+    seeds ``("admin", UserRole.admin)`` before the app serves traffic -- so
+    this restores the production precondition rather than papering over a
+    missing one (#286). Scoped to this file deliberately: a global autouse
+    would hide a genuinely absent user elsewhere.
+    """
+    await seed_user(session, ADMIN_USER_ID, role=UserRole.admin)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -69,11 +88,18 @@ async def _make_run(
 ) -> EvaluationRun:
     """Insert an evaluation run for ``index_version`` and return it.
 
+    Ensures the ``index_versions`` parent exists first: ``evaluation_runs``
+    carries a foreign key onto it, and production only ever writes a run
+    after ``_assert_candidate_is_evaluable`` has confirmed the candidate row
+    (``app/worker/promotion_eval.py``). Idempotent, so the many callers that
+    already made the row via ``_make_candidate`` are unaffected (#286).
+
     The default ``metrics`` blob is the admin-API shape
     (``cases_total``/``cases_passed``) and scores 15/15, i.e. a pass rate
     of 1.0 — enough to clear the #210 promotion gate. Tests that care
     about the gate itself pass their own blob and ``started_at``.
     """
+    await seed_index_version(session, index_version)
     now = started_at or datetime.now(UTC)
     row = EvaluationRun(
         suite_name="golden_v1",
@@ -296,6 +322,10 @@ async def test_promote_version_writes_audit_event(session: AsyncSession) -> None
     await seed_catalog(session)
     candidate = await _make_candidate(session, index_version="v2")
     run = await _make_run(session, index_version="v2")  # satisfy the #210 gate
+    # This test uses its own actor id rather than the seeded ``admin``, so
+    # it needs its own ``users`` row -- ``audit_events.user_id`` is a
+    # foreign key (#286). The assertion below still pins the actor.
+    await seed_user(session, "admin-actor", role=UserRole.admin)
 
     await index_version_service.promote_version(
         session,

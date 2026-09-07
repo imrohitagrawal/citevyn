@@ -245,7 +245,14 @@ def test_a_wrong_secret_for_a_real_auth_session_id_is_rejected(
 
     async def _seed() -> None:
         async with factory() as db:
+            # Parent first, its own flush. ``auth_sessions.user_id`` is a
+            # foreign key onto ``users`` and no ORM ``relationship()`` links
+            # the two, so a single combined flush is not ordered by it --
+            # exactly the ``_mint_principal`` bug this suite exists to guard
+            # (see ``app/core/auth_sessions.py``, which flushes the User on
+            # its own for the same reason). #286
             db.add(User(user_id="anon_victim", role=UserRole.demo_user, created_at=now))
+            await db.flush()
             db.add(
                 AuthSession(
                     auth_session_id=real_id,
@@ -280,7 +287,14 @@ def test_an_expired_auth_session_is_treated_as_no_cookie(in_memory_client: TestC
 
     async def _seed() -> None:
         async with factory() as db:
+            # Parent first, its own flush. ``auth_sessions.user_id`` is a
+            # foreign key onto ``users`` and no ORM ``relationship()`` links
+            # the two, so a single combined flush is not ordered by it --
+            # exactly the ``_mint_principal`` bug this suite exists to guard
+            # (see ``app/core/auth_sessions.py``, which flushes the User on
+            # its own for the same reason). #286
             db.add(User(user_id="anon_stale", role=UserRole.demo_user, created_at=now))
+            await db.flush()
             db.add(
                 AuthSession(
                     auth_session_id=expired_id,

@@ -1381,30 +1381,30 @@ class Orchestrator:
         bare ``session_id``. Returns the ``user_id`` to attach to
         audit events.
 
-        Raises ``RuntimeError`` if a real session row exists but
-        references a user that the orchestrator cannot resolve —
-        that means the orchestrator was handed a stale session id
-        and the route layer should retry.
+        This used to claim it raises ``RuntimeError`` when a session row
+        references an unresolvable user. It never did — there is no ``raise``
+        here, no caller catches one, and no route retries on it. The real
+        behaviour is the opposite: the missing ``users`` row is created and
+        the caller proceeds. Corrected rather than implemented, because
+        under #286's foreign-key enforcement that branch is now unreachable
+        anyway: ``sessions.user_id`` is ``ON DELETE CASCADE``, so a session
+        cannot outlive its user.
         """
         session = await self._session.get(Session, session_id)
-        if session is not None:
-            user_id = session.user_id
-        else:
-            # Caller passed a bare UUID with no Session row yet.
-            # Create both rows so the message inserts do not trip
-            # the FK on ``sessions.session_id``.
-            user_id = "demo_user"
-            self._session.add(
-                Session(
-                    session_id=session_id,
-                    user_id=user_id,
-                    channel="chat",
-                    created_at=_utcnow(),
-                    expires_at=_utcnow_from_seconds(self._settings.index_session_ttl_seconds),
-                )
-            )
-            await self._session.flush()
+        user_id = session.user_id if session is not None else "demo_user"
 
+        # The parent ``users`` row FIRST, in its own flush. ``sessions``
+        # and ``audit_events`` both carry a foreign key onto it, and this
+        # codebase declares no ORM ``relationship()`` between the mapped
+        # classes — only the raw FK column — so SQLAlchemy will NOT order
+        # a single combined flush's INSERTs by that dependency. Writing
+        # the Session first (as this did until #286) inserts a child row
+        # pointing at a user that may not exist yet: a hard
+        # ``ForeignKeyViolation`` on Postgres, the exact shape of the
+        # ``_mint_principal`` bug in ``app.core.auth_sessions``. It never
+        # fired in production only because ``demo_user`` happens to be
+        # seeded (``db/seed/seed_users.py``); a fresh, unseeded database
+        # 500s on the first chat message.
         existing_user = await self._session.get(User, user_id)
         if existing_user is None:
             self._session.add(
@@ -1412,6 +1412,21 @@ class Orchestrator:
                     user_id=user_id,
                     role=UserRole.demo_user,
                     created_at=_utcnow(),
+                )
+            )
+            await self._session.flush()
+
+        if session is None:
+            # Caller passed a bare UUID with no Session row yet.
+            # Create it so the message inserts do not trip the FK on
+            # ``messages.session_id``.
+            self._session.add(
+                Session(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel="chat",
+                    created_at=_utcnow(),
+                    expires_at=_utcnow_from_seconds(self._settings.index_session_ttl_seconds),
                 )
             )
             await self._session.flush()

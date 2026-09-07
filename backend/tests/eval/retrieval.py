@@ -252,10 +252,11 @@ async def _seed_eval_users(session: AsyncSession) -> None:
     """Seed the ``demo_user``/``admin`` rows the judge's orchestrator needs.
 
     The judge drives the full orchestrator, which writes a ``sessions`` row FK'd to
-    ``users``. On the hermetic SQLite path SQLite does not enforce foreign keys so
-    this is a no-op there, but Postgres DOES — without these rows the first judged
-    case raises a ForeignKeyViolation. Seeded into the same rolled-back transaction
-    as the catalog, so it leaves no residue.
+    ``users``. Load-bearing on BOTH backends now: Postgres always enforced this, and
+    since #286 so does SQLite (``app.core.db`` issues ``PRAGMA foreign_keys=ON`` on
+    every connection). Without these rows the first judged case raises a
+    ForeignKeyViolation on either. Seeded into the same rolled-back transaction as
+    the catalog, so it leaves no residue.
     """
     now = datetime.now(UTC)
     for user_id, role in (("demo_user", UserRole.demo_user), ("admin", UserRole.admin)):

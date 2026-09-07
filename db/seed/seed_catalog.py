@@ -102,10 +102,15 @@ async def _retire_orphans(session: AsyncSession, index_version: str) -> int:
       retrieved and cited forever.
 
     Chunks and exact terms are deleted explicitly rather than left to
-    ``ON DELETE CASCADE``: the hermetic SQLite engine does not enforce foreign
-    keys by default, so relying on the cascade would make this a no-op in tests
-    and a silent divergence between backends (the same reason
-    ``IngestionRunner._delete_existing_chunks`` deletes explicitly).
+    ``ON DELETE CASCADE``, so the statements are identical on both backends
+    (the same reason ``IngestionRunner._delete_existing_chunks`` does).
+
+    That used to be load-bearing for a different reason -- the hermetic SQLite
+    engine enforced no foreign keys at all, so the cascade was a no-op in tests
+    and diverged silently from Postgres. Not so since #286: ``app.core.db``
+    turns the pragma on for every SQLite connection, and this module is inside
+    its reach (it imports ``app.worker.cli``). The explicit deletes stay
+    because child-first is the order the sweep wants anyway.
 
     Only ``index_version`` is touched — other index versions belong to the
     operator's worker/promote flow.

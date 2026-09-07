@@ -24,6 +24,7 @@ from app.answer.memory import (
 )
 from app.llm.types import LLMResult
 from app.models import Message, MessageRole
+from tests.conftest import seed_chat_session
 
 # ---------------------------------------------------------------------------
 # build_contextual_query — pure rewrite logic
@@ -158,6 +159,11 @@ async def test_condense_falls_back_on_empty_or_overlong_output() -> None:
 
 
 async def _add_message(session, session_id, *, role, content, created_at) -> None:
+    # ``messages.session_id`` is a foreign key onto ``sessions`` (#286).
+    # Idempotent, so the multi-message tests pay for it once per session id;
+    # the scoping test still gets two genuinely distinct ``sessions`` rows,
+    # because ``recent_user_questions`` filters on session id, not owner.
+    await seed_chat_session(session, session_id)
     session.add(
         Message(
             session_id=session_id,
