@@ -35,17 +35,20 @@ S=$(mktemp -d)
 
 TC=tsconfig.json
 BG=src/test/buildGuards.test.ts
+PK=package.json
+WF=../.github/workflows/frontend.yml
+SP=tests/harness.spec.ts
 TESTS="src/test/buildGuards.test.ts"
 
 restore_all () {
-  for f in TC BG; do
+  for f in TC BG PK WF SP; do
     eval "t=\$$f"
     [ -f "$S/p.$f" ] && cp "$S/p.$f" "$t" 2>/dev/null
   done
 }
 trap 'restore_all; rm -rf "$S"' EXIT INT TERM
 
-for f in TC BG; do
+for f in TC BG PK WF SP; do
   eval "t=\$$f"
   if ! git diff --quiet -- "$t"; then
     echo "refusing to run: $t has uncommitted changes."
@@ -134,6 +137,24 @@ one "check: add noCheck, so tsc loads every spec and checks nothing" "$TC" "$S/p
     "noCheck": true,'
 
 echo
+echo "=== the two ways to keep the block green while tsc's verdict is ignored ==="
+# The entry point CI runs must still be the config this block inspects.
+one "entry: point \`type-check\` at the OTHER project" "$PK" "$S/p.PK" \
+'"type-check": "tsc -b",' '"type-check": "tsc -b tsconfig.node.json",'
+# ...and the step that runs it must still be able to fail the job.
+one "entry: let the Type-check step pass while tsc is red" "$WF" "$S/p.WF" \
+'      - name: Type-check
+        run: npm run type-check' '      - name: Type-check
+        continue-on-error: true
+        run: npm run type-check'
+# A per-file opt-out leaves the file LOADED and unchecked -- #366 for one file.
+# Upper case on purpose: TypeScript lowercases pragma names, and the first
+# version of this guard was a regex that missed exactly this spelling.
+one "nocheck: opt one spec out with \`// @TS-NOCHECK\`" "$SP" "$S/p.SP" \
+'import { test, expect } from "./fixtures";' '// @TS-NOCHECK
+import { test, expect } from "./fixtures";'
+
+echo
 echo "=== META: the guard cannot pass on an empty population ==="
 # The anchor carries the line ABOVE it deliberately. `specs =
 # playwrightSelectedSpecs();` appears in BOTH describe blocks, and
@@ -155,7 +176,7 @@ one "meta: hand the guard an empty loaded-file set" "$BG" "$S/p.BG" \
 echo
 echo "=== KILLED: $K   SURVIVED/ERROR: $SV ==="
 ok=1
-for f in TC BG; do
+for f in TC BG PK WF SP; do
   eval "t=\$$f"
   cmp -s "$t" "$S/p.$f" || { echo "DIRTY: $f"; ok=0; }
 done

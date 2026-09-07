@@ -553,6 +553,12 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
  * required job for nothing.
  */
 let playwrightSpecsCache: string[] | null = null;
+/** Playwright's OWN resolved `rootDir`, read out of `--list --reporter=json`.
+ *  Declared BEFORE the function that assigns it: a `let` used from a function
+ *  hoisted above its declaration throws `ReferenceError: Cannot access … before
+ *  initialization` the moment anyone moves the call site out of a `beforeAll`,
+ *  and that failure says nothing about Playwright. Verified by running it. */
+let playwrightSpecsRootDir = join(frontendRoot, "tests");
 /** The FAILURE is memoised too. Caching only successes means a probe that hangs
  *  costs each describe block a full 120 s hook timeout — 240 s for one file,
  *  double the worst case before the memo existed. */
@@ -611,8 +617,6 @@ function playwrightSelectedSpecs(): string[] {
   playwrightSpecsCache = found;
   return [...found];
 }
-/** Set by the call above; only meaningful once it has succeeded. */
-let playwrightSpecsRootDir = join(frontendRoot, "tests");
 
 describe("every e2e spec is insulated from the third-party font stylesheet (#364)", () => {
   const testsDir = join(frontendRoot, "tests");
@@ -816,9 +820,12 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
  *     this guard only proves it is looking at them.
  *   - a `// @ts-nocheck` at the top of ONE spec, which leaves it loaded and
  *     unchecked. Named here rather than left implied: it is the cheapest way to
- *     re-open #366 for a single file. A grep is the right check for it — unlike
- *     `include`, a compiler pragma has exactly one spelling — and there is one
- *     below.
+ *     re-open #366 for a single file, and there is a check for it below. An
+ *     earlier draft justified that check as a grep on the grounds that "a
+ *     compiler pragma has exactly one spelling". REFUTED by a skeptic:
+ *     TypeScript lowercases pragma names, so `// @TS-NOCHECK` is honoured too,
+ *     and the token anywhere but the leading comment block is NOT. The check
+ *     asks TypeScript instead.
  */
 describe("tsc type-checks the Playwright specs (#366)", () => {
   const srcDir = join(frontendRoot, "src");
@@ -968,21 +975,63 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
     // file and in emittedArtifact.test.ts; this one was not.
     const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
     expect(pkg.scripts["type-check"]).toBe("tsc -b");
+
+    // ...and the step that runs it must still be able to FAIL the job. Pinning
+    // the script and the step's existence is two of the four assertions this
+    // repo already applies to the bundle-budget step (scripts/bundle-budget
+    // .test.mjs): a step-level `continue-on-error: true` or an `if:` leaves
+    // every other assertion in this file green while a red `tsc -b` stops
+    // failing the required job. A skeptic pointed out the gap.
+    const wf = load(
+      readFileSync(join(frontendRoot, "..", ".github", "workflows", "frontend.yml"), "utf8"),
+    ) as { jobs: { build: { if?: unknown; "continue-on-error"?: unknown; steps?: Record<string, unknown>[] } } };
+    const build = wf.jobs.build;
+    const steps = build.steps ?? [];
+    const typeCheck = steps.filter((s) => String(s.run ?? "").includes("npm run type-check"));
+    expect(typeCheck.length, "the Type-check step is gone, or duplicated").toBe(1);
+    expect(typeCheck[0]["continue-on-error"] ?? false).toBe(false);
+    expect(typeCheck[0].if ?? null).toBe(null);
+    expect(build["continue-on-error"] ?? false).toBe(false);
+    expect(build.if ?? null).toBe(null);
   });
 
-  it("no spec opts itself out with @ts-nocheck", () => {
-    // A string check, deliberately, and sound here for a reason `include` does
-    // not share: `@ts-nocheck` is a COMPILER PRAGMA with exactly one spelling —
-    // TypeScript matches `/^\s*\/\/\/?\s*@ts-nocheck/` on a leading comment —
-    // so there is no second form for it to hide in. It leaves a file loaded (so
-    // every assertion above stays green) and unchecked, which is #366 for one
-    // file.
+  it("no loaded file opts itself out with @ts-nocheck", () => {
+    // ASKS TYPESCRIPT, because the first draft was a whole-file regex and a
+    // skeptic broke it in BOTH directions. `// @TS-NOCHECK` is honoured (pragma
+    // names are lowercased: `addPragmaForMatch` does
+    // `match[1].toLowerCase()`) and the regex missed it; and the token sitting
+    // anywhere else in a file — after the first statement, inside a block
+    // comment, inside a template literal — is NOT honoured, yet the regex
+    // flagged it. That second half was live rather than theoretical: this very
+    // file mentions the token four times, and escaped only because of where the
+    // words happened to sit on the line.
+    //
+    // So this reproduces what the compiler does: only the file's LEADING
+    // comment ranges (`processCommentPragmas` calls
+    // `getLeadingCommentRanges(sourceText, 0)`), only single-line comments, and
+    // the name compared case-INSENSITIVELY against TypeScript's own
+    // `singleLinePragmaRegEx`.
     //
     // The partner that stops it going vacuous is the file list itself: these are
     // the sources tsc resolved, and `Playwright selects real specs…` proves the
-    // set is real.
+    // set is real. `pragmaFinds` below is the second partner — it proves this
+    // scanner can see a pragma at all, rather than returning [] because it looks
+    // in the wrong place.
+    const SINGLE_LINE_PRAGMA = /^\/\/\/?\s*@([^\s:]+)((?:[^\S\r\n]|:).*)?$/m;
+    const noCheckPragma = (text: string): boolean =>
+      (ts.getLeadingCommentRanges(text, 0) ?? []).some((r) => {
+        if (r.kind !== ts.SyntaxKind.SingleLineCommentTrivia) return false;
+        const m = SINGLE_LINE_PRAGMA.exec(text.slice(r.pos, r.end));
+        return !!m && m[1].toLowerCase() === "ts-nocheck";
+      });
+
+    // Partner, run first: the scanner finds the pragma when it IS there, in the
+    // upper-case spelling the regex version missed.
+    expect(noCheckPragma("// @TS-NoCheck\nconst a: number = 1;\n")).toBe(true);
+    expect(noCheckPragma("const a = 1;\n// @ts-nocheck\n")).toBe(false);
+
     const optedOut = parsed.fileNames.filter(
-      (f) => !f.includes("/node_modules/") && /(^|\n)\s*\/\/\/?\s*@ts-nocheck/.test(readFileSync(f, "utf8")),
+      (f) => !f.includes("/node_modules/") && noCheckPragma(readFileSync(f, "utf8")),
     );
     expect(optedOut, "these files are loaded by tsc but excluded from checking").toEqual([]);
   });

@@ -689,11 +689,15 @@ test.describe("Chat", () => {
     // never reached the hook at all and no signal could exist. Its unit-level
     // bite is `ChatView.test.tsx`'s "routes the click to the hook in BOTH
     // states"; this is the same claim against a real browser and real timing.
-    // The window really is still open, asserted the way window 1 asserts it
-    // above. Without this, a window that expired early would send the third
-    // question for real and the FIRST failure would be `toContainText("Not
-    // sent")` — which reads as "the refusal is not announced", a product bug
-    // that is not there. A wrong bite-line is worse than none.
+    // The window really is still open. This is a PRECONDITION, weaker than
+    // window 1's assertion above — that one is by IDENTITY (no answer bubble
+    // exists AND exactly one user bubble), because there it has to exclude the
+    // very bug it guards. Here the refusal below is the assertion and this only
+    // has to establish that the gate is shut. Without it, a window that expired
+    // early would send the third question for real and the FIRST failure would
+    // be `toContainText("Not sent")` — which reads as "the refusal is not
+    // announced", a product bug that is not there. A wrong bite-line is worse
+    // than none.
     await expect(page.locator(".pending-msg")).toHaveCount(1);
     await expect(send).toHaveAttribute("aria-disabled", "true");
     await input.fill("A third question");

@@ -179,15 +179,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dash: NVDA's `symbols.dic` files `—` at level `most`, above the default, so a
   reader running punctuation at "most" or "all" hears the words "em dash" — and
   every other sr-only string on this screen already ends its clauses with a full
-  stop. The signal is a counter bumped at the
+  stop. The signal is `refusedInFlight`, set at the
   `inFlight` **ref** inside `submitChat`, never derived from the rendered
   `pending`: `pending` is a render behind the ref by construction (#62), so a
   `pending`-derived announcement would announce refusals that never happened
   and miss ones that did — pinned by the two-submits-in-one-React-batch test.
-  One region rather than two: the refusal copy is a superset of the in-flight
-  sentence, so nothing is lost while it holds the region, and the window closes
-  on its own when the answer lands, at which point the arrival announcement
-  takes over — no restore timer to get wrong. The send button's handler is now
+  The flag lives in the reducer beside `pending` and is cleared by the same
+  `SET_PENDING(0)` action, in the same state object, so the two cannot
+  disagree; the view keeps no copy of it and has no effect for it. Two
+  view-side shapes were tried first and an adversarial round broke both: a
+  latch cleared by an effect keyed on `pending` transitioning left a stale
+  refusal masking the arrival announcement for the rest of the mount, and
+  gating the render on `pending` only hid that latch, so the next genuine
+  request announced "Not sent" about a question that was sent. One region
+  rather than two: the refusal copy is a superset of the in-flight sentence, so
+  nothing is lost while it holds the region, and the window closes on its own
+  when the answer lands, at which point the arrival announcement takes over. The send button's handler is now
   wired unconditionally, because `onClick={pending ? undefined : onSendClick}`
   meant a click while gated never reached the hook and no signal could exist;
   `aria-disabled` and the 0.7 dim still carry the state, and the hook stays the
@@ -195,7 +202,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the *same* in-flight window is silent, since `role="status"` fires on a text
   change and nothing changed; a refusal in a *later* window does announce. An
   empty submit is never announced — "your text is kept" about an empty box is a
-  false statement. +126 B gzip, measured (62,873 -> 62,999 against a 64,479 budget, headroom 1,480). This closes #356; gaps 1 and 3 shipped
+  false statement. +101 B gzip, measured (62,873 -> 62,974 against a 64,479 budget, headroom 1,505). This closes #356; gaps 1 and 3 shipped
   in #359.
 
 - **`npm run type-check` type-checked no Playwright spec at all (#366).**

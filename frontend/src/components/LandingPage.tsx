@@ -338,7 +338,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             pending={state.pending > 0}
             highlightedIndex={state.highlight}
             sendTick={state.sendTick}
-            refusalTick={state.refusalTick}
+            refusedInFlight={state.refusedInFlight}
           />
         </div>
       )}

@@ -140,7 +140,7 @@ echo "=== the REFUSED-submit announcement (#356 gap 2) ==="
 # MutationObserver over the whole body, ZERO DOM mutations on both the Enter
 # path and the click path.
 one "refusal: drop the signal, back to a silent return" "$LS" "$S/p.LS" \
-'      dispatch({ type: "BUMP_REFUSAL_TICK" });' '      void 0;'
+'      dispatch({ type: "REFUSED_SUBMIT" });' '      void 0;'
 # The trap docs/BACKLOG.md names explicitly: `pending` is a render behind the
 # ref, so two Enter presses in ONE React batch both read 0.
 one "refusal: derive it from \`pending\` instead of the ref" "$LS" "$S/p.LS" \
@@ -152,31 +152,22 @@ one "refusal: derive it from \`pending\` instead of the ref" "$LS" "$S/p.LS" \
 # toast had to be fixed for.
 one "refusal: announce an empty submit too" "$LS" "$S/p.LS" \
 '    if (!t) return;' '    if (false) return;'
+# THE ROOT-CAUSE PROPERTY, and the one two successive view-side designs got
+# wrong: the flag must be cleared by the SAME reducer action that clears
+# `pending`. Latching it in the view left a stale refusal masking the arrival
+# announcement; gating the render on `pending` only hid the latch, so the next
+# genuine request announced "Not sent" about a question that WAS sent.
+one "refusal: never clear the flag when the window closes" "$LS" "$S/p.LS" \
+'        refusedInFlight: action.value === 0 ? false : state.refusedInFlight,' \
+'        refusedInFlight: state.refusedInFlight,'
 # The button was `onClick={pending ? undefined : onSendClick}`, so a click while
 # gated never reached the hook and NO prop this component has could tell a
 # refused click from no click.
 one "refusal: re-gate the click in the view, so it never reaches the hook" "$CV" "$S/p.CV" \
 '            onClick={onSendClick}' '            onClick={pending ? undefined : onSendClick}'
-# A remount mid-flight must not announce a refusal that predates it.
-one "refusal: seed the tick ref at 0, so a remount announces" "$CV" "$S/p.CV" \
-'  const seenRefusalTickRef = useRef(refusalTick);' \
-'  const seenRefusalTickRef = useRef(0);'
-# `role="status"` fires on a text CHANGE. If the refusal is never cleared, the
-# NEXT window's first refusal is announced to nobody — the exact shape of the
-# `|| last.streaming` defect above.
-one "refusal: never clear when the in-flight window closes" "$CV" "$S/p.CV" \
-'    if (!pending) setRefused((s) => (s === "" ? s : ""));' \
-'    if (false) setRefused((s) => (s === "" ? s : ""));'
 one "refusal: render the region without it" "$CV" "$S/p.CV" \
-'          {(pending && refused) ||' '          {"" ||'
-# The RENDER GATE, added after review reproduced the shape it prevents: a tick
-# arriving in a commit where `pending` is already false is never cleared (the
-# clear effect keys on `pending` TRANSITIONING), so the refusal masks `settled`
-# for the rest of the mount and the arrival announcement goes silent.
-one "refusal: drop the \`pending &&\` render gate" "$CV" "$S/p.CV" \
-'          {(pending && refused) ||' '          {(true && refused) ||'
+'          {refusedInFlight' '          {false'
 
-echo
 echo "=== the parked-question notice, and its stale-closure trap ==="
 one "park: read the STALE closure value again" "$LS" "$S/p.LS" \
 '          if (!carried && !chatInputRef.current) {' '          if (!carried && !state.chatInput) {'
