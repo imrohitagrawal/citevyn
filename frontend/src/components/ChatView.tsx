@@ -50,7 +50,7 @@ interface ChatViewProps {
       REFUSED because an answer is still in flight (#356 gap 2). A change here
       puts the refusal into the persistent status region below. It comes from
       the hook's `inFlight` REF, never from `pending`. */
-  refusalTick?: number;
+  refusalTick: number;
 }
 
 export function ChatView({
@@ -66,7 +66,7 @@ export function ChatView({
   pending = false,
   highlightedIndex = -1,
   sendTick = 0,
-  refusalTick = 0,
+  refusalTick,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLInputElement>(null);
@@ -214,7 +214,7 @@ export function ChatView({
   // "replace the in-flight sentence and restore it, or add a second region";
   // this is a third shape, and it is cheaper than both. A second `role="status"`
   // inside `.composer` breaks every `getByRole("status")` in ChatView.test.tsx
-  // (29 of them — `getByRole` throws on multiple matches) and the live e2e's
+  // (44 of them today — `getByRole` throws on multiple matches) and the live e2e's
   // `.composer [role='status']` locator, for no gain: the refusal copy is a
   // SUPERSET of the in-flight sentence ("still answering", "your text is kept"),
   // so nothing is lost by it taking over the region while its window is open.
@@ -238,7 +238,14 @@ export function ChatView({
   useEffect(() => {
     if (refusalTick === seenRefusalTickRef.current) return;
     seenRefusalTickRef.current = refusalTick;
-    setRefused("Not sent — CiteVyn is still answering your last question. Your text is kept.");
+    // A full stop, not an em dash, and "previous" rather than "last". NVDA's
+    // `locale/en/symbols.dic` gives `—` the level `most`, above the default
+    // `some`, so it is silent at the default setting — but a reader running
+    // punctuation at "most" or "all" hears "Not sent em dash CiteVyn…", and
+    // every other sr-only string on this screen already uses a full stop.
+    // "last question" is momentarily ambiguous with "the question you just
+    // tried to send", which is the one thing this sentence is NOT about.
+    setRefused("Not sent. CiteVyn is still answering your previous question. Your text is kept.");
   }, [refusalTick]);
   useEffect(() => {
     // The window closed. Clearing to "" is silent (there is nothing to
@@ -629,7 +636,18 @@ export function ChatView({
               less accurate of the pair. What the reader gets is unchanged: the
               hook refuses before it clears the input, the button still carries
               `aria-disabled` (which Playwright's actionability honours) and the
-              0.7 dim, and no second request starts. */}
+              0.7 dim, and no second request starts.
+
+              One honest caveat, since the ref and the rendered `pending` cannot
+              be simultaneous: in the sub-frame window where `markInFlight(-1)`
+              has run but React has not yet committed `pending: false`, a click
+              now SENDS while the button still renders as unavailable, where
+              before it did nothing. The request has genuinely finished by then,
+              so the send is correct and the #62 ordering invariant holds
+              (`streamBot` dispatches the answer bubble BEFORE that decrement);
+              what is briefly wrong is the button's own advertisement. The
+              opposite skew — ref busy, `pending` not yet true — used to be a
+              SILENT refusal and is now an announced one. */}
           <button
             onClick={onSendClick}
             aria-disabled={pending}
@@ -646,8 +664,22 @@ export function ChatView({
             all. It also lives outside the scrolling list, which the bubble does
             not: a reader who has scrolled up had the only explanation of the
             refusal off-screen. */}
+        {/* `pending && refused`, not a bare `refused`. The clear effect above is
+            keyed on `pending` TRANSITIONING, so a refusal that somehow arrived
+            in a commit where `pending` was already false would never be cleared
+            and would mask `settled` — the arrival announcement, this region's
+            main job — for the rest of the mount. Review reproduced exactly that
+            by driving the props directly. It is unreachable through the hook
+            (the tick is bumped only under `if (inFlight.current)`, and
+            `markInFlight` writes the ref and dispatches `SET_PENDING` in one
+            statement pair), but that invariant lives in another file, is
+            asserted nowhere, and the obvious next producer of this tick — the
+            parked-question path — is not `pending`-coupled. Gating the RENDER
+            makes it impossible by construction whatever the producer does; the
+            effect stays as the belt to this braces, because it is what re-arms
+            the region so a LATER window can announce. */}
         <p className="sr-only" role="status">
-          {refused ||
+          {(pending && refused) ||
             (pending
               ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
               : settled)}

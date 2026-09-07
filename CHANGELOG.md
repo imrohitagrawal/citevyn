@@ -174,8 +174,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   MutationObserver over the whole body, the refusal produced **zero DOM
   mutations**, on the Enter path and the click path alike. A screen-reader user
   pressed Enter and nothing whatsoever happened. The persistent `role="status"`
-  region beside the composer now says "Not sent — CiteVyn is still answering
-  your last question. Your text is kept." The signal is a counter bumped at the
+  region beside the composer now says "Not sent. CiteVyn is still answering
+  your previous question. Your text is kept." A full stop rather than an em
+  dash: NVDA's `symbols.dic` files `—` at level `most`, above the default, so a
+  reader running punctuation at "most" or "all" hears the words "em dash" — and
+  every other sr-only string on this screen already ends its clauses with a full
+  stop. The signal is a counter bumped at the
   `inFlight` **ref** inside `submitChat`, never derived from the rendered
   `pending`: `pending` is a render behind the ref by construction (#62), so a
   `pending`-derived announcement would announce refusals that never happened
@@ -191,7 +195,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the *same* in-flight window is silent, since `role="status"` fires on a text
   change and nothing changed; a refusal in a *later* window does announce. An
   empty submit is never announced — "your text is kept" about an empty box is a
-  false statement. +122 B gzip, measured. This closes #356; gaps 1 and 3 shipped
+  false statement. +126 B gzip, measured (62,873 -> 62,999 against a 64,479 budget, headroom 1,480). This closes #356; gaps 1 and 3 shipped
   in #359.
 
 - **`npm run type-check` type-checked no Playwright spec at all (#366).**

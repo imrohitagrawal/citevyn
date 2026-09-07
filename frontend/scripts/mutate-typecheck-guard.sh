@@ -112,12 +112,26 @@ one "include: name one file under tests/ instead of the directory" "$TC" "$S/p.T
 one "include: keep it, then exclude tests/" "$TC" "$S/p.TC" \
 '"include": ["src", "tests"],' '"exclude": ["tests"],
   "include": ["src", "tests"],'
+# The two remaining shapes a `toContain("tests")` string check would wave
+# through, added after review pointed out the docs claimed all four were here
+# and only two were. A near-name that resolves to nothing...
+one "include: a near-name (\"tests-old\") that resolves to nothing" "$TC" "$S/p.TC" \
+'"include": ["src", "tests"],' '"include": ["src", "tests-old"],'
+# ...and the word surviving only in a comment. tsconfig.json is JSONC and this
+# file already carries comments, so this is a real edit, not a hypothetical.
+one "include: leave \"tests\" in a comment only" "$TC" "$S/p.TC" \
+'"include": ["src", "tests"],' '// "include": ["src", "tests"],
+  "include": ["src"],'
 # Swapping one for the other is not a fix.
 one "include: drop src/, keeping only tests/" "$TC" "$S/p.TC" \
 '"include": ["src", "tests"],' '"include": ["tests"],'
 # The #343 half: widening the project must not make it an emitter.
 one "emit: turn noEmit off, so 78 files become emit candidates" "$TC" "$S/p.TC" \
 '"noEmit": true,' '"noEmit": false,'
+# #366's shape one lever over: the files ARE loaded, and tsc checks none of them.
+one "check: add noCheck, so tsc loads every spec and checks nothing" "$TC" "$S/p.TC" \
+'"noEmit": true,' '"noEmit": true,
+    "noCheck": true,'
 
 echo
 echo "=== META: the guard cannot pass on an empty population ==="

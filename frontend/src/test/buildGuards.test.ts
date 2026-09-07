@@ -553,8 +553,16 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
  * required job for nothing.
  */
 let playwrightSpecsCache: string[] | null = null;
+/** The FAILURE is memoised too. Caching only successes means a probe that hangs
+ *  costs each describe block a full 120 s hook timeout — 240 s for one file,
+ *  double the worst case before the memo existed. */
+let playwrightSpecsError: Error | null = null;
+/** Returns a COPY. Two describe blocks share this list; handing out the cached
+ *  array itself would let a `sort()`/`splice()` in one silently reshape the
+ *  other's population. */
 function playwrightSelectedSpecs(): string[] {
-  if (playwrightSpecsCache) return playwrightSpecsCache;
+  if (playwrightSpecsError) throw playwrightSpecsError;
+  if (playwrightSpecsCache) return [...playwrightSpecsCache];
   const r = spawnSync(
     "npx",
     ["playwright", "test", "-c", "playwright.config.ts", "--list", "--reporter=json"],
@@ -577,17 +585,34 @@ function playwrightSelectedSpecs(): string[] {
   // Fail loudly rather than returning []: an empty list would make "no spec
   // bypasses the fixture" and "the probe broke" indistinguishable, and only
   // one of those is a real defect.
+  const fail = (e: Error): never => {
+    playwrightSpecsError = e;
+    throw e;
+  };
   if (r.status !== 0) {
-    throw new Error(`playwright --list failed (status ${r.status}): ${r.stderr || r.stdout}`);
+    fail(new Error(`playwright --list failed (status ${r.status}): ${r.stderr || r.stdout}`));
   }
-  const parsed = JSON.parse(r.stdout) as { suites?: { file?: string }[] };
+  let parsed: { suites?: { file?: string }[]; config?: { rootDir?: string } };
+  try {
+    parsed = JSON.parse(r.stdout);
+  } catch (e) {
+    return fail(new Error(`playwright --list produced unparseable JSON: ${(e as Error).message}`));
+  }
   const found = [
     ...new Set((parsed.suites ?? []).map((s) => s.file).filter((f): f is string => !!f)),
   ].sort();
-  if (found.length === 0) throw new Error(`playwright --list selected no files: ${r.stdout}`);
+  if (found.length === 0) fail(new Error(`playwright --list selected no files: ${r.stdout}`));
+  // `suites[].file` is relative to Playwright's OWN resolved `rootDir`, which
+  // the same JSON reports. Reading it here rather than hardcoding `tests/`
+  // means renaming that directory, or moving `testDir`, reds the guard that
+  // OWNS that fact instead of the type-check guard, which would otherwise
+  // report "these specs are outside the type-check" and name the wrong culprit.
+  playwrightSpecsRootDir = parsed.config?.rootDir ?? join(frontendRoot, "tests");
   playwrightSpecsCache = found;
-  return found;
+  return [...found];
 }
+/** Set by the call above; only meaningful once it has succeeded. */
+let playwrightSpecsRootDir = join(frontendRoot, "tests");
 
 describe("every e2e spec is insulated from the third-party font stylesheet (#364)", () => {
   const testsDir = join(frontendRoot, "tests");
@@ -773,8 +798,11 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
  * -------------------------------------------------------------
  * `expect(tsconfigText).toContain("tests")` is defeated by every shape that
  * matters: `"tests-old"`, `"tests/helpers.ts"` (one file, no specs), the word
- * inside a comment, an `exclude` that takes it all back, or a `files` array
- * that overrides `include` entirely. So this runs
+ * inside a comment, and an `exclude` that takes it all back. (An earlier draft
+ * of this paragraph also listed "a `files` array that overrides `include`
+ * entirely". That is FALSE, measured: `files` and `include` UNION. The array is
+ * still handled — the per-entry re-parse below passes `files: []`, because
+ * inheriting it would let one listed file satisfy every entry.) So this runs
  * `ts.parseJsonConfigFileContent` — the compiler's own include/exclude/files
  * resolution, the same call the #343 block above uses — and compares its answer
  * against the list PLAYWRIGHT resolves. Two systems, each authoritative for its
@@ -786,9 +814,13 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
  *     pinned by the workflow guard at the top of this file.
  *   - whether the specs are type-CORRECT. That is `tsc` itself, in that step;
  *     this guard only proves it is looking at them.
+ *   - a `// @ts-nocheck` at the top of ONE spec, which leaves it loaded and
+ *     unchecked. Named here rather than left implied: it is the cheapest way to
+ *     re-open #366 for a single file. A grep is the right check for it — unlike
+ *     `include`, a compiler pragma has exactly one spelling — and there is one
+ *     below.
  */
 describe("tsc type-checks the Playwright specs (#366)", () => {
-  const testsDir = join(frontendRoot, "tests");
   const srcDir = join(frontendRoot, "src");
   const configPath = join(frontendRoot, "tsconfig.json");
 
@@ -831,7 +863,10 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
   });
 
   it("every spec Playwright runs is a file tsc loads", () => {
-    const missing = specs.filter((s) => !loaded.has(resolvePath(join(testsDir, s))));
+    // Joined against PLAYWRIGHT's resolved rootDir, not a hardcoded `tests/`.
+    const missing = specs.filter(
+      (s) => !loaded.has(resolvePath(join(playwrightSpecsRootDir, s))),
+    );
     expect(
       missing,
       "these specs are outside the type-check — a type error in them reaches CI " +
@@ -844,7 +879,7 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
     // names them; #366 was FOUND while adding `fixtures.ts` and discovering that
     // "type-check is clean" said nothing about it.
     for (const f of ["helpers.ts", "fixtures.ts"]) {
-      const p = join(testsDir, f);
+      const p = join(playwrightSpecsRootDir, f);
       expect(existsSync(p), `${p} is gone — this expectation is now vacuous`).toBe(true);
       expect(loaded.has(p), `${f} is not type-checked`).toBe(true);
     }
@@ -869,8 +904,13 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
     const includes = (read.config.include ?? []) as string[];
     expect(includes.length, "tsconfig.json has no `include` at all").toBeGreaterThan(0);
     for (const entry of includes) {
+      // `files: []` as well as the single `include`. `files` and `include`
+      // UNION (measured — a `files` array does NOT override `include`, contrary
+      // to a claim in an earlier draft of the docblock above), so inheriting it
+      // through the spread let ONE file listed there satisfy every entry,
+      // including a re-added phantom `"e2e"`. Review found that bypass.
       const solo = ts.parseJsonConfigFileContent(
-        { ...read.config, include: [entry], references: [] },
+        { ...read.config, include: [entry], files: [], references: [] },
         ts.sys,
         frontendRoot,
         undefined,
@@ -895,6 +935,14 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
   it("widening the project emits nothing next to a source", () => {
     expect(parsed.options.noEmit).toBe(true);
     expect(parsed.options.composite ?? false).toBe(false);
+    // `noCheck: true` is #366's shape one lever over: every assertion in this
+    // block stays green — the files ARE loaded — while `tsc -b` checks none of
+    // them and exits 0. Review reproduced it on an isolated project: a real
+    // TS2322 in a spec gives exit 0 with the flag, exit 1 without.
+    expect(
+      parsed.options.noCheck ?? false,
+      "`noCheck` makes tsc LOAD these files and check nothing — a silently inert type-check",
+    ).toBe(false);
     for (const src of parsed.fileNames) {
       for (const ext of [".js", ".d.ts"]) {
         const stray = src.replace(/\.tsx?$/, ext);
@@ -905,5 +953,37 @@ describe("tsc type-checks the Playwright specs (#366)", () => {
         ).toBe(false);
       }
     }
+  });
+
+  /**
+   * Two ways to have this whole block green while `tsc` still checks nothing.
+   * Neither is about `include`, which is why they sit apart from the rest.
+   */
+  it("the entry point CI runs is still the one this block inspects", () => {
+    // `npm run type-check` is what `.github/workflows/frontend.yml` executes,
+    // and this block reasons entirely about `frontend/tsconfig.json`. Point the
+    // script at another project — `tsc -b tsconfig.node.json`, say — and every
+    // assertion above stays true of a config the required job no longer builds.
+    // `scripts.test` and `scripts.build` are already pinned elsewhere in this
+    // file and in emittedArtifact.test.ts; this one was not.
+    const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
+    expect(pkg.scripts["type-check"]).toBe("tsc -b");
+  });
+
+  it("no spec opts itself out with @ts-nocheck", () => {
+    // A string check, deliberately, and sound here for a reason `include` does
+    // not share: `@ts-nocheck` is a COMPILER PRAGMA with exactly one spelling —
+    // TypeScript matches `/^\s*\/\/\/?\s*@ts-nocheck/` on a leading comment —
+    // so there is no second form for it to hide in. It leaves a file loaded (so
+    // every assertion above stays green) and unchecked, which is #366 for one
+    // file.
+    //
+    // The partner that stops it going vacuous is the file list itself: these are
+    // the sources tsc resolved, and `Playwright selects real specs…` proves the
+    // set is real.
+    const optedOut = parsed.fileNames.filter(
+      (f) => !f.includes("/node_modules/") && /(^|\n)\s*\/\/\/?\s*@ts-nocheck/.test(readFileSync(f, "utf8")),
+    );
+    expect(optedOut, "these files are loaded by tsc but excluded from checking").toEqual([]);
   });
 });

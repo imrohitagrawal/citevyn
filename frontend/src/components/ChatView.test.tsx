@@ -77,6 +77,7 @@ function chat(props: Partial<Props> = {}) {
       onChatKey={() => {}}
       onSendClick={() => {}}
       onBackClick={() => {}}
+      refusalTick={0}
       {...props}
     />
   );
@@ -93,6 +94,7 @@ function renderChat(props: Partial<Props> = {}) {
       onChatKey={() => {}}
       onSendClick={() => {}}
       onBackClick={() => {}}
+      refusalTick={0}
       {...props}
     />
   );
@@ -181,6 +183,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     rerender(
       <ChatView
+        refusalTick={0}
         messages={MESSAGES}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -208,6 +211,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     const withHighlight = (messages: Msg[]) => (
       <ChatView
+        refusalTick={0}
         messages={messages}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -237,6 +241,7 @@ describe("ChatView owns the duplicate-question scroll (#302)", () => {
     scrollTo().mockClear();
     rerender(
       <ChatView
+        refusalTick={0}
         messages={MESSAGES}
         chatEmpty={false}
         chatSuggestions={[]}
@@ -708,6 +713,29 @@ describe("ChatView announces a REFUSED submit (#356 gap 2)", () => {
 
     rerender(chat({ pending: true, refusalTick: 2 }));
     expect(screen.getByRole("status")).toHaveTextContent(REFUSED);
+  });
+
+  it("cannot mask the arrival announcement, whatever produces the tick", () => {
+    // Review reproduced this by driving the props directly: with the region
+    // rendering a bare `refused`, a tick that arrives in a commit where
+    // `pending` is ALREADY false is never cleared — the clear effect is keyed on
+    // `pending` TRANSITIONING — so the refusal masks `settled` for the rest of
+    // the mount and the arrival announcement, this region's main job, is
+    // silently disabled.
+    //
+    // Unreachable through today's hook (the tick is bumped only under
+    // `if (inFlight.current)`), but that invariant lives in another file and is
+    // asserted nowhere, and the obvious next producer of this tick — the
+    // parked-question path — is not `pending`-coupled. The region is gated on
+    // `pending && refused` so the shape is impossible whatever the producer
+    // does; this is the test for that.
+    const { rerender } = renderChat({ pending: false, refusalTick: 0 });
+    rerender(chat({ pending: false, refusalTick: 1 }));
+    expect(screen.getByRole("status")).toHaveTextContent("");
+
+    rerender(chat({ pending: false, refusalTick: 1, messages: streaming }));
+    rerender(chat({ pending: false, refusalTick: 1, messages: done }));
+    expect(screen.getByRole("status")).toHaveTextContent("Answer ready. 1 source cited.");
   });
 
   it("STATED LIMITATION: a second refusal in the SAME window does not re-announce", () => {

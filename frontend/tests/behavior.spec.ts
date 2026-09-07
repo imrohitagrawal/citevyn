@@ -689,6 +689,13 @@ test.describe("Chat", () => {
     // never reached the hook at all and no signal could exist. Its unit-level
     // bite is `ChatView.test.tsx`'s "routes the click to the hook in BOTH
     // states"; this is the same claim against a real browser and real timing.
+    // The window really is still open, asserted the way window 1 asserts it
+    // above. Without this, a window that expired early would send the third
+    // question for real and the FIRST failure would be `toContainText("Not
+    // sent")` — which reads as "the refusal is not announced", a product bug
+    // that is not there. A wrong bite-line is worse than none.
+    await expect(page.locator(".pending-msg")).toHaveCount(1);
+    await expect(send).toHaveAttribute("aria-disabled", "true");
     await input.fill("A third question");
     await send.click({ force: true });
     await expect(status).toContainText("Not sent");

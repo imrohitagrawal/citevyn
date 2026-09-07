@@ -1415,7 +1415,7 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     expect(result.current.state.refusalTick).toBe(1);
   });
 
-  it("does not announce a refusal for a submit that was never refused", () => {
+  it("does not announce a refusal for a submit that was never refused", async () => {
     // The partner. `refusalTick` must count REFUSALS, not submits — a tick that
     // bumps on every Enter would satisfy every positive assertion above while
     // telling a screen-reader user their question was dropped when it was sent.
@@ -1423,9 +1423,19 @@ describe("useLandingState — composer gating while an answer is in flight (#62)
     const { result } = renderHook(() => useLandingState());
 
     type(result, "A question");
-    act(() => {
+    await act(async () => {
       result.current.submitChat();
+      // Past the awaited `ensureSession()` the call has to clear before it
+      // reaches `askQuestion` — the partner below reads 0 on the same tick
+      // whether or not the submit went through, which is how the first version
+      // of this test managed to fail while the product was correct.
+      await vi.advanceTimersByTimeAsync(200);
     });
+    // THE PARTNER. Without it this passes for the wrong reason: review measured
+    // it staying green with `submitChat` made entirely inert, because "the tick
+    // did not move" is satisfied by a submit that did nothing at all. This is
+    // what makes the absence below mean "sent, and not announced as refused".
+    expect(mockAskQuestion).toHaveBeenCalledTimes(1);
     expect(result.current.state.refusalTick).toBe(0);
   });
 

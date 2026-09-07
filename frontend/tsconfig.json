@@ -22,7 +22,7 @@
   // `tests`, not the phantom `e2e` this said until #366. There has never been a
   // `frontend/e2e/` directory; every Playwright spec lives in `frontend/tests/`.
   // tsc ignores an `include` entry that matches nothing SILENTLY, so
-  // `npm run type-check` was green while loading zero of the 7 spec files,
+  // `npm run type-check` was green while loading zero of the 9 spec files,
   // `helpers.ts` and `fixtures.ts` — Playwright transpiles with esbuild, which
   // erases types without checking them, so nothing else looked either.
   //

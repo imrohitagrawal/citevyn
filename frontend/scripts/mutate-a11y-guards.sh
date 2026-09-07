@@ -168,7 +168,13 @@ one "refusal: never clear when the in-flight window closes" "$CV" "$S/p.CV" \
 '    if (!pending) setRefused((s) => (s === "" ? s : ""));' \
 '    if (false) setRefused((s) => (s === "" ? s : ""));'
 one "refusal: render the region without it" "$CV" "$S/p.CV" \
-'          {refused ||' '          {"" ||'
+'          {(pending && refused) ||' '          {"" ||'
+# The RENDER GATE, added after review reproduced the shape it prevents: a tick
+# arriving in a commit where `pending` is already false is never cleared (the
+# clear effect keys on `pending` TRANSITIONING), so the refusal masks `settled`
+# for the rest of the mount and the arrival announcement goes silent.
+one "refusal: drop the \`pending &&\` render gate" "$CV" "$S/p.CV" \
+'          {(pending && refused) ||' '          {(true && refused) ||'
 
 echo
 echo "=== the parked-question notice, and its stale-closure trap ==="
