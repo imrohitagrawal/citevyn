@@ -118,21 +118,45 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `landing-sections.tsx` split in two: `QuestionTicker`, `SourcesStrip` and
   `InteractiveDemo` stay eager; `Personas` → `Footer` move to
   `landing-strip.tsx`, one chunk mounted behind an `IntersectionObserver`.
-  Eager graph **66,394 → 62,526 B gzip (−3,868 B)**, measured with
+  Eager graph **66,394 → 62,873 B gzip (−3,521 B)**, measured with
   `npm run check:bundle` on the shipping variant, and
-  `frontend/bundle-budget.json` ratcheted 68,000 → 64,132 in the same change so
+  `frontend/bundle-budget.json` ratcheted 68,000 → 64,479 in the same change so
   the win is banked rather than spent — headroom held at exactly the 1,606 B the
   previous decision chose. The issue's headline −4,669 B was for the whole strip
   including the two at-the-fold sections and does not apply to what shipped.
-  Three regressions the split would otherwise have caused are fixed with it:
-  `scrollToSection` now waits for a lazy target instead of returning silently
-  (four of the five header nav links point into the deferred chunk and would
-  have looked dead), a `/#pricing` deep link reveals the strip, and the reveal
-  gate fails OPEN where `IntersectionObserver` is absent so the page is never
-  hidden by a missing API. Honest limit, measured: on a 1280×720 desktop the
-  sentinel sits inside the 400 px lead margin, so the chunk is still fetched on
-  first paint — deferred off the critical path, not skipped; the real deferral
-  is on phone-sized viewports. All 22 visual baselines pass unchanged.
+
+  **Where the win actually lands, stated plainly.** On a 1280×720 desktop the
+  sentinel sits inside the 400 px lead margin, so the observer fires on first
+  paint and the chunk is fetched anyway: that reader downloads
+  62,873 + 4,721 = **67,594 B, i.e. 1,200 B MORE** than before. The gain there is
+  ordering — a smaller entry chunk that paints sooner, with the strip on a
+  second non-blocking request. The genuine byte saving is on phone-sized
+  viewports, where the sentinel starts outside the margin and a reader who does
+  not scroll never fetches those 4,721 B. Bytes matter most on metered, slow
+  connections, so that is the deliberate direction of the trade.
+
+  Six regressions the split would otherwise have shipped are fixed with it, each
+  with a test: `scrollToSection` waits for a lazy target instead of returning
+  silently (four of the five header nav links point into the deferred chunk and
+  would have looked dead) and now waits on a MutationObserver rather than a
+  ~2 s frame budget, which a 3 s chunk delay was reproduced defeating; a
+  `/#pricing` deep link reveals the strip; the reveal gate fails OPEN where
+  `IntersectionObserver` is absent *or its constructor throws*, so the page is
+  never hidden by an unusable API; the observer follows the sentinel across the
+  landing→chat→landing remount, which a `useEffect` over a stable ref did not —
+  reproduced leaving the whole strip unreachable on a phone for the rest of the
+  session; a new `LazyChunkBoundary` keeps a failed chunk fetch from unmounting
+  the React root, reproduced as a white screen on the ordinary scroll path; and
+  the nav list and the deferred-id set are now one source
+  (`src/data/navSections.ts`), after review proved a new nav link could silently
+  become a dead link with `tsc` green.
+
+  Measured accessibility cost: nothing is unreachable (a real keyboard walk
+  reaches every deferred control) and CLS is 0.0001 with the chunk instant and
+  0.0001 with it delayed 3 s, but at phone widths heading navigation can skip
+  the 12 headings inserted above the eager demo, and find-in-page cannot match
+  deferred copy until the reader scrolls. Both are recorded in
+  `docs/UI_DESIGN.md` §5.1. All 22 visual baselines pass unchanged.
 
 - **Frontend base image Node 22 → 26 (#227).** Moved deliberately, not as a
   routine bump: all three pins (`frontend/.nvmrc`, `package.json`

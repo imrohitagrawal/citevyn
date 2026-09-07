@@ -91,7 +91,18 @@ beforeAll(() => {
   eagerBytes = eagerBuffers.reduce((n, b) => n + gzipSync(b).length, 0);
 
   stripFile = manifest[STRIP_MODULE]?.file ?? "";
-  if (stripFile) stripGzip = gzipSync(readFileSync(join(outDir, stripFile))).length;
+  // Fail HERE, naming the cause, rather than letting every test that reads the
+  // chunk hit `readFileSync(join(outDir, ""))` — which reads a DIRECTORY and
+  // reports "EISDIR: illegal operation on a directory", pointing at the
+  // filesystem instead of at the regression. Found in review by mutating the
+  // split away and reading what the failures actually said.
+  if (!stripFile) {
+    throw new Error(
+      `${STRIP_MODULE} is no longer a chunk of its own — the eager/lazy split has been undone. ` +
+        `Manifest keys: ${Object.keys(manifest).join(", ")}`,
+    );
+  }
+  stripGzip = gzipSync(readFileSync(join(outDir, stripFile))).length;
 }, 180_000);
 
 afterAll(() => {

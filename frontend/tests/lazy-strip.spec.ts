@@ -12,7 +12,7 @@
  * viewport it is NOT: Hero + ticker + sources-strip are short enough that the
  * sentinel starts within the observer's 400 px lead margin, so the chunk is
  * requested immediately after first paint. That is still off the critical
- * rendering path — the entry chunk is 3,868 B gzip smaller and paints sooner —
+ * rendering path — the entry chunk is 3,521 B gzip smaller and paints sooner —
  * but it is not a byte the desktop reader never downloads, and the first test
  * below MEASURES that rather than leaving it as a claim. If a future change
  * makes the Hero taller, the desktop case starts deferring too and that test's
@@ -32,7 +32,12 @@ const PHONE = { width: 390, height: 844 };
 const LEAD_MARGIN_PX = 400;
 
 test.describe("the deferred landing strip (#358)", () => {
-  test("records where the sentinel sits relative to the fold on desktop", async ({ page }) => {
+  test("records where the sentinel sits relative to the fold on desktop", async ({ page }, testInfo) => {
+    const requested: string[] = [];
+    page.on("request", (r) => {
+      if (/landing-strip/.test(r.url())) requested.push(r.url());
+    });
+
     await gotoApp(page);
 
     const geometry = await page.evaluate(() => {
@@ -47,17 +52,46 @@ test.describe("the deferred landing strip (#358)", () => {
     // assertion in this file is about nothing.
     expect(geometry.sentinelTop).not.toBeNull();
 
-    // MEASURED on Desktop Chrome 1280x720: sentinelTop 854 px, viewport 720 px.
-    // 854 < 720 + 400, so the observer fires on first paint and the desktop
-    // reader fetches the chunk immediately — deferred off the critical path,
-    // but NOT skipped. This is asserted rather than described so the claim in
-    // the PR body cannot quietly stop being true: if the Hero grows and pushes
-    // the sentinel past the lead margin, this goes red and the docs get
-    // revisited instead of drifting.
-    expect(geometry.sentinelTop).toBeLessThan(geometry.viewportHeight + LEAD_MARGIN_PX);
+    // RECORDED, not asserted. Measured on Desktop Chrome 1280x720 at the time
+    // of writing: sentinelTop 854 px, viewport 720 px, so 854 < 720 + 400 and
+    // the desktop observer fires on first paint — the chunk is off the critical
+    // path but not skipped.
+    //
+    // An earlier draft ASSERTED that inequality to keep the docs honest. That
+    // was backwards: making the Hero taller would push the sentinel past the
+    // lead margin and start deferring on desktop too — a strict improvement to
+    // exactly the thing #358 is about — and the test would have gone RED for it.
+    // A check that fails when the behaviour gets better locks in the weaker
+    // behaviour, so this attaches the number to the report instead.
+    const deferredOnThisViewport = geometry.sentinelTop! >= geometry.viewportHeight + LEAD_MARGIN_PX;
 
-    // Either way, the desktop reader must end up with the content.
+    // The one-directional guard that DOES belong here: whichever side of the
+    // margin the sentinel falls on, the desktop reader must end up with the
+    // content. That fails only when something is broken, never when it improves.
     await expect(page.locator(DEFERRED)).toBeVisible({ timeout: 10_000 });
+
+    // ASSERT THE THING, NOT A PROXY. Geometry only PREDICTS whether the chunk
+    // is fetched on first paint; the request count IS the fact the budget file
+    // reasons about. Recorded, not asserted in a direction, for the same reason
+    // the inequality is not: fetching it later would be an improvement.
+    await testInfo.attach("desktop-first-paint", {
+      body: JSON.stringify(
+        {
+          ...geometry,
+          leadMarginPx: LEAD_MARGIN_PX,
+          deferredOnThisViewport,
+          stripRequestsWithoutScrolling: requested.length,
+        },
+        null,
+        2,
+      ),
+      contentType: "application/json",
+    });
+    // Geometry and network must at least AGREE. If the sentinel is inside the
+    // lead margin the chunk must have been requested, and vice versa — a
+    // mismatch means the gate is not doing what the docs say it does, whichever
+    // way round it is.
+    expect(requested.length > 0).toBe(!deferredOnThisViewport);
   });
 
   test("defers the strip on a phone-sized viewport until the reader scrolls", async ({ page }) => {
@@ -107,6 +141,14 @@ test.describe("the deferred landing strip (#358)", () => {
 
     // LandingStripTop and LandingStripBottom are two lazy() wrappers over ONE
     // module, so the reader pays one round trip, not two.
+    //
+    // BE HONEST ABOUT WHAT THIS PROVES. The suite runs against the Vite DEV
+    // server, and both wrappers use the same specifier, so the browser's own
+    // ESM module cache would collapse two requests into one regardless of how
+    // the production build chunks. What this test really catches is the deferred
+    // half being split back into TWO modules (two URLs, two requests). The
+    // production one-chunk property is proved where it can be — against the
+    // build manifest, in scripts/lazy-landing-strip.test.mjs.
     expect(requested.length).toBe(1);
   });
 
@@ -132,6 +174,29 @@ test.describe("the deferred landing strip (#358)", () => {
           .toBeGreaterThan(0);
       });
     }
+  });
+
+  test("still arrives on scroll after a trip through the chat screen", async ({ page }) => {
+    // <main> — and the observer's sentinel with it — is destroyed for the chat
+    // screen and rebuilt on the way back. The first implementation attached the
+    // observer from a useEffect over a stable ref object, so it went on watching
+    // the DETACHED original node and the strip became permanently unreachable by
+    // scrolling for the rest of the session. Caught in review, before merge.
+    await page.setViewportSize(PHONE);
+    await gotoApp(page);
+    await expect(page.locator(DEFERRED)).toHaveCount(0);
+
+    await page.locator(".cta-button").first().click();
+    await expect(page.locator(".chat-input")).toBeVisible({ timeout: 10_000 });
+    await page.locator(".back-button").click();
+    await expect(page.locator("#top")).toBeVisible();
+
+    // Still deferred — the round trip must not have revealed it by accident,
+    // or the scroll below would prove nothing.
+    await expect(page.locator(DEFERRED)).toHaveCount(0);
+
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await expect(page.locator(DEFERRED)).toBeAttached({ timeout: 10_000 });
   });
 
   test("a deep link to a deferred section lands on it", async ({ page }) => {

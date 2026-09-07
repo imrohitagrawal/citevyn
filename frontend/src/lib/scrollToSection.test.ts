@@ -1,38 +1,18 @@
 /**
- * scrollToSection (#358) — the retry is the whole point of this module.
+ * scrollToSection (#358) — waiting for the target is the whole point.
  *
- * Four of the five header nav links now point into a lazily-loaded chunk, so
- * at click time the target element does not exist. The version this replaced
- * did `if (!el) return;` — a SILENT no-op that made the link look dead.
+ * Four of the five header nav links now point into a lazily-loaded chunk, so at
+ * click time the target element does not exist. The version this replaced did
+ * `if (!el) return;` — a SILENT no-op that made the link look dead.
+ *
+ * The retry mechanism is a MutationObserver rather than a frame counter,
+ * because review reproduced the frame counter being simultaneously too short
+ * (a 3 s chunk delay mounted the section and never scrolled) and too long (rAF
+ * throttling in a background tab stretched 120 frames to minutes). These tests
+ * drive real DOM insertions, so they exercise the mechanism that ships.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SCROLL_TARGET_FRAMES, scrollToSection } from "./scrollToSection";
-
-/**
- * Drives the retry by hand. requestAnimationFrame callbacks are queued rather
- * than run, so a test decides exactly how many frames pass — no fake timers, no
- * wall clock, and a runaway retry loop shows up as a growing queue instead of
- * hanging the suite.
- */
-function installFrameQueue() {
-  const queue: FrameRequestCallback[] = [];
-  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-    queue.push(cb);
-    return queue.length;
-  });
-  return {
-    get pending() {
-      return queue.length;
-    },
-    /** Runs every callback queued right now (callbacks may queue more). */
-    tick(times = 1) {
-      for (let i = 0; i < times; i += 1) {
-        const due = queue.splice(0, queue.length);
-        for (const cb of due) cb(0);
-      }
-    },
-  };
-}
+import { SCROLL_TARGET_TIMEOUT_MS, scrollToSection } from "./scrollToSection";
 
 let scrollTo: ReturnType<typeof vi.fn>;
 
@@ -44,6 +24,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   document.body.innerHTML = "";
 });
 
@@ -54,77 +35,48 @@ function addSection(id: string) {
   return el;
 }
 
+/** MutationObserver callbacks are delivered as microtasks. */
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 describe("scrollToSection", () => {
   it("scrolls straight away when the section is already in the DOM", () => {
-    const frames = installFrameQueue();
     addSection("pricing");
 
     scrollToSection("pricing");
 
     expect(scrollTo).toHaveBeenCalledTimes(1);
     expect(scrollTo).toHaveBeenCalledWith({ top: -72, behavior: "smooth" });
-    // No retry was scheduled — the happy path costs nothing.
-    expect(frames.pending).toBe(0);
   });
 
-  it("waits for a section that only appears after the lazy chunk lands", () => {
-    const frames = installFrameQueue();
-
+  it("waits for a section that only appears after the lazy chunk lands", async () => {
     scrollToSection("faq");
     // The element genuinely is not there yet.
     expect(scrollTo).not.toHaveBeenCalled();
-    expect(frames.pending).toBe(1);
 
-    frames.tick(3);
+    await settle();
     expect(scrollTo).not.toHaveBeenCalled();
 
     // ...the chunk resolves and React mounts the section.
     addSection("faq");
-    frames.tick();
+    await settle();
 
     expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
-  it("gives up after a bounded number of frames rather than retrying forever", () => {
-    const frames = installFrameQueue();
-
-    scrollToSection("never-arrives");
-    // One frame per attempt; after the budget the queue drains and stays drained.
-    frames.tick(SCROLL_TARGET_FRAMES + 5);
-
-    expect(frames.pending).toBe(0);
-    expect(scrollTo).not.toHaveBeenCalled();
-
-    // PARTNER for that "never called": the same helper, same queue, does scroll
-    // when the element is present — so the assertion above is about the bound,
-    // not about a broken harness.
-    addSection("never-arrives");
-    scrollToSection("never-arrives");
-    expect(scrollTo).toHaveBeenCalledTimes(1);
-  });
-
-  it("still scrolls once a section arrives on the LAST frame of the budget", () => {
-    const frames = installFrameQueue();
-
-    scrollToSection("who");
-    frames.tick(SCROLL_TARGET_FRAMES - 1);
-    expect(scrollTo).not.toHaveBeenCalled();
-
-    addSection("who");
-    frames.tick();
-
-    expect(scrollTo).toHaveBeenCalledTimes(1);
-  });
-
-  it("falls back to a timer where requestAnimationFrame does not exist", () => {
-    vi.stubGlobal("requestAnimationFrame", undefined);
+  it("still scrolls when the chunk is SLOW — far past any frame budget", async () => {
+    // The regression this mechanism exists for. The previous implementation
+    // gave up after ~120 animation frames (~2 s), so a 3 s chunk mounted the
+    // section and left the reader at the top of the page with a link that had
+    // visibly done nothing. Driven on fake timers so the test does not
+    // actually wait seconds.
     vi.useFakeTimers();
     try {
-      scrollToSection("how");
+      scrollToSection("pricing");
+      vi.advanceTimersByTime(5_000); // ~2.5x the old budget
       expect(scrollTo).not.toHaveBeenCalled();
 
-      addSection("how");
-      vi.advanceTimersByTime(20);
+      addSection("pricing");
+      await vi.advanceTimersByTimeAsync(0);
 
       expect(scrollTo).toHaveBeenCalledTimes(1);
     } finally {
@@ -132,8 +84,84 @@ describe("scrollToSection", () => {
     }
   });
 
+  it("gives up on a real clock, so a bogus id does not watch the document forever", async () => {
+    vi.useFakeTimers();
+    try {
+      scrollToSection("never-arrives");
+      vi.advanceTimersByTime(SCROLL_TARGET_TIMEOUT_MS + 1);
+
+      // Past the deadline the observer is disconnected, so a late arrival is
+      // ignored rather than yanking the page around minutes later.
+      addSection("never-arrives");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // PARTNER for that "never called": arriving JUST INSIDE the deadline
+      // does scroll, so the assertion above is about the deadline and not
+      // about a harness that can never observe anything.
+      scrollToSection("arrives-in-time");
+      vi.advanceTimersByTime(SCROLL_TARGET_TIMEOUT_MS - 1);
+      addSection("arrives-in-time");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets the MOST RECENT request win when two nav links are clicked in a row", async () => {
+    // Both targets live in the same chunk, so they appear in the same commit.
+    // Without a request token both pending waits would fire and the reader
+    // would land on whichever resolved last rather than what they last asked
+    // for.
+    scrollToSection("pricing");
+    scrollToSection("faq");
+
+    const faq = addSection("faq");
+    vi.spyOn(faq, "getBoundingClientRect").mockReturnValue({ top: 900 } as DOMRect);
+    addSection("pricing");
+    await settle();
+
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 828, behavior: "smooth" });
+  });
+
+  it("does nothing, rather than throwing, where MutationObserver is absent", async () => {
+    vi.stubGlobal("MutationObserver", undefined);
+
+    expect(() => scrollToSection("how")).not.toThrow();
+
+    addSection("how");
+    await settle();
+    // Degrades to the pre-#358 behaviour: no scroll, no crash.
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("honours prefers-reduced-motion, which the CSS cascade cannot reach here", () => {
+    // A JS `behavior` option OVERRIDES `scroll-behavior` from CSS, so
+    // reset.css's reduced-motion rule does not apply to this call. Measured in
+    // review before this check existed: a ~7,500 px animated glide delivered
+    // under `reducedMotion: reduce`.
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q.includes("reduce") }));
+    addSection("pricing");
+
+    scrollToSection("pricing");
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: -72, behavior: "auto" });
+  });
+
+  it("keeps the smooth scroll when reduced motion is NOT requested", () => {
+    // PARTNER for the test above: proves the branch is reading the query and
+    // not just hard-coding "auto".
+    vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    addSection("pricing");
+
+    scrollToSection("pricing");
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: -72, behavior: "smooth" });
+  });
+
   it("offsets the scroll by the fixed header height", () => {
-    installFrameQueue();
     const el = addSection("pricing");
     vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ top: 500 } as DOMRect);
     Object.defineProperty(window, "pageYOffset", { value: 1000, configurable: true });

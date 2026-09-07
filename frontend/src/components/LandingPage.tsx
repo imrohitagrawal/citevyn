@@ -5,15 +5,17 @@
  * Replaces the old multi-style architecture with a single unified page.
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useLandingState } from "../hooks/useLandingState";
 import { useDeferredReveal } from "../lib/useDeferredReveal";
 import { scrollToSection } from "../lib/scrollToSection";
+import { DEFERRED_SECTION_IDS } from "../data/navSections";
 import { KB } from "../data/knowledgeBase";
 import { Header } from "./Header";
 import { Hero } from "./Hero";
 import { QuestionTicker, SourcesStrip, InteractiveDemo } from "./landing-sections";
 import { ChatView } from "./ChatView";
+import { LazyChunkBoundary } from "./LazyChunkBoundary";
 import { ToastHost } from "./ToastHost";
 
 // ADR-0004 PR 14: mounted only on the ?auth=ok return trip, and lazy, so the
@@ -29,15 +31,6 @@ const LandingStripBottom = lazy(() =>
   import("./landing-strip").then((m) => ({ default: m.LandingStripBottom })),
 );
 
-/**
- * Section ids that live inside the deferred strip. A nav click or an on-load
- * `#hash` naming one of these has to REVEAL the strip first: `scrollToId`
- * cannot scroll to an element that has not been fetched yet.
- *
- * "demo" is deliberately absent — InteractiveDemo stays eager, so its anchor is
- * always in the DOM. "top" is on <main>, also eager.
- */
-const DEFERRED_SECTION_IDS: ReadonlySet<string> = new Set(["who", "how", "why", "pricing", "faq"]);
 
 // ---------------------------------------------------------------------------
 // Component
@@ -109,9 +102,14 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   // #358: gate for the deferred marketing strip. The sentinel is a zero-height
   // div sitting where the first deferred section will go; `useDeferredReveal`
   // starts already-revealed when IntersectionObserver is absent, so jsdom and
-  // any browser without it get the whole page.
-  const stripSentinel = useRef<HTMLDivElement | null>(null);
-  const { revealed: stripRevealed, reveal: revealStrip } = useDeferredReveal(stripSentinel);
+  // any browser without it get the whole page. `sentinelRef` is a CALLBACK ref
+  // on purpose — <main> unmounts for the chat screen, and the observer has to
+  // follow the sentinel across that remount.
+  const {
+    revealed: stripRevealed,
+    reveal: revealStrip,
+    sentinelRef: stripSentinelRef,
+  } = useDeferredReveal();
 
   // A nav click whose target is inside the strip must mount it before
   // `goSection` scrolls; `scrollToId` retries for ~2 s, which covers the
@@ -262,12 +260,14 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
           so an empty div here adds nothing to the layout. aria-hidden and no
           text content, so it is invisible to assistive tech too.
         */}
-        <div ref={stripSentinel} aria-hidden="true" data-strip-sentinel="" />
+        <div ref={stripSentinelRef} aria-hidden="true" data-strip-sentinel="" />
 
         {stripRevealed && (
-          <Suspense fallback={null}>
-            <LandingStripTop onAsk={(q) => enterChat(q)} />
-          </Suspense>
+          <LazyChunkBoundary label="landing-strip">
+            <Suspense fallback={null}>
+              <LandingStripTop onAsk={(q) => enterChat(q)} />
+            </Suspense>
+          </LazyChunkBoundary>
         )}
 
         <InteractiveDemo
@@ -291,14 +291,16 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
         />
 
         {stripRevealed && (
-          <Suspense fallback={null}>
-            <LandingStripBottom
-              onGetPro={getPro}
-              onOpenChat={() => enterChat(null)}
-              openFaq={openFaq}
-              toggleFaq={toggleFaq}
-            />
-          </Suspense>
+          <LazyChunkBoundary label="landing-strip">
+            <Suspense fallback={null}>
+              <LandingStripBottom
+                onGetPro={getPro}
+                onOpenChat={() => enterChat(null)}
+                openFaq={openFaq}
+                toggleFaq={toggleFaq}
+              />
+            </Suspense>
+          </LazyChunkBoundary>
         )}
       </main>
         </>

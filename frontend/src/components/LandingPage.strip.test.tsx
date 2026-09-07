@@ -4,11 +4,12 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LandingPage } from "./LandingPage";
 import { isLiveMode } from "../lib/api";
+import { NAV_SECTIONS, DEFERRED_SECTION_IDS } from "../data/navSections";
 
 /**
  * #358 — the deferred below-the-fold marketing strip, from the READER's side.
  *
- * The bundle-side proof lives in src/test/lazyLandingStrip.test.ts, which reads
+ * The bundle-side proof lives in scripts/lazy-landing-strip.test.mjs, which reads
  * the emitted chunks. This file proves the other half: that deferring the
  * sections did not make them unreachable. Every regression the split could
  * introduce is a way for real content to go missing, so each one gets a test:
@@ -147,12 +148,15 @@ describe("the deferred landing strip (#358)", () => {
     expect(ids).toEqual(["who", "how", "why", "demo", "pricing", "faq"]);
   });
 
-  it.each([
-    ["Who it's for", "who"],
-    ["How it works", "how"],
-    ["Pricing", "pricing"],
-    ["FAQ", "faq"],
-  ])("mounts AND scrolls to the target when the header's %s link is clicked", async (label, id) => {
+  // DERIVED from the shared nav list, never hardcoded. Review proved the
+  // hardcoded version's gap: adding a nav link that points into the strip
+  // without adding its id to DEFERRED_SECTION_IDS produced a dead link, `tsc`
+  // exited 0, and this loop stayed green because it only knew the four labels
+  // it was written with. Iterating the source means a new entry is exercised
+  // the moment someone adds it.
+  it.each(NAV_SECTIONS.filter((s) => s.deferred).map((s) => [s.label, s.id] as const))(
+    "mounts AND scrolls to the target when the header's %s link is clicked",
+    async (label, id) => {
     installObserver();
     // jsdom does not implement scrollTo; stub it so the second half of the
     // click — actually moving the page — is observable and not just assumed.
@@ -171,21 +175,34 @@ describe("the deferred landing strip (#358)", () => {
     // moved nothing — it just looked dead. Mounting alone would still leave the
     // reader stranded at the top of the page.
     await waitFor(() => expect(scrollTo).toHaveBeenCalled());
+    },
+  );
+
+  it("covers every deferred nav link, so the loop above cannot silently shrink", () => {
+    // PARTNER for the derived it.each: a filter that matched nothing would run
+    // ZERO tests and the file would still be green.
+    const deferred = NAV_SECTIONS.filter((s) => s.deferred);
+    expect(deferred.length).toBeGreaterThanOrEqual(4);
+    // And every one of them really is in the set LandingPage consults.
+    for (const s of deferred) expect(DEFERRED_SECTION_IDS.has(s.id)).toBe(true);
   });
 
-  it("leaves the strip alone for a nav link whose target is already eager", async () => {
+  it.each(NAV_SECTIONS.filter((s) => !s.deferred).map((s) => [s.label, s.id] as const))(
+    "leaves the strip alone for the eager %s link",
+    async (label, id) => {
     installObserver();
     const user = userEvent.setup();
     const { container } = renderPage();
 
-    await user.click(screen.getByRole("link", { name: "Demo" }));
+    await user.click(screen.getByRole("link", { name: label }));
 
-    // "Demo" is InteractiveDemo, which never left the eager bundle — clicking
-    // it must not drag 4.7 kB of marketing copy down with it.
-    expect(container.querySelector("#demo")).not.toBeNull();
+    // The eager target is already there — no fetch needed...
+    expect(container.querySelector(`#${id}`)).not.toBeNull();
+    // ...and clicking it must not drag 4.7 kB of marketing copy down with it.
     await new Promise((r) => setTimeout(r, 0));
     expect(container.querySelector("#pricing")).toBeNull();
-  });
+    },
+  );
 
   it("mounts the strip for a deep link that names one of its sections", async () => {
     installObserver();

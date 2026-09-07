@@ -331,6 +331,13 @@ for (const theme of ["light", "dark"] as ThemeName[]) {
   test.describe(`focus ring — ${theme} theme (#355)`, () => {
     test.beforeEach(async ({ page }) => {
       await gotoApp(page);
+      // `.cta-banner` moved into the lazily-loaded strip (#358), and the
+      // coverage partner below REQUIRES the sweep to reach it. At 1280x720 the
+      // observer happens to fire on first paint, so this passes today by
+      // timing rather than by anything this spec states — and this job fails on
+      // `flaky != 0`. Waiting for it makes the dependency explicit instead of
+      // leaving a focus-ring test to red for a lazy-loading reason.
+      await expect(page.locator(".cta-banner")).toBeAttached({ timeout: 15_000 });
       await ensureTheme(page, theme);
     });
 

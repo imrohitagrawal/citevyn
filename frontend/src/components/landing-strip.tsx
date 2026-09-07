@@ -3,9 +3,13 @@
  * it as its own chunk, fetched only when the reader scrolls toward it.
  *
  * Split out of landing-sections.tsx, which now keeps only what must be on
- * screen at first paint. Measured on the shipping build: the eager graph goes
- * 66,394 B -> 62,284 B gzip, and this module is the 2.81 kB gzip chunk that
- * leaves it.
+ * screen at first paint. Measured on the shipping build (`npm run check:bundle`,
+ * which builds the VITE_API_LIVE=true variant the image ships): the eager graph
+ * goes 66,394 B -> 62,873 B gzip, and this module is the 4.72 kB gzip chunk
+ * that leaves it. (An earlier draft of this comment quoted 62,284 B / 2.81 kB —
+ * figures from a throwaway pre-implementation variant that had none of the gate
+ * machinery. Caught in review; bundle-budget.json and docs/UI_DESIGN.md always
+ * had the right numbers.)
  *
  * TWO wrappers, one module. In DOM order the deferred sections are not
  * contiguous: InteractiveDemo (eager) sits between WhyDifferent and Pricing.
