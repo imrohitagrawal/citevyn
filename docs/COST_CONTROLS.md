@@ -31,13 +31,19 @@ Two properties matter and neither is automatic:
   is dead until someone notices and raises it by hand. §9 is a *daily* policy, so
   the provider cap must be daily to correspond to it.
 * **It must be raised to match §9's $10 hard limit before going public.** The cap
-  currently in force is a development-scale figure ($1.10, ~96% consumed as of
-  2026-07-20). Layer 3 stops paid calls at $10/day; a provider cap below that makes
+  currently in force was last recorded as a development-scale figure ($1.10, ~96%
+  consumed) on **2026-07-20** — roughly seven weeks stale as of 2026-09-08, and NOT re-checked
+  since, so treat it as a historical note rather than the live value. `make budget`
+  prints the real one. Layer 3 stops paid calls at $10/day; a provider cap below that makes
   Layer 3 unreachable and turns every overage into an opaque upstream 402 instead of
   our controlled response.
 
-Read the live value — free, no inference. `make budget` is **planned** (§5, not yet
-implemented); today, read it directly:
+Read the live value — free, no inference. **`make budget` does this for you** — it is
+implemented (`Makefile:326` → `scripts/check_budget.sh`, wired into deploy-verify with a
+`MIN_REMAINING_USD` floor), which is what the Layer 5 row above has always said. This
+paragraph claimed the opposite ("planned, not yet implemented") four lines below that
+row until #360; it was wrong, not the table. The underlying call, if you want it
+directly:
 
 ```bash
 curl -sS https://openrouter.ai/api/v1/key \

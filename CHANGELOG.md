@@ -6,6 +6,61 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **All 15 `docs/BACKLOG.md` rows that were silently losing content now render in
+  full (#360).** The issue counted them correctly but named one cause; there were
+  **two**, and the fix it implied would have made the larger group worse.
+  Three rows in the 5-column table had literal `|` characters inside their Origin
+  cell (a `hey|hello|ok|...` token list, an array of style names, a test-count
+  string) — escaped to `\|`. The other **twelve** sit in the 2-column
+  "Issue | Why it matters" archive table while carrying the 5-column schema they
+  were pasted from when they closed, so GFM was discarding **Area, Priority and
+  Origin from every one of them** — e.g. `backend / answer`, `— (fixed)`,
+  `live UI testing 2026-07-20` on the #208 row alone. Escaping pipes there would
+  have rendered visible backslashes instead of restoring the columns; the three
+  trailing fields are folded into the "Why it matters" cell instead. Verified
+  nothing was dropped by rendering all 15 rows through **GitHub's own renderer**
+  (`gh api /markdown`, mode=gfm) before and after and diffing the text: the 12
+  folds are pure insertions — the opcode set contains no `delete` and no
+  `replace` on any of the twelve, which shows nothing was removed or reordered
+  (it does not, by itself, rule out duplicated text) —
+  and the 3 escapes go from truncated to complete (#300 2,417 → 8,625 rendered
+  characters, #316 4,769 → 6,217, #308 4,838 → 10,487). An earlier draft of this
+  entry claimed "107 issue links before and after"; that was measured before the
+  8 new rows below were added and is false for the shipped state (107 → 115).
+  The conclusion held, the stated evidence did not.
+- **`docs/COST_CONTROLS.md` no longer contradicts itself about `make budget`.**
+  The Layer 5 table row said **Live**; §0, four lines below, called it "planned
+  (§5, not yet implemented)". The table was right — `Makefile:326` defines the
+  target and wires `scripts/check_budget.sh` into deploy-verify. The stale
+  "$1.10, ~96% consumed" cap figure is now dated and marked as a historical
+  reading rather than the live value.
+
+### Changed
+- **`test_backlog_table_renders.py`'s exemption list is empty, and its staleness
+  partner no longer goes vacuous when it is.** The old partner was parametrized
+  over `KNOWN_BROKEN`; emptying the set would have collapsed it to pytest's
+  "got empty parameter set" — a test that asserts nothing, the failure mode
+  tracked as #381. It is now an iterating test (executed even when the set is
+  empty) plus `test_the_detector_actually_detects`, which feeds the parser
+  deliberately broken tables in **both** repaired shapes and a correctly-escaped
+  row it must NOT flag. The collection loop is now an
+  `_offenders()` function the detector test calls, because review proved that
+  with it inlined **four mutations that completely disable the guard survived
+  every test green** — `if got <= cols or True`, `offenders.append` →
+  `[].append`, `got = cols`, and `if tag in KNOWN_BROKEN` → `if True`. All four
+  now die, as does blinding `_cell_count` to `return 0`. A skeptic round on that
+  fix then found the fix's own claim wrong: it said "one mutation still
+  survives" where nine did, one of them — `continue` → `break` in the skip —
+  reporting **zero** offenders on a file that really had one, because every
+  fixture was a single-row table that cannot tell the two apart. Multi-row
+  fixtures and field-by-field assertions on the message now kill twelve
+  mutations; the survivors are enumerated in the docstring rather than counted,
+  because a count is what was wrong both times. `test_no_exemption_is_stale` is likewise
+  honest that while the set is empty it asserts nothing and is held in place for
+  when the set refills; the file's non-vacuity is carried by
+  `test_the_detector_actually_detects`.
+
 ### Added
 - **Every `Settings` field is now declared in an env example, or exempted by
   name with a reason — enforced by a test (#332).** The issue's headline said 29
