@@ -448,6 +448,41 @@ def test_the_extraction_is_scoped_to_section_4_1() -> None:
     assert all("--app citevyn" in c for c in cmds), f"a §4.1 deploy command has no --app: {cmds}"
 
 
+def test_the_deploy_command_builds_locally() -> None:
+    """#385. ``--local-only`` must stay on the §4.1 command.
+
+    Without it ``fly deploy`` uploads the build context to Fly's REMOTE
+    builder. Reported from the owner's v12 session: that builder stalled three
+    times running on the upload -- 548 KB in 825 s, then ``deadline_exceeded``.
+    ``--local-only`` worked first try for v12 and again for v17 on 2026-09-08.
+
+    This is mechanical rather than prose for the same reason the rest of this
+    file is: #385's own complaint is that the flag was documented NOWHERE while
+    three paragraphs of the runbook discussed deploy failure modes. A note that
+    a later edit can silently delete reproduces exactly that.
+
+    It is a WEAK guard on purpose, and saying so is the point: it asserts the
+    flag is on the command, not that the deploy works. What it CANNOT see is
+    whether a local Docker daemon is running, whether the remote builder is
+    healthy today, or whether the operator pasted the command at all.
+
+    RED if ``--local-only`` is removed from the §4.1 deploy command. Its
+    non-vacuity partner is
+    ``test_the_runbook_extraction_finds_the_deploy_command_at_all`` above, which
+    fails if the extraction returns nothing to check.
+    """
+    cmds = _deploy_commands()
+    assert cmds, "no runnable `fly deploy` line found under '### 4.1'"
+    missing = [c for c in cmds if "--local-only" not in c]
+    assert not missing, (
+        "a docs/DEPLOY_FLY.md §4.1 deploy command does not pass `--local-only`, so it "
+        "uploads the build context to Fly's remote builder -- the step that stalled "
+        "three times on v12 with `deadline_exceeded` (#385). A failed build creates NO "
+        "release, so `fly releases` looks unchanged afterwards and reads as success.\n"
+        + "\n".join(missing)
+    )
+
+
 # ---------------------------------------------------------------------------
 # The guard itself.
 # ---------------------------------------------------------------------------

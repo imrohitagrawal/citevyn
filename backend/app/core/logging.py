@@ -80,6 +80,75 @@ OPAQUE_ID_KEYS = frozenset({"request_id", "index_version", "index_versions", "so
 MAX_OPAQUE_ID = 160
 
 
+# Keys whose value is a URL PATH, swept ONE ``/``-DELIMITED SEGMENT AT A TIME
+# instead of as one string. Matched on the WHOLE lowered key, the same
+# discipline as ``OPAQUE_ID_KEYS`` above.
+#
+# THE DEFECT (#384), seen in the Fly v17 production logs: ``HIGH_ENTROPY_RE``'s
+# character class contains ``/``, so a path is one contiguous run and the whole
+# thing collapses. Every session route printed as
+#
+#     request_completed ... 'path': '/[REDACTED]'
+#
+# An operator reading ``fly logs`` could not tell an answer POST from a session
+# DELETE from a 404 -- the app's own request log became useless for exactly the
+# routes that carry the product. ``/health`` (7 characters) still printed, which
+# is why this survived review: the short paths look fine.
+#
+# WHY THE SCOPE IS A KEY NAME AND NOT THE VALUE'S SHAPE. The obvious cheap
+# trigger is ``value.startswith("/")``. Rejected, and measured: that trigger is
+# ATTACKER-INFLUENCED. 1.58% of random base64 values begin with ``/`` (200,000
+# samples per length, seed 20260908), so a secret could select its own weaker
+# redaction rule by its first character. A key name is chosen in our source; a
+# value is not.
+#
+# WHY THE SCOPE IS NARROW, measured. Applying the per-segment sweep to EVERY
+# string is not a mild loosening -- it is a hole. Of random 44-character base64
+# values (``b64encode`` of 32 bytes, 200,000 samples, seed 20260908) 48.51%
+# contain a ``/``, and of THOSE every ``/``-delimited segment is under 32
+# characters often enough that 28.35% of all such values would print IN FULL.
+# For 40-character values it is 32.12%. A concrete leaker:
+# ``AKIAxxxxxxxxx/yyyyyyyyyyyyy/zzzzzzzzzzzz``. Worse, the per-segment sweep
+# applied to every string is not merely similar to deleting ``/`` from
+# ``HIGH_ENTROPY_RE``'s class -- it is INDISTINGUISHABLE from it: 0 differing
+# inputs over 400,000 sampled strings. So the key-name scope is not a stylistic
+# preference; it is the ONLY thing separating this fix from the rejected one.
+#
+# ``endpoint`` is deliberately NOT in this set even though it is allowlisted
+# alongside ``path``. Its values are source literals (``"embeddings"``,
+# ``"embedContent"``, ``"batchEmbedContents"``) that the entropy sweep never
+# touches, so adding it would widen the attack surface above for zero benefit.
+#
+# WHY ``MAX_PATH`` EXISTS. The whole-string entropy collapse was, by accident,
+# the only thing bounding a client-controlled value on the ``build_log_event``
+# path -- ``MAX_EMITTED_TEXT`` governs the ``extra=`` path only and does not
+# reach it (see the SCOPE paragraph on ``EMITTED_TEXT_KEYS``). A 4,400-character
+# path of short segments emits 11 characters today and would emit 4,400 under an
+# uncapped per-segment rule. The cap restores that bound explicitly rather than
+# as a side effect, using the same truncation shape as ``MAX_OPAQUE_ID``.
+#
+# WHY A PATH SEGMENT IS SAFE TO PRINT. No route carries a credential in a path
+# segment: all 11 parameterized routes take a UUID, a sha-shaped
+# ``index_version``, or a provider slug. The magic-link token and the OAuth
+# ``code``/``state`` are QUERY parameters -- ``URL.path`` never contains the
+# query string, and uvicorn's access line, which does, is covered by
+# ``QUERY_CREDENTIAL_RE`` above. And a session UUID is not a capability token:
+# ``api/routes/messages.py`` and ``api/routes/sessions.py`` both filter on
+# ``Session.user_id == user_id`` where ``user_id`` comes from
+# ``Depends(resolve_principal)`` -- a cookie-derived ownership principal, NOT
+# the constant ``DEMO_USER_ID`` (``app/core/auth_sessions.py``). Knowing the id
+# buys nothing without the cookie.
+#
+# THE RESIDUAL, stated. A client can put a base64-with-``/`` string of its OWN
+# into a path segment (it 404s) and see it echoed back into our log, since the
+# 28.35% figure above applies to any value the segment split can break up. That
+# is the client's own value disclosing none of our secrets, bounded by
+# ``MAX_PATH``, and it is the identical, already-accepted tradeoff documented
+# for ``request_id`` at the ``OPAQUE_ID_KEYS`` comment above.
+PATH_KEYS = frozenset({"path"})
+MAX_PATH = 160
+
+
 # Query-string parameters that ARE credentials. uvicorn's access log records
 # the full request line -- path AND query string -- so without this a
 # magic-link click (``GET /v1/auth/magic-link/confirm?token=<id>.<secret>``,
@@ -350,6 +419,17 @@ def redact_value(key: str, value: Any) -> Any:
             if len(redacted) > MAX_OPAQUE_ID:
                 return redacted[:MAX_OPAQUE_ID] + "…<truncated>"
             return redacted
+        # A URL path is swept one `/`-delimited SEGMENT at a time, so the route
+        # shape survives and only a high-entropy segment blanks -- see
+        # PATH_KEYS for the defect (#384), the measurement, and why this is
+        # scoped to a key name rather than to the value's shape.
+        if key_lower in PATH_KEYS:
+            swept = "/".join(
+                HIGH_ENTROPY_RE.sub(SECRET_VALUE, segment) for segment in redacted.split("/")
+            )
+            if len(swept) > MAX_PATH:
+                return swept[:MAX_PATH] + "…<truncated>"
+            return swept
         return HIGH_ENTROPY_RE.sub(SECRET_VALUE, redacted)
 
     return value

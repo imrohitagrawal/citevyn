@@ -461,3 +461,85 @@ def test_orchestrator_error_does_not_leak_upstream_body_to_client(
     assert any(
         _LEAKY_UPSTREAM_MESSAGE in str(rec.__dict__.get("cause", "")) for rec in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# #384: what the request log line ACTUALLY says about the route it served.
+#
+# These are the load-bearing tests for the per-segment path sweep. Everything
+# else about #384 is a unit assertion on ``redact_value``; this drives a real
+# request through the real ``RequestIDMiddleware`` and renders the record it
+# emitted through ``build_log_formatter()`` -- the object production installs --
+# because this repo has repeatedly shipped guards that pinned a constant while
+# the emitted artifact went unchecked.
+# ---------------------------------------------------------------------------
+
+
+def _emitted_request_lines(caplog: pytest.LogCaptureFixture) -> str:
+    from app.core.logging import build_log_formatter
+
+    formatter = build_log_formatter()
+    return "\n".join(
+        formatter.format(rec) for rec in caplog.records if rec.name == "citevyn.request"
+    )
+
+
+def test_the_request_log_line_names_the_session_route_it_served(
+    in_memory_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE #384 REGRESSION, read off the emitted line.
+
+    Before the fix every session route printed ``'path': '/[REDACTED]'`` --
+    observed in the Fly v17 logs -- because ``HIGH_ENTROPY_RE``'s character
+    class contains ``/`` and swallowed the whole path in one match. An operator
+    could not tell an answer POST from a session DELETE.
+
+    A 404 is used on purpose: it still logs ``request_completed``, and it needs
+    no seeded catalog, no LLM and no paid call.
+
+    RED if ``PATH_KEYS`` stops containing ``"path"``.
+    """
+    session_id = uuid.uuid4()
+    with caplog.at_level("INFO", logger="citevyn.request"):
+        response = in_memory_client.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"message": "hello", "answer_style": "short"},
+            headers={"Authorization": DEMO_BEARER},
+        )
+    assert response.status_code == 404
+
+    emitted = _emitted_request_lines(caplog)
+    assert "request_completed" in emitted, f"no request line was emitted at all: {emitted!r}"
+    assert "'/v1/sessions/[REDACTED]/messages'" in emitted, (
+        f"the operator cannot tell which route this was: {emitted!r}"
+    )
+    # The UUID itself is still blanked -- the fix restores the ROUTE SHAPE, it
+    # does not start printing opaque ids into the path.
+    assert str(session_id) not in emitted, emitted
+
+
+def test_the_request_log_line_prints_a_short_route_unchanged(
+    in_memory_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """PARTNER proving the test above is not vacuous: a real short route was
+    ALREADY printed in full before the fix, so 'the path field reaches the line'
+    is not what that test is measuring -- the route shape of a long path is.
+
+    RED if ``app.core.middleware`` stops passing ``path=`` to
+    ``build_log_event`` (executed, both these tests fail), or if ``redact_value``
+    starts blanking a short path.
+
+    NOT red if ``"path"`` is removed from ``EMITTED_TEXT_KEYS`` -- measured, and
+    worth writing down because it is the obvious wrong guess. That allowlist
+    governs the ``extra=`` path only; ``RequestIDMiddleware`` logs the
+    ``build_log_event`` DICT as the record's message, so it never consults the
+    allowlist. ``test_log_extra_fields.py`` covers that other route into the
+    same field.
+    """
+    with caplog.at_level("INFO", logger="citevyn.request"):
+        response = in_memory_client.get("/health")
+    assert response.status_code == 200
+
+    emitted = _emitted_request_lines(caplog)
+    assert "'/health'" in emitted, emitted
+    assert "[REDACTED]" not in emitted, f"a short route was over-redacted: {emitted!r}"

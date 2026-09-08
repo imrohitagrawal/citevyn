@@ -263,11 +263,38 @@ curl -sS -o /dev/null https://citevyn.stackclimb.com/health
 VERSION="$(git describe --tags --always)"
 DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
 
-fly deploy --app citevyn \
+fly deploy --app citevyn --local-only \
   --build-arg VERSION="${VERSION:?git describe produced nothing — run this from the repo}" \
   --build-arg VITE_API_LIVE=true \
   --build-arg VITE_API_DEMO_KEY="${DEMO_KEY:?empty — the machine is asleep or the secret is unset; curl /health above, then retry}"
 ```
+
+> **`--local-only` is not optional either, and the signal you would check
+> LIES to you.** Without it `fly deploy` uploads the build context to Fly's
+> *remote* builder. On the v12 deploy that builder stalled on the context
+> upload three times running — 548 KB moved in 825 s, then `deadline_exceeded`.
+> `fly deploy --local-only` builds the image on your own machine and pushes the
+> result; it worked first try for v12, and again for v17 on 2026-09-08
+> (`1fd7556`). See #385.
+>
+> **A failed build creates NO release.** This is the part that misleads
+> operators: after an aborted deploy `fly releases` looks exactly as it did
+> before, and reads as "nothing changed, so the deploy must have been a no-op
+> or silently succeeded". It is neither — an unchanged release list is the
+> EXPECTED symptom of a build that never finished. The only deploy-success
+> signal is the release number going up and the new build passing its health
+> check (§4.4); `fly releases` is a rollback tool here (§6.1, §9), not a
+> success check.
+>
+> **What `--local-only` needs, and what it costs.** A working local Docker
+> daemon (Docker Desktop on macOS) — the image is built on your machine
+> instead of Fly's builder, so the whole context never crosses the network.
+> It leaves no local image to delete, but it does grow Docker's build cache.
+> **Do not run `docker builder prune -af` to reclaim that.** That cache is
+> shared with everything else the machine builds, so a blanket prune bills the
+> next build of every unrelated project for this one. If you need the space,
+> prune selectively — e.g. `docker builder prune --filter until=168h` — and
+> only when you actually need it.
 
 > **`VITE_API_DEMO_KEY` is not optional.** The frontend is built inside the
 > image and the demo bearer is baked into the bundle at build time
@@ -319,7 +346,10 @@ curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app 
 
 What happens, in order:
 
-1. Fly builds `infra/docker/Dockerfile.api` from the repo root.
+1. **Your machine** builds `infra/docker/Dockerfile.api` from the repo root,
+   because of `--local-only`; the finished image is pushed to Fly's registry.
+   Drop that flag and the build context is uploaded to Fly's remote builder
+   instead, which is the step that stalled on v12 (see the note above).
 2. Fly starts a **release machine** from the new image and runs
    `python -m alembic --config /db/alembic.ini upgrade head` (the
    `release_command` in `fly.toml`). Migrations therefore run *before* any
