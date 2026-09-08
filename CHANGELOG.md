@@ -83,6 +83,100 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes red the day desktop STARTS deferring.
 
 ### Fixed
+- **A chat with no answer on it no longer tells the reader "This answer was
+  generated live, just now." (#380).**
+  `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …` branch — that branch
+  opens at `frontend/src/components/ChatView.tsx:478` and closes at `:577`, while
+  the composer `<div>` starts at `:606` and the hint at `:675` (line numbers as
+  of `a756847`, before this change) — so it is on
+  screen on the very first chat view a visitor sees, and its second sentence was
+  keyed only on `live`.
+  **The first attempt at this fix keyed the sentence on `chatEmpty`, and review
+  measured it still making the same false claim on the COMMON path.** `chatEmpty`
+  is `messages.length === 0`, but `submitChat` appends the USER bubble and THEN
+  awaits the network (`frontend/src/hooks/useLandingState.ts`, `routeQuestion` →
+  `sendLive`), so for the WHOLE live request the page is non-empty with no answer
+  on it. Measured end-to-end through the real component tree:
+  `user-msgs=1 bot-msgs=0`, hint = "CiteVyn answers from the official docs. This
+  answer was generated live, just now." — verbatim the symptom the issue was
+  filed for. Three reviewers converged on it independently. It is also
+  shipped-only: the demo path batches the user and bot bubbles into a single
+  React commit, so that window does not exist in demo mode and the demo-CI
+  Playwright job cannot see it.
+  The sentence now keys on whether an **ANSWER is on screen** —
+  `messages.some((m) => !m.isUser && !m.errorKind)` — not on emptiness. No answer
+  + live reads **"Answers here are generated live."**, no answer + demo reads
+  **"Answers here are samples for the demo."**, and with an answer on screen the
+  two original strings are unchanged — **"This answer was generated live, just
+  now."** and **"This is a sample answer for the demo."** The `!m.errorKind` half
+  is the second finding: a rate-limit or network bubble is copy `handleApiError`
+  builds on the client and pushes through `streamBot`, not something the backend
+  generated, and it too was being counted as an answer. The first sentence,
+  "CiteVyn answers from the official docs.", is unconditional and unchanged.
+  **This deliberately DIVERGES from the fix the issue suggested**, which was to
+  drop the sentence entirely while the chat is empty. Two reasons. A mode-stating
+  sentence keeps the live/demo signal at the moment the reader is about to act,
+  which is the one moment it is worth anything; and rendering nothing could only
+  be guarded by asserting an ABSENCE, whereas a present string lets the
+  no-answer test assert exact equality — a guard that also dies to a reworded
+  or reordered replacement. The no-answer strings are GENERAL ("Answers
+  here…") rather than about a specific answer precisely so they claim nothing
+  about content that is not on screen.
+  No test asserted this copy before, and `live: true` appeared in **no test in
+  `ChatView.test.tsx`** before this work (it is not true that it appeared in zero
+  vitest tests — `frontend/src/hooks/useLandingState.test.tsx:79` sets
+  `mockIsLive.mockReturnValue(true)` in a `beforeEach`; that overstated claim
+  shipped in the first attempt and is corrected here). The only other reference
+  to `.composer-hint` in the suite is a geometry assertion in
+  `frontend/tests/fidelity.spec.ts` that is blind to the text. There are now nine
+  tests, each reading the rendered `textContent` and asserting the full string
+  with `toBe`, plus one asserting there is exactly ONE `.composer-hint` (a second
+  one would be invisible to `querySelector`). The two `not.toContain` lines the
+  first attempt offered as its non-vacuity proof were **deleted**: each sat after
+  a `toBe` on the same expression, so whether the pinned literal contains the
+  needle is a compile-time constant and the line could not fail. What makes the
+  set non-vacuous instead is holding BOTH sides of the predicate over the same
+  non-empty transcript — user-only and error-bubble transcripts must read the
+  no-answer copy while a real answer must read the answer copy, so neither
+  `hasAnswer` pinned false nor `!chatEmpty` satisfies it.
+  `frontend/scripts/mutate-a11y-guards.sh` now carries fifteen mutants for this
+  hint, enumerated rather than counted: collapse the no-answer branch onto the
+  answer copy; key on `live` alone; invert the predicate; `hasAnswer` →
+  `!chatEmpty` (the measured defect above); drop `&& !m.errorKind`; test
+  `m.isUser` instead of `!m.isUser`; `messages.length > 0`; `hasAnswer &&
+  !pending`; invert `live` inside the no-answer branch; invert `live` inside the
+  answer branch; drop the mode sentence; drop the first sentence; drop the
+  `{" "}` separator; rename the class the tests select on; delete the whole
+  `<p>`. All fifteen die; the whole harness reports **KILLED: 38 SURVIVED: 0,
+  all restored byte-identical**.
+  Two stale lines in `docs/UI_DESIGN.md` §3 were found while writing the first
+  attempt and corrected there, but the reason given was wrong and is corrected
+  now: both quoted "DEMO — canned responses", which was **accurate spec text that
+  went stale**, not an invented string. `ChatView.tsx` rendered exactly that
+  string from `2503dd4` (2026-07-09) until `9b689d5` (#138, 2026-07-17) replaced
+  it with "DEMO — sample answers" without updating the doc — two months of
+  undetected drift, shown by `git log -S "DEMO — canned responses" --
+  frontend/src/components/ChatView.tsx`. Those two lines carried THREE wrong
+  facts between them, and the first attempt fixed only two: the claim that
+  genuinely never matched the code rode on the composer line beside the second
+  quote and was carried forward verbatim. It said `.composer-hint` is
+  `JetBrains Mono` 11px,
+  and `frontend/src/styles/landing.css` has set `font-size: 11.5px` with **no**
+  `font-family` — so it inherits `"Geist", system-ui, sans-serif` from `body` —
+  since the file's first commit (`2503dd4`). `.composer-prompt` is the mono one.
+  Both halves are fixed here. **+33 B gzip, measured** (62,974 before #380; 63,007 after; budget 64,479, headroom 1,505 -> 1,472). Both `chat-empty` visual baselines **pass
+  UNRECORDED on the final tree** — re-run after this round, `visual.spec.ts -g
+  chat-empty`, 2 passed. **This is a TOLERANCE pass, not an identity one**, and
+  an earlier draft of this entry got that wrong: the baselines were last
+  recorded at `1240484` (#336, 2026-09-04), so the stored pixels still contain
+  "This is a sample answer for the demo." The empty chat now renders "Answers
+  here are samples for the demo." — a genuinely different line — and both
+  baselines pass because that one 11.5px line stays inside
+  `maxDiffPixelRatio: 0.02` (`visual.spec.ts:56`). The pass is not vacuous:
+  replacing that string with a deliberately long three-line one FAILS both
+  baselines at ratio 0.04 (19,003 px light / 18,220 px dark), so the gate does
+  see this element. That suite is `testIgnore`d by
+  `playwright.demo-ci.config.ts`, so this was a local check, not a CI one.
 - **An answer built while more than one index claims `active` is no longer frozen
   into the answer cache, and an answer that actually drew on several indexes now
   says so (#352).** Scoped by an explicit owner decision — observability plus the
