@@ -83,6 +83,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes red the day desktop STARTS deferring.
 
 ### Fixed
+- **An empty chat no longer tells the reader "This answer was generated live,
+  just now." before any answer exists (#380).**
+  `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …` branch — that branch
+  opens at `frontend/src/components/ChatView.tsx:478` and closes at `:577`, while
+  the composer `<div>` starts at `:606` and the hint at `:675` (line numbers as
+  of `a756847`, before this change) — so it is on
+  screen on the very first chat view a visitor sees, and its second sentence was
+  keyed only on `live`. Worse, `chatEmpty` and `pending` CAN be true at the same
+  time (a request in flight over a still-empty transcript, resuming a zero-message
+  session mid-request; already pinned by a test in `ChatView.test.tsx`), so the
+  hint asserted an answer had been generated while the loader above it said
+  "Searching the docs…". The second sentence is now keyed on `chatEmpty` as well:
+  empty + live reads **"Answers here are generated live."**, empty + demo reads
+  **"Answers here are samples for the demo."**, and the two non-empty strings are
+  unchanged — **"This answer was generated live, just now."** and **"This is a
+  sample answer for the demo."** The first sentence, "CiteVyn answers from the
+  official docs.", is unconditional and unchanged.
+  **This deliberately DIVERGES from the fix the issue suggested**, which was to
+  drop the sentence entirely while the chat is empty. Two reasons. A mode-stating
+  sentence keeps the live/demo signal at the moment the reader is about to act,
+  which is the one moment it is worth anything; and rendering nothing could only
+  be guarded by asserting an ABSENCE, whereas a present string lets the
+  empty-state test assert exact equality — a guard that also dies to a reworded
+  or reordered replacement. The empty-state strings are GENERAL ("Answers
+  here…") rather than about a specific answer precisely so they claim nothing
+  about content that is not on screen.
+  No test asserted this copy before, and `live` was `true` in **zero** vitest
+  tests; the only other reference to `.composer-hint` in the suite is a geometry
+  assertion in `frontend/tests/fidelity.spec.ts` that is blind to the text. There
+  are now four tests, each reading the rendered `textContent` and asserting the
+  full string with `toBe`, and six mutants in
+  `frontend/scripts/mutate-a11y-guards.sh`. Two stale lines in
+  `docs/UI_DESIGN.md` §3 were found while writing this and corrected in the same
+  change: both quoted "DEMO — canned responses", a string that has never existed
+  in `ChatView.tsx`. **+29 B gzip, measured** (62,974 -> 63,003; budget 64,479,
+  headroom 1,505 -> 1,476). **Both `chat-empty` visual baselines pass
+  UNRECORDED** — the one changed line of 11.5px text stays inside
+  `maxDiffPixelRatio: 0.02`, verified by running `visual.spec.ts -g chat-empty`
+  (2 passed) and by proving that gate still bites: a deliberately long
+  three-line hint FAILS both baselines. Note that suite is `testIgnore`d by
+  `playwright.demo-ci.config.ts`, so this was a local check, not a CI one.
 - **An answer built while more than one index claims `active` is no longer frozen
   into the answer cache, and an answer that actually drew on several indexes now
   says so (#352).** Scoped by an explicit owner decision — observability plus the

@@ -2,6 +2,7 @@
 #
 # Mutation harness for the #356 announcements (an arriving answer, and a REFUSED
 # submit), the parked-question notice and the toast stacking limits.
+# It also covers the composer hint's empty/non-empty mode copy (#380).
 #
 #     bash frontend/scripts/mutate-a11y-guards.sh
 #
@@ -193,6 +194,41 @@ one "toast: drop the cap" "$UT" "$S/p.UT" \
 '.slice(-MAX_VISIBLE_TOASTS)' ''
 one "toast: cap keeps the OLDEST instead of the newest" "$UT" "$S/p.UT" \
 '.slice(-MAX_VISIBLE_TOASTS)' '.slice(0, MAX_VISIBLE_TOASTS)'
+
+echo
+echo "=== the composer hint's mode sentence (#380) ==="
+# THE DEFECT ITSELF: `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …`
+# branch, and its second sentence was keyed only on `live`. An empty chat — the
+# first screen a visitor sees — therefore said "This answer was generated live,
+# just now." with no answer on the page, loudest while `pending` is true and the
+# loader above it says "Searching the docs…". Three shapes of that bug, then the
+# two branch inversions, then the deletion that proves the non-empty partners
+# are not vacuous.
+one "hint: collapse the empty branch onto the non-empty copy (the #380 defect)" "$CV" "$S/p.CV" \
+'      ? "Answers here are generated live."
+      : "Answers here are samples for the demo."' \
+'      ? "This answer was generated live, just now."
+      : "This is a sample answer for the demo."'
+one "hint: ignore \`chatEmpty\` entirely, key on \`live\` alone (the literal bug)" "$CV" "$S/p.CV" \
+'  const MODE_HINT = chatEmpty' '  const MODE_HINT = false'
+one "hint: invert the \`chatEmpty\` test (empty and non-empty copy swapped)" "$CV" "$S/p.CV" \
+'  const MODE_HINT = chatEmpty' '  const MODE_HINT = !chatEmpty'
+one "hint: invert the \`live\` test inside the EMPTY branch" "$CV" "$S/p.CV" \
+'      ? "Answers here are generated live."
+      : "Answers here are samples for the demo."' \
+'      ? "Answers here are samples for the demo."
+      : "Answers here are generated live."'
+one "hint: invert the \`live\` test inside the NON-EMPTY branch" "$CV" "$S/p.CV" \
+'      ? "This answer was generated live, just now."
+      : "This is a sample answer for the demo.";' \
+'      ? "This is a sample answer for the demo."
+      : "This answer was generated live, just now.";'
+# Without the two non-empty tests this one would only be caught by an absence
+# assertion, which is why they are in the file.
+one "hint: drop the mode sentence from the hint altogether" "$CV" "$S/p.CV" \
+'          CiteVyn answers from the official docs.{" "}
+          {MODE_HINT}' \
+'          CiteVyn answers from the official docs.'
 
 echo
 echo "=== KILLED: $K   SURVIVED/ERROR: $SV ==="

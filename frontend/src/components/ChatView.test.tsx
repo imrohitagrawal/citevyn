@@ -1066,3 +1066,57 @@ describe("ChatView announces an ARRIVING answer (#356)", () => {
     expect(screen.getByRole("main")).toHaveAccessibleName("Chat");
   });
 });
+
+describe("ChatView — composer hint (#380)", () => {
+  // The bug these guard: `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …`
+  // branch, and its second sentence was keyed only on `live`. So an empty chat —
+  // the first screen a visitor lands on — said "This answer was generated live,
+  // just now." with no answer anywhere on the page, and said it hardest while
+  // `pending` is true, when the loader above it says "Searching the docs…". No
+  // test asserted this copy before, and `live` was `true` in ZERO vitest tests.
+  //
+  // Every case reads the RENDERED text of `.composer-hint` and asserts the FULL
+  // string with `toBe`, so a mutation to either half — or a reordering — dies.
+  // The two non-empty cases are MANDATORY partners: without them, collapsing the
+  // non-empty branch onto the empty-state copy would go unseen, and the
+  // empty-state cases alone would be satisfied by copy that is never right.
+  const hint = (container: HTMLElement) => container.querySelector(".composer-hint")?.textContent;
+
+  it("on an EMPTY chat in live mode, states the mode instead of claiming an answer", () => {
+    // RED if `"Answers here are generated live."` is replaced by the non-empty
+    // live copy `"This answer was generated live, just now."`.
+    const { container } = renderChat({ chatEmpty: true, messages: [], live: true });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. Answers here are generated live.",
+    );
+    expect(hint(container)).not.toContain("This answer was generated live, just now.");
+  });
+
+  it("on an EMPTY chat in demo mode, states the mode instead of claiming a sample answer", () => {
+    // RED if `"Answers here are samples for the demo."` is replaced by the
+    // non-empty demo copy `"This is a sample answer for the demo."`.
+    const { container } = renderChat({ chatEmpty: true, messages: [], live: false });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. Answers here are samples for the demo.",
+    );
+    expect(hint(container)).not.toContain("This is a sample answer for the demo.");
+  });
+
+  it("with messages on screen in live mode, still says the answer was generated live", () => {
+    // RED if `"This answer was generated live, just now."` is replaced by the
+    // empty-state live copy `"Answers here are generated live."`.
+    const { container } = renderChat({ live: true });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. This answer was generated live, just now.",
+    );
+  });
+
+  it("with messages on screen in demo mode, still says the answer is a sample", () => {
+    // RED if `"This is a sample answer for the demo."` is replaced by the
+    // empty-state demo copy `"Answers here are samples for the demo."`.
+    const { container } = renderChat({ live: false });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. This is a sample answer for the demo.",
+    );
+  });
+});

@@ -254,6 +254,23 @@ export function ChatView({
     // tried to send", which is the one thing this sentence is NOT about.
     "Not sent. CiteVyn is still answering your previous question. Your text is kept.";
 
+  // The composer hint's second sentence (#380). It was keyed only on `live`, so
+  // an empty transcript asserted an answer existed — sharpest while `pending` is
+  // true and the loader beside it says "Searching the docs…".
+  //
+  // The empty-state strings are general ("Answers here…") rather than about a
+  // specific answer precisely so they claim nothing about content that is not on
+  // screen. Kept as a sentence rather than dropped: it holds the live/demo signal
+  // at the moment the reader is about to type, and an empty branch rendering
+  // nothing could only be guarded by asserting an absence.
+  const MODE_HINT = chatEmpty
+    ? live
+      ? "Answers here are generated live."
+      : "Answers here are samples for the demo."
+    : live
+      ? "This answer was generated live, just now."
+      : "This is a sample answer for the demo.";
+
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
   // programmatic ``scrollTop = scrollHeight`` lands at the bottom, so it keeps the
@@ -674,7 +691,7 @@ export function ChatView({
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}
-          {live ? "This answer was generated live, just now." : "This is a sample answer for the demo."}
+          {MODE_HINT}
         </p>
       </div>
     </main>
