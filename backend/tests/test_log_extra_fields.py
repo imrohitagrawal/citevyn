@@ -665,6 +665,71 @@ def test_a_pathological_path_is_capped_by_max_path() -> None:
     assert len(capped) == MAX_PATH + len("…<truncated>"), len(capped)
 
 
+def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
+    """PARTNER for the cap test above, pinning the COMPARISON rather than the
+    cap. ``len(swept) > MAX_PATH`` and ``len(swept) >= MAX_PATH`` both truncate
+    everything the cap test feeds them, so that test passes under either -- an
+    independent review round applied the ``>=`` mutant and the whole suite
+    stayed green. Under ``>=`` a path whose swept form is EXACTLY ``MAX_PATH``
+    characters gets ``…<truncated>`` appended to content that was never
+    truncated: a log line that lies about itself, and the operator reading it
+    goes looking for a longer path that does not exist.
+
+    The swept length is established, not assumed equal to the input length. It
+    is established TWICE, because the cheap version of this check is wrong: the
+    module's ``HIGH_ENTROPY_RE`` matches a slash path as ONE run -- that IS
+    #384 -- so searching the whole value proves nothing about a rule that
+    sweeps SEGMENTS. What matters is that no individual segment matches, and
+    then the sweep is the identity and swept length IS input length. That is
+    asserted against the real regex here, and measured end-to-end through
+    ``redact_value`` itself at ``MAX_PATH - 1``, a length where the correct
+    comparison and the ``>=`` mutant necessarily agree so the measurement
+    cannot be contaminated by the thing under test.
+
+    RED if the comparison is loosened to ``>=`` (the exactly-``MAX_PATH`` half
+    fails) or tightened to a larger threshold (the ``MAX_PATH + 1`` half fails).
+
+    NOT fixed here: the pre-existing ``MAX_OPAQUE_ID`` branch a few lines above
+    carries the identical ``>`` comparison with no boundary test of its own.
+    That is pre-existing debt, out of scope for #384, and deliberately left
+    alone rather than fixed in a change whose subject is the ``path`` key.
+    """
+    from app.core.logging import HIGH_ENTROPY_RE, MAX_PATH, redact_value
+
+    # This test materialises strings of length ``MAX_PATH``, so it states the
+    # bound it is willing to build instead of allocating whatever the constant
+    # happens to say. Found by the mutation sweep for this very change: the
+    # ``MAX_PATH = 10**9`` mutant made an earlier draft allocate four GB and
+    # HANG the suite rather than fail it, which is a survivor wearing a
+    # timeout. A cap of more than a few KB is not a cap.
+    assert MAX_PATH <= 4096, f"MAX_PATH={MAX_PATH} is not a cap"
+
+    marker = "…<truncated>"
+
+    at_limit = ("/seg" * MAX_PATH)[:MAX_PATH]
+    over_limit = ("/seg" * MAX_PATH)[: MAX_PATH + 1]
+    just_under = ("/seg" * MAX_PATH)[: MAX_PATH - 1]
+    assert len(at_limit) == MAX_PATH
+    assert len(over_limit) == MAX_PATH + 1
+
+    # No SEGMENT matches the entropy regex, so the per-segment sweep is the
+    # identity on this material and swept length == len(). (Searching the
+    # whole value instead would match -- "/" is in the class; that is #384.)
+    for value in (at_limit, over_limit, just_under):
+        assert all(HIGH_ENTROPY_RE.search(seg) is None for seg in value.split("/")), value
+    # And measured end-to-end, one character below the boundary, where the
+    # correct comparison and the ">=" mutant give the same answer.
+    assert redact_value("path", just_under) == just_under
+
+    exactly = redact_value("path", at_limit)
+    assert exactly == at_limit, exactly
+    assert not str(exactly).endswith(marker), exactly
+
+    one_over = redact_value("path", over_limit)
+    assert str(one_over).endswith(marker), one_over
+    assert len(str(one_over)) == MAX_PATH + len(marker), len(str(one_over))
+
+
 def test_a_real_session_path_is_not_truncated() -> None:
     """PARTNER for the cap test above, which on its own counts nothing: prove
     the thing being bounded is a value the cap does NOT reach. The longest path

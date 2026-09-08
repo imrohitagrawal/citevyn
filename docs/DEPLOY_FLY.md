@@ -269,33 +269,6 @@ fly deploy --app citevyn --local-only \
   --build-arg VITE_API_DEMO_KEY="${DEMO_KEY:?empty — the machine is asleep or the secret is unset; curl /health above, then retry}"
 ```
 
-> **`--local-only` is not optional either, and the signal you would check
-> LIES to you.** Without it `fly deploy` uploads the build context to Fly's
-> *remote* builder. On the v12 deploy that builder stalled on the context
-> upload three times running — 548 KB moved in 825 s, then `deadline_exceeded`.
-> `fly deploy --local-only` builds the image on your own machine and pushes the
-> result; it worked first try for v12, and again for v17 on 2026-09-08
-> (`1fd7556`). See #385.
->
-> **A failed build creates NO release.** This is the part that misleads
-> operators: after an aborted deploy `fly releases` looks exactly as it did
-> before, and reads as "nothing changed, so the deploy must have been a no-op
-> or silently succeeded". It is neither — an unchanged release list is the
-> EXPECTED symptom of a build that never finished. The only deploy-success
-> signal is the release number going up and the new build passing its health
-> check (§4.4); `fly releases` is a rollback tool here (§6.1, §9), not a
-> success check.
->
-> **What `--local-only` needs, and what it costs.** A working local Docker
-> daemon (Docker Desktop on macOS) — the image is built on your machine
-> instead of Fly's builder, so the whole context never crosses the network.
-> It leaves no local image to delete, but it does grow Docker's build cache.
-> **Do not run `docker builder prune -af` to reclaim that.** That cache is
-> shared with everything else the machine builds, so a blanket prune bills the
-> next build of every unrelated project for this one. If you need the space,
-> prune selectively — e.g. `docker builder prune --filter until=168h` — and
-> only when you actually need it.
-
 > **`VITE_API_DEMO_KEY` is not optional.** The frontend is built inside the
 > image and the demo bearer is baked into the bundle at build time
 > (`infra/docker/Dockerfile.api`, `ARG VITE_API_DEMO_KEY=local-demo-key`).
@@ -315,6 +288,43 @@ fly deploy --app citevyn --local-only \
 > the shell *before* `fly deploy` runs, in both bash and zsh, so that build
 > cannot start. Do not "simplify" it back to an inline `$(…)`: a command
 > substitution has no way to fail on empty.
+
+> **`--local-only` is not optional either, and the signal you would check
+> LIES to you.** Without it `fly deploy` uploads the build context to a
+> *remote* builder. On the v12 deploy that builder stalled on the context
+> upload three times running — 548 KB moved in 825 s, then `deadline_exceeded`.
+> `fly deploy --local-only` builds the image on your own machine and pushes the
+> result; it worked first try for v12, and again for v17 on 2026-09-08
+> (`1fd7556`). See #385. This one fails LOUDLY — the build aborts and nothing
+> ships — which is why it sits *below* the demo-key note above rather than
+> before it: that one fails silently, and under incident pressure the silent
+> failure is the warning you must meet first.
+>
+> **Which** remote builder is unconfirmed. `fly deploy` also carries a
+> `--depot` flag that defaults to `auto`, so on a current `fly` the no-flag
+> path may route the build through Depot rather than through Fly's own remote
+> builder. The v12 symptom — a context upload that crawls and then times out —
+> fits either, and nothing was captured at the time that distinguishes them.
+> It does not change the remedy.
+>
+> **A failed build creates NO release.** This is the part that misleads
+> operators: after an aborted deploy `fly releases` looks exactly as it did
+> before, and reads as "nothing changed, so the deploy must have been a no-op
+> or silently succeeded". It is neither — an unchanged release list is the
+> EXPECTED symptom of a build that never finished. The only deploy-success
+> signal is the release number going up and the new build passing its health
+> check (§4.4); `fly releases` is a rollback tool here (§6.1, §9), not a
+> success check.
+>
+> **What `--local-only` needs, and what it costs.** A working local Docker
+> daemon (Docker Desktop on macOS) — the image is built on your machine
+> instead of on a builder Fly reaches, so the whole context never crosses the
+> network. On the v12 and v17 runs it left no local image to delete, but it
+> does grow Docker's build cache. **Do not run `docker builder prune -af` to
+> reclaim that.** That cache is shared with everything else the machine
+> builds, so a blanket prune bills the next build of every unrelated project
+> for this one. If you need the space, prune selectively — e.g. `docker
+> builder prune --filter until=168h` — and only when you actually need it.
 
 **Verify after every deploy**, from the repo root, in the same shell (it reuses
 `$DEMO_KEY` from above):
@@ -348,7 +358,7 @@ What happens, in order:
 
 1. **Your machine** builds `infra/docker/Dockerfile.api` from the repo root,
    because of `--local-only`; the finished image is pushed to Fly's registry.
-   Drop that flag and the build context is uploaded to Fly's remote builder
+   Drop that flag and the build context is uploaded to a remote builder
    instead, which is the step that stalled on v12 (see the note above).
 2. Fly starts a **release machine** from the new image and runs
    `python -m alembic --config /db/alembic.ini upgrade head` (the
