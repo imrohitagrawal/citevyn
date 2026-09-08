@@ -1,5 +1,15 @@
 /**
- * Fails the build if the EAGER GRAPH exceeds the gzip budget.
+ * Fails the build if the EAGER GRAPH exceeds its gzip budget, or if ANY SINGLE
+ * LAZY CHUNK exceeds its own per-chunk gzip budget (#372). It also RECORDS, on
+ * every run and on both the pass and the fail path, three numbers that nothing
+ * gates: the per-chunk lazy table, the lazy SUM, and the all-JS TOTAL.
+ *
+ * That reporting IS the fix for #372. The complaint there was not a missing
+ * ceiling — it was that this command reported a 3,521 B eager WIN for #358
+ * while desktop first-paint JS grew 1,200 B, and no output said so. A PR can no
+ * longer quote the eager delta without the countervailing totals printed beside
+ * it by the same command. A total-JS ceiling was considered and rejected; the
+ * four reasons are in frontend/bundle-budget.json's `_comment`.
  *
  * Three things this guards that a human eye did not:
  *   1. The ceiling is a NUMBER IN A FILE, not prose in a docs row. It was raised
@@ -10,6 +20,9 @@
  *      this builds the shipping variant itself.
  *   3. It measures the eager module graph from Vite's own build manifest, not a
  *      filename pattern and not preload hints. See bundle-budget.mjs.
+ *   4. The lazy set is a SET DIFFERENCE against that eager closure, never a walk
+ *      out from `dynamicImports` — the real manifest's shared chunks declare a
+ *      back-edge to the entry, and a walk mis-files the entry chunk as lazy.
  *
  * All decision logic lives in ./bundle-budget.mjs so it is testable without a
  * 7-second build; see bundle-budget.test.mjs, which drives this file too.
@@ -23,10 +36,15 @@ import {
   parseBudget,
   buildCommand,
   eagerChunkFilesFromManifest,
+  nonEagerChunkFilesFromManifest,
   resolveAssetPath,
   measureEagerGraph,
   evaluate,
+  evaluateLazyChunks,
+  renderRecordedReport,
   EXCEEDED_ADVICE,
+  LAZY_BUDGET_KEY,
+  LAZY_EXCEEDED_ADVICE,
 } from "./bundle-budget.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,21 +88,52 @@ if (distOverride === null) {
 const distDir = distOverride === null ? join(root, "dist") : distOverride;
 const budgetPath = budgetOverride === null ? join(root, "bundle-budget.json") : budgetOverride;
 
-const max = parseBudget(readFileSync(budgetPath, "utf8"));
+const budgetText = readFileSync(budgetPath, "utf8");
+const max = parseBudget(budgetText);
+// BOTH ceilings go through the SAME validated path, so a missing, mistyped or
+// renamed lazy key is a hard failure too rather than an `undefined` that every
+// comparison quietly passes (#323, reproduced one function over in #372).
+const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);
+
 const manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8"));
 const files = eagerChunkFilesFromManifest(manifest);
+const { files: lazyFiles, skippedNonJs } = nonEagerChunkFilesFromManifest(manifest);
 
-const measurement = measureEagerGraph({
-  files,
-  readAsset: (file) =>
-    readFileSync(resolveAssetPath({ distDir, file, realpath: realpathSync })),
-  gzipSize: (bytes) => gzipSync(bytes).length,
-});
+const readAsset = (file) =>
+  readFileSync(resolveAssetPath({ distDir, file, realpath: realpathSync }));
+const gzipSize = (bytes) => gzipSync(bytes).length;
+
+const measurement = measureEagerGraph({ files, readAsset, gzipSize });
+// Same gzip-each-and-sum over a different file list. Reused rather than
+// duplicated so one arithmetic bug cannot be fixed in one place and not the
+// other; the sum it computes is RECORDED, never gated.
+const lazyMeasurement = measureEagerGraph({ files: lazyFiles, readAsset, gzipSize });
 
 const { ok, line } = evaluate({ measurement, max });
+const lazy = evaluateLazyChunks({ chunks: lazyMeasurement.files, max: lazyMax });
+
+// Printed BEFORE the verdict, so the recorded numbers appear whichever way the
+// gate falls. #372's actual complaint is that a win was reported without them.
+for (const reportLine of renderRecordedReport({
+  eager: measurement,
+  lazy: lazyMeasurement,
+  max: lazyMax,
+  skippedNonJs,
+})) {
+  console.log(reportLine);
+}
 
 if (!ok) {
   console.error(`BUNDLE BUDGET EXCEEDED\n  ${line}\n${EXCEEDED_ADVICE}`);
+}
+if (!lazy.ok) {
+  const named = lazy.violators
+    .map((c) => `  ${c.file} — ${c.gzip} B gzip, over the ${lazyMax} B ceiling by ${c.gzip - lazyMax} B`)
+    .join("\n");
+  console.error(`LAZY CHUNK BUDGET EXCEEDED\n${named}\n${LAZY_EXCEEDED_ADVICE}`);
+}
+if (!ok || !lazy.ok) {
   process.exit(1);
 }
 console.log(`bundle budget OK — ${line}`);
+console.log(`lazy chunk budget OK — ${lazy.line}`);

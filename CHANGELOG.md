@@ -6,6 +6,53 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Every lazy JS chunk now has a gzip ceiling of its own, and
+  `npm run check:bundle` records the totals no ceiling bounds (#372).**
+  `frontend/bundle-budget.json` gains ONE enforced key,
+  `lazyChunkGzipMaxBytes: 6328` — a **per-chunk** ceiling on every emitted `.js`
+  chunk that is not in the eager closure. 6,328 B is 4,722 (landing-strip,
+  today's largest lazy chunk, measured) + 1,606, the headroom constant this file
+  has held since the 68,000 decision, so it keeps ONE such constant rather than
+  two nobody can reconstruct.
+  **The issue's actual complaint was the reporting, not the missing ceiling.**
+  #358 freed 3,521 B from the eager chunk, the gate said so, and nothing in its
+  output said desktop first-paint JS had grown 1,200 B. So the command now
+  prints, on every run and on BOTH the pass and the fail path: the per-chunk
+  lazy table with each chunk's headroom, the largest lazy chunk, the lazy SUM
+  (13,117 B over 8 chunks today), the all-JS TOTAL (76,091 B over 9 chunks), and
+  the count of manifest records skipped as non-`.js`. A PR can no longer quote
+  the eager delta without the countervailing numbers in the same output.
+  **Two proposals in the issue were falsified and are NOT implemented.** A
+  TOTAL-JS ceiling would have gone RED for #358 — reconstructed from this repo's
+  own recorded figures, all-JS went ~74,789 → ~75,989 B across a change that
+  improved PHONE first-paint JS by 3,521 B — and would have had to be RAISED by
+  the very PR that ratcheted the eager key DOWN. Its advertised virtue is also
+  symmetric: folding all five lazy surfaces back into the entry LOWERS the total
+  while first-paint JS goes 62,974 → ~76,000 B. A `firstPaintGzipMaxBytes` key
+  cannot be fed from the input the issue named: `playwright.config.ts` runs
+  `lazy-strip.spec.ts` against the Vite **dev** server (`npm run dev`,
+  `VITE_API_LIVE: "false"`), which serves unbundled ES modules — no production
+  chunks, no gzip sizes.
+  **The lazy set is a SET DIFFERENCE, never a graph walk.** In the real manifest
+  the three `_`-prefixed shared chunks each declare `imports: ["index.html"]` —
+  a back-edge to the ENTRY — so an implementation that walks out from
+  `dynamicImports` following `imports` reaches the entry and files the 62,974 B
+  entry chunk as "lazy", handing it the 6,328 B allowance. A fixture modelling
+  that back-edge is the test such a reimplementation fails.
+  Both ceilings go through the same validated `parseBudget` path (#323), the
+  per-chunk comparison is written `!(gzip <= max)` so an `undefined` ceiling
+  makes every chunk a violator instead of producing an empty violator list that
+  passes, an empty lazy collection is a hard error (`MIN_LAZY_CHUNKS`), and
+  `src/test/buildGuards.test.ts` now pins the enforced-key SET as exactly those
+  two so adding or dropping a key is no longer invisible. **The gate is still a
+  REVIEW control**: raising either number turns nothing red, and
+  `frontend/bundle-budget.json`'s `_comment` says so, along with what the new
+  key still cannot see — the lazy SUM, the lazy COUNT (a per-chunk ceiling
+  rewards splitting one chunk into two), CSS, `frontend/public/`, the fonts, and
+  the desktop first-paint total, which is deliberately unbounded so that nothing
+  goes red the day desktop STARTS deferring.
+
 ### Fixed
 - **An answer built while more than one index claims `active` is no longer frozen
   into the answer cache, and an answer that actually drew on several indexes now

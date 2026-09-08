@@ -41,7 +41,13 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildCommand, eagerChunkFilesFromManifest } from "./bundle-budget.mjs";
+import {
+  LAZY_BUDGET_KEY,
+  buildCommand,
+  eagerChunkFilesFromManifest,
+  nonEagerChunkFilesFromManifest,
+  parseBudget,
+} from "./bundle-budget.mjs";
 
 const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -135,6 +141,38 @@ describe("the below-the-fold landing strip is not in the eager bundle (#358)", (
     expect(eagerFiles.length).toBeGreaterThan(0);
     expect(eagerBytes).toBeGreaterThan(50_000);
     expect(stripGzip).toBeGreaterThan(3_000);
+  });
+
+  /**
+   * #372 — the OTHER side of that inequality, against the REAL build.
+   *
+   * scripts/bundle-budget.test.mjs proves the per-chunk ceiling works on
+   * fixtures. This proves the number in bundle-budget.json is the right one for
+   * the chunk that actually ships: the strip is the largest lazy chunk, and it
+   * is what `lazyChunkGzipMaxBytes` was derived from (largest + the 1,606 B
+   * headroom constant this repo has held since the 68,000 decision).
+   *
+   * It is a BOUND, not a pin: shrinking the strip can never turn it red.
+   */
+  it("is under the per-chunk lazy ceiling, and is the chunk that ceiling was set from (#372)", () => {
+    const lazyMax = parseBudget(
+      readFileSync(join(frontendRoot, "bundle-budget.json"), "utf8"),
+      LAZY_BUDGET_KEY,
+    );
+    expect(stripGzip).toBeLessThanOrEqual(lazyMax);
+
+    // PARTNER: the ceiling is not vacuously large. `stripGzip > 3_000` above
+    // already proves the chunk is real; this proves the ceiling is within a
+    // change or two of it rather than an unreachable number.
+    expect(lazyMax).toBeLessThan(stripGzip * 2);
+
+    // And the strip really is the largest lazy chunk, which is the premise the
+    // ceiling was derived from. If some other chunk overtakes it, the derivation
+    // in bundle-budget.json's `_comment` needs redoing and this says so.
+    const { files } = nonEagerChunkFilesFromManifest(manifest);
+    expect(files).toContain(stripFile);
+    const sizes = files.map((f) => gzipSync(readFileSync(join(outDir, f))).length);
+    expect(Math.max(...sizes)).toBe(stripGzip);
   });
 
   it("keeps the deferred sections' copy out of the bytes the browser downloads first", () => {
