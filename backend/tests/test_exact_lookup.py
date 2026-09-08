@@ -458,3 +458,152 @@ async def test_exact_lookup_pinned_version_skips_active_filter(session) -> None:
         index_version=candidate.index_version,
     )
     assert len(hits_candidate) == 1
+
+
+# ---------------------------------------------------------------------------
+# #352, PATH 1. ``index_version="active"`` is SET MEMBERSHIP, so on a dual-active
+# database this route silently unions the documents of every active index. It has
+# no answer cache to poison and changing what it returns is read-path policy that
+# #265 owns, so it keeps unioning -- but no longer silently.
+# ---------------------------------------------------------------------------
+
+
+async def _add_second_active_index_with_the_same_term(session) -> None:
+    """A second ``active`` IndexVersion owning its own copy of ``--model``."""
+    import uuid
+    from datetime import UTC, datetime
+
+    from app.models import Chunk, Document, DocumentStatus, ExactTerm, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="v2",
+            status=IndexStatus.active,
+            source_version_hash="sha256:v2",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc = Document(
+        document_id=uuid.uuid4(),
+        index_version="v2",
+        source_name="codex",
+        product_area="codex",
+        source_url="https://example.invalid/codex-v2",
+        title="Codex CLI (v2 index)",
+        identity_checksum="sha256:codex-v2",
+        last_fetched_at=now,
+        last_indexed_at=now,
+        status=DocumentStatus.active,
+    )
+    session.add(doc)
+    await session.flush()
+    chunk = Chunk(
+        chunk_id=uuid.uuid4(),
+        document_id=doc.document_id,
+        product_area="codex",
+        section_path="/flags",
+        heading="Flags",
+        parent_heading=None,
+        chunk_text="The --model flag selects the model, on the v2 index.",
+        context_summary="v2 copy",
+        exact_terms=[],
+        chunk_order=0,
+        content_checksum="sha256:codex-v2-chunk-0",
+    )
+    session.add(chunk)
+    await session.flush()
+    session.add(
+        ExactTerm(
+            term_id=uuid.uuid4(),
+            term_text="--model",
+            term_type=TermType.flag,
+            product_area="codex",
+            document_id=doc.document_id,
+            chunk_id=chunk.chunk_id,
+        )
+    )
+    await session.flush()
+
+
+@pytest.mark.asyncio
+async def test_active_sentinel_warns_when_it_unions_two_indexes(session, caplog) -> None:
+    """The union is real and is now on the record.
+
+    RED without the fix: no ``exact_lookup_spans_multiple_indexes`` record exists
+    (the event was never emitted, and ``Document.index_version`` was not even in
+    the projection to emit it from).
+    """
+    import logging
+
+    await _seed(session)
+    await _add_second_active_index_with_the_same_term(session)
+
+    with caplog.at_level(logging.WARNING, logger="citevyn.retrieval"):
+        hits = await exact_lookup(
+            session, term="--model", product_area="codex", index_version="active"
+        )
+
+    # PARTNER: the route still returns BOTH hits. The owner's decision is that this
+    # keeps serving; only the silence is fixed.
+    assert len(hits) == 2, hits
+    rec = next(
+        (r for r in caplog.records if "exact_lookup_spans_multiple_indexes" in r.getMessage()),
+        None,
+    )
+    assert rec is not None, [r.getMessage() for r in caplog.records]
+    assert rec.index_versions == "v1,v2"
+    assert rec.index_version_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_single_active_index_lookup_is_not_warned(session, caplog) -> None:
+    """NON-VACUITY PARTNER: the WARN must not fire on every lookup.
+
+    Without this, ``_warn_if_hits_span_indexes`` could log unconditionally and the
+    test above would still pass -- and the line would be worthless, because an
+    operator would see it on a perfectly healthy database.
+
+    RED if the ``len(versions) <= 1`` guard is removed.
+    """
+    import logging
+
+    await _seed(session)
+
+    with caplog.at_level(logging.WARNING, logger="citevyn.retrieval"):
+        hits = await exact_lookup(
+            session, term="--model", product_area="codex", index_version="active"
+        )
+
+    assert len(hits) == 1, "precondition: one active index, one hit"
+    assert not any(
+        "exact_lookup_spans_multiple_indexes" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_index_version_is_never_warned_even_on_a_dual_active_db(
+    session, caplog
+) -> None:
+    """BOUNDARY: pinning a version is the replay/debug path and cannot union, so a
+    dual-active database is irrelevant to it.
+
+    RED if the pinned branch stops filtering on ``Document.index_version ==``.
+    (An earlier version of this line also claimed "RED if the WARN is moved above
+    the ``index_version == 'active'`` branch" — that is unfalsifiable: the WARN
+    reads ``rows``, which are fetched after BOTH branches, so there is no position
+    above the branch where it can still see any rows.)
+    """
+    import logging
+
+    await _seed(session)
+    await _add_second_active_index_with_the_same_term(session)
+
+    with caplog.at_level(logging.WARNING, logger="citevyn.retrieval"):
+        hits = await exact_lookup(session, term="--model", product_area="codex", index_version="v2")
+
+    assert len(hits) == 1, "a pinned lookup returns only that index's row"
+    assert not any(
+        "exact_lookup_spans_multiple_indexes" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]

@@ -455,7 +455,7 @@ async def test_vector_arm_degrades_when_scoped_candidate_stamp_mismatches(
         assert await h._active_index_stamp() == EmbedderIdentity(
             provider="openrouter", model="text-embedding-3-small", dim=1536
         )
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.mismatch
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
 
 
@@ -479,7 +479,7 @@ async def test_vector_arm_runs_when_scoped_candidate_stamp_matches(seeded_sessio
     )
     h = HybridRetriever(seeded_session, active_index_version="v-cand", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
@@ -504,7 +504,7 @@ async def test_active_index_stamp_scoped_by_version_ignores_a_second_active_row(
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
         assert await h._active_index_stamp() == _GEMINI
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
 
 
@@ -534,18 +534,26 @@ async def test_active_index_stamp_ambiguous_on_dual_active_when_unscoped(
 async def test_vector_arm_fails_closed_on_dual_active_when_unscoped(seeded_session) -> None:
     """The consequence of the sentinel, at the method retrieval actually calls.
 
-    ``_vector_arm_enabled`` is the gate; ``_active_index_stamp`` is only its
+    ``_vector_arm_degrade`` is the gate; ``_active_index_stamp`` is only its
     input. This also pins that the ambiguous resolution does not crash the
     mismatch WARN's identifier payload (the sentinel has no ``.provider``), and
     that the fail-closed decision is separately observable.
 
+    It pins the REASON and not merely "not none" (#352). Reporting ambiguity as
+    ``VectorDegrade.mismatch`` — which is what the old ``bool`` return collapsed
+    to — makes the orchestrator log
+    ``answer_cache_write_skipped_embedder_mismatch``, sending an operator to the
+    embedder config when the database needs ``promote_version``.
+
     Turns RED if ``is_index_embedder_mismatch`` stops returning True for the
-    sentinel — the arm goes back to running with unknown provenance.
+    sentinel (the arm goes back to running with unknown provenance), or if the
+    ``isinstance(stamp, IndexStampStatus)`` branch returns
+    ``VectorDegrade.mismatch`` again.
     """
     await _add_second_active_index(seeded_session)
     h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.ambiguous_index
     msgs = [r.getMessage() for r in records]
     assert any("vector_retrieval_index_provenance_ambiguous" in m for m in msgs)
     rec = next(
@@ -566,12 +574,12 @@ async def test_dual_active_still_allowed_when_enforcement_is_off(seeded_session)
     is to stop the new deny from creeping above that short-circuit.
 
     Turns RED if the ambiguity check is hoisted above the
-    ``embedder_identity is None`` short-circuit in ``_vector_arm_enabled``.
+    ``embedder_identity is None`` short-circuit in ``_vector_arm_degrade``.
     """
     await _add_second_active_index(seeded_session)
     h = HybridRetriever(seeded_session, active_index_version=None)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("ambiguous" in r.getMessage() for r in records)
 
 
@@ -593,7 +601,7 @@ async def test_active_index_stamp_none_when_named_version_does_not_exist(
     h = HybridRetriever(seeded_session, active_index_version="v-nope", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
         assert await h._active_index_stamp() is None
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
@@ -618,7 +626,7 @@ async def test_vector_arm_allowed_when_unscoped_with_zero_active_indexes(session
     h = HybridRetriever(session, active_index_version=None, embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
         assert await h._active_index_stamp() is None
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("retrieval_multiple_active_indexes" in r.getMessage() for r in records)
 
 
@@ -652,19 +660,19 @@ async def test_gate_delegates_to_shared_predicate_for_the_ambiguous_sentinel(
 
     monkeypatch.setattr(hybrid_mod, "is_index_embedder_mismatch", _spy)
     with _capture_retrieval_logs():
-        enabled = await h._vector_arm_enabled()
+        degrade = await h._vector_arm_degrade()
 
     assert calls == [(_GEMINI, IndexStampStatus.ambiguous)]
-    assert enabled is False
+    assert degrade is VectorDegrade.ambiguous_index
 
 
-async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:
+async def test_vector_arm_runs_when_stamp_matches(seeded_session) -> None:
     await _stamp_active_index(
         seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
     )
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
@@ -674,7 +682,7 @@ async def test_vector_arm_degrades_on_stamp_mismatch(seeded_session) -> None:
     await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.mismatch
     msgs = [r.getMessage() for r in records]
     assert any("vector_retrieval_index_embedder_mismatch" in m for m in msgs)
 
@@ -685,7 +693,7 @@ async def test_vector_arm_mismatch_warn_carries_identifiers(seeded_session) -> N
     await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.mismatch
     rec = next(r for r in records if "vector_retrieval_index_embedder_mismatch" in r.getMessage())
     assert rec.index_embedding_provider == "stub"
     assert rec.configured_embedding_provider == "gemini"
@@ -703,7 +711,7 @@ async def test_vector_arm_degrades_on_dim_only_mismatch(seeded_session) -> None:
     )
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.mismatch
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
 
 
@@ -714,7 +722,7 @@ async def test_vector_arm_degrades_on_partial_stamp(seeded_session) -> None:
     await _stamp_active_index(seeded_session, provider="gemini", model=None, dim=None)
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is False
+        assert await h._vector_arm_degrade() is VectorDegrade.mismatch
     assert any("vector_retrieval_index_embedder_mismatch" in r.getMessage() for r in records)
 
 
@@ -724,20 +732,21 @@ async def test_vector_arm_allowed_on_null_stamp(seeded_session) -> None:
     # index would break.
     h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
     with _capture_retrieval_logs() as records:
-        assert await h._vector_arm_enabled() is True
+        assert await h._vector_arm_degrade() is VectorDegrade.none
     assert not any("mismatch" in r.getMessage() for r in records)
 
 
 async def test_gate_delegates_to_shared_predicate(seeded_session, monkeypatch) -> None:
     """Single-source-of-truth guard (#71): the canonical read-time gate
-    ``HybridRetriever._vector_arm_enabled`` (#57) must DELEGATE its allow/degrade
+    ``HybridRetriever._vector_arm_degrade`` (#57) must DELEGATE its allow/degrade
     comparison to the shared ``is_index_embedder_mismatch`` predicate (#65), not
     carry an inline copy. Post-#71, agreement with the orchestrator's predictor is
     guaranteed by construction; this asserts the delegation directly so a future
     edit that reintroduces an inline copy — and could drift from the predictor —
     is caught. We spy on the predicate: for every stamp the gate calls it exactly
-    once with ``(configured_identity, resolved_stamp)`` and returns ``enabled ==
-    (not mismatch)`` (with the enforcement-off short-circuit still gate-side)."""
+    once with ``(configured_identity, resolved_stamp)`` and returns
+    ``VectorDegrade.none`` exactly when the predicate says there is no mismatch
+    (with the enforcement-off short-circuit still gate-side)."""
     import app.retrieval.hybrid as hybrid_mod
     from app.embeddings import is_index_embedder_mismatch
 
@@ -761,25 +770,27 @@ async def test_gate_delegates_to_shared_predicate(seeded_session, monkeypatch) -
 
         monkeypatch.setattr(hybrid_mod, "is_index_embedder_mismatch", _spy)
         with _capture_retrieval_logs():
-            enabled = await h._vector_arm_enabled()
+            degrade = await h._vector_arm_degrade()
 
         # The gate routed its decision through the shared predicate, exactly once,
         # with the configured identity and the resolved active-index stamp.
         assert calls == [(_GEMINI, resolved)], f"gate did not delegate for {stamp_cfg}"
-        assert enabled == (not is_index_embedder_mismatch(_GEMINI, resolved)), stamp_cfg
+        assert (degrade is VectorDegrade.none) == (
+            not is_index_embedder_mismatch(_GEMINI, resolved)
+        ), stamp_cfg
 
 
 async def test_vector_arm_enforcement_off_without_identity(seeded_session) -> None:
     # No identity wired ⇒ enforcement is off, even against a mismatching stamp.
     await _stamp_active_index(seeded_session, provider="stub", model="stub", dim=1536)
     h = HybridRetriever(seeded_session, active_index_version="v1")
-    assert await h._vector_arm_enabled() is True
+    assert await h._vector_arm_degrade() is VectorDegrade.none
 
 
 async def test_vector_arm_allowed_when_no_active_index(session) -> None:
     # Empty catalog (no active IndexVersion) ⇒ nothing to enforce against ⇒ allow.
     h = HybridRetriever(session, embedder_identity=_GEMINI)
-    assert await h._vector_arm_enabled() is True
+    assert await h._vector_arm_degrade() is VectorDegrade.none
 
 
 async def test_safe_vector_retrieve_skips_when_disabled(seeded_session) -> None:
@@ -794,10 +805,37 @@ async def test_safe_vector_retrieve_skips_when_disabled(seeded_session) -> None:
         "anything",
         product_area=Domain.claude_api.value,
         limit=5,
-        enabled=False,
+        arm_degrade=VectorDegrade.mismatch,
     )
-    # A disabled arm degrades to no hits with the Tier-3 ``mismatch`` reason.
+    # A disabled arm degrades to no hits and hands back the REASON it was given —
+    # it no longer re-derives ``mismatch`` from a bare bool (#352).
     assert result == ([], VectorDegrade.mismatch)
+
+
+async def test_safe_vector_retrieve_passes_the_ambiguity_reason_through(seeded_session) -> None:
+    """PARTNER for the test above, and the #352 bite: a skipped arm must report
+    the reason it was ACTUALLY given, not a hard-coded ``mismatch``.
+
+    Same call, one different input, one different output — which is what proves
+    the return value is threaded rather than constant.
+
+    RED if ``_safe_vector_retrieve``'s skip branch returns
+    ``VectorDegrade.mismatch`` instead of ``arm_degrade``.
+    """
+
+    class _ExplodingVector:
+        async def retrieve(self, question, *, product_area, limit):
+            raise AssertionError("vector arm must not run when disabled")
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _ExplodingVector(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+        arm_degrade=VectorDegrade.ambiguous_index,
+    )
+    assert result == ([], VectorDegrade.ambiguous_index)
 
 
 async def test_safe_vector_retrieve_reports_not_degraded_on_success(seeded_session) -> None:
@@ -816,7 +854,7 @@ async def test_safe_vector_retrieve_reports_not_degraded_on_success(seeded_sessi
         "anything",
         product_area=Domain.claude_api.value,
         limit=5,
-        enabled=True,
+        arm_degrade=VectorDegrade.none,
     )
     assert result == ([], VectorDegrade.none)
 
@@ -1036,3 +1074,497 @@ async def test_source_named_question_word_returns_evidence_hermetically(
     assert any(expected_substr in h.chunk_text for h in result.hits), (
         f"#87: retrieved evidence for {question!r} lacks {expected_substr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #352: an answer built on a dual-active database is not cacheable, and an answer
+# that ACTUALLY drew on more than one active index says so.
+#
+# Two separate signals on two separate facts. The cache gate keys on the DATABASE
+# being ambiguous; the WARN keys on the EVIDENCE having spanned indexes. The pair
+# of tests below is what proves they are not the same check wearing two names.
+# ---------------------------------------------------------------------------
+
+
+async def _mirror_exact_term_into_second_index(session) -> None:
+    """Give ``v2`` its own active document + chunk carrying the SAME exact term.
+
+    This is what makes a dual-active database actually UNION: with the term present
+    under both ``v1`` and ``v2`` and ``active_index_version=None``, ``ExactRetriever``
+    drops its ``Document.index_version ==`` predicate and returns rows from both.
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    from app.models import Chunk, Document, DocumentStatus, ExactTerm, TermType
+
+    now = datetime.now(UTC)
+    doc = Document(
+        document_id=_uuid.uuid4(),
+        index_version="v2",
+        source_name="claude_api",
+        product_area="claude_api",
+        source_url="https://example.invalid/v2",
+        title="Claude API (v2 index)",
+        identity_checksum="sha256:claude_api-v2",
+        last_fetched_at=now,
+        last_indexed_at=now,
+        status=DocumentStatus.active,
+    )
+    session.add(doc)
+    await session.flush()
+    chunk = Chunk(
+        chunk_id=_uuid.uuid4(),
+        document_id=doc.document_id,
+        product_area="claude_api",
+        section_path="/rate-limits",
+        heading="Rate limits",
+        parent_heading=None,
+        chunk_text="CLAUDE_API_RATE_LIMIT caps requests per minute on the v2 index.",
+        context_summary="v2 copy",
+        exact_terms=[],
+        chunk_order=0,
+        content_checksum="sha256:claude_api-v2-chunk-0",
+    )
+    session.add(chunk)
+    await session.flush()
+    session.add(
+        ExactTerm(
+            term_id=_uuid.uuid4(),
+            term_text="CLAUDE_API_RATE_LIMIT",
+            term_type=TermType.environment_variable,
+            product_area="claude_api",
+            document_id=doc.document_id,
+            chunk_id=chunk.chunk_id,
+        )
+    )
+    await session.flush()
+
+
+async def test_exact_lookup_evidence_spanning_two_indexes_is_warned_and_not_cacheable(
+    seeded_session,
+) -> None:
+    """#352, the union made visible.
+
+    The exact arm short-circuits before the provenance gate ever runs, so this
+    result used to come back ``VectorDegrade.none`` -- cacheable -- while its
+    evidence was drawn from two different indexes at once.
+
+    RED without the fix on BOTH halves: ``retrieve`` returns
+    ``VectorDegrade.none``, and no ``retrieval_evidence_spans_multiple_indexes``
+    record is emitted (the event does not exist).
+    """
+    await _add_second_active_index(seeded_session)
+    await _mirror_exact_term_into_second_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        result = await h.retrieve(
+            "CLAUDE_API_RATE_LIMIT",
+            product_area=Domain.claude_api.value,
+            intent=Intent.exact_lookup,
+            limit=20,
+            top_k=6,
+        )
+
+    # PARTNER: the answer is still SERVED. "Not cacheable" must not become
+    # "not answered" -- that would be the fail-closed option the owner rejected.
+    assert len(result.hits) == 2, [hit.index_version for hit in result.hits]
+    assert {hit.index_version for hit in result.hits} == {"v1", "v2"}
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+
+    rec = next(
+        (r for r in records if "retrieval_evidence_spans_multiple_indexes" in r.getMessage()),
+        None,
+    )
+    assert rec is not None, [r.getMessage() for r in records]
+    assert rec.index_versions == "v1,v2"
+    assert rec.index_version_count == 2
+
+
+async def test_a_single_index_answer_on_an_ambiguous_database_is_uncacheable_but_unwarned(
+    seeded_session,
+) -> None:
+    """THE PARTNER THAT SEPARATES THE TWO SIGNALS.
+
+    Same dual-active database, but nothing was mirrored into ``v2``, so the
+    evidence came from ``v1`` alone. The cache gate still fires (the database is
+    ambiguous and ``promote_version`` may yet demote the row this answer came
+    from), and the span WARN does NOT -- it would be noise, and it is the rarer,
+    more actionable line precisely because it does not fire here.
+
+    Without this test, ``_warn_if_evidence_spans_indexes`` could log on EVERY
+    ambiguous request and every other assertion in this file would still pass.
+
+    RED if ``_finalize`` gates the cache on the SPAN instead of the database
+    state, or if ``_warn_if_evidence_spans_indexes`` drops its ``> 1`` guard.
+    """
+    await _add_second_active_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        result = await h.retrieve(
+            "CLAUDE_API_RATE_LIMIT",
+            product_area=Domain.claude_api.value,
+            intent=Intent.exact_lookup,
+            limit=20,
+            top_k=6,
+        )
+
+    assert {hit.index_version for hit in result.hits} == {"v1"}, "precondition: one index only"
+    assert result.vector_degrade is VectorDegrade.ambiguous_index, (
+        "the DATABASE was ambiguous, so the answer is not cacheable even from one index"
+    )
+    assert not any(
+        "retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records
+    ), "the span WARN must key on the evidence, not on the database state"
+
+
+async def test_a_healthy_scoped_retrieval_is_cacheable_and_costs_no_extra_query(
+    seeded_session,
+) -> None:
+    """NON-VACUITY PARTNER for both tests above, plus the performance claim.
+
+    If ``_finalize`` returned ``ambiguous_index`` unconditionally every assertion
+    about "not cached" would pass while the answer cache was dead. It must stay
+    ``none`` on the ordinary single-active path.
+
+    It also pins the cost argument in ``_active_index_ambiguous``'s docstring: a
+    retriever SCOPED to a named index issues NO ``index_versions`` query at all,
+    because the arms already filtered to that one index.
+
+    RED if ``_active_index_ambiguous`` drops its ``active_index_version is not
+    None`` short-circuit (an ``index_versions`` statement appears), or if
+    ``_finalize`` stops returning the incoming degrade unchanged.
+    """
+    from sqlalchemy import event
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        statements.append(statement)
+
+    engine = seeded_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+        result = await h.retrieve(
+            "CLAUDE_API_RATE_LIMIT",
+            product_area=Domain.claude_api.value,
+            intent=Intent.exact_lookup,
+            limit=20,
+            top_k=6,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    assert result.hits, "precondition: the exact arm hit"
+    assert result.vector_degrade is VectorDegrade.none, "a healthy answer must stay cacheable"
+    # PARTNER for the count: the exact-term SELECT really did run, so "no
+    # index_versions query" is not "no queries at all".
+    assert any("exact_terms" in s for s in statements), statements
+    assert not any("index_versions" in s for s in statements), (
+        f"a scoped retriever must not resolve the active index: {statements}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (#352). Every test below was added because a MUTATION of the
+# line it covers survived the whole 2047-test suite. Each names that mutation.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_real_degrade_reason_is_never_overwritten_by_the_ambiguity_overlay(
+    seeded_session,
+) -> None:
+    """THE INVARIANT `_finalize`'s docstring asserts, which nothing pinned.
+
+    Dropping the ``degrade is VectorDegrade.none`` guard survived the full suite,
+    and losing it is not cosmetic: ``Orchestrator.ask`` raises the transient 5xx
+    of #142 only when the reason is exactly ``unavailable``. Relabel an embedder
+    outage as ``ambiguous_index`` and the user gets "the corpus has no answer" --
+    a content refusal the client records as a SUCCESS and never retries -- for
+    what is actually a retryable provider outage.
+
+    RED if ``_finalize`` escalates a reason that is already named, i.e. if the
+    ``degrade is VectorDegrade.none and`` guard is removed.
+    """
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+
+    # Precondition: this database really is ambiguous, so the overlay WOULD fire
+    # on a `none`. Without this the test could pass because nothing was ambiguous.
+    assert await h._active_index_ambiguous() is True
+
+    for named in (VectorDegrade.unavailable, VectorDegrade.mismatch):
+        result = await h._finalize([], named)
+        assert result.vector_degrade is named, (
+            f"the ambiguity overlay overwrote {named!r}, losing the reason the "
+            "orchestrator branches on"
+        )
+
+
+async def test_the_global_answer_when_grounded_path_is_finalized_too(seeded_session) -> None:
+    """``_retrieve_global`` is live production (`product_area is None`) and its
+    ``_finalize`` call was LINE-COVERED but behaviourally untested -- replacing it
+    with a bare ``RetrievalResult(...)`` left the whole suite green. That is this
+    repo's "coverage is not assertion" scar, inside this very change.
+
+    With Tier-3 enforcement OFF -- which #226 pins as a legitimate state and which
+    is the stub-seeded demo shape -- ``_vector_arm_degrade`` returns ``none``, so
+    ``_finalize`` is the ONLY thing that can withhold the cache write here.
+
+    RED if ``_retrieve_global`` returns ``RetrievalResult(...)`` directly instead
+    of awaiting ``_finalize``.
+    """
+    await _add_second_active_index(seeded_session)
+    # No ``embedder_identity`` => enforcement off => the arm is allowed to run.
+    h = HybridRetriever(seeded_session, active_index_version=None)
+
+    result = await h.retrieve(
+        "something entirely unscoped", product_area=None, intent=Intent.how_to, limit=20, top_k=6
+    )
+
+    assert result.vector_degrade is VectorDegrade.ambiguous_index, (
+        "a global answer built while the active index is ambiguous must not be cached"
+    )
+
+
+async def test_the_keyword_arm_carries_the_index_version_it_retrieved_from(
+    seeded_session,
+) -> None:
+    """Deleting ``index_version=doc.index_version`` from the KEYWORD arm left the
+    whole suite green -- only the exact arm's projection was pinned. The
+    consequence is not cosmetic: on every non-``exact_lookup`` question (the
+    common case) every hit would carry ``None``, the span set would be empty, and
+    ``retrieval_evidence_spans_multiple_indexes`` could never fire again.
+
+    RED if ``KeywordRetriever`` stops setting ``index_version``.
+    """
+    r = KeywordRetriever(seeded_session, active_index_version="v1")
+    hits = await r.retrieve("model", product_area=Domain.codex.value)
+
+    assert hits, "precondition: the keyword arm hit"
+    assert {h.index_version for h in hits} == {"v1"}
+
+
+async def test_a_keyword_answer_spanning_two_indexes_is_warned_and_not_cacheable(
+    seeded_session,
+) -> None:
+    """The keyword arm's projection, exercised END TO END through the hybrid layer
+    rather than only at the arm -- the operator-facing half of #352 on the path
+    that produces most evidence.
+
+    RED if the keyword arm stops carrying ``index_version`` (the span set empties
+    and neither the WARN nor the gate fires).
+    """
+    await _add_second_active_index(seeded_session)
+    await _mirror_exact_term_into_second_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        # ``how_to`` never touches the exact short-circuit, so this evidence comes
+        # from the keyword arm.
+        result = await h.retrieve(
+            "how do I raise the claude api rate limit per minute",
+            product_area=Domain.claude_api.value,
+            intent=Intent.how_to,
+            limit=20,
+            top_k=6,
+        )
+
+    assert {h_.index_version for h_ in result.hits} == {"v1", "v2"}, [
+        (h_.retrieval_type, h_.index_version) for h_ in result.hits
+    ]
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+    assert any("retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records)
+
+
+async def test_a_cross_area_span_is_caught_on_the_merged_multi_hop_list(
+    seeded_session,
+) -> None:
+    """Two reviewers reproduced this independently: area A returns only ``v1``,
+    area B only ``v2``, so NEITHER per-area check fires while the merged answer
+    draws on both indexes. The first draft skipped finalizing the merged list,
+    arguing it was "a subset of lists that were each already checked" -- true, and
+    not sufficient, because spanning is not preserved under subsetting.
+
+    RED if ``retrieve_multi`` returns ``RetrievalResult(...)`` directly instead of
+    awaiting ``_finalize`` on the merged list.
+    """
+    from app.retrieval.types import RetrievalResult
+
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+
+    a_only_v1 = _hit_on_index("claude_api", "v1")
+    b_only_v2 = _hit_on_index("gemini_api", "v2")
+
+    async def _fake_retrieve(question, *, product_area, intent, limit, top_k):
+        hit = a_only_v1 if product_area == "claude_api" else b_only_v2
+        # Each area is internally single-index, so each per-area ``_finalize``
+        # sees nothing to warn about -- that is the whole point.
+        return RetrievalResult(hits=[hit], vector_degrade=VectorDegrade.none)
+
+    h.retrieve = _fake_retrieve  # type: ignore[method-assign]
+
+    with _capture_retrieval_logs() as records:
+        result = await h.retrieve_multi(
+            "compare them",
+            product_areas=["claude_api", "gemini_api"],
+            intent=Intent.how_to,
+            limit=20,
+            top_k=6,
+        )
+
+    assert {h_.index_version for h_ in result.hits} == {"v1", "v2"}
+    rec = next(
+        (r for r in records if "retrieval_evidence_spans_multiple_indexes" in r.getMessage()),
+        None,
+    )
+    assert rec is not None, "the merged list spanned two indexes and nothing said so"
+    assert rec.index_versions == "v1,v2"
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+
+
+def _hit_on_index(area: str, index_version: str):
+    """One EvidenceHit pinned to a named index, for the merge tests."""
+    import uuid as _uuid
+
+    from app.models.enums import RetrievalType
+    from app.retrieval.types import EvidenceHit
+
+    return EvidenceHit(
+        chunk_id=_uuid.uuid4(),
+        document_id=_uuid.uuid4(),
+        product_area=area,
+        source_name=area,
+        document_title=f"{area} doc",
+        section_path="/s",
+        heading="H",
+        parent_heading=None,
+        chunk_text=f"{area} chunk",
+        context_summary="s",
+        source_url=f"https://x/{area}",
+        score=1.0,
+        index_version=index_version,
+        retrieval_type=RetrievalType.hybrid,
+        rank=1,
+    )
+
+
+async def test_the_span_warn_is_not_fired_by_hits_that_simply_do_not_know_their_index(
+    seeded_session,
+) -> None:
+    """PARTNER for the ``is not None`` filter, which also survived mutation.
+
+    Counting ``None`` as its own version would make a single-index answer look
+    like a union the moment ONE hand-built hit reached ``_finalize`` -- and the
+    overlay now gates the cache on the span, so that would also stop caching a
+    perfectly healthy answer.
+
+    RED if ``_warn_if_evidence_spans_indexes`` drops its ``is not None`` filter.
+    """
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    hits = [_hit_on_index("claude_api", "v1"), _hit_on_index("claude_api", "v1")]
+    hits[1].index_version = None
+
+    with _capture_retrieval_logs() as records:
+        result = await h._finalize(hits, VectorDegrade.none)
+
+    assert result.vector_degrade is VectorDegrade.none, (
+        "an unknown index is not a second index; this answer is still cacheable"
+    )
+    assert not any(
+        "retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records
+    ), [r.getMessage() for r in records]
+
+
+async def test_a_spanning_answer_on_a_ZERO_active_database_is_not_cached_either(
+    seeded_session,
+) -> None:
+    """THE ONLY PRODUCTION-REACHABLE CELL THE SPAN GATE CHANGES, driven through the
+    REAL arms.
+
+    A skeptic enumerated all 12 cells of {0,1,2 active} x {scoped, unscoped} x
+    {evidence spans 1, 2} and found the gate changes exactly two, of which only
+    this one is reachable through ``Orchestrator.ask`` -- the retriever is unscoped
+    precisely when the database is zero-active or ambiguous. It then found that the
+    span half of the gate was held by a single test that monkeypatches ``retrieve``
+    on a SCOPED retriever, a shape the real arms cannot produce.
+
+    Zero active rows is #265's state and its POLICY is untouched here: the arms
+    still answer, and a zero-active database whose evidence comes from ONE index is
+    still cacheable (pinned by the partner below). What changes is only the case
+    where the evidence itself proves a union.
+
+    RED if ``_finalize`` stops escalating on ``spans_indexes`` (the resolver says
+    ``none``, not ``ambiguous``, so the resolver half cannot cover this).
+    """
+    await _add_second_active_index(seeded_session)
+    await _mirror_exact_term_into_second_index(seeded_session)
+    # Demote BOTH index rows to ``candidate``: that is #265's state -- ingested but
+    # never promoted. The documents stay ``status=active`` regardless, because
+    # ``_upsert_document`` marks them so at INGEST, before promotion, which is
+    # exactly why the arms still return them.
+    await _demote_every_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    assert await h._active_index_ambiguous() is False, (
+        "precondition: zero active rows is NOT 'ambiguous' -- the resolver half is silent here"
+    )
+
+    result = await h.retrieve(
+        "CLAUDE_API_RATE_LIMIT",
+        product_area=Domain.claude_api.value,
+        intent=Intent.exact_lookup,
+        limit=20,
+        top_k=6,
+    )
+
+    assert {hit.index_version for hit in result.hits} == {"v1", "v2"}
+    assert result.vector_degrade is VectorDegrade.ambiguous_index, (
+        "the evidence PROVES a union, so it must not be frozen even though the "
+        "resolver reports 'none' rather than 'ambiguous'"
+    )
+
+
+async def test_a_zero_active_database_with_single_index_evidence_still_caches(
+    seeded_session,
+) -> None:
+    """PARTNER, and the #265 boundary. Without it the test above would be satisfied
+    by "a zero-active database never caches", which IS #265's owner-gated policy
+    change and is deliberately NOT made here -- it would disable the answer cache on
+    every pre-first-promote and seeded-demo deploy.
+
+    RED if ``_active_index_ambiguous`` is widened to ``state is not one``.
+    """
+    await _demote_every_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    result = await h.retrieve(
+        "CLAUDE_API_RATE_LIMIT",
+        product_area=Domain.claude_api.value,
+        intent=Intent.exact_lookup,
+        limit=20,
+        top_k=6,
+    )
+
+    assert {hit.index_version for hit in result.hits} == {"v1"}, "precondition: one index"
+    assert result.vector_degrade is VectorDegrade.none, (
+        "an un-promoted database still caches; #265's policy is not changed here"
+    )
+
+
+async def _demote_every_index(session) -> None:
+    """Leave ZERO rows in ``status=active`` without deleting anything.
+
+    Deleting ``index_versions`` trips the ``documents.index_version`` foreign key;
+    demoting is also what the real un-promoted state looks like.
+    """
+    from sqlalchemy import select as _select
+
+    from app.models import IndexStatus, IndexVersion
+
+    for row in (await session.execute(_select(IndexVersion))).scalars().all():
+        row.status = IndexStatus.candidate
+    await session.flush()

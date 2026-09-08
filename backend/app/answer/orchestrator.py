@@ -86,6 +86,26 @@ from app.routing.intent import Intent, classify_intent, should_skip_retrieval
 
 _logger = logging.getLogger("citevyn.answer")
 
+# The operator-facing name for each reason the answer-cache write was skipped.
+#
+# A MAPPING, not the ``if mismatch else unavailable`` ternary this replaces. That
+# ternary was exhaustive-by-omission: it had no branch for a reason it had not
+# heard of, so a third :class:`VectorDegrade` member silently took the ``else``
+# and every dual-active request told operators the embedding provider was down
+# (#352). No test caught it, because each test asserted one name present and *the
+# other* absent, and there were only two names to be absent.
+#
+# ``test_answer_orchestrator.py``'s exhaustiveness guard asserts this covers every
+# non-``none`` member, so the fallback below is unreachable today. It exists
+# anyway: a ``KeyError`` raised here would 500 a request that had already been
+# answered successfully, which is a far worse failure than a vaguer log line.
+_CACHE_SKIP_EVENTS: dict[VectorDegrade, str] = {
+    VectorDegrade.mismatch: "answer_cache_write_skipped_embedder_mismatch",
+    VectorDegrade.unavailable: "answer_cache_write_skipped_vector_unavailable",
+    VectorDegrade.ambiguous_index: "answer_cache_write_skipped_ambiguous_index",
+}
+_CACHE_SKIP_EVENT_FALLBACK = "answer_cache_write_skipped_unclassified"
+
 # ---------------------------------------------------------------------------
 # Greeting short-circuit
 # ---------------------------------------------------------------------------
@@ -1278,14 +1298,17 @@ class Orchestrator:
         """Persist a grounded answer, write the cache, and return the response.
 
         The cache write is *intentionally skipped* when ``vector_degrade`` is not
-        :attr:`VectorDegrade.none` — the RUNTIME reason from the retriever that the
-        vector arm actually degraded to no hits (a transient Tier-1 outage, #70, or
-        a Tier-3 embedder mismatch that was truly consulted, #57). Caching an answer
+        :attr:`VectorDegrade.none` — the RUNTIME reason from the retriever that this
+        answer must not be frozen: a transient Tier-1 outage (#70), a Tier-3
+        embedder mismatch that was truly consulted (#57), or more than one index
+        claiming ``active`` while the arms were unscoped (#352). Caching an answer
         built without the vector arm would freeze that weaker answer to TTL and
-        silence the degrade WARN on subsequent hits (#65). The skip is logged with a
-        reason-specific event so it is observable and never indistinguishable from a
-        silent drop; the answer itself is still served and persisted to the trace
-        exactly as normal.
+        silence the degrade WARN on subsequent hits (#65); caching one built while
+        the active index was ambiguous would outlive the ``promote_version`` the
+        operator runs to converge the database. The skip is logged with a
+        reason-specific event (:data:`_CACHE_SKIP_EVENTS`) so it is observable and
+        never indistinguishable from a silent drop; the answer itself is still
+        served and persisted to the trace exactly as normal.
         """
         message_id = await self._persist_messages(
             session_id=session_id,
@@ -1313,12 +1336,10 @@ class Orchestrator:
                 ),
             )
         else:
-            skip_event = (
-                "answer_cache_write_skipped_embedder_mismatch"
-                if vector_degrade is VectorDegrade.mismatch
-                else "answer_cache_write_skipped_vector_unavailable"
+            _logger.warning(
+                _CACHE_SKIP_EVENTS.get(vector_degrade, _CACHE_SKIP_EVENT_FALLBACK),
+                extra={"request_id": request_id},
             )
-            _logger.warning(skip_event, extra={"request_id": request_id})
         await self._persist_audit(
             request_id=request_id,
             session_id=session_id,

@@ -48,7 +48,14 @@ def _chunk(area: str):
 
 
 def _doc(area: str):
-    return SimpleNamespace(source_name=area, title=f"{area} doc", source_url=f"https://x/{area}")
+    # ``index_version`` is read by ``VectorRetriever`` onto every ``RetrievedChunk``
+    # (#352), so the double has to carry it like the real ``documents`` row does.
+    return SimpleNamespace(
+        source_name=area,
+        title=f"{area} doc",
+        source_url=f"https://x/{area}",
+        index_version="v1",
+    )
 
 
 def _mock_session(rows: list[tuple]):
@@ -56,8 +63,17 @@ def _mock_session(rows: list[tuple]):
 
     ``rows`` are ``(chunk, doc, distance)`` tuples, ordered by distance ascending
     (closest first) exactly as the real ``ORDER BY distance`` query would.
+
+    ``mappings()`` returns NO rows: ``HybridRetriever._finalize`` resolves the active
+    index to decide whether the answer is cacheable (#352), and an empty
+    ``index_versions`` projection is the ``ActiveIndexState.none`` state — not
+    ambiguous — which leaves every assertion in this module about the CONFIDENCE
+    GATE, which is what it is here to test.
     """
-    result = SimpleNamespace(all=lambda: rows)
+    result = SimpleNamespace(
+        all=lambda: rows,
+        mappings=lambda: SimpleNamespace(all=lambda: []),
+    )
     return SimpleNamespace(
         bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
         execute=AsyncMock(return_value=result),
@@ -127,3 +143,29 @@ async def test_hybrid_global_threads_confidence_into_vector_arm() -> None:
 
     result = await hybrid.retrieve("q", product_area=None, intent=Intent.how_to, limit=10, top_k=6)
     assert result.hits == []  # the gate fired → confirms the tuple was threaded through
+
+
+async def test_the_vector_arm_carries_the_index_version_it_retrieved_from() -> None:
+    """#352. Deleting ``index_version=doc.index_version`` from the VECTOR arm
+    survived the whole suite, because on the hermetic SQLite engine the arm
+    short-circuits to ``[]`` before it builds a single hit -- so no test outside
+    this module can reach the construction at all.
+
+    Consequence if it regresses: on every question the vector arm contributes to,
+    those hits carry ``None``, they drop out of the span set, and
+    ``retrieval_evidence_spans_multiple_indexes`` cannot fire for them. The cache
+    gate still holds (it also keys on the resolver), so this is observability --
+    which is half of what #352 shipped.
+
+    This module's mocked ``postgresql`` dialect is the only hermetic place the
+    real construction runs.
+
+    RED if ``VectorRetriever`` stops setting ``index_version``.
+    """
+    rows = _rows([("codex", 0.60), ("claude_api", 0.30)])
+    vr = VectorRetriever(_mock_session(rows), embedder=_FakeEmbedder(), global_confidence=None)
+
+    hits = await vr.retrieve("q", product_area=None, limit=10)
+
+    assert hits, "precondition: the mocked dialect let the arm actually build hits"
+    assert {h.index_version for h in hits} == {"v1"}, [h.index_version for h in hits]

@@ -32,15 +32,21 @@ of plain dataclasses that the route layer can serialise.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.middleware import get_current_request_id
 from app.models.documents import Document
 from app.models.enums import IndexStatus, TermType
 from app.models.exact_terms import ExactTerm
 from app.models.index_versions import IndexVersion
+
+_logger = logging.getLogger("citevyn.retrieval")
 
 #: Hard cap on the number of hits returned in one response.
 #: Bigger requests are clamped to this value; the route layer
@@ -122,8 +128,26 @@ async def exact_lookup(
     # Build the base query. We join to documents so we can filter
     # on the index version attached to the source document; the
     # join is on the FK the model already declares.
+    # ``Document.index_version`` rides along in the projection so the union below
+    # is observable (#352). Both branches join ``documents`` on the same condition
+    # and always did, so the join is hoisted out of the branch rather than written
+    # twice — the emitted SQL is unchanged apart from the one extra column, and
+    # selecting the column is what makes the hoist load-bearing rather than
+    # cosmetic. The relationship is ``lazy="raise"``, so the join has to be
+    # explicit; explicit also keeps the SQL predictable.
+    # ``.label(...)`` so the WARN below reads ``row.index_version`` by NAME. The
+    # hits loop beneath uses positional ``row[1]``/``row[2]``, which is this file's
+    # existing idiom, but a positional read of a column ADDED to the end is the
+    # kind that silently retargets when someone inserts a column ahead of it, with
+    # no test failing.
     stmt = (
-        select(ExactTerm, ExactTerm.document_id, ExactTerm.chunk_id)
+        select(
+            ExactTerm,
+            ExactTerm.document_id,
+            ExactTerm.chunk_id,
+            Document.index_version.label("index_version"),
+        )
+        .join(Document, ExactTerm.document_id == Document.document_id)
         .where(ExactTerm.term_text == term)
         .where(ExactTerm.product_area == product_area)
     )
@@ -135,23 +159,32 @@ async def exact_lookup(
     # specific one (e.g. for replay). The "active" string is
     # the sentinel — a real index_version is just a string PK.
     if index_version == "active":
-        # Join to the document's index_version column and filter on
-        # its status. The relationship is `lazy="raise"` so we
-        # must use ``joinedload`` or an explicit join; explicit
-        # join keeps the SQL predictable.
-        stmt = stmt.join(Document, ExactTerm.document_id == Document.document_id).where(
+        stmt = stmt.where(
             Document.index_version.in_(
                 select(IndexVersion.index_version).where(IndexVersion.status == IndexStatus.active)
             )
         )
     else:
-        stmt = stmt.join(Document, ExactTerm.document_id == Document.document_id).where(
-            Document.index_version == index_version
-        )
+        stmt = stmt.where(Document.index_version == index_version)
 
     stmt = stmt.limit(capped_limit)
 
     rows = (await session.execute(stmt)).all()
+
+    # ``index_version="active"`` is SET MEMBERSHIP, not a single-row pick: on a
+    # database where more than one ``IndexVersion`` claims ``active`` this route
+    # silently unions their documents, at the exact moment the answer pipeline's
+    # provenance gate has decided it cannot tell which index owns the vectors
+    # (#352). It is left unioning on purpose — this route has no answer cache to
+    # poison, and changing what it returns is the same CLASS of owner decision as
+    # #265 (which is scoped to ZERO active rows, a different state) — but
+    # it no longer does so silently.
+    #
+    # STATED LIMIT: this sees only the rows that survived ``limit(capped_limit)``,
+    # which carries no ``ORDER BY``, so a truncated result can hide the second
+    # index and under-report. It can therefore prove a union happened and can
+    # never prove one did not.
+    _warn_if_hits_span_indexes(rows)
 
     hits: list[ExactLookupHit] = []
     for row in rows:
@@ -171,6 +204,47 @@ async def exact_lookup(
             )
         )
     return hits
+
+
+def _warn_if_hits_span_indexes(rows: Sequence[Any]) -> None:
+    """WARN when this lookup's rows came from more than one index version (#352).
+
+    Pure over rows already fetched — no extra query.
+
+    Read by NAME (``row.index_version``) rather than by position, so inserting a
+    column ahead of it cannot silently retarget this WARN at the wrong value. The
+    protection is the **by-name read**, not the ``.label(...)``: a skeptic mutated
+    the label away and the whole suite stayed green, because SQLAlchemy already
+    keys that column ``index_version`` either way. The label is kept as an explicit
+    statement of the name this line depends on, and is honestly inert.
+
+    **Stated, because this file is now half-converted:** the hits loop below still
+    reads ``row[1]`` / ``row[2]`` positionally for ``document_id`` and ``chunk_id``
+    — the values actually returned to API callers. The column-insertion hazard is
+    closed for the log line and still live on those two.
+
+    Note that ``ExactLookupHit.index_version`` echoes back what the CALLER asked
+    for (the literal ``"active"`` on the default path), so before this the
+    response could not tell an operator which index any hit belonged to, and
+    nothing else recorded it. Changing that field to the per-hit truth is a
+    response-contract change and is deliberately not done here.
+
+    Payload shaped for ``app.core.logging``'s ``extra=`` allowlist:
+    ``index_version_count`` is an ``int`` (printed verbatim under any key) and
+    ``index_versions`` is a joined ``str`` under a key on both
+    ``EMITTED_TEXT_KEYS`` and ``OPAQUE_ID_KEYS``.
+    """
+    versions = sorted({r.index_version for r in rows if r.index_version is not None})
+    if len(versions) <= 1:
+        return
+    _logger.warning(
+        "exact_lookup_spans_multiple_indexes",
+        extra={
+            "request_id": get_current_request_id(),
+            "index_versions": ",".join(versions),
+            "index_version_count": len(versions),
+        },
+    )
 
 
 __all__ = ["ExactLookupHit", "exact_lookup", "MAX_RESULTS"]

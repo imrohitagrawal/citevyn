@@ -8,6 +8,7 @@ existing single-domain path (covered elsewhere).
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -41,7 +42,18 @@ def _hit(area: str) -> EvidenceHit:
 
 def _hybrid(per_area: dict[str, RetrievalResult]) -> tuple[HybridRetriever, list[str]]:
     calls: list[str] = []
-    h = HybridRetriever(SimpleNamespace())  # session unused — retrieve is stubbed
+    # ``retrieve_multi`` finalizes the MERGED list (#352), and ``_finalize`` resolves
+    # the active index when nothing else already degraded the result. The session is
+    # otherwise unused (per-area ``retrieve`` is stubbed), so it only has to answer
+    # that one projection — an empty ``index_versions`` is ``ActiveIndexState.none``,
+    # which keeps every assertion in this module about the MERGE, not the gate.
+    h = HybridRetriever(
+        SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: []))
+            )
+        )
+    )
 
     async def _fake_retrieve(question, *, product_area, intent, limit, top_k):
         calls.append(product_area)
@@ -108,3 +120,73 @@ async def test_retrieve_multi_caps_fan_out() -> None:
     h, calls = _hybrid(per)
     await h.retrieve_multi("q", product_areas=areas, intent=Intent.how_to, limit=20, top_k=6)
     assert len(calls) == 3  # _MAX_MULTIHOP_DOMAINS
+
+
+# ---------------------------------------------------------------------------
+# #352: ``_combine_degrades`` used to be a two-test ladder with a ``none``
+# fall-through, so any reason it had not been taught about was merged into "clean"
+# and the multi-hop answer was cached. It fails OPEN, which is the wrong
+# direction, and nothing here would have noticed.
+# ---------------------------------------------------------------------------
+
+
+async def test_retrieve_multi_does_not_cache_when_one_area_saw_an_ambiguous_index() -> None:
+    """The concrete #352 case at the multi-hop seam.
+
+    RED if ``ambiguous_index`` is left out of ``_DEGRADE_PRECEDENCE`` -- the loop
+    falls through to ``VectorDegrade.none`` and the union answer is cached.
+    """
+    h, _ = _hybrid(
+        {
+            "claude_api": RetrievalResult(
+                hits=[_hit("claude_api")], vector_degrade=VectorDegrade.ambiguous_index
+            ),
+            "gemini_api": RetrievalResult(
+                hits=[_hit("gemini_api")], vector_degrade=VectorDegrade.none
+            ),
+        }
+    )
+    result = await h.retrieve_multi(
+        "q", product_areas=["claude_api", "gemini_api"], intent=Intent.how_to, limit=20, top_k=6
+    )
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+    # PARTNER: the hits are still merged and served -- "not cached" is not
+    # "not answered".
+    assert len(result.hits) == 2
+
+
+async def test_every_degrade_reason_is_ranked_so_none_can_only_mean_clean() -> None:
+    """THE GUARD FOR THE NEXT MEMBER, not for this one.
+
+    ``_combine_degrades`` returns ``VectorDegrade.none`` for anything it does not
+    recognise, and ``Orchestrator._respond_answer`` reads ``none`` as "safe to
+    freeze for 24 hours". So an unranked member is silently a cache-poisoning bug
+    on the multi-hop path. Asserting the SET rather than adding one more example
+    test is what makes this hold for a member nobody has written yet.
+
+    RED if a ``VectorDegrade`` member is added without ranking it.
+    """
+    from app.retrieval.hybrid import _DEGRADE_PRECEDENCE, _combine_degrades
+
+    assert set(_DEGRADE_PRECEDENCE) == set(VectorDegrade) - {VectorDegrade.none}
+    assert VectorDegrade.none not in _DEGRADE_PRECEDENCE, (
+        "ranking 'none' would make it win over a real reason"
+    )
+    # PARTNER: the ranking is actually CONSULTED, so the set assertion above is
+    # not pinning a constant nothing reads.
+    for reason in _DEGRADE_PRECEDENCE:
+        assert _combine_degrades([VectorDegrade.none, reason]) is reason, reason
+    assert _combine_degrades([VectorDegrade.none, VectorDegrade.none]) is VectorDegrade.none
+    # The ORDER, not just the set. The module comment argues at length that
+    # ``ambiguous_index`` outranks ``mismatch`` -- ``index_versions`` is the root
+    # cause an operator must fix before an embedder verdict means anything -- and
+    # review found that swapping the two survived the entire suite, because every
+    # assertion here was about membership.
+    assert (
+        _combine_degrades([VectorDegrade.mismatch, VectorDegrade.ambiguous_index])
+        is VectorDegrade.ambiguous_index
+    )
+    assert (
+        _combine_degrades([VectorDegrade.unavailable, VectorDegrade.mismatch])
+        is VectorDegrade.mismatch
+    )

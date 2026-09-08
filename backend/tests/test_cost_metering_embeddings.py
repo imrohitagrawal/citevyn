@@ -640,6 +640,7 @@ def test_a_cost_stop_is_NOT_swallowed_by_the_vector_arms_degrade_path() -> None:
     instead of the transient 5xx the budget is specified to raise."""
     from app.embeddings.errors import EmbedderUnavailable
     from app.retrieval.hybrid import HybridRetriever
+    from app.retrieval.types import VectorDegrade
 
     assert not issubclass(CostLimitReached, EmbedderUnavailable)
 
@@ -655,6 +656,9 @@ def test_a_cost_stop_is_NOT_swallowed_by_the_vector_arms_degrade_path() -> None:
                 "q",
                 product_area=None,
                 limit=5,
-                enabled=True,
+                # ``VectorDegrade.none`` is the "the gate says run" input — the
+                # bare ``enabled=True`` bool this replaces (#352). The arm has to
+                # actually RUN for this test to mean anything.
+                arm_degrade=VectorDegrade.none,
             )
         )

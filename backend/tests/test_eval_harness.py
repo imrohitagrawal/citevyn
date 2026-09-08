@@ -1187,3 +1187,66 @@ def test_eval_harness_mirrors_the_orchestrator_alias_canonicalization() -> None:
         "the harness did not canonicalize 'sitewin' -> 'CiteVyn', so retrieval found "
         "nothing — it has drifted from Orchestrator.ask"
     )
+
+
+# ---------------------------------------------------------------------------
+# #352: the Postgres-eval "this number is meaningless" guard.
+# ---------------------------------------------------------------------------
+
+
+def test_the_postgres_eval_raises_on_every_corrupting_degrade_reason() -> None:
+    """The guard used to read ``degrade is VectorDegrade.mismatch``, so a reason it
+    had not been taught about slipped past and the hit rate simply came out LOWER
+    with no error — which is precisely the "silently lowering the number" outcome
+    its own docstring says it exists to prevent (#352).
+
+    ``VectorDegrade.unavailable`` is asserted ABSENT on purpose: a transient
+    provider outage is a retry, not a corrupt fixture, and folding it in would make
+    every flaky embedding call abort a paid eval run.
+
+    RED if a ``VectorDegrade`` member other than ``none``/``unavailable`` is added
+    without being listed, or if ``unavailable`` is folded in.
+    """
+    from app.retrieval.types import VectorDegrade
+    from tests.eval.retrieval import _EVAL_FATAL_DEGRADES
+
+    corrupting = set(VectorDegrade) - {VectorDegrade.none, VectorDegrade.unavailable}
+    assert corrupting == _EVAL_FATAL_DEGRADES
+    # PARTNER: the set is non-empty and names the two real corruptions, so the
+    # equality above is not satisfiable by an empty set.
+    assert VectorDegrade.mismatch in _EVAL_FATAL_DEGRADES
+    assert VectorDegrade.ambiguous_index in _EVAL_FATAL_DEGRADES
+
+
+def test_the_postgres_eval_fatal_predicate_is_actually_consulted() -> None:
+    """THE PARTNER THE SET GUARD ABOVE LACKED, and it is the reason the predicate
+    was extracted from its call site at all.
+
+    The consumer line is behind ``if postgres and ...``; ``postgres`` defaults to
+    ``False`` and NO hermetic test passes ``True``. So a reviewer reverted the
+    membership test to the pre-#352 ``degrade is VectorDegrade.mismatch`` and the
+    entire suite -- 2047 tests, this file's set guard included -- stayed GREEN.
+    A guard that cannot detect its own reversion is exactly what this guard exists
+    to prevent, one level up.
+
+    Driving ``eval_degrade_is_fatal`` directly is what makes the set assertion
+    above load-bearing rather than a pin on a constant nothing reads.
+
+    RED if ``eval_degrade_is_fatal`` stops consulting ``_EVAL_FATAL_DEGRADES``
+    (e.g. reverts to ``degrade is VectorDegrade.mismatch``), or if it stops
+    exempting refusal cases.
+    """
+    from app.retrieval.types import VectorDegrade
+    from tests.eval.retrieval import eval_degrade_is_fatal
+
+    # The corruptions: an answerable case is invalidated by both, and this is what
+    # a reversion to ``is VectorDegrade.mismatch`` gets wrong.
+    assert eval_degrade_is_fatal(VectorDegrade.ambiguous_index, kind="factual") is True
+    assert eval_degrade_is_fatal(VectorDegrade.mismatch, kind="factual") is True
+    # PARTNERS, so this is not "everything is fatal": a clean run and a transient
+    # provider outage both pass, and a refusal case is exempt whatever the reason
+    # (it expects no evidence, so a degraded arm cannot corrupt its verdict).
+    assert eval_degrade_is_fatal(VectorDegrade.none, kind="factual") is False
+    assert eval_degrade_is_fatal(VectorDegrade.unavailable, kind="factual") is False
+    assert eval_degrade_is_fatal(VectorDegrade.ambiguous_index, kind="refusal") is False
+    assert eval_degrade_is_fatal(VectorDegrade.mismatch, kind="refusal") is False

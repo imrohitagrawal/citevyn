@@ -101,6 +101,10 @@ class KeywordRetriever:
                 context_summary=chunk.context_summary,
                 source_url=doc.source_url,
                 score=0.5,
+                # The document's owning index (#352). ``doc`` is already selected,
+                # so this is free; it lets the hybrid layer see whether the merged
+                # evidence spans more than one active index.
+                index_version=doc.index_version,
             )
             for chunk, doc in rows
         ]

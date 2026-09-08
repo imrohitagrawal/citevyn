@@ -62,6 +62,29 @@ class PostgresEvalError(RuntimeError):
     """
 
 
+# Degrade reasons that make a Postgres eval number MEANINGLESS rather than merely
+# unlucky, so the run raises instead of quietly reporting a lower hit rate.
+# ``VectorDegrade.unavailable`` is excluded on purpose: a transient provider outage
+# is a retry, not a corrupt fixture.
+_EVAL_FATAL_DEGRADES = frozenset({VectorDegrade.mismatch, VectorDegrade.ambiguous_index})
+
+
+def eval_degrade_is_fatal(degrade: VectorDegrade, *, kind: str) -> bool:
+    """Whether ``degrade`` invalidates a Postgres eval case rather than just lowering it.
+
+    Extracted from the call site so a HERMETIC test can consult it. The predicate
+    used to be inline behind ``if postgres and ...``, and ``postgres`` defaults to
+    ``False`` with no hermetic caller passing ``True`` — so a reviewer reverted the
+    membership test to the pre-#352 ``degrade is VectorDegrade.mismatch`` and the
+    entire 2047-test suite stayed green. A guard that cannot detect its own
+    reversion is the exact failure mode this guard exists to prevent, one level up.
+
+    ``kind == "refusal"`` cases are exempt: a refusal case EXPECTS no evidence, so a
+    degraded arm cannot corrupt its verdict.
+    """
+    return kind != "refusal" and degrade in _EVAL_FATAL_DEGRADES
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrievalOutcome:
     """Per-case retrieval result."""
@@ -563,10 +586,15 @@ async def evaluate_retrieval(
                 embedder=embedder,
                 use_memory=use_memory,
             )
-            if postgres and case.kind != "refusal" and degrade is VectorDegrade.mismatch:
+            # The membership test lives in ``eval_degrade_is_fatal`` so a hermetic
+            # test can drive it directly — this branch is behind ``postgres``, which
+            # no hermetic caller sets, so an inline predicate here is unreachable in
+            # every test run and cannot be held by anything (#352).
+            if postgres and eval_degrade_is_fatal(degrade, kind=case.kind):
                 raise PostgresEvalError(
-                    f"vector arm degraded to Tier-3 mismatch on case {case.id!r}: the "
-                    "seeded index provenance and configured query embedder disagree."
+                    f"vector arm degraded ({degrade.value}) on case {case.id!r}: the "
+                    "seeded index provenance and configured query embedder disagree, "
+                    "or more than one index_versions row claims status=active."
                 )
             # The domain actually routed to (from the memory-resolved query for a
             # followup) — not a second classification of the raw question (finding #7).

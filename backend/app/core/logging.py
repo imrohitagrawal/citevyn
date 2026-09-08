@@ -40,7 +40,7 @@ HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{32,}\b")
 
 # Keys whose value is an OPAQUE CORRELATION ID, not a credential, and which the
 # entropy sweep would otherwise destroy. Matched on the WHOLE lowered key, not
-# as a substring, so this is exactly these three names and nothing that merely
+# as a substring, so this is exactly these four names and nothing that merely
 # contains them.
 #
 # Measured, and the reason this exists: a production request id is
@@ -64,9 +64,19 @@ HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{32,}\b")
 # value to ``[REDACTED]``, so nothing else bounded the length -- and a client
 # sending a 4 kB ``X-Request-ID`` would then have written a 4 kB line into a
 # metered log pipeline, on the ``build_log_event`` path where
-# ``MAX_EMITTED_TEXT`` does not reach. No real id comes close to the cap: the
-# longest is a 128-character ``source_version_hash``.
-OPAQUE_ID_KEYS = frozenset({"request_id", "index_version", "source_version_hash"})
+# ``MAX_EMITTED_TEXT`` does not reach. No real SINGLE id comes close to the cap:
+# the longest is a 128-character ``source_version_hash``. (A JOINED value can:
+# see ``index_versions`` below, where two 64-character versions already make 129
+# and three overflow the cap.)
+#
+# ``index_versions`` (plural, #352) is the comma-joined set of index versions one
+# answer's evidence spanned. It is the same data as ``index_version`` under a
+# different cardinality, so it needs the same exemption -- and because this set is
+# matched on the WHOLE key it does not inherit one. The joined value is bounded by
+# ``MAX_OPAQUE_ID`` like the others; on a database with enough simultaneously-active
+# sha-shaped indexes to overflow 160 characters the value truncates and the
+# ``index_version_count`` int emitted alongside it stays exact.
+OPAQUE_ID_KEYS = frozenset({"request_id", "index_version", "index_versions", "source_version_hash"})
 MAX_OPAQUE_ID = 160
 
 
@@ -182,6 +192,15 @@ EMITTED_TEXT_KEYS = frozenset(
         "status",
         # Index / embedder provenance (retrieval + promotion diagnostics).
         "index_version",
+        # The PLURAL of the line above: the comma-joined set of index versions one
+        # answer's evidence actually came from (#352). Same data, same disclosure
+        # profile -- an admin-chosen `index_versions.index_version` primary key,
+        # never a credential -- so it is allowlisted on the same grounds. It is
+        # ALSO in `OPAQUE_ID_KEYS`: the exemption there is matched on the WHOLE
+        # key, so without it the entropy sweep would blank a sha-shaped version to
+        # `[REDACTED]` and this field would be one letter away from the exact #361
+        # defect that motivated that set.
+        "index_versions",
         "index_stamp_status",
         "index_embedding_provider",
         "index_embedding_model",
