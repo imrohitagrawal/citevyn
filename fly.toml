@@ -42,8 +42,23 @@ primary_region = "iad"
   dockerfile = "infra/docker/Dockerfile.api"
 
 [build.args]
-  # Stamped into the image and reported by the app. Override per release:
-  #   fly deploy --build-arg VERSION=$(git describe --tags --always)
+  # Stamped into the image and reported by the app, and overridden per release
+  # on the command line. The example of that command that used to sit here has
+  # been REMOVED rather than corrected, and it must not come back:
+  #
+  #   * the real command also passes VITE_API_LIVE and VITE_API_DEMO_KEY (#296
+  #     — omitting the key ships the public default and 401s every browser
+  #     call for as long as nobody notices) and --local-only (#385);
+  #   * VITE_API_DEMO_KEY is a credential read from the RUNNING MACHINE at
+  #     deploy time, which no committed file can do — so any copy living here
+  #     can only ever be a partial one, which is exactly the trap the old
+  #     comment was. (test_fly_config.py also forbids a credential here, but
+  #     only in the [env] table: both of its checks read fly_config["env"]
+  #     and neither looks at [build.args].)
+  #   * a partial copy in a config file is worse than none: it is what a human
+  #     copies, and tomllib discards comments so no config test can see it.
+  #
+  # The single copy is docs/DEPLOY_FLY.md §4.1. Run it from there.
   VERSION = "dev"
 
 [deploy]

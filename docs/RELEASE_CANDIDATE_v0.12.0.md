@@ -60,8 +60,37 @@ git push origin main --tags   # fires release.yml: build -> boot-smoke -> push :
 # 3. Confirm the images actually published and boot
 gh run watch --exit-status $(gh run list --workflow=release.yml -L1 --json databaseId -q '.[0].databaseId')
 
-# 4. Deploy (Fly) — owner-only, not run by this session
-fly deploy --build-arg VERSION=$(git describe --tags --always)
+# 4. Deploy (Fly) — owner-only, not run by this session.
+#    STOP HERE. Open docs/DEPLOY_FLY.md §4.1 and run it verbatim.
+#    Then come back and continue with the block below.
+```
+
+Step 4 is deliberately not written out here. The copy that used to sit on that
+line went stale twice, independently: it never learned `VITE_API_DEMO_KEY`
+(#296 — the bundle shipped the public default and every browser call 401'd for
+about an hour) and it never learned `--local-only` (#385 — the remote builder
+stalled three times with `deadline_exceeded`). §4.1 is now the only copy of the
+build command, and `backend/tests/test_deploy_fly_build_args_are_documented.py`
+fails if a second one appears in a markdown code block, or in a `.toml` or `.sh`
+line, anywhere in the repo. What that scan does **not** read: markdown prose
+(this paragraph included), `.yml`, `Makefile`, `.mdx`, and §4.1 itself, which is
+exempt by line range — a stale command planted inside §4.1 is caught by that
+file's §4.1 content guards instead.
+
+Two `fly deploy` invocations outside §4.1 are visible to that scan today, and
+both are permitted by design: §6.1's `fly deploy --image` rollback at
+`docs/DEPLOY_FLY.md:828`, which passes no build argument, and the allowlisted
+incident hint at `scripts/check_bundle_key.sh:150`, which deliberately ends in
+`...`. This paragraph's own mention of the rollback is invisible to the scan
+because prose is not a code block — which is why the explanation lives here and
+not inside the block above, where it *was* classified as a deploy copy and saved
+only by the `--image` shape exemption, so that rewording it to name any other
+flag would have turned this document red.
+
+```bash
+# 4 (continued) — ONLY after §4.1 has actually been run. Pasting these before
+#    it tails the logs of whatever is deployed NOW, which reads as a successful
+#    deploy that never happened.
 fly logs
 fly status
 

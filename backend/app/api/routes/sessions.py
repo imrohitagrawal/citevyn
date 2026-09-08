@@ -65,8 +65,13 @@ def _now() -> datetime:
 class CreateSessionRequest(BaseModel):
     """Body for ``POST /v1/sessions`` (per ``docs/API_SPEC.md`` §4).
 
-    The MVP pins every session to the authenticated ``demo_user``; the
-    ``user_id`` and ``channel`` fields are accepted to keep the wire
+    The session is owned by the caller's RESOLVED principal -- the
+    cookie-derived ``anon_``/``usr_`` id ``resolve_principal`` returns
+    (ADR-0004 PR 3), which ``create_session`` writes to ``Session.user_id``.
+    It has not been pinned to the constant ``demo_user`` since PR 3; that
+    constant is the audit identity only.
+
+    The ``user_id`` and ``channel`` fields are accepted to keep the wire
     shape stable for the V1 multi-tenant work but only ``channel`` is
     acted on. ``user_id`` is ignored so a misconfigured client cannot
     impersonate another caller.
@@ -131,9 +136,31 @@ async def _get_session_or_404(
     (including a soft-closed session, whose ``DELETE`` sets ``expires_at`` to
     now), returns the SAME 404 as a genuine miss — never a 403, which would
     confirm the id is real and turn this into a membership oracle over the
-    UUID space. Behaviourally a no-op today (every caller resolves to the one
-    constant ``demo_user`` principal); load-bearing the moment a second
-    principal exists (see ``docs/ADR/0004-user-accounts.md`` PR 1).
+    UUID space.
+
+    ``Session.user_id == user_id`` is LOAD-BEARING today, not a placeholder.
+    Both callers pass ``Depends(resolve_principal)`` (ADR-0004 PR 3), which
+    returns a cookie-derived per-visitor principal -- a minted
+    ``anon_<uuid4hex>`` or a signed-in ``usr_`` account id -- and deliberately
+    NOT the constant ``DEMO_USER_ID`` audit identity that ``rate_limited_demo``
+    returns. Two callers presenting DIFFERENT cookies therefore resolve to
+    different principals, and this predicate is the ONLY thing separating
+    them. Stated that way rather than as "distinct visitors hold distinct
+    principals", which is false in both directions: ``resolve_principal``
+    mints a fresh ``anon_`` id on every request that presents no RESOLVABLE
+    cookie (so one visitor can hold many), and two browsers signed into one
+    account share a single ``usr_`` id (so many visitors can hold one). The
+    boundary this predicate defends is the ACCOUNT, not the human, which is
+    what the security argument actually needs: no ownership middleware and no
+    row-level security backs it up (``db/versions`` declares no policy and no
+    trigger). Deleting it reopens the cross-account IDOR that PR 1 closed;
+    ``tests/test_session_ownership.py`` goes red on exactly that deletion
+    (measured: 6 passed -> 2 failed, both asserting ``200 == 404`` /
+    ``204 == 404``). TWO other routes carry the same predicate and must change
+    with it -- ``messages.py:87`` in ``_require_session`` and ``me.py:62`` in
+    ``GET /v1/me/sessions`` (``Session.user_id == principal_id``); a
+    ``grep -rn 'Session.user_id' backend/app/api/routes/`` finds all three and
+    nothing else.
     """
     stmt = select(Session).where(
         Session.session_id == session_id,

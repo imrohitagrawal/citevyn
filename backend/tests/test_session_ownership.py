@@ -5,9 +5,15 @@
 each discarded the caller's ``user_id`` (``del user_id`` / an unused ``_user_id``
 param) and loaded the row by primary key alone. That is harmless with exactly
 one principal (the constant ``demo_user``), but it is a live cross-account IDOR
-the moment a second principal exists — this test seeds one directly, the way a
-real second account will look once ADR-0004 PR 6 ships, rather than waiting for
-that PR to prove the predicate works.
+the moment a second principal exists — this test seeds one directly rather than
+driving the account routes to make one.
+
+Second principals are no longer hypothetical: PR 3 gave every visitor a
+cookie-derived ``anon_`` principal and PR 6 shipped real ``usr_`` accounts, so
+the predicate has been load-bearing in production since PR 3. Seeding the row
+directly is still the right shape here — it keeps this an ownership test rather
+than a registration test — but it is a convenience now, not a stand-in for a PR
+that has not landed.
 
 Every assertion here is **404**, never 403: a mismatch must be indistinguishable
 from a genuine miss, or the response becomes a membership oracle over the UUID
