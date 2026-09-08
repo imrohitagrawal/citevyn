@@ -273,10 +273,43 @@ describe("the bundle gate is reachable from npm", () => {
     expect(existsSync(join(frontendRoot, "scripts", "check-bundle-size.mjs"))).toBe(true);
   });
 
-  it("bundle-budget.json holds a positive integer ceiling", () => {
+  /**
+   * THE ONLY PLACE IN THE REPO THAT PINS A BUDGET KEY NAME AS A LITERAL.
+   * Everything in scripts/bundle-budget.test.mjs goes through the imported
+   * `BUDGET_KEY` / `LAZY_BUDGET_KEY` constants, so a COORDINATED rename of
+   * constant + JSON key is invisible to all of it. These two literals are what
+   * catches that, and they survive a `scripts/**` deselection because this file
+   * lives under the original `src/**` glob.
+   */
+  it("bundle-budget.json holds a positive integer ceiling for BOTH enforced keys", () => {
     const budget = JSON.parse(readFileSync(join(frontendRoot, "bundle-budget.json"), "utf8"));
     expect(Number.isInteger(budget.eagerChunkGzipMaxBytes)).toBe(true);
     expect(budget.eagerChunkGzipMaxBytes).toBeGreaterThan(0);
+    // #372's per-chunk lazy ceiling. A literal, for the reason above.
+    expect(Number.isInteger(budget.lazyChunkGzipMaxBytes)).toBe(true);
+    expect(budget.lazyChunkGzipMaxBytes).toBeGreaterThan(0);
+  });
+
+  /**
+   * The PARTNER for the two assertions above. They each check that ONE key is
+   * present and sane; neither notices a THIRD key appearing (an unenforced
+   * ceiling nobody reads) or one of them being dropped while the other stays.
+   * `npm test` has no count gate, so without this a deleted key is invisible to
+   * the whole unit suite (no figure quoted: it moves with every PR, and this
+   * repo has shipped a stale one before): `parseBudget` would still be called
+   * for it and the process
+   * would fail, but only in `npm run check:bundle`, which is a different job.
+   */
+  it("the enforced-key SET is exactly those two, so adding or dropping one is visible", () => {
+    const budget = JSON.parse(readFileSync(join(frontendRoot, "bundle-budget.json"), "utf8"));
+    const enforced = Object.keys(budget)
+      .filter((k) => k !== "_comment")
+      .sort();
+    expect(enforced).toEqual(["eagerChunkGzipMaxBytes", "lazyChunkGzipMaxBytes"]);
+    // And the `_comment` really is the only non-key entry, so the filter above
+    // cannot be hiding something by accident.
+    expect(Array.isArray(budget._comment)).toBe(true);
+    expect(Object.keys(budget)).toHaveLength(3);
   });
 });
 

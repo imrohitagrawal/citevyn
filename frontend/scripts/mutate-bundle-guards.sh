@@ -32,10 +32,16 @@ RUN=scripts/check-bundle-size.mjs
 PKG=package.json
 VC=vite.config.ts
 WF=../.github/workflows/frontend.yml
-TESTS="scripts/bundle-budget.test.mjs src/test/buildGuards.test.ts"
+BUD=bundle-budget.json
+# scripts/lazy-landing-strip.test.mjs is in here since #372: it holds the only
+# assertion that ties the per-chunk lazy ceiling to the chunk that actually
+# ships, and a mutant run against a suite that cannot see a guard reads as a
+# SURVIVOR for the wrong reason. It runs a real vite build in beforeAll, which
+# is what most of this harness's wall-clock now is.
+TESTS="scripts/bundle-budget.test.mjs scripts/lazy-landing-strip.test.mjs src/test/buildGuards.test.ts"
 
-if ! git diff --quiet -- "$PURE" "$RUN" "$PKG" "$VC" "$WF"; then
-  echo "refusing to run: one of $PURE / $RUN / $PKG / $VC / $WF has uncommitted changes."
+if ! git diff --quiet -- "$PURE" "$RUN" "$PKG" "$VC" "$WF" "$BUD"; then
+  echo "refusing to run: one of $PURE / $RUN / $PKG / $VC / $WF / $BUD has uncommitted changes."
   echo "commit or stash them first, so a restore cannot lose your work."
   exit 1
 fi
@@ -43,7 +49,7 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 cp "$PURE" "$TMP/pure"; cp "$RUN" "$TMP/run"; cp "$PKG" "$TMP/pkg"
-cp "$VC" "$TMP/vc"; cp "$WF" "$TMP/wf"
+cp "$VC" "$TMP/vc"; cp "$WF" "$TMP/wf"; cp "$BUD" "$TMP/bud"
 
 KILLED=0; SURVIVED=0
 
@@ -100,7 +106,14 @@ mutate "build: drop --manifest" "$PURE" "$TMP/pure" \
 mutate "build: drop production mode" "$PURE" "$TMP/pure" \
 '"--mode", "production", ' ''
 mutate "build: stop building the LIVE variant" "$PURE" "$TMP/pure" \
-'env: { VITE_API_LIVE: "true" },' 'env: {},'
+'env: { VITE_API_LIVE: "true", NODE_ENV: "production" },' 'env: { NODE_ENV: "production" },'
+# #372 review finding: `--mode production` does NOT set NODE_ENV, vitest sets it
+# to "test", and React's package exports branch on it. Without this pin,
+# lazy-landing-strip.test.mjs measured a React DEVELOPMENT build (118,897 B gzip
+# entry, 6,067 B strip) while its docblock claimed it measured the shipping
+# chunk (62,974 B / 4,722 B).
+mutate "build: drop the NODE_ENV pin (measures a React DEV build under vitest)" "$PURE" "$TMP/pure" \
+'env: { VITE_API_LIVE: "true", NODE_ENV: "production" },' 'env: { VITE_API_LIVE: "true" },'
 
 # --- the eager graph ---------------------------------------------------------
 mutate "graph: stop following static imports (the modulePreload:false blind spot)" "$PURE" "$TMP/pure" \
@@ -144,6 +157,130 @@ mutate "evaluate: drop the plausibility floor" "$PURE" "$TMP/pure" \
 mutate "evaluate: report constant zeros instead of the real numbers" "$PURE" "$TMP/pure" \
 '    `${totalRaw} B raw / ${totalGzip} B gzip total (budget ${max} B, headroom ${headroom} B)`;' \
 '    `0 B raw / 0 B gzip total (budget 0 B, headroom 0 B)`;'
+
+# --- #372: the PER-CHUNK lazy ceiling ---------------------------------------
+#
+# Every mutation here is a way the second gate can look present and measure
+# nothing. The first is the #323 defect itself, reproduced one function over:
+# with `c.gzip > max` an `undefined` ceiling makes the violator list EMPTY and
+# the gate passes for a bundle of any shape.
+
+echo
+echo "--- the per-chunk lazy ceiling (#372) ---"
+mutate "lazy: fail-OPEN comparison (undefined ceiling finds no violators)" "$PURE" "$TMP/pure" \
+'  const violators = chunks.filter((c) => !(c.gzip <= max));' \
+'  const violators = chunks.filter((c) => c.gzip > max);'
+mutate "lazy: off-by-one at the ceiling" "$PURE" "$TMP/pure" \
+'  const violators = chunks.filter((c) => !(c.gzip <= max));' \
+'  const violators = chunks.filter((c) => !(c.gzip <= max + 1));'
+mutate "lazy: always pass" "$PURE" "$TMP/pure" \
+'  return { ok: violators.length === 0, violators, largest, line };' \
+'  return { ok: true, violators, largest, line };'
+mutate "lazy: report only the FIRST violator" "$PURE" "$TMP/pure" \
+'  return { ok: violators.length === 0, violators, largest, line };' \
+'  return { ok: violators.length === 0, violators: violators.slice(0, 1), largest, line };'
+mutate "lazy: drop the empty-collection partner (a max over nothing passes)" "$PURE" "$TMP/pure" \
+'  if (chunks.length < MIN_LAZY_CHUNKS) {' '  if (false) {'
+# The eager side has had a plausibility floor since #323; this side had none.
+# Reproduced: two zero-byte lazy chunks report "20 B gzip (headroom 6308 B)" and
+# exit 0. `raw > 0` and not a gzip floor, because the shipping build really does
+# emit a 66 B raw / 79 B gzip chunk.
+mutate "lazy: drop the zero-byte chunk floor (an empty chunk reports headroom)" "$PURE" "$TMP/pure" \
+'  if (empty.length > 0) {' '  if (false) {'
+mutate "lazy: floor written fail-OPEN (an undefined raw passes)" "$PURE" "$TMP/pure" \
+'  const empty = chunks.filter((c) => !(c.raw > 0));' \
+'  const empty = chunks.filter((c) => c.raw < 0);'
+mutate "lazy: take the FIRST chunk instead of the largest" "$PURE" "$TMP/pure" \
+'  const largest = chunks.reduce((a, b) => (b.gzip > a.gzip ? b : a));' \
+'  const largest = chunks[0];'
+
+echo
+echo "--- classifying the lazy set (#372) ---"
+mutate "classify: break out of the loop on the first eager file" "$PURE" "$TMP/pure" \
+'    if (eagerFiles.has(record.file)) continue;' \
+'    if (eagerFiles.has(record.file)) break;'
+mutate "classify: stop subtracting the eager closure (the entry becomes 'lazy')" "$PURE" "$TMP/pure" \
+'    if (eagerFiles.has(record.file)) continue;' \
+'    if (false) continue;'
+mutate "classify: break instead of skipping a non-.js record" "$PURE" "$TMP/pure" \
+'      skippedNonJs += 1;
+      continue;' \
+'      skippedNonJs += 1;
+      break;'
+mutate "classify: stop filtering non-.js records (CSS lands under the JS ceiling)" "$PURE" "$TMP/pure" \
+'    if (!record.file.endsWith(".js")) {' '    if (false) {'
+mutate "classify: drop file deduplication" "$PURE" "$TMP/pure" \
+'    if (seen.has(record.file)) continue;' '    if (false) continue;'
+mutate "classify: silently skip a record with no usable file" "$PURE" "$TMP/pure" \
+'      throw new Error(`manifest.json record has no usable file: ${key}`);' \
+'      continue;'
+mutate "classify: stop counting the records it skipped" "$PURE" "$TMP/pure" \
+'      skippedNonJs += 1;' '      skippedNonJs += 0;'
+
+echo
+echo "--- the RECORDED report: numbers a reader relies on (#372) ---"
+# The defect a skeptic found in the FIRST fix round: renderRecordedReport built
+# its largest-chunk line by CALLING evaluateLazyChunks, which throws TWICE (empty
+# collection, zero-byte chunk) while the guard beside it saw only the first. A
+# truncated build exited 1 with zero bytes of stdout -- the reorder made to stop
+# the report being swallowed had re-created the swallow one throw over. A
+# reporter must not compute a verdict.
+mutate "report: compute the largest line via the VERDICT again (swallows the zero-byte run)" "$PURE" "$TMP/pure" \
+'    const largest = sorted[0];' \
+'    const largest = evaluateLazyChunks({ chunks: lazy.files, max }).largest;'
+mutate "report: hardcode the lazy SUM line" "$PURE" "$TMP/pure" \
+'    `RECORDED, NOT GATED — lazy gzip SUM ${lazy.totalGzip} B over ${lazy.files.length} chunks`,' \
+'    `RECORDED, NOT GATED — lazy gzip SUM 0 B over 0 chunks`,'
+mutate "report: hardcode the all-JS TOTAL line" "$PURE" "$TMP/pure" \
+'    `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) ${allJsGzip} B over ` +' \
+'    `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) 0 B over ` +'
+# The label overstated what is measured until #372's review round: dist/about-theme
+# .js (1,512 B raw) comes from frontend/public/ and is in NEITHER term.
+mutate "report: drop the 'manifest chunks only' qualifier from the TOTAL label" "$PURE" "$TMP/pure" \
+'all-JS gzip TOTAL (manifest chunks only) ${allJsGzip} B over ' \
+'all-JS gzip TOTAL ${allJsGzip} B over '
+mutate "report: hardcode the skipped-record count to zero" "$PURE" "$TMP/pure" \
+'  lines.push(`manifest records skipped as non-.js: ${skippedNonJs}`);' \
+'  lines.push(`manifest records skipped as non-.js: 0`);'
+mutate "report: drop the per-chunk table" "$PURE" "$TMP/pure" \
+'    lines.push(`  ${c.file} — ${c.gzip} B gzip (headroom ${max - c.gzip} B)`);' \
+'    void c;'
+
+echo
+echo "--- the runner: is the second gate actually consulted? (#372) ---"
+mutate "runner: drop the second parseBudget (an unvalidated lazy ceiling)" "$RUN" "$TMP/run" \
+'const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);' \
+'const lazyMax = 1000000;'
+mutate "runner: read the lazy ceiling WITHOUT validating it (#323, one key over)" "$RUN" "$TMP/run" \
+'const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);' \
+'const lazyMax = JSON.parse(budgetText)[LAZY_BUDGET_KEY] ?? 1000000;'
+# The failure mode `parseBudget(text, key = BUDGET_KEY)`'s DEFAULT ARGUMENT
+# uniquely enables, named here because a mutant nobody wrote down is a mutant
+# nobody re-runs: drop the second argument and the LAZY ceiling silently becomes
+# the EAGER value (64,479 instead of 6,328). No throw, no NaN, no missing key --
+# #323's shape exactly one key over. Two shipped tests already kill it; this
+# names it.
+mutate "runner: drop the KEY argument (the default silently yields the EAGER ceiling)" "$RUN" "$TMP/run" \
+'const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);' \
+'const lazyMax = parseBudget(budgetText);'
+mutate "runner: exit on the eager verdict only, ignoring the lazy one" "$RUN" "$TMP/run" \
+'if (!ok || !lazy.ok) {' 'if (!ok) {'
+mutate "runner: stop printing the RECORDED report" "$RUN" "$TMP/run" \
+'  console.log(reportLine);' '  void reportLine;'
+mutate "runner: never name the violating chunks" "$RUN" "$TMP/run" \
+'    .map((c) => `  ${c.file} — ${c.gzip} B gzip, over the ${lazyMax} B ceiling by ${c.gzip - lazyMax} B`)' \
+'    .map(() => "  (a chunk)")'
+
+echo
+echo "--- the budget FILE: can a key be renamed or added unnoticed? (#372) ---"
+mutate "budget: rename the lazy key in the JSON only" "$BUD" "$TMP/bud" \
+'"lazyChunkGzipMaxBytes": 6328' '"lazyChunkGzipMaxBytesRENAMED": 6328'
+mutate "budget: add a third, unenforced ceiling nobody reads" "$BUD" "$TMP/bud" \
+'"lazyChunkGzipMaxBytes": 6328' '"lazyChunkGzipMaxBytes": 6328,
+  "totalJsGzipMaxBytes": 999999'
+mutate "budget: drop the lazy key entirely" "$BUD" "$TMP/bud" \
+',
+  "lazyChunkGzipMaxBytes": 6328' ''
 
 # --- the runner and the CI invocation ---------------------------------------
 mutate "runner: swallow the failure and exit 0" "$RUN" "$TMP/run" \
@@ -234,6 +371,6 @@ mutate "argv: the workflow passes a path to npm test" "$WF" "$TMP/wf" \
 echo
 echo "=== KILLED: $KILLED    SURVIVED/ERROR: $SURVIVED ==="
 cmp -s "$PURE" "$TMP/pure" && cmp -s "$RUN" "$TMP/run" && cmp -s "$PKG" "$TMP/pkg" \
-  && cmp -s "$VC" "$TMP/vc" && cmp -s "$WF" "$TMP/wf" \
+  && cmp -s "$VC" "$TMP/vc" && cmp -s "$WF" "$TMP/wf" && cmp -s "$BUD" "$TMP/bud" \
   && echo "all files restored byte-identical" || { echo "TREE DIRTY -- restore by hand"; exit 97; }
 [ "$SURVIVED" -eq 0 ]
