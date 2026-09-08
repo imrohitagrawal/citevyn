@@ -1066,3 +1066,155 @@ describe("ChatView announces an ARRIVING answer (#356)", () => {
     expect(screen.getByRole("main")).toHaveAccessibleName("Chat");
   });
 });
+
+describe("ChatView — composer hint (#380)", () => {
+  // The bug these guard: `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …`
+  // branch, and its second sentence was keyed only on `live`. So a chat with no
+  // answer on it said "This answer was generated live, just now." with no answer
+  // anywhere on the page, and said it hardest while `pending` is true, when the
+  // loader above it says "Searching the docs…".
+  //
+  // The FIRST fix keyed the sentence on `chatEmpty`, which is
+  // `messages.length === 0`. Review measured that still false on the COMMON path:
+  // the user's own bubble is appended BEFORE the request starts, so for the whole
+  // live round trip the state is `user-msgs=1 bot-msgs=0` — non-empty, no answer,
+  // and the hint claimed one. It is now keyed on whether an ANSWER is on screen,
+  // and an `errorKind` bubble is client-side transport copy, not an answer.
+  //
+  // Every case reads the RENDERED text of `.composer-hint` and asserts the FULL
+  // string with `toBe`, so a mutation to either half — or a reordering — dies.
+  // What makes the set non-vacuous is that it holds BOTH sides of the predicate
+  // over the SAME non-empty transcript: a user-only transcript and an
+  // error-bubble transcript must read the no-answer copy, while a transcript with
+  // a real bot answer must read the answer copy. Drop either side and the
+  // predicate could be hardcoded — `hasAnswer` pinned false satisfies the
+  // no-answer cases, `!chatEmpty` satisfies the answer cases — and nothing here
+  // would notice. `live: true` appeared in NO test in this file before #380.
+  const hint = (container: HTMLElement) => container.querySelector(".composer-hint")?.textContent;
+
+  const NO_ANSWER_LIVE = "CiteVyn answers from the official docs. Answers here are generated live.";
+  const ANSWER_LIVE =
+    "CiteVyn answers from the official docs. This answer was generated live, just now.";
+
+  it("renders exactly ONE composer hint", () => {
+    // RED if a second `.composer-hint` element is rendered. `hint()` reads
+    // `querySelector`, which returns the FIRST match, so every `toBe` below is
+    // blind to a duplicate saying something else.
+    const { container } = renderChat({ live: true });
+    expect(container.querySelectorAll(".composer-hint")).toHaveLength(1);
+  });
+
+  it("on an EMPTY chat in live mode, states the mode instead of claiming an answer", () => {
+    // RED if `"Answers here are generated live."` is replaced by the answer-state
+    // live copy `"This answer was generated live, just now."`.
+    const { container } = renderChat({ chatEmpty: true, messages: [], live: true });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
+  it("on an EMPTY chat with a request already in flight, still claims no answer", () => {
+    // The state the issue called sharpest: the loader says "Searching the docs…"
+    // while the hint speaks. RED if a request in flight is allowed to stand in for
+    // an answer — `hasAnswer` replaced by `hasAnswer || pending`.
+    const { container } = renderChat({
+      chatEmpty: true,
+      messages: [],
+      pending: true,
+      live: true,
+    });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
+  it("on an EMPTY chat in demo mode, states the mode instead of claiming a sample answer", () => {
+    // RED if `"Answers here are samples for the demo."` is replaced by the
+    // answer-state demo copy `"This is a sample answer for the demo."`.
+    const { container } = renderChat({ chatEmpty: true, messages: [], live: false });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. Answers here are samples for the demo.",
+    );
+  });
+
+  it("with the user's question on screen and the answer still in flight, claims no answer", () => {
+    // The measured F1 state: `submitChat` appends the user bubble and THEN awaits
+    // the network, so this is what the page looks like for the whole live request.
+    // RED if `hasAnswer` goes back to `!chatEmpty`.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [msg(0, true, "What is Claude Code?")],
+      pending: true,
+      live: true,
+    });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
+  it("does not count a transport-error bubble as an answer", () => {
+    // A failure bubble is copy `handleApiError` built on the client, not something
+    // the backend generated. RED if `&& !m.errorKind` is dropped from `hasAnswer`.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [
+        msg(0, true, "What is Claude Code?"),
+        { ...msg(1, false, "The request failed. Please try again in a moment."), errorKind: "error" as const },
+      ],
+      live: true,
+    });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
+  it("does not count a RATE-LIMIT bubble as an answer either", () => {
+    // The partner for the test above, and the one that makes this change's own
+    // headline claim — "a rate-limit OR network bubble is client-side copy" —
+    // load-bearing. A skeptic reproduced `!m.errorKind` narrowed to
+    // `m.errorKind !== "error"` SURVIVING the whole suite, because every other
+    // hint test uses `errorKind: "error"`. RED if the predicate is narrowed to
+    // test one flavour of `errorKind`.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [
+        msg(0, true, "What is Claude Code?"),
+        { ...msg(1, false, "One moment — too many questions."), errorKind: "rate_limit" as const },
+      ],
+      live: true,
+    });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
+  it("with a real answer on screen in live mode, says it was generated live", () => {
+    // The mandatory partner: without it `hasAnswer` could be hardcoded false and
+    // every no-answer case above would still pass. RED if `hasAnswer` is pinned
+    // false, or if the answer copy is replaced by the no-answer copy.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [
+        msg(0, true, "What is Claude Code?"),
+        msg(1, false, "Claude Code is an agentic coding tool."),
+      ],
+      live: true,
+    });
+    expect(hint(container)).toBe(ANSWER_LIVE);
+  });
+
+  it("keeps claiming the visible answer while a NEW question is in flight", () => {
+    // An answer IS on screen; a second request being open changes nothing about
+    // it. RED if the predicate is narrowed to `hasAnswer && !pending`.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [
+        msg(0, true, "What is Claude Code?"),
+        msg(1, false, "Claude Code is an agentic coding tool."),
+        msg(2, true, "How do I install the Codex CLI?"),
+      ],
+      pending: true,
+      live: true,
+    });
+    expect(hint(container)).toBe(ANSWER_LIVE);
+  });
+
+  it("with a real answer on screen in demo mode, says the answer is a sample", () => {
+    // RED if `"This is a sample answer for the demo."` is replaced by the
+    // no-answer demo copy `"Answers here are samples for the demo."`.
+    const { container } = renderChat({ chatEmpty: false, messages: MESSAGES, live: false });
+    expect(hint(container)).toBe(
+      "CiteVyn answers from the official docs. This is a sample answer for the demo.",
+    );
+  });
+});

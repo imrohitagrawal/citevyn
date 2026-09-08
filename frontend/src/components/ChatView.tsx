@@ -254,6 +254,26 @@ export function ChatView({
     // tried to send", which is the one thing this sentence is NOT about.
     "Not sent. CiteVyn is still answering your previous question. Your text is kept.";
 
+  // The composer hint's second sentence (#380). It keys on whether an ANSWER is on
+  // screen, NOT on whether the transcript is empty. `chatEmpty` is
+  // `messages.length === 0`, and the user's own bubble is appended BEFORE the
+  // request starts, so a non-empty transcript with no answer is the normal live
+  // state for the whole round trip — measured through the real component tree as
+  // `user-msgs=1 bot-msgs=0` with the hint reading "This answer was generated live,
+  // just now." An `errorKind` bubble is client-side copy for a transport failure,
+  // not a generated answer, so it does not count either.
+  // Kept as a sentence rather than dropped: it holds the live/demo signal at the
+  // moment the reader is about to type, and the no-answer strings are general
+  // ("Answers here…") so they claim nothing about content that is not on screen.
+  const hasAnswer = messages.some((m) => !m.isUser && !m.errorKind);
+  const MODE_HINT = hasAnswer
+    ? live
+      ? "This answer was generated live, just now."
+      : "This is a sample answer for the demo."
+    : live
+      ? "Answers here are generated live."
+      : "Answers here are samples for the demo.";
+
   // Keep the latch in sync with the user's manual scrolling. A gesture that leaves
   // the true bottom (>8px) disarms; returning to it re-arms. The effect's own
   // programmatic ``scrollTop = scrollHeight`` lands at the bottom, so it keeps the
@@ -674,7 +694,7 @@ export function ChatView({
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}
-          {live ? "This answer was generated live, just now." : "This is a sample answer for the demo."}
+          {MODE_HINT}
         </p>
       </div>
     </main>
