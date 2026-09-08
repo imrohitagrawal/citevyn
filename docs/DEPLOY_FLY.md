@@ -263,7 +263,7 @@ curl -sS -o /dev/null https://citevyn.stackclimb.com/health
 VERSION="$(git describe --tags --always)"
 DEMO_KEY="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
 
-fly deploy --app citevyn \
+fly deploy --app citevyn --local-only \
   --build-arg VERSION="${VERSION:?git describe produced nothing — run this from the repo}" \
   --build-arg VITE_API_LIVE=true \
   --build-arg VITE_API_DEMO_KEY="${DEMO_KEY:?empty — the machine is asleep or the secret is unset; curl /health above, then retry}"
@@ -289,6 +289,43 @@ fly deploy --app citevyn \
 > cannot start. Do not "simplify" it back to an inline `$(…)`: a command
 > substitution has no way to fail on empty.
 
+> **`--local-only` is not optional either, and the signal you would check
+> LIES to you.** Without it `fly deploy` uploads the build context to a
+> *remote* builder. On the v12 deploy that builder stalled on the context
+> upload three times running — 548 KB moved in 825 s, then `deadline_exceeded`.
+> `fly deploy --local-only` builds the image on your own machine and pushes the
+> result; it worked first try for v12, and again for v17 on 2026-09-08
+> (`1fd7556`). See #385. This one fails LOUDLY — the build aborts and nothing
+> ships — which is why it sits *below* the demo-key note above rather than
+> before it: that one fails silently, and under incident pressure the silent
+> failure is the warning you must meet first.
+>
+> **Which** remote builder is unconfirmed. `fly deploy` also carries a
+> `--depot` flag that defaults to `auto`, so on a current `fly` the no-flag
+> path may route the build through Depot rather than through Fly's own remote
+> builder. The v12 symptom — a context upload that crawls and then times out —
+> fits either, and nothing was captured at the time that distinguishes them.
+> It does not change the remedy.
+>
+> **A failed build creates NO release.** This is the part that misleads
+> operators: after an aborted deploy `fly releases` looks exactly as it did
+> before, and reads as "nothing changed, so the deploy must have been a no-op
+> or silently succeeded". It is neither — an unchanged release list is the
+> EXPECTED symptom of a build that never finished. The only deploy-success
+> signal is the release number going up and the new build passing its health
+> check (§4.4); `fly releases` is a rollback tool here (§6.1, §9), not a
+> success check.
+>
+> **What `--local-only` needs, and what it costs.** A working local Docker
+> daemon (Docker Desktop on macOS) — the image is built on your machine
+> instead of on a builder Fly reaches, so the whole context never crosses the
+> network. On the v12 and v17 runs it left no local image to delete, but it
+> does grow Docker's build cache. **Do not run `docker builder prune -af` to
+> reclaim that.** That cache is shared with everything else the machine
+> builds, so a blanket prune bills the next build of every unrelated project
+> for this one. If you need the space, prune selectively — e.g. `docker
+> builder prune --filter until=168h` — and only when you actually need it.
+
 **Verify after every deploy**, from the repo root, in the same shell (it reuses
 `$DEMO_KEY` from above):
 
@@ -308,8 +345,12 @@ curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app 
 > **Why this replaced `grep -c local-demo-key   # must print 0`.** That check
 > asserted the *absence* of the old default, which is the wrong shape twice.
 > It printed `0` — reported success — on a bundle built with an empty build
-> argument, i.e. the one failure the paragraph above tells you to guard
-> against. And an absence check fails *open*: if the key ever moves into a
+> argument, i.e. the exact failure the **"`:?` is the mechanism"** note earlier
+> in this section tells you to guard against — `--build-arg
+> VITE_API_DEMO_KEY=""`, which bakes `const K = ""` and 401s every browser
+> call. (Naming that note rather than saying "the paragraph above": three
+> `--local-only` paragraphs now sit between the two, so adjacency no longer
+> identifies it.) And an absence check fails *open*: if the key ever moves into a
 > lazily-imported chunk, "not found" still reads as a pass. `check_bundle_key.sh`
 > asserts the **presence of the expected, non-empty key**, so it fails closed,
 > and it refuses to run at all when `DEMO_KEY` is empty — otherwise the
@@ -319,7 +360,10 @@ curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app 
 
 What happens, in order:
 
-1. Fly builds `infra/docker/Dockerfile.api` from the repo root.
+1. **Your machine** builds `infra/docker/Dockerfile.api` from the repo root,
+   because of `--local-only`; the finished image is pushed to Fly's registry.
+   Drop that flag and the build context is uploaded to a remote builder
+   instead, which is the step that stalled on v12 (see the note above).
 2. Fly starts a **release machine** from the new image and runs
    `python -m alembic --config /db/alembic.ini upgrade head` (the
    `release_command` in `fly.toml`). Migrations therefore run *before* any

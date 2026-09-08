@@ -80,6 +80,133 @@ OPAQUE_ID_KEYS = frozenset({"request_id", "index_version", "index_versions", "so
 MAX_OPAQUE_ID = 160
 
 
+# Keys whose value is a URL PATH, swept ONE ``/``-DELIMITED SEGMENT AT A TIME
+# instead of as one string. Matched on the WHOLE lowered key, the same
+# discipline as ``OPAQUE_ID_KEYS`` above.
+#
+# PRECEDENCE, since two key-name sets now guard the same branch:
+# ``redact_value`` tests ``OPAQUE_ID_KEYS`` FIRST, so a key listed in both
+# would take the opaque-id branch and skip the segment sweep entirely -- on a
+# collision the WEAKER rule wins, silently. The two sets are disjoint today
+# (``PATH_KEYS & OPAQUE_ID_KEYS == frozenset()``, verified); keep them
+# disjoint, or reorder the branches deliberately and say why.
+#
+# THE DEFECT (#384), seen in the Fly v17 production logs: ``HIGH_ENTROPY_RE``'s
+# character class contains ``/``, so a path is one contiguous run and the whole
+# thing collapses. Every session route printed as
+#
+#     request_completed ... 'path': '/[REDACTED]'
+#
+# An operator reading ``fly logs`` could not tell an answer POST from a session
+# DELETE from a 404 -- the app's own request log became useless for exactly the
+# routes that carry the product. ``/health`` (7 characters) still printed, which
+# is why this survived review: the short paths look fine.
+#
+# WHY THE SCOPE IS A KEY NAME AND NOT THE VALUE'S SHAPE. The obvious cheap
+# trigger is ``value.startswith("/")``. Rejected, and measured: that trigger is
+# ATTACKER-INFLUENCED. Roughly one in sixty-five random base64 values begins
+# with ``/`` -- independent 200,000-sample draws gave 1.58%, 1.54% and 1.52% --
+# so a secret could select its own weaker redaction rule by its first
+# character. A key name is chosen in our source; a value is not.
+#
+# WHY THE SCOPE IS NARROW, measured. Applying the per-segment sweep to EVERY
+# string is not a mild loosening -- it is a hole. About HALF of random
+# 44-character base64 values (``b64encode`` of 32 bytes) contain a ``/``, and
+# of those, every ``/``-delimited segment is under 32 characters often enough
+# that ABOUT THREE IN TEN of all such values would print IN FULL. At 40
+# characters it is about a third. A concrete leaker:
+# ``AKIAxxxxxxxxx/yyyyyyyyyyyyy/zzzzzzzzzzzz``.
+#
+# Those three figures are rounded ON PURPOSE, because they do not reproduce to
+# two decimal places: independent 200,000-sample draws gave 48.51% / 48.32% /
+# 48.45% for "contains a ``/``", 28.35% / 29.19% / 29.51% / 29.34% for "prints
+# in full at 44 characters", and 32.12% / 32.04% / 32.31% / 32.15% at 40. A
+# reader re-deriving them should expect the first decimal to move.
+#
+# ONE figure here is exact and it is the load-bearing one. The per-segment
+# sweep applied to every string is not merely similar to deleting ``/`` from
+# ``HIGH_ENTROPY_RE``'s class -- it is INDISTINGUISHABLE from it: 0 differing
+# inputs over 400,000 sampled strings, reproduced EXACTLY, at full precision,
+# by an independent agent on an independent sample. So the key-name scope is
+# not a stylistic preference; it is the ONLY thing separating this fix from
+# the rejected one.
+#
+# ``endpoint`` is deliberately NOT in this set even though it is allowlisted
+# alongside ``path``. Its values are source literals (``"embeddings"``,
+# ``"embedContent"``, ``"batchEmbedContents"``) that the entropy sweep never
+# touches, so adding it would widen the attack surface above for zero benefit.
+#
+# WHY ``MAX_PATH`` EXISTS. The whole-string entropy collapse was, by accident,
+# the only thing bounding the PATH FIELD on the ``build_log_event`` path --
+# ``MAX_EMITTED_TEXT`` governs the ``extra=`` path only and does not reach it
+# (see the SCOPE paragraph on ``EMITTED_TEXT_KEYS``). A 4,400-character path of
+# short segments emits 11 characters today and would emit 4,400 under an
+# uncapped per-segment rule. The cap restores that bound explicitly rather than
+# as a side effect, using the same truncation shape as ``MAX_OPAQUE_ID``.
+#
+# NARROWED to "the path field" on review: an earlier draft claimed the collapse
+# was the only thing bounding ANY client-controlled value here, and that is
+# false. ``app/core/middleware.py`` passes ``method=request.method`` on the SAME
+# ``build_log_event`` call. It is equally client-controlled and it is uncapped
+# at BOTH revisions -- unchanged by this fix, and not fixed by it.
+# ``redact_value("method", "!" * 14700)`` returns all 14,700 characters, before
+# and after, because ``!`` is outside ``HIGH_ENTROPY_RE``'s class while still
+# being a legal HTTP token character. (``"A" * 14700`` collapses to 10, which
+# is presumably why nobody noticed: the obvious probe is the one shape that is
+# safe.) It is LATENT, not live. ``infra/docker/Dockerfile.api``'s CMD passes
+# no ``--http`` flag, so uvicorn selects httptools, and httptools 0.8.0 refuses
+# an unrecognised method outright -- ``HttpParserInvalidMethodError`` for
+# ``"!" * 14700`` and for ``"A" * 14700`` alike, measured. h11 accepts both and
+# hands the full 14,700 characters to the app, so this becomes reachable the
+# moment anything selects h11. Recorded, not fixed: ``method`` is not a path,
+# and widening this change to cover it would be the blanket loosening the
+# paragraph above rejects.
+#
+# TWO ``path=`` CALL SITES CARRY A FILESYSTEM PATH, NOT A URL PATH, and their
+# output really did change. Both re-verified rather than inherited:
+#
+#   * ``app/main.py:182`` / ``:185`` (``frontend_bundle_absent`` /
+#     ``frontend_bundle_mounted``, ``str(FRONTEND_DIST)``). In the container
+#     this is ``/app/frontend_dist`` -- every segment short, so it printed in
+#     full BEFORE this change too and production output is unchanged. Only a
+#     developer checkout moved, from ``/[REDACTED]`` to its full absolute path.
+#   * ``app/core/email_client.py:199`` (``email_outbox_written``, the dev file
+#     outbox). ``/var/folders/.../citevyn_email_outbox/<stamp>-<hex>.eml`` went
+#     from ``/[REDACTED].eml`` to the full path. The ``.eml`` stem measures 31
+#     characters -- ONE under the 32-character floor -- so the filename itself
+#     now prints too.
+#
+# Both are acceptable. The first is a build-time constant.
+# ``FileOutboxEmailClient`` is dev-only: ``app/services/notifications.py:61``
+# constructs it only when ``settings.environment != "production"``, and a
+# ``Settings`` validator refuses it in production outright. Neither filename
+# carries message content -- the outbox name is a timestamp plus
+# ``secrets.token_hex(4)``, as its own docstring says. What DID change is that
+# a developer's home-directory layout now appears in local logs; worth naming,
+# and a privacy cost of zero in the deployment this app has.
+#
+# WHY A PATH SEGMENT IS SAFE TO PRINT. No route carries a credential in a path
+# segment: all 11 parameterized routes take a UUID, a sha-shaped
+# ``index_version``, or a provider slug. The magic-link token and the OAuth
+# ``code``/``state`` are QUERY parameters -- ``URL.path`` never contains the
+# query string, and uvicorn's access line, which does, is covered by
+# ``QUERY_CREDENTIAL_RE`` above. And a session UUID is not a capability token:
+# ``api/routes/messages.py`` and ``api/routes/sessions.py`` both filter on
+# ``Session.user_id == user_id`` where ``user_id`` comes from
+# ``Depends(resolve_principal)`` -- a cookie-derived ownership principal, NOT
+# the constant ``DEMO_USER_ID`` (``app/core/auth_sessions.py``). Knowing the id
+# buys nothing without the cookie.
+#
+# THE RESIDUAL, stated. A client can put a base64-with-``/`` string of its OWN
+# into a path segment (it 404s) and see it echoed back into our log, since the
+# three-in-ten figure above applies to any value the segment split breaks up.
+# That is the client's own value disclosing none of our secrets, bounded by
+# ``MAX_PATH``, and it is the identical, already-accepted tradeoff documented
+# for ``request_id`` at the ``OPAQUE_ID_KEYS`` comment above.
+PATH_KEYS = frozenset({"path"})
+MAX_PATH = 160
+
+
 # Query-string parameters that ARE credentials. uvicorn's access log records
 # the full request line -- path AND query string -- so without this a
 # magic-link click (``GET /v1/auth/magic-link/confirm?token=<id>.<secret>``,
@@ -350,6 +477,17 @@ def redact_value(key: str, value: Any) -> Any:
             if len(redacted) > MAX_OPAQUE_ID:
                 return redacted[:MAX_OPAQUE_ID] + "…<truncated>"
             return redacted
+        # A URL path is swept one `/`-delimited SEGMENT at a time, so the route
+        # shape survives and only a high-entropy segment blanks -- see
+        # PATH_KEYS for the defect (#384), the measurement, and why this is
+        # scoped to a key name rather than to the value's shape.
+        if key_lower in PATH_KEYS:
+            swept = "/".join(
+                HIGH_ENTROPY_RE.sub(SECRET_VALUE, segment) for segment in redacted.split("/")
+            )
+            if len(swept) > MAX_PATH:
+                return swept[:MAX_PATH] + "…<truncated>"
+            return swept
         return HIGH_ENTROPY_RE.sub(SECRET_VALUE, redacted)
 
     return value
