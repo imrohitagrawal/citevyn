@@ -103,7 +103,7 @@ def is_index_embedder_mismatch(
 
     The single source of truth for the stamp-vs-configured **comparison** (#71).
     The canonical enforcement point
-    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_enabled`, #57)
+    (:meth:`app.retrieval.hybrid.HybridRetriever._vector_arm_degrade`, #57)
     delegates to it, and :func:`app.services.index_health.active_index_vector_health`
     reuses it for ``GET /health/index``. Any second implementation of this
     comparison is a bug.

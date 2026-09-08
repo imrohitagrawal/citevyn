@@ -124,7 +124,7 @@ def ambiguous_vector_health(settings: Settings, *, active_count: int) -> dict[st
     sentinel the read path resolves to in this state, so this block reports the
     same verdict the vector arm acts on (#71 — a second implementation of that
     comparison is a bug). It comes out ``False``, i.e. the arm is OFF, which is
-    exactly what ``HybridRetriever._vector_arm_enabled`` does here (#226).
+    exactly what ``HybridRetriever._vector_arm_degrade`` does here (#226).
 
     ``configured_query_embedder`` survives because it is read from ``Settings``,
     not from the database, so it is the one half of the comparison that stays

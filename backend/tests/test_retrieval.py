@@ -574,7 +574,7 @@ async def test_dual_active_still_allowed_when_enforcement_is_off(seeded_session)
     is to stop the new deny from creeping above that short-circuit.
 
     Turns RED if the ambiguity check is hoisted above the
-    ``embedder_identity is None`` short-circuit in ``_vector_arm_enabled``.
+    ``embedder_identity is None`` short-circuit in ``_vector_arm_degrade``.
     """
     await _add_second_active_index(seeded_session)
     h = HybridRetriever(seeded_session, active_index_version=None)
@@ -666,7 +666,7 @@ async def test_gate_delegates_to_shared_predicate_for_the_ambiguous_sentinel(
     assert degrade is VectorDegrade.ambiguous_index
 
 
-async def test_vector_arm_enabled_when_stamp_matches(seeded_session) -> None:
+async def test_vector_arm_runs_when_stamp_matches(seeded_session) -> None:
     await _stamp_active_index(
         seeded_session, provider="gemini", model="gemini-embedding-001", dim=1536
     )

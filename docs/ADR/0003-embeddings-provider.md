@@ -139,7 +139,9 @@ index version**, with queries always using the model that built the active index
 | **Tier 3 failover** | Automatic re-ingest under a secondary provider + query-time model matching driven off the stamp | **Deferred** |
 
 > ✅ **The stamp is now a live guardrail (#57).** At read time,
-> `HybridRetriever._vector_arm_enabled` compares the configured embedder's
+> `HybridRetriever._vector_arm_degrade` (named `_vector_arm_enabled` until #352, when it
+> started returning the *reason* rather than a bool that had two meanings) compares the
+> configured embedder's
 > `(provider, model, dim)` against the active `IndexVersion`'s stamp. On a mismatch it
 > **degrades the vector arm to `[]` with a loud WARN**
 > (`vector_retrieval_index_embedder_mismatch`) — exact + keyword still answer, the
@@ -198,7 +200,7 @@ Tracked as GitHub issues (see `docs/BACKLOG.md`): item 1 → **#57**, item 2 →
 items 3–7 → **#59**.
 
 1. **Tier 3 enforcement (read the stamp) — SHIPPED (#57).** At read time,
-   `HybridRetriever._vector_arm_enabled` compares the configured embedder's
+   `HybridRetriever._vector_arm_degrade` compares the configured embedder's
    `provider/model/dim` (`app/embeddings/factory.configured_embedder_identity`) against
    the active `IndexVersion` stamp; on mismatch it degrades the vector arm to `[]` with
    a loud WARN rather than returning silently-corrupted rankings. Read-time degrade was
