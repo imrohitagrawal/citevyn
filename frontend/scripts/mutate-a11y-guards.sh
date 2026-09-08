@@ -2,7 +2,8 @@
 #
 # Mutation harness for the #356 announcements (an arriving answer, and a REFUSED
 # submit), the parked-question notice and the toast stacking limits.
-# It also covers the composer hint's empty/non-empty mode copy (#380).
+# It also covers the composer hint's mode copy (#380), which keys on whether an
+# ANSWER is on screen.
 #
 #     bash frontend/scripts/mutate-a11y-guards.sh
 #
@@ -198,37 +199,71 @@ one "toast: cap keeps the OLDEST instead of the newest" "$UT" "$S/p.UT" \
 echo
 echo "=== the composer hint's mode sentence (#380) ==="
 # THE DEFECT ITSELF: `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …`
-# branch, and its second sentence was keyed only on `live`. An empty chat — the
-# first screen a visitor sees — therefore said "This answer was generated live,
-# just now." with no answer on the page, loudest while `pending` is true and the
-# loader above it says "Searching the docs…". Three shapes of that bug, then the
-# two branch inversions, then the deletion that proves the non-empty partners
-# are not vacuous.
-one "hint: collapse the empty branch onto the non-empty copy (the #380 defect)" "$CV" "$S/p.CV" \
+# branch, and its second sentence was keyed only on `live`. A chat with nothing
+# answered on it therefore said "This answer was generated live, just now.",
+# loudest while `pending` is true and the loader above it says "Searching the
+# docs…".
+#
+# THE SECOND DEFECT, measured by review on the first fix: that fix keyed the
+# sentence on `chatEmpty`, i.e. `messages.length === 0`. But `submitChat` appends
+# the USER bubble and THEN awaits the network, so for the whole live round trip
+# the page is `user-msgs=1 bot-msgs=0` — non-empty, no answer — and the sentence
+# made exactly the false claim again, on the COMMON path. It now keys on whether
+# an ANSWER is on screen; a transport-error bubble is client-side copy, not one.
+one "hint: collapse the no-answer branch onto the answer copy (the #380 defect)" "$CV" "$S/p.CV" \
 '      ? "Answers here are generated live."
-      : "Answers here are samples for the demo."' \
+      : "Answers here are samples for the demo.";' \
 '      ? "This answer was generated live, just now."
-      : "This is a sample answer for the demo."'
-one "hint: ignore \`chatEmpty\` entirely, key on \`live\` alone (the literal bug)" "$CV" "$S/p.CV" \
-'  const MODE_HINT = chatEmpty' '  const MODE_HINT = false'
-one "hint: invert the \`chatEmpty\` test (empty and non-empty copy swapped)" "$CV" "$S/p.CV" \
-'  const MODE_HINT = chatEmpty' '  const MODE_HINT = !chatEmpty'
-one "hint: invert the \`live\` test inside the EMPTY branch" "$CV" "$S/p.CV" \
+      : "This is a sample answer for the demo.";'
+one "hint: ignore the predicate entirely, key on \`live\` alone (the literal bug)" "$CV" "$S/p.CV" \
+'  const MODE_HINT = hasAnswer' '  const MODE_HINT = true'
+one "hint: invert the predicate (the two copies swapped)" "$CV" "$S/p.CV" \
+'  const MODE_HINT = hasAnswer' '  const MODE_HINT = !hasAnswer'
+# THE F1 DEFECT ITSELF: back to emptiness, which is what review measured wrong.
+one "hint: key on emptiness again, \`hasAnswer\` -> \`!chatEmpty\` (the F1 defect)" "$CV" "$S/p.CV" \
+'  const MODE_HINT = hasAnswer' '  const MODE_HINT = !chatEmpty'
+# THE F2 DEFECT: a rate-limit / network bubble counted as a generated answer.
+one "hint: count a transport-error bubble as an answer (the F2 defect)" "$CV" "$S/p.CV" \
+'messages.some((m) => !m.isUser && !m.errorKind)' 'messages.some((m) => !m.isUser)'
+one "hint: look at the USER's bubbles instead of the bot's" "$CV" "$S/p.CV" \
+'(m) => !m.isUser && !m.errorKind' '(m) => m.isUser && !m.errorKind'
+one "hint: any message at all counts as an answer" "$CV" "$S/p.CV" \
+'messages.some((m) => !m.isUser && !m.errorKind)' 'messages.length > 0'
+# An answer on screen does not stop being one because a NEW question is open.
+one "hint: a new request in flight un-claims the answer already on screen" "$CV" "$S/p.CV" \
+'  const MODE_HINT = hasAnswer' '  const MODE_HINT = hasAnswer && !pending'
+one "hint: invert the \`live\` test inside the NO-ANSWER branch" "$CV" "$S/p.CV" \
 '      ? "Answers here are generated live."
-      : "Answers here are samples for the demo."' \
+      : "Answers here are samples for the demo.";' \
 '      ? "Answers here are samples for the demo."
-      : "Answers here are generated live."'
-one "hint: invert the \`live\` test inside the NON-EMPTY branch" "$CV" "$S/p.CV" \
+      : "Answers here are generated live.";'
+one "hint: invert the \`live\` test inside the ANSWER branch" "$CV" "$S/p.CV" \
 '      ? "This answer was generated live, just now."
-      : "This is a sample answer for the demo.";' \
+      : "This is a sample answer for the demo."' \
 '      ? "This is a sample answer for the demo."
-      : "This answer was generated live, just now.";'
-# Without the two non-empty tests this one would only be caught by an absence
-# assertion, which is why they are in the file.
+      : "This answer was generated live, just now."'
+# Without the answer-on-screen partners these three would only be caught by an
+# absence assertion, which is why those partners are in the file.
 one "hint: drop the mode sentence from the hint altogether" "$CV" "$S/p.CV" \
 '          CiteVyn answers from the official docs.{" "}
           {MODE_HINT}' \
 '          CiteVyn answers from the official docs.'
+one "hint: drop the FIRST sentence, keep only the mode sentence" "$CV" "$S/p.CV" \
+'          CiteVyn answers from the official docs.{" "}
+' ''
+one "hint: drop the \`{\" \"}\` separator between the two sentences" "$CV" "$S/p.CV" \
+'official docs.{" "}' 'official docs.'
+# The tests' SOLE selector, and the whole element. A renamed class or a deleted
+# `<p>` makes `querySelector` return null, which a `?.textContent` would happily
+# read as `undefined` — these prove the `toBe` sees that.
+one "hint: rename the class the tests select on" "$CV" "$S/p.CV" \
+'className="composer-hint"' 'className="composer-hint-x"'
+one "hint: delete the whole \`.composer-hint\` element" "$CV" "$S/p.CV" \
+'        <p className="composer-hint">
+          CiteVyn answers from the official docs.{" "}
+          {MODE_HINT}
+        </p>
+' ''
 
 echo
 echo "=== KILLED: $K   SURVIVED/ERROR: $SV ==="
