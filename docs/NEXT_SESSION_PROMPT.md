@@ -38,11 +38,22 @@ Closed this round, each merged with post-merge CI green and deployed:
 
 ## The one thing that changed about HOW you work here
 
-**`main` now requires seven status checks, not five.** `type-check + unit tests + build`
-(which carries the 341 unit tests AND the bundle budget gate) and `Demo-mode Playwright (no
-visual snapshots)` (124 tests) are now REQUIRED. `frontend.yml` deliberately has NO `paths:`
-filter — a path-filtered workflow that does not trigger reports nothing, so a required context
-would hang forever on a docs-only PR. Do not add path filters back to that workflow.
+**`main` now requires NINE status checks, not five.** (This line said "seven" and was
+wrong — read 2026-09-08,
+`gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks --jq '.contexts|length'`
+returns `9`. The full list is in `docs/TEST_STRATEGY.md` §12.1.) Among them,
+`type-check + unit tests + build` (which carries the frontend unit tests AND the bundle budget
+gate) and `Demo-mode Playwright (no visual snapshots)` are REQUIRED. `frontend.yml`
+deliberately has NO `paths:` filter — a path-filtered workflow that does not trigger reports
+nothing, so a required context would hang forever on a docs-only PR.
+
+**Do not add path filters back — and this now applies to BOTH frontend workflows.** #379
+removed the `frontend/**` filter from `frontend-live-e2e.yml` for the same reason, so that
+`Live-mode Playwright (stub backend)` is eligible to be promoted. It is still **advisory**
+today; promotion is a branch-protection change and belongs to the owner.
+`backend/tests/test_gating_workflows.py` (in the required `pytest + lint` job) fails if a
+filter comes back, if a gating job is defused with `continue-on-error:`/`if:`, or if the job
+name drifts from the context string the promotion command sends.
 
 Consequence: a flaky frontend test now blocks merges. The job asserts `flaky == 0` on purpose.
 Two flakes were fixed this round (`behavior.spec.ts:553` scroll, `behavior.spec.ts:125`

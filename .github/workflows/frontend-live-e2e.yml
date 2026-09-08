@@ -1,23 +1,96 @@
 name: frontend-live-e2e
 
+# NO `paths:` FILTER, DELIBERATELY (#379) — the same decision `frontend.yml`
+# made for #326 (PR #339), for the same reason, applied to the one frontend
+# workflow that still had one.
+#
+# WHY THE FILTER HAD TO GO BEFORE THIS CAN BE A REQUIRED CHECK
+# ------------------------------------------------------------
+# GitHub's own docs ("Handling skipped but required checks",
+# https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks)
+# draw the distinction that matters here: a JOB skipped by a conditional inside
+# a workflow that DID run reports SUCCESS, but a workflow that never triggers
+# because of PATH FILTERING reports NOTHING — so a required context sits at
+# "Expected — waiting for status to be reported" forever and the PR can never
+# merge.
+#
+# Both halves are visible in this repo's own history. On PRs #394, #392, #386
+# and #369 — none of which touch a `frontend/**` path — the check-run
+# `Live-mode Playwright (stub backend)` is ABSENT entirely, while
+# `judged answer-quality eval …` (a job-level `if:` inside `ci.yml`, whose
+# workflow did run) reports `completed | skipped` on the same PRs. On #391 and
+# #376, which do touch frontend, the live check-run is present and `success`.
+#
+# Counts, re-measured 2026-09-08 with
+# `gh api repos/imrohitagrawal/citevyn/commits/<head sha>/check-runs`: those
+# four PRs each report 12 DISTINCT check names, and #391/#376 report 13 — the
+# live check-run being the thirteenth. Raw `total_count` equals the distinct
+# count on all but #369, which shows 26 because `ci.yml` ran three times on that
+# SHA (7 of its jobs appear 3x each). An earlier version of this comment quoted
+# "12 check-runs", which is the distinct-name figure, not #369's total.
+#
+# That is not a rare case. Re-derived 2026-09-08: 13 of the last 30 merged PRs
+# touch ZERO `frontend/**` files (#394 #392 #386 #383 #382 #377 #373 #369 #363
+# #350 #345 #341 #340, measured with
+# `gh api repos/imrohitagrawal/citevyn/pulls/<n>/files`). An earlier reading said
+# 14 including #333; that was correct when written and is now 13 only because
+# #395 merged and pushed #333 out of the 30-PR window. The window MOVES — expect
+# the number to drift and re-derive it; roughly two in five is the shape of the
+# argument, not the exact count. With the
+# filter still in place, marking this context required would have blocked every
+# one of them — until somebody touched a `frontend/**` file to make the workflow
+# trigger at all, which is a workaround, not a merge path.
+#
+# WHY ALWAYS RUNNING IT IS AFFORDABLE
+# -----------------------------------
+# The repo is PUBLIC (`gh repo view --json visibility` -> PUBLIC), so Actions
+# minutes are free: `gh api .../actions/runs/<id>/timing` returns
+# `billable.UBUNTU.total_ms: 0` on all 15 most recent runs of this workflow.
+# The job is also short and off the critical path — over its OWN last 15 runs
+# it took min 85 s / median 92 s / max 97 s, against `Demo-mode Playwright`'s
+# min 472 s / median 529 s / max 563 s over ITS last 15 (re-measured
+# 2026-09-08). Not the same date range: `frontend.yml` has no path filter and
+# runs far more often, so 15 of its runs span hours where 15 of these span days.
+# Both windows move; re-derive rather than trusting these figures.
+#
+# This is a SEPARATE workflow, so it runs in parallel with that one and adds 0
+# minutes of wall clock to a PR.
+#
+# The usual dodges for a required-but-filtered check — a skip-shim workflow
+# duplicating the job name on the inverse filter, or a job-level `if:` relying
+# on skipped-counts-as-success — both work and both are subtle enough to get
+# wrong in a way that blocks every PR. Always running it has the fewest moving
+# parts of the three. Do not add path filters back.
+#
+# STATUS: this workflow is now ELIGIBLE to be required; it is not yet required.
+# Promotion is a branch-protection change and belongs to the repo owner — the
+# exact command is in `docs/TEST_STRATEGY.md` §12.
 on:
   push:
     branches: [main]
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/frontend-live-e2e.yml'
   pull_request:
-    paths:
-      - 'frontend/**'
-      - '.github/workflows/frontend-live-e2e.yml'
 
 permissions:
   contents: read
 
 jobs:
   live-e2e:
+    # BYTE-EXACT: this string is the status-check context the owner types into
+    # branch protection, and `docs/TEST_STRATEGY.md` §12 quotes it verbatim.
+    # `backend/tests/test_gating_workflows.py` pins both copies together.
     name: Live-mode Playwright (stub backend)
     runs-on: ubuntu-latest
+    # The whole job has measured at 97 s max over its last 15 runs, so 15
+    # minutes is ~9x headroom — a runner would have to be an order of magnitude
+    # slower than anything observed here to trip it, which is not a guarantee,
+    # just a wide margin against the measurements we have. It caps
+    # the two things that CAN hang unboundedly: `playwright install --with-deps`
+    # (apt) and a dev server that accepts the port but never serves, which the
+    # webServer's own 120 s wait does not cover once it has started. Without a
+    # cap those burn the 360-minute default. (`frontend.yml`'s demo job uses 20
+    # for a ~8.8-minute job; the same generosity here is far smaller in
+    # absolute terms.)
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
@@ -35,20 +108,157 @@ jobs:
         run: npm ci
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
+      # A job that runs ZERO tests passes. `playwright.live.config.ts` selects by
+      # `grep: /live only/i` over the joined title path, which makes two distinct
+      # ways to empty this run:
+      #
+      #   1. testDir/testIgnore drift, or a spec file that stops loading, quietly
+      #      removes a live-only test from the live config while the DEFAULT
+      #      config still has it. That is the differential below.
+      #   2. A title stops matching the grep. This guard CANNOT see that: a
+      #      rename changes BOTH sides of the differential identically, so the
+      #      two counts stay equal. The guard that CAN see it lives in
+      #      `frontend.yml`'s "Assert the suite actually executed" step — it
+      #      asserts every test that SKIPPED in the demo run is still selected
+      #      by this grep, so a test that self-skips in demo AND stops matching
+      #      here (i.e. runs nowhere at all) turns the REQUIRED demo job red.
+      #      `backend/tests/test_gating_workflows.py` additionally pins the exact
+      #      set of live-only test titles, which covers the one live test that
+      #      does not self-skip in demo mode.
+      #
+      # `--list` on this config does not boot the webServer, so it is cheap.
+      #
+      # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
+      # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
+      # needs `|| true` — which then also swallows a CRASHED playwright, and the
+      # differential passes because the command produced no output at all.
+      # Writing to a file first lets `set -e` catch the producer's failure, so the
+      # `|| true` afterwards can only ever mean "grep found nothing".
+      - name: Guard against a vacuous selection
+        run: |
+          set -euo pipefail
+          npx playwright test -c playwright.live.config.ts --list --reporter=list > /tmp/live_list.txt
+          npx playwright test -c playwright.config.ts      --list --reporter=list > /tmp/all_list.txt
+          # ANCHORED. Playwright prints its summary at column 0 while every
+          # listed test is indented two spaces (verified against a real `--list`
+          # run of this config), so `^` makes the match unambiguous. Unanchored,
+          # a test TITLE containing "Total: 7 sources" adds a second line to the
+          # capture and the step dies four lines down with the misleading
+          # "selects 0 tests — vacuous" instead of naming the real cause.
+          live_total=$(grep -oE '^Total: [0-9]+' /tmp/live_list.txt | grep -oE '[0-9]+')
+          # NOT the same string Playwright greps, and worth being precise about.
+          # Playwright joins `project + file path + describe titles + test title`
+          # with single spaces; this greps the `--list` RENDERING of that path,
+          # `  [chromium] › behavior.spec.ts:473:3 › Chat › <title>`. The two
+          # agree for today's separator-free `live only` literal. If they ever
+          # diverged, the failure is LOUD, not open: the counts stop being equal
+          # and the differential below goes red. The literal is pinned equal to
+          # `playwright.live.config.ts`'s `grep:` by
+          # backend/tests/test_gating_workflows.py.
+          all_live_titled=$(grep -ciE 'live only' /tmp/all_list.txt || true)
+          echo "live_total=$live_total all_live_titled=$all_live_titled"
+          # Defence in depth, not the live edge today. `set -euo pipefail` is on
+          # and `playwright test --list` EXITS 1 when it selects nothing
+          # (measured), so the producer line above already kills the step before
+          # this is reached. Keep it anyway: it becomes the load-bearing line the
+          # day Playwright starts exiting 0 on an empty selection, and it costs
+          # one comparison.
+          test "$live_total" -gt 0 || {
+            echo "::error::the live config selects 0 tests — this whole job is vacuous";
+            exit 1; }
+          # This differential assumes BOTH configs declare the same `projects`
+          # list — it compares one config's test count against the other's
+          # listing. Adding a project to `playwright.config.ts` alone multiplies
+          # `all_live_titled` without moving `live_total` (measured: 10 vs 5),
+          # which is a FALSE red. The fix then is to add the project to
+          # `playwright.live.config.ts` too, never to delete this guard.
+          test "$live_total" -eq "$all_live_titled" || {
+            echo "::error::the live config selects $live_total tests but $all_live_titled tests in the DEFAULT config are titled for the live grep. Either testDir/testIgnore drift is dropping a live-only test (which would then run in NO job), or playwright.config.ts declares a projects list that playwright.live.config.ts does not — check that before touching this guard";
+            exit 1; }
+          echo "LIVE_TOTAL=$live_total" >> "$GITHUB_ENV"
+      # VITE_LIVE_STUB=1 enables the in-process stub plugin
+      # (frontend/vite.liveStub.ts) so the dev server returns canned responses
+      # with a controlled delay — no real backend is required. The Playwright
+      # live config then sets VITE_API_LIVE=true so the front end exercises
+      # sendLive instead of the demo path.
+      #
+      # `--reporter` REPLACES the config's reporters rather than adding to them
+      # (playwright/lib/runner/index.js:301:
+      # `result.reporter = [...this._options.configOverrides.reporter]`), so
+      # `html` MUST be listed here or the upload step below collects nothing.
+      # The config's own html reporter carries `outputFolder:
+      # playwright-report-live`, and that option is lost with it — the CLI
+      # reporter form cannot carry options — so PLAYWRIGHT_HTML_OUTPUT_DIR is
+      # what puts the report back where the upload step looks. Verified locally
+      # by running both forms: without it, `frontend/playwright-report-live` did
+      # not exist and `frontend/playwright-report` did.
       - name: Run live-mode e2e suite
-        # VITE_LIVE_STUB=1 enables the in-process stub plugin
-        # (frontend/vite.liveStub.ts) so the dev server returns
-        # canned responses with a controlled delay — no real backend
-        # is required. The Playwright live config then sets
-        # VITE_API_LIVE=true so the front end exercises sendLive
-        # instead of the demo path. The grep "live only" filter
-        # restricts the run to live-only tests
-        # (currently: pending-bubble loading indicator).
-        run: VITE_LIVE_STUB=1 npx playwright test --config=playwright.live.config.ts
+        run: npx playwright test --config=playwright.live.config.ts --reporter=list,json,html
+        env:
+          VITE_LIVE_STUB: '1'
+          PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/live-results.json
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report-live
+      # The selection guard above is NOT enough. `--list` COUNTS SKIPPED TESTS,
+      # and Playwright exits 0 when every selected test skips — so selection can
+      # read 5 while the run executes nothing and reports green.
+      #
+      # That is not hypothetical for THIS job. Four of the five live tests
+      # self-skip via `if (!isLive) test.skip(...)`, and `isLive` is read from
+      # the DOM badge — i.e. from the DEV SERVER's env, not this process's. A
+      # dev server that comes up in DEMO mode (a dropped VITE_API_LIVE, a
+      # `reuseExistingServer` regression, an adopted stray server) leaves 4
+      # skipped, 1 passed, exit 0, job green, and ZERO live-path coverage. That
+      # is exactly why `skipped == 0` below is the load-bearing line.
+      - name: Assert the suite actually executed
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+
+          stats = json.load(open("/tmp/live-results.json"))["stats"]
+          selected = int(os.environ["LIVE_TOTAL"])
+          print("stats:", stats, "selected:", selected)
+
+          # Account for EVERY selected test. A threshold (`expected >= 1`) would
+          # be a magic number that rots: with 5 selected it would stay green
+          # while four of them turned into skips.
+          if stats["expected"] + stats["skipped"] + stats["unexpected"] + stats["flaky"] != selected:
+              print(f"::error::selected {selected} tests but the run accounts for "
+                    f"{stats['expected']}+{stats['skipped']}+{stats['unexpected']}+{stats['flaky']}")
+              sys.exit(1)
+          # ZERO, not a pinned count: in LIVE mode nothing is supposed to skip,
+          # and every `if (!isLive)` guard in the live suite is a detector for a
+          # dev server that booted in demo mode. Relaxing this line is what turns
+          # a silent-green live job back on.
+          if stats["skipped"]:
+              print(f"::error::{stats['skipped']} of {selected} live tests SKIPPED. In live "
+                    f"mode nothing should skip — this is what a dev server that came up in "
+                    f"DEMO mode looks like (the `if (!isLive)` guards read the badge from the "
+                    f"server's env), and it would otherwise exit 0 with no live coverage")
+              sys.exit(1)
+          if stats["unexpected"]:
+              print(f"::error::{stats['unexpected']} unexpected failures")
+              sys.exit(1)
+          # `playwright.live.config.ts` sets `retries: 0` and says why: a live
+          # failure "almost always points at a real regression in the
+          # pending/streaming wiring and a green-by-flake is worse than a red
+          # signal". This asserts that stays true if someone adds retries.
+          if stats["flaky"]:
+              print(f"::error::{stats['flaky']} flaky test(s) — passed only on retry; "
+                    f"a green-by-flake is worse than a red signal")
+              sys.exit(1)
+          PY
       - name: Upload HTML report on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report-live
+          # Must stay equal to `frontend/` + the run step's
+          # PLAYWRIGHT_HTML_OUTPUT_DIR; pinned by
+          # backend/tests/test_gating_workflows.py.
           path: frontend/playwright-report-live
           retention-days: 7
+          # The default is `warn`. Fail instead: a debugging artifact that
+          # collects nothing is worth knowing about on the first run, not the
+          # tenth — the same defect `frontend.yml` hit and fixed.
+          if-no-files-found: error
