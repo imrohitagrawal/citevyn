@@ -225,6 +225,12 @@ one "hint: key on emptiness again, \`hasAnswer\` -> \`!chatEmpty\` (the F1 defec
 # THE F2 DEFECT: a rate-limit / network bubble counted as a generated answer.
 one "hint: count a transport-error bubble as an answer (the F2 defect)" "$CV" "$S/p.CV" \
 'messages.some((m) => !m.isUser && !m.errorKind)' 'messages.some((m) => !m.isUser)'
+# A SKEPTIC FOUND THIS ONE SURVIVING: every hint test used errorKind "error", so
+# narrowing the predicate to that one flavour passed the whole suite while the
+# commit's own headline claim named rate-limit bubbles too. A rate_limit test now
+# partners the error one, and this mutant is what proves it bites.
+one "hint: honour only the \"error\" flavour of errorKind, not rate_limit" "$CV" "$S/p.CV" \
+'messages.some((m) => !m.isUser && !m.errorKind)' 'messages.some((m) => !m.isUser && m.errorKind !== "error")'
 one "hint: look at the USER's bubbles instead of the bot's" "$CV" "$S/p.CV" \
 '(m) => !m.isUser && !m.errorKind' '(m) => m.isUser && !m.errorKind'
 one "hint: any message at all counts as an answer" "$CV" "$S/p.CV" \

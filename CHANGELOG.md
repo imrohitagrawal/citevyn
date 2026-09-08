@@ -164,12 +164,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `frontend/src/styles/landing.css` has set `font-size: 11.5px` with **no**
   `font-family` — so it inherits `"Geist", system-ui, sans-serif` from `body` —
   since the file's first commit (`2503dd4`). `.composer-prompt` is the mono one.
-  Both halves are fixed here. **+33 B gzip, measured** (62,974 before #380; 63,007 after; budget 64,479, headroom 1,505 -> 1,472). The `chat-empty` visual baselines are **not re-run** this round
-  and are not invalidated: an empty transcript renders byte-identical copy to the
-  version they were verified against (`visual.spec.ts -g chat-empty`, 2 passed,
-  and the gate proven to bite by a deliberately long three-line hint failing
-  both). That suite is `testIgnore`d by `playwright.demo-ci.config.ts`, so it was
-  a local check, not a CI one.
+  Both halves are fixed here. **+33 B gzip, measured** (62,974 before #380; 63,007 after; budget 64,479, headroom 1,505 -> 1,472). Both `chat-empty` visual baselines **pass
+  UNRECORDED on the final tree** — re-run after this round, `visual.spec.ts -g
+  chat-empty`, 2 passed. **This is a TOLERANCE pass, not an identity one**, and
+  an earlier draft of this entry got that wrong: the baselines were last
+  recorded at `1240484` (#336, 2026-09-04), so the stored pixels still contain
+  "This is a sample answer for the demo." The empty chat now renders "Answers
+  here are samples for the demo." — a genuinely different line — and both
+  baselines pass because that one 11.5px line stays inside
+  `maxDiffPixelRatio: 0.02` (`visual.spec.ts:56`). The pass is not vacuous:
+  replacing that string with a deliberately long three-line one FAILS both
+  baselines at ratio 0.04 (19,003 px light / 18,220 px dark), so the gate does
+  see this element. That suite is `testIgnore`d by
+  `playwright.demo-ci.config.ts`, so this was a local check, not a CI one.
 - **An answer built while more than one index claims `active` is no longer frozen
   into the answer cache, and an answer that actually drew on several indexes now
   says so (#352).** Scoped by an explicit owner decision — observability plus the

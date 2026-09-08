@@ -1160,6 +1160,24 @@ describe("ChatView — composer hint (#380)", () => {
     expect(hint(container)).toBe(NO_ANSWER_LIVE);
   });
 
+  it("does not count a RATE-LIMIT bubble as an answer either", () => {
+    // The partner for the test above, and the one that makes this change's own
+    // headline claim — "a rate-limit OR network bubble is client-side copy" —
+    // load-bearing. A skeptic reproduced `!m.errorKind` narrowed to
+    // `m.errorKind !== "error"` SURVIVING the whole suite, because every other
+    // hint test uses `errorKind: "error"`. RED if the predicate is narrowed to
+    // test one flavour of `errorKind`.
+    const { container } = renderChat({
+      chatEmpty: false,
+      messages: [
+        msg(0, true, "What is Claude Code?"),
+        { ...msg(1, false, "One moment — too many questions."), errorKind: "rate_limit" as const },
+      ],
+      live: true,
+    });
+    expect(hint(container)).toBe(NO_ANSWER_LIVE);
+  });
+
   it("with a real answer on screen in live mode, says it was generated live", () => {
     // The mandatory partner: without it `hasAnswer` could be hardcoded false and
     // every no-answer case above would still pass. RED if `hasAnswer` is pinned
