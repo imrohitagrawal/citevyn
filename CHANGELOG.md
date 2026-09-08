@@ -83,6 +83,287 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes red the day desktop STARTS deferring.
 
 ### Fixed
+- **The BACKLOG table guard no longer stops checking at the first malformed row
+  (#393).**
+  `_tables()` collected rows with `while lines[j].startswith("|")`, so a row that
+  lost its LEADING pipe did not merely go unflagged — it TERMINATED the row loop,
+  and that row plus every later row in the same table left the checked set
+  silently. Measured at `5e383a1`: removing the leading pipe from the #372 row
+  (line 45) took the checked set from **94 rows to 47**, `offenders` stayed **0**,
+  and the file reported **4 passed**.
+  **The issue's own numbers were wrong and are corrected in `docs/BACKLOG.md`.**
+  It said 93 rows and "43 rows below reality"; at `5e383a1` the file holds 94 rows
+  (the #393 row itself landed after that measurement) and the `rows >= 40` floor
+  sits **54** below reality.
+  **The fix is four count-free checks, unioned into one file-level gate.**
+  (A) a table's row run may end only at a blank line, at end-of-file, or at the
+  start of a block-level structure, and a header plus separator that collects
+  ZERO rows is itself an offender — `_tables()` is now a projection of
+  `_table_blocks()`, which returns the line that ended each run, so the parser's
+  own bail-out becomes visible. (B) every row-shaped line outside a code fence
+  must be a line the parser actually collected. (C) after a table's rows end, the
+  next non-blank line must not split into exactly that table's column count.
+  (D) no collected row may have the shape of a delimiter row.
+  **(C) and (D) were added because (A) and (B) together ACCEPTED the defect they
+  guard.** Six shapes, each applied ALONE to the real `docs/BACKLOG.md`, all
+  GREEN on the whole gate and all verified LOSSY through GitHub's own renderer
+  (`gh api -X POST /markdown`): a blank line before an untagged last row; the
+  same with a whitespace-only line; the same plus a zero-width-space prefix; a
+  de-piped row whose `[#N]` sits in cell 2; a 2-column archive row that lost BOTH
+  outer pipes, leaving ONE unescaped pipe; and two tables with no blank line
+  between them, which GFM MERGES — measured `<table>` count 2 → 1, with the
+  second table's delimiter row rendered as `<td>` cells of `---`.
+  **(C)'s threshold is a CELL COUNT, not a pipe count, and that was measured.**
+  `>= 2` pipes misses the 2-column shape (it has exactly one); `>= 1` fires on
+  any prose line carrying a pipe. The orphan must instead split into AT LEAST as
+  many cells as the table it adjoins, with both outer pipes optional the way GFM
+  treats them, and the walk skips blank lines and block-level structures (a
+  heading, a bullet, an HTML comment) rather than stopping at them. `>=` rather
+  than `==` because an orphan of the WRONG width is still an orphan: measured,
+  `| - | untagged | a | p | o | extra |` after a blank line renders as a
+  paragraph, and an equality test declined it. (C) also runs BACKWARDS now, so an
+  orphan sitting above a table's header is reported too.
+  **Two claims in the previous draft of this entry were measurably FALSE and are
+  corrected here.** "This file is full of sentences containing `` `a | b` ``
+  inside a code span" — measured, ZERO non-table lines in `docs/BACKLOG.md`
+  contain a `|` at all. And "the first non-blank line after every one of the six
+  tables is a heading with ZERO pipes" — true for five of six; after the 2-column
+  table it is a prose BULLET (line 176), which the block-structure skip is what
+  keeps green. **Residual false positive, named rather than hidden:** a prose
+  PARAGRAPH line — not a bullet, not a heading — placed next to the 2-column
+  archive table and carrying one unescaped pipe would be flagged. Nothing in the
+  file has that shape.
+  **(B) now keys on a TRAILING unescaped pipe rather than a pipe count.** A real
+  BACKLOG row ends on `|`; a sentence ends on a full stop. Verified rather than
+  assumed — all 94 parsed rows end on an unescaped pipe, and a new test asserts
+  that premise so it reddens the day it stops holding.
+  **(B) is ONE-DIRECTIONAL on purpose.** `docs/BACKLOG.md:88` is a legitimate
+  parsed row carrying no `[#N]` tag, so asserting the converse would redden the
+  clean file today.
+  **Five false positives were reproduced and closed.** Each rendered correctly
+  through GitHub's renderer and each turned the guard RED: a fenced ```` ```markdown ````
+  block containing a complete example TABLE (`_unfenced_lines` had been wired into
+  check (B) only — `_table_blocks`, `_tables`, `_offenders` and `_truncated_tables`
+  all still read raw `text.splitlines()`, so the closing fence was reported as an
+  illegitimate terminator); a nested bullet or an HTML comment directly after a
+  table with no blank line (GFM ends a table at the first block-level structure,
+  and the message's remedy — "give it a leading `|` and no indent" — was actively
+  wrong advice for them); a paragraph opening `[#909](url)` and mentioning
+  `` `a | b` `` and `` `c | d` ``; and the same as a wrapped bullet continuation.
+  A plain prose line directly after a table is deliberately STILL reported:
+  measured, GFM absorbs it as a table row with one filled cell and four empty
+  ones, so it really does damage the table.
+  **The fence tracker is now flavour-aware in BOTH guard files.** A `~~~` line
+  inside a ```` ```python ```` block used to close it early and invert the parity
+  of every fence after it; a four-backtick opener was closed by any three-backtick
+  line. A fence now closes only on the same marker character, at least as long as
+  the opener, carrying no info string. "Both files pin the identical shape table
+  so a fix applied to one and not the other reddens whichever drifted" was FALSE
+  as written — there was no cross-file comparison at all, only two independent
+  tables sharing a name, and widening `_FENCE_RE` in one file alone left both
+  files green (144 passed). The tracker is now ONE block delimited by
+  `# --- BEGIN/END SHARED CODE-BLOCK TRACKER` markers, duplicated byte for byte,
+  and `test_the_shared_code_block_tracker_has_not_drifted` compares the two
+  copies as bytes.
+  **Three false positives on the guard side were reproduced and closed, each
+  verified against GitHub's renderer first.** A four-space-INDENTED code block
+  containing a table row (and an indented fence, at top level or inside a list)
+  renders as `<pre>` and changes no table — the guard reported all three, on a
+  document whose whole subject is broken table rows, so quoting one as a code
+  sample was the most likely future content there is. A legitimate `| - | - |`
+  row renders `<td>-</td><td>-</td>` — check (D) called it a merged table; it now
+  requires a RUN of dashes, and the stated cost is that a second table whose
+  delimiter is written `| - | - |` is not caught. And `U+0085`, `U+2028`, `\x0c`
+  or `\x0b` inside a cell still renders as one row with every cell intact, while
+  `str.splitlines()` tore the row in two and shifted every line number after it;
+  the file now splits on `\n` alone, which is also what makes its 1:1 line
+  numbering true rather than nearly true.
+  **Two false negatives closed and two blind spots STATED.** An orphan reached
+  past an HTML comment or a bullet, and an orphan above the first table, are both
+  reported now. An orphan with FEWER cells than its table is not — it is
+  indistinguishable from prose at the line level — and neither is a table written
+  inside a BLOCKQUOTE: `_table_blocks` needs a header starting with `|` and `> |`
+  does not, so a quoted table's pipe over-run (`stray` and `pipe` DISCARDED,
+  measured) is invisible to every check. Stripping `> ` before parsing would turn
+  every legitimate blockquote terminator into a false positive, so it is recorded
+  in the "what it cannot see" list rather than half-fixed; `docs/BACKLOG.md` has
+  one blockquote today, lines 9-10, containing no table.
+  **A shipped claim about GFM was measurably FALSE and is corrected.** The
+  offender messages said "GFM will not render it as part of the table either".
+  Measured through GitHub's renderer on the real 48-row table: a row that loses
+  its leading pipe, or gains 1, 2 or 3 spaces of indent, still renders INSIDE the
+  table (6 tables, 100 `<tr>`, unchanged from baseline); only a FOUR-space indent
+  breaks it (100 → 68 `<tr>`). Every message now says the parser stops CHECKING
+  here, which is what actually happens.
+  **Union coverage, re-measured per shape** (A / B / C / D / union). Every row
+  below marked REAL is the mutation applied to `docs/BACKLOG.md` itself; the two
+  marked SYNTH are fixtures, because the real file has no line of that shape, and
+  they are labelled rather than passed off as file measurements — an earlier
+  draft of this list claimed "against the real file" for a verdict that could
+  only have come from a fixture.
+
+  | shape | A | B | C | D | union |
+  |---|---|---|---|---|---|
+  | REAL leading pipe gone, mid or last row | RED | RED | RED | blind | RED |
+  | REAL leading pipe gone, FIRST row | RED | RED | blind | blind | RED |
+  | REAL indented 2 spaces, mid or last row | RED | RED | RED | blind | RED |
+  | REAL blank line inserted mid-table | blind | RED | RED | blind | RED |
+  | REAL header, or separator, loses its leading pipe | blind | RED | blind | blind | RED |
+  | REAL untagged last row, blank line before it | blind | blind | RED | blind | RED |
+  | REAL untagged last row loses its pipe | RED | blind | RED | blind | RED |
+  | REAL whitespace-only line before an untagged last row | blind | blind | RED | blind | RED |
+  | REAL zero-width-space prefix + blank line | blind | blind | RED | blind | RED |
+  | REAL 2-column archive row loses BOTH pipes, blank before | blind | blind | RED | blind | RED |
+  | REAL two tables with no blank line between them | blind | blind | blind | RED | RED |
+  | SYNTH de-piped row whose `[#N]` sits in cell 2, blank before | blind | blind | RED | blind | RED |
+  | SYNTH header + separator that collects ZERO rows | RED | RED | blind | blind | RED |
+
+  **Blind spots, stated rather than implied:** a row DELETED outright, and the two
+  shapes GFM renders without loss anyway (a row with FEWER cells than its header,
+  and a row missing its TRAILING pipe). All three measured GREEN and left alone.
+  **The `rows >= 40` / `tables >= 3` floors were deliberately KEPT and NOT
+  raised.** Raising them reproduces the defect with a bigger number; pinning exact
+  counts (`== 94`) reddens on every ordinary BACKLOG edit, and a gate that cries
+  wolf on normal work gets blanket-updated without thought or deleted. The floors
+  stay as the count-nothing partner, and the file now says in the docstring that
+  they are NOT the truncation guard.
+- **`sessions.py` no longer describes a live ownership control as a no-op
+  (#389).** Docstrings only; no executable line changed.
+  `_get_session_or_404`'s "behaviourally a no-op today (every caller resolves to
+  the one constant `demo_user` principal)" has been false since ADR-0004 PR 3.
+  Both callers pass `Depends(resolve_principal)`, which returns a cookie-derived
+  `anon_<uuid4hex>` or a signed-in `usr_` id and deliberately NOT the constant
+  `DEMO_USER_ID` audit identity, so `Session.user_id == user_id` is the ONLY
+  thing separating two visitors.
+  **Verified load-bearing by execution, not by reading.** Deleting that predicate
+  takes `backend/tests/test_session_ownership.py` from 6 passed to 2 failed
+  (`test_get_session_on_another_users_session_returns_404` asserting `200 == 404`
+  and `test_delete_session_on_another_users_session_returns_404` asserting
+  `204 == 404`); the mutant was restored byte-identically.
+  **No backup mechanism.** `db/versions` declares no row-level security, policy
+  or trigger across all 13 migrations; the three middlewares `main.py`
+  registers (`configure_cors` -> `CORSMiddleware`,
+  `configure_security_headers` -> `SecurityHeadersMiddleware`, and
+  `RequestIDMiddleware`, at `main.py:124-126`) are none of them
+  ownership-aware; `messages._require_message` filters on `session_id`
+  alone and relies on `_require_session` having run first.
+  **The issue's attribution was wrong: ADR-0004 PR 3, not PR 13.** The ADR's PR
+  table has PR 3 as "Migration 0007 `auth_sessions` + anonymous cookie issuance"
+  and PR 13 as account linking, ten PRs later. `6374368` (PR 1, #272) wrote the
+  sentence — true when written — and `b8ffc46` (PR 3, #275) made it false. The
+  docstring's own "PR 1" cross-reference was correct and is kept.
+  Two further stale claims in the same defect class were found and fixed with it:
+  `CreateSessionRequest` said "the MVP pins every session to the authenticated
+  `demo_user`" while `create_session` writes `user_id=principal_id`, and
+  `test_session_ownership.py` still described its second principal as seeded
+  "once ADR-0004 PR 6 ships" — PR 6 shipped.
+- **The pre-#296 Fly deploy command is gone from its two unguarded copies, and a
+  guard now forbids a third (#388).**
+  `docs/RELEASE_CANDIDATE_v0.12.0.md:64` and the `[build.args]` comment in
+  `fly.toml` both still read `fly deploy --build-arg VERSION=$(...)`. Both were
+  TWO revisions stale, independently: each had missed #296 (2026-09-02,
+  `VITE_API_DEMO_KEY`, a ~1h 401 outage) and #385 (2026-09-08, `--local-only`).
+  That one line is defective four ways at
+  once — an unguarded `$()`, no `--app`, no `--local-only`, and neither `VITE_*`
+  argument — and the four are found by four DIFFERENT guards, not by one:
+  `_classify` inspects `--build-arg` VALUES only and yields exactly ONE offender
+  on that line (the `$()`), while `--app` is
+  `test_the_extraction_is_scoped_to_section_4_1`, `--local-only` is
+  `test_the_deploy_command_builds_locally`, and the missing `VITE_*` arguments
+  are `_baked_build_args()`.
+  **The release-candidate doc is not history.** Line 64 sits inside "Exact
+  ordered commands (owner-run)" and `v0.12*` matches no tag, so it is a
+  prospective to-do list; correcting it is a fix, not a rewrite.
+  **DELETE-AND-LINK rather than a three-way sync guard.** `fly.toml` cannot hold
+  the correct command even in principle — it needs `${DEMO_KEY:?...}` read from
+  the RUNNING MACHINE at deploy time, which no committed file can do — so any
+  copy there is a partial one, which is exactly the trap it was.
+  (`test_fly_config.py` also forbids a credential there, but only in the
+  `[env]` table: both of its checks read `fly_config["env"]`, and
+  `grep -n 'build.args' backend/tests/test_fly_config.py` returns no hits, so
+  `[build.args]` — where a build argument would land — is not covered by it.) And an absence guard cannot be satisfied by its own subject,
+  whereas a presence guard is satisfied by the literal string it greps for.
+  **The new guard, and its deliberate inversion.** The rest of
+  `backend/tests/test_deploy_fly_build_args_are_documented.py` STRIPS comments so
+  only runnable text can satisfy an assertion. Here the comment IS the subject:
+  in a `.toml` or `.sh` file the comment is what a human copies, and
+  `test_fly_config.py` reads `fly.toml` through `tomllib`, which discards
+  comments — so no existing test could see that line at all. Markdown is scanned
+  only inside CODE BLOCKS — fenced, or four-space indented — which makes CHANGELOG
+  prose, `NEXT_SESSION_PROMPT.md` and `BACKLOG.md` table cells invisible BY
+  CONSTRUCTION with no allowlist entry to rot. Indented blocks were first excluded
+  as "a shape this repo does not use"; measured, that was FALSE —
+  `docs/DEMO_CHECKLIST.md:51-54` is a six-space-indented fence around a live,
+  copy-pasteable `psql` command — so they are scanned, and the fence tracker is
+  now one BYTE-IDENTICAL block shared with `test_backlog_table_renders.py` and
+  asserted equal across the two files. Backslash continuations are joined before
+  matching, or §4.1's own four-line command would be invisible to a line-oriented
+  scan; only ADJACENT scan units are joined, so a `\` running out of one code
+  block cannot manufacture a command out of the next one.
+  **§4.1 is exempt from the sweep by LINE RANGE, so the §4.1 content guards are
+  the only net over it — and they used a different matcher.** They selected their
+  subject with a `"fly deploy" in ln` substring while the sweep used the
+  spelling-aware regex, so `flyctl deploy --app citevyn --build-arg VERSION=1.2.3`,
+  `fly  deploy ...` and `fly -a citevyn deploy ...` planted inside §4.1 were
+  invisible to BOTH halves at once — measured in the real runbook, 108 tests
+  green. Both halves now use `_FLY_DEPLOY_COMMAND_RE`, and each spelling is
+  pinned.
+  **Measured on the real tree:** 109 files scanned (74 `.md`, 2 `.toml`, 33
+  `.sh`) and exactly three candidates found — §4.1 line 266 (sanctioned), the
+  §6.1 `--image` rollback at line 828 (exempt, and the exemption is conditional
+  on passing NO build argument in either spelling), and
+  `scripts/check_bundle_key.sh:150`, an incident-remediation hint that
+  deliberately ends in `...` — allowlisted with its reason. Every allowlist entry
+  is asserted to still match something, so a stale exemption goes red.
+  Also closed here: `test_every_baked_build_arg_is_passed_by_the_deploy_command`
+  searched for the literal `--build-arg NAME=` while `_classify` also captures
+  `--build-arg=NAME=value`, so two guards over one command read it differently.
+  Whether `fly` accepts the equals form is UNVERIFIED — one `fly deploy --help`
+  settles it — so both spellings are treated as passing a build argument.
+  **The sweep itself was unguarded, and four mutations proved it.** The fixture
+  table proved the SHAPE rule and a partner proved the ENUMERATION reached 109
+  files, but nothing connected them: restricting the sweep to `docs/DEPLOY_FLY.md`
+  (which is exempt anyway), skipping every non-`.md` file, dropping `.sh` from
+  `_SCANNED_SUFFIXES`, and adding `scripts`/`infra`/`tests` to `_PRUNED_DIRS` each
+  left all 81 tests GREEN while the guard covered nothing. The sweep is now a
+  function of a ROOT that also reports what it PROCESSED, one test asserts that
+  set equals the enumeration, and another drives the real sweep over a synthetic
+  tree with one planted offender per scanned suffix. All four mutants die.
+  **The allowlist was FILE-scoped, which is a hole rather than a simplification.**
+  `_is_sanctioned('scripts/check_bundle_key.sh', N)` answered yes for line 1, line
+  150 and line 99999 alike, so appending a genuinely stale
+  `fly deploy --build-arg VERSION=$(git describe --tags --always)` to that file
+  produced `offenders = []` — reproduced, then restored byte-identically. An entry
+  is now `(path, anchor text, reason)` and the exempt line must still CONTAIN the
+  anchor; the staleness partner requires the anchor to match EXACTLY ONE line.
+  **The matcher missed five documented spellings of the same command**, each
+  demonstrated: `flyctl deploy` (the CLI's real binary name, already used at
+  `docs/NEXT_SESSION_PROMPT.md:90` and in #385's own issue body — `:19` of that
+  file is `flyctl releases`, not `flyctl deploy`, and an earlier draft of this
+  entry cited both lines as the same command),
+  `fly  deploy` with two spaces, `fly\tdeploy`, `fly deploy . --build-arg ...`
+  with a positional build context, and `fly -a citevyn deploy --build-arg ...`
+  with a global flag before the subcommand. The `` (?<!`) `` lookbehind was also a
+  hole in `.toml`/`.sh` — a backticked command in a config comment is exactly what
+  a human copies the inside of — and is gone; the `(?=\s+-)` lookahead is replaced
+  by "a flag appears anywhere AFTER the subcommand", which keeps every prose
+  mention excluded and admits the positional form.
+  **Three fail-open defaults closed.** A file that cannot be decoded as UTF-8 is
+  now a FLAGGED offender rather than a silent `continue` (reproduced: a latin-1
+  `.md` carrying a fenced `fly deploy --build-arg V=1` was skipped with no signal);
+  `_section_line_range` returns an EMPTY range when its section is missing rather
+  than `(0, len(lines))`, which had made every line of the runbook sanctioned when
+  `### 4.1` was renamed; and `os.walk` now raises on an unreadable directory
+  instead of discarding the `OSError`.
+  **Pre-existing, fixed in passing:** `test_the_smoke_call_sends_the_session_cookie`
+  ended with `for line in (ask, create):`, re-using the LEAKED loop variables of the
+  two loops above it, so the bearer assertion ran against only the LAST ask and the
+  LAST create — the same "only one of them is checked" defect `_deploy_commands` had
+  been fixed to remove. Latent today (the runbook has one of each), so it is
+  bite-proved rather than mutation-proved: a decoy second `/messages` curl carrying
+  `Bearer $NEVER_ASSIGNED_ANYWHERE`, planted BEFORE the real one, makes the fixed
+  loop RED and the leaked-variable loop GREEN; both files were restored
+  byte-identically.
 - **A chat with no answer on it no longer tells the reader "This answer was
   generated live, just now." (#380).**
   `.composer-hint` renders OUTSIDE the `chatEmpty ? … : …` branch — that branch
