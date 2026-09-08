@@ -57,7 +57,8 @@
  *     gzip that no version of this gate has ever counted. Counting it now would
  *     silently consume the whole headroom.
  *   - The SUM of the lazy chunks (13,117 B over 8 chunks) and their COUNT. Both
- *     are RECORDED on every run by check-bundle-size.mjs and gated by nothing.
+ *     are RECORDED by check-bundle-size.mjs on every run that reaches the
+ *     measurement, and gated by nothing.
  *     A per-chunk ceiling actively REWARDS splitting one chunk into two, which
  *     costs one more round trip, and nothing here counts round trips.
  *   - Anything in frontend/public/ (about-theme.js, 1,512 B raw) — outside the
@@ -160,7 +161,7 @@ export function parseBudget(text, key = BUDGET_KEY) {
  *                            NODE_ENV=test, so scripts/lazy-landing-strip.test
  *                            .mjs — which builds through THIS function — was
  *                            measuring a dev build. Measured, same flags, same
- *                            outDir: NODE_ENV=test gives a 118,900 B gzip entry
+ *                            outDir: NODE_ENV=test gives a 118,897 B gzip entry
  *                            and a 6,067 B strip; NODE_ENV=production gives
  *                            62,974 B and 4,722 B, with content hashes
  *                            identical to `npm run check:bundle`. Pinning it
@@ -236,7 +237,8 @@ export function eagerChunkFilesFromManifest(manifest) {
  * `eagerChunkFilesFromManifest` claims is subtracted, by construction.
  *
  * Records whose `file` is not `.js` are SKIPPED and COUNTED. The count is
- * printed on every run, so "the gate silently stopped looking at something" is
+ * printed on every run that reaches the measurement, so "the gate silently
+ * stopped looking at something" is
  * not a state this can be in without saying so. A chunk emitted with some other
  * extension (`.mjs`, say) would land in that count rather than under the
  * ceiling — which is why the number is reported rather than assumed to be 0.
@@ -432,12 +434,24 @@ export function renderRecordedReport({ eager, lazy, max, skippedNonJs }) {
   for (const c of sorted) {
     lines.push(`  ${c.file} — ${c.gzip} B gzip (headroom ${max - c.gzip} B)`);
   }
-  // Guarded, so this function can be called BEFORE the verdicts (which is what
-  // makes "produced on the fail path too" true): evaluateLazyChunks THROWS on
-  // an empty collection, and an unguarded call here would swallow the whole
-  // report on exactly the run whose numbers a reader most needs.
+  // Built from `sorted[0]`, NOT by calling evaluateLazyChunks.
+  //
+  // A REPORTER MUST NOT COMPUTE A VERDICT. The first version of this did call
+  // evaluateLazyChunks and guarded it with `sorted.length > 0`, because that
+  // function throws on an empty collection. That guard covered ONE of its two
+  // throws: the zero-byte-chunk check below it also throws, is not a shape this
+  // guard can see, and a skeptic reproduced the result through the real script —
+  // exit 1 with ZERO bytes of stdout, on precisely the truncated build whose
+  // numbers a reader most needs. The reorder that put this function above the
+  // verdicts was made to remove that swallow and had re-created it one throw
+  // over. Reading `sorted[0]` cannot throw for any input this function accepts,
+  // so the report no longer depends on a verdict succeeding.
   if (sorted.length > 0) {
-    lines.push(`  ${evaluateLazyChunks({ chunks: lazy.files, max }).line}`);
+    const largest = sorted[0];
+    lines.push(
+      `  largest lazy chunk ${largest.file} (${largest.gzip} B gzip) ` +
+        `(ceiling ${max} B each, headroom ${max - largest.gzip} B)`,
+    );
   }
   lines.push(
     `RECORDED, NOT GATED — lazy gzip SUM ${lazy.totalGzip} B over ${lazy.files.length} chunks`,

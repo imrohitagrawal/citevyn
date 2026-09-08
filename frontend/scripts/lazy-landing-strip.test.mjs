@@ -148,7 +148,7 @@ describe("the below-the-fold landing strip is not in the eager bundle (#358)", (
     // React's package exports branch on it — so until buildCommand() pinned
     // NODE_ENV=production this whole file measured a React DEVELOPMENT build
     // and said it was measuring the shipping chunk. `> 50_000` passed happily
-    // on both: measured 62,974 B gzip for the shipping entry and 118,900 B for
+    // on both: measured 62,974 B gzip for the shipping entry and 118,897 B for
     // the dev one. A BAND catches that; a floor never could.
     //
     // Deliberately a band, not a pin: 90,000 B is ~43% above today's shipping
@@ -156,7 +156,7 @@ describe("the below-the-fold landing strip is not in the eager bundle (#358)", (
     // (so the environment cannot drift back without this going red).
     //
     // TURNS RED IF: the `NODE_ENV: "production"` pair is dropped from
-    // buildCommand()'s `env` — the entry then measures ~118,900 B.
+    // buildCommand()'s `env` — the entry then measures 118,897 B.
     expect(eagerBytes).toBeLessThan(90_000);
   });
 

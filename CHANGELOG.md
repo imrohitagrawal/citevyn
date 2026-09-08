@@ -21,7 +21,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **The issue's actual complaint was the reporting, not the missing ceiling.**
   #358 freed 3,521 B from the eager chunk, the gate said so, and nothing in its
   output said desktop first-paint JS had grown 1,200 B. So the command now
-  prints, on every run and on BOTH the pass and the fail path: the per-chunk
+  prints, on every run that reaches the measurement and on BOTH verdict paths: the per-chunk
   lazy table with each chunk's headroom, the largest lazy chunk, the lazy SUM
   (13,117 B over 8 chunks today), the all-JS TOTAL (76,091 B over 9 chunks,
   manifest chunks only — `public/about-theme.js` is in neither term), and the
@@ -60,7 +60,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `scripts/lazy-landing-strip.test.mjs`, which builds through `buildCommand()`,
   was measuring a React **development** build while its docblock said it proved
   the ceiling was right for the chunk that actually ships. Measured with
-  identical flags: `NODE_ENV=test` gives a 118,900 B gzip entry and a **6,067 B**
+  identical flags: `NODE_ENV=test` gives a 118,897 B gzip entry and a **6,067 B**
   strip — a 261 B margin against the 6,328 ceiling — where the shipping build
   gives 62,974 B and 4,722 B, a 1,606 B margin, in the same CI job. The
   eager-graph assertion there gains an **upper** bound (a band, not a pin) so

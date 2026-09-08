@@ -1,8 +1,11 @@
 /**
  * Fails the build if the EAGER GRAPH exceeds its gzip budget, or if ANY SINGLE
  * LAZY CHUNK exceeds its own per-chunk gzip budget (#372). It also RECORDS, on
- * every run and on both the pass and the fail path, three numbers that nothing
- * gates: the per-chunk lazy table, the lazy SUM, and the all-JS TOTAL.
+ * every run that reaches the measurement and on both verdict paths, three
+ * numbers that nothing gates: the per-chunk lazy table, the lazy SUM, and the
+ * all-JS TOTAL. NOT "on every run" — that phrasing stood here and was denied
+ * 118 lines below by this file's own comment; a failure earlier than the
+ * measurement still prints nothing, and that is stated at the print loop.
  *
  * That reporting IS the fix for #372. The complaint there was not a missing
  * ceiling — it was that this command reported a 3,521 B eager WIN for #358

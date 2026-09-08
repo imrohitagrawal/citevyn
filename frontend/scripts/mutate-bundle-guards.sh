@@ -109,7 +109,7 @@ mutate "build: stop building the LIVE variant" "$PURE" "$TMP/pure" \
 'env: { VITE_API_LIVE: "true", NODE_ENV: "production" },' 'env: { NODE_ENV: "production" },'
 # #372 review finding: `--mode production` does NOT set NODE_ENV, vitest sets it
 # to "test", and React's package exports branch on it. Without this pin,
-# lazy-landing-strip.test.mjs measured a React DEVELOPMENT build (118,900 B gzip
+# lazy-landing-strip.test.mjs measured a React DEVELOPMENT build (118,897 B gzip
 # entry, 6,067 B strip) while its docblock claimed it measured the shipping
 # chunk (62,974 B / 4,722 B).
 mutate "build: drop the NODE_ENV pin (measures a React DEV build under vitest)" "$PURE" "$TMP/pure" \
@@ -219,6 +219,15 @@ mutate "classify: stop counting the records it skipped" "$PURE" "$TMP/pure" \
 
 echo
 echo "--- the RECORDED report: numbers a reader relies on (#372) ---"
+# The defect a skeptic found in the FIRST fix round: renderRecordedReport built
+# its largest-chunk line by CALLING evaluateLazyChunks, which throws TWICE (empty
+# collection, zero-byte chunk) while the guard beside it saw only the first. A
+# truncated build exited 1 with zero bytes of stdout -- the reorder made to stop
+# the report being swallowed had re-created the swallow one throw over. A
+# reporter must not compute a verdict.
+mutate "report: compute the largest line via the VERDICT again (swallows the zero-byte run)" "$PURE" "$TMP/pure" \
+'    const largest = sorted[0];' \
+'    const largest = evaluateLazyChunks({ chunks: lazy.files, max }).largest;'
 mutate "report: hardcode the lazy SUM line" "$PURE" "$TMP/pure" \
 '    `RECORDED, NOT GATED — lazy gzip SUM ${lazy.totalGzip} B over ${lazy.files.length} chunks`,' \
 '    `RECORDED, NOT GATED — lazy gzip SUM 0 B over 0 chunks`,'

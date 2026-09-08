@@ -236,7 +236,7 @@ describe("buildCommand — the flags that decide WHICH artifact gets measured", 
    * that runs UNDER vitest — scripts/lazy-landing-strip.test.mjs does — was
    * building react-dom's DEVELOPMENT copy and calling it "the chunk that
    * actually ships". Measured with the same flags into the same outDir:
-   * NODE_ENV=test gives a 118,900 B gzip entry and a 6,067 B strip;
+   * NODE_ENV=test gives a 118,897 B gzip entry and a 6,067 B strip;
    * NODE_ENV=production gives 62,974 B and 4,722 B, matching `npm run
    * check:bundle` content hash for content hash.
    *
@@ -897,6 +897,35 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     // PARTNER: with no lazy chunks there IS no largest, and the report must not
     // invent one — nor die trying to compute it.
     expect(r.stdout).not.toContain("largest lazy chunk");
+  });
+
+  /**
+   * THE SECOND THROW, which the first version of the reorder did not cover.
+   *
+   * `evaluateLazyChunks` throws twice: on an empty collection (the test above)
+   * and on a zero-byte chunk. `renderRecordedReport` used to CALL it to build
+   * the largest-chunk line, guarded by `sorted.length > 0` — a guard that sees
+   * only the first throw. So a truncated build exited 1 with ZERO bytes of
+   * stdout: the reorder made to stop the report being swallowed had re-created
+   * the swallow one throw over, while three files claimed otherwise. The report
+   * now reads `sorted[0]` directly and computes no verdict at all.
+   *
+   * TURNS RED IF: renderRecordedReport goes back to calling evaluateLazyChunks
+   * (verified — restoring that call makes this exit 1 with an empty stdout).
+   */
+  it("still records the numbers when a lazy chunk is truncated to zero bytes", () => {
+    const r = runGate({
+      budgetJson: budgetFile(10000000),
+      manifest: MANIFEST_LAZY,
+      assets: { "index-abc.js": ENTRY_BYTES, "Nudge-lazy.js": Buffer.alloc(0) },
+    });
+    // The zero-byte floor still bites — that is not what this test relaxes.
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/no bytes at all/);
+    // ...and the numbers a reader needs on exactly this run are still printed.
+    expect(r.stdout).toContain("lazy chunks: 1, ceiling");
+    expect(r.stdout).toMatch(/RECORDED, NOT GATED — lazy gzip SUM \d+ B over 1 chunks/);
+    expect(r.stdout).toContain("largest lazy chunk assets/Nudge-lazy.js");
   });
 
   // Uses a REAL symlink to a REAL file, so the only thing that can fail it is
