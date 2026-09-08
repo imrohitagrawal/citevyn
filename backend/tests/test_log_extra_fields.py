@@ -696,13 +696,21 @@ def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
     """
     from app.core.logging import HIGH_ENTROPY_RE, MAX_PATH, redact_value
 
-    # This test materialises strings of length ``MAX_PATH``, so it states the
-    # bound it is willing to build instead of allocating whatever the constant
-    # happens to say. Found by the mutation sweep for this very change: the
-    # ``MAX_PATH = 10**9`` mutant made an earlier draft allocate four GB and
-    # HANG the suite rather than fail it, which is a survivor wearing a
-    # timeout. A cap of more than a few KB is not a cap.
-    assert MAX_PATH <= 4096, f"MAX_PATH={MAX_PATH} is not a cap"
+    # A TEST-HARNESS BOUND, not a policy on the constant. This test builds
+    # ``"/seg" * MAX_PATH`` -- four times ``MAX_PATH`` characters -- so it
+    # states the largest string it is willing to materialise. Found by the
+    # mutation sweep for this very change: under the ``MAX_PATH = 10**9``
+    # mutant an earlier draft allocated four GB and HUNG the suite rather than
+    # failing it, which is a survivor wearing a timeout. The bound is set far
+    # above any value the constant could sanely take -- raising ``MAX_PATH``
+    # to 4096 or 8192 is a legitimate product decision and must not fail here
+    # -- and exists only so an absurd value fails FAST and LOUDLY.
+    MATERIALISATION_LIMIT = 1_000_000
+    assert MAX_PATH <= MATERIALISATION_LIMIT, (
+        f"MAX_PATH={MAX_PATH}: this test refuses to materialise a "
+        f"{4 * MAX_PATH}-character string. This is the harness declining to "
+        f"allocate, not a statement that {MAX_PATH} is an invalid cap."
+    )
 
     marker = "…<truncated>"
 
@@ -728,6 +736,156 @@ def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
     one_over = redact_value("path", over_limit)
     assert str(one_over).endswith(marker), one_over
     assert len(str(one_over)) == MAX_PATH + len(marker), len(str(one_over))
+
+
+# ── The two operations inside the ``path`` branch, pinned individually ─────
+#
+# ``redact_value``'s path branch does exactly two things: SWEEP the value one
+# ``/``-delimited segment at a time, then TRUNCATE at ``MAX_PATH``. The three
+# tests above pin the sweep's OUTPUT and the cap's THRESHOLD. Neither pins how
+# the two compose, and a second review round measured two mutants of that
+# composition surviving the whole suite (2075 passed, 24 skipped -- byte
+# identical to baseline). One of them LEAKS. The two tests below close them.
+
+# An OBVIOUSLY-FAKE constructed token. Every character is inside
+# ``HIGH_ENTROPY_RE``'s class and it is long enough to match, so the sweep
+# blanks it -- which is precisely what a truncation landing inside it undoes.
+FAKE_PATH_SECRET = "NOTAREALSECRET" + "0123456789" + "abcdefghij" + "QRSTUV"
+
+
+def _fake_secret_path(cut_keeps: int) -> str:
+    """A path built so a raw cut at ``MAX_PATH`` lands ``cut_keeps`` characters
+    into ``FAKE_PATH_SECRET``, leaving a prefix too short for the sweep to see.
+
+    Derived from ``MAX_PATH`` rather than hard-coded, so the fixture keeps its
+    meaning if the cap is retuned.
+    """
+    from app.core.logging import MAX_PATH
+
+    filler = "q" * (MAX_PATH - cut_keeps - len("/v1/") - len("/"))
+    return "/v1/" + filler + "/" + FAKE_PATH_SECRET + "/tail"
+
+
+def test_the_path_sweep_runs_BEFORE_the_truncation_so_a_cut_cannot_expose_a_secret() -> None:
+    """The sweep-then-truncate ORDER is load-bearing, and nothing pinned it.
+
+    Swapping the two -- cap the raw value first, then sweep the pieces --
+    leaves the whole suite green while LEAKING. The cut lands mid-token, and
+    the surviving prefix is under ``HIGH_ENTROPY_RE``'s 32-character floor, so
+    the sweep that runs afterwards no longer matches it and prints it verbatim.
+    Measured on this fixture, with ``MAX_PATH = 160`` and a 28-character cut::
+
+        SHIPPED: '/v1/[REDACTED]/[REDACTED]/tail'
+        MUTANT : '/v1/[REDACTED]/NOTAREALSECRET0123456789abcd…<truncated>'
+
+    RED if the ``path`` branch truncates before it sweeps. Asserted on the
+    SECRET's own characters, not on the exact output string, so it stays true
+    if ``MAX_PATH``, the truncation marker or the redaction placeholder change.
+
+    Its non-vacuity partner is
+    ``test_the_fake_path_secret_really_is_present_and_really_is_swept``, which
+    proves this fixture actually carries the token and that only the sweep
+    removes it.
+    """
+    from app.core.logging import redact_value
+
+    value = _fake_secret_path(cut_keeps=28)
+    out = redact_value("path", value)
+    assert isinstance(out, str)
+
+    # No 16-character window of the token survives anywhere in the output --
+    # strictly stronger than "the leaked prefix is absent", and independent of
+    # exactly where a cut would land.
+    window = 16
+    leaked = [
+        FAKE_PATH_SECRET[i : i + window]
+        for i in range(len(FAKE_PATH_SECRET) - window + 1)
+        if FAKE_PATH_SECRET[i : i + window] in out
+    ]
+    assert leaked == [], (leaked, out)
+
+
+def test_the_fake_path_secret_really_is_present_and_really_is_swept() -> None:
+    """NON-VACUITY PARTNER for the ordering test above, which on its own
+    asserts only an ABSENCE and would pass just as happily on a fixture that
+    never contained the token at all.
+
+    Three things, each measured against the real module rather than assumed:
+
+    1. the token IS in the input;
+    2. a RAW cut at ``MAX_PATH`` preserves a 28-character prefix of it -- so
+       truncation alone does not remove the leak material, and whatever does
+       remove it must be the sweep;
+    3. that surviving prefix does NOT match ``HIGH_ENTROPY_RE`` while the whole
+       token DOES -- the exact mechanism by which a truncate-first order goes
+       blind. And the sweep, on its own, really does blank the whole token.
+    """
+    from app.core.logging import HIGH_ENTROPY_RE, MAX_PATH, redact_value
+
+    cut_keeps = 28
+    value = _fake_secret_path(cut_keeps=cut_keeps)
+
+    assert FAKE_PATH_SECRET in value
+    assert len(value) > MAX_PATH, len(value)
+
+    survives_a_raw_cut = value[:MAX_PATH]
+    assert survives_a_raw_cut.endswith(FAKE_PATH_SECRET[:cut_keeps]), survives_a_raw_cut
+
+    assert HIGH_ENTROPY_RE.search(FAKE_PATH_SECRET) is not None
+    assert HIGH_ENTROPY_RE.search(FAKE_PATH_SECRET[:cut_keeps]) is None, (
+        "the fixture no longer straddles the 32-character floor, so the "
+        "ordering test above would pass for the wrong reason"
+    )
+
+    # And the sweep, unaided, blanks the whole token.
+    assert redact_value("path", "/" + FAKE_PATH_SECRET) == "/[REDACTED]"
+
+
+def test_the_max_path_cap_measures_the_SWEPT_length_not_the_raw_length() -> None:
+    """The cap's OPERAND, which its sibling boundary test cannot see.
+
+    ``len(swept) > MAX_PATH`` mutated to ``len(redacted) > MAX_PATH`` -- the
+    cap keyed on the UNSWEPT length -- also survives the whole suite. It
+    appends ``…<truncated>`` to output that was never truncated::
+
+        input  : '/v1/' + 'B'*40 + '/' + 'c'*130      (len 175, swept len 25)
+        SHIPPED: '/v1/[REDACTED]/[REDACTED]'
+        MUTANT : '/v1/[REDACTED]/[REDACTED]…<truncated>'
+
+    WHY ``test_the_max_path_cap_fires_only_ABOVE_the_limit`` IS BLIND TO IT, BY
+    CONSTRUCTION. Every fixture there is a ``"/seg"`` repeat, chosen so that no
+    segment matches ``HIGH_ENTROPY_RE`` and the sweep is therefore the
+    identity. That is exactly the property its docstring establishes to make
+    its OPERATOR check (``>`` versus ``>=``) sound -- and it forces
+    ``len(redacted) == len(swept)`` on every one of its inputs, so the two
+    operands are indistinguishable there. The property that makes the operator
+    check sound is the property that makes the operand check vacuous. Only a
+    value the sweep SHORTENS can separate them.
+
+    RED if the cap is measured against the pre-sweep length.
+    """
+    from app.core.logging import MAX_PATH, redact_value
+
+    marker = "…<truncated>"
+    entropy_segment = "B" * 40
+    long_segment = "c" * (MAX_PATH + 15 - len("/v1/") - len(entropy_segment) - len("/"))
+    value = "/v1/" + entropy_segment + "/" + long_segment
+
+    # Both segments are over the 32-character floor, so both collapse and the
+    # sweep genuinely SHORTENS -- the one shape the sibling test never feeds.
+    assert len(entropy_segment) >= 32 and len(long_segment) >= 32
+    # The RAW length straddles the cap: a cap keyed on it fires, a cap keyed on
+    # the swept length does not. Without this the test would prove nothing.
+    assert len(value) > MAX_PATH, len(value)
+
+    out = redact_value("path", value)
+    assert isinstance(out, str)
+    assert not out.endswith(marker), out
+    assert len(out) <= MAX_PATH, (len(out), out)
+    # Positive partner: the sweep really did fire on both segments, so the
+    # shortening is real and not an empty-input artefact.
+    assert out.count("[REDACTED]") == 2, out
+    assert entropy_segment not in out and long_segment not in out
 
 
 def test_a_real_session_path_is_not_truncated() -> None:

@@ -345,8 +345,12 @@ curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app 
 > **Why this replaced `grep -c local-demo-key   # must print 0`.** That check
 > asserted the *absence* of the old default, which is the wrong shape twice.
 > It printed `0` — reported success — on a bundle built with an empty build
-> argument, i.e. the one failure the paragraph above tells you to guard
-> against. And an absence check fails *open*: if the key ever moves into a
+> argument, i.e. the exact failure the **"`:?` is the mechanism"** note earlier
+> in this section tells you to guard against — `--build-arg
+> VITE_API_DEMO_KEY=""`, which bakes `const K = ""` and 401s every browser
+> call. (Naming that note rather than saying "the paragraph above": three
+> `--local-only` paragraphs now sit between the two, so adjacency no longer
+> identifies it.) And an absence check fails *open*: if the key ever moves into a
 > lazily-imported chunk, "not found" still reads as a pass. `check_bundle_key.sh`
 > asserts the **presence of the expected, non-empty key**, so it fails closed,
 > and it refuses to run at all when `DEMO_KEY` is empty — otherwise the
