@@ -116,16 +116,25 @@ _PLAIN_LITERAL_RE = re.compile(r'^(?:"[A-Za-z0-9_.:/-]+"|[A-Za-z0-9_.:/-]+)$')
 # `fly(?:ctl)?` -- `flyctl` is the binary's real name, used at
 # `docs/NEXT_SESSION_PROMPT.md:90` and in #385's own body. `\s+` rather than one
 # space -- `fly  deploy` and `fly\tdeploy` are the same command to a shell. The
-# repeating `(?:-\S+(?:\s+\S+)?\s+)*` admits GLOBAL FLAGS before the subcommand:
-# `fly -a citevyn deploy ...` and `fly -t TOK -a app deploy ...`. Every one of
-# those was missed by `\bfly deploy\b`.
+# repeating `(?:-\S+(?:\s+[^-\s]\S*)?\s+)*` admits GLOBAL FLAGS before the
+# subcommand: `fly -a citevyn deploy ...` and `fly -t TOK -a app deploy ...`.
+# Every one of those was missed by `\bfly deploy\b`.
+#
+# A flag's optional VALUE is `[^-\s]\S*`, not `\S+`, and that is a ReDoS fix, not
+# a style choice. With `\S+` a run like `-! -! -!` decomposes two ways per token
+# (flag alone, or flag plus value), so the outer `*` explores 2^n parses --
+# CodeQL flagged exactly that as `py/redos`, high severity, on the first version
+# of this line. Requiring a value to start with a NON-DASH makes the
+# decomposition unique and the match linear, because a `-`-prefixed token can
+# only ever be the next flag. No real invocation is lost: a Fly global flag's
+# value is an app name, region or token, never another dash-prefixed flag.
 #
 # The ``(?<!`)`` lookbehind is GONE: in `.md` prose is already excluded by
 # scanning only code blocks, and in a `.toml`/`.sh` COMMENT it was a hole,
 # because a backticked command in a config comment is what a human copies the
 # inside of. The `(?=\s+-)` lookahead is gone too -- it missed
 # `fly deploy . --build-arg ...` -- and its job is done by `_HAS_FLAG_RE`.
-_FLY_DEPLOY_COMMAND_RE = re.compile(r"\bfly(?:ctl)?\s+(?:-\S+(?:\s+\S+)?\s+)*deploy\b")
+_FLY_DEPLOY_COMMAND_RE = re.compile(r"\bfly(?:ctl)?\s+(?:-\S+(?:\s+[^-\s]\S*)?\s+)*deploy\b")
 
 # A flag, anywhere after the subcommand: what separates a COMMAND from a MENTION
 # now the lookahead is gone. `-{1,2}` accepts a SINGLE dash, because
