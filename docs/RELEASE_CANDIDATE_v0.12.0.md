@@ -14,7 +14,7 @@ the pack the owner needs to make that call and execute it.
 | Backend tests | **1437 passed / 17 skipped** (provider=stub, repo root) — re-run in this session on `3042f7e`, matches the prior baseline exactly |
 | Lint / typecheck | **Re-run in this session**: `ruff check` all green, `ruff format --check` all 193 files formatted, `pyright` 0 errors/0 warnings |
 | CHANGELOG | `[Unreleased]` now covers all 28 commits (this PR) |
-| `answer_policy_version` | `v6` (bumped 4 times since `v0.11.0`'s `v2`: v2→v3 #215/#236, v3→v4 #263, v4→v5 #237/#262, v5→v6 #226) — **cache invalidates automatically, no flush needed** (see below) |
+| `answer_policy_version` | `v7` (bumped 5 times since `v0.11.0`'s `v2`: v2→v3 #215/#236, v3→v4 #263, v4→v5 #237/#262, v5→v6 #226, v6→v7 #352) — **cache invalidates automatically, no flush needed** (see below). This row read `v6` until #352 bumped it; the RC is unreleased, so it tracks the value the release will actually ship |
 | Migrations since `v0.11.0` | **None.** `git log v0.11.0..main -- db/versions` is empty, head stays `0006` — this release is a pure application-code release, no schema coordination needed |
 | Security advisories | 5 open (4 high, 1 medium), all frontend-lockfile, all closed by PRs #249/#252/#244 (Wave 1, separate PR) |
 | **Ship recommendation** | **Ship.** No open bugs, no schema risk, cache invalidates itself. The only real decision is *when* the owner wants to spend the `fly deploy` + Gemini re-embed cost of a corpus re-ingest (not required by this release — no corpus content changed). |
@@ -30,8 +30,8 @@ key = sha256(normalized_question || product_area || source_version_hash
              || answer_policy_version || embedder_identity)
 ```
 
-A lookup after deploy uses `answer_policy_version="v6"`. Every row cached
-under `v2`–`v5` sits at a **different key** and can never be read again — it
+A lookup after deploy uses `answer_policy_version="v7"`. Every row cached
+under `v2`–`v6` sits at a **different key** and can never be read again — it
 is not "stale data that might be served," it is **unreachable by
 construction**. It ages out via the existing TTL and is never an active risk.
 This differs from the `v0.11.0` release, where the CHANGELOG explicitly told
