@@ -8,6 +8,7 @@ existing single-domain path (covered elsewhere).
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -41,7 +42,18 @@ def _hit(area: str) -> EvidenceHit:
 
 def _hybrid(per_area: dict[str, RetrievalResult]) -> tuple[HybridRetriever, list[str]]:
     calls: list[str] = []
-    h = HybridRetriever(SimpleNamespace())  # session unused — retrieve is stubbed
+    # ``retrieve_multi`` finalizes the MERGED list (#352), and ``_finalize`` resolves
+    # the active index when nothing else already degraded the result. The session is
+    # otherwise unused (per-area ``retrieve`` is stubbed), so it only has to answer
+    # that one projection — an empty ``index_versions`` is ``ActiveIndexState.none``,
+    # which keeps every assertion in this module about the MERGE, not the gate.
+    h = HybridRetriever(
+        SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: []))
+            )
+        )
+    )
 
     async def _fake_retrieve(question, *, product_area, intent, limit, top_k):
         calls.append(product_area)
@@ -165,3 +177,16 @@ async def test_every_degrade_reason_is_ranked_so_none_can_only_mean_clean() -> N
     for reason in _DEGRADE_PRECEDENCE:
         assert _combine_degrades([VectorDegrade.none, reason]) is reason, reason
     assert _combine_degrades([VectorDegrade.none, VectorDegrade.none]) is VectorDegrade.none
+    # The ORDER, not just the set. The module comment argues at length that
+    # ``ambiguous_index`` outranks ``mismatch`` -- ``index_versions`` is the root
+    # cause an operator must fix before an embedder verdict means anything -- and
+    # review found that swapping the two survived the entire suite, because every
+    # assertion here was about membership.
+    assert (
+        _combine_degrades([VectorDegrade.mismatch, VectorDegrade.ambiguous_index])
+        is VectorDegrade.ambiguous_index
+    )
+    assert (
+        _combine_degrades([VectorDegrade.unavailable, VectorDegrade.mismatch])
+        is VectorDegrade.mismatch
+    )

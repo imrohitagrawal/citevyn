@@ -135,8 +135,18 @@ async def exact_lookup(
     # selecting the column is what makes the hoist load-bearing rather than
     # cosmetic. The relationship is ``lazy="raise"``, so the join has to be
     # explicit; explicit also keeps the SQL predictable.
+    # ``.label(...)`` so the WARN below reads ``row.index_version`` by NAME. The
+    # hits loop beneath uses positional ``row[1]``/``row[2]``, which is this file's
+    # existing idiom, but a positional read of a column ADDED to the end is the
+    # kind that silently retargets when someone inserts a column ahead of it, with
+    # no test failing.
     stmt = (
-        select(ExactTerm, ExactTerm.document_id, ExactTerm.chunk_id, Document.index_version)
+        select(
+            ExactTerm,
+            ExactTerm.document_id,
+            ExactTerm.chunk_id,
+            Document.index_version.label("index_version"),
+        )
         .join(Document, ExactTerm.document_id == Document.document_id)
         .where(ExactTerm.term_text == term)
         .where(ExactTerm.product_area == product_area)
@@ -166,7 +176,8 @@ async def exact_lookup(
     # silently unions their documents, at the exact moment the answer pipeline's
     # provenance gate has decided it cannot tell which index owns the vectors
     # (#352). It is left unioning on purpose — this route has no answer cache to
-    # poison and changing what it returns is read-path policy that #265 owns — but
+    # poison, and changing what it returns is the same CLASS of owner decision as
+    # #265 (which is scoped to ZERO active rows, a different state) — but
     # it no longer does so silently.
     #
     # STATED LIMIT: this sees only the rows that survived ``limit(capped_limit)``,
@@ -198,8 +209,10 @@ async def exact_lookup(
 def _warn_if_hits_span_indexes(rows: Sequence[Any]) -> None:
     """WARN when this lookup's rows came from more than one index version (#352).
 
-    Pure over rows already fetched — no extra query. ``row[3]`` is
-    ``Document.index_version`` from the projection above.
+    Pure over rows already fetched — no extra query. Read by NAME
+    (``row.index_version``, labelled in the projection above) rather than by
+    position, so inserting a column ahead of it cannot silently retarget this WARN
+    at the wrong value.
 
     Note that ``ExactLookupHit.index_version`` echoes back what the CALLER asked
     for (the literal ``"active"`` on the default path), so before this the
@@ -212,7 +225,7 @@ def _warn_if_hits_span_indexes(rows: Sequence[Any]) -> None:
     ``index_versions`` is a joined ``str`` under a key on both
     ``EMITTED_TEXT_KEYS`` and ``OPAQUE_ID_KEYS``.
     """
-    versions = sorted({row[3] for row in rows if row[3] is not None})
+    versions = sorted({r.index_version for r in rows if r.index_version is not None})
     if len(versions) <= 1:
         return
     _logger.warning(

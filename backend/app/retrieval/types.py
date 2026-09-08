@@ -38,10 +38,28 @@ class RetrievedChunk(BaseModel):
     # strictly rarer and strictly more useful signal than "the database is
     # dual-active" (already logged once per request by the orchestrator).
     #
-    # Optional, and never projected onto the wire: ``chunk_to_citation`` below,
-    # ``app.answer.generate._format_evidence`` and the ``retrieved_evidence``
-    # INSERT in ``Orchestrator._persist_messages`` all name their fields
-    # explicitly, so this reaches no response body, no prompt and no table.
+    # OPTIONAL, and that is a measured decision rather than a default. Review
+    # showed the gap it leaves: deleting ``index_version=doc.index_version`` from
+    # the keyword arm, or from the vector arm, left the ENTIRE suite green, because
+    # every hit silently fell back to ``None`` and the span set emptied. Making the
+    # field REQUIRED turns both into a loud ``ValidationError`` — so it was tried,
+    # and measured: it reddens **135 tests** across the suite, because hand-built
+    # hits are the idiom in far more than the seven factories a reviewer counted.
+    # That is a disproportionate diff for a test gap, so the gap is closed by two
+    # targeted behavioural tests (a keyword-arm and a vector-arm span) instead, and
+    # this comment records the tradeoff rather than leaving it to be rediscovered.
+    #
+    # ``None`` means "this construction site did not know", never "this document
+    # has no index" — ``documents.index_version`` is ``nullable=False``, so no real
+    # row can produce it. ``_warn_if_evidence_spans_indexes`` skips it rather than
+    # counting "unknown" as its own version, which would fire the WARN on a
+    # perfectly healthy single-index database.
+    #
+    # Never projected onto the wire: ``chunk_to_citation`` below,
+    # ``app.answer.generate._format_evidence``, ``app.answer.no_answer``'s
+    # ``build_suggestions``, and the ``retrieved_evidence`` INSERT in
+    # ``Orchestrator._persist_messages`` all name their fields explicitly, so this
+    # reaches no response body, no prompt and no table.
     index_version: str | None = None
 
 
@@ -57,9 +75,16 @@ class VectorDegrade(enum.StrEnum):
     vector arm degrading to no hits. What the value has always actually driven is
     :attr:`RetrievalResult.vector_degrade`, i.e. the cache-write gate below, and
     :attr:`ambiguous_index` is a reason that has nothing to do with the vector arm
-    at all. The type is deliberately NOT renamed here (nineteen call sites, zero
-    behaviour change, and #352 is scoped to the gate); this docstring is the
-    honest statement of what the enum means.
+    at all. The type is deliberately NOT renamed here; this docstring is the honest
+    statement of what the enum means. Renaming it — to something like
+    ``CacheBlockReason``, moving ``RetrievalResult.vector_degrade`` with it — is
+    where the type wants to end up, and is left to a follow-up: it touches over 150
+    references across 14 files for zero behaviour change, and #352 is scoped to the
+    gate, so landing it here would bury two real defects in rename noise. The
+    misnomer is not dangerous while it lasts, because nothing dispatches on the
+    word "vector" and the three set-equality guards over this enum
+    (``_DEGRADE_PRECEDENCE``, ``_CACHE_SKIP_EVENTS``, ``_EVAL_FATAL_DEGRADES``)
+    stop a future member being added silently.
 
     Reported at the degrade site so the answer-cache gate and its skip-WARN read
     the *actual* reason, never a config re-prediction:

@@ -1266,3 +1266,214 @@ async def test_a_healthy_scoped_retrieval_is_cacheable_and_costs_no_extra_query(
     assert not any("index_versions" in s for s in statements), (
         f"a scoped retriever must not resolve the active index: {statements}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (#352). Every test below was added because a MUTATION of the
+# line it covers survived the whole 2047-test suite. Each names that mutation.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_real_degrade_reason_is_never_overwritten_by_the_ambiguity_overlay(
+    seeded_session,
+) -> None:
+    """THE INVARIANT `_finalize`'s docstring asserts, which nothing pinned.
+
+    Dropping the ``degrade is VectorDegrade.none`` guard survived the full suite,
+    and losing it is not cosmetic: ``Orchestrator.ask`` raises the transient 5xx
+    of #142 only when the reason is exactly ``unavailable``. Relabel an embedder
+    outage as ``ambiguous_index`` and the user gets "the corpus has no answer" --
+    a content refusal the client records as a SUCCESS and never retries -- for
+    what is actually a retryable provider outage.
+
+    RED if ``_finalize`` escalates a reason that is already named, i.e. if the
+    ``degrade is VectorDegrade.none and`` guard is removed.
+    """
+    await _add_second_active_index(seeded_session)
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+
+    # Precondition: this database really is ambiguous, so the overlay WOULD fire
+    # on a `none`. Without this the test could pass because nothing was ambiguous.
+    assert await h._active_index_ambiguous() is True
+
+    for named in (VectorDegrade.unavailable, VectorDegrade.mismatch):
+        result = await h._finalize([], named)
+        assert result.vector_degrade is named, (
+            f"the ambiguity overlay overwrote {named!r}, losing the reason the "
+            "orchestrator branches on"
+        )
+
+
+async def test_the_global_answer_when_grounded_path_is_finalized_too(seeded_session) -> None:
+    """``_retrieve_global`` is live production (`product_area is None`) and its
+    ``_finalize`` call was LINE-COVERED but behaviourally untested -- replacing it
+    with a bare ``RetrievalResult(...)`` left the whole suite green. That is this
+    repo's "coverage is not assertion" scar, inside this very change.
+
+    With Tier-3 enforcement OFF -- which #226 pins as a legitimate state and which
+    is the stub-seeded demo shape -- ``_vector_arm_degrade`` returns ``none``, so
+    ``_finalize`` is the ONLY thing that can withhold the cache write here.
+
+    RED if ``_retrieve_global`` returns ``RetrievalResult(...)`` directly instead
+    of awaiting ``_finalize``.
+    """
+    await _add_second_active_index(seeded_session)
+    # No ``embedder_identity`` => enforcement off => the arm is allowed to run.
+    h = HybridRetriever(seeded_session, active_index_version=None)
+
+    result = await h.retrieve(
+        "something entirely unscoped", product_area=None, intent=Intent.how_to, limit=20, top_k=6
+    )
+
+    assert result.vector_degrade is VectorDegrade.ambiguous_index, (
+        "a global answer built while the active index is ambiguous must not be cached"
+    )
+
+
+async def test_the_keyword_arm_carries_the_index_version_it_retrieved_from(
+    seeded_session,
+) -> None:
+    """Deleting ``index_version=doc.index_version`` from the KEYWORD arm left the
+    whole suite green -- only the exact arm's projection was pinned. The
+    consequence is not cosmetic: on every non-``exact_lookup`` question (the
+    common case) every hit would carry ``None``, the span set would be empty, and
+    ``retrieval_evidence_spans_multiple_indexes`` could never fire again.
+
+    RED if ``KeywordRetriever`` stops setting ``index_version``.
+    """
+    r = KeywordRetriever(seeded_session, active_index_version="v1")
+    hits = await r.retrieve("model", product_area=Domain.codex.value)
+
+    assert hits, "precondition: the keyword arm hit"
+    assert {h.index_version for h in hits} == {"v1"}
+
+
+async def test_a_keyword_answer_spanning_two_indexes_is_warned_and_not_cacheable(
+    seeded_session,
+) -> None:
+    """The keyword arm's projection, exercised END TO END through the hybrid layer
+    rather than only at the arm -- the operator-facing half of #352 on the path
+    that produces most evidence.
+
+    RED if the keyword arm stops carrying ``index_version`` (the span set empties
+    and neither the WARN nor the gate fires).
+    """
+    await _add_second_active_index(seeded_session)
+    await _mirror_exact_term_into_second_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    with _capture_retrieval_logs() as records:
+        # ``how_to`` never touches the exact short-circuit, so this evidence comes
+        # from the keyword arm.
+        result = await h.retrieve(
+            "how do I raise the claude api rate limit per minute",
+            product_area=Domain.claude_api.value,
+            intent=Intent.how_to,
+            limit=20,
+            top_k=6,
+        )
+
+    assert {h_.index_version for h_ in result.hits} == {"v1", "v2"}, [
+        (h_.retrieval_type, h_.index_version) for h_ in result.hits
+    ]
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+    assert any("retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records)
+
+
+async def test_a_cross_area_span_is_caught_on_the_merged_multi_hop_list(
+    seeded_session,
+) -> None:
+    """Two reviewers reproduced this independently: area A returns only ``v1``,
+    area B only ``v2``, so NEITHER per-area check fires while the merged answer
+    draws on both indexes. The first draft skipped finalizing the merged list,
+    arguing it was "a subset of lists that were each already checked" -- true, and
+    not sufficient, because spanning is not preserved under subsetting.
+
+    RED if ``retrieve_multi`` returns ``RetrievalResult(...)`` directly instead of
+    awaiting ``_finalize`` on the merged list.
+    """
+    from app.retrieval.types import RetrievalResult
+
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+
+    a_only_v1 = _hit_on_index("claude_api", "v1")
+    b_only_v2 = _hit_on_index("gemini_api", "v2")
+
+    async def _fake_retrieve(question, *, product_area, intent, limit, top_k):
+        hit = a_only_v1 if product_area == "claude_api" else b_only_v2
+        # Each area is internally single-index, so each per-area ``_finalize``
+        # sees nothing to warn about -- that is the whole point.
+        return RetrievalResult(hits=[hit], vector_degrade=VectorDegrade.none)
+
+    h.retrieve = _fake_retrieve  # type: ignore[method-assign]
+
+    with _capture_retrieval_logs() as records:
+        result = await h.retrieve_multi(
+            "compare them",
+            product_areas=["claude_api", "gemini_api"],
+            intent=Intent.how_to,
+            limit=20,
+            top_k=6,
+        )
+
+    assert {h_.index_version for h_ in result.hits} == {"v1", "v2"}
+    rec = next(
+        (r for r in records if "retrieval_evidence_spans_multiple_indexes" in r.getMessage()),
+        None,
+    )
+    assert rec is not None, "the merged list spanned two indexes and nothing said so"
+    assert rec.index_versions == "v1,v2"
+    assert result.vector_degrade is VectorDegrade.ambiguous_index
+
+
+def _hit_on_index(area: str, index_version: str):
+    """One EvidenceHit pinned to a named index, for the merge tests."""
+    import uuid as _uuid
+
+    from app.models.enums import RetrievalType
+    from app.retrieval.types import EvidenceHit
+
+    return EvidenceHit(
+        chunk_id=_uuid.uuid4(),
+        document_id=_uuid.uuid4(),
+        product_area=area,
+        source_name=area,
+        document_title=f"{area} doc",
+        section_path="/s",
+        heading="H",
+        parent_heading=None,
+        chunk_text=f"{area} chunk",
+        context_summary="s",
+        source_url=f"https://x/{area}",
+        score=1.0,
+        index_version=index_version,
+        retrieval_type=RetrievalType.hybrid,
+        rank=1,
+    )
+
+
+async def test_the_span_warn_is_not_fired_by_hits_that_simply_do_not_know_their_index(
+    seeded_session,
+) -> None:
+    """PARTNER for the ``is not None`` filter, which also survived mutation.
+
+    Counting ``None`` as its own version would make a single-index answer look
+    like a union the moment ONE hand-built hit reached ``_finalize`` -- and the
+    overlay now gates the cache on the span, so that would also stop caching a
+    perfectly healthy answer.
+
+    RED if ``_warn_if_evidence_spans_indexes`` drops its ``is not None`` filter.
+    """
+    h = HybridRetriever(seeded_session, active_index_version="v1", embedder_identity=_GEMINI)
+    hits = [_hit_on_index("claude_api", "v1"), _hit_on_index("claude_api", "v1")]
+    hits[1].index_version = None
+
+    with _capture_retrieval_logs() as records:
+        result = await h._finalize(hits, VectorDegrade.none)
+
+    assert result.vector_degrade is VectorDegrade.none, (
+        "an unknown index is not a second index; this answer is still cacheable"
+    )
+    assert not any(
+        "retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records
+    ), [r.getMessage() for r in records]

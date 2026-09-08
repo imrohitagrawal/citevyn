@@ -1216,3 +1216,37 @@ def test_the_postgres_eval_raises_on_every_corrupting_degrade_reason() -> None:
     # equality above is not satisfiable by an empty set.
     assert VectorDegrade.mismatch in _EVAL_FATAL_DEGRADES
     assert VectorDegrade.ambiguous_index in _EVAL_FATAL_DEGRADES
+
+
+def test_the_postgres_eval_fatal_predicate_is_actually_consulted() -> None:
+    """THE PARTNER THE SET GUARD ABOVE LACKED, and it is the reason the predicate
+    was extracted from its call site at all.
+
+    The consumer line is behind ``if postgres and ...``; ``postgres`` defaults to
+    ``False`` and NO hermetic test passes ``True``. So a reviewer reverted the
+    membership test to the pre-#352 ``degrade is VectorDegrade.mismatch`` and the
+    entire suite -- 2047 tests, this file's set guard included -- stayed GREEN.
+    A guard that cannot detect its own reversion is exactly what this guard exists
+    to prevent, one level up.
+
+    Driving ``eval_degrade_is_fatal`` directly is what makes the set assertion
+    above load-bearing rather than a pin on a constant nothing reads.
+
+    RED if ``eval_degrade_is_fatal`` stops consulting ``_EVAL_FATAL_DEGRADES``
+    (e.g. reverts to ``degrade is VectorDegrade.mismatch``), or if it stops
+    exempting refusal cases.
+    """
+    from app.retrieval.types import VectorDegrade
+    from tests.eval.retrieval import eval_degrade_is_fatal
+
+    # The corruptions: an answerable case is invalidated by both, and this is what
+    # a reversion to ``is VectorDegrade.mismatch`` gets wrong.
+    assert eval_degrade_is_fatal(VectorDegrade.ambiguous_index, kind="factual") is True
+    assert eval_degrade_is_fatal(VectorDegrade.mismatch, kind="factual") is True
+    # PARTNERS, so this is not "everything is fatal": a clean run and a transient
+    # provider outage both pass, and a refusal case is exempt whatever the reason
+    # (it expects no evidence, so a degraded arm cannot corrupt its verdict).
+    assert eval_degrade_is_fatal(VectorDegrade.none, kind="factual") is False
+    assert eval_degrade_is_fatal(VectorDegrade.unavailable, kind="factual") is False
+    assert eval_degrade_is_fatal(VectorDegrade.ambiguous_index, kind="refusal") is False
+    assert eval_degrade_is_fatal(VectorDegrade.mismatch, kind="refusal") is False

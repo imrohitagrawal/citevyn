@@ -3026,8 +3026,12 @@ async def test_every_cache_skip_reason_has_its_own_operator_facing_name() -> Non
     to be absent none of them could see it.
 
     Asserting the KEY SET is what makes this hold for a member nobody has written
-    yet, and pairing it with a rendered line is what stops it from being a pin on a
-    constant nothing reads.
+    yet. This test renders no log line, so on its own it would be a pin on a
+    constant; what stops that is
+    ``test_exact_lookup_short_circuit_is_not_cached_on_a_dual_active_database``,
+    which asserts the emitted line and goes RED if the mapping is bypassed. (An
+    earlier version of this docstring claimed the rendered-line pairing for
+    itself — it lives in that sibling, not here.)
 
     RED if a ``VectorDegrade`` member is added without its own event name.
     """
@@ -3080,3 +3084,46 @@ async def test_empty_evidence_under_an_ambiguous_index_refuses_rather_than_500in
     # PARTNER: a refusal is not cached either, so this is not asserting that the
     # gate was bypassed to get here.
     assert (await session.execute(select(AnswerCache))).scalars().all() == []
+
+
+async def test_a_dual_active_non_exact_answer_names_the_index_not_the_embedder(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE OPERATOR-FACING POINT OF #352, end to end, on the path the issue does
+    not mention.
+
+    Before this change `_vector_arm_enabled` returned a bare bool and
+    `_safe_vector_retrieve` turned every `False` into `VectorDegrade.mismatch`, so
+    a dual-active database told operators
+    `answer_cache_write_skipped_embedder_mismatch` on every non-exact question --
+    sending them to the embedder config and ADR-0003 when the fix is
+    `promote_version`. Review found that nothing asserted the corrected label at
+    the HTTP-shaped boundary; hard-coding the skip reason back to `mismatch` killed
+    only one unit test.
+
+    RED if `_vector_arm_degrade`'s ambiguous branch returns
+    `VectorDegrade.mismatch` again, or if `_safe_vector_retrieve` stops threading
+    the reason it was given.
+    """
+    await seed_catalog(session)
+    await _add_second_active_index(session)
+    await session.commit()
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        response = await orchestrator.ask(
+            question="the rate limit for the claude api",
+            request_id="req_dual_faq",
+            session_id=uuid.uuid4(),
+        )
+
+    # PARTNER: the keyword arm still answers, so this is a served answer that was
+    # withheld from the cache -- not a refusal.
+    assert response["no_answer"] is False
+    assert response["intent"] == Intent.faq.value
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
+    assert "answer_cache_write_skipped_ambiguous_index" in caplog.text
+    assert "answer_cache_write_skipped_embedder_mismatch" not in caplog.text, (
+        "a dual-active database must not send the operator to the embedder config"
+    )
+    assert "answer_cache_write_skipped_vector_unavailable" not in caplog.text

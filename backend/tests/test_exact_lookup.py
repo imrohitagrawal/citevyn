@@ -589,8 +589,11 @@ async def test_a_pinned_index_version_is_never_warned_even_on_a_dual_active_db(
     """BOUNDARY: pinning a version is the replay/debug path and cannot union, so a
     dual-active database is irrelevant to it.
 
-    RED if the WARN is moved above the ``index_version == "active"`` branch, or if
-    the pinned branch stops filtering on ``Document.index_version ==``.
+    RED if the pinned branch stops filtering on ``Document.index_version ==``.
+    (An earlier version of this line also claimed "RED if the WARN is moved above
+    the ``index_version == 'active'`` branch" — that is unfalsifiable: the WARN
+    reads ``rows``, which are fetched after BOTH branches, so there is no position
+    above the branch where it can still see any rows.)
     """
     import logging
 

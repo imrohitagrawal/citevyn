@@ -234,21 +234,44 @@ class HybridRetriever:
         The overlay only ever ESCALATES ``none``: a real ``mismatch`` or
         ``unavailable`` already blocks the cache write and names a reason of its
         own, so overwriting it would lose information for no gain.
+
+        **A DEMONSTRATED span escalates too, whatever the resolver says**, so that
+        "the span WARN fired" always implies "this was not cached". Review found
+        the asymmetry: with ZERO active rows the arms *also* drop the index
+        predicate (``_upsert_document`` marks documents ``active`` at ingest,
+        before promotion), so one request could log "the evidence spanned v1 and
+        v2" and freeze that answer for the full TTL. Widening the RESOLVER test to
+        ``state is not one`` would disable caching on every un-promoted database —
+        that is #265's owner-gated policy question and is deliberately NOT done
+        here. Escalating on evidence we can PROVE is a union is a different and
+        much narrower claim: it changes nothing about what is served, picks no
+        winner among rows, and leaves a zero-active database with single-index
+        evidence cacheable exactly as before.
         """
-        self._warn_if_evidence_spans_indexes(hits)
-        if degrade is VectorDegrade.none and await self._active_index_ambiguous():
+        spans_indexes = self._warn_if_evidence_spans_indexes(hits)
+        if degrade is VectorDegrade.none and (
+            spans_indexes or await self._active_index_ambiguous()
+        ):
             return RetrievalResult(hits=hits, vector_degrade=VectorDegrade.ambiguous_index)
         return RetrievalResult(hits=hits, vector_degrade=degrade)
 
-    def _warn_if_evidence_spans_indexes(self, hits: list[EvidenceHit]) -> None:
+    def _warn_if_evidence_spans_indexes(self, hits: list[EvidenceHit]) -> bool:
         """WARN when the evidence actually drew on more than one index (#352).
+
+        Returns whether it spanned, so :meth:`_finalize` can gate the cache write
+        on the same fact this line reports. Returning the verdict rather than
+        recomputing it in the caller is what keeps "WARN fired" and "not cached"
+        from being two predicates that can drift apart.
 
         Pure and synchronous — every ``index_version`` is already on the hits,
         because all three arms select the ``documents`` row anyway. ``None`` is
         skipped rather than counted as its own index: a hand-built
-        :class:`EvidenceHit` (the eval harness, an injected test double) leaves the
-        field unset, and treating "unknown" as a distinct version would fire this
-        WARN on a perfectly healthy single-index database.
+        :class:`EvidenceHit` (an injected test double) leaves the field unset, and
+        treating "unknown" as a distinct version would fire this WARN — and, since
+        :meth:`_finalize` now gates on it, withhold the cache write — on a
+        perfectly healthy single-index database. (The eval harness is NOT such a
+        caller: it drives a real :class:`HybridRetriever` against a seeded session,
+        so its hits come from the real arms and do carry the field.)
 
         The payload is shaped for ``app.core.logging``'s ``extra=`` allowlist:
         ``index_version_count`` is an ``int`` (printed verbatim under any key) and
@@ -258,7 +281,7 @@ class HybridRetriever:
         """
         versions = sorted({h.index_version for h in hits if h.index_version is not None})
         if len(versions) <= 1:
-            return
+            return False
         _logger.warning(
             "retrieval_evidence_spans_multiple_indexes",
             extra={
@@ -267,6 +290,7 @@ class HybridRetriever:
                 "index_version_count": len(versions),
             },
         )
+        return True
 
     async def _active_index_ambiguous(self) -> bool:
         """Whether MORE THAN ONE ``IndexVersion`` row claims ``status=active`` (#352).
@@ -322,13 +346,20 @@ class HybridRetriever:
         ``vector_degrade`` is ``none`` only when EVERY area's retrieval was clean, so
         the orchestrator's cache-write gate never freezes a partially-degraded answer.
 
-        Each per-area :meth:`retrieve` has already run :meth:`_finalize`, so the
-        index-ambiguity overlay and its WARN are applied per area and are NOT
-        re-applied to the merged list here — the merged evidence is a subset of the
-        union of lists that were each already checked. On a dual-active database
-        that means up to :data:`_MAX_MULTIHOP_DOMAINS` copies of the span WARN for
-        one question; on such a database the per-area breakdown is worth more than
-        the deduplication.
+        The MERGED list is finalized too, and that is load-bearing rather than
+        belt-and-braces. An earlier draft skipped it, arguing "the merged evidence
+        is a subset of the union of lists that were each already checked" — which
+        is true and does not imply what it was used for, because **spanning is not
+        preserved under subsetting**. Two reviewers reproduced the same case
+        independently: area A returns only ``v1``, area B only ``v2``, so neither
+        per-area check fires while the merged answer draws on both indexes. Without
+        this call that answer got no WARN and, in the zero-active state where
+        ``_combine_degrades`` also returns ``none``, no cache gate either.
+
+        Cost of doing it: on a dual-active database one question can now emit up to
+        :data:`_MAX_MULTIHOP_DOMAINS` per-area span WARNs plus one for the merged
+        list. On a database that already needs ``promote_version`` the per-area
+        breakdown is worth more than the deduplication.
         """
         areas = product_areas[:_MAX_MULTIHOP_DOMAINS]
         per_area = [
@@ -339,9 +370,8 @@ class HybridRetriever:
         reranked = await self._reranker.rerank(question, merged, top_k=top_k)
         for idx, hit in enumerate(reranked, start=1):
             hit.rank = idx
-        return RetrievalResult(
-            hits=reranked,
-            vector_degrade=_combine_degrades([r.vector_degrade for r in per_area]),
+        return await self._finalize(
+            reranked, _combine_degrades([r.vector_degrade for r in per_area])
         )
 
     async def _retrieve_global(self, question: str, *, limit: int, top_k: int) -> RetrievalResult:

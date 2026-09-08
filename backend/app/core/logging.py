@@ -64,8 +64,10 @@ HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9+/=_-]{32,}\b")
 # value to ``[REDACTED]``, so nothing else bounded the length -- and a client
 # sending a 4 kB ``X-Request-ID`` would then have written a 4 kB line into a
 # metered log pipeline, on the ``build_log_event`` path where
-# ``MAX_EMITTED_TEXT`` does not reach. No real id comes close to the cap: the
-# longest is a 128-character ``source_version_hash``.
+# ``MAX_EMITTED_TEXT`` does not reach. No real SINGLE id comes close to the cap:
+# the longest is a 128-character ``source_version_hash``. (A JOINED value can:
+# see ``index_versions`` below, where two 64-character versions already make 129
+# and three overflow the cap.)
 #
 # ``index_versions`` (plural, #352) is the comma-joined set of index versions one
 # answer's evidence spanned. It is the same data as ``index_version`` under a

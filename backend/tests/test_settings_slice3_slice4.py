@@ -38,13 +38,17 @@ def test_default_retrieval_and_cache_settings() -> None:
     settings = Settings()
     assert settings.retrieval_top_k == 6
     assert settings.retrieval_max_candidates == 20
-    # v6 since #226; v4/v5 since #237; v3 since #215; v2 since #169. The bump is the
-    # cache-invalidation mechanism, so this pin is load-bearing: silently reverting it
-    # would re-serve stale rows. v2 rows were written while the validator discarded
-    # gapped citations, so their citations carry no ``marker`` field — replaying them
-    # would render unnumbered cards. v5 rows may have been built with the vector arm
-    # scoring a foreign vector space, which the #226 gate now refuses.
-    assert settings.answer_policy_version == "v6"
+    # v7 since #352; v6 since #226; v4/v5 since #237; v3 since #215; v2 since #169.
+    # The bump is the cache-invalidation mechanism, so this pin is load-bearing:
+    # silently reverting it would re-serve stale rows. v2 rows were written while the
+    # validator discarded gapped citations, so their citations carry no ``marker``
+    # field — replaying them would render unnumbered cards. v5 rows may have been
+    # built with the vector arm scoring a foreign vector space, which the #226 gate
+    # now refuses. v6 rows may have been written while more than one index claimed
+    # ``active``: their ``source_version_hash`` is a constant ``""``, so nothing else
+    # in the key evicts them while the database stays ambiguous, and a cache hit
+    # returns before the #352 gate — or any of its WARNs — can run.
+    assert settings.answer_policy_version == "v7"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 

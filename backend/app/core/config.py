@@ -398,7 +398,24 @@ class Settings(BaseSettings):
     # reached the cache: only ``promotion_eval`` passes a candidate version, and
     # that path never touches ``answer_cache``. It is fixed for correctness, not
     # for cache hygiene.)
-    answer_policy_version: str = "v6"
+    # v6 -> v7 (#352): the answer-cache WRITE gate changed -- an answer produced
+    # while more than one index claims ``active`` is no longer frozen. That is a
+    # write-path change, so the first draft argued NO bump was needed: a row
+    # written during a dual-active window carries ``source_version_hash == ""``,
+    # and the moment an operator converges the database the key changes and the row
+    # is unreachable by construction. That argument is TRUE and INSUFFICIENT, and
+    # review measured why. While the database is STILL ambiguous the hash stays
+    # pinned to ``""``, so the cache key's corpus-invalidation input is INERT: edit
+    # the corpus mid-window and the same question still returns ``cache_hit=True``,
+    # with retrieval and generation skipped entirely. And because a cache hit
+    # returns BEFORE retrieval, every WARN #352 adds
+    # (``retrieval_evidence_spans_multiple_indexes``,
+    # ``answer_cache_write_skipped_ambiguous_index``) stays dark for the full TTL --
+    # the fix silences its own observability on exactly the databases it is for.
+    # That second clause is the v5 -> v6 rationale above, word for word, about the
+    # very same state; reaching the opposite conclusion from the same fact needed a
+    # better reason than "the write path is what changed".
+    answer_policy_version: str = "v7"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 

@@ -452,10 +452,27 @@ A 409 body names both numbers so you can see how far short the candidate fell:
 Re-promoting the index that is already active is a no-op and is **never**
 blocked — the idempotent path returns 200 before the gate runs.
 
+**How a dual-active database announces itself in `fly logs`** (#352). Five events,
+most general first; all of them mean "run the `?force=true` promote below":
+
+| event | what it tells you |
+|---|---|
+| `orchestrator_multiple_active_indexes` | the database has more than one `active` row (`active_count`). Fires once per request |
+| `retrieval_multiple_active_indexes` | the retrieval gate saw the same thing |
+| `vector_retrieval_index_provenance_ambiguous` | consequence: the vector arm is off, because nothing can say whose vectors it would be scoring |
+| `retrieval_evidence_spans_multiple_indexes` | **this answer really was built from a union** — `index_versions` names them and `index_version_count` counts them. Rarer and more actionable than the rows above |
+| `answer_cache_write_skipped_ambiguous_index` | the answer was served but deliberately not cached, so it cannot outlive the repair |
+
+`exact_lookup_spans_multiple_indexes` is the same union signal for
+`POST /v1/search/exact`, which has no cache and keeps returning the union.
+
+A cache **hit** returns before retrieval, so none of these fire on a replayed
+answer. `CITEVYN_ANSWER_POLICY_VERSION` was bumped to `v7` in #352 precisely so
+rows written during an earlier ambiguous window cannot replay past the fix.
+
 **That no-op is not the dual-active repair**, and it is worth being exact about
 this because the reverse is easy to assume. If the database has drifted into a
-dual-active state (you will see `orchestrator_multiple_active_indexes` in the
-logs), the thing that converges it is the demotion loop, and that loop only runs
+dual-active state, the thing that converges it is the demotion loop, and that loop only runs
 when you promote a **different** version — which means it runs *below* the gate.
 So the repair is gated like any other promotion, and on a stack with no
 evaluation runs it will 409 until you pass `?force=true`. Mid-incident, that is

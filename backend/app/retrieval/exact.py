@@ -89,6 +89,7 @@ def _to_chunk(term: ExactTerm, chunk: Chunk, doc: Document) -> RetrievedChunk:
         # is free; it lets the hybrid layer see whether the evidence this arm
         # returned spans more than one active index — which it can, because under
         # ambiguity ``active_index_version`` is ``None`` and the
-        # ``Document.index_version ==`` predicate below is skipped entirely.
+        # ``Document.index_version ==`` predicate in ``retrieve`` above is skipped
+        # entirely.
         index_version=doc.index_version,
     )
