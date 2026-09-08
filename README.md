@@ -50,8 +50,8 @@ for reproducible defects and accepted work.
 | Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
 | Smoke (`/health` against the stack) | 🟢 green | `make smoke`                              |
 | Smoke (chat happy-path, curl)     | 🟢 green | `make e2e` — API healthy + 1 grounded ask; **not** Playwright |
-| E2E demo-mode (Playwright, 124)   | 🟢 green | CI job `Demo-mode Playwright (no visual snapshots)`; locally `npm run test:ui` |
-| E2E live-mode (Playwright, 4)     | 🟢 green | CI job `Live-mode Playwright (stub backend)` |
+| E2E demo-mode (Playwright, 180)   | 🟢 green | CI job `Demo-mode Playwright (no visual snapshots)`; locally `npm run test:ui` |
+| E2E live-mode (Playwright, 5)     | 🟢 green | CI job `Live-mode Playwright (stub backend)` — **advisory, not a required check**: it can go red and a PR still merges. See `docs/TEST_STRATEGY.md` §12 |
 | Visual snapshots (22)             | ⚪ local-only | `npx playwright test tests/visual.spec.ts` — baselines are `-darwin` only |
 | Production guard: `stub` rejected | 🟢 green | unit test in `test_llm_factory_singleton.py` |
 | Production guard: router empty    | 🟢 green | unit test in `test_llm_factory_singleton.py` |

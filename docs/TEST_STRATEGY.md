@@ -215,3 +215,178 @@ when the question is out of scope.
 3. How will citation correctness be judged?
 4. How often will regression tests run?
 5. Will evaluation run on every candidate index?
+
+## 12. Which CI Checks Block a Merge (#379)
+
+### 12.1 Required status checks on `main`
+
+Nine contexts are required. Read with
+`gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks`
+(read 2026-09-08):
+
+| Context | Produced by |
+|---|---|
+| `Analyze (python)` | `codeql.yml` |
+| `CodeQL` | GitHub's code-scanning app, not a job in this repo |
+| `alembic + postgres integration tests` | `ci.yml` |
+| `pytest + lint` | `ci.yml` |
+| `quality-gate / quality-gate` | `pr-quality.yml` |
+| `type-check + unit tests + build` | `frontend.yml` |
+| `Demo-mode Playwright (no visual snapshots)` | `frontend.yml` |
+| `shell suites (bash 3.2 + 5.x) (ubuntu-latest)` | `ci.yml` |
+| `shell suites (bash 3.2 + 5.x) (macos-latest)` | `ci.yml` |
+
+`strict: true` (a branch must be up to date with `main` before merging) and
+`enforce_admins: true` (the rules apply to admins too).
+
+### 12.2 What is advisory
+
+`Live-mode Playwright (stub backend)` (`frontend-live-e2e.yml`) is **advisory**:
+it is not in the list above, so it can go red and the pull request still merges.
+
+It is the only job that executes these five tests, in two spec files:
+
+| Test | What only this job proves |
+|---|---|
+| `behavior.spec.ts:534` | the composer refuses a second in-flight question (#62), **and** announces the refusal — "Not sent" / "kept" at lines 629-630, which is #356's *gap 2* |
+| `behavior.spec.ts:473` | the pending-bubble loading indicator |
+| `behavior.spec.ts:1272` | the #302 landing re-ask scrolls to the existing answer and stays |
+| `answer-format.spec.ts:52` | a multi-line answer renders as multiple lines, not one blob |
+| `answer-format.spec.ts:150` | the markdown subset, citation chips, and per-document card collapsing (#303) |
+
+**Correction (measured 2026-09-08).** An earlier version of this list credited
+the live suite with "the arriving-answer announcement (#356)". It is not
+live-only: `behavior.spec.ts:1453` asserts it **unskipped** in the required
+`Demo-mode Playwright` job, and `ChatView.test.tsx` covers it in vitest inside
+the required `type-check + unit tests + build` job. Counts re-derived 2026-09-09:
+`grep -rn "Answer ready" frontend/src` → **20** hits — 5 in `ChatView.tsx` and 15
+in `ChatView.test.tsx` — and `grep -rn "Answer ready" frontend/tests` → 4. (This
+paragraph first said "15 hits under `frontend/src`". That 15 is the test file's
+share alone; the directory total is 20.) The #356 coverage that
+*is* live-only is the refused-submit announcement, which `docs/BACKLOG.md`'s
+#379 row calls gap 2. The multi-line-rendering test above was missing from the
+list entirely.
+
+`judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)` is also
+advisory and deliberately so: it is the paid job, gated behind a label.
+
+### 12.3 Measured case for promoting the live check
+
+Every figure here is **timestamped and moving**. The invariant is what carries
+the argument, not the number: re-derive before quoting, and a *larger* run count
+that is still 100% `success` at `run_attempt: 1` **confirms** this case rather
+than contradicting it.
+
+- **Flake record: every run has passed, on the first attempt.** Read 2026-09-08:
+  `total_count: 171` — the complete history of the workflow from its first
+  commit, 2026-07-14 to 2026-09-08, 56 days. All 171 are `success` and all 171
+  are `run_attempt: 1`, so no re-run is hiding an attempt-1 failure. (An earlier
+  reading in this file said 168; three more runs landed since.) Re-derive with:
+
+  ```sh
+  gh api --paginate \
+    'repos/imrohitagrawal/citevyn/actions/workflows/frontend-live-e2e.yml/runs?per_page=100' \
+    --jq '.workflow_runs[] | "\(.conclusion) attempt=\(.run_attempt)"' | sort | uniq -c
+  ```
+
+- **Cost: $0.** The repo is public (`gh repo view --json visibility` → `PUBLIC`),
+  and `gh api repos/imrohitagrawal/citevyn/actions/runs/<id>/timing` returns
+  `billable.UBUNTU.total_ms: 0` on all 15 most recent runs.
+- **Wall clock added to a pull request: 0 minutes.** Over **each job's own last
+  15 runs** (re-measured 2026-09-08) the live job took min 85 s / median 92 s /
+  max 97 s, against `Demo-mode Playwright`'s min 472 s / median 529 s /
+  max 563 s. Those are **not the same date range**, and an earlier version of
+  this line wrongly said they were: `frontend.yml` has no path filter and runs
+  far more often, so its 15-run window spanned a few hours on 2026-09-08 while
+  the live job's spanned 2026-09-06 to 2026-09-08. Both windows move. What
+  carries the point is unaffected: the live job is a **separate workflow**, so it
+  runs in parallel and never becomes the critical path.
+
+### 12.4 The prerequisite, now done
+
+`frontend-live-e2e.yml` used to be path-filtered to `frontend/**`. A required
+check whose workflow never triggers reports **nothing**, and the pull request
+waits on it forever — see GitHub's ["Handling skipped but required
+checks"](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks).
+13 of the last 30 merged pull requests touched zero `frontend/**` files
+(re-derived 2026-09-08; an earlier reading said 14, and it is now 13 only because
+#395 merged and pushed #333 out of the 30-PR window — the window moves, so
+re-derive rather than quoting this), so promoting the context with the filter in
+place would have blocked all of them.
+The filter has been removed; `backend/tests/test_gating_workflows.py` keeps it
+off.
+
+### 12.5 The promotion command (owner only)
+
+This is a branch-protection change, so only the repo owner runs it.
+
+```sh
+gh api --method POST \
+  repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks/contexts \
+  -f 'contexts[]=Live-mode Playwright (stub backend)'
+```
+
+Use this endpoint, not the alternatives:
+
+- It **adds** one context and touches nothing else, so `strict: true` and
+  `enforce_admins: true` are preserved because they are never sent.
+- `PATCH .../protection/required_status_checks` replaces the whole
+  required-status-checks object: every one of the nine contexts above has to be
+  re-listed, and `strict` re-sent, or they are silently dropped.
+- `PUT .../branches/main/protection` (full protection) **replaces every field**.
+  Omitting `enforce_admins` clears it — and it is `true` today, so that half is
+  live. The half about `required_pull_request_reviews` does **not** apply here:
+  this branch has no review requirement configured
+  (`gh api …/branches/main/protection` returns no such key), so there is nothing
+  for a `PUT` to clear. It is still the command that quietly unprotects the
+  branch; the `enforce_admins` clause is the reason.
+
+**Known trade-off in the recommended endpoint.** GitHub's docs attach a "Closing
+down notice" to the `contexts` parameter and point at `checks` for finer control.
+Concretely: all nine existing entries carry an `app_id` pin — `15368`
+(github-actions) on eight, `57789` (github-advanced-security) on `CodeQL` — while
+a context added through the `contexts` endpoint lands with `app_id: null`, which
+accepts a same-named check from **any** app. Read the pins with:
+
+```sh
+gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks \
+  --jq '.checks[] | "\(.app_id)  \(.context)"'
+```
+
+The recommendation above still stands: the `checks` route is part of the same
+whole-object replace as `PATCH`, so taking it to gain one `app_id` pin means
+re-sending all nine entries and `strict` correctly, which is the larger risk. If
+the pin is wanted, add the context first with the command above, then set it
+deliberately as a separate step.
+
+Verify afterwards with
+`gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks`
+and confirm the returned `contexts` array has ten entries and `strict` is still
+`true`.
+
+### 12.6 What the guards cover, and what they do not
+
+`backend/tests/test_gating_workflows.py` (in the required `pytest + lint` job)
+asserts that:
+
+- no gating workflow is path-filtered, and each still triggers on `pull_request`;
+- **no gating job is defused** — no job-level `if:`, no `continue-on-error:` that
+  is not literally `false`, and no step-level `if:` outside a byte-exact
+  allowlist of four artifact-upload steps. Three words (`continue-on-error:
+  true` on an assertion step) otherwise leave a required check green while it
+  asserts nothing;
+- the live job's `name:` matches the context string in §12.5 byte for byte —
+  compared against the `contexts[]=` **argument extracted from the fenced
+  command above**, not merely against the file, because the string appears in
+  this document twice and only one copy gets pasted into a shell;
+- the live job asserts **execution** from its run's JSON `stats` rather than a
+  `--list` count, and `frontend.yml`'s rename trap walks a skip list that is
+  **complete**, not merely non-empty;
+- the three copies of the `live only` selection regex agree, and the five
+  live-only test titles are pinned as a set — read from source with
+  commented-out declarations stripped, because commenting a live-only test out
+  is invisible to every CI job.
+
+It cannot read branch protection. It keeps the live workflow eligible; it cannot
+confirm the owner promoted it, or notice it being demoted. The full blind-spot
+register is `_UNGUARDABLE` in that file.
