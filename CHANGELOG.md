@@ -19,8 +19,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `live UI testing 2026-07-20` on the #208 row alone. Escaping pipes there would
   have rendered visible backslashes instead of restoring the columns; the three
   trailing fields are folded into the "Why it matters" cell instead. Verified
-  nothing was dropped: 107 issue links before and after, and every previously
-  discarded fragment is present in the file.
+  nothing was dropped by rendering all 15 rows through **GitHub's own renderer**
+  (`gh api /markdown`, mode=gfm) before and after and diffing the text: the 12
+  folds are pure insertions — zero characters deleted, reordered or duplicated —
+  and the 3 escapes go from truncated to complete (#300 2,417 → 8,625 rendered
+  characters, #316 4,769 → 6,217, #308 4,838 → 10,487). An earlier draft of this
+  entry claimed "107 issue links before and after"; that was measured before the
+  8 new rows below were added and is false for the shipped state (107 → 115).
+  The conclusion held, the stated evidence did not.
 - **`docs/COST_CONTROLS.md` no longer contradicts itself about `make budget`.**
   The Layer 5 table row said **Live**; §0, four lines below, called it "planned
   (§5, not yet implemented)". The table was right — `Makefile:326` defines the
@@ -36,8 +42,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tracked as #381. It is now an iterating test (executed even when the set is
   empty) plus `test_the_detector_actually_detects`, which feeds the parser
   deliberately broken tables in **both** repaired shapes and a correctly-escaped
-  row it must NOT flag. Mutation-proven: blinding `_cell_count` to `return 0`
-  leaves the other three tests green and reds only the new partner.
+  row it must NOT flag. The collection loop is now an
+  `_offenders()` function the detector test calls, because review proved that
+  with it inlined **four mutations that completely disable the guard survived
+  every test green** — `if got <= cols or True`, `offenders.append` →
+  `[].append`, `got = cols`, and `if tag in KNOWN_BROKEN` → `if True`. All four
+  now die, as does blinding `_cell_count` to `return 0`. One mutation still
+  survives and is named in the docstring rather than papered over: replacing the
+  caller's `assert not offenders` with `assert True`, which is not detectable
+  from inside the test that carries it. `test_no_exemption_is_stale` is likewise
+  honest that while the set is empty it asserts nothing and is held in place for
+  when the set refills; the file's non-vacuity is carried by
+  `test_the_detector_actually_detects`.
 
 ### Added
 - **Every `Settings` field is now declared in an env example, or exempted by

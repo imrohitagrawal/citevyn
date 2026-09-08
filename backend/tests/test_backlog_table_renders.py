@@ -90,9 +90,24 @@ def test_backlog_has_tables_to_check() -> None:
     assert sum(len(rows) for _, _, rows in tables) >= 40
 
 
-def test_no_backlog_row_loses_cells_to_an_unescaped_pipe() -> None:
+def _offenders(text: str) -> list[str]:
+    """Rows whose cells GFM would discard, as operator-readable messages.
+
+    A FUNCTION, not a loop inlined into the test, so the detector partner can
+    call the same code path the real file check uses. Review of PR #383 proved
+    why that matters: with the loop inlined, four mutations that completely
+    disable the guard -- ``if got <= cols or True``, ``offenders.append`` ->
+    ``[].append``, ``got = cols``, ``if tag in KNOWN_BROKEN`` -> ``if True`` --
+    all left every test in this file GREEN, because nothing executed the loop
+    with input it should have flagged. Those four now die.
+
+    One mutation still survives and is named here rather than papered over:
+    replacing this function's caller's ``assert not offenders`` with
+    ``assert True``. Deleting an assertion outright is not detectable from
+    inside the test that carries it.
+    """
     offenders: list[str] = []
-    for header_no, cols, rows in _tables(BACKLOG.read_text(encoding="utf-8")):
+    for header_no, cols, rows in _tables(text):
         for line_no, row in rows:
             got = _cell_count(row)
             if got <= cols:
@@ -109,6 +124,11 @@ def test_no_backlog_row_loses_cells_to_an_unescaped_pipe() -> None:
                 f"last {got - cols}, roughly {lost} characters. Escape the pipe "
                 f"as \\| -- backticks do not protect it."
             )
+    return offenders
+
+
+def test_no_backlog_row_loses_cells_to_an_unescaped_pipe() -> None:
+    offenders = _offenders(BACKLOG.read_text(encoding="utf-8"))
     assert not offenders, "\n".join(offenders)
 
 
@@ -116,9 +136,17 @@ def test_no_exemption_is_stale() -> None:
     """Staleness partner for ``KNOWN_BROKEN``.
 
     A tag left here after its row is fixed silently shelters the next row to
-    reuse that issue number. Iterating (rather than parametrizing) keeps this
-    test EXECUTED when the set is empty instead of collapsing to "got empty
-    parameter set", which would assert nothing at all.
+    reuse that issue number.
+
+    HONEST SCOPE, because the first version of this docstring overstated it and
+    review caught that: while ``KNOWN_BROKEN`` is EMPTY this test asserts
+    nothing -- the body reduces to ``assert not []`` and no mutation of the
+    parser or of BACKLOG.md can redden it. Iterating rather than parametrizing
+    buys one narrow thing: it stays EXECUTED instead of collapsing to pytest's
+    "got empty parameter set" (the vacuous-parametrize shape tracked as #381).
+    It is held in place for when the set refills, at which point it becomes a
+    real check again. The non-vacuity of this FILE is carried by
+    ``test_the_detector_actually_detects``, not by this test.
     """
     text = BACKLOG.read_text(encoding="utf-8")
     still_broken = {
@@ -161,6 +189,19 @@ def test_the_detector_actually_detects() -> None:
             f"{name}: the deliberately-broken row was NOT flagged as over-running "
             f"its header -- the detector has stopped detecting."
         )
+        # Through `_offenders` too, which is what the file check actually calls.
+        # Asserting only on the helpers above left the collection loop -- the
+        # `got <= cols` skip, the KNOWN_BROKEN skip, the append itself -- with no
+        # guard at all; four mutations disabling it survived every test here.
+        found = _offenders(doc)
+        assert len(found) == 1, (
+            f"{name}: _offenders returned {len(found)} messages for a table with "
+            f"exactly one over-running row -- the check's own loop is not working."
+        )
+        assert "#" in found[0] and "DISCARDS" in found[0], (
+            f"{name}: the offender message does not name the row or say what is "
+            f"lost, so an operator cannot act on it: {found[0]!r}"
+        )
 
     # And the inverse, so the detector is not simply flagging everything: a
     # correctly-escaped row must NOT be flagged.
@@ -173,4 +214,8 @@ def test_the_detector_actually_detects() -> None:
     assert _cell_count(rows[0][1]) == cols, (
         "an escaped pipe was counted as a cell split -- the guard would report "
         "false failures on correctly-written rows."
+    )
+    assert _offenders(escaped) == [], (
+        "a correctly-escaped row was reported as an offender -- the guard would "
+        "go red on rows that render perfectly well."
     )
