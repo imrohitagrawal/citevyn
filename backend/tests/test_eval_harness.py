@@ -1187,3 +1187,32 @@ def test_eval_harness_mirrors_the_orchestrator_alias_canonicalization() -> None:
         "the harness did not canonicalize 'sitewin' -> 'CiteVyn', so retrieval found "
         "nothing — it has drifted from Orchestrator.ask"
     )
+
+
+# ---------------------------------------------------------------------------
+# #352: the Postgres-eval "this number is meaningless" guard.
+# ---------------------------------------------------------------------------
+
+
+def test_the_postgres_eval_raises_on_every_corrupting_degrade_reason() -> None:
+    """The guard used to read ``degrade is VectorDegrade.mismatch``, so a reason it
+    had not been taught about slipped past and the hit rate simply came out LOWER
+    with no error — which is precisely the "silently lowering the number" outcome
+    its own docstring says it exists to prevent (#352).
+
+    ``VectorDegrade.unavailable`` is asserted ABSENT on purpose: a transient
+    provider outage is a retry, not a corrupt fixture, and folding it in would make
+    every flaky embedding call abort a paid eval run.
+
+    RED if a ``VectorDegrade`` member other than ``none``/``unavailable`` is added
+    without being listed, or if ``unavailable`` is folded in.
+    """
+    from app.retrieval.types import VectorDegrade
+    from tests.eval.retrieval import _EVAL_FATAL_DEGRADES
+
+    corrupting = set(VectorDegrade) - {VectorDegrade.none, VectorDegrade.unavailable}
+    assert corrupting == _EVAL_FATAL_DEGRADES
+    # PARTNER: the set is non-empty and names the two real corruptions, so the
+    # equality above is not satisfiable by an empty set.
+    assert VectorDegrade.mismatch in _EVAL_FATAL_DEGRADES
+    assert VectorDegrade.ambiguous_index in _EVAL_FATAL_DEGRADES

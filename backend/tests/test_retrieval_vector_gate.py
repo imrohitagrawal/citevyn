@@ -48,7 +48,14 @@ def _chunk(area: str):
 
 
 def _doc(area: str):
-    return SimpleNamespace(source_name=area, title=f"{area} doc", source_url=f"https://x/{area}")
+    # ``index_version`` is read by ``VectorRetriever`` onto every ``RetrievedChunk``
+    # (#352), so the double has to carry it like the real ``documents`` row does.
+    return SimpleNamespace(
+        source_name=area,
+        title=f"{area} doc",
+        source_url=f"https://x/{area}",
+        index_version="v1",
+    )
 
 
 def _mock_session(rows: list[tuple]):
@@ -56,8 +63,17 @@ def _mock_session(rows: list[tuple]):
 
     ``rows`` are ``(chunk, doc, distance)`` tuples, ordered by distance ascending
     (closest first) exactly as the real ``ORDER BY distance`` query would.
+
+    ``mappings()`` returns NO rows: ``HybridRetriever._finalize`` resolves the active
+    index to decide whether the answer is cacheable (#352), and an empty
+    ``index_versions`` projection is the ``ActiveIndexState.none`` state — not
+    ambiguous — which leaves every assertion in this module about the CONFIDENCE
+    GATE, which is what it is here to test.
     """
-    result = SimpleNamespace(all=lambda: rows)
+    result = SimpleNamespace(
+        all=lambda: rows,
+        mappings=lambda: SimpleNamespace(all=lambda: []),
+    )
     return SimpleNamespace(
         bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
         execute=AsyncMock(return_value=result),

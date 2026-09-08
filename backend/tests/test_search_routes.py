@@ -661,13 +661,19 @@ def test_health_index_agrees_with_the_read_path_on_the_same_dual_active_session(
         identity=identity,
     )
 
+    from app.retrieval.types import VectorDegrade
+
     retriever = HybridRetriever(session, active_index_version=None, embedder_identity=identity)
-    arm_enabled = asyncio.get_event_loop().run_until_complete(retriever._vector_arm_enabled())
+    arm_degrade = asyncio.get_event_loop().run_until_complete(retriever._vector_arm_degrade())
 
     with TestClient(app_with_seeded_session) as client:
         body = client.get("/health/index").json()
 
-    assert arm_enabled is False, "precondition: the read path fails closed on dual-active (#226)"
+    # The reason, not just "off": ``ambiguous_index`` is what makes the operator's
+    # cache-skip line point at ``index_versions`` rather than the embedder (#352).
+    assert arm_degrade is VectorDegrade.ambiguous_index, (
+        "precondition: the read path fails closed on dual-active (#226) and names why (#352)"
+    )
     assert body["vector_arm"]["healthy"] is False, (
         "the route reported the vector arm healthy while retrieval had it OFF — #264"
     )

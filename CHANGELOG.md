@@ -7,6 +7,96 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **An answer built while more than one index claims `active` is no longer frozen
+  into the answer cache, and an answer that actually drew on several indexes now
+  says so (#352).** Scoped by an explicit owner decision — observability plus the
+  cache hole; **what the retrieval arms return to a user is unchanged**, because
+  serving something rather than 500-ing under ambiguity is the standing decision at
+  `orchestrator._retrieve_active_index` and failing closed was considered and
+  rejected.
+  **The issue named the wrong file.** There are two exact-lookup paths.
+  `app/services/exact_lookup.py`, the one it quotes, backs `POST /v1/search/exact`
+  and has **no answer cache at all**, so it cannot produce the consequence the
+  issue attributes to it. The cache hole is in `app/retrieval/exact.py` via
+  `HybridRetriever.retrieve`'s `Intent.exact_lookup` short-circuit, which unions by
+  **omission** rather than by set membership: under ambiguity
+  `_retrieve_active_index` returns the `("", "")` sentinel, the caller's `or None`
+  drops the `Document.index_version ==` predicate, and the short-circuit returns
+  `VectorDegrade.none` — cacheable — *before* the provenance gate that fails closed
+  for every other arm can run. Reproduced RED at the orchestrator boundary before
+  any fix: a dual-active database plus an `exact_lookup` question that hits wrote
+  one `answer_cache` row and the second identical ask came back `cache_hit: True`.
+  A **second defect the issue does not mention** surfaced while fixing it:
+  `_vector_arm_enabled` returned a bare `bool`, and `_safe_vector_retrieve` turned
+  every `False` into `VectorDegrade.mismatch` — so on the fall-through and
+  non-exact paths a dual-active database already told operators
+  `answer_cache_write_skipped_embedder_mismatch`, sending them to ADR-0003 and the
+  embedder config when the fix is `promote_version`.
+  A new `VectorDegrade.ambiguous_index` carries the honest reason. It is a plain
+  `StrEnum`, never persisted and never on the wire (grepped: no column, no
+  migration, no response field, no frontend type), so there is **no migration**.
+  `_vector_arm_enabled` becomes `_vector_arm_degrade` and returns the reason
+  instead of a bool that had two meanings — the same shape #226 removed from
+  `_active_index_stamp`'s `None`.
+  **The two signals key on different facts, on purpose.** The cache gate keys on
+  the DATABASE being ambiguous, so an answer whose evidence happened to come from
+  one index is still not frozen — `promote_version` may be about to demote the very
+  row it came from. The new `retrieval_evidence_spans_multiple_indexes` WARN keys on
+  the EVIDENCE actually spanning indexes, which is strictly rarer and strictly more
+  actionable than "the database is dual-active" (already logged once per request by
+  `orchestrator_multiple_active_indexes`). It reads an `index_version` now carried
+  on `RetrievedChunk`; all three arms already `SELECT` the `documents` row, so it
+  costs no extra query and no extra column, and it is projected onto no response
+  body, no prompt and no table.
+  **It costs nothing on a healthy database.** A retriever scoped to a named index
+  returns `False` from `_active_index_ambiguous` without a query at all — measured
+  with a `before_cursor_execute` counter asserting no `index_versions` statement
+  runs, paired with an assertion that the `exact_terms` SELECT did, so "no query"
+  is not "nothing happened". The one small indexed read only lands on a database
+  that is already degenerate, because unscoped retrieval is reached in production
+  only through the `("", "")` sentinel.
+  **`answer_policy_version` was deliberately NOT bumped**, argued from mechanism
+  rather than from an assumption about production: a row written during a
+  dual-active window carries `source_version_hash=""`, so the moment the operator
+  converges the database the cache KEY changes and that row is unreachable by
+  construction; while still ambiguous, replaying it serves exactly what a miss would
+  serve live, since the union stays served by decision. The residual — re-entering
+  ambiguity inside one 24h TTL — is accepted and stated, and
+  `CITEVYN_ANSWER_POLICY_VERSION` is an env var an operator can bump at deploy time
+  with no code change.
+  `POST /v1/search/exact` keeps its union and gained the same observability
+  (`exact_lookup_spans_multiple_indexes`) because it is a retrieval surface with no
+  cache to poison. Its `limit()` carries no `ORDER BY`, so a truncated result can
+  HIDE the second index: the WARN can prove a union happened and can never prove one
+  did not, and the code says so rather than implying completeness. Its
+  `ExactLookupHit.index_version` still echoes the caller's request (the literal
+  `"active"`); changing it to the per-hit truth is a response-contract change and
+  was left alone.
+  **Three exhaustive-by-omission sites that failed OPEN** were found and closed with
+  set-equality guards rather than one more example test each, so they hold for a
+  member nobody has written yet: `_combine_degrades`'s two-test ladder fell through
+  to `none`, so a multi-hop answer where one area reported an unrecognised reason
+  was **cached**; the cache-skip label's `if mismatch else unavailable` ternary put
+  any new reason under "the embedding provider is down" (no test could see it —
+  each asserted one name present and *the other* absent, and there were only two
+  names to be absent); and the Postgres eval's `is VectorDegrade.mismatch` check
+  would have let the hit rate drop silently, the exact outcome its own docstring
+  says it exists to prevent. `VectorDegrade.unavailable` is deliberately excluded
+  from the eval guard — a transient outage is a retry, not a corrupt fixture.
+  `index_versions` needed adding to **both** `EMITTED_TEXT_KEYS` and
+  `OPAQUE_ID_KEYS` (#361): a `list` never prints under any key, and the plural is
+  matched on the WHOLE key so it did **not** inherit `index_version`'s entropy
+  exemption — a sha-shaped version would have rendered `index_versions='[REDACTED]'`.
+  Pinned with a 64-character fixture rather than a friendly `v1`, which is the #361
+  lesson applied; the companion `index_version_count` is an `int` and rides the
+  scalar branch with no allowlist entry, and stays exact if the joined string ever
+  truncates.
+  Fifteen mutations were run one at a time, each grep-confirmed present in the file
+  before the run and restored byte-identically (`cmp`), including **both** vacuity
+  directions on each WARN guard (never fires / always fires). Every one listed was
+  killed; the list is not claimed exhaustive. Backend suite **2047 passed, 24
+  skipped, 0 failed** (baseline on `1fd7556`: 2030 passed, 24 skipped), `ruff check`
+  and `pyright` clean.
 - **All 15 `docs/BACKLOG.md` rows that were silently losing content now render in
   full (#360).** The issue counted them correctly but named one cause; there were
   **two**, and the fix it implied would have made the larger group worse.

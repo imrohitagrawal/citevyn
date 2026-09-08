@@ -62,6 +62,13 @@ class PostgresEvalError(RuntimeError):
     """
 
 
+# Degrade reasons that make a Postgres eval number MEANINGLESS rather than merely
+# unlucky, so the run raises instead of quietly reporting a lower hit rate.
+# ``VectorDegrade.unavailable`` is excluded on purpose: a transient provider outage
+# is a retry, not a corrupt fixture.
+_EVAL_FATAL_DEGRADES = frozenset({VectorDegrade.mismatch, VectorDegrade.ambiguous_index})
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrievalOutcome:
     """Per-case retrieval result."""
@@ -563,10 +570,16 @@ async def evaluate_retrieval(
                 embedder=embedder,
                 use_memory=use_memory,
             )
-            if postgres and case.kind != "refusal" and degrade is VectorDegrade.mismatch:
+            # ``unavailable`` is deliberately NOT here: a transient provider outage
+            # is a retry, not a broken fixture. ``ambiguous_index`` IS, and had to
+            # be added by hand — a bare ``is VectorDegrade.mismatch`` test lets any
+            # future member through, and the eval number would then drop silently on
+            # exactly the corruption this guard exists to shout about (#352).
+            if postgres and case.kind != "refusal" and degrade in _EVAL_FATAL_DEGRADES:
                 raise PostgresEvalError(
-                    f"vector arm degraded to Tier-3 mismatch on case {case.id!r}: the "
-                    "seeded index provenance and configured query embedder disagree."
+                    f"vector arm degraded ({degrade.value}) on case {case.id!r}: the "
+                    "seeded index provenance and configured query embedder disagree, "
+                    "or more than one index_versions row claims status=active."
                 )
             # The domain actually routed to (from the memory-resolved query for a
             # followup) — not a second classification of the raw question (finding #7).

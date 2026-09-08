@@ -85,4 +85,10 @@ def _to_chunk(term: ExactTerm, chunk: Chunk, doc: Document) -> RetrievedChunk:
         context_summary=chunk.context_summary,
         source_url=doc.source_url,
         score=1.0,
+        # The document's owning index (#352). ``doc`` is already selected, so this
+        # is free; it lets the hybrid layer see whether the evidence this arm
+        # returned spans more than one active index — which it can, because under
+        # ambiguity ``active_index_version`` is ``None`` and the
+        # ``Document.index_version ==`` predicate below is skipped entirely.
+        index_version=doc.index_version,
     )

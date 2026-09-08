@@ -32,6 +32,7 @@ same test proving the line was produced and carries the operational content, so
 a formatter that redacted everything -- or emitted nothing at all -- fails.
 """
 
+import hashlib
 import logging
 import uuid
 
@@ -291,7 +292,15 @@ def test_the_opaque_id_exemption_is_exact_not_substring() -> None:
     long_secret = "z" * 40
     assert redact_value("request_id", long_secret) == long_secret  # exact key: exempt
     assert redact_value("outer_request_id", long_secret) == "[REDACTED]"  # not exempt
-    assert set(OPAQUE_ID_KEYS) == {"request_id", "index_version", "source_version_hash"}
+    # Byte-exact, so every addition is a deliberate, reviewed edit. ``index_versions``
+    # (plural) joined #352; it is the same data as ``index_version`` and, because the
+    # membership test is on the WHOLE key, it did NOT inherit that key's exemption.
+    assert set(OPAQUE_ID_KEYS) == {
+        "request_id",
+        "index_version",
+        "index_versions",
+        "source_version_hash",
+    }
 
 
 def test_a_container_under_an_allowlisted_key_never_prints_its_contents() -> None:
@@ -615,3 +624,69 @@ def test_the_allowlist_contains_no_key_that_redact_value_would_blank() -> None:
 
     blanked = {k for k in EMITTED_TEXT_KEYS if redact_value(k, "sentinel") != "sentinel"}
     assert not blanked, f"allowlisted keys that redact_value blanks anyway: {sorted(blanked)}"
+
+
+# ---------------------------------------------------------------------------
+# #352: the span-of-indexes WARN payload.
+# ---------------------------------------------------------------------------
+
+# A REAL index version can be sha-shaped -- ``index_versions.index_version`` is a
+# 64-character string PK and this module's own OPAQUE_ID_KEYS comment already names
+# "a sha-shaped ``index_version``" as the thing the entropy sweep destroyed. #361's
+# recorded lesson is that a test proving a field survives must use the shape the
+# application can actually produce, not a friendly literal like ``v1``.
+_SHA_VERSION_A = "a" + hashlib.sha256(b"index-a").hexdigest()[:63]
+_SHA_VERSION_B = "b" + hashlib.sha256(b"index-b").hexdigest()[:63]
+
+
+def test_the_spanned_index_versions_reach_the_operator_verbatim() -> None:
+    """#352's observability field must PRINT, not render as a shape summary.
+
+    Two independent mechanisms have to hold at once: ``index_versions`` on
+    ``EMITTED_TEXT_KEYS`` (a string under an unlisted key becomes ``<str len=N>``)
+    AND on ``OPAQUE_ID_KEYS`` (a sha-shaped version is 64 characters inside
+    ``HIGH_ENTROPY_RE``'s class, so the sweep would blank it).
+
+    RED if ``index_versions`` is removed from EITHER set.
+    """
+    assert len(_SHA_VERSION_A) == 64, "the fixture must match the column's real width"
+    line = render(
+        "retrieval_evidence_spans_multiple_indexes",
+        request_id=REAL_REQUEST_ID,
+        index_versions=f"{_SHA_VERSION_A},{_SHA_VERSION_B}",
+        index_version_count=2,
+    )
+    assert _SHA_VERSION_A in line, f"the first index version was destroyed: {line!r}"
+    assert _SHA_VERSION_B in line, f"the second index version was destroyed: {line!r}"
+    assert "[REDACTED]" not in line, line
+    assert "<str len=" not in line, line
+    # The int rides the scalar branch and needs no allowlist entry at all.
+    assert "index_version_count=2" in line, line
+
+
+def test_the_singular_index_version_key_still_prints_too() -> None:
+    """PARTNER: adding the plural must not have been a rename. Both keys are live
+    -- ``retrieval_multiple_active_indexes`` and the promotion diagnostics still
+    emit the singular.
+
+    RED if ``index_version`` is dropped from ``EMITTED_TEXT_KEYS`` or
+    ``OPAQUE_ID_KEYS`` while wiring up the plural.
+    """
+    line = render("promote", index_version=_SHA_VERSION_A)
+    assert _SHA_VERSION_A in line, line
+    assert "[REDACTED]" not in line, line
+
+
+def test_a_plural_index_versions_LIST_is_still_summarised() -> None:
+    """PARTNER, and the trap this field was one line away from: the allowlist
+    governs STRINGS ONLY. Allowlisting the key does NOT make a list print, so the
+    call sites join before logging -- had they passed the list, the operator would
+    have received ``index_versions=<list n=2>`` and the field would have looked
+    live while carrying nothing.
+
+    RED if ``render_extra_value`` starts stringifying containers under an
+    allowlisted key.
+    """
+    line = render("probe", index_versions=[_SHA_VERSION_A, _SHA_VERSION_B])
+    assert "index_versions=<list n=2>" in line, line
+    assert _SHA_VERSION_A not in line, line

@@ -2882,3 +2882,201 @@ async def test_citation_only_inside_a_fence_costs_no_second_llm_call(
     assert [c["marker"] for c in response["citations"]] == [1]
     # And it cost ONE generation, not two.
     assert fenced.complete.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# #352: on a DUAL-ACTIVE database the exact arm unions documents from every
+# active index, and the ``exact_lookup`` short-circuit reported that union as
+# ``VectorDegrade.none`` -- i.e. cacheable -- because it returns BEFORE the
+# provenance gate that fails closed for every other arm ever runs.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_exact_lookup_corpus(session: Any) -> Any:
+    """``seed_catalog`` plus the bespoke term that makes ``"claude api --model"``
+    both classify as ``claude_api``/``exact_lookup`` AND hit the exact arm.
+
+    Same construction as ``test_exact_lookup_short_circuit_caches_under_mismatch``
+    -- ``ExactRetriever`` compares the WHOLE normalized question to ``term_text``,
+    so the term has to carry the domain keyword too.
+    """
+    from app.models import TermType
+
+    seeded = await seed_catalog(session)
+    claude_chunk = next(c for c in seeded["chunks"] if c.product_area == "claude_api")  # type: ignore[attr-defined]
+    session.add(
+        ExactTerm(
+            term_id=uuid.uuid4(),
+            term_text="claude api --model",
+            term_type=TermType.flag,
+            product_area="claude_api",
+            document_id=claude_chunk.document_id,
+            chunk_id=claude_chunk.chunk_id,
+        )
+    )
+    return seeded
+
+
+async def _add_second_active_index(session: Any, *, index_version: str = "v2") -> None:
+    """Drive the database into the dual-active state (#58/#264).
+
+    ``seed_catalog`` already made ``v1`` active; a second ``active`` row is what
+    ``resolve_active_index`` reports as ``ActiveIndexState.ambiguous`` and what
+    makes ``_retrieve_active_index`` return the ``("", "")`` sentinel.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import IndexStatus, IndexVersion
+
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version=index_version,
+            status=IndexStatus.active,
+            source_version_hash=f"sha256:{index_version}",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    await session.flush()
+
+
+async def test_exact_lookup_short_circuit_is_not_cached_on_a_dual_active_database(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#352 -- THE CENTRAL GUARD.
+
+    On a dual-active database ``_retrieve_active_index`` returns ``("", "")``, the
+    caller's ``or None`` drops the ``Document.index_version ==`` predicate, and the
+    exact arm answers from a union of every active index. Before the fix the
+    ``exact_lookup`` short-circuit returned ``VectorDegrade.none`` -- so
+    ``_respond_answer``'s ``cache_written = vector_degrade is VectorDegrade.none``
+    FROZE that union answer into ``answer_cache`` for the full TTL, outliving the
+    ``promote_version`` the operator runs to converge the database.
+
+    The answer is still SERVED -- serving something rather than 500-ing under
+    ambiguity is the deliberate product decision at ``orchestrator.py:279-281``
+    and is unchanged here. Only the cache WRITE is withheld.
+
+    RED without the fix: the short-circuit in ``HybridRetriever.retrieve`` reports
+    ``VectorDegrade.none`` and ``len(cache_rows) == 1``.
+    """
+    await _seed_exact_lookup_corpus(session)
+    await _add_second_active_index(session)
+    await session.commit()
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    question = "claude api --model"
+
+    with caplog.at_level(logging.WARNING, logger="citevyn.answer"):
+        response = await orchestrator.ask(
+            question=question, request_id="req_dual_exact", session_id=uuid.uuid4()
+        )
+
+    # PARTNER inside the test: the answer is still served from the exact arm, so
+    # "nothing was cached" is not merely "nothing was answered".
+    assert response["no_answer"] is False, "the union answer is still served (owner decision)"
+    assert response["intent"] == Intent.exact_lookup.value
+    assert response["retrieval_strategy"] == RetrievalStrategy.exact_lookup.value
+
+    cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
+    assert cache_rows == [], "an answer built while the active index is ambiguous must not cache"
+    audit = (await session.execute(select(AuditEvent))).scalars().all()[0]
+    assert audit.metadata_["cache_written"] is False
+    # The skip names the ACTUAL cause. Labelling it an embedder mismatch would
+    # send an operator to the embedder config; the fix is ``promote_version``.
+    assert "answer_cache_write_skipped_ambiguous_index" in caplog.text
+    assert "answer_cache_write_skipped_embedder_mismatch" not in caplog.text
+    assert "answer_cache_write_skipped_vector_unavailable" not in caplog.text
+
+
+async def test_a_second_ask_under_dual_active_still_re_retrieves(session: Any) -> None:
+    """PARTNER for the row-count assertion above: prove nothing was frozen.
+
+    ``cache_rows == []`` would also pass if the cache were broken outright, so the
+    second identical ask must report ``cache_hit is False`` rather than replaying.
+
+    RED without the fix: the second ask returns ``cache_hit is True``.
+    """
+    await _seed_exact_lookup_corpus(session)
+    await _add_second_active_index(session)
+    await session.commit()
+
+    orchestrator = Orchestrator(_settings(embedding_provider="stub"), session)
+    question = "claude api --model"
+
+    first = await orchestrator.ask(
+        question=question, request_id="req_dual_1", session_id=uuid.uuid4()
+    )
+    second = await orchestrator.ask(
+        question=question, request_id="req_dual_2", session_id=uuid.uuid4()
+    )
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is False, "an ambiguous-index answer must never be replayed"
+
+
+async def test_every_cache_skip_reason_has_its_own_operator_facing_name() -> None:
+    """THE GUARD FOR THE NEXT MEMBER (#352).
+
+    The skip label used to be ``"...embedder_mismatch" if degrade is mismatch else
+    "...vector_unavailable"``. That is exhaustive-by-omission: a third reason took
+    the ``else`` and told operators the embedding provider was down. Every existing
+    test asserted one name present and *the other* absent, and with only two names
+    to be absent none of them could see it.
+
+    Asserting the KEY SET is what makes this hold for a member nobody has written
+    yet, and pairing it with a rendered line is what stops it from being a pin on a
+    constant nothing reads.
+
+    RED if a ``VectorDegrade`` member is added without its own event name.
+    """
+    from app.answer.orchestrator import _CACHE_SKIP_EVENTS
+
+    assert set(_CACHE_SKIP_EVENTS) == set(VectorDegrade) - {VectorDegrade.none}
+    assert VectorDegrade.none not in _CACHE_SKIP_EVENTS, (
+        "'none' means the answer WAS cached; it has no skip event"
+    )
+    # Distinct names: a mapping that pointed every reason at one string would
+    # satisfy the set assertion above and lose exactly the information the mapping
+    # exists to carry.
+    assert len(set(_CACHE_SKIP_EVENTS.values())) == len(_CACHE_SKIP_EVENTS)
+
+
+async def test_empty_evidence_under_an_ambiguous_index_refuses_rather_than_500ing(
+    session: Any,
+) -> None:
+    """BOUNDARY GUARD: #352 must not have become the fail-closed option the owner
+    rejected.
+
+    ``Orchestrator.ask`` raises a transient 5xx when the vector arm was
+    ``unavailable`` AND there is no evidence (#142) — the client then retries.
+    ``ambiguous_index`` must NOT join that branch: an ambiguous index is a
+    persistent, operator-fixable state, not a retryable outage, so 5xx-ing it would
+    make every question fail the moment two rows claim ``active`` and would make
+    every retry fail too. Today's behaviour (a content refusal) is what
+    ``VectorDegrade.mismatch`` already gets, and this reason changes nothing about
+    it.
+
+    Directly the sibling of ``test_empty_evidence_without_outage_still_refuses``.
+
+    RED if ``ambiguous_index`` is added to the ``VectorDegrade.unavailable`` test on
+    ``orchestrator.py``'s empty-evidence branch — the call then raises
+    ``OrchestratorError`` instead of returning.
+    """
+    await _seed_index_version(session)
+    retriever = _FakeRetriever(evidence=[], vector_degrade=VectorDegrade.ambiguous_index)
+    orchestrator = Orchestrator(
+        _settings(), session, llm=AsyncMock(wraps=StubLLMClient()), retriever=retriever
+    )
+
+    response = await orchestrator.ask(
+        question="How do I configure Claude Code permissions?",
+        request_id="req_ambiguous_empty",
+        session_id=uuid.uuid4(),
+    )
+
+    assert response["no_answer"] is True, "an ambiguous index still refuses, it does not raise"
+    # PARTNER: a refusal is not cached either, so this is not asserting that the
+    # gate was bypassed to get here.
+    assert (await session.execute(select(AnswerCache))).scalars().all() == []
