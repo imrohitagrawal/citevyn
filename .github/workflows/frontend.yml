@@ -124,8 +124,14 @@ jobs:
           set -euo pipefail
           npx playwright test -c playwright.demo-ci.config.ts --list --reporter=list > /tmp/ci_list.txt
           npx playwright test -c playwright.config.ts        --list --reporter=list > /tmp/all_list.txt
-          ci_total=$(grep -oE 'Total: [0-9]+' /tmp/ci_list.txt  | grep -oE '[0-9]+')
-          all_total=$(grep -oE 'Total: [0-9]+' /tmp/all_list.txt | grep -oE '[0-9]+')
+          # ANCHORED. Playwright prints its summary line at column 0 while every
+          # listed test is indented two spaces (verified against a real `--list`
+          # run), so `^` makes the match unambiguous. Unanchored, a test TITLE
+          # containing "Total: 7 sources" puts a second line in the capture,
+          # `$(...)` becomes multi-line, and the step dies further down with a
+          # misleading "selects 0 tests — vacuous" instead of naming the cause.
+          ci_total=$(grep -oE '^Total: [0-9]+' /tmp/ci_list.txt  | grep -oE '[0-9]+')
+          all_total=$(grep -oE '^Total: [0-9]+' /tmp/all_list.txt | grep -oE '[0-9]+')
           ci_visual=$(grep -c 'visual regression' /tmp/ci_list.txt || true)
           all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)
           echo "ci_total=$ci_total all_total=$all_total ci_visual=$ci_visual all_visual=$all_visual"
@@ -159,8 +165,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, sys
-          stats = json.load(open("/tmp/demo-results.json"))["stats"]
+          import json, os, re, sys
+          report = json.load(open("/tmp/demo-results.json"))
+          stats = report["stats"]
           selected = int(os.environ["CI_TOTAL"])
           print("stats:", stats, "selected:", selected)
           # Account for EVERY selected test. `expected >= N` was still a magic
@@ -186,6 +193,11 @@ jobs:
           # The demo side is NOT left uncovered: "the composer is never gated in demo
           # mode" runs HERE, unskipped, and is what catches a gate re-keyed onto
           # something demo mode does set.
+          #
+          # This literal is now LOAD-BEARING for a second rule: the rename trap
+          # below compares its walk against `stats["skipped"]`, so relaxing this
+          # line (`!= 4` -> `> 99`, say) would take the completeness partner with
+          # it. `backend/tests/test_gating_workflows.py` pins the literal.
           if stats["skipped"] != 4:
               print(f"::error::{stats['skipped']} skipped, expected exactly 4 "
                     f"(the `if (!isLive)` guards) — a new skip silently shrinks this job")
@@ -197,6 +209,79 @@ jobs:
               print(f"::error::{stats['flaky']} flaky test(s) — passed only on retry; "
                     f"a green-by-flake is worse than a red signal")
               sys.exit(1)
+
+          # ── the title-rename trap (#379) ───────────────────────────────────
+          #
+          # A test that self-skips here is only honest if it runs SOMEWHERE, and
+          # the somewhere is `frontend-live-e2e.yml`, which selects by
+          # `grep: /live only/i` over the joined title path. Nothing connects the
+          # two: a tidy-up that renames "(live only)" to the hyphenated
+          # "(live-only)" leaves this job green (a rename does not change whether
+          # a test SKIPS, so the pinned skip count above stays 4) and silently
+          # drops the test from the live suite. It then runs in NO job at all.
+          #
+          # The live job's own selection differential cannot see this either —
+          # a rename changes both sides of it identically. This is the guard that
+          # can, and it lives HERE on purpose: this job is already a REQUIRED
+          # status check, so the trap bites today rather than after branch
+          # protection is changed.
+          #
+          # The regex literal is pinned equal to the live config's `grep:` by
+          # backend/tests/test_gating_workflows.py — if they drift, this checks
+          # the wrong thing.
+          LIVE_GREP = re.compile(r"live only", re.IGNORECASE)
+
+          # Playwright greps `[...describe titles, test title, ...tags].join(" ")`
+          # (playwright/lib/common/index.js `_grepTitleWithTags`), and that path
+          # INCLUDES the project name and the spec file path — measured on
+          # Playwright 1.61.0: `--grep "^chromium behavior.spec.ts Chat "`
+          # selects 15 tests, `--grep "spec.ts"` selects the whole suite. So
+          # rebuild the same string: project, then every enclosing suite title
+          # (the outermost of which is the file), then the spec title.
+          skipped: list[str] = []
+
+          def walk(suites, path):
+              for suite in suites:
+                  here = path + [suite.get("title", "")]
+                  for spec in suite.get("specs", []):
+                      for test in spec.get("tests", []):
+                          if test.get("status") == "skipped":
+                              skipped.append(
+                                  " ".join(
+                                      [test.get("projectName", "")] + here + [spec.get("title", "")]
+                                  ).strip()
+                              )
+                  walk(suite.get("suites", []), here)
+
+          walk(report["suites"], [])
+
+          # The partner. Without it, "every skipped test is live-selected" is
+          # vacuously true the moment the skip detection breaks — and the JSON
+          # schema is exactly the kind of thing that changes under a Playwright
+          # bump.
+          #
+          # COMPLETE, not merely non-empty. `if not skipped:` proved the list had
+          # SOMETHING in it and nothing more: with stats saying 4 skipped and the
+          # walk reaching only 1 — the other three renamed out of the live grep —
+          # the rule exited 0 and printed "all 1 demo-skipped tests are selected".
+          # A silent pass, over exactly the tests this trap exists to catch.
+          # Comparing against the pinned `stats["skipped"]` subsumes the
+          # non-empty case: 0 != 4.
+          if len(skipped) != stats["skipped"]:
+              print(f"::error::the JSON report's stats say {stats['skipped']} tests skipped, "
+                    f"but walking `suites` found {len(skipped)} — the skip detection below "
+                    "is reading the report wrongly, so the live-selection rule would check "
+                    "only part of the list (or none of it)")
+              sys.exit(1)
+
+          orphans = [title for title in skipped if not LIVE_GREP.search(title)]
+          if orphans:
+              print("::error::these tests SKIP in the demo job and are NOT selected by the "
+                    f"live job's {LIVE_GREP.pattern!r} grep, so they now run in NO job at all:")
+              for title in orphans:
+                  print(f"::error::  {title}")
+              sys.exit(1)
+          print(f"all {len(skipped)} demo-skipped tests are selected by the live suite")
           PY
       - name: Upload report + traces on failure
         if: failure()
