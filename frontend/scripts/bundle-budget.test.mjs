@@ -230,6 +230,23 @@ describe("buildCommand — the flags that decide WHICH artifact gets measured", 
     expect(buildCommand().env.VITE_API_LIVE).toBe("true");
   });
 
+  /**
+   * `--mode production` does NOT set NODE_ENV, and React's package exports
+   * branch on it. Vitest sets NODE_ENV=test, so every caller of buildCommand()
+   * that runs UNDER vitest — scripts/lazy-landing-strip.test.mjs does — was
+   * building react-dom's DEVELOPMENT copy and calling it "the chunk that
+   * actually ships". Measured with the same flags into the same outDir:
+   * NODE_ENV=test gives a 118,900 B gzip entry and a 6,067 B strip;
+   * NODE_ENV=production gives 62,974 B and 4,722 B, matching `npm run
+   * check:bundle` content hash for content hash.
+   *
+   * TURNS RED IF: the `NODE_ENV: "production"` pair is dropped from
+   * buildCommand()'s `env`.
+   */
+  it("pins NODE_ENV=production, so a caller under vitest cannot measure a React DEV build", () => {
+    expect(buildCommand().env.NODE_ENV).toBe("production");
+  });
+
   it("invokes vite build and nothing else", () => {
     const { cmd, args } = buildCommand();
     expect(cmd).toBe("npx");
@@ -465,6 +482,44 @@ describe("evaluateLazyChunks — every violator, fail-closed, with a partner for
     expect(evaluateLazyChunks({ chunks: [chunk("only.js", 10)], max: 500 }).ok).toBe(true);
   });
 
+  /**
+   * The eager side has had MIN_PLAUSIBLE_GZIP since #323; this side had no size
+   * floor at all. Reproduced before the fix: two zero-byte lazy chunks reported
+   * `20 B gzip (headroom 6308 B)` and exited 0 — a truncated build reading as
+   * generous headroom.
+   *
+   * A blanket GZIP floor is not available: the shipping build legitimately
+   * emits a 66 B raw / 79 B gzip shared chunk, so any floor above 79 B would go
+   * red on a healthy build. `raw > 0` is the only floor true of every real
+   * chunk.
+   *
+   * TURNS RED IF: the `chunks.filter((c) => !(c.raw > 0))` throw is removed
+   * from evaluateLazyChunks (a 0-byte chunk then returns ok:true).
+   */
+  it("THROWS on a lazy chunk emitted with zero raw bytes, rather than reporting headroom", () => {
+    expect(() =>
+      evaluateLazyChunks({ chunks: [{ file: "empty.js", raw: 0, gzip: 20 }], max: 500 }),
+    ).toThrow(/no bytes at all/);
+    // Named, not just counted — a report that says "a chunk" costs a round trip.
+    expect(() =>
+      evaluateLazyChunks({
+        chunks: [chunk("real.js", 100), { file: "empty.js", raw: 0, gzip: 20 }],
+        max: 500,
+      }),
+    ).toThrow(/empty\.js/);
+  });
+
+  // PARTNER for that floor, in BOTH directions: it must not fire on the
+  // smallest chunk this app really emits (66 B raw / 79 B gzip, measured), and
+  // `raw` is checked, not `gzip` — a gzip floor at 79 B would reject it.
+  it("accepts the 66 B raw shared chunk the real build emits, so the floor is not a blanket", () => {
+    const r = evaluateLazyChunks({
+      chunks: [{ file: "assets/index-C-L.js", raw: 66, gzip: 79 }],
+      max: 6328,
+    });
+    expect(r.ok).toBe(true);
+  });
+
   it("reports the LARGEST chunk, and the real numbers, in its line", () => {
     const r = evaluateLazyChunks({
       chunks: [chunk("small.js", 10), chunk("big.js", 400), chunk("mid.js", 200)],
@@ -510,8 +565,12 @@ describe("renderRecordedReport — the real numbers, not constants", () => {
   it("prints the lazy SUM and the all-JS TOTAL, both labelled RECORDED, NOT GATED", () => {
     const text = report();
     expect(text).toContain("RECORDED, NOT GATED — lazy gzip SUM 5500 B over 2 chunks");
+    // "(manifest chunks only)" is load-bearing, not decoration: dist/about-theme
+    // .js comes from frontend/public/ and is in neither term, so an unqualified
+    // "all-JS" would name more than the arithmetic covers.
     expect(text).toContain(
-      "RECORDED, NOT GATED — all-JS gzip TOTAL 65500 B over 3 chunks (eager 60000 + lazy 5500)",
+      "RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) 65500 B over 3 chunks " +
+        "(eager 60000 + lazy 5500)",
     );
   });
 
@@ -532,7 +591,9 @@ describe("renderRecordedReport — the real numbers, not constants", () => {
     expect(other).toContain("lazy chunks: 1, ceiling 99 B each");
     expect(other).toContain("assets/c0.js — 70 B gzip (headroom 29 B)");
     expect(other).toContain("RECORDED, NOT GATED — lazy gzip SUM 70 B over 1 chunks");
-    expect(other).toContain("RECORDED, NOT GATED — all-JS gzip TOTAL 1070 B over 2 chunks");
+    expect(other).toContain(
+      "RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) 1070 B over 2 chunks",
+    );
     expect(other).toContain("manifest records skipped as non-.js: 0");
     expect(other).not.toContain("6328");
     expect(other).not.toContain("5500");
@@ -801,6 +862,41 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toMatch(/bundle budget OK/);
     expect(r.stderr).toMatch(/plausibility floor/);
+
+    // AND THE RECORDED NUMBERS SURVIVE A THROWING VERDICT. `evaluate` throws
+    // here, and with the print loop below the verdict calls (where it used to
+    // be) stdout was EMPTY on exactly the run whose numbers a reader most
+    // needs. "Recorded on the fail path" has to mean the THROW path too.
+    //
+    // TURNS RED IF: the `renderRecordedReport` print loop in
+    // check-bundle-size.mjs is moved back below the `evaluate` call.
+    expect(r.stdout).toMatch(/RECORDED, NOT GATED — lazy gzip SUM/);
+    expect(r.stdout).toMatch(/manifest records skipped as non-\.js:/);
+  });
+
+  /**
+   * The other throw, on the LAZY side: a build with no lazy chunks at all makes
+   * `evaluateLazyChunks` throw, and `renderRecordedReport` calls it too. Without
+   * the empty guard inside that function, moving the print loop up would have
+   * swallowed the whole report here instead of printing it.
+   *
+   * TURNS RED IF: the `if (sorted.length > 0)` guard around the largest-chunk
+   * push in `renderRecordedReport` is removed (the report then throws before
+   * any line is returned), or if the print loop moves back below the verdicts.
+   */
+  it("still records the numbers when the LAZY verdict itself throws", () => {
+    const r = runGate({
+      budgetJson: budgetFile(10000000),
+      manifest: MANIFEST_SINGLE,
+      assets: { "index-abc.js": ENTRY_BYTES },
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/no lazy chunks found/);
+    expect(r.stdout).toContain("lazy chunks: 0, ceiling");
+    expect(r.stdout).toMatch(/RECORDED, NOT GATED — lazy gzip SUM 0 B over 0 chunks/);
+    // PARTNER: with no lazy chunks there IS no largest, and the report must not
+    // invent one — nor die trying to compute it.
+    expect(r.stdout).not.toContain("largest lazy chunk");
   });
 
   // Uses a REAL symlink to a REAL file, so the only thing that can fail it is
@@ -824,6 +920,43 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     expect(r.status).not.toBe(0);
     expect(r.stdout).not.toMatch(/bundle budget OK/);
     expect(r.stderr).toMatch(/outside dist/);
+  });
+
+  /**
+   * THE SAME CONTAINMENT, ON THE LAZY READ PATH (#372 review finding).
+   *
+   * The test above escapes on the EAGER chunk. Containment holds for the lazy
+   * list today only because ONE shared `readAsset` closure serves both
+   * measurements — which no test could see. Split those two reads in a future
+   * refactor and the eager test stays green while the lazy path reads whatever
+   * a symlink points at. So: a real symlink on the LAZY chunk, with the eager
+   * asset a real file, so the only thing that can fail this is containment on
+   * the second list.
+   *
+   * TURNS RED IF: `resolveAssetPath` is dropped from the `readAsset` used for
+   * `lazyMeasurement` in check-bundle-size.mjs (e.g. a second, unguarded reader
+   * introduced for the lazy list).
+   */
+  it("refuses a symlinked LAZY chunk that escapes dist, not just an eager one", () => {
+    const { dir, dist, budgetPath } = fixture({
+      budgetJson: budgetFile(10000000),
+      manifest: MANIFEST_LAZY,
+      assets: { "index-abc.js": ENTRY_BYTES },
+    });
+    const outsider = join(dir, "outside-lazy.js");
+    writeFileSync(outsider, LAZY_BYTES);
+    expect(readFileSync(outsider).length).toBe(LAZY_BYTES.length); // really readable
+    symlinkSync(outsider, join(dist, "assets", "Nudge-lazy.js"));
+
+    const r = spawnSync(process.execPath, [scriptPath, "--dist", dist, "--budget", budgetPath], {
+      encoding: "utf8",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toMatch(/bundle budget OK/);
+    expect(r.stderr).toMatch(/outside dist/);
+    // PARTNER: name the LAZY file, so this cannot be passing on the eager
+    // chunk's containment check (which the test above already covers).
+    expect(r.stderr).toMatch(/Nudge-lazy\.js/);
   });
 
   it("works when --dist is given with a trailing separator", () => {
@@ -967,10 +1100,17 @@ describe("check-bundle-size.mjs as a process — the exit code is what CI consum
     expect(r.stdout).toContain(`assets/Nudge-lazy.js — ${LAZY_GZ} B gzip`);
     expect(r.stdout).toContain(`RECORDED, NOT GATED — lazy gzip SUM ${LAZY_GZ} B over 1 chunks`);
     expect(r.stdout).toContain(
-      `RECORDED, NOT GATED — all-JS gzip TOTAL ${ENTRY_GZ + LAZY_GZ} B over 2 chunks ` +
-        `(eager ${ENTRY_GZ} + lazy ${LAZY_GZ})`,
+      `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) ` +
+        `${ENTRY_GZ + LAZY_GZ} B over 2 chunks (eager ${ENTRY_GZ} + lazy ${LAZY_GZ})`,
     );
     expect(r.stdout).toContain("manifest records skipped as non-.js: 0");
+
+    // The largest-lazy-chunk line appears ONCE, not twice. It used to be
+    // printed by the recorded report AND repeated verbatim in the pass-path
+    // footer, so a reader saw the same sentence twice and could not tell which
+    // one was the verdict.
+    const largestLines = r.stdout.split("\n").filter((l) => l.includes("largest lazy chunk"));
+    expect(largestLines).toHaveLength(1);
   });
 
   // The SHIPPING budget file, through the real process and both keys. Nothing

@@ -6,12 +6,16 @@
  *
  * That reporting IS the fix for #372. The complaint there was not a missing
  * ceiling — it was that this command reported a 3,521 B eager WIN for #358
- * while desktop first-paint JS grew 1,200 B, and no output said so. A PR can no
- * longer quote the eager delta without the countervailing totals printed beside
- * it by the same command. A total-JS ceiling was considered and rejected; the
- * four reasons are in frontend/bundle-budget.json's `_comment`.
+ * while desktop first-paint JS grew 1,200 B, and no output said so. The
+ * countervailing totals are now PRODUCED by the same command, on both verdict
+ * paths. They are not, and this is the honest limit of it, IN THE DIFF: they go
+ * to a CI log that nothing asserts, so a PR body quoting an eager-only win is
+ * as available as it ever was. Closing that would take a recorded-measurements
+ * file this gate rewrites — a separate work package. A total-JS ceiling was
+ * considered and rejected; the four reasons are in
+ * frontend/bundle-budget.json's `_comment`.
  *
- * Three things this guards that a human eye did not:
+ * Four things this guards that a human eye did not:
  *   1. The ceiling is a NUMBER IN A FILE, not prose in a docs row. It was raised
  *      twice in two PRs by the same person who recorded it, with nothing checking.
  *   2. It refuses to measure the WRONG ARTIFACT. The bundle must be built with
@@ -109,11 +113,16 @@ const measurement = measureEagerGraph({ files, readAsset, gzipSize });
 // other; the sum it computes is RECORDED, never gated.
 const lazyMeasurement = measureEagerGraph({ files: lazyFiles, readAsset, gzipSize });
 
-const { ok, line } = evaluate({ measurement, max });
-const lazy = evaluateLazyChunks({ chunks: lazyMeasurement.files, max: lazyMax });
-
-// Printed BEFORE the verdict, so the recorded numbers appear whichever way the
-// gate falls. #372's actual complaint is that a win was reported without them.
+// Printed BEFORE either verdict is COMPUTED, not merely before it is acted on.
+// #372's actual complaint is that a win was reported without these numbers, and
+// both `evaluate` (the plausibility floor) and `evaluateLazyChunks` (the empty
+// collection, the zero-byte chunk) THROW — so with the verdicts first, the run
+// that most needs these numbers printed nothing at all.
+//
+// It is still not literally "every run": a failure EARLIER than the
+// measurement — an unreadable asset, a manifest with no entry, a symlink that
+// escapes dist/ — throws above this line and prints nothing. That is stated
+// rather than claimed away.
 for (const reportLine of renderRecordedReport({
   eager: measurement,
   lazy: lazyMeasurement,
@@ -122,6 +131,9 @@ for (const reportLine of renderRecordedReport({
 })) {
   console.log(reportLine);
 }
+
+const { ok, line } = evaluate({ measurement, max });
+const lazy = evaluateLazyChunks({ chunks: lazyMeasurement.files, max: lazyMax });
 
 if (!ok) {
   console.error(`BUNDLE BUDGET EXCEEDED\n  ${line}\n${EXCEEDED_ADVICE}`);
@@ -136,4 +148,9 @@ if (!ok || !lazy.ok) {
   process.exit(1);
 }
 console.log(`bundle budget OK — ${line}`);
-console.log(`lazy chunk budget OK — ${lazy.line}`);
+// The verdict, NOT a second copy of `lazy.line` — the recorded report above
+// already printed that line, and it used to appear twice on the pass path.
+console.log(
+  `lazy chunk budget OK — all ${lazyMeasurement.files.length} lazy chunks are within ` +
+    `the ${lazyMax} B per-chunk ceiling`,
+);

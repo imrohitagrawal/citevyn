@@ -152,12 +152,27 @@ export function parseBudget(text, key = BUDGET_KEY) {
  *                            measurement input
  *   VITE_API_LIVE=true       matches infra/docker/Dockerfile.api; a build
  *                            without it is ~860 B larger and is not what ships
+ *   NODE_ENV=production      `--mode production` does NOT set it. Whatever
+ *                            NODE_ENV the caller already has is inherited, and
+ *                            React's package exports branch on it, so a caller
+ *                            with NODE_ENV=test builds react-dom's DEVELOPMENT
+ *                            copy. This is not hypothetical: vitest sets
+ *                            NODE_ENV=test, so scripts/lazy-landing-strip.test
+ *                            .mjs — which builds through THIS function — was
+ *                            measuring a dev build. Measured, same flags, same
+ *                            outDir: NODE_ENV=test gives a 118,900 B gzip entry
+ *                            and a 6,067 B strip; NODE_ENV=production gives
+ *                            62,974 B and 4,722 B, with content hashes
+ *                            identical to `npm run check:bundle`. Pinning it
+ *                            here makes "the exact build this gate measures"
+ *                            true at BOTH call sites rather than only at the
+ *                            one that happened to run with NODE_ENV unset.
  */
 export function buildCommand() {
   return {
     cmd: "npx",
     args: ["vite", "build", "--mode", "production", "--config", "vite.config.ts", "--manifest"],
-    env: { VITE_API_LIVE: "true" },
+    env: { VITE_API_LIVE: "true", NODE_ENV: "production" },
   };
 }
 
@@ -287,9 +302,15 @@ export function resolveAssetPath({ distDir, file, realpath }) {
 }
 
 /**
- * Gzip each eager file and sum. Summing per-file gzip sizes (rather than
+ * Gzip each file in `files` and sum. Summing per-file gzip sizes (rather than
  * gzipping the concatenation) is the correct model: the browser fetches N
  * separately-compressed responses.
+ *
+ * The name says EAGER for history: since #372 the runner calls this on the LAZY
+ * list too, so the docstring cannot say "each EAGER file" without being false
+ * at one of its two call sites. Reusing it is deliberate — one arithmetic bug
+ * cannot be fixed on one side and not the other. The name is left alone because
+ * it is a mutation anchor in scripts/mutate-bundle-guards.sh.
  */
 export function measureEagerGraph({ files, readAsset, gzipSize }) {
   const measured = files.map((file) => {
@@ -328,9 +349,10 @@ export function evaluate({ measurement, max }) {
 
 export const EXCEEDED_ADVICE = `
 This is a deliberate decision, not a formality. Either bring the eager graph back
-under the line (lazy-load the new surface, as AuthModal/HistoryDrawer/Nudge
-already do), or raise ${BUDGET_KEY} in frontend/bundle-budget.json IN THIS PR and
-say why in the PR body.`;
+under the line (lazy-load the new surface, as AuthModal, HistoryDrawer,
+ConnectedAccountsDrawer, Nudge and landing-strip already do), or raise
+${BUDGET_KEY} in frontend/bundle-budget.json IN THIS PR and say why in the PR
+body.`;
 
 /**
  * The per-chunk lazy verdict (#372).
@@ -345,6 +367,16 @@ say why in the PR body.`;
  *
  * EVERY violator is named, not the first: a report that stops at one turns a
  * two-chunk regression into two review rounds.
+ *
+ * AND A SIZE FLOOR, which the eager side has had since #323 and this did not.
+ * Reproduced in review: two EMPTY lazy chunks report `20 B gzip (headroom
+ * 6308 B)` and exit 0 — a truncated build reading as generous headroom, the
+ * same class of silent pass MIN_PLAUSIBLE_GZIP exists to remove. A blanket gzip
+ * floor is NOT available here: the shipping build legitimately emits a 66 B raw
+ * / 79 B gzip shared chunk, so any floor above 79 would go red on a healthy
+ * build. `raw > 0` is the floor that is actually true of every legitimate
+ * chunk — a zero-length emitted file is never a real one — and it is written in
+ * the positive form so an `undefined` raw is a failure rather than a pass.
  */
 export function evaluateLazyChunks({ chunks, max }) {
   if (chunks.length < MIN_LAZY_CHUNKS) {
@@ -352,6 +384,14 @@ export function evaluateLazyChunks({ chunks, max }) {
       `no lazy chunks found, but at least ${MIN_LAZY_CHUNKS} is required — a per-chunk ` +
         `maximum over an EMPTY collection passes for a bundle of any shape. Either the ` +
         `manifest shape changed, or every dynamic import has been removed.`,
+    );
+  }
+  const empty = chunks.filter((c) => !(c.raw > 0));
+  if (empty.length > 0) {
+    throw new Error(
+      `lazy chunk(s) emitted with no bytes at all: ${empty.map((c) => c.file).join(", ")} — ` +
+        `a zero-length chunk gzips to 20 B and would report almost the whole ceiling as ` +
+        `headroom. The build output is truncated; this is not a real measurement.`,
     );
   }
   const violators = chunks.filter((c) => !(c.gzip <= max));
@@ -363,19 +403,27 @@ export function evaluateLazyChunks({ chunks, max }) {
 }
 
 /**
- * The numbers #372 is actually about, printed on EVERY run and on BOTH the pass
- * and the fail path.
+ * The numbers #372 is actually about, PRODUCED on both the pass and the fail
+ * path of both verdicts.
  *
  * The complaint in #372 is not that a ceiling was missing — it is that the gate
  * REPORTED A WIN. #358 freed 3,521 B from the eager chunk and the command said
  * so, while desktop first-paint JS grew by 1,200 B and all-JS grew too, and
- * neither number appeared anywhere. A PR can no longer quote the eager delta
- * without the countervailing totals sitting in the same command's output.
+ * neither number appeared anywhere. These lines are now produced whichever way
+ * the gate falls.
+ *
+ * WHAT THAT DOES NOT DO, said plainly rather than overclaimed (this file said
+ * "a PR can no longer quote the eager delta without the countervailing numbers"
+ * and a reviewer was right that it is stronger than the mechanism): these
+ * numbers land in a CI LOG. They are not in the diff, not in a tracked file,
+ * and nothing asserts them. A PR body quoting an eager-only win is exactly as
+ * available as it was before. Closing that gap needs the numbers to appear IN
+ * THE DIFF — a recorded-measurements file this gate rewrites, which a reviewer
+ * then sees change — and that is a separate work package, not this one.
  *
  * RECORDED, NOT GATED is the literal label, because a total-JS ceiling was
  * considered and REJECTED — see bundle-budget.json's `_comment` for the four
- * reasons, the first of which is that such a ceiling would have gone RED for
- * #358, a change that improved phone first-paint JS by 3,521 B.
+ * reasons.
  */
 export function renderRecordedReport({ eager, lazy, max, skippedNonJs }) {
   const sorted = [...lazy.files].sort((a, b) => b.gzip - a.gzip);
@@ -384,12 +432,21 @@ export function renderRecordedReport({ eager, lazy, max, skippedNonJs }) {
   for (const c of sorted) {
     lines.push(`  ${c.file} — ${c.gzip} B gzip (headroom ${max - c.gzip} B)`);
   }
-  lines.push(`  ${evaluateLazyChunks({ chunks: lazy.files, max }).line}`);
+  // Guarded, so this function can be called BEFORE the verdicts (which is what
+  // makes "produced on the fail path too" true): evaluateLazyChunks THROWS on
+  // an empty collection, and an unguarded call here would swallow the whole
+  // report on exactly the run whose numbers a reader most needs.
+  if (sorted.length > 0) {
+    lines.push(`  ${evaluateLazyChunks({ chunks: lazy.files, max }).line}`);
+  }
   lines.push(
     `RECORDED, NOT GATED — lazy gzip SUM ${lazy.totalGzip} B over ${lazy.files.length} chunks`,
   );
+  // "manifest chunks only" is not a hedge: dist/about-theme.js (1,512 B raw)
+  // comes from frontend/public/ and is in NEITHER term, so an unqualified
+  // "all-JS" would name more than this arithmetic covers.
   lines.push(
-    `RECORDED, NOT GATED — all-JS gzip TOTAL ${allJsGzip} B over ` +
+    `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) ${allJsGzip} B over ` +
       `${eager.files.length + lazy.files.length} chunks ` +
       `(eager ${eager.totalGzip} + lazy ${lazy.totalGzip})`,
   );

@@ -106,7 +106,14 @@ mutate "build: drop --manifest" "$PURE" "$TMP/pure" \
 mutate "build: drop production mode" "$PURE" "$TMP/pure" \
 '"--mode", "production", ' ''
 mutate "build: stop building the LIVE variant" "$PURE" "$TMP/pure" \
-'env: { VITE_API_LIVE: "true" },' 'env: {},'
+'env: { VITE_API_LIVE: "true", NODE_ENV: "production" },' 'env: { NODE_ENV: "production" },'
+# #372 review finding: `--mode production` does NOT set NODE_ENV, vitest sets it
+# to "test", and React's package exports branch on it. Without this pin,
+# lazy-landing-strip.test.mjs measured a React DEVELOPMENT build (118,900 B gzip
+# entry, 6,067 B strip) while its docblock claimed it measured the shipping
+# chunk (62,974 B / 4,722 B).
+mutate "build: drop the NODE_ENV pin (measures a React DEV build under vitest)" "$PURE" "$TMP/pure" \
+'env: { VITE_API_LIVE: "true", NODE_ENV: "production" },' 'env: { VITE_API_LIVE: "true" },'
 
 # --- the eager graph ---------------------------------------------------------
 mutate "graph: stop following static imports (the modulePreload:false blind spot)" "$PURE" "$TMP/pure" \
@@ -174,6 +181,15 @@ mutate "lazy: report only the FIRST violator" "$PURE" "$TMP/pure" \
 '  return { ok: violators.length === 0, violators: violators.slice(0, 1), largest, line };'
 mutate "lazy: drop the empty-collection partner (a max over nothing passes)" "$PURE" "$TMP/pure" \
 '  if (chunks.length < MIN_LAZY_CHUNKS) {' '  if (false) {'
+# The eager side has had a plausibility floor since #323; this side had none.
+# Reproduced: two zero-byte lazy chunks report "20 B gzip (headroom 6308 B)" and
+# exit 0. `raw > 0` and not a gzip floor, because the shipping build really does
+# emit a 66 B raw / 79 B gzip chunk.
+mutate "lazy: drop the zero-byte chunk floor (an empty chunk reports headroom)" "$PURE" "$TMP/pure" \
+'  if (empty.length > 0) {' '  if (false) {'
+mutate "lazy: floor written fail-OPEN (an undefined raw passes)" "$PURE" "$TMP/pure" \
+'  const empty = chunks.filter((c) => !(c.raw > 0));' \
+'  const empty = chunks.filter((c) => c.raw < 0);'
 mutate "lazy: take the FIRST chunk instead of the largest" "$PURE" "$TMP/pure" \
 '  const largest = chunks.reduce((a, b) => (b.gzip > a.gzip ? b : a));' \
 '  const largest = chunks[0];'
@@ -207,8 +223,13 @@ mutate "report: hardcode the lazy SUM line" "$PURE" "$TMP/pure" \
 '    `RECORDED, NOT GATED — lazy gzip SUM ${lazy.totalGzip} B over ${lazy.files.length} chunks`,' \
 '    `RECORDED, NOT GATED — lazy gzip SUM 0 B over 0 chunks`,'
 mutate "report: hardcode the all-JS TOTAL line" "$PURE" "$TMP/pure" \
-'    `RECORDED, NOT GATED — all-JS gzip TOTAL ${allJsGzip} B over ` +' \
-'    `RECORDED, NOT GATED — all-JS gzip TOTAL 0 B over ` +'
+'    `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) ${allJsGzip} B over ` +' \
+'    `RECORDED, NOT GATED — all-JS gzip TOTAL (manifest chunks only) 0 B over ` +'
+# The label overstated what is measured until #372's review round: dist/about-theme
+# .js (1,512 B raw) comes from frontend/public/ and is in NEITHER term.
+mutate "report: drop the 'manifest chunks only' qualifier from the TOTAL label" "$PURE" "$TMP/pure" \
+'all-JS gzip TOTAL (manifest chunks only) ${allJsGzip} B over ' \
+'all-JS gzip TOTAL ${allJsGzip} B over '
 mutate "report: hardcode the skipped-record count to zero" "$PURE" "$TMP/pure" \
 '  lines.push(`manifest records skipped as non-.js: ${skippedNonJs}`);' \
 '  lines.push(`manifest records skipped as non-.js: 0`);'
@@ -224,6 +245,15 @@ mutate "runner: drop the second parseBudget (an unvalidated lazy ceiling)" "$RUN
 mutate "runner: read the lazy ceiling WITHOUT validating it (#323, one key over)" "$RUN" "$TMP/run" \
 'const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);' \
 'const lazyMax = JSON.parse(budgetText)[LAZY_BUDGET_KEY] ?? 1000000;'
+# The failure mode `parseBudget(text, key = BUDGET_KEY)`'s DEFAULT ARGUMENT
+# uniquely enables, named here because a mutant nobody wrote down is a mutant
+# nobody re-runs: drop the second argument and the LAZY ceiling silently becomes
+# the EAGER value (64,479 instead of 6,328). No throw, no NaN, no missing key --
+# #323's shape exactly one key over. Two shipped tests already kill it; this
+# names it.
+mutate "runner: drop the KEY argument (the default silently yields the EAGER ceiling)" "$RUN" "$TMP/run" \
+'const lazyMax = parseBudget(budgetText, LAZY_BUDGET_KEY);' \
+'const lazyMax = parseBudget(budgetText);'
 mutate "runner: exit on the eager verdict only, ignoring the lazy one" "$RUN" "$TMP/run" \
 'if (!ok || !lazy.ok) {' 'if (!ok) {'
 mutate "runner: stop printing the RECORDED report" "$RUN" "$TMP/run" \

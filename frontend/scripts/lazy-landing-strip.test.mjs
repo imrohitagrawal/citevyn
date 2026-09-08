@@ -141,6 +141,23 @@ describe("the below-the-fold landing strip is not in the eager bundle (#358)", (
     expect(eagerFiles.length).toBeGreaterThan(0);
     expect(eagerBytes).toBeGreaterThan(50_000);
     expect(stripGzip).toBeGreaterThan(3_000);
+
+    // AND AN UPPER BOUND, because the lower one cannot tell WHICH BUILD this is.
+    //
+    // `--mode production` does not set NODE_ENV, vitest sets it to "test", and
+    // React's package exports branch on it — so until buildCommand() pinned
+    // NODE_ENV=production this whole file measured a React DEVELOPMENT build
+    // and said it was measuring the shipping chunk. `> 50_000` passed happily
+    // on both: measured 62,974 B gzip for the shipping entry and 118,900 B for
+    // the dev one. A BAND catches that; a floor never could.
+    //
+    // Deliberately a band, not a pin: 90,000 B is ~43% above today's shipping
+    // graph (so ordinary work can never reach it) and ~24% below the dev build
+    // (so the environment cannot drift back without this going red).
+    //
+    // TURNS RED IF: the `NODE_ENV: "production"` pair is dropped from
+    // buildCommand()'s `env` — the entry then measures ~118,900 B.
+    expect(eagerBytes).toBeLessThan(90_000);
   });
 
   /**
@@ -150,9 +167,30 @@ describe("the below-the-fold landing strip is not in the eager bundle (#358)", (
    * fixtures. This proves the number in bundle-budget.json is the right one for
    * the chunk that actually ships: the strip is the largest lazy chunk, and it
    * is what `lazyChunkGzipMaxBytes` was derived from (largest + the 1,606 B
-   * headroom constant this repo has held since the 68,000 decision).
+   * headroom the 68,000 decision chose, and the 64,479 ratchet preserved at the
+   * moment it landed).
    *
-   * It is a BOUND, not a pin: shrinking the strip can never turn it red.
+   * "THE CHUNK THAT ACTUALLY SHIPS" IS A CLAIM WITH A HISTORY. The first
+   * version of this assertion was false: vitest sets NODE_ENV=test, this file
+   * builds through buildCommand(), and `--mode production` does not set
+   * NODE_ENV — so it measured a React DEVELOPMENT build. The strip was 6,067 B
+   * there against a 6,328 B ceiling: a 261 B real margin while `npm run
+   * check:bundle` reported 1,606 B in the SAME CI job, and ~262 B of growth
+   * would have turned `npm test` red citing a ceiling the shipping build was
+   * nowhere near. buildCommand() now pins NODE_ENV=production, and the partner
+   * that keeps it pinned is the eager-graph BAND in the test above.
+   *
+   * IT IS MOSTLY A BOUND, BUT TWO OF ITS THREE ASSERTIONS ARE TRIPWIRES that a
+   * SHRINKING strip can turn red, and that is deliberate rather than an
+   * oversight — say so rather than claiming "shrinking can never turn it red",
+   * which this docblock did:
+   *   - `lazyMax < stripGzip * 2` reddens below 3,164 B, because a ceiling more
+   *     than double the largest real chunk has stopped bounding anything.
+   *   - `Math.max(...sizes) === stripGzip` reddens if the strip drops below the
+   *     next-largest lazy chunk (AuthModal, 2,894 B today), because the
+   *     derivation in bundle-budget.json's `_comment` would then name the wrong
+   *     chunk and needs redoing.
+   * Only `stripGzip <= lazyMax` is a pure one-sided bound.
    */
   it("is under the per-chunk lazy ceiling, and is the chunk that ceiling was set from (#372)", () => {
     const lazyMax = parseBudget(

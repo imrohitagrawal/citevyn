@@ -295,7 +295,9 @@ describe("the bundle gate is reachable from npm", () => {
    * present and sane; neither notices a THIRD key appearing (an unenforced
    * ceiling nobody reads) or one of them being dropped while the other stays.
    * `npm test` has no count gate, so without this a deleted key is invisible to
-   * all 585 tests: `parseBudget` would still be called for it and the process
+   * the whole unit suite (no figure quoted: it moves with every PR, and this
+   * repo has shipped a stale one before): `parseBudget` would still be called
+   * for it and the process
    * would fail, but only in `npm run check:bundle`, which is a different job.
    */
   it("the enforced-key SET is exactly those two, so adding or dropping one is visible", () => {

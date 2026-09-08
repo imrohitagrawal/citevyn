@@ -12,24 +12,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `frontend/bundle-budget.json` gains ONE enforced key,
   `lazyChunkGzipMaxBytes: 6328` — a **per-chunk** ceiling on every emitted `.js`
   chunk that is not in the eager closure. 6,328 B is 4,722 (landing-strip,
-  today's largest lazy chunk, measured) + 1,606, the headroom constant this file
-  has held since the 68,000 decision, so it keeps ONE such constant rather than
-  two nobody can reconstruct.
+  today's largest lazy chunk, measured) + 1,606, the headroom the 68,000
+  decision chose and the 64,479 ratchet preserved at the moment it landed — so
+  the new ceiling is derived from the same constant rather than from a second
+  number nobody can reconstruct. The two headrooms have since diverged, which is
+  normal: 1,606 B on the lazy key (the strip has not moved) and **1,505 B** on
+  the eager one, because #356 spent 101 B of it.
   **The issue's actual complaint was the reporting, not the missing ceiling.**
   #358 freed 3,521 B from the eager chunk, the gate said so, and nothing in its
   output said desktop first-paint JS had grown 1,200 B. So the command now
   prints, on every run and on BOTH the pass and the fail path: the per-chunk
   lazy table with each chunk's headroom, the largest lazy chunk, the lazy SUM
-  (13,117 B over 8 chunks today), the all-JS TOTAL (76,091 B over 9 chunks), and
-  the count of manifest records skipped as non-`.js`. A PR can no longer quote
-  the eager delta without the countervailing numbers in the same output.
+  (13,117 B over 8 chunks today), the all-JS TOTAL (76,091 B over 9 chunks,
+  manifest chunks only — `public/about-theme.js` is in neither term), and the
+  count of manifest records skipped as non-`.js`. **The honest limit of that:**
+  those numbers go to a CI log. They are not in the diff and nothing asserts
+  them, so a PR body quoting an eager-only win is as available as it ever was;
+  what changed is that the countervailing numbers are now *produced* on both
+  verdict paths. Putting them in the diff would take a recorded-measurements
+  file the gate rewrites — a separate work package.
   **Two proposals in the issue were falsified and are NOT implemented.** A
-  TOTAL-JS ceiling would have gone RED for #358 — reconstructed from this repo's
-  own recorded figures, all-JS went ~74,789 → ~75,989 B across a change that
-  improved PHONE first-paint JS by 3,521 B — and would have had to be RAISED by
-  the very PR that ratcheted the eager key DOWN. Its advertised virtue is also
-  symmetric: folding all five lazy surfaces back into the entry LOWERS the total
-  while first-paint JS goes 62,974 → ~76,000 B. A `firstPaintGzipMaxBytes` key
+  TOTAL-JS ceiling would have had to be RAISED by the very PR that ratcheted the
+  eager key DOWN; its advertised virtue is also symmetric — folding all five
+  lazy surfaces back into the entry LOWERS the total while first-paint JS goes
+  62,974 → ~76,000 B; and it is not an upper bound on first-paint bytes anyway.
+  A fourth reason was listed first and has been **withdrawn**: "it would have
+  gone RED for #358" (all-JS ~74,789 → ~75,989 B; the ~8,395 B "other lazy" term
+  is measured at HEAD, not at #358) only holds for a *zero-headroom* ceiling.
+  Apply this repo's own convention of measurement + 1,606 B and the ceiling is
+  76,395, so #358 lands at 75,989 — **green, with 406 B to spare**. What
+  survives is weaker: a total key's verdict on #358 turns entirely on an
+  arbitrary headroom constant where the eager key's does not. The decision
+  stands on the other three reasons. A `firstPaintGzipMaxBytes` key
   cannot be fed from the input the issue named: `playwright.config.ts` runs
   `lazy-strip.spec.ts` against the Vite **dev** server (`npm run dev`,
   `VITE_API_LIVE: "false"`), which serves unbundled ES modules — no production
@@ -40,10 +54,25 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `dynamicImports` following `imports` reaches the entry and files the 62,974 B
   entry chunk as "lazy", handing it the 6,328 B allowance. A fixture modelling
   that back-edge is the test such a reimplementation fails.
+  **`buildCommand()` now pins `NODE_ENV=production`, and review found why it
+  had to.** `--mode production` does not set `NODE_ENV`; vitest sets it to
+  `test`; React's package exports branch on it. So
+  `scripts/lazy-landing-strip.test.mjs`, which builds through `buildCommand()`,
+  was measuring a React **development** build while its docblock said it proved
+  the ceiling was right for the chunk that actually ships. Measured with
+  identical flags: `NODE_ENV=test` gives a 118,900 B gzip entry and a **6,067 B**
+  strip — a 261 B margin against the 6,328 ceiling — where the shipping build
+  gives 62,974 B and 4,722 B, a 1,606 B margin, in the same CI job. The
+  eager-graph assertion there gains an **upper** bound (a band, not a pin) so
+  the environment cannot drift back silently.
   Both ceilings go through the same validated `parseBudget` path (#323), the
   per-chunk comparison is written `!(gzip <= max)` so an `undefined` ceiling
   makes every chunk a violator instead of producing an empty violator list that
-  passes, an empty lazy collection is a hard error (`MIN_LAZY_CHUNKS`), and
+  passes, an empty lazy collection is a hard error (`MIN_LAZY_CHUNKS`), a lazy
+  chunk emitted with **zero raw bytes** is a hard error too (two empty chunks
+  used to report `20 B gzip (headroom 6308 B)` and exit 0; a blanket gzip floor
+  is impossible because the real build emits a legitimate 66 B raw / 79 B gzip
+  chunk), and
   `src/test/buildGuards.test.ts` now pins the enforced-key SET as exactly those
   two so adding or dropping a key is no longer invisible. **The gate is still a
   REVIEW control**: raising either number turns nothing red, and
