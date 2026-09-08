@@ -1477,3 +1477,94 @@ async def test_the_span_warn_is_not_fired_by_hits_that_simply_do_not_know_their_
     assert not any(
         "retrieval_evidence_spans_multiple_indexes" in r.getMessage() for r in records
     ), [r.getMessage() for r in records]
+
+
+async def test_a_spanning_answer_on_a_ZERO_active_database_is_not_cached_either(
+    seeded_session,
+) -> None:
+    """THE ONLY PRODUCTION-REACHABLE CELL THE SPAN GATE CHANGES, driven through the
+    REAL arms.
+
+    A skeptic enumerated all 12 cells of {0,1,2 active} x {scoped, unscoped} x
+    {evidence spans 1, 2} and found the gate changes exactly two, of which only
+    this one is reachable through ``Orchestrator.ask`` -- the retriever is unscoped
+    precisely when the database is zero-active or ambiguous. It then found that the
+    span half of the gate was held by a single test that monkeypatches ``retrieve``
+    on a SCOPED retriever, a shape the real arms cannot produce.
+
+    Zero active rows is #265's state and its POLICY is untouched here: the arms
+    still answer, and a zero-active database whose evidence comes from ONE index is
+    still cacheable (pinned by the partner below). What changes is only the case
+    where the evidence itself proves a union.
+
+    RED if ``_finalize`` stops escalating on ``spans_indexes`` (the resolver says
+    ``none``, not ``ambiguous``, so the resolver half cannot cover this).
+    """
+    await _add_second_active_index(seeded_session)
+    await _mirror_exact_term_into_second_index(seeded_session)
+    # Demote BOTH index rows to ``candidate``: that is #265's state -- ingested but
+    # never promoted. The documents stay ``status=active`` regardless, because
+    # ``_upsert_document`` marks them so at INGEST, before promotion, which is
+    # exactly why the arms still return them.
+    await _demote_every_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    assert await h._active_index_ambiguous() is False, (
+        "precondition: zero active rows is NOT 'ambiguous' -- the resolver half is silent here"
+    )
+
+    result = await h.retrieve(
+        "CLAUDE_API_RATE_LIMIT",
+        product_area=Domain.claude_api.value,
+        intent=Intent.exact_lookup,
+        limit=20,
+        top_k=6,
+    )
+
+    assert {hit.index_version for hit in result.hits} == {"v1", "v2"}
+    assert result.vector_degrade is VectorDegrade.ambiguous_index, (
+        "the evidence PROVES a union, so it must not be frozen even though the "
+        "resolver reports 'none' rather than 'ambiguous'"
+    )
+
+
+async def test_a_zero_active_database_with_single_index_evidence_still_caches(
+    seeded_session,
+) -> None:
+    """PARTNER, and the #265 boundary. Without it the test above would be satisfied
+    by "a zero-active database never caches", which IS #265's owner-gated policy
+    change and is deliberately NOT made here -- it would disable the answer cache on
+    every pre-first-promote and seeded-demo deploy.
+
+    RED if ``_active_index_ambiguous`` is widened to ``state is not one``.
+    """
+    await _demote_every_index(seeded_session)
+
+    h = HybridRetriever(seeded_session, active_index_version=None, embedder_identity=_GEMINI)
+    result = await h.retrieve(
+        "CLAUDE_API_RATE_LIMIT",
+        product_area=Domain.claude_api.value,
+        intent=Intent.exact_lookup,
+        limit=20,
+        top_k=6,
+    )
+
+    assert {hit.index_version for hit in result.hits} == {"v1"}, "precondition: one index"
+    assert result.vector_degrade is VectorDegrade.none, (
+        "an un-promoted database still caches; #265's policy is not changed here"
+    )
+
+
+async def _demote_every_index(session) -> None:
+    """Leave ZERO rows in ``status=active`` without deleting anything.
+
+    Deleting ``index_versions`` trips the ``documents.index_version`` foreign key;
+    demoting is also what the real un-promoted state looks like.
+    """
+    from sqlalchemy import select as _select
+
+    from app.models import IndexStatus, IndexVersion
+
+    for row in (await session.execute(_select(IndexVersion))).scalars().all():
+        row.status = IndexStatus.candidate
+    await session.flush()

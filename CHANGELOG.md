@@ -67,8 +67,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — measured with a `before_cursor_execute` counter asserting no `index_versions`
   statement runs, paired with an assertion that the `exact_terms` SELECT did, so "no
   query" is not "nothing happened". A database with **zero** active rows is a
-  supported state and does pay one small indexed read per retrieval (up to three in
-  multi-hop); that is stated rather than glossed as "healthy".
+  supported state and does pay one small indexed read per retrieval and **four** on a
+  multi-hop question (one per area, plus one for the merged list); that is stated
+  rather than glossed as "healthy". The merged read is what `retrieve_multi`'s
+  `_finalize` costs — an earlier draft of this sentence said "up to three", which
+  the same commit's own change made false. Measured with a `before_cursor_execute`
+  counter: 3 at `ae4e41f`, 4 here.
   **`answer_policy_version` is bumped v6 → v7.** The first draft argued no bump was
   needed — a row written during a dual-active window carries
   `source_version_hash == ""`, so once the operator converges the database the key
@@ -124,7 +128,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   driven directly), the "only ever escalates `none`" invariant (losing it re-opens
   #142's class: an outage relabelled as ambiguity never raises the retryable 5xx),
   the `is not None` filter, and `_DEGRADE_PRECEDENCE`'s **order**. Backend suite
-  **2055 passed, 24 skipped, 0 failed** (baseline on `1fd7556`: 2030 passed, 24
+  **2058 passed, 24 skipped, 0 failed** (baseline on `1fd7556`: 2030 passed, 24
   skipped — independently re-measured by a reviewer), `ruff check` and `pyright`
   clean.
 - **All 15 `docs/BACKLOG.md` rows that were silently losing content now render in

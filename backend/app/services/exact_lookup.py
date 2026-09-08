@@ -209,10 +209,19 @@ async def exact_lookup(
 def _warn_if_hits_span_indexes(rows: Sequence[Any]) -> None:
     """WARN when this lookup's rows came from more than one index version (#352).
 
-    Pure over rows already fetched — no extra query. Read by NAME
-    (``row.index_version``, labelled in the projection above) rather than by
-    position, so inserting a column ahead of it cannot silently retarget this WARN
-    at the wrong value.
+    Pure over rows already fetched — no extra query.
+
+    Read by NAME (``row.index_version``) rather than by position, so inserting a
+    column ahead of it cannot silently retarget this WARN at the wrong value. The
+    protection is the **by-name read**, not the ``.label(...)``: a skeptic mutated
+    the label away and the whole suite stayed green, because SQLAlchemy already
+    keys that column ``index_version`` either way. The label is kept as an explicit
+    statement of the name this line depends on, and is honestly inert.
+
+    **Stated, because this file is now half-converted:** the hits loop below still
+    reads ``row[1]`` / ``row[2]`` positionally for ``document_id`` and ``chunk_id``
+    — the values actually returned to API callers. The column-insertion hazard is
+    closed for the log line and still live on those two.
 
     Note that ``ExactLookupHit.index_version`` echoes back what the CALLER asked
     for (the literal ``"active"`` on the default path), so before this the

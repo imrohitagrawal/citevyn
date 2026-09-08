@@ -460,15 +460,19 @@ most general first; all of them mean "run the `?force=true` promote below":
 | `orchestrator_multiple_active_indexes` | the database has more than one `active` row (`active_count`). Fires once per request |
 | `retrieval_multiple_active_indexes` | the retrieval gate saw the same thing |
 | `vector_retrieval_index_provenance_ambiguous` | consequence: the vector arm is off, because nothing can say whose vectors it would be scoring |
-| `retrieval_evidence_spans_multiple_indexes` | **this answer really was built from a union** — `index_versions` names them and `index_version_count` counts them. Rarer and more actionable than the rows above |
+| `retrieval_evidence_spans_multiple_indexes` | **this answer really was built from a union** — `index_versions` names them and `index_version_count` counts them. Rarer and more actionable than the rows above. **Not one line per answer:** a multi-hop question emits one per product area plus one for the merged list, so up to **four**. Count distinct `request_id`s, not lines |
 | `answer_cache_write_skipped_ambiguous_index` | the answer was served but deliberately not cached, so it cannot outlive the repair |
 
 `exact_lookup_spans_multiple_indexes` is the same union signal for
 `POST /v1/search/exact`, which has no cache and keeps returning the union.
 
-A cache **hit** returns before retrieval, so none of these fire on a replayed
-answer. `CITEVYN_ANSWER_POLICY_VERSION` was bumped to `v7` in #352 precisely so
-rows written during an earlier ambiguous window cannot replay past the fix.
+**On a replayed (cached) answer you see only the first line.** A cache hit
+returns before retrieval, so the four retrieval-side events above stay dark —
+but `orchestrator_multiple_active_indexes` is emitted by `_retrieve_active_index`,
+which runs *before* the cache lookup, so it still fires. Silence on the other four
+therefore means "either healthy, or replayed from cache", never "healthy" on its
+own. `CITEVYN_ANSWER_POLICY_VERSION` was bumped to `v7` in #352 precisely so rows
+written during an earlier ambiguous window cannot replay past the fix.
 
 **That no-op is not the dual-active repair**, and it is worth being exact about
 this because the reverse is easy to assume. If the database has drifted into a
