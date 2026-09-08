@@ -817,8 +817,11 @@ physical — `React.lazy` over named exports of one module frees nothing.
 | `landing-strip.tsx` | Personas, HowItWorks, WhyDifferent, Pricing, FAQ, CTABanner, Footer | one chunk, on scroll |
 
 Measured on the shipping build (`npm run check:bundle`): the eager graph goes
-**66,394 B → 62,873 B gzip (−3,521 B)**, and `frontend/bundle-budget.json` was
-ratcheted 68,000 → 64,479 in the same change so the win is not spent silently.
+**66,394 B → 62,873 B gzip (−3,521 B)** *(#358-era)*, and
+`frontend/bundle-budget.json` was ratcheted 68,000 → 64,479 in the same change
+so the win is not spent silently. Re-measured at #372 the floor is **62,974 B**
+— #356 spent 101 B of the headroom — so read the pair above as the measurement
+of that change, not as today's number.
 
 `QuestionTicker` and `SourcesStrip` stay eager because they sit immediately under
 the Hero, where a `fallback={null}` boundary is a visible jump on first paint.
@@ -869,6 +872,57 @@ rather than asserting it — asserting `sentinelTop < viewportHeight + 400` woul
 go red if a taller Hero made desktop start deferring too, which is an
 improvement, and a check that fails when the behaviour gets better locks in the
 weaker behaviour.
+
+**A second ceiling, and three recorded numbers (#372).** The table above is the
+whole complaint in #372: the gate reported a 3,521 B *win* for a change that
+made desktop first-paint JS bigger, and nothing in its output said so. Two
+things changed, and only the first is a gate.
+
+`frontend/bundle-budget.json` gained one enforced key,
+**`lazyChunkGzipMaxBytes: 6328`** — a *per-chunk* gzip ceiling on every emitted
+`.js` chunk that is not in the eager closure. 6,328 is 4,722 (landing-strip,
+today's largest lazy chunk) + 1,606, the same headroom constant the 68,000
+decision chose and the 64,479 ratchet preserved.
+
+And `npm run check:bundle` now prints, on every run that reaches the measurement and on both verdict
+fail path, three numbers nothing gates: the per-chunk lazy table, the lazy SUM,
+and the all-JS TOTAL. Re-measured on the shipping build for this change:
+
+| | gzip | gated by |
+|---|---|---|
+| eager graph (entry chunk) | 62,974 B | `eagerChunkGzipMaxBytes` 64,479 (headroom 1,505) |
+| largest lazy chunk (`landing-strip`) | 4,722 B | `lazyChunkGzipMaxBytes` 6,328 (headroom 1,606) |
+| lazy SUM, 8 chunks | 13,117 B | **nothing** — recorded only |
+| all-JS TOTAL, 9 chunks | 76,091 B | **nothing** — recorded only |
+| desktop first-paint JS (62,974 + 4,722) | 67,696 B | **nothing** — recorded only |
+| CSS | 9,169 B | **nothing**, and never has been |
+
+(The 62,873 / 4,721 figures in the table above are the #358-era measurements and
+are kept as such. `landing-strip.tsx` is byte-identical since #358 and still
+moved 4,721 → 4,722 B, because every lazy chunk embeds the entry's content hash;
+expect ±1–2 B of that whenever eager code changes.)
+
+**A total-JS ceiling was considered and rejected**, and the reasoning is written
+out in `frontend/bundle-budget.json`'s `_comment` because it is the kind of thing
+that gets re-proposed. The short version: it would have had to be raised by the
+very PR that ratcheted the eager key down; its advertised virtue is symmetric
+(folding the lazy surfaces back into the entry *lowers* a total while first-paint
+JS rises); and it is not an upper bound on first-paint bytes anyway.
+
+A fourth reason was listed first and is **withdrawn**. It said a total ceiling
+"would have gone red for #358" — reconstructed from this repo's own recorded
+figures, all-JS went ~74,789 → ~75,989 B across that change (the ~8,395 B "other
+lazy" term in that arithmetic is measured *at HEAD*, not at #358). That only
+holds for a **zero-headroom** ceiling. Apply this repo's own convention of
+measurement + 1,606 B and the ceiling is 76,395, against 75,989 after: **green,
+406 B to spare**. What survives is weaker and still worth knowing — a total key's
+verdict on #358 turns entirely on which headroom constant you pick, where the
+eager key's verdict does not. A first-paint ceiling was
+rejected too: the issue proposed feeding it from `lazy-strip.spec.ts`, but
+`playwright.config.ts` runs that suite against the Vite **dev** server, which
+serves unbundled ES modules — there are no production chunks or gzip sizes there
+to read. The new key is deliberately **viewport-blind**, for the same reason the
+desktop geometry is recorded rather than asserted.
 
 **Accessibility, measured.** Nothing becomes unreachable: any viewport scroll of
 ~214 px or more mounts the strip, and a real keyboard walk at 390×844 reaches
@@ -971,6 +1025,7 @@ what is fundamentally a two-view marketing page.
 | 2026-09-06 | The arrival announcement latches on the streaming bubble's stable `msgId`, not on a boolean "something is unfinished" flag | Skeptic round on the #356 fix — the fix round hid the next defect, as it has in every package so far. The `armed` boolean armed whenever the tail was unfinished, INCLUDING on an empty transcript (`!last`), and `HistoryDrawer` lives on the chat screen, so `resumeSession` fires under a mounted `ChatView` at any time (#62 gated the composer, not the drawer). Reproduced through the real hook: a signed-in reader opens the empty chat screen, picks a 3-day-old conversation from History, and a screen reader is told **"Answer ready. 2 sources cited."** — a false statement to an AT user, the exact harm this feature exists to prevent. Dropping the `!last` arm alone is NOT enough: resuming while the tail is the reader's own in-flight question fires the same way. The same tail-position assumption also meant two answers finishing out of order announced the first twice and the second never. All three are one mistake — position is not identity — so `ChatView` now tracks the set of bubble ids it has WATCHED stream and announces only when one of those finishes. `msgId` is a new prop carrying the hook's monotonic id: `domId` is `cv-msg-${index}` and a resumed transcript re-uses those positions, whereas `resumeSession` assigns fresh ids, so an awaited id can never collide. Four tests, three of them RED against the boolean version (both resume paths and the out-of-order case), with a partner proving an answer arriving AFTER a resume is still announced so the fix is not just silence |
 | 2026-09-07 | The two web fonts are self-hosted from this origin, the Google Fonts stylesheet and both preconnects are gone from `index.html` AND from the server-rendered `/about` page, and the CSP's `style-src`/`font-src` are `'self'` only | #365. A render-blocking stylesheet also blocks `<script type="module">` from EXECUTING, and this app is one module entry, so a slow or unreachable `fonts.googleapis.com` left the visitor on a blank page — no spinner, no text, no error. Measured on the PRODUCTION build, three runs each: normally 193/194/245 ms to first rendered UI, **>45 s and blank (timed out) with that host stalled**, 61–82 ms with it hard-blocked (a blocked host fails fast; the STALL is the defect). After the fix the same conditions are 59–157 ms / 60–64 ms / 59–62 ms, and 66–72 ms with the app's OWN font files aborted too — the app mounts and renders in the fallback stack either way. Both `latin` subsets (60,628 B, SIL OFL 1.1, licence shipped at `/fonts/OFL.txt`) are byte-identical to what Google served, so all 22 darwin visual baselines pass **unregenerated** and the eager JS budget is unmoved at 66,394 B — `public/` assets are outside the module graph the gate measures, traced not assumed. `/about` had the identical defect from its own `<link>` and is fixed in the same change; its `about-theme.js` was being delayed by it too. Guarded by the EMITTED artifact (`dist/index.html` and the emitted CSS, built inside the test) plus a real-browser spec that stalls every third party and aborts every font file and requires a mount in under 10 s — both deliberately outside the #364 font stub, because a guard that runs THROUGH the stub cannot see the path the stub hides. 28 mutants, 28 killed plus one documented known-survivor (`frontend/scripts/mutate-font-guards.sh`); one of them found a live bypass in the guard itself — the minifier rewrites `@import url("…")` to `@import"…"`, so a render-blocking third-party `@import` shipped while the check stayed green |
 | 2026-09-08 | `frontend/tsconfig.json` now includes `tests`, not the phantom `e2e`; seven pre-existing type errors in the Playwright suite cleared; a guard in `src/test/buildGuards.test.ts` asserts the compiler really loads every spec | #366 — there has never been a `frontend/e2e/`, and tsc ignores an `include` entry that matches nothing SILENTLY: no warning, no error, exit 0. So the required `type-check + unit tests + build` job was green while loading **zero** of the 9 spec files, `helpers.ts` and `fixtures.ts` — measured `npx tsc -p tsconfig.json --noEmit --listFiles \| grep -c "/frontend/tests/"` -> **0 before, 11 after**, with `src/` unchanged at 67. Playwright transpiles with esbuild, which erases types without checking them, so nothing else was looking either. **Not a second tsconfig project:** a referenced project needs `composite: true`, composite FORBIDS `noEmit` (TS6310) and FORCES emit — measured, it wrote 22 `.js`/`.d.ts` files into `frontend/tests/`, and Playwright's default `testMatch` `**/*.@(spec\|test).?(c\|m)[jt]s?(x)` matches `.js`, so every spec would have run twice, half of it from a stale snapshot. That is #343 with a bigger blast radius. One `noEmit` project including both directories collides over nothing: `test.globals` is `false`, jest-dom augments the `vitest` MODULE rather than a global, and the auto-included `@types` set is byte-identical. Of the seven errors, FIVE are dead locals, a sixth is `fidelity.spec.ts`'s `THEMED` `Set` inferred with a literal-union type, and the seventh is `helpers.ts:387`, which returned an object missing `strongPixels` — that one was a type gap and not a live defect only because `focus-ring.spec.ts` checks `ratio === null` three lines above the `undefined < 8` that would have failed the sweep OPEN. The guard asks `ts.parseJsonConfigFileContent` which files the config resolves to and compares against the list PLAYWRIGHT selects — a string check for `"tests"` is defeated by `"tests-old"`, by `"tests/helpers.ts"`, by a comment, and by an `exclude`; all four are mutants in `frontend/scripts/mutate-typecheck-guard.sh`. **No visual change** |
+| 2026-09-08 | `frontend/bundle-budget.json` gains `lazyChunkGzipMaxBytes: 6328`, a per-chunk gzip ceiling on every non-eager JS chunk; `npm run check:bundle` now records the lazy table, the lazy SUM and the all-JS TOTAL on every run that reaches the measurement | #372 — the eager key was the only enforced one, so a lazy surface could grow without limit, and worse, the gate REPORTED a 3,521 B win for #358 while desktop first-paint JS grew 1,200 B and no output said so. 6,328 = 4,722 (today's largest lazy chunk, measured) + 1,606, the headroom the 68,000 decision chose and the 64,479 ratchet preserved at the moment it landed; the two headrooms have since diverged normally — 1,606 B lazy, 1,505 B eager, because #356 spent 101 B. A TOTAL-JS ceiling was rejected because it would have had to be RAISED by the same PR that ratcheted the eager key DOWN, because its advertised virtue is symmetric, and because it is not an upper bound on first-paint bytes anyway. A fourth reason, listed first, is WITHDRAWN: "it would have gone RED for #358" (~74,789 → ~75,989 B all-JS; the ~8,395 B "other lazy" term is measured at HEAD, not at #358) holds only for a zero-headroom ceiling — at measurement + 1,606 the ceiling is 76,395 and #358 lands green with 406 B to spare. A first-paint ceiling was rejected because its proposed input cannot exist: `playwright.config.ts` runs `lazy-strip.spec.ts` against the Vite DEV server, which serves unbundled ES modules. So the totals are RECORDED, not gated — in a CI log, not in the diff, which is the honest limit of the reporting half — and the new key is viewport-blind: nothing here may go red the day desktop STARTS deferring. **Review of this change found the strip guard was measuring a React DEV build**: `--mode production` does not set `NODE_ENV`, vitest sets it to `test`, so `lazy-landing-strip.test.mjs` saw a 6,067 B strip (261 B of margin) rather than the 4,722 B that ships (1,606 B). `buildCommand()` now pins `NODE_ENV=production` |
 | 2026-09-08 | A REFUSED composer submit is announced: the persistent `role="status"` region says "Not sent. CiteVyn is still answering your previous question. Your text is kept.", and the send button's handler is wired unconditionally | #356 gap 2, the last one left open on that issue. Measured with a MutationObserver over the whole body, the refusal produced **zero DOM mutations** on both the Enter path and the click path — a screen-reader user pressed Enter and nothing whatsoever happened. The signal is `refusedInFlight`, reducer state beside `pending`, set at the `inFlight` **ref** inside `submitChat`, never derived from the rendered `pending`: `pending` is a render behind the ref by construction (#62), so a `pending`-derived announcement would announce refusals that never happened and miss ones that did — pinned by the ONE-React-batch test. **One region, not two.** The backlog framed the choice as "replace the in-flight sentence and restore it, or add a second region"; this is a third shape and cheaper than both — the refusal copy is a SUPERSET of the in-flight sentence, so nothing is lost while it holds the region, and the window closes on its own when `pending` drops, at which point the arrival announcement takes over. A second `role="status"` in `.composer` would also have broken every `getByRole("status")` call in `ChatView.test.tsx` (no count quoted: it moves with every test added, and the first two figures written here were both stale within the hour) (`getByRole` throws on multiple matches) and the live e2e's `.composer [role='status']` locator, for no gain. **The click path needed a product change:** `onClick={pending ? undefined : onSendClick}` meant a click while gated never reached the hook, so no prop this component has could tell a refused click from no click; wiring it unconditionally also makes the ref the single gate instead of the view second-guessing with a staler copy. **Stated limitation, pinned as a test rather than left as prose:** a second refusal inside the SAME window is silent, because `role="status"` fires on a text CHANGE and nothing changed; a refusal in a LATER window does announce, which its partner test proves. An EMPTY submit is never announced — telling a reader "your text is kept" about an empty box is a false statement, the same class the parked-question toast was fixed for. **+101 B gzip, measured** (62,873 -> 62,974; budget 64,479, headroom 1,505). 7 mutants added to `frontend/scripts/mutate-a11y-guards.sh`, and the live-e2e test reddens when the tick dispatch is removed — verified. **No visual change** |
 
 ### Future entries
