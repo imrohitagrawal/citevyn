@@ -21,7 +21,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trailing fields are folded into the "Why it matters" cell instead. Verified
   nothing was dropped by rendering all 15 rows through **GitHub's own renderer**
   (`gh api /markdown`, mode=gfm) before and after and diffing the text: the 12
-  folds are pure insertions — zero characters deleted, reordered or duplicated —
+  folds are pure insertions — the opcode set contains no `delete` and no
+  `replace` on any of the twelve, which shows nothing was removed or reordered
+  (it does not, by itself, rule out duplicated text) —
   and the 3 escapes go from truncated to complete (#300 2,417 → 8,625 rendered
   characters, #316 4,769 → 6,217, #308 4,838 → 10,487). An earlier draft of this
   entry claimed "107 issue links before and after"; that was measured before the
@@ -47,10 +49,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with it inlined **four mutations that completely disable the guard survived
   every test green** — `if got <= cols or True`, `offenders.append` →
   `[].append`, `got = cols`, and `if tag in KNOWN_BROKEN` → `if True`. All four
-  now die, as does blinding `_cell_count` to `return 0`. One mutation still
-  survives and is named in the docstring rather than papered over: replacing the
-  caller's `assert not offenders` with `assert True`, which is not detectable
-  from inside the test that carries it. `test_no_exemption_is_stale` is likewise
+  now die, as does blinding `_cell_count` to `return 0`. A skeptic round on that
+  fix then found the fix's own claim wrong: it said "one mutation still
+  survives" where nine did, one of them — `continue` → `break` in the skip —
+  reporting **zero** offenders on a file that really had one, because every
+  fixture was a single-row table that cannot tell the two apart. Multi-row
+  fixtures and field-by-field assertions on the message now kill twelve
+  mutations; the survivors are enumerated in the docstring rather than counted,
+  because a count is what was wrong both times. `test_no_exemption_is_stale` is likewise
   honest that while the set is empty it asserts nothing and is held in place for
   when the set refills; the file's non-vacuity is carried by
   `test_the_detector_actually_detects`.
