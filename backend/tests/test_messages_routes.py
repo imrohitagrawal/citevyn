@@ -16,6 +16,7 @@ confirm the standard envelope and status mapping without seeding.
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -543,3 +544,50 @@ def test_the_request_log_line_prints_a_short_route_unchanged(
     emitted = _emitted_request_lines(caplog)
     assert "'/health'" in emitted, emitted
     assert "[REDACTED]" not in emitted, f"a short route was over-redacted: {emitted!r}"
+
+
+def test_the_request_log_line_bounds_a_crafted_many_segment_path(
+    in_memory_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#390, read off the emitted line rather than off ``redact_value``.
+
+    The per-segment sweep of #384 costs one ``re.sub`` per segment inside the
+    event loop, on every request, and a 404 matches no route so nothing
+    throttles it. Above ``MAX_PATH_SEGMENTS`` the path field is replaced by a
+    marker naming the element count.
+
+    THE SECURITY HALF, and the reason this drives a real request instead of
+    calling the helper: an obviously-fake 27-character literal is planted in
+    the crafted path -- deliberately under ``HIGH_ENTROPY_RE``'s 32-character
+    floor, so NO sweep in this module removes it. Under #390's proposed
+    whole-string fallback that literal reaches the log line; under the marker
+    it cannot, because the marker emits no character of its input.
+
+    ``"/" * n`` is not used as the fixture: httpx rejects a relative URL
+    beginning ``//`` before the app ever sees it, so the crafted path is built
+    from one-character segments instead. Measured, not guessed.
+
+    RED if the marker arm is removed (the line carries 160 characters of path
+    plus ``…<truncated>``), if ``MAX_PATH_SEGMENTS`` is raised above 101, or if
+    the arm is replaced by a whole-string sweep (the planted literal appears).
+    """
+    from app.core.logging import MAX_PATH_SEGMENTS
+    from tests.test_log_extra_fields import FAKE_SUB_FLOOR_KEY
+
+    fake_key = FAKE_SUB_FLOOR_KEY
+    assert len(fake_key) == 27
+    crafted = "/a" * 100 + "/." + fake_key
+    assert crafted.count("/") > MAX_PATH_SEGMENTS
+
+    with caplog.at_level("INFO", logger="citevyn.request"):
+        response = in_memory_client.get(crafted)
+    assert response.status_code == 404
+
+    emitted = _emitted_request_lines(caplog)
+    assert "request_completed" in emitted, f"no request line was emitted at all: {emitted!r}"
+    assert re.search(r"'path': '/\[REDACTED\]…<\d+ segments>'", emitted), emitted
+    assert fake_key not in emitted, f"a sub-floor literal reached the log line: {emitted!r}"
+    # Positive partner: the line still carries the operational content, so this
+    # is not "the middleware stopped logging".
+    assert "'status_code': 404" in emitted, emitted
+    assert "'method': 'GET'" in emitted, emitted
