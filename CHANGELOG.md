@@ -7,6 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **The request-path redaction stops sweeping above 64 `/`-delimited elements
+  and emits a bounded marker instead (#390).** `backend/app/core/logging.py`
+  gains `MAX_PATH_SEGMENTS = 64`; a `path` value above it returns
+  `/[REDACTED]…<N segments>` without running the sweep at all. The #384
+  per-segment rule runs one `re.sub` per segment inside the asyncio event loop
+  on every request, and `MAX_PATH` bounded the OUTPUT while nothing bounded the
+  WORK — a 404 matches no route, so no rate limiter throttles it. Measured on
+  an Apple M4 / CPython 3.14.5, median of 7 independent `timeit` runs of 200
+  reps, on the 16,385-byte all-slash path: **1,702.1 µs** for the per-segment
+  sweep against **126.6 µs** for the pre-#384 whole-string rule and **3.6 µs**
+  for the marker. A real session route pays **1.04 µs against 0.96 µs** — one
+  extra `str.count`, 76 ns.
+  **This is a pre-deploy fix, not a live one.** Production is Fly v17
+  (`1fd7556`) and the per-segment sweep landed in `cdd8d06`, which is not an
+  ancestor of it, so the regression has never run in production and now will
+  not.
+  **#390's own proposed remedy was measured and rejected.** It fell back to the
+  pre-#384 whole-string sweep, recorded as "strictly stronger, 0 cases weaker
+  over 300,000 samples". The superset claim holds for the sweep and fails for
+  the rule: a superset redaction makes the output shorter, and a shorter output
+  pulls tail material inside the 160-character `MAX_PATH` window the
+  per-segment order truncates away. Reproduced deterministically — at 65
+  elements the fallback prints a 27-character Resend-shaped literal, and an
+  Argon2 salt, that the shipped order does not. Both are shapes neither sweep
+  redacts; the per-segment order hid them by volume. The marker cannot regress
+  that way because its output is a constant plus a decimal count, so no input
+  character can reach the line. Pinned as a regression test.
+  **Observability is not lost above the threshold:** no route this app declares
+  exceeds 7 elements and no filesystem `path=` value exceeds 10, the marker
+  states the element count that `'/[REDACTED]'` never did, and uvicorn's access
+  line still carries the full request line.
 - **Every lazy JS chunk now has a gzip ceiling of its own, and
   `npm run check:bundle` records the totals no ceiling bounds (#372).**
   `frontend/bundle-budget.json` gains ONE enforced key,
