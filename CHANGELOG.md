@@ -7,6 +7,59 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
+- **The request-path redaction stops sweeping above 64 `/` separators and emits
+  a bounded marker instead (#390).** `backend/app/core/logging.py` gains
+  `MAX_PATH_SEGMENTS = 64`; a `path` value above it returns
+  `/[REDACTED]…<N segments>` without running any regex over the value at all.
+  The #384 per-segment rule runs one `re.sub` per segment inside the asyncio
+  event loop on every request, and `MAX_PATH` bounded the OUTPUT while nothing
+  bounded the WORK — a 404 matches no route, so no rate limiter throttles it.
+  Measured END TO END through `redact_value`, which is what the process pays,
+  on an Apple M4 / CPython 3.14.5, median of 7 `timeit` runs, three runs
+  reproduced within 1%:
+
+  | input | #384 sweep | this change |
+  |---|---|---|
+  | 16,385 B all-slash | 966 µs | **2.70 µs** (~360x) |
+  | 16,384 B, 4,096 segments | 379 µs | 2.70 µs (~140x) |
+  | 1 MB all-slash | 59,197 µs | 122 µs (~487x) |
+  | real session route | 1.556 µs | 1.615 µs (+59 ns) |
+
+  The check sits **above** `BEARER_RE.sub`, not merely above the entropy sweep:
+  that sub is an unbounded scan the marker arm has no use for, and with the
+  check below it the same path cost 45.6 µs instead of 2.70.
+  **This is a pre-deploy fix, not a live one.** Production is Fly v17
+  (`1fd7556`) and the per-segment sweep landed in `cdd8d06`, which is not an
+  ancestor of it, so the regression has never run in production and now will
+  not.
+  **#390's own proposed remedy was measured and rejected.** It fell back to the
+  pre-#384 whole-string sweep, recorded there as "strictly stronger, 0 cases
+  weaker over 300,000 samples". The superset claim holds for the sweep and
+  fails for the rule: a superset redaction makes the output shorter, and a
+  shorter output pulls tail material inside the 160-character `MAX_PATH` window
+  the per-segment order truncates away. Reproduced deterministically — at 65
+  separators the fallback prints a 27-character Resend-shaped literal, and an
+  Argon2 salt, that the shipped order does not. Both are shapes neither sweep
+  redacts; the per-segment order hid them by volume. The marker cannot regress
+  that way because its output is a constant plus a decimal count, bounded at
+  `23 + the count's digits`. Pinned as a regression test.
+  **What it costs, stated:** above the threshold the route shape is gone. In
+  separators — the unit the threshold counts — no declared route exceeds 6
+  (`/v1/auth/oauth/{provider}/connect/start`) and no filesystem `path=` value
+  observed here exceeds 9, so nothing production emits changes; a new test
+  asserts that margin against the live route table rather than leaving it in
+  prose. The flip point also moved by one: the rule counts separators where a
+  first draft counted `split("/")` elements, so a value with exactly 64
+  separators now takes the sweep. That matches what `main` ships today. The
+  marker names the separator count, which `'/[REDACTED]'` did not — but that
+  count is client-influenced and a short crafted path forges the same field, so
+  it is a hint, not a measurement. uvicorn's access line still carries the full
+  request line, though without a `request_id` to join on. `docs/RUNBOOK.md`
+  §2.3 now lists all three redaction markers an operator can see.
+  **Not bounded by this change, and not claimed to be:** `BEARER_RE` remains an
+  unbounded scan for every other key, and uvicorn's access-log filter scans the
+  full request line at a larger cost than anything here. Both pre-existing, in
+  different mechanisms, tracked separately.
 - **All 26 `--faint` text uses moved to `--muted`, and the token now colours
   nothing (#396).**
   The issue was filed against ONE rule — `.composer-hint`, 11.5px on `--faint`,
