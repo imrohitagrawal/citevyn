@@ -177,8 +177,10 @@ MAX_OPAQUE_ID = 160
 # and widening this change to cover it would be the blanket loosening the
 # paragraph above rejects.
 #
-# TWO ``path=`` CALL SITES CARRY A FILESYSTEM PATH, NOT A URL PATH, and their
-# output really did change. Both re-verified rather than inherited:
+# THREE ``path=`` CALL SITES CARRY A FILESYSTEM PATH, NOT A URL PATH, and their
+# output really did change. Two distinct VALUES, across three sites, each
+# re-verified rather than inherited (an earlier version of this heading said
+# TWO, counting values and not sites):
 #
 #   * ``app/main.py:182`` / ``:185`` (``frontend_bundle_absent`` /
 #     ``frontend_bundle_mounted``, ``str(FRONTEND_DIST)``). In the container
@@ -276,8 +278,11 @@ MAX_PATH = 160
 # The rule is not the sweep, though: it is the sweep AND the ``MAX_PATH`` cut.
 # Redacting a superset makes the swept string SHORTER, and a shorter string
 # pulls tail material INSIDE the 160-character window that the per-segment
-# order truncates away. Reproduced here, deterministically, at 64 separators --
-# 63 blobs of 32 ``A``s, then a 27-character Resend-shaped literal:
+# order truncates away. Reproduced here, deterministically, at 65 separators --
+# 64 blobs of 32 ``A``s, then a 27-character Resend-shaped literal. 65 and not
+# 64: at exactly 64 the arm does not fire and the literal stays hidden, which
+# an earlier draft of this paragraph got wrong while renumbering it into the
+# separator unit -- the fixture in the test is right, the prose was not:
 #
 #     per-segment  '/[REDACTED]/[REDACTED]/...'   (cut at 160; literal absent)
 #     #390's arm   '/[REDACTED]/.re_...'          (literal PRINTS IN FULL)
@@ -302,14 +307,28 @@ MAX_PATH = 160
 #
 # WHAT THE MARKER COSTS, stated. Above the threshold the route shape is gone --
 # the #384 symptom, deliberately, for values that are not routes. No path this
-# app serves comes close: the deepest declared route is 7 elements
-# (``/v1/auth/oauth/{provider}/connect/start``, and its concrete form is 7 too
-# -- Starlette's default converter never matches ``/``). The THREE filesystem
-# ``path=`` sites measure 3 in the container (``/app/frontend_dist``,
-# ``main.py`` twice), 7 in a plain developer checkout, 10 inside a linked
-# checkout, and 8 for the dev email outbox, whose directory is settings-
-# configurable and so has no fixed bound. Against the deepest value observed
-# anywhere, 64 is a little over 6x. Nothing production emits changes.
+# app serves comes close. ALL FIGURES BELOW ARE SEPARATORS, the unit this
+# constant counts; an earlier draft quoted split-element counts here while the
+# rest of the block used separators, so every number read one too high.
+#
+#     deepest declared route        6   /v1/auth/oauth/{provider}/connect/start
+#     (its concrete form is 6 too -- Starlette's default converter never
+#      matches ``/``, so substituting a provider slug cannot change the count)
+#     container bundle path         2   /app/frontend_dist   (main.py, twice)
+#     plain developer checkout      6
+#     linked checkout               9
+#     dev email outbox              7   (email_client.py)
+#
+# Three filesystem ``path=`` sites, not two -- the paragraph further up that
+# says TWO predates ``email_client.py``'s and is corrected there too. Against
+# the deepest value observed anywhere, 9, the threshold is a little over 7x;
+# against the deepest ROUTE it is more than 10x. Nothing production emits
+# changes. The outbox directory is settings-configurable
+# (``settings.email_outbox_dir``) and so has no fixed bound, which is also the
+# one way a ``path=`` value could arrive WITHOUT a leading ``/``: a relative
+# outbox directory. There the separator count is one less than the segment
+# count. It would take 65 separators to matter and a dev outbox path has 7, so
+# this is stated for accuracy rather than defended against.
 #
 # AND THE COUNT IS CLIENT-INFLUENCED. The marker names the separator count,
 # which ``'/[REDACTED]'`` did not, so an operator seeing a 404 flood learns

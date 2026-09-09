@@ -43,10 +43,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redacts; the per-segment order hid them by volume. The marker cannot regress
   that way because its output is a constant plus a decimal count, bounded at
   `23 + the count's digits`. Pinned as a regression test.
-  **What it costs, stated:** above the threshold the route shape is gone. No
-  declared route exceeds 7 elements and no filesystem `path=` value observed
-  here exceeds 10, so nothing production emits changes; a new test asserts that
-  margin against the live route table rather than leaving it in prose. The
+  **What it costs, stated:** above the threshold the route shape is gone. In
+  separators — the unit the threshold counts — no declared route exceeds 6
+  (`/v1/auth/oauth/{provider}/connect/start`) and no filesystem `path=` value
+  observed here exceeds 9, so nothing production emits changes; a new test
+  asserts that margin against the live route table rather than leaving it in
+  prose. The flip point also moved by one: the rule counts separators where a
+  first draft counted `split("/")` elements, so a value with exactly 64
+  separators now takes the sweep. That matches what `main` ships today. The
   marker names the separator count, which `'/[REDACTED]'` did not — but that
   count is client-influenced and a short crafted path forges the same field, so
   it is a hint, not a measurement. uvicorn's access line still carries the full

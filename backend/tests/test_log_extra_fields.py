@@ -790,14 +790,6 @@ def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
     # than loud. This assertion is what makes it loud.
     from app.core.logging import MAX_PATH_SEGMENTS
 
-    assert (MAX_PATH + 1) // 4 <= MAX_PATH_SEGMENTS, (
-        f"MAX_PATH={MAX_PATH} and MAX_PATH_SEGMENTS={MAX_PATH_SEGMENTS} have drifted apart: "
-        f"this test's fixtures carry about {(MAX_PATH + 1) // 4} separators, which now exceeds "
-        f"the segment threshold, so they take the MARKER arm and stop exercising the cap at "
-        f"all. Raise MAX_PATH_SEGMENTS alongside MAX_PATH, or rebuild these fixtures with "
-        f"longer segments."
-    )
-
     marker = "…<truncated>"
 
     at_limit = ("/seg" * MAX_PATH)[:MAX_PATH]
@@ -805,6 +797,21 @@ def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
     just_under = ("/seg" * MAX_PATH)[: MAX_PATH - 1]
     assert len(at_limit) == MAX_PATH
     assert len(over_limit) == MAX_PATH + 1
+
+    # Asserted on the FIXTURE's own separator count, not on arithmetic over
+    # ``MAX_PATH``. The first version of this guard computed
+    # ``(MAX_PATH + 1) // 4`` and was off by one: it permitted
+    # ``MAX_PATH_SEGMENTS = 40``, where ``over_limit`` already carries 41
+    # separators and the test fails anyway -- opaquely, which is the exact
+    # thing this guard exists to prevent. Measured, not reasoned: the real
+    # requirement is 41. Deriving the number from the fixture cannot drift.
+    widest = max(value.count("/") for value in (at_limit, over_limit, just_under))
+    assert widest <= MAX_PATH_SEGMENTS, (
+        f"MAX_PATH={MAX_PATH} and MAX_PATH_SEGMENTS={MAX_PATH_SEGMENTS} have drifted apart: "
+        f"this test's fixtures carry up to {widest} separators, which now exceeds the segment "
+        f"threshold, so they take the MARKER arm and stop exercising the cap at all. Raise "
+        f"MAX_PATH_SEGMENTS alongside MAX_PATH, or rebuild these fixtures with longer segments."
+    )
 
     # No SEGMENT matches the entropy regex, so the per-segment sweep is the
     # identity on this material and swept length == len(). (Searching the
@@ -1263,8 +1270,13 @@ class _CountingPattern:
     run before EITHER of them.
     """
 
-    def __init__(self, inner: re.Pattern[str]) -> None:
+    def __init__(self, inner: re.Pattern[str], name: str) -> None:
         self._inner = inner
+        # The pattern's own name, because this class wraps TWO of them and a
+        # hardcoded one made a stray `BEARER_RE` call report as
+        # `HIGH_ENTROPY_RE` -- a misdiagnosis in the one probe whose whole job
+        # is saying which pattern ran.
+        self._name = name
         self.calls = 0
         self.sub_calls = 0
 
@@ -1274,10 +1286,14 @@ class _CountingPattern:
         return self._inner.sub(repl, string)
 
     def __getattr__(self, name: str) -> object:
+        # Deliberately AssertionError, not AttributeError: this must fail the
+        # test rather than let a `hasattr` probe quietly answer False. The
+        # cost, named because it is real: `copy.copy` and `hasattr` on this
+        # object raise. Nothing in these tests does either.
         raise AssertionError(
-            f"the path branch reached HIGH_ENTROPY_RE.{name}: this probe counts "
-            f"`sub` only, so any other use is unmeasured work and must be "
-            f"either counted here or removed"
+            f"the path branch reached {object.__getattribute__(self, '_name')}"
+            f".{name}: this probe counts `sub` only, so any other use is "
+            f"unmeasured work and must be either counted here or removed"
         )
 
 
@@ -1306,7 +1322,7 @@ def test_the_marker_arm_runs_INSTEAD_OF_the_sweep_not_after_it(
     from app.core import logging as logging_module
 
     _refuse_to_materialise(logging_module.MAX_PATH_SEGMENTS)
-    counting = _CountingPattern(logging_module.HIGH_ENTROPY_RE)
+    counting = _CountingPattern(logging_module.HIGH_ENTROPY_RE, "HIGH_ENTROPY_RE")
     monkeypatch.setattr(logging_module, "HIGH_ENTROPY_RE", counting)
 
     crafted = "/a" * (logging_module.MAX_PATH_SEGMENTS + 5)
@@ -1359,8 +1375,8 @@ def test_no_regex_at_all_runs_on_a_path_the_marker_answers(
     from app.core import logging as logging_module
 
     _refuse_to_materialise(logging_module.MAX_PATH_SEGMENTS)
-    bearer = _CountingPattern(logging_module.BEARER_RE)
-    entropy = _CountingPattern(logging_module.HIGH_ENTROPY_RE)
+    bearer = _CountingPattern(logging_module.BEARER_RE, "BEARER_RE")
+    entropy = _CountingPattern(logging_module.HIGH_ENTROPY_RE, "HIGH_ENTROPY_RE")
     monkeypatch.setattr(logging_module, "BEARER_RE", bearer)
     monkeypatch.setattr(logging_module, "HIGH_ENTROPY_RE", entropy)
 
@@ -1451,17 +1467,28 @@ def test_the_threshold_clears_every_route_this_app_declares() -> None:
     **42 through 80** unguarded. At 42, any 43-separator value would silently
     lose its route shape and no test would say so.
 
-    This asserts the margin against the REAL route table, so lowering the
-    threshold toward the routes -- or adding a pathologically deep route --
-    fails here and names both numbers.
+    This asserts the margin against the REAL route table, in the separator unit
+    the constant counts.
+
+    WHAT IT UNIQUELY CATCHES, stated honestly because the first draft of this
+    docstring claimed the whole window and a skeptic measured otherwise. On the
+    LOWERING direction it contributes nothing: the coupling assertion inside
+    ``test_the_max_path_cap_fires_only_ABOVE_the_limit`` requires
+    ``MAX_PATH_SEGMENTS >= 41`` (measured, by running it) and fires first at
+    every value below that. What
+    only this test catches is the OPPOSITE direction -- a route being ADDED
+    that is deep enough to approach the threshold, which no other test looks
+    at, and which is the failure the constant's comment would otherwise be the
+    only record of.
 
     The 4x factor is the margin the comment claims, not a tight bound; it is
     stated as a factor so the test does not have to be edited every time a
     route is added.
 
-    RED if ``MAX_PATH_SEGMENTS`` is lowered to 4x the deepest route or below
-    (28 or less today), or if a route is added that is deeper than a quarter of
-    the threshold (17 separators or more today).
+    RED if a route is added deeper than a quarter of the threshold (17
+    separators or more today), or -- redundantly with the coupling assertion --
+    if ``MAX_PATH_SEGMENTS`` drops to 23 or below. The deepest declared route
+    is 6 separators today, so the guard reads ``6 * 4 <= 64``.
     """
     from app.core.logging import MAX_PATH_SEGMENTS
     from app.main import create_app
