@@ -160,6 +160,41 @@ Logs should redact common secret patterns:
 
 Do not log full retrieved context unless explicitly enabled in a local development environment.
 
+### 9.1 What rule 5 actually is, and what it is not
+
+Rule 5 is a length floor over a fixed character class, and stating its limits
+is the point of writing it down — an implementation of it elsewhere will hit
+the same three.
+
+- **The boundary must be defined over the class, not over `\w`.** A regex
+  word boundary is a transition in `\w`, which is neither a subset nor a
+  superset of a base64-ish class, so the two disagree at both ends of every
+  run: one non-ASCII letter beside a secret removes the transition and the
+  whole run prints, while a character that is in the class but is not `\w`
+  (`+ / = -`) stops a match beginning or ending there. Both were live here
+  (#400). Use explicit lookarounds over the class itself.
+- **A length floor cannot survive an interior separator.** Any character
+  outside the class inside a secret — an ordinary `.` or a space, not just
+  something exotic — splits it into sub-floor halves that both print. An
+  Argon2 PHC string (`$`-delimited) and a JWT (`.`-delimited) are the two
+  shapes this reaches here. Entropy is the *backstop*; key-name matching and
+  a fail-closed allowlist on what may be printed at all are the actual
+  controls.
+- **The rule is a scan, so it needs a work bound as well as an output
+  bound.** Both regexes are `O(len)` and run inside the request path, on
+  values a client can lengthen. Above 8,192 characters a value is replaced by
+  a marker (`[REDACTED]…<N chars>`) instead of being scanned (#401). It is a
+  **marker, not a truncation**, deliberately: cutting a value and then
+  sweeping the remainder leaves a sub-floor prefix that the sweep no longer
+  matches and then prints, whereas a marker emits no character of its input.
+
+Redaction may also be **too strong**, and that is a real defect rather than a
+safe default: an operationally necessary field blanked on every line makes the
+log useless for exactly the traffic it exists to explain. Correlation ids, URL
+paths and provider model slugs are each exempted by explicit **key name** —
+never by the value's shape, which an attacker chooses — and each exemption is
+capped so the exemption cannot become an unbounded field.
+
 ## 10. Admin Endpoint Controls
 
 Admin endpoints require admin API key and should be audited.

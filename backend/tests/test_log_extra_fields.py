@@ -42,8 +42,16 @@ import pytest
 from app.core.logging import (
     EMITTED_TEXT_KEYS,
     MAX_EMITTED_TEXT,
+    MAX_MODEL_ID,
+    MAX_SCANNED_CHARS,
+    MODEL_ID_KEYS,
     OPAQUE_ID_KEYS,
+    PATH_KEYS,
+    QUERY_CREDENTIAL_RE,
+    RAW_TEXT_KEYS,
     RESERVED_RECORD_ATTRS,
+    SECRET_KEY_PARTS,
+    SECRET_VALUE,
     build_log_event,
     build_log_formatter,
 )
@@ -493,19 +501,31 @@ def test_a_very_long_allowlisted_value_is_truncated() -> None:
     """Volume control: one runaway field costs a truncated field, not a
     multi-kilobyte line. RED if ``MAX_EMITTED_TEXT`` stops being applied.
 
-    Dots separate the segments on purpose, and the key is ``model``, not
-    ``path``. ``HIGH_ENTROPY_RE``'s character class includes ``/``, so under any
-    key OUTSIDE ``PATH_KEYS`` a long slash-separated value is one contiguous
-    32+-char run and gets blanked to ``[REDACTED]`` BEFORE truncation is
-    reached -- the test would then pass on the redactor's behaviour rather than
-    on the truncation it names. (Under ``path`` the per-segment sweep of #384
-    applies instead and the value survives to be truncated by ``MAX_PATH``,
-    which is pinned by ``test_a_pathological_path_is_capped_by_max_path``
-    below.)
+    Dots separate the segments on purpose, and the key is neither ``path`` nor
+    a ``MODEL_ID_KEYS`` member. ``HIGH_ENTROPY_RE``'s character class includes
+    ``/``, so under any key OUTSIDE ``PATH_KEYS`` a long slash-separated value
+    is one contiguous 32+-char run and gets blanked to ``[REDACTED]`` BEFORE
+    truncation is reached -- the test would then pass on the redactor's
+    behaviour rather than on the truncation it names. (Under ``path`` the
+    per-segment sweep of #384 applies instead and the value survives to be
+    truncated by ``MAX_PATH``, which is pinned by
+    ``test_a_pathological_path_is_capped_by_max_path`` below.)
+
+    THE KEY MOVED FROM ``model`` TO ``call_site`` WITH #387, and the reason is
+    worth recording because ``model`` is the obvious choice and is now the one
+    wrong one: ``model`` joined ``MODEL_ID_KEYS``, whose over-cap arm returns
+    ``'[REDACTED]…<N chars>'`` at 64 characters, so this fixture would be
+    answered by ``MAX_MODEL_ID`` and never reach ``MAX_EMITTED_TEXT`` at all.
+    Measured -- it went red on exactly the ``"[REDACTED]" not in line``
+    assertion below. ``call_site`` is on ``EMITTED_TEXT_KEYS`` and in none of
+    the three key-name exemption sets, which is the property this test needs.
     """
     long_value = "seg." * 400
     assert len(long_value) > MAX_EMITTED_TEXT * 5
-    line = render("req", model=long_value)
+    # The premise the docstring rests on, asserted rather than assumed: this
+    # value is under the WORK guard, so it really does reach the sweep.
+    assert len(long_value) < MAX_SCANNED_CHARS
+    line = render("req", call_site=long_value)
     assert "[REDACTED]" not in line, "the entropy sweep fired; this is not testing truncation"
     assert "…<truncated>" in line, line
     assert len(line) < MAX_EMITTED_TEXT + 100, len(line)
@@ -610,7 +630,13 @@ def test_the_path_rule_is_keyed_on_the_key_name_not_the_value_shape() -> None:
     from app.core.logging import redact_value
 
     session_path = "/v1/sessions/0f0d1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b/messages"
-    assert redact_value("reason", session_path) == "/[REDACTED]"
+    # CHANGED BY #400, deliberately, and it is ABSORPTION rather than weakening:
+    # this used to read ``"/[REDACTED]"``. The old boundary was ``\b``, which
+    # cannot start a match on ``/`` (in the class, not a word character), so the
+    # leading slash survived. The new boundary is defined over the class itself,
+    # so the slash is part of the maximal run and is redacted with it. One
+    # character MORE is blanked, never less.
+    assert redact_value("reason", session_path) == "[REDACTED]"
     # Partner: the very same value under `path` DOES keep its shape, so the
     # assertion above is about the key, not about the value being unredactable.
     assert redact_value("path", session_path) == "/v1/sessions/[REDACTED]/messages"
@@ -1709,3 +1735,1137 @@ def test_a_plural_index_versions_LIST_is_still_summarised() -> None:
     line = render("probe", index_versions=[_SHA_VERSION_A, _SHA_VERSION_B])
     assert "index_versions=<list n=2>" in line, line
     assert _SHA_VERSION_A not in line, line
+
+
+# ---------------------------------------------------------------------------
+# #400: the entropy rule's BOUNDARY. ``\b`` is a transition in ``\w``; the
+#       character class is not ``\w``, and the two disagree in BOTH directions,
+#       so both ends of every run were bypassable. The boundary is now defined
+#       over the class itself.
+# ---------------------------------------------------------------------------
+
+# A 64-character sha256, the shape #400 reproduces with. Every character is
+# inside ``HIGH_ENTROPY_RE``'s class, so the ONLY thing that can decide whether
+# it redacts is the boundary.
+_SHA256_SHAPED = hashlib.sha256(b"citevyn-400-fixture").hexdigest()
+
+# Characters that ARE ``\w`` to Python's ``re`` but are NOT in the character
+# class. Each one therefore removed the word/non-word transition ``\b`` needed,
+# and one of them next to a secret defeated the sweep completely. #400 files the
+# LEADING case only; the trailing mirror leaks identically and is covered here.
+_WORD_BUT_NOT_IN_CLASS = [
+    ("latin_small_e_acute", "\u00e9"),
+    ("cyrillic_small_a", "\u0430"),
+    ("cjk_zhong", "\u4e2d"),
+    ("fullwidth_capital_a", "\uff21"),
+    ("arabic_indic_zero", "\u0660"),
+]
+
+# Characters that are IN the character class but are NOT ``\w``. A ``\b``-anchored
+# match could not START (or END) on one, so a value sitting exactly on the
+# 32-character floor lost a character of protection and fell under it.
+_IN_CLASS_BUT_NOT_WORD = ["-", "+", "/", "="]
+
+# NOT bypasses, before or after. They are not ``\w``, so the shipped ``\b``
+# already fired next to them. Listed so the suite does not claim credit for
+# three bugs that never existed.
+_ALREADY_SAFE_NEIGHBOURS = [
+    ("zero_width_joiner", "\u200d"),
+    ("rtl_override", "\u202e"),
+    ("combining_acute", "\u0301"),
+]
+
+
+def _longest_class_run(text: str) -> int:
+    """The maximal run of ``HIGH_ENTROPY_RE``-class characters, scanned
+    INDEPENDENTLY of that regex.
+
+    Deliberately not implemented by re-running the rule under test: a check
+    keyed on the rule passes under every mutation of the rule.
+    """
+    best = run = 0
+    for char in text:
+        run = run + 1 if re.fullmatch(r"[A-Za-z0-9+/=_-]", char) else 0
+        best = max(best, run)
+    return best
+
+
+@pytest.mark.parametrize("position", ["leading", "trailing"])
+@pytest.mark.parametrize(
+    ("name", "neighbour"), _WORD_BUT_NOT_IN_CLASS, ids=[n for n, _ in _WORD_BUT_NOT_IN_CLASS]
+)
+def test_a_word_character_outside_the_class_no_longer_defeats_the_entropy_sweep(
+    name: str, neighbour: str, position: str
+) -> None:
+    """#400 8a, BOTH ENDS. ``é`` is a word character that is not in the
+    character class, so where the run began there was no word/non-word
+    transition, ``\\b`` failed, and a 64-character sha printed VERBATIM. It is
+    reachable through a URL: uvicorn percent-decodes the path before the app
+    sees it, so ``%C3%A9`` arrives as ``é``.
+
+    The issue reports only the LEADING case. Measured here, the TRAILING mirror
+    leaks identically for all five shapes -- ``\\b`` fails at the END of the run
+    for exactly the same reason -- which is why this is parametrized over both.
+
+    RED if ``HIGH_ENTROPY_RE``'s lookaround boundary is reverted to ``\\b``.
+    Verified by making that change: all ten cases fail.
+    """
+    from app.core.logging import redact_value
+
+    value = (neighbour + _SHA256_SHAPED) if position == "leading" else (_SHA256_SHAPED + neighbour)
+    out = str(redact_value("detail", value))
+
+    assert _SHA256_SHAPED not in out, f"{name}/{position} still bypasses the sweep: {out!r}"
+    assert SECRET_VALUE in out, out
+    # NON-VACUITY: the neighbour really is a ``\w`` character outside the class,
+    # which is the whole mechanism. Without this the fixture could drift to some
+    # character the sweep never had trouble with and the test would still pass.
+    assert re.match(r"\w", neighbour), f"{name} is not a word character; the fixture is wrong"
+    assert not re.fullmatch(r"[A-Za-z0-9+/=_-]", neighbour), f"{name} is inside the class"
+    # And the neighbour itself survives: this is a boundary fix, not "blank the
+    # whole field".
+    assert neighbour in out, out
+
+
+@pytest.mark.parametrize("position", ["leading", "trailing"])
+@pytest.mark.parametrize("edge_char", _IN_CLASS_BUT_NOT_WORD)
+def test_a_secret_sitting_on_the_floor_is_caught_whichever_class_character_it_ends_with(
+    edge_char: str, position: str
+) -> None:
+    """#400 8b, BOTH ENDS. ``- + / =`` are in the character class but are not
+    word characters, so a ``\\b``-anchored match could not begin (or end) on
+    one: a 32-character value starting with ``-`` matched only its last 31
+    characters, fell under the floor, and printed in full.
+
+    #400 files the leading half and calls it narrow. It is exactly as narrow at
+    the other end and exactly as complete a leak there -- measured, all eight
+    combinations print today and redact after.
+
+    RED if the lookaround boundary is reverted to ``\\b``. Verified by making
+    that change: all eight cases fail.
+    """
+    from app.core.logging import redact_value
+
+    body = "X" * 31
+    value = (edge_char + body) if position == "leading" else (body + edge_char)
+    # ON the floor, not over it: at 33 characters the shipped rule simply starts
+    # one character in and catches the rest, so only this length shows the bug.
+    assert len(value) == 32
+
+    assert redact_value("detail", value) == SECRET_VALUE, (
+        f"a 32-character secret {position} on {edge_char!r} printed in full"
+    )
+
+
+@pytest.mark.parametrize("position", ["leading", "trailing"])
+@pytest.mark.parametrize(
+    ("name", "neighbour"), _ALREADY_SAFE_NEIGHBOURS, ids=[n for n, _ in _ALREADY_SAFE_NEIGHBOURS]
+)
+def test_zero_width_and_combining_neighbours_were_never_a_bypass(
+    name: str, neighbour: str, position: str
+) -> None:
+    """SCOPE PARTNER for the two tests above, and DELIBERATELY NOT LOAD-BEARING
+    -- declared here in the same spirit as the non-behavioural pins named in
+    this module's docstring.
+
+    Its job is to stop a reader concluding "unicode next to a secret leaks".
+    Zero-width joiner, right-to-left override and a combining acute are NOT
+    ``\\w``, so the shipped ``\\b`` already fired beside them and these shapes
+    redacted before this change as well as after. Measured, leading and
+    trailing, on both rules. Without this, the fix's comment block would be
+    claiming credit for three bugs that never existed.
+
+    RED if the entropy sweep stops firing at all, or if its floor is raised
+    above 64. It does NOT bite the boundary change -- that is the point.
+    """
+    from app.core.logging import redact_value
+
+    value = (neighbour + _SHA256_SHAPED) if position == "leading" else (_SHA256_SHAPED + neighbour)
+    assert not re.match(r"\w", neighbour), f"{name} IS a word character; the premise is wrong"
+    out = str(redact_value("detail", value))
+    assert _SHA256_SHAPED not in out, out
+    # THE TWO PARTNERS ITS SIBLINGS CARRY AND THIS ONE WAS MISSING. Absence of
+    # the sha alone is satisfied by a ``redact_value`` returning ``""`` -- or
+    # returning anything at all -- so it is not evidence that the sweep fired.
+    # These say what the output IS: the sweep replaced the run, and the
+    # neighbour itself survived rather than being swallowed with it.
+    assert SECRET_VALUE in out, out
+    assert neighbour in out, out
+
+
+def test_the_entropy_rule_is_not_ascii_only() -> None:
+    """THE FALSIFIER. ``re.ASCII`` is the tempting one-token "simplification" of
+    this regex and it LEAKS -- and nothing in the suite could see it.
+
+    Measured before this test existed: the ENTIRE backend suite passed under
+    ``re.compile(r"\\b[A-Za-z0-9+/=_-]{32,}\\b", re.ASCII)``, a variant that
+    prints the value below in full. The flag makes ``\\w`` ASCII-only, so MORE
+    characters count as non-word and MORE of them manufacture the boundary a
+    secret needs -- the opposite of what it looks like it does.
+
+    RED if the rule is rewritten as ``\\b...\\b`` WITH ``re.ASCII``. That is the
+    truthful statement and it is narrower than the obvious one: measured,
+    ``re.ASCII`` added to the SHIPPED lookaround pattern alone is a semantic
+    no-op and this test stays green under it, because that pattern contains no
+    ``\\w``, ``\\b``, ``\\d`` or ``\\s`` for the flag to reach. Which is itself
+    part of what the boundary change buys -- after it, the flag cannot do harm
+    without a boundary rewrite alongside. Verified by applying both mutants: the
+    combination kills this test, the flag alone does not.
+    """
+    from app.core.logging import redact_value
+
+    # Obviously synthetic. The load-bearing character is ``ª`` (U+00AA), a
+    # Unicode word character that is not ASCII: under ``re.ASCII`` it stops
+    # being ``\w``, the ``=`` beside it is not ``\w`` either, and the boundary
+    # the match needs never exists.
+    leaky = "DhR86\u00aa=QY0GJHlwmF0z9vfF9aipERC7sqdPW2g;"
+    # NON-VACUITY: the value really does carry a 32-character run of the class,
+    # so it is material the rule is supposed to catch and not a short string.
+    assert _longest_class_run(leaky) >= 32, leaky
+
+    assert redact_value("detail", leaky) == f"DhR86\u00aa{SECRET_VALUE};"
+
+
+def test_no_path_segment_keeps_a_32_character_class_run_after_the_sweep() -> None:
+    """THE SECURITY PROPERTY BEHIND THE ``MAX_PATH`` TRUNCATION FLIP.
+
+    #400 makes the sweep redact a SUPERSET, so the swept path is SHORTER, so
+    tail material the per-segment order used to truncate away now lands inside
+    the 160-character ``MAX_PATH`` window. That is the same mechanism
+    ``MAX_PATH_SEGMENTS``'s comment block records for #390's rejected arm, and
+    it fires here for the same reason.
+
+    It is NOT a regression, and this test is the executable form of that
+    argument. The exposed material is sub-32-character by construction -- no
+    rule in the module redacts a 27-character literal under any key -- so what
+    changed is which under-floor bytes the cap happened to hide, and hiding by
+    volume was never redaction. What the output must satisfy is that no
+    ``/``-delimited SEGMENT still carries a run of 32 or more class characters.
+    The fixture's five segments violate that before the fix (32 characters
+    each, every one opening on the 8b bypass -- exactly ON the floor, which is
+    the only length at which that bypass bites) and satisfy it after.
+
+    PER SEGMENT, not over the whole string, and that is not a weakening: ``/``
+    is itself inside the character class, so any path at all is one long run
+    when read whole -- that IS #384, and the per-segment sweep is the rule.
+
+    There is deliberately NO test asserting the 27-character literal is
+    VISIBLE. That would lock in a defect and go red the day someone improves
+    the cap.
+
+    RED if the lookaround boundary is reverted to ``\\b``. Verified by making
+    that change: the scan reports segments at a run of 32.
+    """
+    from app.core.logging import MAX_PATH, MAX_PATH_SEGMENTS, redact_value
+
+    # Each segment is 32 characters of the class, opening on ``-`` -- the exact
+    # 8b bypass, so the shipped rule matched none of them and the whole value
+    # overflowed ``MAX_PATH``. The tail literal is this file's own sub-floor
+    # fixture, 27 characters, which NO sweep in the module removes.
+    segment = "-" + "X" * 31
+    assert len(segment) == 32
+    crafted = "".join("/" + segment for _ in range(5)) + "/" + FAKE_SUB_FLOOR_KEY
+    assert crafted.count("/") <= MAX_PATH_SEGMENTS, (
+        "the fixture must take the sweep, not the marker arm"
+    )
+    assert len(crafted) > MAX_PATH, (
+        f"the fixture must overflow MAX_PATH={MAX_PATH} so the truncation is in play"
+    )
+
+    out = str(redact_value("path", crafted))
+    runs = [(seg, _longest_class_run(seg)) for seg in out.split("/")]
+    offenders = [(seg, run) for seg, run in runs if run >= 32]
+    assert offenders == [], (offenders, out)
+    # NON-VACUITY, two ways. The scan is not blind -- it reports 32 on the RAW
+    # segment, so an empty result above means the sweep acted...
+    assert _longest_class_run(segment) == 32
+    # ...and the sweep really did fire on all five, so this is not passing on an
+    # output the cap emptied.
+    assert out.count(SECRET_VALUE) == 5, out
+
+
+def test_the_whole_string_sweep_leaves_no_32_character_class_run_either() -> None:
+    """The same invariant on the DEFAULT branch, where it applies to the whole
+    value because there are no segments: after ``redact_value`` under a
+    non-path key, no run of 32 or more class characters survives. This is the
+    maximal-run property the new boundary buys, stated where it holds without
+    qualification.
+
+    RED if the lookaround boundary is reverted to ``\\b`` (the leading-``é``
+    probe leaves a 64-character run standing).
+    """
+    from app.core.logging import redact_value
+
+    probes = [
+        "\u00e9" + _SHA256_SHAPED,
+        _SHA256_SHAPED + "\u00e9",
+        "-" + "X" * 31,
+        "X" * 31 + "-",
+        "/v1/sessions/0f0d1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b/messages",
+    ]
+    for probe in probes:
+        # NON-VACUITY: each probe really does carry the run being tested for.
+        assert _longest_class_run(probe) >= 32, probe
+        assert _longest_class_run(str(redact_value("detail", probe))) < 32, probe
+
+
+# ---------------------------------------------------------------------------
+# #387: legitimate long PROVIDER MODEL SLUGS must reach the operator.
+#       The ``error`` half is DECLINED -- see MODEL_ID_KEYS and the last test
+#       in this section.
+# ---------------------------------------------------------------------------
+
+# Provider slugs this repo or #387 NAMES, both measured collapsing to
+# ``[REDACTED]`` before this change because every character is inside
+# ``HIGH_ENTROPY_RE``'s class and there is no separator to break the run.
+#
+# ONLY TWO, and the shortfall is deliberate rather than an oversight. A third
+# candidate, ``google/gemini-2.5-flash-lite:thinking`` (37 characters), is NOT a
+# fixture for this test: its ``.`` and ``:`` are outside the class, so its
+# longest run is 15 and it never over-blanked at all. It is a headroom data
+# point, not a defect shape, and using it here would have made this test pass
+# for the wrong reason.
+_OVER_BLANKED_SLUGS = [
+    # Named at ``app/cost/pricing.py:177`` as a model that WOULD have been
+    # mis-billed -- i.e. a slug this codebase already anticipates seeing.
+    "openai/gpt-4o-mini-realtime-preview",
+    # #387's own measured example.
+    "anthropic/claude-3-5-sonnet-20240620",
+]
+
+# THE KEY LIST IS A LITERAL, NOT ``sorted(MODEL_ID_KEYS)``, and that is the
+# whole difference between a guard and a tautology. Parametrizing over the set
+# under test makes the parametrization SHRINK when a key is removed: the case
+# for that key is simply never generated, the suite stays green, and the
+# coverage vanishes silently. Measured -- dropping ``index_embedding_model`` or
+# ``configured_embedding_model`` from ``MODEL_ID_KEYS`` SURVIVED the whole
+# selection until this list was written out by hand.
+_MODEL_KEYS_UNDER_TEST = [
+    "model",
+    "index_embedding_model",
+    "configured_embedding_model",
+]
+
+
+def test_the_model_key_set_is_exactly_the_set_under_test() -> None:
+    """The partner that makes the parametrization below honest: it pins the set
+    BYTE-EXACTLY, so removing a key reddens here even though the parametrized
+    cases for it stop being generated, and ADDING one reddens here rather than
+    slipping in untested.
+
+    RED if any key is added to or removed from ``MODEL_ID_KEYS``. Verified by
+    removing each of the three in turn and by adding a fourth.
+    """
+    assert set(MODEL_ID_KEYS) == set(_MODEL_KEYS_UNDER_TEST)
+    assert len(_MODEL_KEYS_UNDER_TEST) == len(set(_MODEL_KEYS_UNDER_TEST))
+
+
+@pytest.mark.parametrize("key", _MODEL_KEYS_UNDER_TEST)
+@pytest.mark.parametrize("slug", _OVER_BLANKED_SLUGS)
+def test_a_long_provider_slug_reaches_the_operator_under_every_model_key(
+    key: str, slug: str
+) -> None:
+    """#387. A slug of 32 class characters or more is one contiguous run, so the
+    whole-string sweep collapsed it and every spend and provider line read
+    ``model=[REDACTED]`` -- the #384 symptom on the cost path.
+
+    All THREE keys are covered, not just ``model``. ``index_embedding_model``
+    and ``configured_embedding_model`` (``app/retrieval/hybrid.py:532``,
+    ``:546``, ``:549``) carry the same slug space, and because the membership
+    test is on the WHOLE key neither inherits ``model``'s exemption. They would
+    have failed identically, one config change later.
+
+    RED if a key is removed from ``MODEL_ID_KEYS``. Verified by removing each of
+    the three in turn: that key's two cases fail with ``'[REDACTED]'``.
+    """
+    from app.core.logging import redact_value
+
+    # NON-VACUITY: the slug really is over the floor and really is one unbroken
+    # class run, so this is the shape that used to blank.
+    assert len(slug) >= 32, slug
+    assert re.fullmatch(r"[A-Za-z0-9+/=_-]+", slug), slug
+    assert len(slug) <= MAX_MODEL_ID, "the fixture must sit under the cap, not over it"
+
+    assert redact_value(key, slug) == slug
+    # And it reaches the EMITTED LINE, not just ``redact_value``'s return: the
+    # key has to be on ``EMITTED_TEXT_KEYS`` too, which is a separate mechanism.
+    assert render("provider_call_unpriced", **{key: slug}) == (
+        f"provider_call_unpriced {key}={slug!r}"
+    )
+
+
+def test_an_over_cap_model_value_emits_a_marker_carrying_none_of_its_input() -> None:
+    """THE EXEMPTION'S CEILING, and why it is a MARKER rather than a truncation.
+
+    ``model`` is not merely env-configurable as #387 says: on the cost-meter
+    path it is UPSTREAM-SUPPLIED. ``app/llm/openrouter.py:119`` and
+    ``app/llm/anthropic.py:116`` both read ``data.get("model", self._model)``
+    out of the provider's HTTP response body, and it reaches
+    ``app/cost/meter.py:61`` as ``extra={"model": model}`` -- from
+    ``provider_call_unpriced``, which fires exactly when the value is one we did
+    not choose. Truncating would emit a PREFIX of that string; the marker emits
+    none of it.
+
+    RED if the over-cap arm returns a truncation (``redacted[:MAX_MODEL_ID] +
+    ...``) instead of the marker. Verified by making that change: the
+    eight-character window check fails.
+    """
+    from app.core.logging import redact_value
+
+    hostile = "sk-live-" + "Zq7" * 60
+    assert len(hostile) > MAX_MODEL_ID
+
+    out = str(redact_value("model", hostile))
+    assert out == f"{SECRET_VALUE}…<{len(hostile)} chars>", out
+    # No eight-character window of the input survives -- stronger than "the
+    # value is absent" and independent of where a cut would have landed.
+    windows = [hostile[i : i + 8] for i in range(len(hostile) - 7)]
+    assert [w for w in windows if w in out] == [], out
+
+    # PARTNER (non-vacuity), because the assertions above are satisfied by a
+    # ``redact_value`` that blanks every model: a real slug still prints whole.
+    #
+    # THE PARTNER MUST BE OVER THE 32-CHARACTER FLOOR, and the first version of
+    # it was not. It used ``google/gemini-2.5-flash`` -- 23 characters, longest
+    # class run 15 -- which the entropy sweep never touched in the first place,
+    # so it passed with ``MODEL_ID_KEYS`` emptied ENTIRELY and proved nothing
+    # about the exemption. Measured; that is the exact vacuity this partner
+    # exists to rule out. This slug is 36 characters in one unbroken class run,
+    # so it prints ONLY because the exemption is live.
+    live_slug = "anthropic/claude-3-5-sonnet-20240620"
+    assert _longest_class_run(live_slug) >= 32, live_slug
+    assert redact_value("model", live_slug) == live_slug
+
+
+def test_the_model_cap_fires_only_ABOVE_the_limit() -> None:
+    """The comparison, not the cap. ``len(redacted) > MAX_MODEL_ID`` and
+    ``>= MAX_MODEL_ID`` both answer every over-cap fixture, so the test above
+    passes under either -- and a ``>=``-versus-``>`` mutant has survived a whole
+    review round in this file's history. Under ``>=`` a slug of exactly
+    ``MAX_MODEL_ID`` characters is replaced by a marker claiming it was over the
+    cap: a log line that lies about itself.
+
+    RED if the comparison is loosened to ``>=`` (the at-limit half fails) or
+    raised to ``MAX_MODEL_ID + 1`` (the one-over half fails). Verified by making
+    both changes.
+    """
+    from app.core.logging import redact_value
+
+    at_limit = "m" * MAX_MODEL_ID
+    one_over = "m" * (MAX_MODEL_ID + 1)
+
+    assert redact_value("model", at_limit) == at_limit
+    assert redact_value("model", one_over) == f"{SECRET_VALUE}…<{MAX_MODEL_ID + 1} chars>"
+
+
+@pytest.mark.parametrize("key", _MODEL_KEYS_UNDER_TEST)
+def test_a_model_key_keeps_the_bearer_sweep_it_only_skips_the_entropy_one(key: str) -> None:
+    """THE EXEMPTION IS FROM ``HIGH_ENTROPY_RE`` ONLY, AND NOTHING TESTED THAT.
+
+    ``model`` is UPSTREAM-SUPPLIED -- ``app/llm/openrouter.py:119`` and
+    ``app/llm/anthropic.py:116`` read it out of the provider's HTTP response
+    body -- so a provider string carrying ``Bearer <token>`` is not a
+    hypothetical, and under this key the value is printed rather than summarised.
+    The arm is written to return the SWEPT string for exactly that reason, and
+    no fixture in this file put a Bearer token under a model key.
+
+    RED if the arm returns ``value`` instead of ``redacted`` (i.e. skips
+    ``BEARER_RE.sub`` as well). Verified by making that change on the real
+    module: all three cases fail with the token printed in full.
+    """
+    from app.core.logging import redact_value
+
+    token = "NOTAREALTOKEN" + "9" * 17
+    value = f"m Bearer {token}"
+    # NON-VACUITY: the token really is present, and the value really does take
+    # the under-cap branch rather than the marker, so this measures the sweep.
+    assert token in value
+    assert len(value) <= MAX_MODEL_ID
+
+    out = str(redact_value(key, value))
+    assert out == f"m Bearer {SECRET_VALUE}", out
+    assert token not in out, out
+
+
+def test_the_model_exemption_is_exact_not_substring() -> None:
+    """The membership test is ``key_lower in MODEL_ID_KEYS`` -- WHOLE KEY -- and
+    the comment at ``MODEL_ID_KEYS`` says so, but nothing measured it.
+
+    Same shape as ``test_the_opaque_id_exemption_is_exact_not_substring`` above,
+    and for the same reason: ``any(part in key_lower for part in ...)`` is the
+    idiom used three lines earlier in ``redact_value`` for ``RAW_TEXT_KEYS`` and
+    ``SECRET_KEY_PARTS``, so copying it here is a one-token slip that hands the
+    exemption to every key CONTAINING ``model`` -- ``outer_model``,
+    ``model_secret_note``, anything.
+
+    RED if the whole-key test is loosened to a substring test. Verified by
+    making that change: ``outer_model`` then prints the slug.
+    """
+    from app.core.logging import redact_value
+
+    slug = "anthropic/claude-3-5-sonnet-20240620"
+    # NON-VACUITY: the value is over the floor in ONE class run, so the entropy
+    # sweep is what decides, and the key really does contain a real member.
+    assert _longest_class_run(slug) >= 32, slug
+    assert "model" in "outer_model" and "outer_model" not in MODEL_ID_KEYS
+
+    assert redact_value("outer_model", slug) == SECRET_VALUE
+    # PARTNER: the exemption really is live for the exact key, so the assertion
+    # above is about the MATCHING RULE and not about a dead exemption.
+    assert redact_value("model", slug) == slug
+
+
+def test_the_over_cap_model_marker_counts_the_SWEPT_value_not_the_raw_one() -> None:
+    """The count in the marker is ``len(redacted)``, and the comment says so.
+    Every other over-cap fixture in this file has no Bearer token in it, so the
+    swept and raw lengths are EQUAL and ``len(value)`` passes them all.
+
+    It matters twice over. The comparison that chose this branch measured the
+    swept length, so a raw count describes a different string than the one the
+    branch was taken for; and the count is the one thing an operator can act on
+    -- a marker that overstates by the length of a collapsed token invites
+    "the provider sent 148 characters" when it sent 98 of them post-redaction.
+
+    RED if the marker is built from ``len(value)``. Verified by making that
+    change: the expected/actual counts differ by 50.
+    """
+    from app.core.logging import redact_value
+
+    raw = "Bearer " + "T" * 60 + " " + "x" * 80
+    swept = "Bearer " + SECRET_VALUE + " " + "x" * 80
+    # NON-VACUITY, all three legs: both lengths clear the cap (so the marker is
+    # what fires, not the passthrough), and they DIFFER (so the two
+    # implementations are distinguishable at all).
+    assert len(raw) > MAX_MODEL_ID and len(swept) > MAX_MODEL_ID
+    assert len(raw) != len(swept), (len(raw), len(swept))
+
+    assert redact_value("model", raw) == f"{SECRET_VALUE}…<{len(swept)} chars>"
+
+
+def test_the_three_key_name_sets_are_pairwise_disjoint() -> None:
+    """``redact_value`` tests ``OPAQUE_ID_KEYS``, then ``MODEL_ID_KEYS``, then
+    ``PATH_KEYS``, and every arm RETURNS. A key in two sets therefore takes
+    whichever is tested first and skips the other silently -- on a collision the
+    WEAKER rule wins, which is what ``PATH_KEYS``'s precedence note says must
+    never happen. That was prose only until this test.
+
+    THE PAIR LIST IS MULTI-ITEM AND ITS FIRST ENTRY IS COMPLIANT, deliberately:
+    a ``break``-versus-``continue`` mistake, or an early ``return``, has
+    silently disabled a guard in this repo before, and a single-item or
+    first-item-offending fixture cannot see it.
+
+    RED if a key is added to two of the three sets. Verified by adding
+    ``"path"`` to ``MODEL_ID_KEYS``.
+    """
+    pairs: list[tuple[str, frozenset[str], str, frozenset[str]]] = [
+        ("OPAQUE_ID_KEYS", OPAQUE_ID_KEYS, "MODEL_ID_KEYS", MODEL_ID_KEYS),
+        ("OPAQUE_ID_KEYS", OPAQUE_ID_KEYS, "PATH_KEYS", PATH_KEYS),
+        ("MODEL_ID_KEYS", MODEL_ID_KEYS, "PATH_KEYS", PATH_KEYS),
+    ]
+    assert len(pairs) == 3
+
+    def overlaps(candidates: list[tuple[str, frozenset[str], str, frozenset[str]]]) -> list[str]:
+        found: list[str] = []
+        for name_a, set_a, name_b, set_b in candidates:
+            shared = set_a & set_b
+            if shared:
+                found.append(f"{name_a} & {name_b} = {sorted(shared)}")
+        return found
+
+    assert overlaps(pairs) == [], (
+        "two key-name sets share a key, so one of the two rules is now dead for "
+        "it and the branch order decides which -- see PATH_KEYS's precedence note"
+    )
+    # SELF-CHECK: the walk really does reach every pair and really can report, so
+    # the empty result above is a measurement rather than a broken loop. The
+    # offender is planted LAST, behind three compliant pairs.
+    planted = [*pairs, ("planted", frozenset({"model"}), "planted_twin", frozenset({"model"}))]
+    assert overlaps(planted) == ["planted & planted_twin = ['model']"]
+
+    # THE FOURTH AND FIFTH SETS, WHICH THE PAIRWISE WALK ABOVE CANNOT SEE.
+    # ``RAW_TEXT_KEYS`` and ``SECRET_KEY_PARTS`` are tested FIRST in
+    # ``redact_value``, BEFORE any of the three above, and they match on
+    # SUBSTRING rather than on the whole key. So they shadow by containment, not
+    # by equality, and set intersection finds nothing: a future exempt key named
+    # ``embedding_model_token`` is disjoint from all three sets above and would
+    # still be answered by ``SECRET_KEY_PARTS``'s ``token`` before its own arm
+    # is reached -- the exemption silently dead, this test still green.
+    shadowed = [
+        f"{set_name}:{key!r} is shadowed by the earlier substring rule {part!r}"
+        for set_name, keys in (
+            ("OPAQUE_ID_KEYS", OPAQUE_ID_KEYS),
+            ("MODEL_ID_KEYS", MODEL_ID_KEYS),
+            ("PATH_KEYS", PATH_KEYS),
+        )
+        for key in keys
+        for part in (*SECRET_KEY_PARTS, *RAW_TEXT_KEYS)
+        if part in key.lower()
+    ]
+    assert shadowed == [], (
+        "a whole-key exemption contains a SECRET_KEY_PARTS/RAW_TEXT_KEYS "
+        "substring, so redact_value answers it before the exemption's own arm "
+        "and the exemption is dead -- see the precedence note at PATH_KEYS"
+    )
+    # SELF-CHECK, same discipline as the plant above: the comprehension really
+    # can report. ``token`` is a real ``SECRET_KEY_PARTS`` member and this key
+    # really does contain it.
+    assert [
+        f"planted:{key!r} shadowed by {part!r}"
+        for key in ("embedding_model_token",)
+        for part in SECRET_KEY_PARTS
+        if part in key
+    ] == ["planted:'embedding_model_token' shadowed by 'token'"]
+
+
+def test_the_error_key_is_deliberately_not_exempted() -> None:
+    """#387's OTHER HALF, DECLINED, and this is the executable record of that
+    decision rather than a comment nobody re-checks.
+
+    ``error`` carries arbitrary ``str(exc)`` text. The ``EMITTED_TEXT_KEYS``
+    comment names ``cause``/``error``/``reason`` as deliberately excluded on
+    exactly that ground, so exempting ``error`` from the sweep would let a
+    secret embedded in an exception message print. What #387 loses instead is a
+    filename out of an ``OSError`` string, which #387 itself rates low because
+    ``source=spec.name`` survives -- and it does.
+
+    RED if ``error`` is ever added to ``EMITTED_TEXT_KEYS`` or to
+    ``MODEL_ID_KEYS``. Verified by adding it to each.
+    """
+    assert "error" not in EMITTED_TEXT_KEYS
+    assert "error" not in MODEL_ID_KEYS
+    # On the ``extra=`` path the value never reaches the line at all, so the
+    # sweep's behaviour under this key is not what an operator sees there.
+    line = render("boom", error="[Errno 13] Permission den", source="codex")
+    assert "error=<str len=25>" in line, line
+    # PARTNER: the line stays diagnostic, which is why the loss is acceptable.
+    assert "source='codex'" in line, line
+    # On the ``build_log_event`` path it DOES reach the line, and a
+    # secret-shaped run inside it must still blank.
+    event = build_log_event("source_unfetchable", error=f"cannot read {_SHA256_SHAPED}")
+    assert _SHA256_SHAPED not in str(event["error"]), event
+    assert "cannot read" in str(event["error"]), event
+
+
+# ---------------------------------------------------------------------------
+# #401: the WORK guard. Every other constant in the module bounds the OUTPUT;
+#       this one bounds the SCAN. Above MAX_SCANNED_CHARS a string value is
+#       answered by a marker and no regex runs on it at all.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingPattern:
+    """A ``re.Pattern`` stand-in that records EVERY attribute the module uses.
+
+    Written fresh rather than reusing ``_CountingPattern`` above, which RAISES on
+    any non-``sub`` attribute: that is the right probe for the marker arm and the
+    wrong one here, because this test wants to REPORT what ran rather than fail
+    on the first non-``sub`` use. The recorder still sees ``search``, ``match``
+    and friends, so a mutant restoring work through a different method is
+    visible instead of invisible.
+    """
+
+    def __init__(self, inner: re.Pattern[str], name: str) -> None:
+        self._inner = inner
+        self._name = name
+        self.uses: list[str] = []
+
+    def sub(self, repl: str, string: str) -> str:
+        self.uses.append("sub")
+        return self._inner.sub(repl, string)
+
+    def __getattr__(self, name: str) -> object:
+        object.__getattribute__(self, "uses").append(name)
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
+def test_an_over_length_value_runs_no_regex_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#401 IS A COST DEFECT, so the assertion that measures it is one about
+    WORK. ``BEARER_RE.sub`` is an unbounded O(len) scan that ran over every
+    string value; #390 hoisted the ``path`` marker arm above it, so ``path``
+    stopped paying it while ``method``, ``request_id`` and every other key still
+    did. ``request_id`` is the reachable one -- ``app/core/middleware.py``
+    honours an inbound ``X-Request-ID`` -- and ``MAX_OPAQUE_ID`` bounded its
+    OUTPUT while nothing bounded the scan.
+
+    Asserting the output alone cannot see this: moving the guard BELOW
+    ``BEARER_RE.sub`` produces a byte-identical result for every input.
+
+    RED if the ``MAX_SCANNED_CHARS`` guard is moved below ``BEARER_RE.sub``, or
+    if it stops returning early. Verified by moving it: ``bearer.uses`` becomes
+    ``['sub']`` on every key.
+    """
+    from app.core import logging as logging_module
+
+    bearer = _RecordingPattern(logging_module.BEARER_RE, "BEARER_RE")
+    entropy = _RecordingPattern(logging_module.HIGH_ENTROPY_RE, "HIGH_ENTROPY_RE")
+    monkeypatch.setattr(logging_module, "BEARER_RE", bearer)
+    monkeypatch.setattr(logging_module, "HIGH_ENTROPY_RE", entropy)
+
+    crafted = "z" * (MAX_SCANNED_CHARS + 1)
+    for key in ("request_id", "method", "path", "model", "detail"):
+        bearer.uses.clear()
+        entropy.uses.clear()
+        out = logging_module.redact_value(key, crafted)
+        assert out == f"{SECRET_VALUE}…<{len(crafted)} chars>", (key, out)
+        assert bearer.uses == [], (key, bearer.uses)
+        assert entropy.uses == [], (key, entropy.uses)
+
+    # PARTNER, because zeros would also be produced by a ``redact_value`` that
+    # never scans anything: on a value UNDER the guard both patterns really run.
+    bearer.uses.clear()
+    entropy.uses.clear()
+    assert logging_module.redact_value("detail", "hello") == "hello"
+    assert bearer.uses == ["sub"], bearer.uses
+    assert entropy.uses == ["sub"], entropy.uses
+
+
+def test_the_work_guard_emits_no_window_of_its_input() -> None:
+    """THE REASON IT IS A MARKER AND NOT A LENGTH PRE-CHECK THAT THEN SWEEPS.
+
+    #401 suggests a pre-check and names the trap: cutting before sweeping leaves
+    a sub-floor prefix the later sweep no longer matches, and it prints. That
+    trap is REAL for ``HIGH_ENTROPY_RE`` -- a 40-character run cut to 31 falls
+    under the floor -- and the marker is immune to it because it emits no
+    character of its input.
+
+    (The trap as #401 states it, for ``BEARER_RE``, is REFUTED: that pattern is
+    anchored on the literal ``Bearer`` and has no length floor, so a cut inside
+    the token still matches. Measured, and recorded at ``MAX_SCANNED_CHARS``.)
+
+    RED if the guard returns a truncation of ``value`` instead of the marker.
+    Verified by making that change.
+    """
+    from app.core.logging import redact_value
+
+    secret = "NOTAREALSECRET" + "0123456789abcdefghij" * 3
+    crafted = secret + "q" * (MAX_SCANNED_CHARS + 1 - len(secret))
+    assert len(crafted) == MAX_SCANNED_CHARS + 1
+
+    out = str(redact_value("detail", crafted))
+    windows = [secret[i : i + 8] for i in range(len(secret) - 7)]
+    assert [w for w in windows if w in out] == [], out
+    assert out == f"{SECRET_VALUE}…<{len(crafted)} chars>", out
+
+
+def test_the_work_guard_fires_only_ABOVE_the_limit() -> None:
+    """The COMPARISON, pinned separately. ``> MAX_SCANNED_CHARS`` and
+    ``>= MAX_SCANNED_CHARS`` both answer every over-limit fixture, so the tests
+    above pass under either; a ``>=``-versus-``>`` mutant survived a whole review
+    round in this file's history.
+
+    The material is chosen so the sweep is the IDENTITY on it -- alternating
+    ``q.`` gives a maximum class run of one -- so at the limit the output is the
+    input exactly and any difference is attributable to the BRANCH rather than
+    to redaction or truncation.
+
+    RED if the comparison is loosened to ``>=`` (the at-limit half fails) or
+    raised to ``+ 1`` (the one-over half fails). Verified by making both
+    changes.
+    """
+    from app.core.logging import redact_value
+
+    at_limit = "q." * (MAX_SCANNED_CHARS // 2)
+    one_over = at_limit + "q"
+    assert len(at_limit) == MAX_SCANNED_CHARS
+    assert _longest_class_run(at_limit) == 1, "the sweep must be the identity on this fixture"
+
+    assert redact_value("detail", at_limit) == at_limit
+    assert redact_value("detail", one_over) == f"{SECRET_VALUE}…<{MAX_SCANNED_CHARS + 1} chars>"
+
+
+def test_a_str_subclass_cannot_talk_its_way_past_the_work_guard() -> None:
+    """The guard reads ``str.__len__(value)`` -- the UNBOUND method -- for the
+    same reason the ``MAX_PATH_SEGMENTS`` arm reads ``str.count``: it runs
+    BEFORE ``BEARER_RE.sub``, which is what normalises a ``str`` subclass to a
+    plain ``str`` everywhere else in this function. With the bound
+    ``len(value)`` a subclass supplies its own length and picks the branch.
+
+    RED if the guard is changed to ``len(value)``. Verified by making that
+    change.
+    """
+    from app.core.logging import redact_value
+
+    class LyingStr(str):
+        def __len__(self) -> int:
+            return 1  # "I am tiny, please scan me in full"
+
+    crafted = LyingStr("z" * (MAX_SCANNED_CHARS + 1))
+    # The lie is real, so this cannot pass for the wrong reason.
+    assert len(crafted) == 1
+    assert str.__len__(crafted) == MAX_SCANNED_CHARS + 1
+
+    assert redact_value("detail", crafted) == f"{SECRET_VALUE}…<{MAX_SCANNED_CHARS + 1} chars>"
+
+
+def test_every_declared_route_sits_far_below_the_work_guard() -> None:
+    """THE DESIGN MARGIN, made executable against REALITY rather than against a
+    constant. ``MAX_SCANNED_CHARS``'s comment says no value this app emits comes
+    near it; that argument lived only in prose.
+
+    Read off the OpenAPI schema for the same reason
+    ``test_the_threshold_clears_every_route_this_app_declares`` does: the API
+    routers are attached through include wrappers, so ``app.routes`` yields only
+    ``/docs`` and friends.
+
+    RED if a route is declared longer than a twentieth of the guard (410
+    characters today), or if ``MAX_SCANNED_CHARS`` is lowered under twenty times
+    the longest route. The longest declared route is 48 characters, so the guard
+    reads ``48 * 20 <= 8192``.
+    """
+    from app.main import create_app
+
+    paths = list(create_app().openapi()["paths"])
+    # PARTNER: the enumeration really found the API, not just the docs routes.
+    assert len(paths) >= 20, (len(paths), sorted(paths))
+    assert "/v1/sessions/{session_id}/messages" in paths, sorted(paths)[:10]
+
+    longest = max(paths, key=len)
+    assert len(longest) * 20 <= MAX_SCANNED_CHARS, (
+        f"the longest declared route is {len(longest)} characters ({longest!r}) and "
+        f"MAX_SCANNED_CHARS is {MAX_SCANNED_CHARS}: the margin the constant's comment "
+        f"claims is gone, so a real route is approaching the work guard."
+    )
+
+
+# ── #401, the other half: uvicorn's access line ────────────────────────────
+
+
+def _uvicorn_access_record(path_with_query: str) -> logging.LogRecord:
+    """A record shaped exactly like uvicorn's h11/httptools access line.
+
+    The 5-tuple and the format string are verified against the INSTALLED
+    uvicorn: ``protocols/http/httptools_impl.py:485`` and ``h11_impl.py:482``
+    both log ``'%s - "%s %s HTTP/%s" %d'`` with
+    ``(client_addr, method, path_with_query, http_version, status_code)``.
+    """
+    return logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=("127.0.0.1:1", "GET", path_with_query, "1.1", 200),
+        exc_info=None,
+    )
+
+
+def test_the_access_log_filter_bounds_an_over_long_arg_and_keeps_the_record_renderable() -> None:
+    """#401's second half. ``QUERY_CREDENTIAL_RE.sub`` scanned uvicorn's full
+    access line with no ceiling, and after #390 that was the dominant
+    per-request cost of a crafted request.
+
+    THE BOUND IS ON THE ARG, NOT ON THE LINE, and that is a correctness
+    constraint. Verified against ``uvicorn/logging.py:97-107``, whose
+    ``formatMessage`` destructures ``record.args`` into exactly five names
+    (lines 99-105) and then calls ``int(status_code)`` (line 106): shortening a
+    string arg is safe, but changing the tuple's ARITY or an element's TYPE
+    raises inside the formatter and DROPS the record.
+
+    RED, AND THE MECHANISM STATED HONESTLY, because the first version of this
+    line named one that is false. Removing the bound does NOT make the
+    credential reappear: ``QUERY_CREDENTIAL_RE`` still matches the ``token=``
+    parameter at any length and still redacts it, so the ``"S3cr3t" not in
+    line`` assertion below stays GREEN under that mutant. What actually reddens
+    is the MARKER assertion -- unbounded, the line carries
+    ``?token=[REDACTED]`` and no ``…<N chars>`` at all. Verified by removing the
+    bound from ``_redact_arg``: exactly that one assertion fails.
+
+    RED also if ``_redact_arg`` changes the tuple's shape (the arity and type
+    assertions fail). Verified by making that change.
+    """
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    secret = "S3cr3t" * 4000
+    crafted = "/v1/auth/magic-link/confirm?token=" + secret
+    assert len(crafted) > MAX_SCANNED_CHARS
+
+    record = _uvicorn_access_record(crafted)
+    assert RedactQueryCredentialsFilter().filter(record) is True
+
+    args = record.args
+    assert isinstance(args, tuple)
+    # ARITY and TYPES intact, which is what keeps the record renderable.
+    assert len(args) == 5, args
+    assert args[4] == 200 and type(args[4]) is int, args[4]
+    assert all(isinstance(a, str) for a in args[:4]), args
+
+    line = record.getMessage()
+    # THE LOAD-BEARING ASSERTION. This is the only one the bound moves.
+    assert f"{SECRET_VALUE}…<{len(crafted)} chars>" in line, line
+    # ABSENCE, kept only because it has a PARTNER proving the thing counted
+    # exists: the same 6-character run really is present in the input, in bulk,
+    # so "not in the output" is a measurement rather than a vacuous truth. On
+    # its own this assertion proves nothing here -- see the RED note above.
+    assert crafted.count("S3cr3t") == 4000, "the fixture lost its material"
+    assert "S3cr3t" not in line, line
+    # PARTNER: the record is still a usable access line, not a blank.
+    assert "GET" in line and "200" in line and "HTTP/1.1" in line, line
+
+
+@pytest.mark.parametrize("args", [None, ()], ids=["args_none", "args_empty_tuple"])
+def test_the_args_FALSY_branch_bounds_the_msg_itself(args: tuple[object, ...] | None) -> None:
+    """THE OTHER HALF OF THE ``if record.args`` SPLIT, and the reason the split
+    exists at all -- and nothing in this file reached it. Every other filter
+    test builds a record with uvicorn's truthy 5-tuple, so they all take the
+    args-PRESENT branch, and a mutant that deleted the bound from the else arm
+    survived the whole selection.
+
+    Both falsy shapes are covered because they arrive differently: ``args=None``
+    is a bare ``logger.info(msg)``, ``args=()`` is a caller that passed an empty
+    tuple. ``LogRecord.getMessage`` skips interpolation for both, so ``msg`` is
+    NOT a format string and bounding it cannot break rendering -- which is the
+    whole argument for treating it differently from the args-present case.
+
+    RED if the else arm stops bounding (e.g. reverts to a bare
+    ``QUERY_CREDENTIAL_RE.sub``). Verified by making that change: the marker
+    assertion fails and the 8,200-character msg is emitted whole.
+    """
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    token = "NOTAREALTOKEN" + "7" * 30
+    msg = "GET /cb?token=" + token + " " + "z" * MAX_SCANNED_CHARS
+    assert len(msg) > MAX_SCANNED_CHARS
+
+    record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg=msg,
+        args=args,
+        exc_info=None,
+    )
+    assert RedactQueryCredentialsFilter().filter(record) is True
+
+    # The msg was replaced by the marker, carrying none of its input.
+    assert record.msg == f"{SECRET_VALUE}…<{len(msg)} chars>", record.msg
+    # AND THE RECORD IS STILL RENDERABLE -- the point of the falsy-args split.
+    assert record.getMessage() == f"{SECRET_VALUE}…<{len(msg)} chars>"
+    # PARTNER, so this is not "the filter blanks everything": a SHORT msg with
+    # falsy args still takes the ordinary substitution and keeps its shape.
+    short = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="GET /cb?token=" + token,
+        args=args,
+        exc_info=None,
+    )
+    RedactQueryCredentialsFilter().filter(short)
+    assert short.getMessage() == f"GET /cb?token={SECRET_VALUE}"
+    assert token not in short.getMessage()
+
+
+def test_a_str_subclass_cannot_talk_its_way_past_the_access_log_bound() -> None:
+    """``_redact_arg`` reads ``str.__len__(arg)`` -- the UNBOUND method -- and its
+    comment says why, but the only test of that discipline went through
+    ``redact_value``, never through the FILTER. They are separate call sites and
+    a mutant only has to be applied to one of them.
+
+    It is reachable in principle for the same reason it is in ``redact_value``:
+    the filter runs before any ``sub`` normalises a subclass to a plain ``str``,
+    so with the bound ``len(arg)`` an object supplies its own length and picks
+    its own branch.
+
+    RED if ``_redact_arg`` uses ``len(arg)``. Verified by making that change:
+    the marker assertion fails and the record renders the full value.
+    """
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    class LyingStr(str):
+        def __len__(self) -> int:
+            return 1  # "I am tiny, please scan me in full"
+
+    crafted = LyingStr("/cb?token=" + "z" * MAX_SCANNED_CHARS)
+    # The lie is real, so this cannot pass for the wrong reason.
+    assert len(crafted) == 1
+    assert str.__len__(crafted) > MAX_SCANNED_CHARS
+
+    record = _uvicorn_access_record(crafted)
+    assert RedactQueryCredentialsFilter().filter(record) is True
+
+    args = record.args
+    assert isinstance(args, tuple)
+    assert args[2] == f"{SECRET_VALUE}…<{str.__len__(crafted)} chars>", args[2]
+    # AND THE CONSUMER SEES IT -- the emitted line, not just the tuple.
+    assert f"{SECRET_VALUE}…<{str.__len__(crafted)} chars>" in record.getMessage()
+
+
+def test_the_access_log_arg_bound_fires_only_ABOVE_the_limit() -> None:
+    """THE THIRD MARKER SITE'S COMPARISON, pinned like the other two.
+
+    ``redact_value``'s guard and the ``MAX_MODEL_ID`` cap each have an at-limit
+    partner; ``_redact_arg`` did not, and a ``>``-to-``>=`` mutant on it survived
+    the FULL backend suite while the identical mutant at the other two sites is
+    killed. Found by the skeptic round on the fix round.
+
+    No leak either way -- ``>=`` redacts strictly more -- but at the limit it
+    emits a line claiming the value exceeded a bound it did not exceed, and an
+    operator reading the marker is told a false thing about a value we still
+    hold in full.
+
+    The fixture carries no ``token=``/``code=`` marker, so
+    ``QUERY_CREDENTIAL_RE`` is the identity on it and any difference at the
+    boundary is attributable to the BRANCH rather than to redaction.
+
+    RED if the comparison is loosened to ``>=`` (the at-limit half fails) or
+    raised to ``+ 1`` (the one-over half fails). Verified by making both changes.
+    """
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    at_limit = "q." * (MAX_SCANNED_CHARS // 2)
+    one_over = at_limit + "q"
+    assert len(at_limit) == MAX_SCANNED_CHARS
+    assert QUERY_CREDENTIAL_RE.sub("x", at_limit) == at_limit, "the sub must be the identity here"
+
+    filt = RedactQueryCredentialsFilter()
+
+    record = _uvicorn_access_record(at_limit)
+    assert filt.filter(record) is True
+    args = record.args
+    assert isinstance(args, tuple)
+    assert args[2] == at_limit, "at exactly the limit the value must pass through untouched"
+
+    record = _uvicorn_access_record(one_over)
+    assert filt.filter(record) is True
+    args = record.args
+    assert isinstance(args, tuple)
+    assert args[2] == f"{SECRET_VALUE}…<{MAX_SCANNED_CHARS + 1} chars>", args[2]
+
+
+def test_the_access_log_filter_still_redacts_a_short_crafted_line() -> None:
+    """NON-VACUITY PARTNER for the bound above, which would be satisfied by a
+    filter that replaced every line with a marker. A normal-length line still
+    takes the ordinary substitution and still loses its credential.
+
+    RED if ``QUERY_CREDENTIAL_RE`` stops being applied under the threshold --
+    e.g. if ``_redact_arg`` returns ``arg`` unchanged there.
+    """
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    secret = "a" * 32 + "." + "b" * 64
+    record = _uvicorn_access_record(f"/v1/auth/magic-link/confirm?token={secret}")
+    RedactQueryCredentialsFilter().filter(record)
+
+    line = record.getMessage()
+    assert secret not in line, line
+    assert f"/v1/auth/magic-link/confirm?token={SECRET_VALUE}" in line, line
+    assert "…<" not in line, "a short line must not be marked as bounded"
+
+
+def test_the_bounded_record_survives_uvicorns_real_access_formatter(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """THE CONSUMER, not the filter's return value. This repo has shipped a guard
+    that pinned a constant while the emitted artifact went unchecked, and the
+    failure mode here is specifically invisible from inside the filter.
+
+    If a bound were applied to ``record.msg`` while ``record.args`` were present,
+    ``LogRecord.getMessage``'s ``msg % self.args`` would raise,
+    ``logging.Handler.handleError`` would catch it, and it would then print the
+    record's UNREDACTED ``args`` to stderr -- turning one redacted log line into
+    a plaintext credential dump. So the record is rendered through uvicorn's OWN
+    ``AccessFormatter`` and stderr is captured and asserted EMPTY.
+
+    RED if the filter rewrites ``record.msg`` while args are present (stderr
+    fills with ``--- Logging error ---`` and the raw token, and the stream is
+    empty). Verified by making that change.
+    """
+    import io
+
+    from uvicorn.logging import AccessFormatter
+
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    secret = "S3cr3t" * 4000
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(AccessFormatter(use_colors=False))
+
+    logger = logging.getLogger("citevyn.test.access.401")
+    logger.handlers = [handler]
+    logger.filters = [RedactQueryCredentialsFilter()]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:1",
+            "GET",
+            "/v1/auth/magic-link/confirm?token=" + secret,
+            "1.1",
+            200,
+        )
+    finally:
+        logger.handlers = []
+        logger.filters = []
+
+    emitted = stream.getvalue()
+    # THE RECORD WAS NOT DROPPED.
+    assert emitted.strip(), "uvicorn's own formatter dropped the record"
+    assert "GET" in emitted and "200" in emitted, emitted
+    assert "S3cr3t" not in emitted, emitted
+    assert f"{SECRET_VALUE}…<" in emitted, emitted
+
+    # AND STDERR IS CLEAN: no ``--- Logging error ---``, no raw token.
+    captured = capsys.readouterr()
+    assert captured.err == "", captured.err
+
+
+def test_a_long_format_string_with_args_is_left_formattable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """THE ARGS-PRESENT BRANCH, which is where bounding ``record.msg`` turns a
+    redacted line into a plaintext credential dump.
+
+    The test above cannot see this: uvicorn's own ``msg`` is a 23-character
+    constant, so bounding it unconditionally is a NO-OP on every record uvicorn
+    emits -- measured, that mutant survived the whole selection. Only a record
+    whose FORMAT STRING is over the threshold AND which carries args separates
+    the two implementations, so this builds one.
+
+    Under the correct rule the msg is left alone (it is a format string; the
+    unbounded scan over it is the residual the filter's docstring states) and
+    the ARG is bounded. Under an unconditional bound the msg becomes a marker
+    with no ``%s`` left, ``msg % self.args`` raises ``TypeError``,
+    ``logging.Handler.handleError`` catches it, and the handler then prints the
+    record's UNREDACTED ``args`` -- including the token -- to stderr.
+
+    RED if the ``record.args`` guard is dropped from the ``record.msg`` branch.
+    Verified by dropping it: stderr fills with ``--- Logging error ---`` and the
+    raw token.
+    """
+    import io
+
+    from app.core.logging import RedactQueryCredentialsFilter
+
+    secret = "NOTAREALTOKEN-" + "9" * 40
+    long_format = "x" * (MAX_SCANNED_CHARS + 1) + " %s"
+    assert len(long_format) > MAX_SCANNED_CHARS
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(build_log_formatter())
+
+    logger = logging.getLogger("citevyn.test.access.401.longmsg")
+    logger.handlers = [handler]
+    logger.filters = [RedactQueryCredentialsFilter()]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    try:
+        logger.info(long_format, f"/cb?token={secret}")
+    finally:
+        logger.handlers = []
+        logger.filters = []
+
+    emitted = stream.getvalue()
+    assert emitted.strip(), "the record was dropped: the format string is no longer formattable"
+    assert secret not in emitted, emitted
+    assert f"?token={SECRET_VALUE}" in emitted, emitted[-200:]
+    # THE ACTUAL PAYLOAD OF THIS TEST: nothing reached stderr. A dropped record
+    # here does not merely lose a line -- it PRINTS the unredacted args.
+    captured = capsys.readouterr()
+    assert "--- Logging error ---" not in captured.err, captured.err
+    assert secret not in captured.err, "the credential was dumped to stderr"
+    assert captured.err == "", captured.err
