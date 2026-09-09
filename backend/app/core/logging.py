@@ -91,9 +91,13 @@ MAX_OPAQUE_ID = 160
 # (``PATH_KEYS & OPAQUE_ID_KEYS == frozenset()``, verified); keep them
 # disjoint, or reorder the branches deliberately and say why.
 #
-# INSIDE the branch there is now a third ordering, and it is deliberate:
-# ``MAX_PATH_SEGMENTS`` is checked BEFORE the sweep, and its arm returns
-# without ever consulting the input again. See that constant.
+# THE ``PATH_KEYS`` NAME IS NOW TESTED TWICE, in two places, and that is
+# deliberate. ``MAX_PATH_SEGMENTS`` is checked ABOVE ``BEARER_RE.sub`` -- ahead
+# of every other string branch -- because its arm emits no character of its
+# input and everything below it is therefore dead work; the sweep is checked in
+# its usual place. Both are guarded on the same key name, so the value's shape
+# never selects a rule. See ``MAX_PATH_SEGMENTS`` for the measurement that
+# forced the ordering.
 #
 # THE DEFECT (#384), seen in the Fly v17 production logs: ``HIGH_ENTROPY_RE``'s
 # character class contains ``/``, so a path is one contiguous run and the whole
@@ -218,26 +222,48 @@ PATH_KEYS = frozenset({"path"})
 MAX_PATH = 160
 
 
-# The number of ``/``-delimited elements above which a path stops being swept
-# and is replaced by a fixed marker. Counts ``value.split("/")`` ELEMENTS, not
-# separators: ``"/a/b"`` is 3, ``"/"`` is 2, ``""`` is 1. A leading ``/`` means
-# 64 elements is 63 real segments.
+# The number of ``/`` SEPARATORS above which a path stops being swept and is
+# replaced by a fixed marker. Separators, not ``split("/")`` elements: for any
+# value beginning with ``/`` -- every value this branch sees, URL and
+# filesystem alike -- the separator count IS the segment count, so the number
+# the operator reads off the marker is the number they get by counting slashes.
+# ``"/a/b"`` is 2, ``"/"`` is 1, ``""`` is 0.
 #
 # THE DEFECT (#390), found by the adversarial review of the #384 fix. The
 # per-segment sweep runs one ``re.sub`` per segment, inside the asyncio event
 # loop, on EVERY request, and ``MAX_PATH`` bounds the OUTPUT but not the WORK.
-# Measured on an Apple M4 / CPython 3.14.5, median of 7 independent timeit runs
-# of 200 reps each, on the 16,385-byte all-slash path (the largest request line
-# uvicorn's httptools parser accepts):
-#
-#     pre-#384 whole-string rule       126.6 us
-#     per-segment sweep (#384)       1,702.1 us   <- 13.4x
-#     this marker branch                 3.6 us   <- 477x faster than #384
-#
 # A 404 matches no route, so no ``Depends(rate_limited_*)`` throttles it, and
 # the redaction alone then costs many times the request it is logging. The
 # probe that settled reachability is recorded in #390: a 16 kB crafted path
 # returns OUR error envelope, not Fly's, so it does reach ``build_log_event``.
+#
+# MEASURED END TO END -- ``redact_value("path", value)``, which is what the
+# process actually pays -- not one branch in isolation. Apple M4 / CPython
+# 3.14.5, median of 7 independent timeit runs, three runs reproduced within 1%.
+# An earlier draft of this block quoted BRANCH-ONLY figures against
+# whole-function ones and overstated the win by more than tenfold; three
+# reviewers caught it independently, which is why the frame is stated here.
+#
+#                              #384 sweep    this file
+#     16,385 B all-slash          966 us       2.70 us    ~360x
+#     16,384 B, 4,096 segments    379 us       2.70 us    ~140x
+#     16,368 B, 496 segments      124 us       2.70 us     ~46x
+#     1 MB all-slash           59,197 us        122 us    ~487x
+#     real session route        1.556 us      1.615 us    +59 ns
+#     ``/health``               1.040 us      1.089 us    +49 ns
+#
+# THE ORDERING IS THE FIX, not a layout choice. With this check placed BELOW
+# ``BEARER_RE.sub`` -- where it first landed -- the same 16 kB path cost 45.6
+# us rather than 2.70, because that sub is an unbounded O(len) scan the marker
+# arm has no use for. See the comment at the check itself for why it uses the
+# unbound ``str.count``.
+#
+# STILL NOT BOUNDED, and worth saying because the word is easy to overclaim:
+# ``BEARER_RE.sub`` remains an unbounded scan for every OTHER key, and
+# uvicorn's access-log filter (``QUERY_CREDENTIAL_RE``) scans the full request
+# line for the same request at a measured cost larger than anything here. Those
+# are pre-existing, in different mechanisms, and are tracked separately. What
+# this constant bounds is the ``path`` field of the app's own request log.
 #
 # WHY THE ARM RETURNS A MARKER INSTEAD OF FALLING BACK TO THE WHOLE-STRING
 # SWEEP, which is what #390 proposed. The whole-string sweep redacts a SUPERSET
@@ -250,50 +276,82 @@ MAX_PATH = 160
 # The rule is not the sweep, though: it is the sweep AND the ``MAX_PATH`` cut.
 # Redacting a superset makes the swept string SHORTER, and a shorter string
 # pulls tail material INSIDE the 160-character window that the per-segment
-# order truncates away. Reproduced here, deterministically, at 65 elements --
+# order truncates away. Reproduced here, deterministically, at 64 separators --
 # 63 blobs of 32 ``A``s, then a 27-character Resend-shaped literal:
 #
 #     per-segment  '/[REDACTED]/[REDACTED]/...'   (cut at 160; literal absent)
 #     #390's arm   '/[REDACTED]/.re_...'          (literal PRINTS IN FULL)
 #
-# The same flip prints an Argon2 salt, which the ``SECRET_KEY_PARTS`` comment
-# at the top of this file records as a shape ``HIGH_ENTROPY_RE`` cannot catch.
-# Neither rule REDACTS those; the per-segment order hid them by volume. The
-# marker cannot regress that way because it emits no input character at all:
-# its output is a constant plus a decimal count, so it is bounded by
-# construction (28 characters at the largest request line uvicorn accepts) and
-# there is nothing for a cut to expose. Verified at 60..69 elements: the
-# literal appears under #390's arm from 65 onward and never under this one.
+# The same flip prints the salt out of an Argon2 PHC string, which the
+# ``SECRET_KEY_PARTS`` comment at the top of this file records as a shape
+# ``HIGH_ENTROPY_RE`` cannot catch. Neither rule REDACTS those; the per-segment
+# order hid them by volume. The marker cannot regress that way because it emits
+# no input character at all: its output is a constant plus a decimal count, so
+# it is bounded at ``23 + the count's digits`` -- 25 characters at the
+# threshold, 28 for a 16 kB path, 31 for a 10 MB one -- and there is nothing
+# for a cut to expose. Verified across 60..69 separators: the literal appears
+# under #390's arm from 65 onward and never under this one.
+#
+# NOT "the largest request line uvicorn accepts". An earlier draft said that of
+# 16,385 bytes. It is false: httptools 0.8.0 parses a 1,000,000-byte request
+# line and uvicorn imposes no cap on that path (16,384 is h11's
+# ``DEFAULT_MAX_INCOMPLETE_EVENT_SIZE``, a different implementation, and
+# ``infra/docker/Dockerfile.api`` selects httptools). 16 kB is simply the size
+# #390 probed. The marker stays bounded regardless, which is the point of
+# stating the bound logarithmically rather than as a flat number.
 #
 # WHAT THE MARKER COSTS, stated. Above the threshold the route shape is gone --
 # the #384 symptom, deliberately, for values that are not routes. No path this
 # app serves comes close: the deepest declared route is 7 elements
-# (``/v1/auth/oauth/{provider}/connect/start``), the deepest concrete URL 6,
-# and the two filesystem ``path=`` sites measure 3 in the container and 10 in a
-# developer checkout. 64 is ~9x the deepest route and ~6x the deepest observed
-# filesystem value, so nothing production emits changes. And the marker states
-# the element count, which ``'/[REDACTED]'`` did not -- an operator seeing a
-# 404 flood learns the SHAPE of it. uvicorn's own access line still carries the
-# full request line (``--access-log`` in ``infra/docker/Dockerfile.api``, query
-# credentials stripped by ``QUERY_CREDENTIAL_RE``), so nothing is lost.
+# (``/v1/auth/oauth/{provider}/connect/start``, and its concrete form is 7 too
+# -- Starlette's default converter never matches ``/``). The THREE filesystem
+# ``path=`` sites measure 3 in the container (``/app/frontend_dist``,
+# ``main.py`` twice), 7 in a plain developer checkout, 10 inside a linked
+# checkout, and 8 for the dev email outbox, whose directory is settings-
+# configurable and so has no fixed bound. Against the deepest value observed
+# anywhere, 64 is a little over 6x. Nothing production emits changes.
 #
-# TWO ALTERNATIVES MEASURED AND REJECTED, on the same 16,385-byte input:
+# AND THE COUNT IS CLIENT-INFLUENCED. The marker names the separator count,
+# which ``'/[REDACTED]'`` did not, so an operator seeing a 404 flood learns
+# more than before -- but not something they may trust as measured. A short
+# crafted path forges the identical line: ``/`` + 32 ``A``s + the literal
+# ``…<999999 segments>`` has one separator, takes the SWEEP, and renders as
+# ``'/[REDACTED]…<999999 segments>'`` because ``…`` is outside
+# ``HIGH_ENTROPY_RE``'s class and closes the match. That is the client's own
+# value echoed back, disclosing none of our secrets -- the identical,
+# already-accepted tradeoff documented for ``request_id`` above, and
+# ``'…<truncated>'`` was forgeable the same way before this change.
+#
+# uvicorn's own access line still carries the full request line
+# (``--access-log`` in ``infra/docker/Dockerfile.api``, query credentials
+# stripped by ``QUERY_CREDENTIAL_RE``). It carries NO ``request_id``, though,
+# and this module's format prints no timestamp, so recovering the path means
+# correlating two lines by time -- which is precisely the burden #384 filed as
+# the defect. For crafted non-routes that is an acceptable trade; "nothing is
+# lost" would not be true and is not claimed.
+#
+# TWO ALTERNATIVES MEASURED AND REJECTED:
 #
 #   * Cap BEFORE sweeping: strictly WEAKER, and not retried here. The cut lands
 #     mid-token and the surviving sub-32-character prefix falls under
 #     ``HIGH_ENTROPY_RE``'s floor and prints. Pinned by
 #     ``test_the_path_sweep_runs_BEFORE_the_truncation_so_a_cut_cannot_expose_a_secret``.
 #   * Skip the ``re.sub`` for segments under 32 characters, which cannot match
-#     and so is a provable no-op: 702.3 us, and on 496 segments of 32
-#     characters it measures 121.8 us against the sweep's 122.4 us -- no help
-#     at all on the shape it does not happen to fit. It reduces the cost; it
-#     does not BOUND it, which is what #390 asks for.
+#     and so is a provable no-op. On 496 segments of 32 characters it is no
+#     help at all -- the segments are over the floor, so nothing is skipped.
+#     It reduces the cost on one shape; it does not BOUND it, which is what
+#     #390 asks for. Note it is also NOT free to adopt later: it is killed by
+#     the sweep-call-count partner in ``test_log_extra_fields.py``, which pins
+#     an exact call count deliberately.
 #
 # COUPLED TO ``MAX_PATH``, and the coupling is invisible from either constant
 # alone: ``MAX_PATH``'s own boundary tests build ``"/seg" * MAX_PATH`` sliced to
-# ``MAX_PATH``, which is 41 elements at 160 and would cross this threshold if
-# ``MAX_PATH`` were raised past 252. Those tests assert the relationship rather
-# than assume it, so raising one constant without the other fails loudly.
+# ``MAX_PATH``, which is 40 separators at 160 and crosses this threshold when
+# ``MAX_PATH`` reaches 252. ``test_the_max_path_cap_fires_only_ABOVE_the_limit``
+# asserts that relationship explicitly, naming BOTH constants in the failure
+# message -- it did not before, and a reviewer measured the resulting failure
+# at ``MAX_PATH = 300`` as an opaque string diff that never mentioned this
+# constant at all.
 MAX_PATH_SEGMENTS = 64
 
 
@@ -559,6 +617,31 @@ def redact_value(key: str, value: Any) -> Any:
         return [redact_value(key, item) for item in cast(list[Any], value)]
 
     if isinstance(value, str):
+        # #390. This arm runs BEFORE the Bearer sweep, not after it, and the
+        # ordering is the fix rather than an accident of layout. The arm emits
+        # no character of its input, so everything below is dead work for the
+        # values it answers -- and `BEARER_RE.sub` is an unbounded O(len) scan
+        # over the same crafted path, which measured as the entire remaining
+        # cost when this check sat below it. See MAX_PATH_SEGMENTS.
+        #
+        # `str.count(value, ...)` is the UNBOUND method, deliberately. Below
+        # this point every value has been through `BEARER_RE.sub`, which
+        # returns a plain `str` even when handed a `str` SUBCLASS; here it has
+        # not, so a subclass could otherwise supply its own `count` and choose
+        # the branch. No call site constructs one, and `render_extra_value`
+        # already refuses `int` subclasses on the same reasoning; this costs
+        # one attribute lookup and removes the question.
+        #
+        # It counts SEPARATORS, which is the number of segments for any value
+        # that begins with `/` -- every value this branch sees does, URL and
+        # filesystem alike. The count is what the operator is shown, so it is
+        # the number they get by counting slashes, not an off-by-one they have
+        # to know a convention to undo.
+        if key_lower in PATH_KEYS:
+            segment_count = str.count(value, "/")
+            if segment_count > MAX_PATH_SEGMENTS:
+                return f"/{SECRET_VALUE}…<{segment_count} segments>"
+
         redacted = BEARER_RE.sub(f"Bearer {SECRET_VALUE}", value)
         # An opaque correlation id keeps the Bearer sweep and skips the entropy
         # sweep, which would otherwise blank the whole value -- see
@@ -572,16 +655,6 @@ def redact_value(key: str, value: Any) -> Any:
         # PATH_KEYS for the defect (#384), the measurement, and why this is
         # scoped to a key name rather than to the value's shape.
         if key_lower in PATH_KEYS:
-            # #390: one `re.sub` per segment, in the event loop, on every
-            # request. Above `MAX_PATH_SEGMENTS` the value is not a route this
-            # app serves, so it is replaced outright rather than swept -- see
-            # that constant for the measurement and for why this arm emits a
-            # marker instead of falling back to the whole-string sweep.
-            # `count` rather than `len(split(...))`: the crafted input is the
-            # one case where materialising the list is itself the cost.
-            segment_count = redacted.count("/") + 1
-            if segment_count > MAX_PATH_SEGMENTS:
-                return f"/{SECRET_VALUE}…<{segment_count} segments>"
             swept = "/".join(
                 HIGH_ENTROPY_RE.sub(SECRET_VALUE, segment) for segment in redacted.split("/")
             )

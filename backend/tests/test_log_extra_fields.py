@@ -658,9 +658,14 @@ def test_a_secret_inside_one_path_segment_is_still_blanked() -> None:
 # exactly like a mutant that fails, and this repo has already shipped one
 # survivor wearing a timeout.
 #
-# The bound is far above any value the constant could sanely take -- raising the
-# threshold to 256 or 1024 is a legitimate product decision and must not fail
-# here -- and exists only so an absurd value fails FAST and LOUDLY.
+# The bound is far above any value the constant could sanely take, and exists
+# only so an absurd value fails FAST and LOUDLY rather than allocating.
+#
+# It does NOT promise that any value under it is acceptable to the suite. An
+# earlier version said raising the threshold to 256 or 1024 "must not fail
+# here", which is true of this guard and misleading about the file: other
+# tests bracket the constant much more tightly, and a reviewer measured the
+# suite going red well below 256. This guard is about allocation, nothing more.
 _SEGMENTS_MATERIALISATION_LIMIT = 100_000
 
 
@@ -681,12 +686,21 @@ def test_a_pathological_path_is_capped_by_max_path() -> None:
 
     THE FIXTURE CHANGED WITH #390, and the old one is worth naming because it
     is the obvious thing to write. This test used ``"/seg" * 1100`` -- 4,400
-    characters, 1,101 split elements -- which now exceeds ``MAX_PATH_SEGMENTS``
-    and is answered by the marker arm, never reaching ``MAX_PATH`` at all. It
-    would have passed for the wrong reason under a mutant that deleted the cap,
-    because the marker bounds that input too. The fixture is now built AT the
-    largest element count the sweep still handles, so it exercises the cap on
-    the only branch that has one.
+    characters, 1,100 separators -- which now exceeds ``MAX_PATH_SEGMENTS`` and
+    is answered by the marker arm, never reaching ``MAX_PATH`` at all.
+
+    An earlier version of this paragraph, and of the commit message that
+    shipped it, said that fixture "would have passed for the wrong reason under
+    a mutant that deleted the cap". That is FALSE, and two reviewers
+    reproduced it independently: against the shipped code the old assertion
+    ``capped.endswith("…<truncated>")`` is simply False, because the value is
+    now ``'/[REDACTED]…<1100 segments>'``. The old test went RED and FORCED
+    this rewrite; it did not pass quietly. Recorded rather than silently
+    corrected, because overstating what evidence showed is this repo's most
+    expensive recurring mistake.
+
+    The fixture is now built AT the largest separator count the sweep still
+    handles, so it exercises the cap on the only branch that has one.
 
     RED if ``MAX_PATH`` stops being applied (set it to a huge number and this
     fails). Also RED, loudly and with a message, if ``MAX_PATH`` is ever raised
@@ -700,8 +714,8 @@ def test_a_pathological_path_is_capped_by_max_path() -> None:
     # segment matches and the sweep is the identity -- the cap is then the only
     # thing that can shorten this value.
     segment = "q" * 20
-    pathological = ("/" + segment) * (MAX_PATH_SEGMENTS - 1)
-    assert len(pathological.split("/")) == MAX_PATH_SEGMENTS, (
+    pathological = ("/" + segment) * MAX_PATH_SEGMENTS
+    assert pathological.count("/") == MAX_PATH_SEGMENTS, (
         "the fixture must sit ON the sweep's boundary, not past it"
     )
     assert len(pathological) > MAX_PATH, (
@@ -764,6 +778,24 @@ def test_the_max_path_cap_fires_only_ABOVE_the_limit() -> None:
         f"MAX_PATH={MAX_PATH}: this test refuses to materialise a "
         f"{4 * MAX_PATH}-character string. This is the harness declining to "
         f"allocate, not a statement that {MAX_PATH} is an invalid cap."
+    )
+
+    # THE COUPLING TO ``MAX_PATH_SEGMENTS``, asserted rather than assumed.
+    # Every fixture below is a ``"/seg"`` repeat sliced to about ``MAX_PATH``,
+    # so it carries roughly ``MAX_PATH / 4`` separators. Past ``MAX_PATH = 252``
+    # that crosses the segment threshold, the marker arm answers these values
+    # instead of the sweep, and this test fails -- with a bare diff of a
+    # 300-character string that never names the other constant. A reviewer
+    # measured exactly that at ``MAX_PATH = 300`` and called it opaque rather
+    # than loud. This assertion is what makes it loud.
+    from app.core.logging import MAX_PATH_SEGMENTS
+
+    assert (MAX_PATH + 1) // 4 <= MAX_PATH_SEGMENTS, (
+        f"MAX_PATH={MAX_PATH} and MAX_PATH_SEGMENTS={MAX_PATH_SEGMENTS} have drifted apart: "
+        f"this test's fixtures carry about {(MAX_PATH + 1) // 4} separators, which now exceeds "
+        f"the segment threshold, so they take the MARKER arm and stop exercising the cap at "
+        f"all. Raise MAX_PATH_SEGMENTS alongside MAX_PATH, or rebuild these fixtures with "
+        f"longer segments."
     )
 
     marker = "…<truncated>"
@@ -953,7 +985,13 @@ def test_a_real_session_path_is_not_truncated() -> None:
 
     session_path = "/v1/sessions/0f0d1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b/messages"
     assert len(session_path) == 58
-    assert "…<truncated>" not in str(redact_value("path", session_path))
+    # POSITIVE, not merely 'the truncation marker is absent'. #390 added a
+    # SECOND mechanism that satisfies that absence: under
+    # ``MAX_PATH_SEGMENTS = 4`` this route renders as
+    # ``'/[REDACTED]…<5 segments>'`` -- total loss of the route shape this
+    # test exists to protect -- and the absence assertion still passed.
+    # Measured by a reviewer. Assert the value instead.
+    assert redact_value("path", session_path) == "/v1/sessions/[REDACTED]/messages"
 
 
 # ── #390: the MAX_PATH_SEGMENTS marker arm ─────────────────────────────────
@@ -974,10 +1012,64 @@ def test_a_real_session_path_is_not_truncated() -> None:
 # The marker's ONLY variable part is a decimal count, so its whole output is a
 # constant modulo digits. That is the security property, and it is asserted as
 # a full match rather than described.
-_SEGMENT_MARKER_RE = re.compile(r"/\[REDACTED\]…<\d+ segments>")
+# ANCHORED with \A and \Z, not merely relied on being used with `fullmatch`.
+# Unanchored, the pattern accepts every leak under a stray `search`:
+# `//[REDACTED]…<1 segments>`, `/[REDACTED]…<1 segments>/leak` and
+# `x/[REDACTED]…<1 segments>` all match. Every use here is `fullmatch` today;
+# the anchors mean a future `search` cannot silently weaken it.
+_SEGMENT_MARKER_RE = re.compile(r"\A/\[REDACTED\]…<\d+ segments>\Z")
 
-# The largest request line uvicorn's httptools parser accepts, per #390.
-_LARGEST_ACCEPTED_REQUEST_LINE = 16385
+# A large crafted request line. NOT "the largest uvicorn accepts" -- an earlier
+# name said that and it is false: httptools 0.8.0 parses a 1,000,000-byte
+# request line and uvicorn caps neither (16,384 is h11's
+# DEFAULT_MAX_INCOMPLETE_EVENT_SIZE, a different implementation). This is
+# simply the size #390 probed.
+_A_LARGE_REQUEST_LINE = 16385
+
+# The sub-floor literal the #390 counterexample turns on: 27 characters, under
+# HIGH_ENTROPY_RE's 32-character floor, so NO sweep in the module removes it.
+# ONE constant, imported by every site that needs it. It was written out three
+# times in three tests, so changing one copy to a shape the sweep DOES redact
+# would have left the regression test passing for the wrong reason while its
+# non-vacuity partner stayed green -- the exact failure that partner exists to
+# prevent. Obviously synthetic; never a real key.
+FAKE_SUB_FLOOR_KEY = "re_" + "M5jEIbOReG1FaJDGhnseqgg4"
+
+
+def test_the_marker_reaches_the_line_through_the_extra_route_too() -> None:
+    """THE OTHER EMISSION ROUTE, which nothing else covers.
+
+    ``path`` reaches the log by two different mechanisms and this change
+    affects both. ``app/core/middleware.py`` passes it to ``build_log_event``,
+    whose dict becomes the record's MESSAGE -- that route is driven end to end
+    by ``test_messages_routes.py``. But ``app/main.py`` emits ``path`` as an
+    ``extra=`` field at TWO sites (``orchestrator_error`` at :267 and
+    ``unhandled_exception`` at :348), and that route goes through
+    ``render_extra_value``'s allowlist, ``MAX_EMITTED_TEXT`` and ``repr``
+    instead. Two of the three URL-path sites are therefore the untested one.
+
+    Found by an adversarial reviewer, who checked the behaviour by hand and
+    noted that nothing pinned it.
+
+    RED if ``path`` is dropped from ``EMITTED_TEXT_KEYS`` (the field renders as
+    a shape summary), or if the marker grows past ``MAX_EMITTED_TEXT`` and is
+    truncated a second time.
+    """
+    from app.core.logging import MAX_EMITTED_TEXT, MAX_PATH_SEGMENTS
+
+    crafted = "/a" * (MAX_PATH_SEGMENTS + 1)
+    line = render("orchestrator_error", path=crafted)
+
+    expected = f"/[REDACTED]…<{MAX_PATH_SEGMENTS + 1} segments>"
+    assert line == f"orchestrator_error path={expected!r}", line
+    # The `extra=` route applies its OWN cap after `redact_value`. The marker
+    # must sit under it, or the field would carry two truncation markers.
+    assert len(expected) < MAX_EMITTED_TEXT
+    assert "…<truncated>" not in line, line
+    # Positive partner: a short route still renders in full on this same
+    # route, so the assertion above is about the marker, not about `path`
+    # being suppressed here generally.
+    assert render("orchestrator_error", path="/health") == "orchestrator_error path='/health'"
 
 
 def test_a_path_with_too_many_segments_becomes_a_bounded_marker() -> None:
@@ -994,7 +1086,7 @@ def test_a_path_with_too_many_segments_becomes_a_bounded_marker() -> None:
     """
     from app.core.logging import MAX_PATH, redact_value
 
-    crafted = "/" * _LARGEST_ACCEPTED_REQUEST_LINE
+    crafted = "/" * _A_LARGE_REQUEST_LINE
     out = redact_value("path", crafted)
     assert isinstance(out, str)
     assert _SEGMENT_MARKER_RE.fullmatch(out), out
@@ -1004,7 +1096,7 @@ def test_a_path_with_too_many_segments_becomes_a_bounded_marker() -> None:
     assert len(out) < MAX_PATH
     # Positive partner: the count is REAL, so this is not a fixed string that
     # would look identical for any input.
-    assert f"<{_LARGEST_ACCEPTED_REQUEST_LINE + 1} segments>" in out, out
+    assert f"<{_A_LARGE_REQUEST_LINE} segments>" in out, out
 
 
 def test_the_segment_marker_fires_only_ABOVE_the_limit() -> None:
@@ -1012,14 +1104,19 @@ def test_the_segment_marker_fires_only_ABOVE_the_limit() -> None:
     the exact element count at which behaviour flips. Off-by-one here is not a
     cosmetic bug: it decides which of two different redaction rules runs.
 
-    ``MAX_PATH_SEGMENTS`` counts ``split("/")`` ELEMENTS, not separators, so a
-    leading ``/`` means the limit is one fewer real segment than the number
-    reads. That is asserted, not assumed.
+    ``MAX_PATH_SEGMENTS`` counts SEPARATORS, which for a value beginning with
+    ``/`` is the segment count an operator gets by counting slashes. That
+    property is asserted here, not assumed.
 
     RED if the comparison is loosened to ``>=`` (the at-limit half fails, the
     sweep's output replaced by a marker) or tightened to ``+ 1`` (the
-    one-over half fails). Also RED if the count is taken as ``count("/")``
-    without the ``+ 1`` -- the flip point moves by one element.
+    one-over half fails).
+
+    A previous version of this line listed a third mutant, "the count is
+    taken without the ``+ 1``". Under the element-counting rule that was the
+    SAME mutant as ``> MAX_PATH_SEGMENTS + 1`` -- both move the flip point one
+    step -- so it was coverage counted twice, not coverage. The rule now
+    counts separators and there is no ``+ 1`` to drop.
     """
     from app.core.logging import MAX_PATH, MAX_PATH_SEGMENTS, redact_value
 
@@ -1030,18 +1127,20 @@ def test_the_segment_marker_fires_only_ABOVE_the_limit() -> None:
     # the input, so any difference is attributable to the BRANCH and not to
     # redaction or to truncation. (A 3-character segment overflows the cap at
     # 63 segments and this test measured the cap instead. Found by running it.)
-    at_limit = "/a" * (MAX_PATH_SEGMENTS - 1)
-    one_over = "/a" * MAX_PATH_SEGMENTS
+    at_limit = "/a" * MAX_PATH_SEGMENTS
+    one_over = "/a" * (MAX_PATH_SEGMENTS + 1)
     assert len(one_over) <= MAX_PATH, (
-        f"MAX_PATH={MAX_PATH} can no longer hold {MAX_PATH_SEGMENTS} one-character segments "
-        f"({len(one_over)} characters), so this test would measure the cap, not the branch."
+        f"MAX_PATH={MAX_PATH} can no longer hold {MAX_PATH_SEGMENTS + 1} one-character "
+        f"segments ({len(one_over)} characters), so this test would measure the cap, not "
+        f"the branch."
     )
-    assert len(at_limit.split("/")) == MAX_PATH_SEGMENTS
-    assert len(one_over.split("/")) == MAX_PATH_SEGMENTS + 1
-    # The element count is one MORE than the number of real segments, because
-    # a leading "/" produces an empty leading element.
-    assert at_limit.split("/")[0] == ""
-    assert at_limit.count("/") == MAX_PATH_SEGMENTS - 1
+    # SEPARATORS, which is what the rule counts and what the marker prints.
+    assert at_limit.count("/") == MAX_PATH_SEGMENTS
+    assert one_over.count("/") == MAX_PATH_SEGMENTS + 1
+    # And the separator count really is the segment count here, because the
+    # value begins with "/" -- the property the rule relies on.
+    assert at_limit.startswith("/")
+    assert len([s for s in at_limit.split("/") if s]) == MAX_PATH_SEGMENTS
 
     swept = redact_value("path", at_limit)
     assert swept == at_limit, swept
@@ -1056,15 +1155,25 @@ def test_the_segment_marker_fires_only_ABOVE_the_limit() -> None:
     ("shape", "value"), FAKE_SECRET_SHAPES, ids=[s for s, _ in FAKE_SECRET_SHAPES]
 )
 def test_the_marker_arm_emits_no_character_of_its_input(shape: str, value: str) -> None:
-    """THE "NEVER WEAKER" PROOF, per secret shape, and it is a proof by shape
-    of the OUTPUT rather than a sampling argument: the marker arm's result is a
-    fixed string plus a decimal count, so no input character can reach the log
-    line whatever the input contains.
+    """THE "NEVER WEAKER" PROOF: the marker arm's result is a fixed string plus
+    a decimal count, so no input character can reach the log line whatever the
+    input contains. That is a proof by the shape of the OUTPUT, not a sampling
+    argument, and ``_SEGMENT_MARKER_RE.fullmatch`` is the assertion carrying
+    it.
 
-    Asserted twice on purpose -- the full match is the general statement, the
-    per-shape absence is the concrete one an operator would recognise. The
-    first shape in ``FAKE_SECRET_SHAPES`` is one the sweep itself redacts, so a
-    rewrite of that list cannot make this pass vacuously.
+    WHAT THIS PARAMETRIZATION IS AND IS NOT, because an earlier docstring
+    called it a per-shape proof and a reviewer showed it is not. Once the
+    fullmatch passes, ``value not in out`` and the empty-window check are
+    entailed for EVERY shape -- they cannot fail while the fullmatch
+    succeeds. So the eight cases have no marginal kills over the first, and
+    the kill set of this test is a strict subset of
+    ``test_a_path_with_too_many_segments_becomes_a_bounded_marker``'s.
+
+    It is kept as a DOCUMENTATION pin -- the concrete, per-shape statement an
+    operator or auditor would want to see executed rather than argued -- in
+    the same spirit as the three declared non-behavioural pins named in this
+    module's docstring. It is not load-bearing, and this paragraph exists so
+    nobody counts it as coverage.
 
     RED if the marker arm is replaced by anything that echoes input, including
     #390's whole-string fallback.
@@ -1073,7 +1182,7 @@ def test_the_marker_arm_emits_no_character_of_its_input(shape: str, value: str) 
 
     _refuse_to_materialise(MAX_PATH_SEGMENTS)
     crafted = "/" + "/".join(["z"] * MAX_PATH_SEGMENTS) + "/" + value
-    assert len(crafted.split("/")) > MAX_PATH_SEGMENTS
+    assert crafted.count("/") > MAX_PATH_SEGMENTS
     out = str(redact_value("path", crafted))
 
     assert _SEGMENT_MARKER_RE.fullmatch(out), (shape, out)
@@ -1117,11 +1226,11 @@ def test_a_many_segment_path_cannot_print_what_the_per_segment_order_truncated()
     # Obviously fake: a repeated character plus a placeholder body, 27
     # characters, deliberately UNDER the 32-character floor.
     _refuse_to_materialise(MAX_PATH_SEGMENTS)
-    fake_key = "re_" + "M5jEIbOReG1FaJDGhnseqgg4"
+    fake_key = FAKE_SUB_FLOOR_KEY
     assert len(fake_key) == 27
 
-    crafted = "/" + "/".join(["A" * 32] * (MAX_PATH_SEGMENTS - 1)) + "/." + fake_key
-    assert len(crafted.split("/")) == MAX_PATH_SEGMENTS + 1
+    crafted = "/" + "/".join(["A" * 32] * MAX_PATH_SEGMENTS) + "/." + fake_key
+    assert crafted.count("/") == MAX_PATH_SEGMENTS + 1
 
     out = str(redact_value("path", crafted))
     assert _SEGMENT_MARKER_RE.fullmatch(out), out
@@ -1129,23 +1238,47 @@ def test_a_many_segment_path_cannot_print_what_the_per_segment_order_truncated()
 
 
 class _CountingPattern:
-    """A ``re.Pattern`` stand-in that records how many times ``sub`` ran.
+    """A ``re.Pattern`` stand-in that records every call ``redact_value`` makes.
 
-    Only the two methods ``redact_value`` actually calls are implemented, so a
-    future call to a third method fails loudly here rather than silently
-    reporting a count that means something else.
+    An earlier version implemented ``sub`` (counted) and ``search``
+    (UNCOUNTED), which left the hole this class exists to close: a mutant that
+    restored the per-segment work as ``HIGH_ENTROPY_RE.search(seg)`` inside the
+    marker arm produced byte-identical output, cost 1,040 of the 1,592
+    microseconds the sweep costs, and kept the whole suite green. A reviewer
+    measured it. Only the counter was blind -- no output-level test anywhere
+    can see that mutant, because there is no output difference to see.
+
+    So ``sub`` is counted and EVERY other attribute raises. That also makes
+    good on the promise the old docstring made and did not keep.
+
+    THE LIMIT, stated because it is a real surviving mutant and not a
+    hypothetical: this intercepts a module GLOBAL by name. Code that calls
+    ``re.sub(<the pattern source>, ...)`` directly, or compiles its own copy,
+    does the same work and is invisible here -- and to every other test in the
+    repo, since the output is unchanged. That mutant survives, deliberately
+    recorded rather than papered over. Nothing but review catches it; a probe
+    on a name cannot see a call that never uses the name.
+
+    Used for ``HIGH_ENTROPY_RE`` and ``BEARER_RE`` both -- the marker arm must
+    run before EITHER of them.
     """
 
     def __init__(self, inner: re.Pattern[str]) -> None:
         self._inner = inner
+        self.calls = 0
         self.sub_calls = 0
 
     def sub(self, repl: str, string: str) -> str:
+        self.calls += 1
         self.sub_calls += 1
         return self._inner.sub(repl, string)
 
-    def search(self, string: str) -> re.Match[str] | None:
-        return self._inner.search(string)
+    def __getattr__(self, name: str) -> object:
+        raise AssertionError(
+            f"the path branch reached HIGH_ENTROPY_RE.{name}: this probe counts "
+            f"`sub` only, so any other use is unmeasured work and must be "
+            f"either counted here or removed"
+        )
 
 
 def test_the_marker_arm_runs_INSTEAD_OF_the_sweep_not_after_it(
@@ -1155,9 +1288,12 @@ def test_the_marker_arm_runs_INSTEAD_OF_the_sweep_not_after_it(
     one about WORK, not about output.
 
     Moving the threshold check to AFTER the sweep produces a byte-identical log
-    line for every input, and every other test in this file passes -- measured:
-    that mutant survived the whole affected suite (96 passed) while doing the
-    full 1,702 microseconds of per-segment work the issue exists to remove. It
+    line for every input, and every other test in this file passes. Measured:
+    that mutant survived ``pytest tests/test_log_extra_fields.py
+    tests/test_log_redaction.py tests/test_messages_routes.py`` -- the exact
+    selection, because a bare count means nothing without one -- while doing
+    the full per-segment work the issue exists to remove (966 microseconds on
+    the 16 kB all-slash path, end to end through ``redact_value``). It
     would have bounded the output, which was never the problem, and shipped the
     regression under a green suite.
 
@@ -1174,22 +1310,179 @@ def test_the_marker_arm_runs_INSTEAD_OF_the_sweep_not_after_it(
     monkeypatch.setattr(logging_module, "HIGH_ENTROPY_RE", counting)
 
     crafted = "/a" * (logging_module.MAX_PATH_SEGMENTS + 5)
-    assert len(crafted.split("/")) > logging_module.MAX_PATH_SEGMENTS
+    assert crafted.count("/") > logging_module.MAX_PATH_SEGMENTS
     out = logging_module.redact_value("path", crafted)
     assert _SEGMENT_MARKER_RE.fullmatch(str(out)), out
-    assert counting.sub_calls == 0, (
-        f"the entropy sweep ran {counting.sub_calls} times on a path the marker arm "
+    # `calls`, not `sub_calls`: ANY use of the pattern is unmeasured work, and
+    # `__getattr__` turns a non-`sub` use into an error rather than a silent
+    # zero. Asserting only `sub_calls` left a mutant alive that restored 65% of
+    # the cost through `search`.
+    assert counting.calls == 0, (
+        f"the entropy sweep ran {counting.calls} times on a path the marker arm "
         f"answers -- the work is not bounded, only the output is"
     )
 
     # PARTNER, because a count of zero on its own would also be satisfied by a
-    # `redact_value` that never sweeps anything: a real route DOES sweep, once
-    # per segment.
+    # `redact_value` that never sweeps anything: a real route DOES sweep.
+    counting.calls = 0
     counting.sub_calls = 0
     session_path = "/v1/sessions/0f0d1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b/messages"
     swept = logging_module.redact_value("path", session_path)
     assert swept == "/v1/sessions/[REDACTED]/messages", swept
+    # ONE sub per split element, pinned EXACTLY rather than as `> 0`. The
+    # exactness is load-bearing and it has a cost worth naming: it forbids the
+    # "skip segments under 32 characters" optimisation, which is a provable
+    # no-op on output and which `MAX_PATH_SEGMENTS`'s comment records as
+    # measured-and-rejected. Anyone adopting it must change this line and say
+    # why -- which is the point. A bare `> 0` would let the sweep degenerate to
+    # a single call and still pass.
     assert counting.sub_calls == len(session_path.split("/")), counting.sub_calls
+
+
+def test_no_regex_at_all_runs_on_a_path_the_marker_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker arm must run BEFORE ``BEARER_RE``, not merely before the
+    entropy sweep -- and that ordering had nothing pinning it.
+
+    ``BEARER_RE.sub`` is an unbounded O(len) scan over the same crafted path,
+    and it runs on every string value. With the segment check placed below it,
+    output is byte-identical for every input and the entire suite stays green
+    while the 16 kB path costs **45.6 us instead of 2.70** -- measured, both
+    orders, on the same interpreter. A reviewer's mutant proved the gap by
+    surviving; the entropy-sweep counter next door cannot see it, because the
+    wasted work is in a different pattern object.
+
+    RED if the ``MAX_PATH_SEGMENTS`` check is moved below
+    ``redacted = BEARER_RE.sub(...)``.
+    """
+    from app.core import logging as logging_module
+
+    _refuse_to_materialise(logging_module.MAX_PATH_SEGMENTS)
+    bearer = _CountingPattern(logging_module.BEARER_RE)
+    entropy = _CountingPattern(logging_module.HIGH_ENTROPY_RE)
+    monkeypatch.setattr(logging_module, "BEARER_RE", bearer)
+    monkeypatch.setattr(logging_module, "HIGH_ENTROPY_RE", entropy)
+
+    crafted = "/a" * (logging_module.MAX_PATH_SEGMENTS + 5)
+    out = logging_module.redact_value("path", crafted)
+    assert _SEGMENT_MARKER_RE.fullmatch(str(out)), out
+    assert bearer.calls == 0, (
+        f"BEARER_RE ran {bearer.calls} times on a path the marker arm answers: the "
+        f"arm is below the Bearer sweep, so the value is scanned in full before "
+        f"being discarded"
+    )
+    assert entropy.calls == 0, entropy.calls
+
+    # PARTNER: on a value the arm does NOT answer, both patterns really do run,
+    # so the zeros above measure the ordering and not a broken probe.
+    bearer.calls = entropy.calls = 0
+    assert logging_module.redact_value("path", "/v1/x") == "/v1/x"
+    assert bearer.calls == 1, bearer.calls
+    assert entropy.calls > 0, entropy.calls
+
+
+def test_the_marker_arm_is_selected_by_the_key_name_not_the_value_shape() -> None:
+    """#384's central invariant, extended to the arm #390 adds.
+
+    ``test_the_path_rule_is_keyed_on_the_key_name_not_the_value_shape`` pins
+    this for the SWEEP. It did not cover the marker arm: a reviewer's mutant
+    replacing the arm's ``if key_lower in PATH_KEYS`` with an unconditional
+    test survived the whole suite. That mutant leaks nothing -- the marker is
+    strictly more redacted than the sweep -- but it hands the branch choice to
+    the VALUE, which is the one thing the #384 comment block spends a hundred
+    lines establishing must never happen.
+
+    RED if the arm's key-name guard is dropped or widened to all keys.
+    """
+    from app.core.logging import MAX_PATH_SEGMENTS, redact_value
+
+    _refuse_to_materialise(MAX_PATH_SEGMENTS)
+    many_slashes = "/a" * (MAX_PATH_SEGMENTS + 5)
+
+    # Under a NON-path key the arm must not fire: the default branch runs and
+    # collapses this to the whole-string sweep's output instead.
+    under_other_key = str(redact_value("reason", many_slashes))
+    assert not _SEGMENT_MARKER_RE.fullmatch(under_other_key), under_other_key
+    # Partner: the identical value under `path` DOES take the arm, so the
+    # assertion above is about the key and not about the value being immune.
+    assert _SEGMENT_MARKER_RE.fullmatch(str(redact_value("path", many_slashes)))
+
+
+def test_a_str_subclass_cannot_choose_its_own_branch() -> None:
+    """The arm reads ``str.count(value, "/")`` -- the UNBOUND method -- because
+    it runs before ``BEARER_RE.sub``, which is what normalises a ``str``
+    subclass to a plain ``str`` everywhere else in this function.
+
+    With the bound ``value.count("/")`` a subclass supplies its own count and
+    picks the branch, which is the same class of hole ``render_extra_value``
+    already refuses ``int`` subclasses for. No call site constructs one today;
+    a reviewer's mutant showed nothing would notice if one did.
+
+    RED if the arm is changed to ``value.count("/")``.
+    """
+    from app.core.logging import MAX_PATH_SEGMENTS, redact_value
+
+    _refuse_to_materialise(MAX_PATH_SEGMENTS)
+
+    class LyingStr(str):
+        def count(self, *args: object, **kwargs: object) -> int:  # type: ignore[override]
+            return 0  # "I have no separators, please sweep me instead"
+
+    crafted = LyingStr("/a" * (MAX_PATH_SEGMENTS + 5))
+    # The lie is real: the object reports 0 while the true count is over the
+    # threshold. Without this the test could pass for the wrong reason.
+    assert crafted.count("/") == 0
+    assert str.count(crafted, "/") == MAX_PATH_SEGMENTS + 5
+
+    out = str(redact_value("path", crafted))
+    assert _SEGMENT_MARKER_RE.fullmatch(out), (
+        f"a str subclass talked its way out of the marker arm: {out!r}"
+    )
+
+
+def test_the_threshold_clears_every_route_this_app_declares() -> None:
+    """THE DESIGN MARGIN, made executable. Nothing else pins it.
+
+    ``MAX_PATH_SEGMENTS``'s comment justifies 64 by saying the deepest declared
+    route is 7 separators and the deepest observed filesystem ``path=`` value
+    is 10. That argument lived only in prose: a reviewer enumerated the values
+    the constant may take without any test noticing and found the whole window
+    **42 through 80** unguarded. At 42, any 43-separator value would silently
+    lose its route shape and no test would say so.
+
+    This asserts the margin against the REAL route table, so lowering the
+    threshold toward the routes -- or adding a pathologically deep route --
+    fails here and names both numbers.
+
+    The 4x factor is the margin the comment claims, not a tight bound; it is
+    stated as a factor so the test does not have to be edited every time a
+    route is added.
+
+    RED if ``MAX_PATH_SEGMENTS`` is lowered to 4x the deepest route or below
+    (28 or less today), or if a route is added that is deeper than a quarter of
+    the threshold (17 separators or more today).
+    """
+    from app.core.logging import MAX_PATH_SEGMENTS
+    from app.main import create_app
+
+    # From the OpenAPI schema, not from ``app.routes``: the API routers are
+    # attached through include wrappers, so the top-level ``routes`` list
+    # yields only ``/docs``, ``/openapi.json`` and friends. The partner below
+    # is what caught that -- the first draft of this test enumerated 4 paths
+    # and would have "passed" against a maximum depth of 2.
+    paths = list(create_app().openapi()["paths"])
+    assert len(paths) >= 20, (len(paths), sorted(paths))
+    assert "/health" in paths, sorted(paths)[:10]
+    assert "/v1/sessions/{session_id}/messages" in paths, sorted(paths)[:10]
+
+    deepest = max(path.count("/") for path in paths)
+    deepest_path = max(paths, key=lambda p: p.count("/"))
+    assert deepest * 4 <= MAX_PATH_SEGMENTS, (
+        f"the deepest declared route is {deepest} separators ({deepest_path!r}) and "
+        f"MAX_PATH_SEGMENTS is {MAX_PATH_SEGMENTS}: the margin the constant's comment "
+        f"claims is gone, so a real route is close to being logged as a marker."
+    )
 
 
 def test_the_fake_under_floor_key_really_does_survive_both_sweeps() -> None:
@@ -1207,7 +1500,7 @@ def test_the_fake_under_floor_key_really_does_survive_both_sweeps() -> None:
     """
     from app.core.logging import HIGH_ENTROPY_RE, SECRET_VALUE, redact_value
 
-    fake_key = "re_" + "M5jEIbOReG1FaJDGhnseqgg4"
+    fake_key = FAKE_SUB_FLOOR_KEY
     assert HIGH_ENTROPY_RE.search(fake_key) is None, (
         "the fixture is now over the 32-character floor, so the regression "
         "test above would pass for the wrong reason"

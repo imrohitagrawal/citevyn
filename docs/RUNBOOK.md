@@ -80,6 +80,24 @@ docker compose -f infra/docker/docker-compose.yml --profile prod logs --tail=200
 Look for: stack traces, repeated 500s, repeated 502s (Caddy
 upstream timeouts).
 
+#### Redaction markers you will see in these lines
+
+The app redacts its own log fields, so three markers appear in normal
+operation. None of them is an error, and knowing which is which saves a
+wrong-turn investigation:
+
+| Marker | Means | Example field |
+|---|---|---|
+| `[REDACTED]` | A value matched a secret-shaped rule, by key name or by entropy | `path='/v1/sessions/[REDACTED]/messages'` |
+| `…<truncated>` | The value was longer than its cap and was cut | `request_id='…<truncated>'` |
+| `…<N segments>` | A **crafted** request path with more than 64 `/` separators. The sweep was skipped on purpose — no route this app serves is anywhere near that deep, so this is a scanner or an attack, not a bug | `path='/[REDACTED]…<3000 segments>'` |
+
+Two things to know about the last one. The full request line is still in
+uvicorn's own access line for the same request, so the path is recoverable —
+but that line carries no `request_id`, so joining them means matching on time.
+And `N` is **client-influenced**: a short crafted path can forge the identical
+field, so read it as a hint, not as a measurement.
+
 ---
 
 ## 3. Common scenarios

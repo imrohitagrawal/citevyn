@@ -572,11 +572,12 @@ def test_the_request_log_line_bounds_a_crafted_many_segment_path(
     the arm is replaced by a whole-string sweep (the planted literal appears).
     """
     from app.core.logging import MAX_PATH_SEGMENTS
+    from tests.test_log_extra_fields import FAKE_SUB_FLOOR_KEY
 
-    fake_key = "re_" + "M5jEIbOReG1FaJDGhnseqgg4"
+    fake_key = FAKE_SUB_FLOOR_KEY
     assert len(fake_key) == 27
     crafted = "/a" * 100 + "/." + fake_key
-    assert len(crafted.split("/")) > MAX_PATH_SEGMENTS
+    assert crafted.count("/") > MAX_PATH_SEGMENTS
 
     with caplog.at_level("INFO", logger="citevyn.request"):
         response = in_memory_client.get(crafted)
