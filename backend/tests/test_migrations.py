@@ -8,6 +8,7 @@ server. The set of tables created must match ``docs/DATA_MODEL.md``.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -548,3 +549,83 @@ def test_versions_directory_contains_chunk_embedding_migration() -> None:
     migration is not in this file — it lands as 0004.
     """
     assert (VERSIONS_DIR / "0003_add_chunk_embedding.py").exists()
+
+
+# ── #374: alembic must not disable the application's loggers ────────────────
+#
+# `db/env.py` calls `logging.config.fileConfig(...)`, whose `disable_existing_
+# loggers` defaults to True. `db/alembic.ini`'s `[loggers] keys` names only
+# `root,sqlalchemy,alembic`, so the default sets `disabled = True` on every
+# `citevyn.*` logger ALREADY CREATED in the process -- mutating them in place,
+# so re-fetching the logger does not undo it.
+#
+# That made 34 tests order-dependent: this module runs alembic IN-PROCESS, and
+# every later test asserting on a captured `citevyn.*` record then saw an empty
+# capture. Default file order hid it (this file sorts after most of them);
+# reverse order exposed it.
+#
+# WHAT TURNS THESE RED: drop `disable_existing_loggers=False` from
+# `db/env.py`'s fileConfig call. Verified by doing exactly that -- both fail.
+
+
+def test_running_alembic_does_not_disable_the_apps_loggers(
+    alembic_config: AlembicConfig,
+) -> None:
+    """The consumer-visible effect: the logger still emits after a migration."""
+    logger = logging.getLogger("citevyn.request")
+    # PARTNER for the assertion below. A logger that was ALREADY disabled would
+    # make "still enabled" vacuous, and a typo'd name would create a fresh
+    # enabled logger and pass no matter what env.py does.
+    assert logger.disabled is False, "precondition: the logger starts enabled"
+    assert "citevyn.request" in logging.root.manager.loggerDict, (
+        "precondition: the logger must already EXIST in the manager, since "
+        "fileConfig only disables loggers that exist when it runs"
+    )
+
+    alembic_upgrade(alembic_config, "head")
+
+    assert logger.disabled is False, (
+        "alembic disabled citevyn.request (#374). db/env.py's fileConfig call "
+        "needs disable_existing_loggers=False, or every later test that reads a "
+        "captured citevyn.* record sees an empty capture"
+    )
+
+
+@pytest.fixture(scope="module")
+def _alembic_already_ran(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Run a migration BEFORE the probe test's ``caplog`` handler is installed.
+
+    MODULE scope is the point. ``fileConfig`` rebuilds the ROOT logger's
+    handlers too, which drops pytest's capture handler for the REMAINDER of the
+    test that triggered it -- so running alembic inside the probe test would
+    fail even with #374 fixed, for an unrelated reason, and would not be
+    testing #374 at all. pytest re-installs that handler per test, so the
+    handler effect is transient while ``disabled = True`` was not. Higher-scoped
+    fixtures are set up before function-scoped ``caplog``, which reproduces the
+    real shape: the migration ran in an EARLIER test.
+    """
+    db_path = tmp_path_factory.mktemp("alembic_logging") / "probe.db"
+    config = AlembicConfig(str(ALEMBIC_INI))
+    config.set_main_option("script_location", str(ALEMBIC_INI.parent))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    alembic_upgrade(config, "head")
+
+
+def test_a_citevyn_log_record_still_reaches_a_handler_after_a_migration(
+    _alembic_already_ran: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Asserts the EMITTED record, not the ``disabled`` flag that causes it.
+
+    ``disabled`` is the mechanism; an empty capture is what the 34 failing tests
+    actually saw. Pinning only the flag would still pass if some other mechanism
+    started swallowing records.
+    """
+    with caplog.at_level(logging.WARNING, logger="citevyn.request"):
+        logging.getLogger("citevyn.request").warning("post_migration_probe")
+
+    emitted = "".join(record.getMessage() for record in caplog.records)
+    assert "post_migration_probe" in emitted, (
+        f"a citevyn.request record did not reach the capture handler after a "
+        f"migration ran in-process (#374); captured: {emitted!r}"
+    )
