@@ -24,7 +24,21 @@ from app.models import Base  # noqa: E402,F401  -- import registers models
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False is LOAD-BEARING, not tidiness (#374).
+    #
+    # fileConfig defaults it to True, which disables every logger NOT named in
+    # the ini. db/alembic.ini names only root,sqlalchemy,alembic, so the
+    # default silently sets disabled = True on every citevyn.* logger in
+    # the process -- permanently, because a logger already created is mutated in
+    # place rather than replaced.
+    #
+    # In production that is merely wasteful. IN-PROCESS it is a correctness bug:
+    # tests/test_migrations.py runs alembic in the pytest process, so every
+    # later test that asserts on a captured citevyn.* log record saw NOTHING.
+    # Measured on 81546f4: 34 tests failed in reverse file order and 0 in the
+    # default order, because test_migrations.py sorts after most of the
+    # log-asserting files and before them under reverse.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Resolve the database URL. The configuration file ships a placeholder;
 # prefer ``CITEVYN_DATABASE_URL`` from the environment so developers
