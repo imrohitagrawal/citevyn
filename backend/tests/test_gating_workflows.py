@@ -1200,6 +1200,7 @@ _SPEC_FILES: frozenset[str] = frozenset(
     {
         "answer-format.spec.ts",
         "behavior.spec.ts",
+        "faint-contrast.spec.ts",
         "fidelity.spec.ts",
         "focus-ring.spec.ts",
         "fonts-offline.spec.ts",

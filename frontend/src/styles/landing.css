@@ -301,7 +301,7 @@ body {
 .shortcut-badge {
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
   border: 1px solid var(--border-2);
   border-radius: 6px;
   padding: 3px 7px;
@@ -384,7 +384,7 @@ body {
   margin-left: 8px;
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .auto-badge {
@@ -394,7 +394,7 @@ body {
   gap: 6px;
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
-  color: var(--faint);
+  color: var(--muted);
   letter-spacing: 0.08em;
 }
 
@@ -522,7 +522,7 @@ body {
 .source-url {
   font-family: "JetBrains Mono", monospace;
   font-size: 10.5px;
-  color: var(--faint);
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -541,7 +541,7 @@ body {
 .suggestions-label {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--faint);
+  color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -575,7 +575,7 @@ body {
 .suggestion-url {
   font-family: "JetBrains Mono", monospace;
   font-size: 10.5px;
-  color: var(--faint);
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -610,7 +610,7 @@ body {
   margin-left: auto;
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
-  color: var(--faint);
+  color: var(--muted);
   letter-spacing: 0.06em;
 }
 
@@ -726,7 +726,7 @@ body {
   font-size: 11.5px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--muted);
   /* Stay on ONE straight line — the old ``max-width: 180px`` forced
      "Grounded in official documentation from" to wrap onto 2–3 lines. */
   white-space: nowrap;
@@ -842,7 +842,7 @@ body {
   font-family: "JetBrains Mono", monospace;
   font-size: 10.5px;
   letter-spacing: 0.1em;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .persona-card h3 {
@@ -932,11 +932,18 @@ body {
   gap: 14px;
 }
 
+/* `--muted`, not `--faint`, even though 24px/700 IS "large text" under WCAG
+ * (≥18.667px when bold) and so only needs 3:1. It was measured in Chromium and
+ * it does not reach even that: `.step-number` sits in `.step-meta`, a SIBLING
+ * of `.step-preview`, so it paints on `.step-card`'s `--surface` (#ffffff) and
+ * not on the inset panel's `--surface-2` — 2.92:1 light, 0.08 SHORT of the
+ * large-text floor. (Dark is 3.21:1 and would have passed; the light theme
+ * decides it.) #396. */
 .step-number {
   font-family: "JetBrains Mono", monospace;
   font-size: 24px;
   font-weight: 700;
-  color: var(--faint);
+  color: var(--muted);
   letter-spacing: -0.02em;
   line-height: 1;
 }
@@ -979,7 +986,7 @@ body {
 
 .typing-prompt {
   font-family: var(--font-mono);
-  color: var(--faint);
+  color: var(--muted);
   font-size: 14px;
 }
 
@@ -1042,7 +1049,7 @@ body {
   margin-left: auto;
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .doc-skeleton {
@@ -1128,7 +1135,7 @@ body {
   align-items: center;
   gap: 7px;
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* =========================================================================
@@ -1183,7 +1190,7 @@ body {
 
 .generic-avatar {
   border: 1px dashed var(--border-2);
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .cv-avatar {
@@ -1453,7 +1460,7 @@ body {
   font-family: "JetBrains Mono", monospace;
   font-size: 10px;
   letter-spacing: 0.08em;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .demo-right {
@@ -1626,7 +1633,7 @@ body {
 
 .unit {
   font-size: 14px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .pricing-card p {
@@ -1771,6 +1778,28 @@ body {
   color: var(--bg);
 }
 
+/* The banner's body sentence. Found by the #396 sweep, and it is NOT a
+ * `--faint` problem — it is worse: the `<p>` had no rule of its own at all, so
+ * it inherited `.cta-banner`'s `color: var(--ink)` onto `.cta-banner`'s
+ * `background: var(--ink)`. Measured in Chromium before this rule existed:
+ * rgb(28, 27, 25) on rgb(28, 27, 25) light and rgb(240, 239, 233) on
+ * rgb(240, 239, 233) dark — 1.00:1 in BOTH themes, a whole sentence of
+ * marketing copy invisible to every sighted visitor.
+ *
+ * `--bg`, matching the `h2` two rules up, is what the inverted panel is built
+ * for. Measured after: 16.35:1 light, 15.69:1 dark — the same pair
+ * `.cta-banner`'s own `--focus-ring` comment records for `--bg` on `--ink`.
+ *
+ * The child selector is deliberate: `.cta-footnote` is also a `<p>` in this
+ * banner and carries its own alpha colour, so a bare `.cta-banner p` would
+ * silently override it. Excluding it is NOT a statement that it was fine — the
+ * first draft of this comment implied that, and a skeptic then measured the
+ * footnote at 3.30:1 in dark. It is fixed on its own terms three rules down.
+ * #396. */
+.cta-banner > p:not(.cta-footnote) {
+  color: var(--bg);
+}
+
 .cta-pill {
   margin-top: 28px;
   height: 48px;
@@ -1795,7 +1824,19 @@ body {
   font-family: "JetBrains Mono", monospace;
   font-size: 11.5px;
   letter-spacing: 0.06em;
-  color: color-mix(in srgb, var(--bg) 50%, transparent);
+  /* 65%, not the 50% this shipped with. At 50% the composited text measured
+     4.99:1 light but only 3.30:1 DARK against the `--ink` banner — below AA for
+     11.5px text. Found by pointing this change's own alpha-aware ratio check at
+     the element, which the first draft of that check named as its motivating
+     example and then never measured.
+
+     Composited by hand over `--ink` and confirmed in the browser: 50% -> 4.99 /
+     3.30; 60% -> 6.59 / 4.50 (still short once rounding is honest); 65% ->
+     7.50 / 5.30. Alpha is the right dial rather than a flat colour: it keeps
+     one declaration correct on BOTH themes, because the banner inverts and
+     `--bg` inverts with it. Still clearly subordinate — the `h2` above it is
+     16.35:1. */
+  color: color-mix(in srgb, var(--bg) 65%, transparent);
 }
 
 /* =========================================================================
@@ -1847,13 +1888,13 @@ footer {
   padding: 3px 9px;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .footer-meta {
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
-  color: var(--faint);
+  color: var(--muted);
   display: flex;
   gap: 8px;
   align-items: center;
@@ -1862,7 +1903,7 @@ footer {
 
 .footer-copy {
   font-size: 13px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* =========================================================================
@@ -1925,7 +1966,7 @@ footer {
 .demo-badge {
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
   letter-spacing: 0.06em;
 }
 
@@ -2166,10 +2207,18 @@ a.citation-chip:focus-visible {
   border-color: var(--ink);
 }
 
+/* The `›` chevron. This one HAS a real claim to WCAG 1.4.3's "pure decoration"
+ * exemption — a single ornamental glyph, no words, no functionality, and the
+ * composer reads identically with it removed — and that argument is recorded
+ * here rather than pretended away. It is DECLINED anyway: `--faint`'s best
+ * light-theme ratio against any surface it paints on is 2.92:1, below even the
+ * 3:1 large-text floor, so the token cannot legally colour text at any size or
+ * weight. Leaving one live consumer of it keeps the trap loaded for the next
+ * author, who will copy this rule onto something that carries words. #396. */
 .composer-prompt {
   flex: none;
   font-family: "JetBrains Mono", monospace;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 15px;
 }
 
@@ -2187,7 +2236,7 @@ a.citation-chip:focus-visible {
 }
 
 .chat-input::placeholder {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .send-button {
@@ -2248,7 +2297,7 @@ a.citation-chip:focus-visible {
   margin: 10px 0 0;
   text-align: center;
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* =========================================================================
@@ -2374,6 +2423,13 @@ a.citation-chip:focus-visible {
 .pending-msg {
 }
 
+/* NOT a contrast fix, and saying otherwise would be a false claim: this
+ * `color` reaches NO glyph. The bubble's only children are three
+ * `.pending-dot` (drawn by `background: var(--muted)`, not by `color`) and
+ * `.pending-label`, which sets its own `color: var(--muted)` below. So the
+ * declaration inherits to nothing visible and the swap changes zero pixels.
+ * It moves anyway as a LATENT-TRAP removal — the next child added to this
+ * bubble would have inherited an unusable token silently. #396. */
 .pending-bubble {
   display: inline-flex;
   align-items: center;
@@ -2381,7 +2437,7 @@ a.citation-chip:focus-visible {
   padding: 11px 16px;
   border-radius: 16px 16px 16px 4px;
   background: var(--bg);
-  color: var(--faint);
+  color: var(--muted);
   border: 1px solid var(--border-2);
   font-size: 14px;
   line-height: 1;
