@@ -309,6 +309,127 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes red the day desktop STARTS deferring.
 
 ### Fixed
+- **`scripts/refresh_sources.sh` stops telling operators to redeploy production,
+  and its change detection works for the first time (#375).**
+  The script's header, and its closing summary at RUNTIME, both told the reader
+  to "run `make refresh` to ingest the stale sources into the catalog". Both
+  halves of that sentence were false. `make refresh` is defined in the
+  `Makefile` as "Rebuild + re-deploy in place" — it runs
+  `infra/docker/scripts/refresh.sh`, a production redeploy that also applies
+  `alembic upgrade head` against the live database. And the `db.ingest`
+  worker it named has never existed;
+  `docs/ADR/0003-embeddings-provider.md:231-233` (under the ADR's
+  "Deferred / Future Work" heading, item 7) records exactly that, as did the
+  now-closed #59.
+  **The issue named three defects; reproduction found a fourth and larger one.**
+  Change detection had never worked once. The manifest writer emitted
+  `printf '  %q: {"stale": %s}'` — BARE keys, so the file was not JSON and `jq`
+  exited 5 with "Invalid numeric literal" — and it never wrote the `sha256`
+  field its own reader asked for, with the parse error swallowed by a
+  `2>/dev/null` redirect and an or-true fallback. `prev_hash` was therefore
+  permanently the empty string. Measured: two consecutive runs over
+  byte-identical stubbed content BOTH reported "3 changed", and nothing ever
+  cleared a `.stale` marker. Fixing either cause alone would have left it
+  broken, so both are fixed and both are pinned by separate mutants.
+  **`--help` was worse than unhandled.** It fell through to the fetch loop: 3
+  curl calls, 4 files created, exit 0 — so the original acceptance criterion in
+  `docs/superpowers/specs/2026-06-22-demo-readiness-design.md:426` ("`--help`
+  exits 0") passed BY ACCIDENT. A test asserting only that exit code would have
+  been worthless, so the new one asserts the help TEXT on stdout, zero curl
+  invocations, and zero files created.
+  **Output moved out of the source tree, to `artifacts/source-refresh/`**, with
+  `--out DIR` (which repays the `--out` debt in that same spec, §4.6) and
+  `CITEVYN_REFRESH_STATE_DIR`. `mkdir -p` used to run above all argument
+  parsing, so even `--help` on an air-gapped host created `db/seed/sources/`, a
+  mode-0600 manifest and one zero-byte `.stale` per feed, none of them ignored.
+  **Gitignoring that directory was rejected on evidence:** `.gitignore` has no
+  effect on the Docker build context and `infra/docker/Dockerfile.api:115` does
+  `COPY db /build/db`, so the junk would have been baked into the production API
+  image regardless — the ignore rule would only have hidden it. `artifacts/` is
+  already ignored AND is reached by no `COPY` line in either Dockerfile, so this
+  needed no new ignore entry.
+  Also: a feed that is SKIPPED now keeps its previous baseline, so an outage
+  cannot manufacture a false "changed" on the next run; the hasher resolves
+  `sha256sum` and falls back to `shasum -a 256`, because macOS carries
+  `/sbin/sha256sum` only recently and the shell suite is matrixed on
+  `macos-latest`; `mktemp -t` is gone (BSD treats the argument as a prefix and
+  leaves a literal `XXXXXX`, GNU treats it as a template); and temp files are
+  removed by an EXIT trap rather than leaking whenever `set -e` killed the
+  script mid-iteration. That last one is narrower than it first looked: the old
+  script DID `rm -f "$body_file"` both on the curl-failure branch and at the end
+  of each loop iteration, and had no trap — so the leak was the mid-iteration
+  death, measured on the missing-hasher path, where the unguarded
+  `sha256sum "$body_file"` died with a bare 127 and left the body file on disk.
+  **Hardening found while reviewing the above, all now covered by the suite:** a
+  10 MB `curl --max-filesize` (a `--max-time` is not a size limit — an unbounded
+  download filled a workstation's disk during this very review); an empty 200
+  body is skipped rather than banked as the digest of nothing, which used to buy
+  one spurious editorial review now and a second on the next real fetch; a skip
+  line carries curl's exit code, so a permanent 404 (22) is distinguishable from
+  an hour-long outage (7) instead of reading "unreachable" forever; the manifest
+  read SLURPS, because `{}\n{}\n` is a legal jq input STREAM that made three
+  consecutive runs over identical bytes all report "3 changed", silently and
+  self-perpetuating; a hand-edited non-object value under a feed name no longer
+  reaches `.sha256` on a number, which was a jq FATAL that killed the run before
+  it could rewrite the file and so recurred on every later run until a human
+  deleted the manifest; `--out` rejects a flag-shaped value and every `mkdir`
+  passes `--`, so `--out -h` is a usage error instead of "mkdir: illegal option
+  -- h" and an undocumented exit 64; piping the script into a shell is refused,
+  because `${BASH_SOURCE[0]}` is then unbound and `set -e` does NOT fire (the
+  surviving `cd "/.." && pwd` succeeds), leaving `REPO_ROOT=/` and a state dir
+  of `//artifacts/source-refresh`; and the manifest's temp file is created
+  INSIDE the state directory and `chmod 644`-ed before the `mv`, so the replace
+  is a real same-directory rename rather than a cross-device copy-then-unlink,
+  and the manifest is no longer `-rw-------` while the markers beside it are
+  `-rw-r--r--`.
+  **The `[0.10.0] — 2026-07-19` entry below describes a script that never
+  existed.** It claims `refresh_sources.sh` "runs `make refresh`", "pipes the
+  new docs index through the same path the prod worker uses", is "idempotent",
+  and "refuses to run with an unset `CITEVYN_REDIS_URL`". None of that was ever
+  true — `grep -c REDIS scripts/refresh_sources.sh` returns 0, there is no
+  worker path to pipe anything through, and the script was the opposite of
+  idempotent. That entry is left in place as history; this one is the
+  correction, so a reader grepping the CHANGELOG cannot land on the fiction
+  without seeing it.
+  **New suite `tests/shell/test_refresh_sources.sh`, 26 cases**, hermetic behind
+  a stub `curl` with no network at all, picked up by the `tests/shell/*.sh` glob
+  in `make test-shell` so it already runs on ubuntu-latest and macos-latest.
+  **0 of 26 pass against the pre-fix script; 26 of 26 after.**
+  **Still true, and deliberately unchanged:** nothing IN PRODUCTION consumes the
+  script's output — no worker, no seed path, no deploy step — and there is no
+  implemented pipeline from an upstream snapshot to corpus content. The script
+  does now have exactly one caller: the new shell suite runs it, and that suite
+  is reached by `make test-shell` and by the `shell-tests` CI job, both of which
+  collect suites through a `tests/shell/*.sh` GLOB rather than by name — which
+  is why `grep -rn refresh_sources Makefile .github/` still finds nothing and
+  must not be read as "no caller at all". Nothing reads what the script WRITES.
+  A "changed" report is an editorial signal for a human, and the script now says
+  so and points at `docs/RUNBOOK.md` §3.7 instead. Whether to keep the script at
+  all is an owner decision that was not taken here.
+- **`test_job_container_node_images_match_the_pin` gets partners that prove its
+  finder still works, and `_setup_node_steps()` beside it gets the same (#381).**
+  The test SKIPS with "got empty parameter set" because no job in this repo uses
+  `container:`. That is honest today, but nothing proved
+  `_container_node_images()` still works — a dead finder returns the same empty
+  list forever and the rule is disabled with no visible change. The skip STAYS:
+  inventing a `container:` job to remove it would fake coverage. Instead
+  `_workflow_files`, `_setup_node_steps` and `_container_node_images` take a
+  `directory`, and `_container_node_images` returns `(found, examined)` where
+  `examined` is every (workflow, job) it visits, appended inside the same loop —
+  a separate enumerator would prove nothing. Three partners: a planted workflow
+  written into a COPY of the real `.github/workflows` under a name asserted to
+  sort LAST (a plant that sorts first cannot catch a stop-after-the-first-file
+  mutant, and the name alone is not the assertion — `_workflow_files` orders
+  every `.yaml` after every `.yml`); a live-recomputed EQUALITY between
+  `examined` and every job under `_workflow_files()`, through the same zero-arg
+  entry point the parametrize uses; and the same plant driven through
+  `_setup_node_steps`. The plant carries a NEGATIVE table too — `mynode:18` and
+  `myregistry.io/mynode:18` — because without it, relaxing the anchored
+  `re.match` recogniser to a bare `re.search` was measured to survive, and
+  `container: mynode:18` would have been reported as a Node image. The one
+  mutant that cannot be killed while the repo has zero node containers is
+  recorded in the file's `_UNGUARDABLE` register, whose length is now pinned to
+  a hand-count so an entry cannot be deleted in silence.
 - **The BACKLOG table guard no longer stops checking at the first malformed row
   (#393).**
   `_tables()` collected rows with `while lines[j].startswith("|")`, so a row that

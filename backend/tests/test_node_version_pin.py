@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +109,22 @@ _UNGUARDABLE: tuple[str, ...] = (
     "third-party action installs internally.",
     "@types/node in frontend/package.json — a compile-time types package, not a "
     "runtime pin. Currently ^20.16.0 while the runtime is 22; recorded as debt.",
+    "Whether _container_node_images() reads the REAL workflow directory. While "
+    "the repo has zero `container:` jobs its only observation over the real tree "
+    "is an empty `found`, so a mutant keyed on `directory == WORKFLOW_DIR` that "
+    "returns no images AND fabricates the right `examined` list is behaviourally "
+    "identical to the finder. The planted-tree test proves the SCAN works, and "
+    "the join DOES pin the zero-arg call to whatever `_workflow_files()` returns "
+    "— what neither can rule out is a mutant that also FABRICATES `examined` to "
+    "match. The day a real `container: node:` job lands, that mutant dies — "
+    "until then there is no positive observation to make.",
 )
+
+# Hand-counted off the tuple above. Truthiness alone is not a guard: measured,
+# deleting a whole entry left the file at `31 passed, 1 skipped`. Same
+# convention as _REAL_SETUP_NODE_STEPS below — update this line deliberately
+# when a blind spot is genuinely added or genuinely closed.
+_UNGUARDABLE_COUNT = 5
 
 # Inputs that mean "this external workflow will run something with Node".
 _NODE_INPUT_KEYS = frozenset({"node-directory", "node-version", "node-version-file"})
@@ -127,9 +143,17 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _workflow_files() -> list[Path]:
-    files = sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(WORKFLOW_DIR.glob("*.yaml"))
-    assert files, f"no workflow files found under {WORKFLOW_DIR}"
+def _workflow_files(directory: Path = WORKFLOW_DIR) -> list[Path]:
+    """Every workflow file under ``directory``.
+
+    Takes a ``directory`` for the same reason
+    ``test_deploy_fly_build_args_are_documented._scanned_files`` takes a ``root``:
+    so a test can drive the REAL scan over a copy of the real tree that has a
+    planted offender in it. The repo has zero jobs with a ``container:`` image,
+    so nothing else can tell a working scan from a dead one.
+    """
+    files = sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml"))
+    assert files, f"no workflow files found under {directory}"
     return files
 
 
@@ -152,10 +176,10 @@ def _dockerfiles() -> list[Path]:
     return sorted(found)
 
 
-def _setup_node_steps() -> list[tuple[Path, str, dict[str, Any]]]:
+def _setup_node_steps(directory: Path = WORKFLOW_DIR) -> list[tuple[Path, str, dict[str, Any]]]:
     """(workflow, job, ``with:`` mapping) for every ``actions/setup-node`` step."""
     steps: list[tuple[Path, str, dict[str, Any]]] = []
-    for path in _workflow_files():
+    for path in _workflow_files(directory):
         for job_name, job in (_load_yaml(path).get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
@@ -171,16 +195,27 @@ def _setup_node_steps() -> list[tuple[Path, str, dict[str, Any]]]:
     return steps
 
 
-def _container_node_images() -> list[tuple[Path, str, str]]:
-    """(workflow, job, tag) for every job-level ``container:`` on a node image.
+def _container_node_images(
+    directory: Path = WORKFLOW_DIR,
+) -> tuple[list[tuple[Path, str, str]], list[tuple[str, str]]]:
+    """``(found, examined)`` for every job-level ``container:`` on a node image.
 
     ``container: node:18`` runs every step of a job inside that image, with no
     ``setup-node`` step to scan. It is a second, entirely separate way to build
     the bundle on an unpinned Node, so it gets the same major rule.
+
+    ``found`` is ``(workflow, job, tag)`` per node image. ``examined`` is every
+    ``(workflow name, job name)`` this call actually VISITED, appended inside the
+    same loop — the repo has zero node containers, so ``found == []`` is the only
+    thing the real tree can observe and it is exactly what a dead scan returns.
+    ``examined`` is what a dead scan cannot fake: a separate enumerator would
+    prove nothing, so it has to be collected here, by this loop, as it walks.
     """
     found: list[tuple[Path, str, str]] = []
-    for path in _workflow_files():
+    examined: list[tuple[str, str]] = []
+    for path in _workflow_files(directory):
         for job_name, job in (_load_yaml(path).get("jobs") or {}).items():
+            examined.append((path.name, job_name))
             if not isinstance(job, dict):
                 continue
             container = job.get("container")
@@ -190,7 +225,7 @@ def _container_node_images() -> list[tuple[Path, str, str]]:
             match = re.match(r"(?:[\w.\-]+(?::\d+)?/)*node:(?P<tag>[\w.\-]+)", image.strip())
             if match:
                 found.append((path, job_name, match.group("tag")))
-    return found
+    return found, examined
 
 
 def _from_node_lines() -> list[tuple[Path, str]]:
@@ -401,7 +436,7 @@ def test_recorded_external_node_consumers_still_exist(workflow_name: str, job_na
 
 @pytest.mark.parametrize(
     ("path", "job_name", "tag"),
-    _container_node_images(),
+    _container_node_images()[0],
     ids=lambda v: v.name if isinstance(v, Path) else str(v),
 )
 def test_job_container_node_images_match_the_pin(path: Path, job_name: str, tag: str) -> None:
@@ -409,6 +444,238 @@ def test_job_container_node_images_match_the_pin(path: Path, job_name: str, tag:
     assert _major(tag) == _pinned_major(), (
         f"{path.name}:{job_name} runs in container `node:{tag}` but "
         f"{NVMRC_WORKFLOW_PATH} pins Node {_pinned_major()}."
+    )
+
+
+# ─────────── the finders themselves, driven over a planted workflow ───────────
+#
+# #381: `test_job_container_node_images_match_the_pin` SKIPS with "got empty
+# parameter set" because no job in this repo uses `container:`. That is honest
+# today, but nothing proved `_container_node_images()` still WORKS — a dead
+# finder returns the same empty list forever and the rule is disabled with no
+# visible change. `_setup_node_steps()` had the same hole one layer down: its
+# two existing partners only assert that SOME steps are found, so three ways of
+# stopping the walk early were all survivable.
+#
+# The plant below is a real workflow file. Its FIRST job is deliberately
+# unscannable, so turning either finder's `continue` into a `break` loses every
+# job after it and reddens these tests. It is written into a COPY of the real
+# `.github/workflows` directory, under a name that sorts LAST, so the fixture
+# tracks the real population and a scan that stops after the first file cannot
+# reach it.
+_PLANTED_WORKFLOW = """\
+name: planted
+on: workflow_dispatch
+jobs:
+  zeroth-job-not-a-mapping: a scalar, not a job mapping
+  first-job-plain:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo no container at all
+  second-job-non-node-container:
+    runs-on: ubuntu-24.04
+    container: python:3.14-slim
+    steps:
+      - run: echo a container that is not node
+  second-b-job-lookalike-image:
+    runs-on: ubuntu-24.04
+    container: mynode:18
+    steps:
+      - run: echo an image whose NAME merely ends in node
+  second-c-job-lookalike-behind-a-registry:
+    runs-on: ubuntu-24.04
+    container: myregistry.io/mynode:18
+    steps:
+      - run: echo the same lookalike, behind a registry prefix
+  third-job-string-container:
+    runs-on: ubuntu-24.04
+    container: node:18-alpine
+    steps:
+      - run: echo the string form
+  fourth-job-dict-container:
+    runs-on: ubuntu-24.04
+    container:
+      image: docker.io/library/node:19
+    steps:
+      - run: echo the mapping form
+  fifth-job-setup-node:
+    runs-on: ubuntu-24.04
+    steps:
+      - a scalar step, not a mapping
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+      - uses: actions/setup-node@v6
+        with:
+          cache: npm
+"""
+
+# Every job name in _PLANTED_WORKFLOW, in file order. Hand-read off the YAML
+# above, NOT parsed out of it — deriving it would make the assertion agree with
+# any bug in the parser it is checking.
+_PLANTED_JOBS = (
+    "zeroth-job-not-a-mapping",
+    "first-job-plain",
+    "second-job-non-node-container",
+    "second-b-job-lookalike-image",
+    "second-c-job-lookalike-behind-a-registry",
+    "third-job-string-container",
+    "fourth-job-dict-container",
+    "fifth-job-setup-node",
+)
+
+# The three `container:` values in the plant that are NOT the node image. They
+# are what makes the scan's pattern a RECOGNISER rather than a substring search:
+# the sibling `_FROM_NODE` guard already carries such a table (`FROM mynode:18`
+# -> None in test_the_dockerfile_scan_recognises_real_from_syntaxes), and
+# without one here, relaxing `re.match(r"(?:[\w.\-]+(?::\d+)?/)*node:...")` to a
+# bare `re.search(r"node:...")` was measured to SURVIVE the whole file — so
+# `container: mynode:18` would be reported as a Node image and nothing noticed.
+_PLANTED_NON_NODE_JOBS = (
+    "second-job-non-node-container",  # python:3.14-slim
+    "second-b-job-lookalike-image",  # mynode:18
+    "second-c-job-lookalike-behind-a-registry",  # myregistry.io/mynode:18
+)
+
+# The setup-node steps the real repo has, hand-counted from
+# `.github/workflows/` (3, in sorted-filename order). Update this line when a
+# workflow gains or loses a setup-node step.
+_REAL_SETUP_NODE_STEPS = [
+    ("frontend-live-e2e.yml", "live-e2e"),
+    ("frontend.yml", "build"),
+    ("frontend.yml", "demo-e2e"),
+]
+
+
+def _workflow_dir_copy_with_a_plant(tmp_path: Path) -> Path:
+    """A copy of the REAL workflow directory plus one planted workflow file.
+
+    A small synthetic fixture is not enough: in this repo's sibling guard a
+    four-file synthetic tree let ``if len(processed) > 50: continue`` survive the
+    entire suite. Copying the real directory makes the fixture size track
+    reality. The plant is named ``zz-planted.yml`` so it sorts LAST — a plant
+    that sorts first cannot catch a scan that stops after the first file.
+    """
+    real = _workflow_files()
+    for path in real:
+        shutil.copyfile(path, tmp_path / path.name)
+    (tmp_path / "zz-planted.yml").write_text(_PLANTED_WORKFLOW, encoding="utf-8")
+
+    # The plant's sort position is load-bearing, so assert it in the ORDER the
+    # scan actually walks — `_workflow_files` puts every `.yaml` after every
+    # `.yml`, so comparing names alone would be wrong the day a `.yaml` lands.
+    # Measured: renaming the plant `aa-planted.yml` and truncating the scan to
+    # `files[:1]` left test_the_container_scan_finds_a_planted_node_image
+    # passing; the stop-after-the-first-file mutant is only catchable while the
+    # plant genuinely comes last.
+    walked = [path.name for path in _workflow_files(tmp_path)]
+    assert len(walked) == len(real) + 1, (
+        f"the copied tree holds {walked}, want the {len(real)} real workflows plus the plant"
+    )
+    assert walked[-1] == "zz-planted.yml", (
+        f"the plant is no longer the last file the scan walks: {walked}"
+    )
+    return tmp_path
+
+
+def test_the_container_scan_finds_a_planted_node_image(tmp_path: Path) -> None:
+    """Drive the REAL container scan over a tree that HAS node containers.
+
+    RED if `_container_node_images` returns `[]`, if its `node:` pattern stops
+    matching, if the mapping-form `container.image` arm is dropped, if either
+    `continue` becomes a `break`, or if it stops honouring `directory`.
+    """
+    directory = _workflow_dir_copy_with_a_plant(tmp_path)
+
+    found, examined = _container_node_images(directory)
+
+    # Hand-read off _PLANTED_WORKFLOW: exactly two of its eight jobs run a node
+    # image, one written as a string and one as a mapping.
+    assert [(path.name, job, tag) for path, job, tag in found] == [
+        ("zz-planted.yml", "third-job-string-container", "18-alpine"),
+        ("zz-planted.yml", "fourth-job-dict-container", "19"),
+    ], f"the container scan did not find exactly the two planted node images: {found}"
+    # ...and it is not "flags anything with node in it": none of the three
+    # non-node containers may appear. Without this, `re.search` in place of
+    # `re.match` survives and `container: mynode:18` reads as a Node image.
+    flagged = {job for _, job, _ in found}
+    assert not flagged & set(_PLANTED_NON_NODE_JOBS), (
+        "a container that is not the node image was reported as one: "
+        f"{sorted(flagged & set(_PLANTED_NON_NODE_JOBS))}"
+    )
+    # ...and it walked past the unscannable first job to reach them.
+    assert [job for name, job in examined if name == "zz-planted.yml"] == list(_PLANTED_JOBS), (
+        "the scan did not visit every job of the planted workflow: "
+        f"{[job for name, job in examined if name == 'zz-planted.yml']}"
+    )
+
+
+def test_the_container_scan_examines_every_job_in_every_workflow() -> None:
+    """The join between the RULE and the POPULATION, recomputed live.
+
+    A `>= N` floor does not work here and it was measured: with the `node:`
+    pattern dead, with the mapping-form arm dropped, or with `if match:` never
+    taken, the scan still walks all 7 workflows and all 15 jobs — so a
+    population count stays green while the rule does nothing. This is an
+    EQUALITY against the jobs recomputed from `_workflow_files()`, and it goes
+    through the same zero-arg entry point the parametrize uses: routed through
+    an internal helper instead, a wrong-directory mutant survives.
+
+    RED if the scan skips a workflow, skips a job, or truncates either list.
+
+    WHAT IT CANNOT SEE, precisely: `expected` is recomputed from the same
+    `_workflow_files()` that `examined` flows through, so a mutation INSIDE
+    `_workflow_files` — `return files + files`, `return files[:1]`, a changed
+    glob — moves both sides identically and this equality stays green. Its bite
+    is against mutants LOCAL to `_container_node_images`'s own walk; the
+    population helper itself is pinned elsewhere, by
+    `test_the_container_scan_finds_a_planted_node_image` (which drives a tree
+    whose contents this test does not control) and by
+    `test_the_three_locations_that_drifted_are_all_covered`.
+    """
+    _found, examined = _container_node_images()
+
+    expected = [
+        (path.name, job_name)
+        for path in _workflow_files()
+        for job_name in (_load_yaml(path).get("jobs") or {})
+    ]
+    assert expected, "no jobs found in any workflow — this join would pass vacuously"
+    assert sorted(examined) == sorted(expected), (
+        "the container scan did not visit every job in every workflow. "
+        f"missed: {sorted(set(expected) - set(examined))}; "
+        f"unexpected: {sorted(set(examined) - set(expected))}"
+    )
+
+
+def test_the_setup_node_scan_finds_every_planted_step(tmp_path: Path) -> None:
+    """Same plant, for the finder the two existing partners only half-cover.
+
+    `test_at_least_one_workflow_sets_up_node` and
+    `test_the_three_locations_that_drifted_are_all_covered` both pass on a scan
+    that stops early, because the steps they name are found first. Measured: the
+    job-not-a-mapping `continue`, the step-not-a-mapping `continue`, and
+    "stop after the first matching step in a job" all became a `break` without
+    either test noticing.
+
+    RED if any of those three walks stops early, or if `_workflow_files` is
+    truncated inside this finder.
+    """
+    directory = _workflow_dir_copy_with_a_plant(tmp_path)
+
+    steps = _setup_node_steps(directory)
+
+    planted = [(job, block) for path, job, block in steps if path.name == "zz-planted.yml"]
+    # Hand-read off _PLANTED_WORKFLOW: one scalar step (skipped) then two
+    # setup-node steps in the SAME job, given different `with:` blocks so
+    # "kept both" is distinguishable from "kept one twice".
+    assert planted == [
+        ("fifth-job-setup-node", {"node-version-file": "frontend/.nvmrc"}),
+        ("fifth-job-setup-node", {"cache": "npm"}),
+    ], f"the setup-node scan did not find exactly the two planted steps: {planted}"
+    real = [(path.name, job) for path, job, _ in steps if path.name != "zz-planted.yml"]
+    assert real == _REAL_SETUP_NODE_STEPS, (
+        f"the copied real workflows contributed {real}, want {_REAL_SETUP_NODE_STEPS}"
     )
 
 
@@ -426,6 +693,13 @@ def test_the_guards_own_blind_spots_are_written_down() -> None:
     is in the file a maintainer reads, rather than discovered the hard way.
     """
     assert _UNGUARDABLE, "the blind-spot register must not be silently emptied"
+    # Truthiness alone lets any single entry be deleted in silence, which is how
+    # a recorded limitation quietly stops being recorded. Pin the hand-count.
+    assert len(_UNGUARDABLE) == _UNGUARDABLE_COUNT, (
+        f"the blind-spot register holds {len(_UNGUARDABLE)} entries, "
+        f"_UNGUARDABLE_COUNT says {_UNGUARDABLE_COUNT}. Adding or closing a "
+        "blind spot is a deliberate act: update the count in the same edit."
+    )
 
 
 # ──────────────────────────── the #231 regression ────────────────────────────
