@@ -60,6 +60,179 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unbounded scan for every other key, and uvicorn's access-log filter scans the
   full request line at a larger cost than anything here. Both pre-existing, in
   different mechanisms, tracked separately.
+- **All 26 `--faint` text uses moved to `--muted`, and the token now colours
+  nothing (#396).**
+  The issue was filed against ONE rule — `.composer-hint`, 11.5px on `--faint`,
+  2.77:1 light / 3.49:1 dark against the 4.5:1 small-text floor — and asked for
+  a sweep of the rest. **The sweep overturned the issue's own plan.** `--faint`
+  measures 2.77:1 on `--bg`, **2.92:1** on `--surface` and 2.58:1 on
+  `--surface-2` in the light theme; the BEST of those is under even WCAG's
+  relaxed **3:1 large-text** floor, so the token clears no text threshold at any
+  size or weight and the one rule the plan meant to KEEP on it had to move too.
+  That rule is `.step-number` (24px / weight 700, which IS large text). Measured
+  in Chromium rather than reasoned from the CSS: `.step-meta` is a SIBLING of
+  `.step-preview`, so the number paints on `.step-card`'s `--surface` (#ffffff),
+  not on the inset panel's `--surface-2` — **2.92:1 light, 0.08 short**; dark is
+  3.21:1 and would have passed, so the light theme decides it.
+  **Two of the 26 were INLINE STYLES in `Hero.tsx`** — the `▸` glyph and the
+  visible `TRY:` label — which every earlier `--faint` sweep missed, the issue's
+  included, because an inline style beats every stylesheet rule and no CSS-only
+  scan can see one.
+  **Two moves are recorded as declined exemptions, not as fixes.**
+  `.composer-prompt` (`›`) and `Hero.tsx`'s `▸` have a real claim to WCAG
+  1.4.3's "pure decoration" exemption — single ornamental glyphs, no words, no
+  functionality. The argument is written into the code and declined there:
+  keeping one live consumer of a token that clears no text floor preserves the
+  trap for the next author. `.pending-bubble` moved for a third reason and the
+  code says so — its `color` reaches NO glyph (its children are three
+  `.pending-dot`, drawn by `background`, and `.pending-label`, which already
+  overrode to `--muted`), so that one is a latent-trap removal with **zero
+  rendered effect**, not a contrast fix.
+  **`--faint` is kept DECLARED in all three `tokens.css` sites** with the
+  measurement beside it. Retiring a design token is an owner decision, and
+  deleting it would reach into `tests/helpers.ts` and the docs token tables.
+  **The guard is in two halves because neither half can see what the other
+  sees.** `frontend/scripts/faint-contrast.mjs` + `.test.mjs` parse the
+  stylesheets with **postcss** (structurally, so a `/* comment */`, a
+  `content: "…"` string and `@media` nesting cannot fool it) and scan `.tsx`
+  sources for inline uses; `frontend/tests/faint-contrast.spec.ts` walks EVERY
+  element on the landing page and the chat screen in a real browser, in both
+  themes, at a desktop AND a 390x844 phone viewport, `::placeholder` included,
+  and asserts not one renders the resolved `--faint` value by either
+  glyph-painting property.
+  **NOT "the browser half is the only one that would have caught `Hero.tsx`"**,
+  which an earlier draft of this entry and of the spec's own header both
+  claimed. That was measured and it is false: reverting one of the two
+  `Hero.tsx` inline styles reddens the STATIC half as well, on `no .tsx/.ts
+  source carries an inline var(--faint)` — it sees inline styles by scanning
+  the SOURCE. What the browser half is alone in seeing is RENDERED colour: an
+  inherited font size, the real painted backdrop, a value built at runtime that
+  appears in no source as a literal, and `-webkit-text-fill-color` overriding
+  `color`. The rule the static half enforces has **no font-size condition** —
+  that is what removes the inherited-size blind spot, since
+  `.chat-input::placeholder` and `.generic-avatar` set no size of their own.
+  **Adversarial review found TWO TOTAL BYPASSES of the first version of this
+  guard, both measured green on every gate, and both are closed here.**
+  (1) `-webkit-text-fill-color: var(--faint)` on `.composer-hint`: it overrides
+  `color` for the glyph fill while `getComputedStyle(el).color` keeps reporting
+  the old value, so the guard read rgb(107, 104, 98) at 5.27:1 while the glyphs
+  painted rgb(154, 151, 143) at 2.77:1 — the exact #396 defect, with the static
+  suite, the browser suite and `npm run lint:css` all green. Both halves now
+  sweep `color` AND `-webkit-text-fill-color`; `border-color` and
+  `background-color` stay excluded, but for the right reason (they paint no
+  glyph and are judged by 1.4.11), not the one the docblock gave.
+  (2) `.composer-hint { color: VAR(--faint); }` inside the existing
+  `@media (max-width: 600px)` block, which had TWO independent causes: the
+  analyzer matched `var` case-sensitively although CSS function names are
+  ASCII case-insensitive, and the browser sweep only ever ran at the desktop
+  viewport, so no `@media (max-width: …)` rule was reachable by it at all. The
+  match is now case-insensitive on `var` and still case-SENSITIVE on `--faint`
+  (custom-property names are case-sensitive, so a blanket `i` flag would report
+  the different `--FAINT` property), and the sweep runs a second pass at
+  390x844 that asserts both breakpoints are active before measuring.
+  **`.cta-banner`'s body sentence was found by the same sweep and is fixed
+  here.** It is not a `--faint` finding — it is worse: the `<p>` had no rule at
+  all, so it inherited `.cta-banner`'s `color: var(--ink)` onto
+  `.cta-banner`'s `background: var(--ink)`. Measured in Chromium at
+  rgb(28, 27, 25) on rgb(28, 27, 25) light and rgb(240, 239, 233) on
+  rgb(240, 239, 233) dark — **1.00:1 in both themes**, a whole sentence of
+  marketing copy invisible to every sighted visitor.
+  `.cta-banner > p:not(.cta-footnote) { color: var(--bg) }` measures
+  **16.35:1 light / 15.69:1 dark**, the same pair the banner's own
+  `--focus-ring` comment records for `--bg` on `--ink`. `docs/UI_DESIGN.md`
+  §2.11 described this subtext as `color-mix(in srgb, var(--bg) 72%,
+  transparent)`, a value that exists nowhere in the stylesheet; that line is
+  corrected too.
+  **`.cta-footnote`, the banner's other paragraph, was ALSO below AA — and the
+  first version of this change exempted it by name without measuring it.** The
+  `:not(.cta-footnote)` above spares it because it carries its own alpha colour,
+  and the comment justifying that exclusion read as if the footnote were fine.
+  It was not: at `color-mix(in srgb, var(--bg) 50%, transparent)` on the `--ink`
+  banner it composites to **4.99:1 light but 3.30:1 DARK** at 11.5px. The
+  element is named three times in this change's own alpha-aware ratio check as
+  its motivating example, and was measured by none of them until a skeptic
+  pointed the instrument at it. Now 65%: **7.54:1 light / 5.34:1 dark**,
+  measured in Chromium with the alpha composited, and 60% was rejected because
+  it lands on 4.50 exactly. Alpha rather than a flat colour keeps one
+  declaration correct on both themes, since the banner inverts and `--bg`
+  inverts with it.
+  **A THIRD total bypass, found by a skeptic in the FIX for the second one.**
+  Matching `[vV][aA][rR]` still anchored on the SPELLING of `var`, and CSS lets
+  an identifier be ESCAPED: `\76 ar(--faint)`, `\000076ar(--faint)`,
+  `v\61 r(--faint)` and `var(/*c*/--faint)` all render `#9a978f` in Chromium,
+  measured. Planted as `\76 ar(--faint)` inside the existing
+  `@media (prefers-reduced-motion: reduce)` block — which the browser sweep
+  never emulates — it passed the static suite, stylelint AND the browser suite
+  at once. The fix stops matching the function name at all and matches the
+  TOKEN: there is no legal way for `--faint` to appear in a `color` or
+  `-webkit-text-fill-color` value except as a read of that property, so one
+  pattern covers every present and future spelling with no false-positive
+  surface — verified as zero hits across all five shipped stylesheets. The TSX
+  scan keeps a narrower form (the token inside some function call, with quotes
+  excluded from the gap) because source files legitimately MENTION the token in
+  test titles, and flagging those is what trains an author to silence a guard.
+  Three attempts at this one rule were each bypassed by a spelling the previous
+  one had not imagined; that is the argument for matching the thing you care
+  about rather than its syntax.
+  **The BROWSER half had no pin, so deleting it was invisible to every gate.**
+  `buildGuards.test.ts` pinned the static half's two `scripts/` files with
+  `existsSync` and nothing pinned the spec, while the demo-CI selection
+  differential still balances when its tests vanish, because they leave both
+  sides of it at once — measured today at `206 == 228 - 22`, a pair that moves
+  with every test added anywhere. It is now pinned by name against Playwright's own resolved
+  selection.
+  **The non-vacuity partners are derived from the file, never constants**, because
+  a `--faint` count would now be vacuous by construction: the postcss walk's
+  `color:` total must equal an independent comment-stripped textual count and
+  every declaration-shaped line must be one it collected; swapping `--muted` back
+  to `--faint` in memory must make the analyzer report exactly as many violations
+  as the file has `--muted` declarations, naming real selectors; and the browser
+  sweep must still name a planted offender, including a `::placeholder`-only one.
+  `postcss` is now an explicit `devDependency` (it was already installed
+  transitively at 8.5.26) so an upstream extras change cannot silently break the
+  test — the precedent `pyyaml` set in `backend/pyproject.toml`.
+  **`frontend/scripts/mutate-faint-guards.sh` runs 74 mutants across five
+  suites** (`unit`, `sel`, `pin`, `pw`, `fid`), grouped as: the defect put back
+  one rule at a time (6); the two bypasses above and every fix that closes them
+  (14); the `Hero.tsx` inline styles under BOTH runners (5); the CTA sentence
+  (2); META-mutants that try to make the static analyzer, the guard file or the
+  browser sweep check nothing (37); the third bypass and its fix (9); and the
+  selection guards for both halves (3). **No survivor was observed in that run, and all nine touched files
+  restored byte-identical** — not claimed to be exhaustive; the harness prints
+  survivor NAMES rather than a survivor count, because a count cannot be
+  checked. Three mutants are recorded as deliberately NOT run, with reasons:
+  deleting the `--faint` declaration is EQUIVALENT now that nothing consumes
+  it; compositing over black instead of white was RUN and SURVIVED as an
+  equivalent mutant, because the page paints an opaque background under
+  everything measured; and skipping the lazy-strip scroll is EQUIVALENT here.
+  The opaque background comes from `landing.css`'s own
+  `body { background: var(--bg) }`, NOT from `reset.css` as an earlier draft
+  said — `reset.css` paints `var(--surface-base)`, a token only the dead
+  `data-style` skins define, and `landing.css`'s comment exists precisely
+  because it resolves to nothing.
+  **20 of the 22 visual baselines moved.** All 22 PASSED unregenerated at the
+  committed `maxDiffPixelRatio: 0.02`, so the tolerance alone would have hidden
+  the change. The 18 that moved for the `--faint` sweep were measured in the
+  round that made it and are INHERITED here, not re-derived. What WAS re-derived
+  on the final tree, at per-pixel `threshold: 0` with `maxDiffPixels: 0`: with
+  those 18 already recorded, exactly two crops still fail — `cta-light` by
+  1,001 px and `cta-dark` by 1,035 px, ratio 0.01, i.e. INSIDE the committed
+  0.02 tolerance, so the CTA fix would also have passed unregenerated. Those two
+  are regenerated, leaving `ticker-light`/`ticker-dark` as the only two of the
+  22 that contain neither change. Eager bundle **63,007 -> 63,010 B gzip, +3 B**
+  (budget 64,479; headroom 1,472 -> 1,469 B). Not a code change: the eager
+  chunk's RAW size is identical at 193,320 B. An earlier draft of this entry
+  located the difference precisely — "all 102 differing bytes inside
+  `__vite__mapDeps`" — and a skeptic measured 110 bytes across FOUR regions, the
+  last at offset 188,200, including the two `Hero.tsx` inline styles the same
+  sentence called weightless. That precise claim is withdrawn rather than
+  restated at a new number, because the diff moved again after it was made and
+  is not re-derived here. What IS measured on the final tree: raw identical at
+  193,320 B, +3 B gzip. Every substitution in the change is same-length
+  (`faint`/`muted`, and Vite's 8-character content hashes, which cascade through
+  the stylesheet so any CSS edit rewrites them), so raw cannot move and only
+  gzip's compressibility does. `faint` and `muted` are also
+  the same length, so the token sweep itself contributes nothing.
 - **Every lazy JS chunk now has a gzip ceiling of its own, and
   `npm run check:bundle` records the totals no ceiling bounds (#372).**
   `frontend/bundle-budget.json` gains ONE enforced key,

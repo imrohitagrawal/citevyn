@@ -112,9 +112,16 @@ for (const theme of THEMES) {
       }
     });
 
-    test("body copy is --muted, mono kickers are --faint", async ({ page }) => {
+    // The TITLE moved with the assertion. "mono kickers are --faint" was the
+    // design handoff's intent and is now false; leaving it would have made this
+    // test say the opposite of what it checks, which is how a stale name
+    // outlives the behaviour it named.
+    test("body copy and mono kickers are both --muted", async ({ page }) => {
       expect(await page.locator(".hero-description").evaluate((el) => getComputedStyle(el).color)).toBe(T.muted);
-      expect(await page.locator(".mono-label").first().evaluate((el) => getComputedStyle(el).color)).toBe(T.faint);
+      // #396: `.mono-label` is 11.5px on `--faint` — 2.77:1 light / 3.49:1
+      // dark, below the 4.5:1 small-text floor. NOT weakened to "is not
+      // --faint": the expected value is pinned, so a third token would fail too.
+      expect(await page.locator(".mono-label").first().evaluate((el) => getComputedStyle(el).color)).toBe(T.muted);
     });
 
     test("text on the yellow --hl accent stays dark in both themes", async ({ page }) => {
@@ -352,7 +359,10 @@ for (const theme of THEMES) {
       expect(await input.evaluate((el) => getComputedStyle(el).color)).toBe(T.ink);
       expect(await input.getAttribute("placeholder")).toContain("Ask about");
       const ph = await input.evaluate((el) => getComputedStyle(el, "::placeholder").color);
-      expect(ph).toBe(T.faint);
+      // #396: was `T.faint`. The rule sets no font-size, so it INHERITS 16px
+      // from `.chat-input` — the shape a size-conditional CSS checker cannot
+      // resolve, and the reason the #396 ban carries no size condition.
+      expect(ph).toBe(T.muted);
 
       // Hint sits BELOW the box (not inline in the input row).
       const boxBottom = await box.evaluate((el) => el.getBoundingClientRect().bottom);

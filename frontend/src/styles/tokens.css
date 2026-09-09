@@ -29,6 +29,20 @@
   --surface-2: #f3f1ea;
   --ink: #1c1b19;
   --muted: #6b6862;
+  /* NOT usable for text, and CONSUMED BY NOTHING as of #396. Measured against
+   * every surface it ever painted on in the light theme: 2.77:1 on --bg,
+   * 2.92:1 on --surface, 2.58:1 on --surface-2. The best of those is 2.92,
+   * which is under the 3:1 WCAG LARGE-TEXT floor — so unlike the #303
+   * (citation legend) and #62 (`.pending-label`, the composer's in-flight
+   * gate) fixes, which were about small text, this token clears no text
+   * threshold at any size or weight in light mode. An earlier draft cited
+   * #356 for the second of those; #356 is the screen-reader work, and the
+   * `.pending-label` colour belongs to #62. All 26 uses moved to
+   * --muted (5.27 / 5.55 / 4.91 light, 7.01 / 6.45 / 5.84 dark). It is kept
+   * DECLARED rather than deleted because retiring a design token is the
+   * owner's call; `frontend/scripts/faint-contrast.test.mjs` and
+   * `frontend/tests/faint-contrast.spec.ts` keep it from acquiring a new
+   * consumer. */
   --faint: #9a978f;
   --border: #e7e3da;
   --border-2: #dcd7cc;

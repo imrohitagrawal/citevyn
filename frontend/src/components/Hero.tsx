@@ -76,10 +76,21 @@ export function Hero({
               borderColor: heroNudge ? "var(--refusal-amber)" : undefined,
             }}
           >
+            {/* `--muted`, not `--faint` (#396). An INLINE style beats every
+             * stylesheet rule, so the CSS-only sweeps of this token missed
+             * this glyph and the `TRY:` label below twice over.
+             *
+             * The `▸` is the one place with a real claim to WCAG 1.4.3's
+             * "pure decoration" exemption — a single ornamental glyph, no
+             * words, no functionality — and that argument is recorded rather
+             * than pretended away. Declined: `--faint` measures 2.92:1 at BEST
+             * in the light theme, under even the 3:1 large-text floor, so it
+             * can colour no text at any size, and a live consumer keeps the
+             * trap loaded for whoever copies this block next. */}
             <span
               style={{
                 fontFamily: "'JetBrains Mono', monospace",
-                color: "var(--faint)",
+                color: "var(--muted)",
                 fontSize: "15px",
               }}
             >
@@ -122,11 +133,15 @@ export function Hero({
           )}
 
           <div className="hero-chips">
+            {/* `--muted`, not `--faint` (#396). Real WORDS at 11px — small
+             * text needing 4.5:1, which `--faint` misses in both themes
+             * (2.77:1 light on `--bg`, 3.49:1 dark). No decoration argument
+             * applies here at all. Inline, so no CSS sweep could see it. */}
             <span
               style={{
                 fontFamily: "'JetBrains Mono', monospace",
                 fontSize: "11px",
-                color: "var(--faint)",
+                color: "var(--muted)",
                 alignSelf: "center",
                 marginRight: "2px",
               }}

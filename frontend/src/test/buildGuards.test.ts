@@ -126,6 +126,33 @@ describe("the build-tooling test suite is really selected by vitest", () => {
     expect(existsSync(join(frontendRoot, "scripts", "lazy-landing-strip.test.mjs"))).toBe(true);
   });
 
+  it("selects the #396 --faint contrast guard", () => {
+    // Same failure mode as the two above, and it CANNOT live in the guard's own
+    // file: reverting the `scripts/**` glob would deselect the guard along with
+    // the protection it was carrying for itself. This file runs under the
+    // ORIGINAL `src/**` glob, which is the only place that revert cannot reach.
+    expect(
+      selected.some((f) => f.endsWith("scripts/faint-contrast.test.mjs")),
+      // This message names the token in prose, which is safe BY TEST rather
+      // than by luck: the inline scanner anchors on the token sitting inside a
+      // function call and excludes quote characters from that gap, and
+      // `faint-contrast.test.mjs` pins this exact shape — a test title and a
+      // message mentioning the token — as NOT a violation, with a real inline
+      // style beside it as the positive partner. An earlier draft of the
+      // scanner did flag prose here, and the response was to reword this file;
+      // that is backwards, and it is the pressure that trains an author to
+      // silence a guard rather than fix it.
+      "vitest no longer selects scripts/faint-contrast.test.mjs, so nothing " +
+        "stops the --faint token — 2.92:1 at best in the light theme — from " +
+        "coming back into a stylesheet or an inline style",
+    ).toBe(true);
+    expect(existsSync(join(frontendRoot, "scripts", "faint-contrast.test.mjs"))).toBe(true);
+    // The analyzer it imports, named separately: deleting THAT would break the
+    // guard at import time rather than deselect it, which is a different fault
+    // with a different signal.
+    expect(existsSync(join(frontendRoot, "scripts", "faint-contrast.mjs"))).toBe(true);
+  });
+
   it("and still selects the app suite, so widening did not replace src/", () => {
     expect(selected).toContain("src/test/buildGuards.test.ts");
     expect(selected.filter((f) => f.startsWith("src/")).length).toBeGreaterThan(10);
@@ -703,6 +730,31 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     expect(specs).toContain("landing.spec.ts");
     expect(specs).toContain("visual.spec.ts");
     expect(specs).toContain("harness.spec.ts");
+    // #396's BROWSER half, pinned by name. Deleting `faint-contrast.spec.ts`
+    // was invisible to every gate before this line: `buildGuards` pinned the
+    // static half's two `scripts/` files with `existsSync` and nothing pinned
+    // the spec, while the demo-CI selection differential still balances when
+    // this spec's tests vanish, because they leave BOTH sides of it at once.
+    // Measured today at `206 == 228 - 22`; that pair moves with every test
+    // added anywhere, and the 22 is `visual.spec.ts`, the one file demo-CI
+    // ignores — re-run `--list` before quoting either number. That half is
+    // the only net over aliases, raw hex and runtime-built inline styles, so
+    // its disappearance must be loud. The `endsWith` form tolerates a move
+    // into a subdirectory.
+    //
+    // WHAT THIS LINE DOES AND DOES NOT COVER, measured rather than assumed.
+    // RED: deleting the file, renaming it, or emptying it of tests. GREEN:
+    // rewriting all of its `test(` calls to `test.skip(` — `--list` still
+    // reports them, so PRESENCE is what this asserts, not EXECUTION. Execution
+    // is covered one layer out, by `.github/workflows/frontend.yml`'s pin on
+    // `stats["skipped"] != 4` in the demo-CI run, which a mass-skip trips.
+    // Deleting INDIVIDUAL tests from the spec trips neither; nothing in this
+    // repo counts them, and a count here would rot the way #393's did.
+    expect(
+      specs.some((f) => f.endsWith("faint-contrast.spec.ts")),
+      "Playwright no longer selects faint-contrast.spec.ts, so nothing measures " +
+        "the RENDERED colour of any text in this app",
+    ).toBe(true);
     // The floor is the current population, not one below it: `>= 6` with 7
     // files present would let someone delete a spec and stay green.
     expect(specs.length).toBeGreaterThanOrEqual(7);
