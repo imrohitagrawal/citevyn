@@ -60,6 +60,15 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+        with:
+          # FULL history, for test_backlog_rows_are_not_stale.py (#410). That
+          # guard asks "is a commit fixing issue N already an ancestor of
+          # HEAD?", which the default depth-1 checkout cannot answer: `git log
+          # --grep` sees exactly one commit and finds nothing, so the guard
+          # would report "no stale rows" on a repo full of them and PASS.
+          # test_the_history_this_guard_needs_is_present fails loudly if this
+          # line is ever removed, rather than letting the guard go quiet.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
