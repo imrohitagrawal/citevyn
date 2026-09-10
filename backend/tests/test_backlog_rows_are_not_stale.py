@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKLOG = REPO_ROOT / "docs" / "BACKLOG.md"
@@ -62,6 +63,13 @@ OPEN_CLAIM_PATTERNS = (
 # A **bold** span. Non-greedy so two markers on one row stay separate.
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 
+# A `code span`. Stripped BEFORE looking for bold markers, because a row that
+# QUOTES a marker shape is documenting it, not claiming it. CI caught this on
+# the very first run of this guard: #410's own row quotes the two shapes it
+# discovered -- ``(`**FIX READY, PR OPEN — not merged.**`, ...)`` -- and the
+# guard reported its own row stale. A row must be able to talk about markers.
+_CODE_SPAN_RE = re.compile(r"`[^`]*`")
+
 # A row links its own issue as the FIRST issues/<n> URL in the line.
 _ROW_ISSUE_RE = re.compile(r"issues/(\d+)")
 
@@ -72,8 +80,11 @@ def _row_lines(text: str) -> list[str]:
 
 
 def _claims_open(line: str) -> bool:
-    """True if a BOLD span on this row claims the fix has not landed."""
-    return any(p in span.lower() for span in _BOLD_RE.findall(line) for p in OPEN_CLAIM_PATTERNS)
+    """True if a BOLD span OUTSIDE any code span claims the fix has not landed."""
+    outside_code = _CODE_SPAN_RE.sub(" ", line)
+    return any(
+        p in span.lower() for span in _BOLD_RE.findall(outside_code) for p in OPEN_CLAIM_PATTERNS
+    )
 
 
 def _row_issue(line: str) -> int | None:
@@ -138,6 +149,28 @@ def test_the_history_this_guard_needs_is_present() -> None:
         "whether a fix is merged and every staleness check below would pass by "
         "finding nothing. Add `with: {fetch-depth: 0}` to the actions/checkout "
         "step of the `pytest + lint` job in .github/workflows/ci.yml (#410)."
+    )
+
+
+def test_ci_still_declares_the_full_history_this_guard_needs() -> None:
+    """Static partner: ``pytest + lint`` must keep ``fetch-depth: 0``.
+
+    ``test_the_history_this_guard_needs_is_present`` above checks the RUNTIME
+    property and is the stronger guarantee, but it can only speak for whichever
+    job happens to be running. ``quality-gate`` is a reusable workflow from
+    another repository, SHA-pinned, whose checkout this repo does not control --
+    measured: it currently supplies full history, but nothing here can hold it
+    to that. This test is hermetic, needs no git, and pins the one checkout this
+    repo DOES own, so deleting that line fails immediately and by name.
+    """
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    workflow = yaml.safe_load(ci)
+    steps = workflow["jobs"]["test"]["steps"]
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert checkout.get("with", {}).get("fetch-depth") == 0, (
+        "The `pytest + lint` job's actions/checkout no longer sets `fetch-depth: 0`. "
+        "Without full history `git log` cannot see whether a fix is merged and the "
+        "staleness guard would pass by finding nothing (#410)."
     )
 
 
@@ -268,6 +301,38 @@ def test_the_detector_ignores_a_genuinely_open_row() -> None:
     satisfy the detector test above while making the file unmaintainable.
     """
     assert _scan([_FIXTURE_ROWS[1]]) == []
+
+
+def test_a_marker_QUOTED_in_a_code_span_is_not_a_claim() -> None:
+    """RED if _claims_open stops stripping `code spans` first.
+
+    Found by CI, not locally, on this guard's first run: #410's own row quotes
+    the two marker shapes it discovered, and the guard reported that row stale.
+    A row documenting a marker is not a row claiming one.
+
+    It escaped local testing because the row was verified BEFORE the commit
+    naming #410 existed -- with no fix commit to find, the check could not fire
+    whatever the row said. Hence this fixture, which does not depend on history.
+    """
+    quoted = _row(
+        999998,
+        "catalogued two new shapes (`**FIX READY, PR OPEN — not merged.**`)",
+    )
+    assert not _claims_open(quoted)
+
+
+def test_a_real_marker_beside_a_quoted_one_is_still_caught() -> None:
+    """Partner: stripping code spans must not blind the check to a real marker.
+
+    Without this, `_claims_open` could return False for the whole row the moment
+    any code span appeared, and every row containing a backtick would go unchecked.
+    """
+    both = _row(
+        999998,
+        "quoted (`**FIX READY, PR OPEN — not merged.**`)",
+        origin=_OPEN_MARKER,
+    )
+    assert _claims_open(both)
 
 
 def test_unbolded_prose_is_not_a_merge_claim() -> None:
