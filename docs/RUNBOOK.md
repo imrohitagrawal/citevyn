@@ -82,21 +82,53 @@ upstream timeouts).
 
 #### Redaction markers you will see in these lines
 
-The app redacts its own log fields, so three markers appear in normal
+The app redacts its own log fields, so five markers appear in normal
 operation. None of them is an error, and knowing which is which saves a
 wrong-turn investigation:
 
 | Marker | Means | Example field |
 |---|---|---|
 | `[REDACTED]` | A value matched a secret-shaped rule, by key name or by entropy | `path='/v1/sessions/[REDACTED]/messages'` |
-| `…<truncated>` | The value was longer than its cap and was cut | `request_id='…<truncated>'` |
+| `…<truncated>` | The value was longer than its cap and was cut. The kept part **is printed**: the first 160 characters for a correlation id or a path, 200 for any other allowlisted field, then the marker | `request_id='<the value's first 160 characters>…<truncated>'` |
 | `…<N segments>` | A **crafted** request path with more than 64 `/` separators. The sweep was skipped on purpose — no route this app serves is anywhere near that deep, so this is a scanner or an attack, not a bug | `path='/[REDACTED]…<3000 segments>'` |
+| `…<N chars>` | The value was too long to scan (over 8,192 characters), or a `model` value was over its 64-character cap. The value is discarded entirely rather than cut | `request_id='[REDACTED]…<16385 chars>'` |
+| `<str len=N>` | The field is **not on the emit allowlist**, so only its shape is printed. Not a redaction failure and not crafted input — it is the default for any string field nobody has explicitly allowed. `reason` (`app/services/notifications.py:143`) is the one you will actually meet | `reason=<str len=19>` |
 
-Two things to know about the last one. The full request line is still in
-uvicorn's own access line for the same request, so the path is recoverable —
-but that line carries no `request_id`, so joining them means matching on time.
-And `N` is **client-influenced**: a short crafted path can forge the identical
-field, so read it as a hint, not as a measurement.
+**Three of those markers carry no character of their input**: `…<N segments>`,
+`…<N chars>` and `<str len=N>`, plus a bare `[REDACTED]` that replaced a whole
+value. Only `…<truncated>` shows you part of the value. If you need to know
+whether an operator can still read the field, that is the distinction — not
+which marker looks most severe.
+
+Two things to know about the `…<N segments>` line. The full request line is
+still in uvicorn's own access line for the same request, so the path is
+recoverable — but that line carries no `request_id`, so joining them means
+matching on time. And `N` is **client-influenced**: a short crafted path can
+forge the identical field, so read it as a hint, not as a measurement.
+
+**The recoverability note has one exception**, and it is the case you are most
+likely to be investigating: above 8,192 characters uvicorn's own access line
+carries the marker too, because the filter bounds the same value there. At that
+size the path is gone from **both** logs and nothing recovers it.
+
+The client-influenced caveat applies to `…<N chars>` as well: the count comes
+from the value being discarded, so whoever supplied the value chose it. It
+appears in two places:
+
+- **the app's own fields** — over `app.core.logging.MAX_SCANNED_CHARS` (8,192)
+  for any string field, or over `MAX_MODEL_ID` (64) for a provider model slug;
+- **uvicorn's access line** — where a request **path (including its query
+  string)** over 8,192 characters is replaced by the marker in place. The bound
+  is per *argument*, not per line: a request line of 8,224 characters whose path
+  argument is 8,191 still prints that path in full.
+
+**What it means depends on which threshold fired, so check that first.** Over
+8,192 characters, nothing this app emits or serves is close and the value is
+crafted — a scanner or an attack. Over 64 characters under a `model` key it is
+**not** crafted: that string comes from the provider's response body or from
+configuration, so a `model='[REDACTED]…<N chars>'` line means a model slug got
+longer than the cap and the cap needs raising. Reading the second as an attack
+sends you down the wrong path.
 
 ---
 

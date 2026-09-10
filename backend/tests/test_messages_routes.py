@@ -591,3 +591,51 @@ def test_the_request_log_line_bounds_a_crafted_many_segment_path(
     # is not "the middleware stopped logging".
     assert "'status_code': 404" in emitted, emitted
     assert "'method': 'GET'" in emitted, emitted
+
+
+def test_the_request_log_line_redacts_a_secret_a_unicode_letter_used_to_shield(
+    in_memory_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#400, READ OFF THE EMITTED LINE rather than off ``redact_value``.
+
+    ``HIGH_ENTROPY_RE``'s boundary was ``\\b``, a transition in ``\\w``, while
+    its character class is not ``\\w``. ``é`` IS a word character and is NOT in
+    the class, so where the run began there was no transition, the match was
+    never attempted, and a 64-character sha reached the production log VERBATIM.
+    One character defeated the sweep at any secret length.
+
+    IT IS REACHABLE THROUGH A URL, which is why this drives a real request. The
+    percent-decoding is MEASURED here rather than assumed: #400 attributes it to
+    uvicorn (``urllib.parse.unquote`` at ``httptools_impl.py:260`` and
+    ``h11_impl.py:202``) and the ASGI test transport is a different
+    implementation, so the first assertion below checks that ``%C3%A9`` really
+    did arrive as ``é`` before anything is concluded from the rest. It does --
+    measured on this transport -- so the test sends the encoded form, exactly as
+    a client would.
+
+    RED if ``HIGH_ENTROPY_RE``'s lookaround boundary is reverted to ``\\b``.
+    Verified by making that change: the sha appears in the emitted line.
+    """
+    import hashlib
+
+    sha = hashlib.sha256(b"citevyn-400-route-fixture").hexdigest()
+    assert len(sha) == 64
+
+    with caplog.at_level("INFO", logger="citevyn.request"):
+        response = in_memory_client.get("/v1/x/%C3%A9" + sha)
+    assert response.status_code == 404
+
+    emitted = _emitted_request_lines(caplog)
+    assert "request_completed" in emitted, f"no request line was emitted at all: {emitted!r}"
+    # THE TRANSPORT CLAIM, measured rather than inherited: the encoded byte pair
+    # reached the app as the decoded character, so this really is #400's shape.
+    assert "'/v1/x/é" in emitted, (
+        f"the transport did not percent-decode; send the literal character instead: {emitted!r}"
+    )
+
+    assert sha not in emitted, f"a 64-character secret reached the log line: {emitted!r}"
+    assert "'path': '/v1/x/é[REDACTED]'" in emitted, emitted
+    # Positive partner: the route shape and the operational content survive, so
+    # this is not "the whole field was blanked".
+    assert "'status_code': 404" in emitted, emitted
+    assert "'method': 'GET'" in emitted, emitted
