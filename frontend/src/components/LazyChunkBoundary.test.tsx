@@ -78,7 +78,9 @@ describe("LazyChunkBoundary", () => {
 
     // A chunk that never arrives is invisible in the DOM, so "the page is
     // short" would otherwise be the only symptom.
-    const ours = errorSpy.mock.calls.filter((c) => String(c[0]).includes("[landing-strip]"));
+    const ours = errorSpy.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("[landing-strip]"),
+    );
     expect(ours.length).toBeGreaterThan(0);
     expect(String(ours[0][1])).toContain("Failed to fetch dynamically imported module");
   });
