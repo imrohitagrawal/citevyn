@@ -1200,6 +1200,10 @@ _SPEC_FILES: frozenset[str] = frozenset(
     {
         "answer-format.spec.ts",
         "behavior.spec.ts",
+        # #403's contrast-FLOOR sweep. `faint-contrast.spec.ts` below is #396's
+        # token BAN — different questions over the same rendered page, and both
+        # are scanned here.
+        "contrast-floor.spec.ts",
         "faint-contrast.spec.ts",
         "fidelity.spec.ts",
         "focus-ring.spec.ts",

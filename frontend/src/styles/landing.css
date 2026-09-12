@@ -83,12 +83,30 @@ body {
    3. HEADER
    ========================================================================= */
 
+/* #403. THE FILL WAS 82%, AND THE NAV FAILED AA OVER THE CTA BANNER.
+ *
+ * This bar is sticky, so any full-width panel scrolls underneath it — including
+ * `.cta-banner`, whose background is `var(--ink)`. At 82% the composite under
+ * the nav links is `0.82 x --bg + 0.18 x --ink`, and `--muted` on that measures
+ * 3.64:1 light / 4.20:1 dark for 14px text that owes 4.5:1. Nobody could see it
+ * because the whole-page sweep declares the header unmeasurable: the 12px blur
+ * really is not a flat colour, so `contrast-floor.spec.ts` refuses to score
+ * anything inside `<header>` and the site's primary navigation was checked by
+ * nothing at all.
+ *
+ * 94%, measured across every opaque surface the page can put behind this bar
+ * (`--bg`, `--surface`, `--surface-2`, `--ink`, `--hl`): the worst case rises
+ * to 4.69:1 light / 6.08:1 dark. 92% lands on exactly 4.50 and was rejected for
+ * sitting on the line. The frosted look survives — 6% see-through plus the
+ * blur — and `tests/contrast-floor.spec.ts`'s header test now composites this
+ * exact alpha over all five surfaces and requires every run to clear its floor,
+ * so the number cannot drift back without going red. */
 .header {
   position: sticky;
   top: 0;
   z-index: 50;
   backdrop-filter: blur(12px);
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
   border-bottom: 1px solid var(--border);
   transition: background 0.25s ease;
 }
@@ -287,6 +305,22 @@ body {
 .hero-input-box.shake {
   animation: cv-shake 0.4s ease;
   border-color: var(--color-warning) !important;
+}
+
+/* #403. The hero's rotating demo question was UNSTYLED, so it rendered in
+ * Chromium's built-in placeholder grey — rgb(117, 117, 117), measured, and the
+ * SAME grey in both themes, because the UA default does not follow the page's
+ * inverted surfaces. On `--surface` that is 4.61:1 light (just over AA) but
+ * 3.61:1 dark, under the 4.5:1 floor this 16px text owes. It is the most
+ * prominent piece of copy on the page and the control the `/` shortcut targets.
+ *
+ * `--muted`, matching `.chat-input::placeholder` further down, which already
+ * had this rule: 5.55:1 light / 6.45:1 dark on `--surface`.
+ *
+ * A stylesheet rule, not an inline style, because `Hero.tsx` styles this input
+ * inline and an inline `style` attribute cannot address a pseudo-element. */
+#hero-input::placeholder {
+  color: var(--muted);
 }
 
 .hero-nudge {
@@ -1532,16 +1566,33 @@ body {
   border-radius: 999px;
 }
 
+/* #403. Both badges shipped HARDCODED rgba() — colours that belong to no token
+ * and therefore never inverted with the theme. Measured on the rendered chat
+ * view (the badge's own translucent fill composited over `--bg`):
+ *
+ *   .notice-rate-limit   4.31:1 light   3.17:1 dark
+ *   .notice-error        5.45:1 light   2.67:1 dark
+ *
+ * Three of those four are under the 4.5:1 floor this 11px/600 text owes. They
+ * are now the theme-split semantic tokens, so there is one place to retune and
+ * the dark page gets dark-page colours: 4.87 / 6.46 and 4.74 / 5.85 after.
+ *
+ * The BORDER stays decorative and is derived from the same token with
+ * `color-mix` rather than being a third hardcoded rgba: SC 1.4.3 governs the
+ * text, and the badge is already identified by its own fill and its words, so
+ * the border carries no information of its own. Stated rather than left as an
+ * unexplained exemption — it measures 2.00:1 light / 2.65:1 dark against the
+ * page and would not clear 1.4.11 if it did carry meaning. */
 .notice-rate-limit {
-  color: rgba(180, 83, 9, 1);
-  background: rgba(217, 119, 6, 0.1);
-  border: 1px solid rgba(217, 119, 6, 0.45);
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, transparent);
 }
 
 .notice-error {
-  color: rgba(185, 28, 28, 1);
-  background: rgba(220, 38, 38, 0.08);
-  border: 1px solid rgba(220, 38, 38, 0.4);
+  color: var(--color-error);
+  background: var(--color-error-soft);
+  border: 1px solid color-mix(in srgb, var(--color-error) 45%, transparent);
 }
 
 .continue-btn {

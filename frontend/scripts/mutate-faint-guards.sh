@@ -67,13 +67,21 @@ PW_CONFIG=${PW_CONFIG:-playwright.demo-ci.config.ts}
 CV_ALLOW_DIRTY=${CV_ALLOW_DIRTY:-0}
 S=$(mktemp -d)
 
-FILES="LANDING HERO TOKENS ANALYZER GUARD SPEC FIDELITY VITECONF PWCONF"
+FILES="LANDING HERO TOKENS ANALYZER GUARD SPEC KIT FIDELITY VITECONF PWCONF"
 LANDING=src/styles/landing.css
 HERO=src/components/Hero.tsx
 TOKENS=src/styles/tokens.css
 ANALYZER=scripts/faint-contrast.mjs
 GUARD=scripts/faint-contrast.test.mjs
 SPEC=tests/faint-contrast.spec.ts
+# #403 moved the browser sweep OUT of the spec and into a kit both specs
+# import. Thirteen mutants below still named $SPEC after that move, so their
+# anchors matched nothing — and `one` reports an unmatched anchor as ANCHOR
+# MISSING, which lands in the survivor list. Mutants that cannot APPLY are
+# exactly how a dead guard keeps looking alive, so they now name $KIT.
+# The suite is still `pw` (faint-contrast.spec.ts): it calls `installKit`,
+# so it is still the runner that must catch a sabotaged sweep.
+KIT=tests/contrast-kit.ts
 FIDELITY=tests/fidelity.spec.ts
 VITECONF=vite.config.ts
 PWCONF=playwright.config.ts
@@ -108,13 +116,19 @@ SURVIVORS=""
 # `unit` = the static half.  `sel` = the vitest-selection guard that keeps
 # `unit` in the run at all.  `pin` = the Playwright-selection guard that keeps
 # the BROWSER half in the run.  `pw` = the browser half.  `fid` = the two
-# fidelity assertions #396 legitimately flipped.
+# fidelity assertions #396 legitimately flipped.  `floor` = #403's whole-page
+# WCAG 1.4.3 sweep.
 run () {
   case "$1" in
     unit) npx vitest run scripts/faint-contrast.test.mjs >"$S/out" 2>&1 ;;
     sel)  npx vitest run src/test/buildGuards.test.ts -t "faint" >"$S/out" 2>&1 ;;
     pin)  npx vitest run src/test/buildGuards.test.ts -t "Playwright selects the specs" >"$S/out" 2>&1 ;;
     pw)   npx playwright test -c "$PW_CONFIG" faint-contrast.spec.ts --reporter=line >"$S/out" 2>&1 ;;
+    # `floor` = #403's whole-page WCAG sweep. It shares `contrast-kit.ts` with
+    # `pw` but asks a different question, and the WCAG floor itself lives in
+    # code only THIS suite pins — so a floor mutant run under `pw` would prove
+    # nothing about it.
+    floor) npx playwright test -c "$PW_CONFIG" contrast-floor.spec.ts --reporter=line >"$S/out" 2>&1 ;;
     fid)  npx playwright test -c "$PW_CONFIG" fidelity.spec.ts --reporter=line >"$S/out" 2>&1 ;;
     *)    echo "unknown suite $1" >&2; return 97 ;;
   esac
@@ -138,21 +152,35 @@ survived () {  # label
 }
 
 one () {  # label suite file pristine old new
-  local label="$1" suite="$2" t="$3" p="$4"
-  OLD="$5" NEW="$6" T="$t" python3 -c "
+  local label="$1" suite="$2" t="$3" p="$4" ANCHORS
+  # Prints the number of times the anchor matched, so the caller can tell
+  # "matched once" from "matched three times and we edited one of them".
+  ANCHORS=$(OLD="$5" NEW="$6" T="$t" python3 -c "
 import os,sys
 t=os.environ['T'];old=os.environ['OLD'];new=os.environ['NEW']
 s=open(t).read()
-if old not in s: sys.exit(3)
+n=s.count(old)
+if n==0: sys.exit(3)
 open(t,'w').write(s.replace(old,new,1))
-"
-  # Both early returns verify the restore too, rather than `cp`-and-trust: a
-  # failed restore on an anchor typo would otherwise leave the tree dirty and be
-  # reported as a mere harness warning.
+print(n)
+")
+  # All three early returns verify the restore too, rather than `cp`-and-trust:
+  # a failed restore on an anchor typo would otherwise leave the tree dirty and
+  # be reported as a mere harness warning.
   if [ $? -ne 0 ]; then
     echo "!! ANCHOR MISSING: $label"; cp "$p" "$t"
     cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after anchor miss: $label"; exit 98; }
     survived "ANCHOR MISSING (harness fault, not a guard result): $label"; return
+  fi
+  # AMBIGUOUS ANCHOR: `replace(..., 1)` would edit whichever match came first,
+  # so the mutant lands somewhere other than where its label says and the
+  # verdict is about code nobody chose. Same class as ANCHOR MISSING — a result
+  # you cannot trust — so it is reported the same loud way rather than silently
+  # mutating site 1 of N.
+  if [ "$ANCHORS" -gt 1 ]; then
+    echo "!! ANCHOR AMBIGUOUS ($ANCHORS matches): $label"; cp "$p" "$t"
+    cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after ambiguous anchor: $label"; exit 98; }
+    survived "ANCHOR AMBIGUOUS x$ANCHORS (harness fault, not a guard result): $label"; return
   fi
   if cmp -s "$t" "$p"; then
     echo "!! NO-OP: $label"; cp "$p" "$t"
@@ -171,7 +199,7 @@ open(t,'w').write(s.replace(old,new,1))
 }
 
 echo "=== control: every suite must be GREEN on the unmutated tree ==="
-for s in unit sel pin pw fid; do
+for s in unit sel pin pw fid floor; do
   c=$(run "$s")
   if [ "$c" -ne 0 ]; then
     echo "!! suite '$s' is already failing unmutated — nothing below means anything."
@@ -299,10 +327,17 @@ one "css: a comment INSIDE var(), which postcss keeps in the value" unit "$LANDI
 '@media (prefers-reduced-motion: reduce) {' '@media (prefers-reduced-motion: reduce) {
   .composer-hint { color: var(/*c*/--faint); }
 '
+# ANCHORED ON THE FOLLOWING LINE. `Hero.tsx` has TWO identical
+# `color: "var(--muted)",` lines (the TRY: label and the > glyph), so the bare
+# anchor matched both and `replace(...,1)` silently picked whichever came first
+# — a mutant that lands somewhere other than where its label says. The 15px
+# line below it belongs to the glyph span alone.
 one "tsx: an ESCAPED var() inline style (source scan)" unit "$HERO" "$S/p.HERO" \
-'                color: "var(--muted)",' \
-'                color: "\76 ar(--faint)",'
-one "analyzer: match `var` case-SENSITIVELY again (bypass 2, cause 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
+'                color: "var(--muted)",
+                fontSize: "15px",' \
+'                color: "\76 ar(--faint)",
+                fontSize: "15px",'
+one "analyzer: match \`var\` case-SENSITIVELY again (bypass 2, cause 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return /--faint(?![\w-])/.test(value);' \
 '  return /var\(\s*--faint(?![\w-])/.test(value);'
 one "analyzer: anchor on the SPELLING of var again (bypass 3 — CSS escapes)" unit "$ANALYZER" "$S/p.ANALYZER" \
@@ -320,7 +355,7 @@ one "analyzer: anchor the TSX scan on the spelling of var again" unit "$ANALYZER
 one "analyzer: let the TSX gap swallow quotes, so PROSE reads as a violation" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  const re = /\([^)"'"'"'`]{0,40}--faint(?![\w-])[^)]*\)/g;' \
 '  const re = /\([^)]{0,40}--faint(?![\w-])[^)]*\)/g;'
-one "analyzer: blanket `i` flag, which wrongly reports the DIFFERENT --FAINT property" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: blanket \`i\` flag, which wrongly reports the DIFFERENT --FAINT property" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return /--faint(?![\w-])/.test(value);' \
 '  return /var\(\s*--faint(?![\w-])/i.test(value);'
 one "spec: never leave the desktop viewport (bypass 2, cause 2)" pw "$SPEC" "$S/p.SPEC" \
@@ -334,16 +369,16 @@ one "spec: sweep the phone viewport but skip the chat screen, where .composer-hi
 one "analyzer: drop -webkit-text-fill-color from the glyph-painting set (bypass 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
 'const TEXT_PAINT_PROPS = new Set(["color", "-webkit-text-fill-color"]);' \
 'const TEXT_PAINT_PROPS = new Set(["color"]);'
-one "analyzer: drop plain `color` from the glyph-painting set" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: drop plain \`color\` from the glyph-painting set" unit "$ANALYZER" "$S/p.ANALYZER" \
 'const TEXT_PAINT_PROPS = new Set(["color", "-webkit-text-fill-color"]);' \
 'const TEXT_PAINT_PROPS = new Set(["-webkit-text-fill-color"]);'
-one "analyzer: violation sweep narrows back to plain `color` only" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: violation sweep narrows back to plain \`color\` only" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return findTextPaintDeclarations(cssText).filter((d) => usesFaint(d.value));' \
 '  return findColorDeclarations(cssText).filter((d) => usesFaint(d.value));'
 one "analyzer: WIDEN the narrow population, so the two counters stop agreeing" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return declarationsWhere(cssText, (prop) => prop === "color");' \
 '  return declarationsWhere(cssText, (prop) => TEXT_PAINT_PROPS.has(prop));'
-one "spec: sweep reads `color` only, never the text-fill override (bypass 1)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: sweep reads \`color\` only, never the text-fill override (bypass 1)" pw "$KIT" "$S/p.KIT" \
 '            } else if (same(parse(s.webkitTextFillColor), rgb)) {
               offenders.push(`${describe(el, p ? p : "")} [-webkit-text-fill-color]`);
             }' '            }'
@@ -492,19 +527,28 @@ echo "=== META: can the BROWSER sweep be made to check nothing? ==="
 # BOTH branches, not just the `color` one: the text-fill branch would otherwise
 # catch every planted offender on its own (an unset `-webkit-text-fill-color`
 # resolves TO `color`) and this mutant would survive while looking decisive.
-one "spec: the sweep reports no offender, whatever it sees" pw "$SPEC" "$S/p.SPEC" \
+one "kit: the sweep reports no offender, whatever it sees" pw "$KIT" "$S/p.KIT" \
 '            if (same(parse(s.color), rgb)) {
               offenders.push(describe(el, p ? p : ""));
             } else if (same(parse(s.webkitTextFillColor), rgb)) {
               offenders.push(`${describe(el, p ? p : "")} [-webkit-text-fill-color]`);
             }' ''
-one "spec: the sweep walks nothing (non-vacuity floor must bite)" pw "$SPEC" "$S/p.SPEC" \
-'        const all: Element[] = [document.body, ...Array.from(document.body.querySelectorAll("*"))];' \
-'        const all: Element[] = [];'
-one "spec: never visit pseudo-elements, so ::placeholder is invisible" pw "$SPEC" "$S/p.SPEC" \
-'          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+# WIDENED, not just repointed: the kit holds TWO sweeps and both open with this
+# exact line, so the bare anchor is ambiguous and `replace(...,1)` would pick
+# whichever came first. The comment above it is unique to the #396 sweep.
+one "kit: the sweep walks nothing (non-vacuity floor must bite)" pw "$KIT" "$S/p.KIT" \
+'        // inflate the non-vacuity number this test reports.
+        const all: Element[] = [document.body, ...Array.from(document.body.querySelectorAll("*"))];' \
+'        // inflate the non-vacuity number this test reports.
+        const all: Element[] = [];'
+# WIDENED for the same reason: both sweeps push ::placeholder the same way.
+# The single-line `pseudos` declaration belongs to the #396 sweep alone.
+one "kit: never visit pseudo-elements, so ::placeholder is invisible" pw "$KIT" "$S/p.KIT" \
+'          const pseudos: (string | undefined)[] = [undefined, "::before", "::after"];
+          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
             pseudos.push("::placeholder");
-          }' ''
+          }' \
+'          const pseudos: (string | undefined)[] = [undefined, "::before", "::after"];'
 # NOT `if (false)` on the `missing.push` line: every probe selector matches
 # today, so that branch never runs and the mutant would be EQUIVALENT. Renaming
 # a probe is what actually produces the zero-match case the check exists for.
@@ -517,10 +561,10 @@ one "spec: a probe class is renamed, so its sweep silently measures nothing" pw 
 # BLACK" mutant below proves it can actually fail on a real measurement.
 one "spec: raise the floor to an impossible 21:1 (is the ratio even compared?)" pw "$SPEC" "$S/p.SPEC" \
 'const AA_SMALL_TEXT = 4.5;' 'const AA_SMALL_TEXT = 21;'
-one "spec: assume every colour is opaque (alpha never recovered)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: assume every colour is opaque (alpha never recovered)" pw "$KIT" "$S/p.KIT" \
 '          const a = 1 - (w[0] - k[0] + (w[1] - k[1]) + (w[2] - k[2])) / 3 / 255;' \
 '          const a = 1;'
-one "spec: score the text colour opaque instead of compositing its alpha" pw "$SPEC" "$S/p.SPEC" \
+one "kit: score the text colour opaque instead of compositing its alpha" pw "$KIT" "$S/p.KIT" \
 '  const a = colour[3] ?? 1;
   const over = [0, 1, 2].map((i) => Math.round(a * colour[i] + (1 - a) * backdrop[i]));
   return contrastRatio(over, backdrop);' \
@@ -532,22 +576,25 @@ one "spec: accept ANY colour as the token (the rgb comparison stops comparing)" 
 '  const rgbMatches =
     colour.slice(0, 3).map(Math.round).join() === want.slice(0, 3).map(Math.round).join();' \
 '  const rgbMatches = true;'
-one "spec: drop the second sentinel, so an unparseable colour reads as red" pw "$SPEC" "$S/p.SPEC" \
+one "kit: drop the second sentinel, so an unparseable colour reads as red" pw "$KIT" "$S/p.KIT" \
 '        ctx.fillStyle = "#00ff00";
         ctx.fillStyle = css;
         const second = ctx.fillStyle;' '        const second = first;'
-one "spec: stop reporting ancestors the compositor cannot model" pw "$SPEC" "$S/p.SPEC" \
-'        if (s.backgroundImage !== "none") bad.push(`${name} background-image:${s.backgroundImage}`);' ''
+# RE-ANCHORED as well as repointed: prettier reflowed this onto two lines when
+# it moved into the kit, so even the old file would no longer have matched it.
+one "kit: stop reporting ancestors the compositor cannot model" pw "$KIT" "$S/p.KIT" \
+'          if (s.backgroundImage !== "none")
+            bad.push(`${name} background-image:${s.backgroundImage}`);' ''
 # NEW FIXTURE, NEW MUTANT. The `backdrop-filter` push had no fixture, so
 # deleting it was an EQUIVALENT mutation while the spec's RED-WHEN line claimed
 # "any bad.push(...) removed" turns it red. Now it has one.
-one "spec: stop reporting a backdrop-filter ancestor" pw "$SPEC" "$S/p.SPEC" \
+one "kit: stop reporting a backdrop-filter ancestor" pw "$KIT" "$S/p.KIT" \
 '        if (s.backdropFilter && s.backdropFilter !== "none")
           bad.push(`${name} backdrop-filter:${s.backdropFilter}`);' ''
-one "spec: never look at ::before/::after, the overlay shape this app SHIPS" pw "$SPEC" "$S/p.SPEC" \
+one "kit: never look at ::before/::after, the overlay shape this app SHIPS" pw "$KIT" "$S/p.KIT" \
 '        for (const pseudo of ["::before", "::after"]) {' \
 '        for (const pseudo of []) {'
-one "spec: report a TEXT-ONLY pseudo as a blocker, which blocks every measurement" pw "$SPEC" "$S/p.SPEC" \
+one "kit: report a TEXT-ONLY pseudo as a blocker, which blocks every measurement" pw "$KIT" "$S/p.KIT" \
 '          const paints = (pbg && pbg[3] > 0.001) || ps.backgroundImage !== "none";' \
 '          const paints = true;'
 # NO MUTANT for "composite over BLACK instead of white". It was RUN and it
@@ -564,13 +611,39 @@ one "spec: report a TEXT-ONLY pseudo as a blocker, which blocks every measuremen
 #
 # The two below make the compositor genuinely wrong instead, and both bite in
 # DARK mode (--muted on white is 2.20:1).
-one "spec: never walk past the element itself (ancestor backgrounds ignored)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: never walk past the element itself (ancestor backgrounds ignored)" pw "$KIT" "$S/p.KIT" \
 '      for (let n: Element | null = el; n; n = n.parentElement) {
         const c = parse(getComputedStyle(n).backgroundColor);' \
 '      for (let n: Element | null = el; n; n = null) {
         const c = parse(getComputedStyle(n).backgroundColor);'
-one "spec: collect no background layers at all (everything reads as page white)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: collect no background layers at all (everything reads as page white)" pw "$KIT" "$S/p.KIT" \
 '        if (c && c[3] > 0.001) layers.push(c);' '        if (false) layers.push(c!);'
+
+echo
+echo "=== META: is the WCAG FLOOR itself still the criterion? ==="
+# THE DEFECT THIS PAIR EXISTS FOR. The exported `wcagFloor` was rewritten to
+# `px * 0.75` while the in-page copy the sweep actually RUNS kept a truncated
+# `18.666`, so the two disagreed across [18.666, 18.6666...)px at weight >= 700
+# and nothing was red. No planted element can reach that window — Chromium
+# quantises font-size to 1/64px — so the boundary test that plants elements
+# could not see it. `contrast-floor.spec.ts` now calls both copies as PURE
+# functions and requires them to agree; this mutant is what proves that bites.
+one "kit: the truncated 18.666 floor, back in the copy the sweep RUNS" floor "$KIT" "$S/p.KIT" \
+'    const floorFor = (size: number, weight: number) => {
+      const pt = size * 0.75;
+      return pt >= 18 || (pt >= 14 && weight >= 700) ? 3 : 4.5;
+    };' \
+'    const floorFor = (size: number, weight: number) =>
+      size >= 24 || (size >= 18.666 && weight >= 700) ? 3 : 4.5;'
+# The PARTNER, in the other direction: an identical edit to BOTH copies would
+# satisfy an agreement check that only compared them to each other. The grid
+# also pins the boundary against constants, so moving the criterion itself is
+# red even when the two copies still agree.
+one "kit+export: move the 14pt bound in BOTH copies at once (agreement is not enough)" floor "$KIT" "$S/p.KIT" \
+'  const pt = fontSizePx * 0.75;
+  return pt >= 18 || (pt >= 14 && fontWeight >= 700) ? 3 : 4.5;' \
+'  const pt = fontSizePx * 0.75;
+  return pt >= 18 || (pt >= 13 && fontWeight >= 700) ? 3 : 4.5;'
 
 echo
 echo "=== META: are the two halves still SELECTED at all? ==="
@@ -590,6 +663,14 @@ one "playwright.config: deselect the BROWSER half entirely" pin "$PWCONF" "$S/p.
 '  testDir: "./tests",' \
 '  testDir: "./tests",
   testIgnore: ["**/faint-contrast.spec.ts"],'
+# #403's browser half, mutated the same way. Before the pin that this kills,
+# deselecting `contrast-floor.spec.ts` was green on every gate in the repo:
+# `buildGuards` named the file nowhere, and the demo-CI selection differential
+# balances when a whole spec's tests leave both of its sides at once.
+one "playwright.config: deselect the FLOOR SWEEP entirely" pin "$PWCONF" "$S/p.PWCONF" \
+'  testDir: "./tests",' \
+'  testDir: "./tests",
+  testIgnore: ["**/contrast-floor.spec.ts"],'
 
 echo
 # NO MUTANT for "delete the --faint declaration from tokens.css". It would

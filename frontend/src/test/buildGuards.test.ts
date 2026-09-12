@@ -735,7 +735,7 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
     // static half's two `scripts/` files with `existsSync` and nothing pinned
     // the spec, while the demo-CI selection differential still balances when
     // this spec's tests vanish, because they leave BOTH sides of it at once.
-    // Measured today at `206 == 228 - 22`; that pair moves with every test
+    // Measured today at `230 == 252 - 22`; that pair moves with every test
     // added anywhere, and the 22 is `visual.spec.ts`, the one file demo-CI
     // ignores — re-run `--list` before quoting either number. That half is
     // the only net over aliases, raw hex and runtime-built inline styles, so
@@ -755,9 +755,50 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
       "Playwright no longer selects faint-contrast.spec.ts, so nothing measures " +
         "the RENDERED colour of any text in this app",
     ).toBe(true);
-    // The floor is the current population, not one below it: `>= 6` with 7
-    // files present would let someone delete a spec and stay green.
-    expect(specs.length).toBeGreaterThanOrEqual(7);
+    // #403's BROWSER half, pinned the same way and for the same reason. The
+    // line above pins the `--faint` guard, which is a question about ONE token;
+    // `contrast-floor.spec.ts` is the whole-page WCAG 1.4.3 sweep, and it is
+    // the ONLY thing in this repo that scores a text run it was not told about
+    // in advance — including the sticky header, which the sweep declares
+    // unmeasurable and this spec composites by hand.
+    //
+    // WHAT WAS ALREADY COVERED, and what this line ADDS. An earlier draft of
+    // this comment said "nothing else pinned it"; that was false, and checking
+    // it is what this file is for. `backend/tests/test_gating_workflows.py`'s
+    // `_SPEC_FILES` is an EXACT-SET assertion over `frontend/tests/*.spec.ts`
+    // that already named `contrast-floor.spec.ts`, and it runs in CI — so
+    // DELETING or RENAMING the file was already red there.
+    //
+    // What nothing covered, and this line does, is DESELECTION: a `testIgnore`,
+    // `testMatch` or `testDir` edit leaves the file on disk, so `_SPEC_FILES`
+    // stays green while Playwright stops running it. The demo-CI selection
+    // differential does not catch it either — it balances when a whole spec's
+    // tests vanish, because they leave BOTH sides of it at once.
+    //
+    // GREEN, and honestly so: rewriting its `test(` calls to `test.skip(` —
+    // `--list` still reports them, so this asserts PRESENCE, not EXECUTION.
+    // Execution is covered one layer out by `.github/workflows/frontend.yml`'s
+    // `stats["skipped"] != 4` pin on the demo-CI run. The `endsWith` form
+    // tolerates a move into a subdirectory.
+    expect(
+      specs.some((f) => f.endsWith("contrast-floor.spec.ts")),
+      "Playwright no longer selects contrast-floor.spec.ts, so nothing sweeps " +
+        "this app for text below the WCAG 1.4.3 AA floor",
+    ).toBe(true);
+    // The floor is the CURRENT population, not one below it, so deleting any
+    // spec goes red here even if nothing pins that file by name. It read
+    // `>= 7` while 11 files were present, which left four deletions free.
+    //
+    // RE-MEASURE WITH `--list`, NOT WITH `ls`. `specs` comes from
+    // `playwright test --list`, which searches RECURSIVELY and reports only
+    // files that declare a test; `ls frontend/tests/*.spec.ts` is neither. The
+    // two agree at 11 today, but the line above advertises that `endsWith`
+    // tolerates a move into a subdirectory — and the day someone takes it up,
+    // `ls` under-counts and hands back a free deletion. Use
+    // `npx playwright test --list --reporter=json | jq '.suites | length'`.
+    // (The `>= 7` two `describe`s below is a different thing: a non-vacuity
+    // partner for the tsc file-list guard, not a population floor.)
+    expect(specs.length).toBeGreaterThanOrEqual(11);
     for (const spec of specs) {
       expect(existsSync(join(testsDir, spec)), `${spec} is not under tests/`).toBe(true);
       const sources = testBindingSources(readFileSync(join(testsDir, spec), "utf8"));

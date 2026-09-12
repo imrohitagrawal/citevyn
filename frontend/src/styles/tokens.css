@@ -106,18 +106,68 @@
    * touching reset.css. */
   --focus-ring: var(--ink);
 
-  /* ----- Semantic ----- */
-  --color-success: #1c9a5f;
-  --color-success-soft: rgba(28, 154, 95, 0.12);
-  --color-warning: #b4732a;
-  --color-warning-soft: rgba(180, 115, 42, 0.14);
-  --color-error: #c25b4e;
-  --color-error-soft: rgba(194, 91, 78, 0.12);
+  /* ----- Semantic -----
+   *
+   * THEME-SPLIT AS OF #403, and that split is the fix. These four were one
+   * theme-invariant value each, chosen to read on a light page, and they are
+   * drawn as SMALL TEXT (9-13px) on surfaces that invert. One value cannot
+   * clear 4.5:1 on both #ffffff and #1e1e21, so seven text runs shipped under
+   * WCAG 1.4.3 AA. Measured on the RENDERED page, before:
+   *
+   *   .refusal-badge       --color-warning on --hl-soft     3.20 / 3.24
+   *   .hero-nudge          --color-warning on --bg          3.68 / 4.67
+   *   .compare-footer.good --color-success on --surface     3.60 / 4.62
+   *   .check-icon          --bg on --color-success          3.42 / 5.02
+   *   .compare-footer.bad  --color-error-strong on --surface   5.17 / 3.22
+   *   .source-badge.zero   --color-error-strong on --surface-2 4.57 / 2.92
+   *   --color-error at 13-14px on --surface / --bg / --surface-2
+   *                        light 4.29 / 4.07 / 3.79   dark 3.88 / 4.22 / 3.51
+   *
+   * (light / dark; the light column of the last row is computed, not rendered —
+   * those two uses are on signed-in surfaces the demo suite cannot reach.)
+   *
+   * Light takes the darker value, dark the lighter one, and the pairing keeps
+   * the design's own relationship: `--color-error-strong` stays the DEEPER of
+   * the two reds in light and the BRIGHTER of the two in dark, because that is
+   * what "stronger" means once the page inverts. The after-numbers are not
+   * restated here — `frontend/tests/contrast-floor.spec.ts` MEASURES them, so a
+   * retune that breaks one is red rather than merely out of date.
+   *
+   * `--color-info` is unchanged and has ZERO consumers (grep `var(--color-info`
+   * under `frontend/src`), so there is no rendered ratio to state for it. It
+   * appears in both dark blocks only so those two blocks stay identical, which
+   * `src/test/tokenThemeParity.test.ts` requires. If it ever paints text, the
+   * floor sweep measures it then. */
+  --color-success: #157a4a;
+  --color-success-soft: rgba(21, 122, 74, 0.12);
+  --color-warning: #8a5418;
+  --color-warning-soft: rgba(138, 84, 24, 0.14);
+  --color-error: #a84437;
+  --color-error-soft: rgba(168, 68, 55, 0.12);
   /* Deeper red for the "0 SOURCES" chip + ✗ comparison footer (§1). */
-  --color-error-strong: #b0503f;
+  --color-error-strong: #8a3324;
   --color-info: #0284c7;
   --color-info-soft: rgba(2, 132, 199, 0.12);
-  --refusal-amber: #b4732a;
+  /* An ALIAS, not a copy — the same trick as `--focus-ring: var(--ink)` above.
+   * This selector's `:root` half matches <html> whatever its data-theme is, so
+   * `var(--color-warning)` substitutes the value that token has CASCADED to on
+   * that element, and the amber flips with the theme for free. Declared ONCE
+   * here and deliberately NOT repeated in either dark block — which is why the
+   * parity check between those two blocks passes without it.
+   *
+   * IT CURRENTLY REACHES NOTHING ON SCREEN, and that is worth knowing before
+   * anyone "fixes" it. Its only consumer is `Hero.tsx`'s inline
+   * `borderColor: heroNudge ? "var(--refusal-amber)" : undefined`, and
+   * `LandingPage.tsx` passes the SAME `state.heroNudge` flag as `heroBoxShake`,
+   * so `.hero-input-box.shake { border-color: var(--color-warning) !important }`
+   * in `landing.css` is on for the whole window the inline style is on for —
+   * and an `!important` author rule beats a non-important inline declaration.
+   * Measured: a `.hero-input-box.shake` with and without the inline style paint
+   * the identical rgb(138, 84, 24) light / rgb(224, 164, 88) dark. No test can
+   * distinguish a correct `--refusal-amber` from a broken one, so nothing
+   * guards it. Retiring a declared design token is the owner's call (same
+   * precedent as `--faint` above), so it is kept and written down instead. */
+  --refusal-amber: var(--color-warning);
 
   /* ----- Window chrome (traffic lights) — kept as-is for macOS look ----- */
   --chrome-red: #e06c5a;
@@ -239,17 +289,22 @@
   --border-inverse: rgba(42, 42, 48, 0.12);
   --border-focus: #f6c453;
 
-  /* ----- Semantic ----- (theme-independent — same in both modes) */
-  --color-success: #1c9a5f;
-  --color-success-soft: rgba(28, 154, 95, 0.12);
-  --color-warning: #b4732a;
-  --color-warning-soft: rgba(180, 115, 42, 0.14);
-  --color-error: #c25b4e;
-  --color-error-soft: rgba(194, 91, 78, 0.12);
-  --color-error-strong: #b0503f;
+  /* ----- Semantic ----- (#403: theme-SPLIT, not theme-independent, and the
+   * line above said "same in both modes" while that was the defect. Whatever
+   * changes here MUST change identically in the prefers-color-scheme block
+   * below — `src/test/tokenThemeParity.test.ts` fails the build otherwise.)
+   * `--refusal-amber` is NOT here: it is an alias of `--color-warning`
+   * declared once in `:root`, and re-declaring it would freeze it to one
+   * theme. */
+  --color-success: #2fae72;
+  --color-success-soft: rgba(47, 174, 114, 0.12);
+  --color-warning: #e0a458;
+  --color-warning-soft: rgba(224, 164, 88, 0.14);
+  --color-error: #e08b7d;
+  --color-error-soft: rgba(224, 139, 125, 0.12);
+  --color-error-strong: #f5ab9a;
   --color-info: #0284c7;
   --color-info-soft: rgba(2, 132, 199, 0.12);
-  --refusal-amber: #b4732a;
 
   /* ----- Window chrome (traffic lights) — kept as-is for macOS look ----- */
   --chrome-red: #e06c5a;
@@ -306,8 +361,40 @@
     --border-inverse: rgba(42, 42, 48, 0.12);
     --border-focus: #f6c453;
 
-    /* ----- Grid background ----- */
-    --grid-color: rgba(111, 109, 103, 0.08);
+    /* ----- Semantic ----- (#403)
+     *
+     * THESE WERE MISSING, and that was the latent half of the bug. This block
+     * used to stop at the borders, so a reader on "system theme, OS set to
+     * dark" — the DEFAULT, since nothing writes `data-theme` until the toggle
+     * is clicked — got the LIGHT semantic values on a dark page. It was
+     * invisible only because the values happened to be identical in both
+     * blocks. Splitting them by theme would have made every one of these six
+     * tokens wrong for the most common dark-mode reader, which is the precise
+     * shape of "a one-place edit is a bug".
+     *
+     * Kept byte-identical to the `[data-theme="dark"]` block above by
+     * `src/test/tokenThemeParity.test.ts`, which compares the two blocks
+     * property for property. */
+    --color-success: #2fae72;
+    --color-success-soft: rgba(47, 174, 114, 0.12);
+    --color-warning: #e0a458;
+    --color-warning-soft: rgba(224, 164, 88, 0.14);
+    --color-error: #e08b7d;
+    --color-error-soft: rgba(224, 139, 125, 0.12);
+    --color-error-strong: #f5ab9a;
+    --color-info: #0284c7;
+    --color-info-soft: rgba(2, 132, 199, 0.12);
+
+    /* ----- Window chrome (traffic lights) — kept as-is for macOS look ----- */
+    --chrome-red: #e06c5a;
+    --chrome-yellow: #e0b44a;
+    --chrome-green: #5bab6b;
+
+    /* ----- Highlighter for quotes ----- */
+    --hl-transparent: transparent;
+    --hl-overlay: #f6c453;
+
+    /* ----- Grid background ----- (declared once; this line was duplicated) */
     --grid-color: rgba(111, 109, 103, 0.08);
 
     /* ----- Dark mode shadows ----- */

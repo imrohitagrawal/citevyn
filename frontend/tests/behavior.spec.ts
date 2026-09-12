@@ -4,7 +4,17 @@
  * flow is explicitly re-checked in dark.
  */
 import { test, expect } from "./fixtures";
-import { gotoApp, ensureTheme, enterChat, waitStreamDone, TOKENS, SEMANTIC } from "./helpers";
+import {
+  gotoApp,
+  ensureTheme,
+  enterChat,
+  waitStreamDone,
+  watchPresence,
+  readPresenceWindows,
+  waitSincePresence,
+  TOKENS,
+  SEMANTIC,
+} from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await gotoApp(page);
@@ -68,16 +78,104 @@ test.describe("Hero", () => {
   });
 
   test("empty Ask: no nav, amber border, shake, warning ~3s", async ({ page }) => {
+    // #354. THE TITLE SAYS "~3s" AND NOTHING USED TO MEASURE IT. The old body
+    // ended with `not.toBeVisible({ timeout: 4000 })`, which passes the instant
+    // the nudge is gone — after 3 s, or after 30 ms. Mutating
+    // `useLandingState.ts`'s `3000` to `50` left this test GREEN (measured),
+    // so the one behaviour its name promises was unasserted.
+    //
+    // Its other half is the flake #354 filed: `heroNudge` drives the nudge, the
+    // `shake` class AND the amber border, and all three vanish together on that
+    // hard 3 s timer. Three serial CDP round trips on a loaded machine can
+    // outlast the window, and then correct behaviour reads as a failure.
+    //
+    // Both are fixed the same way: the window is measured INSIDE the page, in
+    // the same clock the app's `setTimeout` runs on, and the style snapshot is
+    // taken in-page at a fixed offset from the nudge's own appearance rather
+    // than whenever the runner arrives.
+    await watchPresence(page, "nudge", ".hero-nudge");
+    await page.evaluate(() => {
+      // Snapshot the shake class and the settled border 400 ms after the nudge
+      // appears: past the 200 ms `border-color` transition and far inside the
+      // 3 s window, with no round trip in between.
+      const w = window as unknown as { __cvNudgeSnap?: Record<string, string> };
+      const tick = () => {
+        if (!document.querySelector(".hero-nudge")) {
+          requestAnimationFrame(tick);
+          return;
+        }
+        setTimeout(() => {
+          const box = document.querySelector(".hero-input-box");
+          const nudge = document.querySelector(".hero-nudge") as HTMLElement | null;
+          const ns = nudge ? getComputedStyle(nudge) : null;
+          w.__cvNudgeSnap = {
+            className: box?.className ?? "<no .hero-input-box>",
+            borderColor: box ? getComputedStyle(box).borderColor : "",
+            nudgeText: (nudge?.textContent ?? "").trim(),
+            // PRESENCE IS NOT VISIBILITY. `watchPresence` records whether the
+            // selector MATCHES, so `display: none`, `visibility: hidden` or
+            // `opacity: 0` on `.hero-nudge` left the duration assertions green
+            // over a warning nobody could see — both planted and measured.
+            nudgeVisibility: ns ? ns.visibility : "",
+            nudgeDisplay: ns ? ns.display : "",
+            nudgeOpacity: ns ? ns.opacity : "",
+            nudgeWidth: nudge ? String(Math.round(nudge.getBoundingClientRect().width)) : "0",
+          };
+        }, 400);
+      };
+      tick();
+    });
+
     await page.locator(".ask-button").click();
     await expect(page.locator("#top")).toBeVisible(); // still on landing
-    const box = page.locator(".hero-input-box");
-    await expect(box).toHaveClass(/shake/);
-    // border-color transitions over ~200ms — poll until it settles on amber.
+
+    // Wait for the window to CLOSE, then read what the page recorded.
     await expect
-      .poll(async () => box.evaluate((el) => getComputedStyle(el).borderColor))
-      .toBe("rgb(180, 115, 42)"); // --color-warning #b4732a
-    await expect(page.locator(".hero-nudge")).toBeVisible();
-    await expect(page.locator(".hero-nudge")).not.toBeVisible({ timeout: 4000 });
+      .poll(async () => (await readPresenceWindows(page, "nudge"))[0]?.off ?? null, {
+        timeout: 10000,
+      })
+      .not.toBeNull();
+    const windows = await readPresenceWindows(page, "nudge");
+    const snap = await page.evaluate(
+      () => (window as unknown as { __cvNudgeSnap?: Record<string, string> }).__cvNudgeSnap ?? null,
+    );
+
+    // The recorder actually recorded. Without this the duration assertion is
+    // vacuous on an empty array.
+    expect(windows.length, "the nudge never appeared at all").toBe(1);
+
+    // THE "~3s" THE TITLE PROMISES, measured on the page's own clock, and
+    // asserted FIRST so a changed window fails on the DURATION rather than on a
+    // downstream sample that could not be taken inside it.
+    // RED WHEN: `useLandingState.ts`'s `nudgeTimeout` delay leaves the band —
+    // verified at 50 ms and at 10000 ms, each reported as the measured number.
+    const lifetime = windows[0].off! - windows[0].on;
+    // (2500, 5000), not (2000, 6000). Both ends are observer samples of the
+    // app's own DOM writes in the app's own clock, so runner load cancels and
+    // the wide band bought nothing — it only let a 2100 ms or 5500 ms window
+    // pass under a title that says "~3s". Measured across runs: 3001.9, 3002,
+    // 3007 ms.
+    expect(lifetime, `the nudge was up for ${Math.round(lifetime)}ms, not ~3000`).toBeGreaterThan(
+      2500,
+    );
+    expect(lifetime, `the nudge was up for ${Math.round(lifetime)}ms, not ~3000`).toBeLessThan(5000);
+
+    // The shake and the amber border, sampled in-page 400 ms in.
+    expect(snap, "the in-page snapshot never ran").not.toBeNull();
+    expect(snap!.nudgeText, "the nudge was empty when sampled").toContain("Type a question first");
+    expect(snap!.nudgeVisibility, "the nudge was present but not visible").toBe("visible");
+    expect(snap!.nudgeDisplay, "the nudge was present but display:none").not.toBe("none");
+    expect(Number(snap!.nudgeOpacity), "the nudge was present but fully transparent").toBeGreaterThan(
+      0.9,
+    );
+    expect(Number(snap!.nudgeWidth), "the nudge had no width on screen").toBeGreaterThan(50);
+    expect(snap!.className, "the hero box was not shaking while the nudge was up").toContain(
+      "shake",
+    );
+    expect(snap!.borderColor, "the border had not settled on --color-warning").toBe(
+      SEMANTIC.light.amber,
+    );
+    await expect(page.locator(".hero-nudge")).toHaveCount(0);
   });
 
   test("Enter with text enters chat and streams that answer", async ({ page }) => {
@@ -175,7 +273,11 @@ test.describe("Sections", () => {
     await waitStreamDone(page);
     const badge = page.locator(".demo-right .refusal-badge");
     await expect(badge).toBeVisible();
-    expect(await badge.evaluate((el) => getComputedStyle(el).color)).toBe("rgb(180, 115, 42)"); // amber
+    // This block runs in the default (LIGHT) theme; the dark twin is in
+    // "Dark-theme parity for previously light-only flows" below. #403 split
+    // `--color-warning` by theme, so the literal that used to stand here would
+    // now assert the dark value against a light page.
+    expect(await badge.evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.light.amber);
     expect(await page.locator(".demo-right .source-card").count()).toBe(0);
   });
 
@@ -1160,7 +1262,7 @@ test.describe("Dark-theme parity for previously light-only flows", () => {
     await waitStreamDone(page);
     const badge = page.locator(".demo-right .refusal-badge");
     await expect(badge).toBeVisible();
-    expect(await badge.evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.amber);
+    expect(await badge.evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.dark.amber);
     expect(await page.locator(".demo-right .source-card").count()).toBe(0);
   });
 
@@ -1169,7 +1271,7 @@ test.describe("Dark-theme parity for previously light-only flows", () => {
     await page.locator(".ask-button").click();
     const box = page.locator(".hero-input-box");
     await expect(box).toHaveClass(/shake/);
-    await expect.poll(async () => box.evaluate((el) => getComputedStyle(el).borderColor)).toBe(SEMANTIC.amber);
+    await expect.poll(async () => box.evaluate((el) => getComputedStyle(el).borderColor)).toBe(SEMANTIC.dark.amber);
   });
 
   test("sourced demo answer shows readable source cards in dark", async ({ page }) => {
@@ -1197,9 +1299,47 @@ test.describe("Timer cleanup / no post-unmount state updates", () => {
     // The hook's streamBot schedules scroll timeouts + a streaming interval that
     // reference #chat-list. Bailing back to landing tears ChatView down while
     // those timers are still pending — the guards must keep them from firing into
-    // a torn-down view (no "Cannot read properties of null", no React warning).
+    // a torn-down view (no "Cannot read properties of null").
+    //
+    // WHAT IT CAN AND CANNOT CATCH, because half of the original premise has
+    // expired. "no React warning" is no longer one of them: React is 18.3.1,
+    // which removed the unmounted-setState warning entirely (`grep -rl "Can't
+    // perform a React state update on an unmounted component" node_modules/
+    // react-dom/` finds nothing), and `useLandingState` lives in `LandingPage`
+    // (`App.tsx`), which never unmounts — `.back-button` tears down only
+    // `ChatView`, so an orphaned stream's `dispatch` targets a mounted hook.
+    // What this test CAN catch is a thrown `TypeError` from a timer touching a
+    // node that is gone, which is the defect that produced it. Written down
+    // rather than left implied, so nobody reads a green run as proof of the
+    // wider claim.
     const errors: string[] = [];
-    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    // Console errors the DEV SERVER produces, not the app: `App.tsx` asks
+    // `/v1/auth/me` who the reader is, and in demo mode nothing is listening on
+    // :8000, so Vite's proxy answers 500 and Chromium logs one
+    // "Failed to load resource" per attempt. It is not a post-unmount timer
+    // error and it is not what this test is about.
+    //
+    // The filter is keyed on the REQUEST URL from `msg.location()`, not on the
+    // message text — "Failed to load resource" alone would also swallow a
+    // genuine asset or module failure. Every dropped entry is kept so the test
+    // can say how many it dropped instead of silently narrowing itself.
+    const ignoredBackendErrors: string[] = [];
+    // EXACT, not a `/v1` segment match. `/\/(v1|health)\b/` also matched
+    // `/v1/chat/stream` — so a post-unmount timer that fires a chat request
+    // after `ChatView` is gone and gets a 500 would have been filtered out by
+    // this test, and that is precisely the orphaned-timer class the test
+    // exists to catch. It also matched `/src/health-check.ts` and
+    // `/assets/v1-legacy.js`. One URL is filtered, and it is named.
+    const BACKEND_ABSENCE = /\/v1\/auth\/me$/;
+    page.on("console", (m) => {
+      if (m.type() !== "error") return;
+      const url = m.location()?.url ?? "";
+      if (BACKEND_ABSENCE.test(url)) {
+        ignoredBackendErrors.push(url);
+        return;
+      }
+      errors.push(m.text());
+    });
     page.on("pageerror", (e) => errors.push(String(e)));
 
     // Distinct questions so each one actually streams (dedup would suppress a repeat).
@@ -1208,18 +1348,85 @@ test.describe("Timer cleanup / no post-unmount state updates", () => {
       "How do I install the Codex CLI?",
       "How do I get a Gemini API key?",
     ];
+    // #354. MID-STREAM IS RECORDED, NOT ASSUMED. The premise of this test is
+    // that ChatView is torn down WHILE a stream is running; if the answer had
+    // already finished, the orphaned timers this exists to catch were never
+    // pending and "no errors" is a vacuous pass.
+    //
+    // What the recording proves, and what it does not: the count is read one
+    // round trip BEFORE the click, so it shows a stream was in flight a few
+    // milliseconds earlier, not at the exact instant of unmount. Tightening it
+    // further would mean reading the DOM after ChatView is gone. It is still
+    // more than the old body had, which asserted `.last()` was visible and then
+    // never looked again.
+    //
+    // `waitForFunction` rather than a `.last()` locator: a locator handle goes
+    // stale as earlier streams retire their own cursors, which is a failure of
+    // the harness rather than of the app.
+    const cursorsAtUnmount: number[] = [];
     for (const q of qs) {
       await enterChat(page);
       await page.locator(".chat-input").fill(q);
       await page.keyboard.press("Enter");
-      // A prior iteration's stream may still be running (its interval survives the
-      // view switch — exactly the leak we're probing), so target the NEWEST cursor.
-      await expect(page.locator(".message.bot-msg .typing-cursor").last()).toBeVisible();
+      // A prior iteration's stream may still be running (its interval survives
+      // the view switch — exactly the leak we're probing), so wait for ANY
+      // cursor in the page rather than binding to one element.
+      await page.waitForFunction(() => !!document.querySelector(".message.bot-msg .typing-cursor"));
+      cursorsAtUnmount.push(
+        await page.evaluate(
+          () => document.querySelectorAll(".message.bot-msg .typing-cursor").length,
+        ),
+      );
       await page.locator(".back-button").click(); // unmount ChatView mid-stream
       await expect(page.locator("#top")).toBeVisible();
       await page.waitForTimeout(400); // let the orphaned timers fire
     }
+    expect(
+      cursorsAtUnmount.filter((n) => n > 0).length,
+      `no stream was in flight at unmount on some iteration (${cursorsAtUnmount.join(", ")}) — ` +
+        "this test then proves nothing about post-unmount timers",
+    ).toBe(qs.length);
+
     expect(errors, errors.join("\n")).toEqual([]);
+    // ASSERT what was dropped, rather than annotate it. An annotation is read
+    // by a human opening the HTML report, so "a filter that started matching
+    // the whole page would show up as a suspiciously large number" was a claim
+    // about a person, not a guard. Every dropped entry must be the one URL the
+    // filter is for.
+    expect(
+      ignoredBackendErrors.filter((url) => !BACKEND_ABSENCE.test(url)),
+      "the backend-absence filter dropped something that is not /v1/auth/me",
+    ).toEqual([]);
+    test.info().annotations.push({
+      type: "ignored backend-absence console errors",
+      description: String(ignoredBackendErrors.length),
+    });
+
+    // THE PARTNER FOR AN EMPTY-LIST ASSERTION. `toEqual([])` above is a check
+    // that counts nothing: it passes identically whether the app is clean or
+    // the listeners never attached — a Playwright version bump, a renamed
+    // event, a page that navigated away from the listeners. Emitting one error
+    // of each kind and requiring BOTH to arrive is what makes the green above
+    // mean something.
+    // RED WHEN: either `page.on(...)` registration at the top of this test is
+    // removed.
+    const marker = "cv354-detector-probe";
+    await page.evaluate((m) => console.error(m), marker);
+    await page.evaluate((m) => {
+      // A real uncaught error, not a rejected promise: `pageerror` fires for
+      // the former. Thrown from a timer so it escapes this evaluate's own
+      // try/catch boundary instead of failing the call.
+      setTimeout(() => {
+        throw new Error(`${m}-pageerror`);
+      }, 0);
+    }, marker);
+    await expect
+      .poll(() => errors.filter((e) => e.includes(marker)).length, { timeout: 5000 })
+      .toBeGreaterThanOrEqual(2);
+    expect(
+      errors.some((e) => e.includes(`${marker}-pageerror`)),
+      "the `pageerror` listener never fired — uncaught exceptions are invisible to this test",
+    ).toBe(true);
   });
 });
 
@@ -1350,52 +1557,124 @@ test.describe("Duplicate pulse restarts within its own window", () => {
     await waitStreamDone(page);
 
     const original = page.locator("#cv-msg-0");
-    // A pulse that has ENDED must never read as "restarted", so absence maps to
-    // Infinity rather than to a small number.
-    const elapsed = () =>
-      original.evaluate((el) => {
-        const a = el.getAnimations().find((x) => x.playState === "running");
-        return a ? Number(a.currentTime ?? 0) : Number.POSITIVE_INFINITY;
-      });
+
+    // #354. EVERY CLOCK IN THIS TEST NOW RUNS INSIDE THE PAGE.
+    //
+    // The old body anchored on `Date.now()` and `page.waitForTimeout`, i.e. on
+    // the RUNNER's clock, while the behaviour under test is driven by the app's
+    // own `setTimeout(…, 2000)`. Under load the two diverge and the test failed
+    // for a reason that had nothing to do with the app — that is #354's flake.
+    //
+    // It also had a FALSE PASS the issue does not mention. `elapsed` maps an
+    // ENDED animation to `Infinity`, and `cv-pulse .55s … 3` runs for only
+    // 1.65 s inside a 2 s window — so on a machine slow enough for the first
+    // flash's animation to finish before the sample, `poll(elapsed) > 300`
+    // passed on `Infinity`, `before` was `Infinity`, and the rest of the test
+    // measured a fresh flash instead of a restart INSIDE an open window. The
+    // scenario the title names was not the one running.
+    //
+    // A `MutationObserver` over `#cv-msg-0.highlighted` records both facts the
+    // test is really about, in the app's clock: the class CYCLES (off then on —
+    // the `-1 → index` round trip, without which React skips the re-render and
+    // the pulse never replays), and the second window is a FULL one.
+    await watchPresence(page, "pulse", "#cv-msg-0.highlighted");
 
     await input.fill("What is Claude Code?");
     await page.keyboard.press("Enter");
-    await expect.poll(async () => original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
-    const firstFlashSeenAt = Date.now();
-    // Wait until the animation clock has ACTUALLY advanced — under heavy load
-    // the browser had not run it by the sample instant and this read 0
-    // (measured at load average 42) — and then hold until ~900ms into the first
-    // flash's 2s window. Both halves matter: without the poll the read is
-    // racy, and without the anchor the re-ask lands too early, which leaves a
-    // leftover first-flash timer more than 1.3s of runway and the final
-    // assertion stops catching the cut-short bug. Verified by mutation both
-    // ways.
-    await expect.poll(elapsed, { timeout: 3000 }).toBeGreaterThan(300);
-    const intoFirstFlash = Date.now() - firstFlashSeenAt;
-    if (intoFirstFlash < 900) await page.waitForTimeout(900 - intoFirstFlash);
-    const before = await elapsed();
-    expect(before).toBeGreaterThan(300);
+    // The first flash, and then 900 ms of it, both measured in-page.
+    await waitSincePresence(page, "pulse", 900, 0);
 
     // Re-ask the SAME question while it is still pulsing.
     await input.fill("What is Claude Code?");
     await page.keyboard.press("Enter");
-    // Restarting means the SAME animation is still running from near zero again.
-    await expect.poll(elapsed, { timeout: 1500 }).toBeLessThan(before);
-    const restartSeenAt = Date.now();
+
+    // THE RESTART. Without `flashExisting`'s reset to -1, React sees an
+    // unchanged `highlight` index, skips the re-render, and the class never
+    // leaves the element — one continuous window instead of two, forever.
+    // RED WHEN: the `dispatch({ type: "SET_HIGHLIGHT", index: -1 })` line is
+    // removed from `flashExisting` (measured: this poll times out at 1 window).
+    await expect
+      .poll(async () => (await readPresenceWindows(page, "pulse")).length, { timeout: 8000 })
+      .toBeGreaterThanOrEqual(2);
+    // And the CSS pulse is genuinely playing again. Read here, while the second
+    // window is open: `cv-pulse .55s … 3` runs for 1.65 s inside a 2 s window,
+    // so by the time that window CLOSES `animationName` is legitimately "none"
+    // and this assertion would fail for a reason that is not a defect.
+    // `getComputedStyle().animationName` reports the DECLARED name from the
+    // inline `userStyle` whatever the play state, so on its own it only
+    // restates "the class is on". `getAnimations()` says the pulse is actually
+    // PLAYING, and its `currentTime` says it restarted near zero rather than
+    // carrying on from the first flash — which is the behaviour this test is
+    // named for.
+    //
+    // WHAT IT STILL DOES NOT PROVE, measured rather than assumed: that the
+    // keyframes paint anything. Replacing `@keyframes cv-pulse` with a no-op
+    // leaves this green, because a no-op animation is still a running one.
+    // The visual content of the pulse belongs to `visual.spec.ts`; this test
+    // owns the restart.
+    const running = await original.evaluate((el) => {
+      const a = el.getAnimations().find((x) => x.playState === "running");
+      return a ? { name: (a as CSSAnimation).animationName, at: Number(a.currentTime ?? -1) } : null;
+    });
+    expect(running, "no animation is running on the re-asked bubble").not.toBeNull();
+    expect(running!.name).toBe("cv-pulse");
+    // Restarted: the clock is near the start, not ~900ms in like the first flash.
+    expect(running!.at, `the pulse clock reads ${running!.at}ms — it did not restart`).toBeLessThan(
+      600,
+    );
     expect(await original.evaluate((el) => getComputedStyle(el).animationName)).toBe("cv-pulse");
 
-    // The second flash also gets its OWN full highlight window. Each flash used to
-    // overwrite the timer slots without stopping them, so the first flash's 2s
-    // clear survived and cut the second one short (here: ~1.1s instead of ~2s).
-    //
-    // The wait is ANCHORED to when the restart was observed, not another fixed
-    // `waitForTimeout` stacked on the ones above. Accumulated fixed waits are
-    // why this flaked: under load the elapsed time since the restart exceeded
-    // the 2s highlight window and the class was already gone. 1300ms still sits
-    // above the ~1.1s a cut-short window would give and comfortably below 2s.
-    const alreadyWaited = Date.now() - restartSeenAt;
-    if (alreadyWaited < 1300) await page.waitForTimeout(1300 - alreadyWaited);
-    await expect(original).toHaveClass(/highlighted/);
+    // Now let the second window close, and read the whole record back.
+    await expect
+      .poll(
+        async () => {
+          const w = await readPresenceWindows(page, "pulse");
+          return w[w.length - 1]?.off !== null;
+        },
+        { timeout: 10000 },
+      )
+      .toBe(true);
+    const windows = await readPresenceWindows(page, "pulse");
+
+    // The second ask really did land INSIDE the first flash's window, and far
+    // enough in that a leftover first-flash timer would visibly cut the second
+    // window short. Asserted rather than assumed: if it did not, the assertion
+    // below would be measuring a fresh flash and would pass for the wrong
+    // reason — the exact hole the old `Infinity` path left open.
+    // A PRECONDITION, not a claim about the app. `waitSincePresence` blocks
+    // until the page's own clock passes 900 ms, so the lower bound cannot fail
+    // — it is recorded so the number the final assertion depends on is visible,
+    // and so a future edit that drops the wait fails here instead of silently
+    // weakening the window below. The UPPER bound is the real check: past it,
+    // the re-ask landed outside the first flash and the assertion after it
+    // would be measuring a fresh flash. Measured across CPU throttle 1x/4x/10x/
+    // 20x: 948, 931, 950, 995 ms.
+    const intoFirstFlash = windows[windows.length - 1].on - windows[0].on;
+    expect(
+      intoFirstFlash,
+      `the re-ask landed ${Math.round(intoFirstFlash)}ms into the first flash, outside [900, 1900]`,
+    ).toBeGreaterThanOrEqual(900);
+    expect(intoFirstFlash).toBeLessThan(1900);
+
+    // THE SECOND FLASH GETS ITS OWN FULL WINDOW. Each flash used to overwrite
+    // the timer slots without stopping them, so the first flash's 2 s clear
+    // survived and cut the second one short — here that would be ~1100ms
+    // (2000 minus the ~900ms above) instead of ~1990.
+    // RED WHEN: either `timers.current.highlight*.stop()` call is removed from
+    // `flashExisting` (measured: the last window collapses to ~1.1s).
+    const secondWindow = windows[windows.length - 1].off! - windows[windows.length - 1].on;
+    expect(
+      secondWindow,
+      `the second flash lasted ${Math.round(secondWindow)}ms — a full window is ~1990`,
+    ).toBeGreaterThan(1700);
+    // AND AN UPPER BOUND. Without one, `> 1700` is satisfied by any longer
+    // window, so changing `useLandingState.ts`'s 2000 ms highlight timer to
+    // 9000 leaves this green — the close-poll's 10 s timeout was the only
+    // ceiling. Measured across the same throttle sweep: 1985, 1990, 1985, 1968.
+    expect(
+      secondWindow,
+      `the second flash lasted ${Math.round(secondWindow)}ms — a full window is ~1990`,
+    ).toBeLessThan(3500);
   });
 });
 
