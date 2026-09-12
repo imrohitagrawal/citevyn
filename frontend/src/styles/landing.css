@@ -289,6 +289,22 @@ body {
   border-color: var(--color-warning) !important;
 }
 
+/* #403. The hero's rotating demo question was UNSTYLED, so it rendered in
+ * Chromium's built-in placeholder grey — rgb(117, 117, 117), measured, and the
+ * SAME grey in both themes, because the UA default does not follow the page's
+ * inverted surfaces. On `--surface` that is 4.61:1 light (just over AA) but
+ * 3.61:1 dark, under the 4.5:1 floor this 16px text owes. It is the most
+ * prominent piece of copy on the page and the control the `/` shortcut targets.
+ *
+ * `--muted`, matching `.chat-input::placeholder` further down, which already
+ * had this rule: 5.55:1 light / 6.45:1 dark on `--surface`.
+ *
+ * A stylesheet rule, not an inline style, because `Hero.tsx` styles this input
+ * inline and an inline `style` attribute cannot address a pseudo-element. */
+#hero-input::placeholder {
+  color: var(--muted);
+}
+
 .hero-nudge {
   margin: 10px 0 0;
   max-width: 540px;
@@ -1532,16 +1548,33 @@ body {
   border-radius: 999px;
 }
 
+/* #403. Both badges shipped HARDCODED rgba() — colours that belong to no token
+ * and therefore never inverted with the theme. Measured on the rendered chat
+ * view (the badge's own translucent fill composited over `--bg`):
+ *
+ *   .notice-rate-limit   4.31:1 light   3.17:1 dark
+ *   .notice-error        5.45:1 light   2.67:1 dark
+ *
+ * Three of those four are under the 4.5:1 floor this 11px/600 text owes. They
+ * are now the theme-split semantic tokens, so there is one place to retune and
+ * the dark page gets dark-page colours: 4.87 / 6.46 and 4.74 / 5.85 after.
+ *
+ * The BORDER stays decorative and is derived from the same token with
+ * `color-mix` rather than being a third hardcoded rgba: SC 1.4.3 governs the
+ * text, and the badge is already identified by its own fill and its words, so
+ * the border carries no information of its own. Stated rather than left as an
+ * unexplained exemption — it measures 2.00:1 light / 2.65:1 dark against the
+ * page and would not clear 1.4.11 if it did carry meaning. */
 .notice-rate-limit {
-  color: rgba(180, 83, 9, 1);
-  background: rgba(217, 119, 6, 0.1);
-  border: 1px solid rgba(217, 119, 6, 0.45);
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, transparent);
 }
 
 .notice-error {
-  color: rgba(185, 28, 28, 1);
-  background: rgba(220, 38, 38, 0.08);
-  border: 1px solid rgba(220, 38, 38, 0.4);
+  color: var(--color-error);
+  background: var(--color-error-soft);
+  border: 1px solid color-mix(in srgb, var(--color-error) 45%, transparent);
 }
 
 .continue-btn {

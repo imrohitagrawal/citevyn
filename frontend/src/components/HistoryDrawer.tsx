@@ -133,7 +133,7 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
           <p style={{ color: "var(--muted, #666)", fontSize: "14px" }}>Loading…</p>
         )}
         {loadState === "error" && (
-          <p style={{ color: "var(--color-error, #c25b4e)", fontSize: "14px" }}>
+          <p style={{ color: "var(--color-error, #a84437)", fontSize: "14px" }}>
             Couldn't load your history. Try again in a moment.
           </p>
         )}

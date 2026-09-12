@@ -31,6 +31,9 @@ for (const theme of THEMES) {
     });
 
     const T = TOKENS[theme];
+    // #403 split these by theme; indexing them here keeps every assertion below
+    // asserting the colour of the theme the block actually runs in.
+    const S = SEMANTIC[theme];
 
     test("theme flips every major section background to the page token", async ({ page }) => {
       // #0 prime directive: one root var set flips the WHOLE page.
@@ -192,9 +195,9 @@ for (const theme of THEMES) {
     });
 
     test("status + AUTO dots and step checks use semantic green", async ({ page }) => {
-      expect(await page.locator(".status-dot").evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(SEMANTIC.success);
+      expect(await page.locator(".status-dot").evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(S.success);
       for (const c of await page.locator(".check-icon").all()) {
-        expect(await c.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(SEMANTIC.success);
+        expect(await c.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(S.success);
       }
     });
 
@@ -257,7 +260,7 @@ for (const theme of THEMES) {
 
     test("comparison: generic card red badge/underlines, CiteVyn card ink border + yellow badge", async ({ page }) => {
       const zero = page.locator(".source-badge.zero");
-      expect(await zero.evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.errorChip);
+      expect(await zero.evaluate((el) => getComputedStyle(el).color)).toBe(S.errorChip);
       // Invented claims carry a red dotted UNDERLINE, drawn via border-bottom (per source).
       const underline = page.locator(".invention").first();
       const border = await underline.evaluate((el) => {
@@ -265,14 +268,14 @@ for (const theme of THEMES) {
         return `${cs.borderBottomStyle} ${cs.borderBottomColor}`;
       });
       expect(border).toContain("dotted");
-      expect(border).toContain(SEMANTIC.error); // #c25b4e
+      expect(border).toContain(S.error); // --color-error, theme-split by #403
 
       const cv = page.locator(".compare-card.citevyn");
       expect(await cv.evaluate((el) => getComputedStyle(el).borderColor)).toBe(T.ink);
       expect(await page.locator(".source-badge.one").evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(T.hl);
       // footers: ✗ red, ✓ green
-      expect(await page.locator(".compare-footer.bad").evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.errorChip);
-      expect(await page.locator(".compare-footer.good").evaluate((el) => getComputedStyle(el).color)).toBe(SEMANTIC.success);
+      expect(await page.locator(".compare-footer.bad").evaluate((el) => getComputedStyle(el).color)).toBe(S.errorChip);
+      expect(await page.locator(".compare-footer.good").evaluate((el) => getComputedStyle(el).color)).toBe(S.success);
     });
 
     test("stat band shows the three gate values; four feature cards render", async ({ page }) => {

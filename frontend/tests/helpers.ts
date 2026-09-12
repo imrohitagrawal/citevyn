@@ -105,13 +105,33 @@ export const TOKENS = {
   },
 } as const;
 
-/** Theme-independent semantic colors (same in both modes). */
+/**
+ * Semantic colors, PER THEME as of #403.
+ *
+ * This was one flat map headed "theme-independent semantic colors (same in both
+ * modes)", and that line described the defect rather than the design: one value
+ * per role cannot clear WCAG AA on both #ffffff and #1e1e21, and seven text
+ * runs shipped below 4.5:1 because of it. The shape now mirrors `TOKENS` above
+ * — index it by theme — so a caller cannot quietly assert a light colour inside
+ * a dark test.
+ *
+ * `amber` is `--color-warning` (which `--refusal-amber` aliases); `errorChip`
+ * is `--color-error-strong`.
+ */
 export const SEMANTIC = {
-  success: "rgb(28, 154, 95)", // #1c9a5f
-  amber: "rgb(180, 115, 42)", // #b4732a
-  error: "rgb(194, 91, 78)", // #c25b4e
-  errorChip: "rgb(176, 80, 63)", // #b0503f
-};
+  light: {
+    success: "rgb(21, 122, 74)", // #157a4a
+    amber: "rgb(138, 84, 24)", // #8a5418
+    error: "rgb(168, 68, 55)", // #a84437
+    errorChip: "rgb(158, 63, 48)", // #9e3f30
+  },
+  dark: {
+    success: "rgb(47, 174, 114)", // #2fae72
+    amber: "rgb(224, 164, 88)", // #e0a458
+    error: "rgb(224, 139, 125)", // #e08b7d
+    errorChip: "rgb(239, 154, 137)", // #ef9a89
+  },
+} as const;
 
 export type ThemeName = "light" | "dark";
 
@@ -167,6 +187,104 @@ export async function resolveColor(page: Page, value: string): Promise<string> {
     probe.remove();
     return c;
   }, value);
+}
+
+// ---------------------------------------------------------------------------
+// In-page timing recorders (#354)
+// ---------------------------------------------------------------------------
+
+/** One uninterrupted period during which a selector matched something. */
+export type PresenceWindow = {
+  /** `performance.now()` when it started matching. */
+  on: number;
+  /** `performance.now()` when it stopped, or `null` while it still matches. */
+  off: number | null;
+};
+
+/**
+ * Record, INSIDE THE PAGE, every period during which `selector` matches
+ * something.
+ *
+ * WHY IT HAS TO BE IN-PAGE. Three tests in `behavior.spec.ts` assert a
+ * duration — "the warning shows for ~3s", "the second pulse gets its own 2s
+ * window" — and all three measured it with `Date.now()` on the Playwright side
+ * plus `waitForTimeout`. That clock runs on the RUNNER, so every CDP round trip
+ * and every scheduling delay is charged against a window the app is measuring
+ * with its own `setTimeout`. #354 filed those as flaky under load, and they
+ * are; but the worse half is that none of them actually asserted the duration
+ * at all, so the window could collapse to 50 ms and every one stayed green.
+ *
+ * A `MutationObserver` plus `performance.now()` measures the app's timer
+ * against the app's own clock. Load delays both together, so the RATIO this
+ * asserts does not move, and the number it reports is the one a reader
+ * experiences rather than the one the harness observed.
+ *
+ * `attributes: true` is not optional here: `.highlighted` goes on and off as a
+ * CLASS on an element that is never added or removed, and a childList-only
+ * observer sees none of it.
+ *
+ * Call before the action that opens the window; read back with
+ * `readPresenceWindows`.
+ */
+export async function watchPresence(page: Page, key: string, selector: string) {
+  await page.evaluate(
+    ([k, sel]) => {
+      const store = ((window as any).__cvPresence ??= {} as Record<string, PresenceWindow[]>);
+      const windows: { on: number; off: number | null }[] = [];
+      store[k] = windows;
+      const sample = () => {
+        const present = !!document.querySelector(sel);
+        const open = windows.length ? windows[windows.length - 1] : null;
+        if (present && (!open || open.off !== null)) {
+          windows.push({ on: performance.now(), off: null });
+        } else if (!present && open && open.off === null) {
+          open.off = performance.now();
+        }
+      };
+      sample();
+      const observer = new MutationObserver(sample);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style"],
+      });
+      ((window as any).__cvPresenceObservers ??= {})[k] = observer;
+    },
+    [key, selector] as const,
+  );
+}
+
+/** Read back what `watchPresence` recorded under `key`. */
+export function readPresenceWindows(page: Page, key: string): Promise<PresenceWindow[]> {
+  return page.evaluate(
+    (k) => ((window as any).__cvPresence?.[k] ?? []) as PresenceWindow[],
+    key,
+  );
+}
+
+/**
+ * Block until the page's OWN clock says `ms` have passed since the start of the
+ * `index`-th recorded window for `key`.
+ *
+ * `page.waitForTimeout(ms)` measures from whenever the runner got round to it;
+ * this measures from the event, in the same clock the app's `setTimeout` uses.
+ */
+export async function waitSincePresence(
+  page: Page,
+  key: string,
+  ms: number,
+  index = 0,
+  timeout = 15000,
+) {
+  await page.waitForFunction(
+    ([k, target, i]) => {
+      const w = (window as any).__cvPresence?.[k as string]?.[i as number];
+      return !!w && performance.now() - w.on >= (target as number);
+    },
+    [key, ms, index] as const,
+    { timeout },
+  );
 }
 
 /** Computed CSS property for the first match of a locator. */
