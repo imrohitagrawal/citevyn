@@ -112,10 +112,21 @@ executed by the suite, yet deleting it left all 42 promotion tests green. A
 percentage would have said nothing about that defect, and a required score invites
 tests written to move the number rather than to catch a defect.
 
-So `make coverage` and the CI step (#308) **report** — currently 96% — and nothing
-fails on the number. Read that figure precisely: it covers the hermetic suite
-(`-m "not postgres"`), because the `postgres`-marked tests run in their own job
-without coverage. It is not a whole-repo number. Use coverage to find code no test *touches*; use mutation
+So `make coverage` and the CI step (#308) **report** a line-coverage figure and
+nothing fails on the number. Read it precisely. It covers the hermetic suite
+(`-m "not postgres"`),
+because the `postgres`-marked tests run in their own job without coverage. It is
+not a whole-repo number.
+
+One decimal place, deliberately. A bare integer here is ambiguous by
+construction: `coverage.py`'s `TOTAL` row rounds this ratio and prints **97%**,
+while this document and the README previously said **96%**, its floor — two
+honest sources disagreeing about one measurement taken at the same instant, which
+reads as staleness and was in fact filed as staleness (#421). The ratio is
+quoted so the two can be reconciled rather than ranked. README §12 states it
+identically; if you update one, update both.
+
+Use coverage to find code no test *touches*; use mutation
 testing to find code no test *defends*. Where the two disagree, mutation wins.
 
 What would make it blocking, stated so it cannot drift into permanence

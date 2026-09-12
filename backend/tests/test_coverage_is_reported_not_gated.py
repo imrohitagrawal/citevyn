@@ -230,7 +230,9 @@ def test_ci_fails_when_coverage_measured_nothing() -> None:
     body = checks[0]["run"]
     assert not _mentions_threshold(body), "the non-vacuity check grew into a threshold"
     # It is also the report's only reader: without this the number lives at the
-    # bottom of ~1760 -v lines in a collapsed log and in a 14-day artifact.
+    # bottom of a couple of thousand -v lines in a collapsed log and in a 14-day
+    # artifact. (Said "~1760" until #421 — a hardcoded suite size that the suite
+    # had long outgrown.)
     assert "GITHUB_STEP_SUMMARY" in body
 
     # RUN the embedded script rather than grepping it for `sys.exit`. Asserting a
