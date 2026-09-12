@@ -108,7 +108,7 @@ const PHONE = { width: 390, height: 844 };
 const ALLOWED_BLOCKERS: { prefix: string; why: string }[] = [
   {
     prefix: "header.header backdrop-filter:",
-    // `background: color-mix(in srgb, var(--bg) 82%, transparent)` over a
+    // `background: color-mix(in srgb, var(--bg) 94%, transparent)` over a
     // 12px blur of whatever has scrolled under it. The backdrop genuinely is
     // not a flat colour, and it changes as the page scrolls.
     why: "the sticky header is a translucent blur over scrolling content",
@@ -564,7 +564,7 @@ for (const theme of THEMES) {
       //
       //   - `.sr-only` is `width: 1px; height: 1px; clip-path: inset(50%)`, so
       //     it HAS a rect and the old `> 0.5px` rule scored it: a reviewer
-      //     planted one at 2.88:1 and the sweep reported a failure over text no
+      //     planted one at 3.03:1 and the sweep reported a failure over text no
       //     sighted reader can see. `ChatView.tsx` ships two such regions.
       //   - SC 1.4.3 exempts "text … that is part of an inactive user interface
       //     component". `.cta:disabled` used to escape only incidentally, via
@@ -577,7 +577,7 @@ for (const theme of THEMES) {
           const el = document.createElement(tag);
           el.className = cls;
           el.textContent = "planted";
-          el.style.color = "#949494"; // 2.85:1 on white — below the floor
+          el.style.color = "#949494"; // 3.03:1 on the #ffffff set below — under 4.5:1
           el.style.background = "#ffffff";
           el.style.fontSize = "12px";
           apply(el);
@@ -647,7 +647,7 @@ for (const theme of THEMES) {
         return {
           // #595959 on white is 7.00:1 — comfortably over the floor.
           compliant: mk("cv403-compliant", "#595959"),
-          // #949494 on white is 2.85:1 — under 4.5:1 at 12px.
+          // #949494 on white is 3.03:1 — under 4.5:1 at 12px.
           offender: mk("cv403-planted-offender", "#949494"),
         };
       });
@@ -697,7 +697,7 @@ for (const theme of THEMES) {
         el.textContent = "planted";
         el.style.background = "#ffffff";
         el.style.fontSize = "12px";
-        // `color` stays LEGIBLE (7.00:1). Only the fill is illegible (2.85:1),
+        // `color` stays LEGIBLE (7.00:1). Only the fill is illegible (3.03:1),
         // so nothing but the text-fill pass can find this element.
         el.style.color = "#595959";
         el.style.webkitTextFillColor = "#949494";
@@ -737,7 +737,7 @@ for (const theme of THEMES) {
       const seen = await page.evaluate(() => {
         const wrap = document.createElement("div");
         wrap.className = "cv403-wrapper";
-        wrap.style.color = "#949494"; // 2.85:1 — below the floor
+        wrap.style.color = "#949494"; // 3.03:1 on the #ffffff set below — under the floor
         wrap.style.background = "#ffffff";
         wrap.style.fontSize = "12px";
         const child = document.createElement("span");
@@ -795,7 +795,7 @@ for (const theme of THEMES) {
       // whatever has scrolled under it, and that is not a flat colour. So this
       // test answers the question the sweep cannot, DETERMINISTICALLY and
       // conservatively: composite the header's own
-      // `color-mix(in srgb, var(--bg) 82%, transparent)` over each opaque
+      // `color-mix(in srgb, var(--bg) 94%, transparent)` over each opaque
       // surface the page can put behind it, and require the header's text to
       // clear its floor over EVERY one. That is stricter than reality, because
       // the blur averages toward the mean rather than reaching either extreme.
@@ -837,8 +837,10 @@ for (const theme of THEMES) {
           if (!colour || (colour[3] ?? 1) <= 0.05) continue;
           const size = parseFloat(cs.fontSize);
           const weight = Number(cs.fontWeight) || 400;
-          const pt = size * 0.75;
-          const floor = pt >= 18 || (pt >= 14 && weight >= 700) ? 3 : 4.5;
+          // The KIT's rule, not a third copy of it. This block used to inline
+          // `pt >= 18 || (pt >= 14 && weight >= 700)` itself, which made three
+          // statements of one criterion — and two of them had already drifted.
+          const floor = kit.floorFor(size, weight);
           // Any opaque background the element itself paints wins outright.
           const ownBg = kit.parse(cs.backgroundColor);
           for (const { token, rgb } of behind) {
@@ -948,6 +950,53 @@ for (const theme of THEMES) {
           want,
         );
       }
+
+      // THE WINDOW NO PLANTED ELEMENT CAN REACH. Every case above goes through
+      // a real `font-size`, and Chromium quantises that to 1/64px — so the
+      // in-page copy carried a truncated `18.666` for as long as it did while
+      // every assertion here stayed green. `wcagFloor` says 4.5 across
+      // [18.666, 18.6666…)px at weight 700 (13.9995pt is under 14pt); the old
+      // in-page copy said 3. Calling `floorFor` as a PURE function is the only
+      // way to see it, and agreement is asserted rather than the constant
+      // re-stated, so the two cannot drift apart again in either direction.
+      // RED WHEN: either copy of the rule changes without the other — verified
+      // by putting `18.666` back in the kit's `floorFor`, which reports 3 here
+      // against the exported 4.5.
+      const gridCases: [number, number][] = [
+        [18.666, 700],
+        [18.6665, 700],
+        [18.66666, 700],
+        [18.6666666, 700],
+        [18.6666667, 700],
+        [18.667, 700],
+        [18.666, 400],
+        [23.999, 400],
+        [24, 400],
+        [0, 400],
+        [9, 400],
+        [14, 700],
+        [1000, 100],
+      ];
+      const inPage = await page.evaluate(
+        (rows) => rows.map(([px, w]) => window.__cv396.floorFor(px, w)),
+        gridCases,
+      );
+      // Non-vacuity: the grid must contain BOTH answers, or an implementation
+      // that returned one constant would satisfy the agreement loop below.
+      expect(new Set(inPage), "the agreement grid exercises only one floor").toEqual(
+        new Set([3, 4.5]),
+      );
+      for (let i = 0; i < gridCases.length; i++) {
+        const [px, weight] = gridCases[i];
+        expect(
+          inPage[i],
+          `the in-page floorFor and the exported wcagFloor disagree at ${px}px/${weight}`,
+        ).toBe(wcagFloor(px, weight));
+      }
+      // The 14pt boundary really is inside the grid, so the loop above is not
+      // agreeing on a window where both answers happen to be the same.
+      expect(wcagFloor(18.666, 700), "18.666px/700 is 13.9995pt — normal text").toBe(4.5);
+      expect(wcagFloor(18.6666667, 700), "18.6666667px/700 is just over 14pt").toBe(3);
     });
   });
 }

@@ -67,13 +67,21 @@ PW_CONFIG=${PW_CONFIG:-playwright.demo-ci.config.ts}
 CV_ALLOW_DIRTY=${CV_ALLOW_DIRTY:-0}
 S=$(mktemp -d)
 
-FILES="LANDING HERO TOKENS ANALYZER GUARD SPEC FIDELITY VITECONF PWCONF"
+FILES="LANDING HERO TOKENS ANALYZER GUARD SPEC KIT FIDELITY VITECONF PWCONF"
 LANDING=src/styles/landing.css
 HERO=src/components/Hero.tsx
 TOKENS=src/styles/tokens.css
 ANALYZER=scripts/faint-contrast.mjs
 GUARD=scripts/faint-contrast.test.mjs
 SPEC=tests/faint-contrast.spec.ts
+# #403 moved the browser sweep OUT of the spec and into a kit both specs
+# import. Thirteen mutants below still named $SPEC after that move, so their
+# anchors matched nothing — and `one` reports an unmatched anchor as ANCHOR
+# MISSING, which lands in the survivor list. Mutants that cannot APPLY are
+# exactly how a dead guard keeps looking alive, so they now name $KIT.
+# The suite is still `pw` (faint-contrast.spec.ts): it calls `installKit`,
+# so it is still the runner that must catch a sabotaged sweep.
+KIT=tests/contrast-kit.ts
 FIDELITY=tests/fidelity.spec.ts
 VITECONF=vite.config.ts
 PWCONF=playwright.config.ts
@@ -138,21 +146,35 @@ survived () {  # label
 }
 
 one () {  # label suite file pristine old new
-  local label="$1" suite="$2" t="$3" p="$4"
-  OLD="$5" NEW="$6" T="$t" python3 -c "
+  local label="$1" suite="$2" t="$3" p="$4" ANCHORS
+  # Prints the number of times the anchor matched, so the caller can tell
+  # "matched once" from "matched three times and we edited one of them".
+  ANCHORS=$(OLD="$5" NEW="$6" T="$t" python3 -c "
 import os,sys
 t=os.environ['T'];old=os.environ['OLD'];new=os.environ['NEW']
 s=open(t).read()
-if old not in s: sys.exit(3)
+n=s.count(old)
+if n==0: sys.exit(3)
 open(t,'w').write(s.replace(old,new,1))
-"
-  # Both early returns verify the restore too, rather than `cp`-and-trust: a
-  # failed restore on an anchor typo would otherwise leave the tree dirty and be
-  # reported as a mere harness warning.
+print(n)
+")
+  # All three early returns verify the restore too, rather than `cp`-and-trust:
+  # a failed restore on an anchor typo would otherwise leave the tree dirty and
+  # be reported as a mere harness warning.
   if [ $? -ne 0 ]; then
     echo "!! ANCHOR MISSING: $label"; cp "$p" "$t"
     cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after anchor miss: $label"; exit 98; }
     survived "ANCHOR MISSING (harness fault, not a guard result): $label"; return
+  fi
+  # AMBIGUOUS ANCHOR: `replace(..., 1)` would edit whichever match came first,
+  # so the mutant lands somewhere other than where its label says and the
+  # verdict is about code nobody chose. Same class as ANCHOR MISSING — a result
+  # you cannot trust — so it is reported the same loud way rather than silently
+  # mutating site 1 of N.
+  if [ "$ANCHORS" -gt 1 ]; then
+    echo "!! ANCHOR AMBIGUOUS ($ANCHORS matches): $label"; cp "$p" "$t"
+    cmp -s "$t" "$p" || { echo "!! RESTORE FAILED after ambiguous anchor: $label"; exit 98; }
+    survived "ANCHOR AMBIGUOUS x$ANCHORS (harness fault, not a guard result): $label"; return
   fi
   if cmp -s "$t" "$p"; then
     echo "!! NO-OP: $label"; cp "$p" "$t"
@@ -299,9 +321,16 @@ one "css: a comment INSIDE var(), which postcss keeps in the value" unit "$LANDI
 '@media (prefers-reduced-motion: reduce) {' '@media (prefers-reduced-motion: reduce) {
   .composer-hint { color: var(/*c*/--faint); }
 '
+# ANCHORED ON THE FOLLOWING LINE. `Hero.tsx` has TWO identical
+# `color: "var(--muted)",` lines (the TRY: label and the > glyph), so the bare
+# anchor matched both and `replace(...,1)` silently picked whichever came first
+# — a mutant that lands somewhere other than where its label says. The 15px
+# line below it belongs to the glyph span alone.
 one "tsx: an ESCAPED var() inline style (source scan)" unit "$HERO" "$S/p.HERO" \
-'                color: "var(--muted)",' \
-'                color: "\76 ar(--faint)",'
+'                color: "var(--muted)",
+                fontSize: "15px",' \
+'                color: "\76 ar(--faint)",
+                fontSize: "15px",'
 one "analyzer: match `var` case-SENSITIVELY again (bypass 2, cause 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return /--faint(?![\w-])/.test(value);' \
 '  return /var\(\s*--faint(?![\w-])/.test(value);'
@@ -343,7 +372,7 @@ one "analyzer: violation sweep narrows back to plain `color` only" unit "$ANALYZ
 one "analyzer: WIDEN the narrow population, so the two counters stop agreeing" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return declarationsWhere(cssText, (prop) => prop === "color");' \
 '  return declarationsWhere(cssText, (prop) => TEXT_PAINT_PROPS.has(prop));'
-one "spec: sweep reads `color` only, never the text-fill override (bypass 1)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: sweep reads `color` only, never the text-fill override (bypass 1)" pw "$KIT" "$S/p.KIT" \
 '            } else if (same(parse(s.webkitTextFillColor), rgb)) {
               offenders.push(`${describe(el, p ? p : "")} [-webkit-text-fill-color]`);
             }' '            }'
@@ -492,19 +521,28 @@ echo "=== META: can the BROWSER sweep be made to check nothing? ==="
 # BOTH branches, not just the `color` one: the text-fill branch would otherwise
 # catch every planted offender on its own (an unset `-webkit-text-fill-color`
 # resolves TO `color`) and this mutant would survive while looking decisive.
-one "spec: the sweep reports no offender, whatever it sees" pw "$SPEC" "$S/p.SPEC" \
+one "kit: the sweep reports no offender, whatever it sees" pw "$KIT" "$S/p.KIT" \
 '            if (same(parse(s.color), rgb)) {
               offenders.push(describe(el, p ? p : ""));
             } else if (same(parse(s.webkitTextFillColor), rgb)) {
               offenders.push(`${describe(el, p ? p : "")} [-webkit-text-fill-color]`);
             }' ''
-one "spec: the sweep walks nothing (non-vacuity floor must bite)" pw "$SPEC" "$S/p.SPEC" \
-'        const all: Element[] = [document.body, ...Array.from(document.body.querySelectorAll("*"))];' \
-'        const all: Element[] = [];'
-one "spec: never visit pseudo-elements, so ::placeholder is invisible" pw "$SPEC" "$S/p.SPEC" \
-'          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+# WIDENED, not just repointed: the kit holds TWO sweeps and both open with this
+# exact line, so the bare anchor is ambiguous and `replace(...,1)` would pick
+# whichever came first. The comment above it is unique to the #396 sweep.
+one "kit: the sweep walks nothing (non-vacuity floor must bite)" pw "$KIT" "$S/p.KIT" \
+'        // inflate the non-vacuity number this test reports.
+        const all: Element[] = [document.body, ...Array.from(document.body.querySelectorAll("*"))];' \
+'        // inflate the non-vacuity number this test reports.
+        const all: Element[] = [];'
+# WIDENED for the same reason: both sweeps push ::placeholder the same way.
+# The single-line `pseudos` declaration belongs to the #396 sweep alone.
+one "kit: never visit pseudo-elements, so ::placeholder is invisible" pw "$KIT" "$S/p.KIT" \
+'          const pseudos: (string | undefined)[] = [undefined, "::before", "::after"];
+          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
             pseudos.push("::placeholder");
-          }' ''
+          }' \
+'          const pseudos: (string | undefined)[] = [undefined, "::before", "::after"];'
 # NOT `if (false)` on the `missing.push` line: every probe selector matches
 # today, so that branch never runs and the mutant would be EQUIVALENT. Renaming
 # a probe is what actually produces the zero-match case the check exists for.
@@ -517,10 +555,10 @@ one "spec: a probe class is renamed, so its sweep silently measures nothing" pw 
 # BLACK" mutant below proves it can actually fail on a real measurement.
 one "spec: raise the floor to an impossible 21:1 (is the ratio even compared?)" pw "$SPEC" "$S/p.SPEC" \
 'const AA_SMALL_TEXT = 4.5;' 'const AA_SMALL_TEXT = 21;'
-one "spec: assume every colour is opaque (alpha never recovered)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: assume every colour is opaque (alpha never recovered)" pw "$KIT" "$S/p.KIT" \
 '          const a = 1 - (w[0] - k[0] + (w[1] - k[1]) + (w[2] - k[2])) / 3 / 255;' \
 '          const a = 1;'
-one "spec: score the text colour opaque instead of compositing its alpha" pw "$SPEC" "$S/p.SPEC" \
+one "kit: score the text colour opaque instead of compositing its alpha" pw "$KIT" "$S/p.KIT" \
 '  const a = colour[3] ?? 1;
   const over = [0, 1, 2].map((i) => Math.round(a * colour[i] + (1 - a) * backdrop[i]));
   return contrastRatio(over, backdrop);' \
@@ -532,22 +570,25 @@ one "spec: accept ANY colour as the token (the rgb comparison stops comparing)" 
 '  const rgbMatches =
     colour.slice(0, 3).map(Math.round).join() === want.slice(0, 3).map(Math.round).join();' \
 '  const rgbMatches = true;'
-one "spec: drop the second sentinel, so an unparseable colour reads as red" pw "$SPEC" "$S/p.SPEC" \
+one "kit: drop the second sentinel, so an unparseable colour reads as red" pw "$KIT" "$S/p.KIT" \
 '        ctx.fillStyle = "#00ff00";
         ctx.fillStyle = css;
         const second = ctx.fillStyle;' '        const second = first;'
-one "spec: stop reporting ancestors the compositor cannot model" pw "$SPEC" "$S/p.SPEC" \
-'        if (s.backgroundImage !== "none") bad.push(`${name} background-image:${s.backgroundImage}`);' ''
+# RE-ANCHORED as well as repointed: prettier reflowed this onto two lines when
+# it moved into the kit, so even the old file would no longer have matched it.
+one "kit: stop reporting ancestors the compositor cannot model" pw "$KIT" "$S/p.KIT" \
+'          if (s.backgroundImage !== "none")
+            bad.push(`${name} background-image:${s.backgroundImage}`);' ''
 # NEW FIXTURE, NEW MUTANT. The `backdrop-filter` push had no fixture, so
 # deleting it was an EQUIVALENT mutation while the spec's RED-WHEN line claimed
 # "any bad.push(...) removed" turns it red. Now it has one.
-one "spec: stop reporting a backdrop-filter ancestor" pw "$SPEC" "$S/p.SPEC" \
+one "kit: stop reporting a backdrop-filter ancestor" pw "$KIT" "$S/p.KIT" \
 '        if (s.backdropFilter && s.backdropFilter !== "none")
           bad.push(`${name} backdrop-filter:${s.backdropFilter}`);' ''
-one "spec: never look at ::before/::after, the overlay shape this app SHIPS" pw "$SPEC" "$S/p.SPEC" \
+one "kit: never look at ::before/::after, the overlay shape this app SHIPS" pw "$KIT" "$S/p.KIT" \
 '        for (const pseudo of ["::before", "::after"]) {' \
 '        for (const pseudo of []) {'
-one "spec: report a TEXT-ONLY pseudo as a blocker, which blocks every measurement" pw "$SPEC" "$S/p.SPEC" \
+one "kit: report a TEXT-ONLY pseudo as a blocker, which blocks every measurement" pw "$KIT" "$S/p.KIT" \
 '          const paints = (pbg && pbg[3] > 0.001) || ps.backgroundImage !== "none";' \
 '          const paints = true;'
 # NO MUTANT for "composite over BLACK instead of white". It was RUN and it
@@ -564,12 +605,12 @@ one "spec: report a TEXT-ONLY pseudo as a blocker, which blocks every measuremen
 #
 # The two below make the compositor genuinely wrong instead, and both bite in
 # DARK mode (--muted on white is 2.20:1).
-one "spec: never walk past the element itself (ancestor backgrounds ignored)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: never walk past the element itself (ancestor backgrounds ignored)" pw "$KIT" "$S/p.KIT" \
 '      for (let n: Element | null = el; n; n = n.parentElement) {
         const c = parse(getComputedStyle(n).backgroundColor);' \
 '      for (let n: Element | null = el; n; n = null) {
         const c = parse(getComputedStyle(n).backgroundColor);'
-one "spec: collect no background layers at all (everything reads as page white)" pw "$SPEC" "$S/p.SPEC" \
+one "kit: collect no background layers at all (everything reads as page white)" pw "$KIT" "$S/p.KIT" \
 '        if (c && c[3] > 0.001) layers.push(c);' '        if (false) layers.push(c!);'
 
 echo
@@ -590,6 +631,14 @@ one "playwright.config: deselect the BROWSER half entirely" pin "$PWCONF" "$S/p.
 '  testDir: "./tests",' \
 '  testDir: "./tests",
   testIgnore: ["**/faint-contrast.spec.ts"],'
+# #403's browser half, mutated the same way. Before the pin that this kills,
+# deselecting `contrast-floor.spec.ts` was green on every gate in the repo:
+# `buildGuards` named the file nowhere, and the demo-CI selection differential
+# balances when a whole spec's tests leave both of its sides at once.
+one "playwright.config: deselect the FLOOR SWEEP entirely" pin "$PWCONF" "$S/p.PWCONF" \
+'  testDir: "./tests",' \
+'  testDir: "./tests",
+  testIgnore: ["**/contrast-floor.spec.ts"],'
 
 echo
 # NO MUTANT for "delete the --faint declaration from tokens.css". It would

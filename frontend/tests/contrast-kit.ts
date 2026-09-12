@@ -56,6 +56,15 @@ export function paintedRatio(colour: readonly number[], backdrop: readonly numbe
  * findings. `contrast-floor.spec.ts` therefore asserts the boundary through
  * `window.__cv396.measure`'s REPORTED floor, on planted elements, and this
  * export is kept only for callers outside the page.
+ *
+ * THE FIRST FIX ONLY REACHED THIS COPY. `px * 0.75` landed here while the
+ * in-page `floorFor` kept the truncated `18.666`, so the defect described above
+ * stayed live in the copy that decides findings, and the two rules disagreed
+ * across [18.666, 18.6666…)px at weight >= 700. Both now carry the identical
+ * expression; `contrast-floor.spec.ts` asserts they agree across exactly that
+ * window by calling `window.__cv396.floorFor` directly (no element, so
+ * Chromium's 1/64px font-size quantisation cannot hide it); and no spec writes
+ * a third copy — the header test calls the kit's.
  */
 export function wcagFloor(fontSizePx: number, fontWeight: number): number {
   const pt = fontSizePx * 0.75;
@@ -130,6 +139,12 @@ declare global {
     __cv396: {
       /** [r, g, b, a] for any CSS colour the engine can parse; null when it cannot. */
       parse(css: string): number[] | null;
+      /**
+       * The WCAG floor this run owes, as a PURE function — the same rule the
+       * exported `wcagFloor` states, and the single one any in-page caller may
+       * use. Exposed so no spec writes a third copy of it.
+       */
+      floorFor(fontSizePx: number, fontWeight: number): number;
       /** The element's own background composited over its ancestors', over white. */
       backdrop(selector: string, index: number): number[] | null;
       /** Ancestors whose paint this compositor cannot model, for the precondition check. */
@@ -348,9 +363,25 @@ export async function installKit(page: import("@playwright/test").Page) {
       Math.round(a[1]) === rgb[1] &&
       Math.round(a[2]) === rgb[2];
 
-    /** WCAG 2.1 large text: >= 24px any weight, or >= 18.667px at weight >= 700. */
-    const floorFor = (size: number, weight: number) =>
-      size >= 24 || (size >= 18.666 && weight >= 700) ? 3 : 4.5;
+    /**
+     * WCAG 2.1 large text: >= 18pt any weight, or >= 14pt at weight >= 700.
+     *
+     * ONE RULE, WRITTEN TWICE, KEPT IDENTICAL BY TEST. `addInitScript`
+     * serializes this function into the page and an init script cannot close
+     * over module scope, so this copy cannot literally BE the exported
+     * `wcagFloor` above — but it is now the same expression, in points rather
+     * than the truncated `18.666` px it used to carry. That truncation made the
+     * two copies disagree across [18.666, 18.6666…)px at weight >= 700: the
+     * in-page copy said 3, the exported one said 4.5. No element could expose
+     * it (Chromium quantises font-size to 1/64px), which is why the boundary
+     * test in `contrast-floor.spec.ts` missed it for as long as it existed.
+     * That test now also calls this function DIRECTLY, through
+     * `window.__cv396.floorFor`, across exactly that window.
+     */
+    const floorFor = (size: number, weight: number) => {
+      const pt = size * 0.75;
+      return pt >= 18 || (pt >= 14 && weight >= 700) ? 3 : 4.5;
+    };
 
     /**
      * Does this element/pseudo pair paint GLYPHS a reader can see?
@@ -467,6 +498,7 @@ export async function installKit(page: import("@playwright/test").Page) {
 
     window.__cv396 = {
       parse,
+      floorFor,
       backdrop,
       opaqueBlockers,
       count: (selector: string) => document.querySelectorAll(selector).length,

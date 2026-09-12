@@ -755,9 +755,33 @@ describe("every e2e spec is insulated from the third-party font stylesheet (#364
       "Playwright no longer selects faint-contrast.spec.ts, so nothing measures " +
         "the RENDERED colour of any text in this app",
     ).toBe(true);
-    // The floor is the current population, not one below it: `>= 6` with 7
-    // files present would let someone delete a spec and stay green.
-    expect(specs.length).toBeGreaterThanOrEqual(7);
+    // #403's BROWSER half, pinned the same way and for the same reason. The
+    // line above pins the `--faint` guard, which is a question about ONE token;
+    // `contrast-floor.spec.ts` is the whole-page WCAG 1.4.3 sweep, and it is
+    // the ONLY thing in this repo that scores a text run it was not told about
+    // in advance — including the sticky header, which the sweep declares
+    // unmeasurable and this spec composites by hand. Nothing else pinned it:
+    // `buildGuards` had no mention of the file at all, and the demo-CI
+    // selection differential balances when a whole spec's tests vanish, because
+    // they leave BOTH sides of it at once.
+    //
+    // WHAT THIS COVERS, on the same measured terms as the line above. RED:
+    // deleting the file, renaming it, or emptying it of tests. GREEN:
+    // rewriting its `test(` calls to `test.skip(` — `--list` still reports
+    // them, so this asserts PRESENCE, not EXECUTION. Execution is covered one
+    // layer out by `.github/workflows/frontend.yml`'s skip pin on the demo-CI
+    // run. The `endsWith` form tolerates a move into a subdirectory.
+    expect(
+      specs.some((f) => f.endsWith("contrast-floor.spec.ts")),
+      "Playwright no longer selects contrast-floor.spec.ts, so nothing sweeps " +
+        "this app for text below the WCAG 1.4.3 AA floor",
+    ).toBe(true);
+    // The floor is the CURRENT population, not one below it, so deleting any
+    // spec goes red here even if nothing pins that file by name. Counted from
+    // `tests/*.spec.ts` — re-run `ls frontend/tests/*.spec.ts | wc -l` and
+    // raise this with the file when you add one. It read `>= 7` while 11 files
+    // were present, which left four deletions free.
+    expect(specs.length).toBeGreaterThanOrEqual(11);
     for (const spec of specs) {
       expect(existsSync(join(testsDir, spec)), `${spec} is not under tests/`).toBe(true);
       const sources = testBindingSources(readFileSync(join(testsDir, spec), "utf8"));
