@@ -116,13 +116,19 @@ SURVIVORS=""
 # `unit` = the static half.  `sel` = the vitest-selection guard that keeps
 # `unit` in the run at all.  `pin` = the Playwright-selection guard that keeps
 # the BROWSER half in the run.  `pw` = the browser half.  `fid` = the two
-# fidelity assertions #396 legitimately flipped.
+# fidelity assertions #396 legitimately flipped.  `floor` = #403's whole-page
+# WCAG 1.4.3 sweep.
 run () {
   case "$1" in
     unit) npx vitest run scripts/faint-contrast.test.mjs >"$S/out" 2>&1 ;;
     sel)  npx vitest run src/test/buildGuards.test.ts -t "faint" >"$S/out" 2>&1 ;;
     pin)  npx vitest run src/test/buildGuards.test.ts -t "Playwright selects the specs" >"$S/out" 2>&1 ;;
     pw)   npx playwright test -c "$PW_CONFIG" faint-contrast.spec.ts --reporter=line >"$S/out" 2>&1 ;;
+    # `floor` = #403's whole-page WCAG sweep. It shares `contrast-kit.ts` with
+    # `pw` but asks a different question, and the WCAG floor itself lives in
+    # code only THIS suite pins — so a floor mutant run under `pw` would prove
+    # nothing about it.
+    floor) npx playwright test -c "$PW_CONFIG" contrast-floor.spec.ts --reporter=line >"$S/out" 2>&1 ;;
     fid)  npx playwright test -c "$PW_CONFIG" fidelity.spec.ts --reporter=line >"$S/out" 2>&1 ;;
     *)    echo "unknown suite $1" >&2; return 97 ;;
   esac
@@ -193,7 +199,7 @@ print(n)
 }
 
 echo "=== control: every suite must be GREEN on the unmutated tree ==="
-for s in unit sel pin pw fid; do
+for s in unit sel pin pw fid floor; do
   c=$(run "$s")
   if [ "$c" -ne 0 ]; then
     echo "!! suite '$s' is already failing unmutated — nothing below means anything."
@@ -331,7 +337,7 @@ one "tsx: an ESCAPED var() inline style (source scan)" unit "$HERO" "$S/p.HERO" 
                 fontSize: "15px",' \
 '                color: "\76 ar(--faint)",
                 fontSize: "15px",'
-one "analyzer: match `var` case-SENSITIVELY again (bypass 2, cause 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: match \`var\` case-SENSITIVELY again (bypass 2, cause 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return /--faint(?![\w-])/.test(value);' \
 '  return /var\(\s*--faint(?![\w-])/.test(value);'
 one "analyzer: anchor on the SPELLING of var again (bypass 3 — CSS escapes)" unit "$ANALYZER" "$S/p.ANALYZER" \
@@ -349,7 +355,7 @@ one "analyzer: anchor the TSX scan on the spelling of var again" unit "$ANALYZER
 one "analyzer: let the TSX gap swallow quotes, so PROSE reads as a violation" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  const re = /\([^)"'"'"'`]{0,40}--faint(?![\w-])[^)]*\)/g;' \
 '  const re = /\([^)]{0,40}--faint(?![\w-])[^)]*\)/g;'
-one "analyzer: blanket `i` flag, which wrongly reports the DIFFERENT --FAINT property" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: blanket \`i\` flag, which wrongly reports the DIFFERENT --FAINT property" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return /--faint(?![\w-])/.test(value);' \
 '  return /var\(\s*--faint(?![\w-])/i.test(value);'
 one "spec: never leave the desktop viewport (bypass 2, cause 2)" pw "$SPEC" "$S/p.SPEC" \
@@ -363,16 +369,16 @@ one "spec: sweep the phone viewport but skip the chat screen, where .composer-hi
 one "analyzer: drop -webkit-text-fill-color from the glyph-painting set (bypass 1)" unit "$ANALYZER" "$S/p.ANALYZER" \
 'const TEXT_PAINT_PROPS = new Set(["color", "-webkit-text-fill-color"]);' \
 'const TEXT_PAINT_PROPS = new Set(["color"]);'
-one "analyzer: drop plain `color` from the glyph-painting set" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: drop plain \`color\` from the glyph-painting set" unit "$ANALYZER" "$S/p.ANALYZER" \
 'const TEXT_PAINT_PROPS = new Set(["color", "-webkit-text-fill-color"]);' \
 'const TEXT_PAINT_PROPS = new Set(["-webkit-text-fill-color"]);'
-one "analyzer: violation sweep narrows back to plain `color` only" unit "$ANALYZER" "$S/p.ANALYZER" \
+one "analyzer: violation sweep narrows back to plain \`color\` only" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return findTextPaintDeclarations(cssText).filter((d) => usesFaint(d.value));' \
 '  return findColorDeclarations(cssText).filter((d) => usesFaint(d.value));'
 one "analyzer: WIDEN the narrow population, so the two counters stop agreeing" unit "$ANALYZER" "$S/p.ANALYZER" \
 '  return declarationsWhere(cssText, (prop) => prop === "color");' \
 '  return declarationsWhere(cssText, (prop) => TEXT_PAINT_PROPS.has(prop));'
-one "kit: sweep reads `color` only, never the text-fill override (bypass 1)" pw "$KIT" "$S/p.KIT" \
+one "kit: sweep reads \`color\` only, never the text-fill override (bypass 1)" pw "$KIT" "$S/p.KIT" \
 '            } else if (same(parse(s.webkitTextFillColor), rgb)) {
               offenders.push(`${describe(el, p ? p : "")} [-webkit-text-fill-color]`);
             }' '            }'
@@ -612,6 +618,32 @@ one "kit: never walk past the element itself (ancestor backgrounds ignored)" pw 
         const c = parse(getComputedStyle(n).backgroundColor);'
 one "kit: collect no background layers at all (everything reads as page white)" pw "$KIT" "$S/p.KIT" \
 '        if (c && c[3] > 0.001) layers.push(c);' '        if (false) layers.push(c!);'
+
+echo
+echo "=== META: is the WCAG FLOOR itself still the criterion? ==="
+# THE DEFECT THIS PAIR EXISTS FOR. The exported `wcagFloor` was rewritten to
+# `px * 0.75` while the in-page copy the sweep actually RUNS kept a truncated
+# `18.666`, so the two disagreed across [18.666, 18.6666...)px at weight >= 700
+# and nothing was red. No planted element can reach that window — Chromium
+# quantises font-size to 1/64px — so the boundary test that plants elements
+# could not see it. `contrast-floor.spec.ts` now calls both copies as PURE
+# functions and requires them to agree; this mutant is what proves that bites.
+one "kit: the truncated 18.666 floor, back in the copy the sweep RUNS" floor "$KIT" "$S/p.KIT" \
+'    const floorFor = (size: number, weight: number) => {
+      const pt = size * 0.75;
+      return pt >= 18 || (pt >= 14 && weight >= 700) ? 3 : 4.5;
+    };' \
+'    const floorFor = (size: number, weight: number) =>
+      size >= 24 || (size >= 18.666 && weight >= 700) ? 3 : 4.5;'
+# The PARTNER, in the other direction: an identical edit to BOTH copies would
+# satisfy an agreement check that only compared them to each other. The grid
+# also pins the boundary against constants, so moving the criterion itself is
+# red even when the two copies still agree.
+one "kit+export: move the 14pt bound in BOTH copies at once (agreement is not enough)" floor "$KIT" "$S/p.KIT" \
+'  const pt = fontSizePx * 0.75;
+  return pt >= 18 || (pt >= 14 && fontWeight >= 700) ? 3 : 4.5;' \
+'  const pt = fontSizePx * 0.75;
+  return pt >= 18 || (pt >= 13 && fontWeight >= 700) ? 3 : 4.5;'
 
 echo
 echo "=== META: are the two halves still SELECTED at all? ==="
