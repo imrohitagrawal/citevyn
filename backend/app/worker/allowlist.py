@@ -16,10 +16,16 @@ Design notes
 ------------
 * ``SourceSpec`` is a frozen dataclass — the allowlist is
   compile-time fixed, not runtime-mutable.
-* The five MVP sources match the demo catalog in
+* The MVP sources match the demo catalog in
   :func:`tests.conftest.seed_catalog` so a freshly-built
   ``candidate`` index contains the same docs the demo runs
-  against.
+  against. The number of them is deliberately NOT written
+  down here — it is ``len(MVP_SOURCES)``. This line used to
+  state a count, and that count stayed wrong from the day a
+  further source shipped until #420 removed it. Do not put
+  one back: ``test_worker_allowlist.py`` rejects any count
+  in this file's prose that contradicts ``MVP_SOURCES``,
+  and it cannot tell a live claim from a quoted one.
 * The single source of truth is :data:`MVP_SOURCES`. Tests
   must reference this list (not redefine it) so a future
   source addition only changes one place.
@@ -64,11 +70,23 @@ class SourceSpec:
 # ---------------------------------------------------------------------------
 #
 # Keep in lock-step with the demo catalog used by
-# :func:`tests.conftest.seed_catalog`. The five sources are the four
-# product docs (Claude API, Claude Code, Codex, Gemini API) plus the
-# "About CiteVyn" doc — so questions about CiteVyn itself
-# (Pro/membership/coverage/trust) flow through the normal
-# retrieval + citation path instead of being refused off-domain.
+# :func:`tests.conftest.seed_catalog`. Each entry, and why it is here:
+#
+#   Claude API Reference       product doc
+#   Claude Code Reference      product doc
+#   Codex Reference            product doc
+#   Gemini API Reference       product doc
+#   About CiteVyn              so questions about CiteVyn itself
+#                              (Pro/membership/coverage/trust) flow through the
+#                              normal retrieval + citation path instead of being
+#                              refused off-domain (#49)
+#   AI Concepts and Glossary   so conceptual questions ("what is an LLM?")
+#                              answer instead of refusing (#112 follow-up)
+#
+# This enumeration is not decoration: ``test_worker_allowlist.py`` asserts every
+# shipped ``SourceSpec.title`` appears in it, so adding a source without adding a
+# line here turns the suite red. It carries no count, because the prose count is
+# exactly what went stale before (#420) — the count is ``len(MVP_SOURCES)``.
 # Adding a source is a deliberate operation; an SRE adds it here AND
 # seeds the test fixture so the demo catalog stays consistent.
 
