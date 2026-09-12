@@ -123,13 +123,13 @@ export const SEMANTIC = {
     success: "rgb(21, 122, 74)", // #157a4a
     amber: "rgb(138, 84, 24)", // #8a5418
     error: "rgb(168, 68, 55)", // #a84437
-    errorChip: "rgb(158, 63, 48)", // #9e3f30
+    errorChip: "rgb(138, 51, 36)", // #8a3324
   },
   dark: {
     success: "rgb(47, 174, 114)", // #2fae72
     amber: "rgb(224, 164, 88)", // #e0a458
     error: "rgb(224, 139, 125)", // #e08b7d
-    errorChip: "rgb(239, 154, 137)", // #ef9a89
+    errorChip: "rgb(245, 171, 154)", // #f5ab9a
   },
 } as const;
 
@@ -222,6 +222,29 @@ export type PresenceWindow = {
  * `attributes: true` is not optional here: `.highlighted` goes on and off as a
  * CLASS on an element that is never added or removed, and a childList-only
  * observer sees none of it.
+ *
+ * WHAT IT RECORDS, AND WHAT IT DOES NOT:
+ *   - It records whether the selector MATCHES, not whether anything is on
+ *     screen. `display: none`, `visibility: hidden` and `opacity: 0` all leave
+ *     a window open. A caller asserting that a reader SAW something must check
+ *     that separately — `behavior.spec.ts`'s nudge test snapshots
+ *     `visibility` / `display` / `opacity` / width in-page for exactly this
+ *     reason, after both hidden shapes were planted and passed.
+ *   - `attributeFilter: ["class", "style"]` is right for the two selectors in
+ *     this repo (`.hero-nudge` is added and removed; `.highlighted` is a class
+ *     on an element that persists). It is a TRAP for a future caller keying on
+ *     `[hidden]`, `[open]`, `[aria-expanded]`, a `data-*` attribute or `id` —
+ *     widen the filter with the caller.
+ *   - `sample()` runs once per mutation BATCH, so an off-then-on pair inside a
+ *     single React commit would be recorded as ONE continuous window rather
+ *     than two. Measured for the one caller that depends on the distinction:
+ *     `flashExisting` separates its two dispatches by a 10 ms `setTimeout`, so
+ *     they land in different tasks and two windows are recorded (verified by
+ *     firing it twice 50 ms apart). A missed pair shortens the window count,
+ *     which fails the assertions rather than passing them.
+ *   - The observer is never disconnected. It costs one `querySelector` per
+ *     mutation for the rest of the test, which is negligible while the windows
+ *     under test are open and no stream is running.
  *
  * Call before the action that opens the window; read back with
  * `readPresenceWindows`.

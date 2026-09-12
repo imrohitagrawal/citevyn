@@ -145,7 +145,7 @@
   --color-error: #a84437;
   --color-error-soft: rgba(168, 68, 55, 0.12);
   /* Deeper red for the "0 SOURCES" chip + ✗ comparison footer (§1). */
-  --color-error-strong: #9e3f30;
+  --color-error-strong: #8a3324;
   --color-info: #0284c7;
   --color-info-soft: rgba(2, 132, 199, 0.12);
   /* An ALIAS, not a copy — the same trick as `--focus-ring: var(--ink)` above.
@@ -153,7 +153,20 @@
    * `var(--color-warning)` substitutes the value that token has CASCADED to on
    * that element, and the amber flips with the theme for free. Declared ONCE
    * here and deliberately NOT repeated in either dark block — which is why the
-   * parity check between those two blocks passes without it. */
+   * parity check between those two blocks passes without it.
+   *
+   * IT CURRENTLY REACHES NOTHING ON SCREEN, and that is worth knowing before
+   * anyone "fixes" it. Its only consumer is `Hero.tsx`'s inline
+   * `borderColor: heroNudge ? "var(--refusal-amber)" : undefined`, and
+   * `LandingPage.tsx` passes the SAME `state.heroNudge` flag as `heroBoxShake`,
+   * so `.hero-input-box.shake { border-color: var(--color-warning) !important }`
+   * in `landing.css` is on for the whole window the inline style is on for —
+   * and an `!important` author rule beats a non-important inline declaration.
+   * Measured: a `.hero-input-box.shake` with and without the inline style paint
+   * the identical rgb(138, 84, 24) light / rgb(224, 164, 88) dark. No test can
+   * distinguish a correct `--refusal-amber` from a broken one, so nothing
+   * guards it. Retiring a declared design token is the owner's call (same
+   * precedent as `--faint` above), so it is kept and written down instead. */
   --refusal-amber: var(--color-warning);
 
   /* ----- Window chrome (traffic lights) — kept as-is for macOS look ----- */
@@ -289,7 +302,7 @@
   --color-warning-soft: rgba(224, 164, 88, 0.14);
   --color-error: #e08b7d;
   --color-error-soft: rgba(224, 139, 125, 0.12);
-  --color-error-strong: #ef9a89;
+  --color-error-strong: #f5ab9a;
   --color-info: #0284c7;
   --color-info-soft: rgba(2, 132, 199, 0.12);
 
@@ -368,7 +381,7 @@
     --color-warning-soft: rgba(224, 164, 88, 0.14);
     --color-error: #e08b7d;
     --color-error-soft: rgba(224, 139, 125, 0.12);
-    --color-error-strong: #ef9a89;
+    --color-error-strong: #f5ab9a;
     --color-info: #0284c7;
     --color-info-soft: rgba(2, 132, 199, 0.12);
 

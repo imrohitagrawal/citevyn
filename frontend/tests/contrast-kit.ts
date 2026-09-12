@@ -42,15 +42,24 @@ export function paintedRatio(colour: readonly number[], backdrop: readonly numbe
 
 /**
  * WCAG 2.1 SC 1.4.3 AA. 4.5:1 for normal text; 3:1 for LARGE text, which the
- * criterion defines as >= 18pt (24px) at any weight, or >= 14pt (18.667px) at
- * weight >= 700.
+ * criterion defines as >= 18pt at any weight, or >= 14pt at weight >= 700.
  *
- * Exported and pure so the boundary itself can be tested at the values that
- * matter, rather than only through whatever sizes this app happens to ship.
+ * IN POINTS, not in a px constant. An earlier version wrote the 14pt bound as
+ * `>= 18.666`, and 14pt is 18.6666…px — so an 18.666px/700 run was given the
+ * relaxed 3:1 floor while measuring 13.9995pt, i.e. normal text. A reviewer
+ * planted exactly that and the sweep granted it 3:1. `px * 0.75` removes the
+ * constant instead of retuning it.
+ *
+ * THIS FUNCTION IS NOT WHAT THE SWEEP RUNS. `installKit` serializes its own
+ * copy into the page (the init script cannot close over module scope), so
+ * pinning the boundary here proves nothing about the floor that decides real
+ * findings. `contrast-floor.spec.ts` therefore asserts the boundary through
+ * `window.__cv396.measure`'s REPORTED floor, on planted elements, and this
+ * export is kept only for callers outside the page.
  */
 export function wcagFloor(fontSizePx: number, fontWeight: number): number {
-  const large = fontSizePx >= 24 || (fontSizePx >= 18.666 && fontWeight >= 700);
-  return large ? 3 : 4.5;
+  const pt = fontSizePx * 0.75;
+  return pt >= 18 || (pt >= 14 && fontWeight >= 700) ? 3 : 4.5;
 }
 
 /** One text run that misses its floor. */
@@ -81,15 +90,39 @@ export type MeasuredRun = {
   blockers: string[];
 };
 
+/** A text run the compositor refuses to score, with every reason separately. */
+export type BlockedRun = {
+  /** `tag.class::pseudo — "the text"`. */
+  what: string;
+  /** Each unmodellable ancestor, ONE PER ENTRY — never pre-joined.
+   *
+   * Joining them was a demonstrated bypass: `ALLOWED_BLOCKERS` matched with
+   * `entry.includes(prefix)`, so a run under BOTH an allowed shape and a new
+   * unexplained one was waved through on the allowed half. Reproduced by a
+   * reviewer with a `filter: contrast(0.2)` element inside the header. */
+  blockers: string[];
+};
+
 export type FloorSweep = {
-  /** Every element/pseudo pair the walk visited. */
+  /** Every element/pseudo pair the walk visited, painting text or not. */
   examined: number;
-  /** How many of those actually painted visible text and were measured. */
+  /**
+   * Every element/pseudo pair that is VISIBLE and paints text — the population
+   * this sweep is responsible for.
+   *
+   * The derived non-vacuity partner: `measured + blocked.length` must equal
+   * this, in every sweep. A threshold on `examined` cannot do that job —
+   * `examined` counts DOM nodes, not measurements, and a reviewer hid ten of
+   * the landing page's eleven sections one at a time while `examined` stayed at
+   * 1279 throughout and `measured` fell from 260 to 10.
+   */
+  textRuns: number;
+  /** How many were actually scored. */
   measured: number;
   /** Text runs below their floor. */
   findings: ContrastFinding[];
   /** Text runs whose backdrop this compositor refuses to model. */
-  blocked: string[];
+  blocked: BlockedRun[];
 };
 
 declare global {
@@ -105,6 +138,8 @@ declare global {
       sweep(rgb: number[]): { examined: number; offenders: string[] };
       /** Every visible text run scored against its WCAG floor. */
       floorSweep(): FloorSweep;
+      /** The rendered rgb of one CSS colour expression, resolved on a probe element. */
+      resolve(css: string): number[] | null;
       /** One named text run, scored the same way, for a probe with a stated expectation. */
       measure(selector: string, index: number, pseudo?: string): MeasuredRun | null;
       /** The computed `color` of one match, as [r, g, b, a]. */
@@ -228,41 +263,67 @@ export async function installKit(page: import("@playwright/test").Page) {
      * would block every measured element in the app for nothing.
      *
      * `stopAtOpaque` is what makes the whole-page floor sweep usable. With it,
-     * the walk stops at the first ancestor whose own `background-color` is
-     * FULLY OPAQUE — nothing further up can paint through it, so a gradient on
-     * `<body>` is irrelevant to a chip sitting on an opaque card. Without it
-     * every element under any decorated ancestor is reported as unmeasurable
-     * and the sweep is vacuous over exactly the page it is meant to check. The
-     * stopping element's OWN background-image still counts: an image paints
-     * over that element's background-color.
+     * the BACKGROUND half of the walk stops at the first ancestor whose own
+     * `background-color` is fully opaque — nothing behind that can paint
+     * through, so a gradient on `<body>` is irrelevant to a chip sitting on an
+     * opaque card. Without it every element under any decorated ancestor is
+     * reported as unmeasurable and the sweep is vacuous over exactly the page
+     * it is meant to check. The stopping element's OWN background-image still
+     * counts: an image paints over that element's background-color.
+     *
+     * WHAT KEEPS WALKING PAST THE OPAQUE STOP, and why an earlier version was
+     * unsound. `opacity`, `filter`, `backdrop-filter` and `mix-blend-mode` on
+     * an ancestor do not paint BEHIND the text — they transform the whole
+     * subtree, text and background together, after it is drawn. An opaque
+     * background underneath does not protect against any of them. A reviewer
+     * measured all four against real screenshot pixels: a group `opacity: .5`
+     * over an opaque white card read 4.54:1 from this compositor and 1.96:1
+     * from the pixels; `filter: contrast(.18)` read 4.54 against a real 4.06;
+     * `mix-blend-mode: screen` read 21:1 against a real 1.00:1, with the glyphs
+     * invisible. So those four are collected for the whole chain and only the
+     * background shapes stop early.
+     *
+     * STILL NOT MODELLED, because no ancestor walk can see it: an
+     * absolutely-positioned SIBLING painting over the text. The same reviewer
+     * measured `rgba(255,255,255,.93)` over a legible run as 21:1 reported
+     * against 1.17:1 real. `frontend/tests/focus-ring.spec.ts` answers that
+     * class from rendered PIXELS; this compositor cannot, and says so rather
+     * than implying otherwise.
      */
     const blockersOf = (el: Element | null, stopAtOpaque: boolean): string[] => {
       if (!el) return ["<no such element>"];
       const bad: string[] = [];
+      let behindIsHidden = false;
       for (let n: Element | null = el; n; n = n.parentElement) {
         const s = getComputedStyle(n);
         const name = nameOf(n);
-        if (s.backgroundImage !== "none") bad.push(`${name} background-image:${s.backgroundImage}`);
+        // These four survive an opaque background underneath them.
         if (s.filter !== "none") bad.push(`${name} filter:${s.filter}`);
         if (s.backdropFilter && s.backdropFilter !== "none")
           bad.push(`${name} backdrop-filter:${s.backdropFilter}`);
         if (Number(s.opacity) < 1) bad.push(`${name} opacity:${s.opacity}`);
-        for (const pseudo of ["::before", "::after"]) {
-          const ps = getComputedStyle(n, pseudo);
-          if (!ps.content || ps.content === "none") continue;
-          const pbg = parse(ps.backgroundColor);
-          const paints = (pbg && pbg[3] > 0.001) || ps.backgroundImage !== "none";
-          if (paints) {
-            bad.push(
-              `${name}${pseudo} content:${ps.content} background:${
-                ps.backgroundImage !== "none" ? ps.backgroundImage : ps.backgroundColor
-              }`,
-            );
+        if (s.mixBlendMode && s.mixBlendMode !== "normal")
+          bad.push(`${name} mix-blend-mode:${s.mixBlendMode}`);
+        if (!behindIsHidden) {
+          if (s.backgroundImage !== "none")
+            bad.push(`${name} background-image:${s.backgroundImage}`);
+          for (const pseudo of ["::before", "::after"]) {
+            const ps = getComputedStyle(n, pseudo);
+            if (!ps.content || ps.content === "none") continue;
+            const pbg = parse(ps.backgroundColor);
+            const paints = (pbg && pbg[3] > 0.001) || ps.backgroundImage !== "none";
+            if (paints) {
+              bad.push(
+                `${name}${pseudo} content:${ps.content} background:${
+                  ps.backgroundImage !== "none" ? ps.backgroundImage : ps.backgroundColor
+                }`,
+              );
+            }
           }
-        }
-        if (stopAtOpaque) {
-          const own = parse(s.backgroundColor);
-          if (own && (own[3] ?? 1) > 0.999) break;
+          if (stopAtOpaque) {
+            const own = parse(s.backgroundColor);
+            if (own && (own[3] ?? 1) > 0.999) behindIsHidden = true;
+          }
         }
       }
       return bad;
@@ -300,10 +361,22 @@ export async function installKit(page: import("@playwright/test").Page) {
      * and the sweep would report the same run many times over under the wrong
      * colour.
      */
+    /** Pseudos that restyle the element's OWN text rather than adding any. */
+    const TEXT_STYLING_PSEUDOS = ["::first-line", "::first-letter", "::marker"];
+
     const paintsText = (el: Element, pseudo: string | undefined): boolean => {
       if (pseudo === "::placeholder") {
         const input = el as HTMLInputElement | HTMLTextAreaElement;
         return !!input.placeholder && input.placeholder.trim().length > 0;
+      }
+      if (pseudo && TEXT_STYLING_PSEUDOS.indexOf(pseudo) >= 0) {
+        // These paint the element's own glyphs at their own colour, so they
+        // exist exactly when the element does. `::marker` additionally needs a
+        // list item. A reviewer planted `p::first-line`, `p::first-letter` and
+        // `li::marker` at 2.85:1 and the sweep reported none of them, because
+        // the pseudo list stopped at ::before/::after/::placeholder.
+        if (pseudo === "::marker" && getComputedStyle(el).display !== "list-item") return false;
+        return paintsText(el, undefined);
       }
       if (pseudo) {
         const content = getComputedStyle(el, pseudo).content;
@@ -362,12 +435,33 @@ export async function installKit(page: import("@playwright/test").Page) {
       };
     };
 
-    /** Rendered at a non-zero size and not `visibility: hidden`. */
+    /**
+     * Is this element's text something a SIGHTED reader actually sees, and is
+     * SC 1.4.3 responsible for it?
+     *
+     * Two exclusions beyond the obvious, both added because a reviewer planted
+     * them and the sweep reported a failure no reader could experience:
+     *
+     *   - THE VISUALLY-HIDDEN IDIOM. `landing.css`'s `.sr-only` is
+     *     `width: 1px; height: 1px; clip-path: inset(50%)`, so it HAS a rect —
+     *     a 1x1 one — and the old `> 0.5px` rule scored it. A planted
+     *     `.sr-only` span at 2.88:1 was reported as a finding, over text that
+     *     is on screen for nobody. `ChatView.tsx` ships two such regions. The
+     *     bar is 2px in BOTH dimensions, which no real text run is under.
+     *   - INACTIVE CONTROLS. SC 1.4.3 exempts "text or images of text that are
+     *     part of an inactive user interface component". `.cta:disabled` is one
+     *     ("a true no-op: a disabled button is inert to both mouse and
+     *     keyboard, and removed from the tab order" — landing.css). It used to
+     *     escape only incidentally, because it ALSO sets `opacity: 0.5` and so
+     *     became a blocker; that is keying on the wrong thing, and it would
+     *     stop working the day the opacity moved.
+     */
     const isVisible = (el: Element): boolean => {
       const s = getComputedStyle(el);
       if (s.visibility !== "visible") return false;
+      if (el.closest("[disabled], fieldset[disabled]")) return false;
       const rects = el.getClientRects();
-      for (const r of Array.from(rects)) if (r.width > 0.5 && r.height > 0.5) return true;
+      for (const r of Array.from(rects)) if (r.width > 2 && r.height > 2) return true;
       return false;
     };
 
@@ -418,6 +512,14 @@ export async function installKit(page: import("@playwright/test").Page) {
         }
         return { examined, offenders };
       },
+      resolve: (css: string) => {
+        const probe = document.createElement("span");
+        probe.style.color = css;
+        document.body.appendChild(probe);
+        const out = parse(getComputedStyle(probe).color);
+        probe.remove();
+        return out;
+      },
       measure: (selector: string, index: number, pseudo?: string) => {
         const el = nth(selector, index);
         if (!el) return null;
@@ -443,12 +545,18 @@ export async function installKit(page: import("@playwright/test").Page) {
           backdrop: string;
           colour: string;
         }[] = [];
-        const blocked: string[] = [];
+        const blocked: { what: string; blockers: string[] }[] = [];
         let examined = 0;
         let measured = 0;
+        let textRuns = 0;
         const all: Element[] = [document.body, ...Array.from(document.body.querySelectorAll("*"))];
         for (const el of all) {
-          const pseudos: (string | undefined)[] = [undefined, "::before", "::after"];
+          const pseudos: (string | undefined)[] = [
+            undefined,
+            "::before",
+            "::after",
+            ...TEXT_STYLING_PSEUDOS,
+          ];
           if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
             pseudos.push("::placeholder");
           }
@@ -462,9 +570,13 @@ export async function installKit(page: import("@playwright/test").Page) {
             // Fully transparent glyphs paint nothing. Alpha-0 labels are not a
             // contrast failure.
             if (s.alpha <= 0.05) continue;
+            // Counted BEFORE the blocker branch: this is the population the
+            // sweep is responsible for, and `measured + blocked` must account
+            // for all of it.
+            textRuns += 1;
             const what = describe(el, p ? p : "");
             if (s.blockers.length) {
-              blocked.push(`${what} sits under ${s.blockers.join("; ")}`);
+              blocked.push({ what, blockers: s.blockers });
               continue;
             }
             measured += 1;
@@ -481,7 +593,7 @@ export async function installKit(page: import("@playwright/test").Page) {
             }
           }
         }
-        return { examined, measured, findings, blocked };
+        return { examined, textRuns, measured, findings, blocked };
       },
     };
   });

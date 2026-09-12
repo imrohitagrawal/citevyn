@@ -83,12 +83,30 @@ body {
    3. HEADER
    ========================================================================= */
 
+/* #403. THE FILL WAS 82%, AND THE NAV FAILED AA OVER THE CTA BANNER.
+ *
+ * This bar is sticky, so any full-width panel scrolls underneath it — including
+ * `.cta-banner`, whose background is `var(--ink)`. At 82% the composite under
+ * the nav links is `0.82 x --bg + 0.18 x --ink`, and `--muted` on that measures
+ * 3.64:1 light / 4.20:1 dark for 14px text that owes 4.5:1. Nobody could see it
+ * because the whole-page sweep declares the header unmeasurable: the 12px blur
+ * really is not a flat colour, so `contrast-floor.spec.ts` refuses to score
+ * anything inside `<header>` and the site's primary navigation was checked by
+ * nothing at all.
+ *
+ * 94%, measured across every opaque surface the page can put behind this bar
+ * (`--bg`, `--surface`, `--surface-2`, `--ink`, `--hl`): the worst case rises
+ * to 4.69:1 light / 6.08:1 dark. 92% lands on exactly 4.50 and was rejected for
+ * sitting on the line. The frosted look survives — 6% see-through plus the
+ * blur — and `tests/contrast-floor.spec.ts`'s header test now composites this
+ * exact alpha over all five surfaces and requires every run to clear its floor,
+ * so the number cannot drift back without going red. */
 .header {
   position: sticky;
   top: 0;
   z-index: 50;
   backdrop-filter: blur(12px);
-  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
   border-bottom: 1px solid var(--border);
   transition: background 0.25s ease;
 }

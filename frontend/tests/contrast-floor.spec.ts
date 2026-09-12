@@ -2,8 +2,11 @@
  * #403 — a WCAG contrast FLOOR sweep, not a token ban.
  *
  * WHY THIS FILE EXISTS. #396 shipped a guard that asks "does anything render
- * `--faint`?". That is a question about one token, and seven text runs failed
- * WCAG 1.4.3 AA using OTHER tokens, so nothing caught them. The guard could not
+ * `--faint`?". That is a question about one token, and the text runs listed
+ * below failed WCAG 1.4.3 AA using OTHER tokens, so nothing caught them. (The
+ * issue's title says "seven"; this sweep enumerated them and found more, so no
+ * count is quoted here — the table is the list, and it is NOT claimed to be
+ * exhaustive beyond what this suite can reach.) The guard could not
  * see them by construction — it was never looking at contrast. This file asks
  * the question the criterion actually poses: does every text run a reader can
  * see clear the ratio its size and weight earn?
@@ -39,11 +42,49 @@
  *     those ratios are COMPUTED in `tokens.css`'s comment, not rendered here.
  *   - States demo mode cannot reach: the pending bubble, the live-answer
  *     suggestion list, real transport failures.
- *   - THE ELEVEN BLOCKED RUNS, enumerated and justified in `ALLOWED_BLOCKERS`
- *     below. They are reported, not skipped — a NEW unmodellable region fails
- *     the blocked-list test by name.
- *   - Anything a floor cannot express: text over a photo, a moving gradient,
- *     colour used as the only carrier of meaning (SC 1.4.1).
+ *   - THE BLOCKED RUNS, whose ancestor shapes are enumerated and justified in
+ *     `ALLOWED_BLOCKERS` below. They are reported, not skipped — a NEW
+ *     unmodellable region fails the blocked-list test by name, and a listed
+ *     shape that stops existing fails it too, so the list cannot rot.
+ *   - NON-TEXT CONTRAST (SC 1.4.11, 3:1 for UI components and meaningful
+ *     graphics). This sweep scores TEXT RUNS only. The page has real non-text
+ *     users of the same tokens — `.status-dot` and `.auto-dot`'s 6px discs,
+ *     `.check-icon`'s disc against the card behind it, `.hero-input-box.shake`'s
+ *     border, `.invention`'s dotted underline — and each of them clears 3:1 in
+ *     both themes today (computed, recorded in this PR, not asserted here). A
+ *     future retune of `--color-success` toward the light end would take three
+ *     of them under the floor with this whole suite green. A named hole, not a
+ *     present defect.
+ *   - PSEUDO-ELEMENTS OUTSIDE ITS LIST. It visits the element, `::before`,
+ *     `::after`, `::placeholder`, `::first-line`, `::first-letter` and
+ *     `::marker`. `::selection` is deliberately NOT among them: its backdrop is
+ *     its OWN `background`, not the element's, so scoring it through this
+ *     compositor would invent a failure. `landing.css` sets it to
+ *     `var(--hl-ink)` on `var(--hl)`, measured 12.40:1 light / 10.60:1 dark by
+ *     hand — comfortable, and unguarded.
+ *   - SVG `fill`. `score` reads `color` and `-webkit-text-fill-color`; an
+ *     `<svg><text fill="…">` would be scored at its inherited `color` instead.
+ *     There is no `<text>` element anywhere in `frontend/src` today (grep), so
+ *     this is latent.
+ *   - `text-shadow` and `-webkit-text-stroke`, which can wash a legible colour
+ *     out or rescue an illegible one. Neither appears in `frontend/src` today.
+ *   - `@media` BLOCKS OTHER THAN THE TWO SWEPT. This file runs at 1280 and at
+ *     390 CSS px, so it sees `landing.css`'s `max-width: 900px` and
+ *     `max-width: 600px` rules. A `min-width`, `print`, `prefers-contrast` or
+ *     `forced-colors` block would be invisible. None exists today; the only
+ *     other queries in the app are `prefers-reduced-motion` and
+ *     `prefers-color-scheme`.
+ *   - STATE PSEUDO-CLASSES. `:hover`, `:focus`, `:active` and `:visited`
+ *     colours are never resolved. Every hover/focus rule in `landing.css`
+ *     today moves colour TOWARD `var(--ink)`, which is the safe direction.
+ *   - AN OVERLAY SIBLING. The compositor walks ANCESTORS, so an
+ *     absolutely-positioned sibling painting over a run is invisible to it —
+ *     measured by a reviewer as 21:1 reported against 1.17:1 real.
+ *     `frontend/tests/focus-ring.spec.ts` answers that class from rendered
+ *     pixels; this sweep cannot.
+ *   - NON-TEXT CONTRAST is listed above; so is everything a floor cannot
+ *     express: text over a photo, a moving gradient, colour used as the only
+ *     carrier of meaning (SC 1.4.1).
  *
  * ONE LINE PER TEST names the change that turns it red.
  */
@@ -80,14 +121,15 @@ const ALLOWED_BLOCKERS: { prefix: string; why: string }[] = [
     prefix: "span.highlight-phrase background-image:",
     why: "same gradient band, small variant; same pixel check covers it",
   },
-  {
-    prefix: "button.cta.cta-outlined opacity:",
-    // `landing.css`: "Enterprise 'Contact sales' is a true no-op: a disabled
-    // button is inert to both mouse and keyboard, and removed from the tab
-    // order." WCAG 1.4.3 exempts inactive user-interface components.
-    why: "a :disabled control, which SC 1.4.3 explicitly exempts",
-  },
 ];
+// `button.cta.cta-outlined opacity:` used to be a fourth entry here, for
+// "Contact sales". It is gone because it was keyed on the WRONG THING: the
+// reason that button is exempt is that it is `:disabled` and SC 1.4.3 excludes
+// inactive components, but the string being matched was its `opacity: 0.5` —
+// so the exemption would have evaporated the day the opacity moved, and any
+// ENABLED control that acquired an opacity would have been waved through.
+// `isVisible` in the kit now skips disabled controls by their disabled-ness,
+// which is why no run is blocked by that shape any more.
 
 /** Selectors #403 retuned, with the theme(s) in which they were below AA. */
 type Probe = {
@@ -174,6 +216,19 @@ async function mountSyntheticNotices(page: import("@playwright/test").Page) {
   await waitStreamDone(page);
   await expect(page.locator(".message.bot-msg .content").first()).toBeVisible();
 
+  // The source cards fade up (`animation: cv-fadeup … both`), so at the instant
+  // they mount their computed `opacity` is 0 and the compositor correctly
+  // REFUSES to score anything inside them. Sweeping there reported every source
+  // title and url as an unexplained blocker rather than measuring them — the
+  // same shape as `.hero-nudge` on the landing page. Held until it settles, so
+  // they are MEASURED rather than skipped.
+  await expect(page.locator(".message.bot-msg .sources").first()).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator(".message.bot-msg .sources").first().evaluate((el) => getComputedStyle(el).opacity),
+    )
+    .toBe("1");
+
   const mounted = await page.evaluate(() => {
     const host = document.querySelector(".message.bot-msg .content");
     if (!host) return 0;
@@ -190,6 +245,50 @@ async function mountSyntheticNotices(page: import("@playwright/test").Page) {
   // zero elements" — a failure whose cause reads as a renamed class rather than
   // as this helper.
   expect(mounted, "the synthetic notice badges were not mounted into a real answer bubble").toBe(2);
+}
+
+/**
+ * Blocked runs whose reasons are not ALL on the allow-list.
+ *
+ * Per BLOCKER, not per entry. `entry.includes(prefix)` over the joined string
+ * was a demonstrated bypass: a reviewer put a `filter: contrast(0.2)` element
+ * inside `header.header`, the entry read `p.cv-waved filter:contrast(0.2);
+ * header.header backdrop-filter:blur(12px)`, the allowed half matched, and the
+ * unexplained filter was waved through with the suite green.
+ */
+function unexplainedBlockers(sweep: FloorSweep): string[] {
+  const out: string[] = [];
+  for (const run of sweep.blocked) {
+    for (const blocker of run.blockers) {
+      if (!ALLOWED_BLOCKERS.some(({ prefix }) => blocker.startsWith(prefix))) {
+        out.push(`${run.what} sits under ${blocker}`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The derived non-vacuity partner, asserted in EVERY sweep.
+ *
+ * `measured + blocked` must account for every visible text run the walk found.
+ * A threshold cannot do this job: a reviewer hid the landing page's sections
+ * one at a time and `examined` stayed at 1279 while `measured` fell from 260 to
+ * 10, and `measured > 200` still passed with two whole sections gone.
+ *
+ * A blocker REMOVES a run from `findings`, so the allow-list has to be checked
+ * wherever a sweep is checked — not only in the one desktop landing test, which
+ * is what let `.citation-chip .chip-bracket { opacity: 0.45 }` and
+ * `.send-button[aria-disabled] { opacity: 0.7 }` sit in an unaudited state.
+ */
+function expectSweepAccountsForEverything(label: string, sweep: FloorSweep, minRuns: number) {
+  expect(
+    sweep.measured + sweep.blocked.length,
+    `${label}: the sweep found ${sweep.textRuns} visible text runs but accounts for ` +
+      `${sweep.measured} measured + ${sweep.blocked.length} blocked`,
+  ).toBe(sweep.textRuns);
+  expect(sweep.textRuns, `${label}: the sweep found almost no text at all`).toBeGreaterThan(minRuns);
+  expect(unexplainedBlockers(sweep), `${label}: unexplained unmodellable ancestors`).toEqual([]);
 }
 
 function reportFindings(label: string, sweep: FloorSweep): string[] {
@@ -219,13 +318,7 @@ for (const theme of THEMES) {
         body: JSON.stringify(sweep, null, 2),
         contentType: "application/json",
       });
-      // NON-VACUITY, derived rather than a constant threshold pulled from
-      // nowhere: a sweep that walked nothing reports zero findings and is
-      // indistinguishable from a clean page. `measured` counts runs that were
-      // actually scored, so it also catches a compositor that started refusing
-      // everything.
-      expect(sweep.examined, "the sweep visited nothing").toBeGreaterThan(800);
-      expect(sweep.measured, "the sweep scored nothing — it is not measuring the page").toBeGreaterThan(200);
+      expectSweepAccountsForEverything("landing", sweep, 200);
       expect(reportFindings("landing", sweep)).toEqual([]);
     });
 
@@ -252,7 +345,7 @@ for (const theme of THEMES) {
       await openEveryProbedState(page);
       await showNudge(page);
       const sweep = await page.evaluate(() => window.__cv396.floorSweep());
-      expect(sweep.measured, "the phone sweep scored nothing").toBeGreaterThan(200);
+      expectSweepAccountsForEverything("phone", sweep, 200);
       expect(reportFindings("phone", sweep)).toEqual([]);
     });
 
@@ -263,7 +356,7 @@ for (const theme of THEMES) {
       await enterChat(page);
       await mountSyntheticNotices(page);
       const sweep = await page.evaluate(() => window.__cv396.floorSweep());
-      expect(sweep.measured, "the chat sweep scored nothing").toBeGreaterThan(10);
+      expectSweepAccountsForEverything("chat", sweep, 10);
       expect(reportFindings("chat", sweep)).toEqual([]);
     });
 
@@ -342,17 +435,13 @@ for (const theme of THEMES) {
       await showNudge(page);
       const sweep = await page.evaluate(() => window.__cv396.floorSweep());
 
-      // Non-vacuity: the four shapes below EXIST on this page, so an empty
-      // `blocked` list means the blocker detection died, not that the page got
-      // simpler.
+      // Non-vacuity: the shapes below EXIST on this page, so an empty `blocked`
+      // list means the blocker detection died, not that the page got simpler.
       expect(sweep.blocked.length, "nothing was reported as unmeasurable — the blocker pass is dead")
         .toBeGreaterThan(0);
 
-      const unexplained = sweep.blocked.filter(
-        (entry) => !ALLOWED_BLOCKERS.some(({ prefix }) => entry.includes(prefix)),
-      );
       expect(
-        unexplained,
+        unexplainedBlockers(sweep),
         "these text runs sit under something this compositor cannot model, and no reason is " +
           "recorded for them in ALLOWED_BLOCKERS",
       ).toEqual([]);
@@ -360,13 +449,174 @@ for (const theme of THEMES) {
       // And every allowed shape is still PRESENT. Without this the allow-list
       // rots into a list of things that stopped existing, and the day one comes
       // back it is waved through by a rule nobody re-read.
+      const everyBlocker = sweep.blocked.flatMap((run) => run.blockers);
       for (const { prefix, why } of ALLOWED_BLOCKERS) {
         expect(
-          sweep.blocked.some((entry) => entry.includes(prefix)),
+          everyBlocker.some((blocker) => blocker.startsWith(prefix)),
           `no run is blocked by "${prefix}" any more (${why}) — drop it from ALLOWED_BLOCKERS ` +
             "so the list keeps meaning what it says",
         ).toBe(true);
       }
+
+      // THE BYPASS THIS SHAPE EXISTS FOR, planted and required to be reported.
+      // A run under BOTH an allowed shape and an unexplained one used to be
+      // waved through on the allowed half — reproduced by a reviewer inside the
+      // header, which is why the plant goes there too.
+      // RED WHEN: `unexplainedBlockers` goes back to matching the joined entry
+      // instead of each blocker.
+      const planted = await page.evaluate(() => {
+        const el = document.createElement("p");
+        el.className = "cv403-waved";
+        el.textContent = "waved through";
+        el.style.filter = "contrast(0.2)";
+        document.querySelector("header.header")!.appendChild(el);
+        const out = window.__cv396.floorSweep();
+        el.remove();
+        return { sweep: out, run: out.blocked.find((r) => r.what.includes("cv403-waved")) ?? null };
+      });
+      expect(planted.run, "the plant was not blocked at all").not.toBeNull();
+      // The preconditions: the plant really did pick up BOTH an allowed blocker
+      // and an unexplained one. Without them a green result below could mean
+      // the plant never landed.
+      expect(
+        planted.run!.blockers.some((b) => b.startsWith("header.header backdrop-filter:")),
+        "the plant did not pick up the allowed header blocker, so it proves nothing",
+      ).toBe(true);
+      expect(
+        planted.run!.blockers.some((b) => b.includes("filter:contrast(0.2)")),
+        "the unexplained filter was not recorded as its own blocker",
+      ).toBe(true);
+      // AND THE MATCHER REPORTS IT. This is the assertion the fix is for:
+      // asserting the kit's structure alone left the entry-level `includes`
+      // mutant ALIVE, because the kit returns both blockers either way.
+      expect(
+        unexplainedBlockers(planted.sweep).join(" | "),
+        "the unexplained filter was waved through on the allowed header blocker",
+      ).toContain("filter:contrast(0.2)");
+    });
+
+    test("an unmodellable ancestor ABOVE an opaque background is still reported", async ({
+      page,
+    }) => {
+      // `stopAtOpaque` stops the BACKGROUND walk at the first opaque ancestor,
+      // which is right — nothing behind it paints through. An earlier version
+      // stopped the WHOLE walk there, and that was unsound: `opacity`,
+      // `filter`, `backdrop-filter` and `mix-blend-mode` transform the subtree
+      // AFTER it is drawn, so an opaque background underneath is no protection.
+      // A reviewer measured all four against real screenshot pixels — a group
+      // `opacity: .5` over an opaque white card read 4.54:1 from this
+      // compositor against 1.96:1 from the pixels, and `mix-blend-mode: screen`
+      // read 21:1 against a real 1.00:1 with the glyphs invisible.
+      //
+      // Nothing in this app has that shape today, so without these plants the
+      // whole fix is an EQUIVALENT MUTATION — verified: reverting it left every
+      // other test in this file green.
+      // RED WHEN: `blockersOf` goes back to `break`ing out of the loop when it
+      // reaches an opaque background, or drops the `mix-blend-mode` push.
+      for (const [prop, value, needle] of [
+        ["opacity", "0.5", "opacity:0.5"],
+        ["filter", "contrast(0.2)", "filter:contrast(0.2)"],
+        ["mixBlendMode", "screen", "mix-blend-mode:screen"],
+        ["backdropFilter", "blur(3px)", "backdrop-filter:blur(3px)"],
+      ] as const) {
+        const out = await page.evaluate(
+          ([prop, value]) => {
+            // outer (the unmodellable shape) > opaque card > the text.
+            const outer = document.createElement("div");
+            outer.className = "cv403-outer";
+            (outer.style as unknown as Record<string, string>)[prop as string] = value as string;
+            const card = document.createElement("div");
+            card.style.background = "#ffffff";
+            const text = document.createElement("p");
+            text.className = "cv403-under-opaque";
+            text.textContent = "text on an opaque card, under something else";
+            text.style.color = "#595959";
+            card.appendChild(text);
+            outer.appendChild(card);
+            document.body.appendChild(outer);
+            const applied = (getComputedStyle(outer) as unknown as Record<string, string>)[
+              prop as string
+            ];
+            const cardIsOpaque = getComputedStyle(card).backgroundColor;
+            const run = window.__cv396.measure(".cv403-under-opaque", 0);
+            outer.remove();
+            return { applied, cardIsOpaque, blockers: run ? run.blockers : ["<not measured>"] };
+          },
+          [prop, value] as const,
+        );
+        // Preconditions: the engine accepted the property, and the card really
+        // is the opaque ancestor the walk would otherwise stop at.
+        expect(out.applied, `${prop} was not accepted by the engine`).not.toBe("none");
+        expect(out.cardIsOpaque, "the planted card is not opaque").toBe("rgb(255, 255, 255)");
+        expect(
+          out.blockers.join(" | "),
+          `${prop} above an opaque background was not reported`,
+        ).toContain(needle);
+      }
+    });
+
+    test("visually-hidden text and inactive controls are out of scope, and only those", async ({
+      page,
+    }) => {
+      // TWO EXEMPTIONS, each proved in BOTH directions against the same colour,
+      // so neither can pass on a dead checker and neither can quietly grow into
+      // "skip everything".
+      //
+      //   - `.sr-only` is `width: 1px; height: 1px; clip-path: inset(50%)`, so
+      //     it HAS a rect and the old `> 0.5px` rule scored it: a reviewer
+      //     planted one at 2.88:1 and the sweep reported a failure over text no
+      //     sighted reader can see. `ChatView.tsx` ships two such regions.
+      //   - SC 1.4.3 exempts "text … that is part of an inactive user interface
+      //     component". `.cta:disabled` used to escape only incidentally, via
+      //     its `opacity: 0.5` making it a blocker — keying on the wrong thing.
+      // RED WHEN: the 2px rect bar or the `[disabled]` check is removed from
+      // `isVisible` (the negative halves), or widened to skip real text (the
+      // positive halves).
+      const seen = await page.evaluate(() => {
+        const mk = (cls: string, apply: (el: HTMLElement) => void, tag = "p") => {
+          const el = document.createElement(tag);
+          el.className = cls;
+          el.textContent = "planted";
+          el.style.color = "#949494"; // 2.85:1 on white — below the floor
+          el.style.background = "#ffffff";
+          el.style.fontSize = "12px";
+          apply(el);
+          document.body.appendChild(el);
+          return el;
+        };
+        const hidden = mk("cv403-sronly", (el) => {
+          el.style.width = "1px";
+          el.style.height = "1px";
+          el.style.overflow = "hidden";
+          el.style.clipPath = "inset(50%)";
+        });
+        const shown = mk("cv403-shown", () => {});
+        const off = mk("cv403-disabled", (el) => el.setAttribute("disabled", ""), "button");
+        const on = mk("cv403-enabled", () => {}, "button");
+        const rects = {
+          hiddenW: hidden.getBoundingClientRect().width,
+          shownW: shown.getBoundingClientRect().width,
+          offDisabled: (off as HTMLButtonElement).disabled,
+          onDisabled: (on as HTMLButtonElement).disabled,
+        };
+        const named = window.__cv396.floorSweep().findings.map((f) => f.what);
+        for (const el of [hidden, shown, off, on]) el.remove();
+        return { named, rects };
+      });
+
+      // Preconditions: the plants really are the shapes they claim to be.
+      expect(seen.rects.hiddenW, "the sr-only plant is not 1px wide").toBeLessThan(2);
+      expect(seen.rects.shownW, "the visible plant has no width").toBeGreaterThan(20);
+      expect(seen.rects.offDisabled, "the disabled plant is not disabled").toBe(true);
+      expect(seen.rects.onDisabled, "the enabled plant is disabled").toBe(false);
+
+      const named = seen.named.join(" | ");
+      expect(named, "a visually-hidden 1x1 run was scored").not.toContain("cv403-sronly");
+      expect(named, "an inactive control's text was scored").not.toContain("cv403-disabled");
+      expect(named, "a NORMAL run at the same colour was not scored").toContain("cv403-shown");
+      expect(named, "an ENABLED control at the same colour was not scored").toContain(
+        "cv403-enabled",
+      );
     });
 
     test("the sweep can still SEE a run below its floor", async ({ page }) => {
@@ -407,14 +657,22 @@ for (const theme of THEMES) {
       expect(planted.offender).toBe("rgb(148, 148, 148)");
 
       const after = await page.evaluate(() => window.__cv396.floorSweep());
-      const named = after.findings.map((f) => f.what).join(" | ");
-      expect(named, "the planted low-contrast run was not reported").toContain(
+      const named = after.findings.map((f) => f.what);
+      expect(named.join(" | "), "the planted low-contrast run was not reported").toContain(
         "cv403-planted-offender",
       );
-      expect(named, "the COMPLIANT plant was reported as a failure").not.toContain(
+      expect(named.join(" | "), "the COMPLIANT plant was reported as a failure").not.toContain(
         "cv403-compliant",
       );
-      expect(after.findings.length, "exactly one plant should be reported").toBe(1);
+      // EVERY finding is the offender, and nothing else on the page joined it.
+      // Not `length === 1`: the sweep visits `::first-line` and `::first-letter`
+      // as well as the element, and all three legitimately paint the same
+      // illegible glyphs, so the offender is named more than once by design.
+      expect(
+        named.filter((w) => !w.includes("cv403-planted-offender")),
+        "the plant was not the only thing reported",
+      ).toEqual([]);
+      expect(named.length, "the plant was reported zero times").toBeGreaterThan(0);
 
       await page.evaluate(() => {
         document.querySelector(".cv403-planted-offender")?.remove();
@@ -521,28 +779,175 @@ for (const theme of THEMES) {
       ).toContain("cv403-wrapper-with-text");
     });
 
-    test("the floor follows WCAG's large-text definition, at its boundaries", async () => {
-      // `wcagFloor` is pure, so this needs no page — but it runs beside the
-      // sweeps that consume it, where a reader will look for it.
+    test("the site header's own text clears AA over every surface it can float on", async ({
+      page,
+    }) => {
+      // C1. THE STRUCTURAL HOLE THE ALLOW-LIST OPENS, closed on its own terms.
       //
-      // A guard that applied one flat 4.5:1 to everything would be stricter than
-      // the criterion and would fail legitimate display type; one that applied
-      // 3:1 to everything would wave through the 9px and 10px runs this change
-      // exists to fix. The boundary is where both mistakes live.
-      // RED WHEN: either threshold moves, or the weight condition is dropped
-      // from the 18.667px branch.
-      expect(wcagFloor(23.9, 400)).toBe(4.5);
-      expect(wcagFloor(24, 400)).toBe(3);
-      expect(wcagFloor(18.7, 400), "large only at >= 700 below 24px").toBe(4.5);
-      expect(wcagFloor(18.7, 700)).toBe(3);
-      expect(wcagFloor(18.5, 700), "18.5px is under 14pt even at weight 700").toBe(4.5);
-      expect(wcagFloor(24, 700)).toBe(3);
-      // The sizes this app actually ships at the failing end.
-      expect(wcagFloor(9, 400)).toBe(4.5);
-      expect(wcagFloor(10, 700)).toBe(4.5);
-      expect(wcagFloor(11, 600)).toBe(4.5);
-      expect(wcagFloor(12.5, 400)).toBe(4.5);
-      expect(wcagFloor(16, 400)).toBe(4.5);
+      // `blockersOf` walks ANCESTORS, so allowing `header.header
+      // backdrop-filter:` exempts every text run inside `<header>` — the logo
+      // and all five nav links, in both themes and on both screens. A reviewer
+      // proved the consequence by painting the logo `#fbfbfb` on the near-white
+      // header: the sweep reported zero findings and the allow-list test stayed
+      // green. The primary navigation of the site was never contrast-checked.
+      //
+      // The sweep cannot fix this — the header really is a 12px blur of
+      // whatever has scrolled under it, and that is not a flat colour. So this
+      // test answers the question the sweep cannot, DETERMINISTICALLY and
+      // conservatively: composite the header's own
+      // `color-mix(in srgb, var(--bg) 82%, transparent)` over each opaque
+      // surface the page can put behind it, and require the header's text to
+      // clear its floor over EVERY one. That is stricter than reality, because
+      // the blur averages toward the mean rather than reaching either extreme.
+      //
+      // RED WHEN: any header text colour, or the header's own background alpha,
+      // moves such that the worst case drops under the floor — verified by
+      // painting the logo `#fbfbfb`, which reports 1.06:1 here.
+      const worst = await page.evaluate(() => {
+        const header = document.querySelector("header.header") as HTMLElement;
+        const kit = window.__cv396;
+        // The header's own background, un-premultiplied, with its alpha.
+        const own = kit.parse(getComputedStyle(header).backgroundColor)!;
+        // Every opaque page surface that can scroll under a sticky header.
+        const behind = ["var(--bg)", "var(--surface)", "var(--surface-2)", "var(--ink)", "var(--hl)"]
+          .map((token) => ({ token, rgb: kit.resolve(token) }))
+          .filter((x): x is { token: string; rgb: number[] } => !!x.rgb);
+
+        const lum = (rgb: number[]) => {
+          const c = rgb.map((v) => {
+            const x = v / 255;
+            return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+          });
+          return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        };
+        const ratio = (a: number[], b: number[]) => {
+          const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+          return (hi + 0.05) / (lo + 0.05);
+        };
+
+        const runs: { what: string; over: string; ratio: number; floor: number }[] = [];
+        const texts = Array.from(header.querySelectorAll<HTMLElement>("*")).filter((el) =>
+          Array.from(el.childNodes).some(
+            (n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim().length > 0,
+          ),
+        );
+        for (const el of texts) {
+          const cs = getComputedStyle(el);
+          const colour = kit.parse(cs.webkitTextFillColor) ?? kit.parse(cs.color);
+          if (!colour || (colour[3] ?? 1) <= 0.05) continue;
+          const size = parseFloat(cs.fontSize);
+          const weight = Number(cs.fontWeight) || 400;
+          const pt = size * 0.75;
+          const floor = pt >= 18 || (pt >= 14 && weight >= 700) ? 3 : 4.5;
+          // Any opaque background the element itself paints wins outright.
+          const ownBg = kit.parse(cs.backgroundColor);
+          for (const { token, rgb } of behind) {
+            const base =
+              ownBg && (ownBg[3] ?? 1) > 0.999
+                ? ownBg.slice(0, 3)
+                : [0, 1, 2].map((i) => own[3] * own[i] + (1 - own[3]) * rgb[i]);
+            const a = colour[3] ?? 1;
+            const painted = [0, 1, 2].map((i) => a * colour[i] + (1 - a) * base[i]);
+            runs.push({
+              what: `${el.tagName.toLowerCase()}.${el.className || "-"} — "${(el.textContent ?? "").trim().slice(0, 24)}"`,
+              over: token,
+              ratio: ratio(painted, base),
+              floor,
+            });
+          }
+        }
+        return runs;
+      });
+
+      // Non-vacuity: the header really does carry text, over several surfaces.
+      // Without this, an empty `worst` passes the assertion below silently —
+      // which is the precise shape that let the header go unchecked at all.
+      const subjects = new Set(worst.map((r) => r.what));
+      expect(subjects.size, "no text was found in header.header").toBeGreaterThan(1);
+      expect(new Set(worst.map((r) => r.over)).size, "no surfaces were composited").toBe(5);
+
+      const tooLow = worst
+        .filter((r) => r.ratio < r.floor)
+        .map((r) => `${r.what} over ${r.over}: ${r.ratio.toFixed(2)}:1 needs ${r.floor}:1`);
+      expect(tooLow, "header text below AA over a surface it can float on").toEqual([]);
+    });
+
+    test("the floor the SWEEP applies follows WCAG's large-text definition", async ({ page }) => {
+      // ASSERTED THROUGH THE SWEEP, not through the exported helper.
+      //
+      // `installKit` serializes its own copy of the rule into the page — an
+      // init script cannot close over module scope — so pinning the exported
+      // `wcagFloor` proves nothing about the floor that decides real findings.
+      // A reviewer showed the gap by inspection: changing the in-page copy to a
+      // flat `3` would have left every boundary assertion green. These plant
+      // real elements and read back the floor the SWEEP assigned them.
+      //
+      // A guard that applied one flat 4.5:1 would be stricter than the
+      // criterion and would fail legitimate display type; one that applied 3:1
+      // everywhere would wave through the 9px and 10px runs this change exists
+      // to fix. The boundary is where both mistakes live.
+      // RED WHEN: the in-page `floorFor` changes either threshold, or drops the
+      // weight condition from the 14pt branch.
+      const cases: [number, number, number][] = [
+        // px, weight, expected floor. 18pt = 24px; 14pt = 18.6666…px.
+        [23.9, 400, 4.5],
+        [24, 400, 3],
+        [24, 700, 3],
+        [18.7, 400, 4.5], // large only at weight >= 700 below 18pt
+        [18.7, 700, 3],
+        [18.5, 700, 4.5], // 13.875pt — under 14pt even at weight 700
+        // 18.66px is 13.995pt and 18.68px is 14.01pt. The pair straddles 14pt
+        // while staying outside Chromium's 1/64px font-size quantisation, which
+        // is why they are not written as 18.666 / 18.6667: the engine rounds
+        // 18.666px to 18.671875px, so a test written at the exact boundary
+        // asserts a size the browser never applied. Measured before choosing
+        // these values.
+        [18.66, 700, 4.5],
+        [18.68, 700, 3],
+        // The sizes this app actually ships at the failing end.
+        [9, 400, 4.5],
+        [10, 700, 4.5],
+        [11, 600, 4.5],
+        [12.5, 400, 4.5],
+        [16, 400, 4.5],
+      ];
+      const got = await page.evaluate((rows) => {
+        const out: { px: number; weight: number; floor: number | null; size: string }[] = [];
+        for (const [px, weight] of rows) {
+          const el = document.createElement("p");
+          el.className = "cv403-floor-probe";
+          el.textContent = "probe";
+          el.style.fontSize = `${px}px`;
+          el.style.fontWeight = String(weight);
+          document.body.appendChild(el);
+          const run = window.__cv396.measure(".cv403-floor-probe", 0);
+          out.push({
+            px,
+            weight,
+            floor: run ? run.floor : null,
+            // The precondition: the engine kept the size we asked for. A
+            // rounded or rejected value would make a "correct" floor correct
+            // for a size that is not under test.
+            size: getComputedStyle(el).fontSize,
+          });
+          el.remove();
+        }
+        return out;
+      }, cases);
+
+      for (let i = 0; i < cases.length; i++) {
+        const [px, weight, want] = cases[i];
+        expect(parseFloat(got[i].size), `${px}px was not applied by the engine`).toBeCloseTo(px, 3);
+        expect(got[i].floor, `the sweep gave ${px}px/${weight} the wrong floor`).toBe(want);
+      }
+
+      // The exported copy is kept in step with the in-page one. Callers outside
+      // the page use it, so a drift between the two would be a second rule.
+      for (const [px, weight, want] of cases) {
+        expect(wcagFloor(px, weight), `wcagFloor drifted from the sweep at ${px}px/${weight}`).toBe(
+          want,
+        );
+      }
     });
   });
 }
