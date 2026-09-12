@@ -126,8 +126,12 @@ jobs:
       # one here would be the gate #308 exists to refuse.
       #
       # It doubles as the report's only reader. Before this, the number lived at
-      # the bottom of ~1760 `-v` lines in a collapsed log plus a 204 KB XML that
-      # expires in 14 days — present, but not visible.
+      # the bottom of a couple of thousand `-v` lines in a collapsed log plus an
+      # XML artifact that expires in 14 days — present, but not visible. (Two
+      # hardcoded figures here went stale together and were removed in #421:
+      # "~1760 `-v` lines", against a suite now well past that, and "204 KB XML",
+      # measured at 220,733 bytes on the same run. Neither number was doing any
+      # work that the sentence needed.)
       - name: Coverage was actually measured
         run: |
           uv run python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
@@ -360,10 +364,49 @@ jobs:
     #
     # TRADEOFF, stated plainly: an ordinary merge to main now has NO judged gate,
     # so an answer-quality regression can sit on main until the next tag or manual
-    # run. That is deliberate at this budget. The hermetic half of the eval
-    # (hit-rate, MRR, refusal leaks, the multi-turn echo oracle) still runs on
-    # every push inside `pytest + lint` and costs nothing — only the LLM-JUDGED
-    # half is deferred.
+    # run. That is deliberate at this budget. The hermetic half of the eval does
+    # still run on every push inside `pytest + lint` and costs nothing — but RUNS
+    # and GATES are not the same thing, and an earlier version of this comment
+    # conflated them (#418). What the per-push run actually does:
+    #
+    #   GATED — a regression turns the build red:
+    #     literal hit-rate, overall answerable hit-rate, retrieval refusal leaks
+    #     and the follow-up hit-rate. Two mechanisms, not one:
+    #     tests/test_eval_harness.py::test_retrieval_hit_rate_gate asserts them
+    #     directly, and `gate_failures()` itself runs per push — the three
+    #     `runner.main(...)` calls in tests/test_eval_judge_subset.py assert the
+    #     exit code — which adds its degenerate-input gates (a golden set with no
+    #     answerable cases, or none of kind `literal`, fails rather than sailing
+    #     through on the empty-pool hit_rate convention of 1.0).
+    #
+    #   COMPUTED, BUT NEITHER GATED NOR VISIBLE — cannot fail the build, and you
+    #   will not find it in the log either:
+    #     chunk-rank MRR, precision@1 and the multi-hop hit-rate.
+    #     `gate_failures()` applies MIN_MRR, MIN_PRECISION_AT_1 and
+    #     MIN_MULTIHOP_HIT_RATE only when the embedder mode is `postgres`,
+    #     because the hermetic path has no live vector arm to rank against.
+    #     `make eval` prints `MRR 0.800, precision@1 0.800  [hermetic —
+    #     informational]` against MIN_MRR = 0.95 and exits 0 — but every per-push
+    #     caller passes `--quiet`, and that print sits behind `if not
+    #     args.quiet`, so the number is never even emitted here. Run it by hand
+    #     to see it. The gating asymmetry is deliberate and is pinned by
+    #     test_gate_gates_mrr_and_precision_only_on_postgres.
+    #
+    #   PRODUCES NO CASES AT ALL on this path:
+    #     the multi-turn echo oracle, the prompt-injection oracle and per-case
+    #     groundedness. All three need judged answers; the stub provider produces
+    #     none, so the hermetic report carries `multi_turn: {"cases": 0}`,
+    #     `injection: {"cases": 0}` and `groundedness: {"cases_with_facts": 0}`.
+    #     The echo and injection oracles are simply not gated on an empty pool
+    #     (failing on an oracle that could not run is noise, not signal).
+    #     Groundedness is stricter than that: it is `postgres`-gated as well, so
+    #     it would not fire here even if the cases existed. See
+    #     tests/eval/runner.py::gate_failures.
+    #
+    # So the deferral costs more than the LLM-judged scores alone: it also defers
+    # the echo, injection and groundedness oracles, and leaves MRR, precision@1
+    # and multi-hop advisory AND unprinted. Only the paid half is deferred, but
+    # "hermetic" is neither "gated" nor "reported".
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
       github.event_name == 'workflow_dispatch' ||

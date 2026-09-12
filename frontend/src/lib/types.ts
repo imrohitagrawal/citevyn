@@ -167,7 +167,10 @@ export interface AskResponse {
 /**
  * Term types emitted by the backend's exact-term index. Mirrors
  * :class:`app.models.enums.TermType`. The UI displays each as a
- * coloured badge; the mapping is in ``./format.ts``.
+ * coloured badge; each component that renders one maps it itself.
+ * (This line used to point at ``./format.ts``, which held the
+ * shared label tables — that module was dead in full and was
+ * deleted in #419, so the pointer went with it.)
  */
 export type TermType =
   | "flag"

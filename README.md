@@ -28,7 +28,7 @@ for reproducible defects and accepted work.
 | Cache / rate-limit  | Production    | Redis 7 sliding-window limiter (per-user, per-route)        |
 | TLS termination     | Production    | Caddy v2 (auto-issued Let's Encrypt)                        |
 | Frontend            | Optional preview| React + Vite; build via `make demo-frontend`              |
-| Test coverage       | 1760 tests, 96% lines | pytest + httpx AsyncClient; postgres-marker opt-in          |
+| Test coverage       | whole hermetic suite, 96.7% lines | pytest + httpx AsyncClient; postgres-marker opt-in |
 | CI                  | 2 jobs        | pytest + lint (SQLite), alembic + postgres integration      |
 
 ---
@@ -44,7 +44,7 @@ for reproducible defects and accepted work.
 
 | Gate                              | Status | How it's enforced                           |
 |-----------------------------------|--------|----------------------------------------------|
-| Unit + integration tests          | 🟢 green | `make test` (1760 tests, in-memory SQLite) |
+| Unit + integration tests          | 🟢 green | `make test` (whole hermetic suite, in-memory SQLite) |
 | Type-check (pyright strict)       | 🟢 green | `make typecheck`                            |
 | Lint (ruff + format)              | 🟢 green | `make lint`                                 |
 | Golden evaluation suite           | 🟢 green | `make golden` (50/50 cases)                 |
@@ -227,7 +227,7 @@ citevyn/
 │   │   ├── retrieval/      # Hybrid search (pgvector + lexical)
 │   │   ├── worker/         # citevyn-worker entry point + loop
 │   │   └── main.py         # FastAPI app, lifespan, router wiring
-│   ├── tests/              # 1760 tests; pytest-asyncio; in-memory SQLite
+│   ├── tests/              # hermetic suite; pytest-asyncio; in-memory SQLite
 │   ├── pyproject.toml      # uv-managed; ruff + pyright strict
 │   └── uv.lock
 ├── db/                     # Alembic migrations (single source of truth)
@@ -399,14 +399,30 @@ the opt-in integration tests against a real Postgres if you set
   (Postgres), waits for the API, asserts `/health` reports
   `healthy`, and tears down.
 - **Coverage** — `make coverage` runs the same suite as `make test` and
-  reports line coverage (currently **96%** of the hermetic suite; the
-  `postgres`-marked tests run in their own job without coverage), plus
-  `artifacts/coverage.xml`.
+  reports line coverage (currently **96.7%** of the hermetic suite —
+  5403 of 5585 statements, 182 missed; the `postgres`-marked tests run in
+  their own job without coverage), plus `artifacts/coverage.xml`.
+  The figure is written to one decimal place on purpose. `coverage.py`'s
+  `TOTAL` row rounds it and prints **97%**, and an earlier version of this
+  line read **96%**, the floor of the same ratio — two honest sources
+  disagreeing about the same measurement at the same instant. Quoting the
+  ratio removes the ambiguity instead of picking a winner, so a reader
+  comparing this file against a CI log finds them consistent, not
+  contradictory. `docs/TEST_STRATEGY.md` §4 states it the same way.
   It is a **measurement, never a gate**: coverage shows which lines *ran*,
   not which are *checked*. A line in `promotion_eval.py` once measured 97%
   covered and still left 42 tests green when deleted. Use it to find code no
   test touches; use mutation testing to find code no test defends. What would
   make it blocking is recorded beside the CI step (#308).
+
+- **Suite size** — deliberately **not** written down anywhere in this file.
+  It used to be, and it was stale twice: `361 passed` (introduced in `1d62074`),
+  corrected to `1760 tests` in `73157fe`, which was itself understated by more
+  than six hundred by the time #421 was filed. A hardcoded count goes wrong on the first merge that adds a test, and a
+  wrong number in the most-read file in the repo is worse than no number. For the
+  live figure run `make test`, or `uv run pytest -m "not postgres" --collect-only
+  -q` from `backend/` for the collected total without executing anything. Be
+  precise about which you quote: **collected** and **passed** differ by the skips.
 
 Test strategy: [`docs/TEST_STRATEGY.md`](docs/TEST_STRATEGY.md).
 

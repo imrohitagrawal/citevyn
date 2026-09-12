@@ -6,11 +6,13 @@ Covers the two endpoints defined in ``docs/API_SPEC.md`` §5:
 * ``GET /v1/sessions/{session_id}/messages/{message_id}`` — fetch one
   message for citation hydration.
 
-The happy-path test seeds the minimal catalog (an active index, five
-documents — the four product areas plus the About-CiteVyn source — one
-chunk each) through a one-shot async seed and asserts the full
-grounded-answer shape. The error-path tests
-confirm the standard envelope and status mapping without seeding.
+The happy-path test seeds the minimal catalog through a one-shot async seed and
+asserts the full grounded-answer shape. That catalog is an active index plus one
+document per entry in ``app.worker.allowlist.MVP_SOURCES``, one chunk each —
+named that way rather than counted, because the count this docstring used to
+carry went stale the day a sixth source shipped (#420). ``test_worker_allowlist``
+now scans this file and will reject a contradicting count if one comes back. The
+error-path tests confirm the standard envelope and status mapping without seeding.
 """
 
 from __future__ import annotations
