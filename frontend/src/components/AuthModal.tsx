@@ -477,7 +477,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
             )}
 
             {error && (
-              <p role="alert" style={{ color: "var(--color-error, #c25b4e)", fontSize: "13px", margin: 0 }}>
+              <p role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", margin: 0 }}>
                 {error}
               </p>
             )}
