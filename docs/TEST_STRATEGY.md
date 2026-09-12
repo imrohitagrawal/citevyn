@@ -112,9 +112,9 @@ executed by the suite, yet deleting it left all 42 promotion tests green. A
 percentage would have said nothing about that defect, and a required score invites
 tests written to move the number rather than to catch a defect.
 
-So `make coverage` and the CI step (#308) **report** — currently 96.7%, i.e.
-5403 of 5585 statements with 182 missed — and nothing fails on the number. Read
-that figure precisely: it covers the hermetic suite (`-m "not postgres"`),
+So `make coverage` and the CI step (#308) **report** a line-coverage figure and
+nothing fails on the number. Read it precisely. It covers the hermetic suite
+(`-m "not postgres"`),
 because the `postgres`-marked tests run in their own job without coverage. It is
 not a whole-repo number.
 

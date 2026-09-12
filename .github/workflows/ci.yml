@@ -373,9 +373,11 @@ jobs:
     #     literal hit-rate, overall answerable hit-rate, retrieval refusal leaks
     #     and the follow-up hit-rate. Two mechanisms, not one:
     #     tests/test_eval_harness.py::test_retrieval_hit_rate_gate asserts them
-    #     directly, and `gate_failures()` itself runs per push — the three
-    #     `runner.main(...)` calls in tests/test_eval_judge_subset.py assert the
-    #     exit code — which adds its degenerate-input gates (a golden set with no
+    #     directly, and `gate_failures()` itself runs per push — of the three
+    #     `runner.main(...)` calls in tests/test_eval_judge_subset.py, TWO pin
+    #     the exit code (lines 452 and 533); the third (543) discards it and
+    #     asserts only on stdout, so two callers carry this, not three — which
+    #     adds its degenerate-input gates (a golden set with no
     #     answerable cases, or none of kind `literal`, fails rather than sailing
     #     through on the empty-pool hit_rate convention of 1.0).
     #

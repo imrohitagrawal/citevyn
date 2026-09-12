@@ -167,10 +167,14 @@ export interface AskResponse {
 /**
  * Term types emitted by the backend's exact-term index. Mirrors
  * :class:`app.models.enums.TermType`. The UI displays each as a
- * coloured badge; each component that renders one maps it itself.
- * (This line used to point at ``./format.ts``, which held the
- * shared label tables — that module was dead in full and was
- * deleted in #419, so the pointer went with it.)
+ * coloured badge. NOTHING in the frontend currently maps or
+ * renders one: `git grep TermType -- frontend` returns only this
+ * file, and `term_type` appears once, on `ExactSearchHit` below.
+ * (This line used to point at ``./format.ts``, which held label
+ * tables nothing imported; that module was dead in full and was
+ * deleted in #419. Its first replacement claimed each component
+ * maps the type itself, which was equally untrue — a docs-accuracy
+ * change shipping a fresh false pointer, caught in review.)
  */
 export type TermType =
   | "flag"

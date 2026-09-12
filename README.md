@@ -28,7 +28,7 @@ for reproducible defects and accepted work.
 | Cache / rate-limit  | Production    | Redis 7 sliding-window limiter (per-user, per-route)        |
 | TLS termination     | Production    | Caddy v2 (auto-issued Let's Encrypt)                        |
 | Frontend            | Optional preview| React + Vite; build via `make demo-frontend`              |
-| Test coverage       | whole hermetic suite, 96.7% lines | pytest + httpx AsyncClient; postgres-marker opt-in |
+| Test coverage       | whole hermetic suite; figure in `artifacts/coverage.xml` | pytest + httpx AsyncClient; postgres-marker opt-in |
 | CI                  | 2 jobs        | pytest + lint (SQLite), alembic + postgres integration      |
 
 ---
@@ -399,9 +399,14 @@ the opt-in integration tests against a real Postgres if you set
   (Postgres), waits for the API, asserts `/health` reports
   `healthy`, and tears down.
 - **Coverage** — `make coverage` runs the same suite as `make test` and
-  reports line coverage (currently **96.7%** of the hermetic suite —
-  5403 of 5585 statements, 182 missed; the `postgres`-marked tests run in
-  their own job without coverage), plus `artifacts/coverage.xml`.
+  reports line coverage of the hermetic suite (the `postgres`-marked tests run
+  in their own job without coverage), plus `artifacts/coverage.xml`. Read the
+  figure precisely: coverage.py ROUNDS its `TOTAL` row, so a true 96.74% prints
+  there as `97%` while a reader flooring the same ratio writes `96%`. That
+  ambiguity, not staleness, is what made this file and CI appear to disagree
+  (#421) — quote the ratio or name the tool, never a bare integer. The live pair is in `artifacts/coverage.xml` as
+  `lines-covered` / `lines-valid` — no statement count is written down here,
+  for the same reason the suite size is not.
   The figure is written to one decimal place on purpose. `coverage.py`'s
   `TOTAL` row rounds it and prints **97%**, and an earlier version of this
   line read **96%**, the floor of the same ratio — two honest sources
@@ -415,7 +420,9 @@ the opt-in integration tests against a real Postgres if you set
   test touches; use mutation testing to find code no test defends. What would
   make it blocking is recorded beside the CI step (#308).
 
-- **Suite size** — deliberately **not** written down anywhere in this file.
+- **Suite size** — the pytest suite's size is deliberately **not** written down
+  here. (The Playwright and visual-snapshot rows in §3 still carry literal
+  counts; they are smaller, move far less often, and are out of scope for #421.)
   It used to be, and it was stale twice: `361 passed` (introduced in `1d62074`),
   corrected to `1760 tests` in `73157fe`, which was itself understated by more
   than six hundred by the time #421 was filed. A hardcoded count goes wrong on the first merge that adds a test, and a

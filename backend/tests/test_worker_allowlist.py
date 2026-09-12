@@ -214,8 +214,13 @@ _COUNT_RE = re.compile(
 # as "6 sources" by the first version and passed, which is worse than missing it:
 # the guard actively endorsed a claim that contradicts the list. Matched first and
 # always rejected.
+# `[^\S\n]` is "whitespace but not a newline". A range is a single written
+# phrase; letting it span lines made an ordinary markdown bullet list read as
+# one — "- ... has 5\n- 6 documents ..." matched as the range "5\n- 6 documents"
+# and failed a scanned runbook on correct prose (caught reviewing #420). The
+# separator may still be spaced or unspaced on its own line.
 _RANGE_RE = re.compile(
-    rf"\b(?:\d+|{_COUNT_ALTERNATIVES})\s*[-–—]\s*(?:\d+|{_COUNT_ALTERNATIVES})\s+{_CORPUS_NOUN}\b",
+    rf"\b(?:\d+|{_COUNT_ALTERNATIVES})[^\S\n]*[-–—][^\S\n]*(?:\d+|{_COUNT_ALTERNATIVES})\s+{_CORPUS_NOUN}\b",
     re.IGNORECASE,
 )
 
@@ -277,12 +282,21 @@ def test_no_prose_count_of_the_corpus_contradicts_mvp_sources() -> None:
             # what remains is the number, which may be several words ("half a
             # dozen"). Splitting on the FIRST space instead would read
             # "half a dozen sources" as the word "half".
-            written = claim.rsplit(maxsplit=1)[0].lower().removesuffix(" mvp").strip()
+            # Collapse internal whitespace FIRST. `_COUNT_RE` joins the number
+            # to the noun with `\s+`, which matches a newline, so a correct
+            # claim that hard-wraps between the number and "MVP" arrives as
+            # "six\nMVP sources". Without this, rsplit yields "six\nMVP",
+            # removesuffix(" mvp") does not match "\nmvp", the lookup returns
+            # None, and the guard REDDENS ON CORRECT PROSE — reported against
+            # its own scanned files, which are hard-wrapped at ~70-88 columns.
+            # A guard that fails a correct manifest is a guard someone deletes.
+            claim_flat = " ".join(claim.split())
+            written = claim_flat.rsplit(maxsplit=1)[0].lower().removesuffix(" mvp").strip()
             value = _COUNT_WORDS.get(written)
             if value is None:
                 value = int(written) if written.isdigit() else None
             assert value == shipped, (
-                f'{path.name} prose says "{claim}" but MVP_SOURCES ships {shipped}: '
+                f'{path.name} prose says "{claim_flat}" but MVP_SOURCES ships {shipped}: '
                 f"{[s.name for s in MVP_SOURCES]}"
             )
 
@@ -388,9 +402,12 @@ def test_the_prose_extractor_sees_every_docstring_and_comment(
 def test_the_extractor_reads_markdown_whole(tmp_path: pathlib.Path) -> None:
     """A ``.md`` file has no executable text, so all of it is prose.
 
-    Turns red by: making ``_prose_of`` run the Python branch on every path —
-    ``tokenize`` raises on markdown, so this fails loudly rather than silently
-    returning nothing.
+    Turns red by: making ``_prose_of`` run the Python branch on every path.
+    ``ast.parse`` raises ``SyntaxError`` on markdown and that is what fails the
+    test. NOT ``tokenize``, which this line claimed until review: it lexes
+    ``"The corpus is five documents, one chunk each.\n"`` without complaint and
+    simply yields no comment tokens. The test does go red either way, but the
+    red-trigger line has to name the mechanism that actually fires.
     """
     doc = tmp_path / "runbook.md"
     doc.write_text("The corpus is five documents, one chunk each.\n", encoding="utf-8")
