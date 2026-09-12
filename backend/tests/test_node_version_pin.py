@@ -18,10 +18,23 @@ in sync" comment cannot fail a build. This can, and it runs in ``ci.yml``'s
 ``test`` job, which has no ``paths:`` filter and is a required status check — so
 it fires on a Dependabot PR that touches nothing but ``Dockerfile.api``.
 
-Deliberately MAJOR-only. ``.nvmrc`` holds ``22`` and the image tag is
-``node:22-bookworm-slim``: both float to the newest 22.x, so patch releases flow
+Deliberately MAJOR-only. ``.nvmrc`` holds ``26`` and the image tag is
+``node:26-bookworm-slim``: both float to the newest 26.x, so patch releases flow
 in without a repo edit while the major stays locked together. Pinning a full
-``22.x.y`` here would drift against the floating image tag by construction.
+``26.x.y`` here would drift against the floating image tag by construction.
+(This paragraph said ``22`` until #413, two majors after the repo moved to 26 —
+the same rot the guard exists to stop, in the guard's own prose.)
+
+``@types/node`` joined the population in #413. It is not a runtime, so it was
+recorded below as a blind spot rather than guarded: "a compile-time types
+package, not a runtime pin". That reasoning was wrong in a way worth writing
+down. It is the version TypeScript BELIEVES the runtime is, so at ``^20`` while
+Node is 26 the compiler checks the SPA's build-time code against a DIFFERENT
+API surface from the one that runs — a disagreement no runtime check can reach,
+because nothing here executes. It also bounded what the toolchain could take:
+vitest 5's ``@types/node`` peer is ``^22.0.0 || >=24.0.0``, so ``^20`` blocked
+it (reproduced: ``npm install vitest@5 --dry-run`` exits 1 with ERESOLVE before
+this bump, 0 after). Guarded now.
 """
 
 from __future__ import annotations
@@ -100,15 +113,21 @@ _EXTERNAL_NODE_OUT_OF_REACH: dict[tuple[str, str], str] = {
 _UNGUARDABLE: tuple[str, ...] = (
     "A job that runs `npm run build` with NO setup-node step: it uses the runner "
     "image's preinstalled Node. Nothing in the YAML says 'node', so no static "
-    "scan can find it. ubuntu-24.04 ships 22.23.2 (matches today by luck); "
-    "ubuntu-26.04 ships 24.x, so this breaks silently when ubuntu-latest rolls.",
+    "scan can find it. Every job that sets Node up TODAY is `ubuntu-latest` "
+    "(frontend.yml:build, frontend.yml:demo-e2e, frontend-live-e2e.yml:live-e2e "
+    "— enumerated, not assumed), and ubuntu-latest MEASURED as ubuntu-24.04 "
+    "(image 20260907.300.1, run 34449722396). NOT every job in the repo: "
+    "ci.yml:shell-tests is a matrix over ubuntu-latest AND macos-latest, and "
+    "pr-quality.yml:quality-gate declares no runs-on here at all. This entry's "
+    "own earlier text put that image's preinstalled Node at 22.23.2, which is "
+    "INHERITED, not re-measured. On those facts the mismatch is live TODAY — "
+    "the entry used to say it arrived only when ubuntu-latest rolled, which was "
+    "true while .nvmrc said 22 and stopped being true at 26.",
     "A Dockerfile that resolves its base through ARG indirection "
     "(`ARG NODE_VERSION=18` + `FROM node:${NODE_VERSION}`). Deliberately not "
     "supported: the literal FROM is what keeps Dependabot tracking the image.",
     "Node inside the external reusable workflow's own repository, and any Node a "
     "third-party action installs internally.",
-    "@types/node in frontend/package.json — a compile-time types package, not a "
-    "runtime pin. Currently ^20.16.0 while the runtime is 22; recorded as debt.",
     "Whether _container_node_images() reads the REAL workflow directory. While "
     "the repo has zero `container:` jobs its only observation over the real tree "
     "is an empty `found`, so a mutant keyed on `directory == WORKFLOW_DIR` that "
@@ -118,12 +137,29 @@ _UNGUARDABLE: tuple[str, ...] = (
     "— what neither can rule out is a mutant that also FABRICATES `examined` to "
     "match. The day a real `container: node:` job lands, that mutant dies — "
     "until then there is no positive observation to make.",
+    "What @types/node RESOLVES to, as opposed to the range package.json declares. "
+    "test_types_node_major_matches_the_pin reads the declared range only, so two "
+    "things are out of its reach: an `overrides`/`resolutions` block redirecting "
+    "the install (frontend/package.json has neither today — verified, its only "
+    "keys are name/version/private/type/description/engines/scripts/dependencies/"
+    "devDependencies), and package-lock.json naming a different version from the "
+    "range. The lockfile case is covered MECHANICALLY rather than here: `npm ci` "
+    "refuses a lockfile that disagrees with package.json, and both CI jobs run "
+    "`npm ci`. A local `npm install --force` is not covered by either.",
 )
 
 # Hand-counted off the tuple above. Truthiness alone is not a guard: measured,
 # deleting a whole entry left the file at `31 passed, 1 skipped`. Same
 # convention as _REAL_SETUP_NODE_STEPS below — update this line deliberately
 # when a blind spot is genuinely added or genuinely closed.
+#
+# Unchanged at 5 across #413, which is a coincidence worth spelling out rather
+# than leaving as a silent no-op: one entry CLOSED (@types/node is now enforced
+# by test_types_node_major_matches_the_pin and carried in the population of
+# test_every_node_version_in_the_repo_agrees) and one OPENED (that new guard
+# reads the declared range, not what npm resolves). Closing a blind spot with a
+# guard that has its own is the normal case, and the register is only honest if
+# the new one goes in the same edit.
 _UNGUARDABLE_COUNT = 5
 
 # Inputs that mean "this external workflow will run something with Node".
@@ -249,9 +285,9 @@ def test_nvmrc_exists_and_names_exactly_one_version() -> None:
     lines = [line for line in NVMRC.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == 1, f"{NVMRC} must hold exactly one version line, got {lines!r}"
     assert re.fullmatch(r"\d+", lines[0].strip()), (
-        f"{NVMRC} must hold a BARE MAJOR (e.g. `22`), got {lines[0]!r}. A full "
-        "`22.x.y` would pin CI to one patch release while the Docker tag "
-        "`node:22-bookworm-slim` keeps floating to the newest 22.x — the two "
+        f"{NVMRC} must hold a BARE MAJOR (e.g. `26`), got {lines[0]!r}. A full "
+        "`26.x.y` would pin CI to one patch release while the Docker tag "
+        "`node:26-bookworm-slim` keeps floating to the newest 26.x — the two "
         "would drift by construction, which is what this file exists to prevent."
     )
 
@@ -380,6 +416,84 @@ def test_package_json_engine_floor_matches_the_pin() -> None:
         f"frontend/package.json engines.node is {declared!r} but "
         f"{NVMRC_WORKFLOW_PATH} pins Node {_pinned_major()}. Two version "
         "declarations that disagree is the defect this guard exists to stop."
+    )
+
+
+# ──────────────────────── the types that describe it ────────────────────────
+
+# Range forms that keep @types/node INSIDE one major: a caret, a tilde, or an
+# exact version. Deliberately NOT `>=<major>`, which is the correct shape for
+# `engines.node` (a floor: "this or newer runs it") and the wrong one here.
+# `>=26` reads as agreement with the pin while silently accepting 27 and 28 —
+# the same class of trap as `node-version` overriding `node-version-file`
+# above, where the authoritative-looking value is not the one that applies.
+_TYPES_NODE_RANGE = re.compile(r"[\^~]?\d+\.\d+\.\d+")
+
+# Both manifest sections npm reads for a direct dependency. BOTH, not just
+# `devDependencies`: adversarial review measured that a guard reading only
+# `devDependencies` stays GREEN on a manifest declaring `@types/node` in
+# `dependencies` too, at a DIFFERENT major — npm accepts that manifest, `npm
+# ci` accepts the resulting lockfile, and the repo then names two majors with
+# every test passing. Reading the union is what makes "the declared major" a
+# single value rather than whichever one the guard happened to look at.
+_TYPES_NODE_SECTIONS = ("dependencies", "devDependencies")
+
+
+def _declared_types_node() -> str:
+    """The ONE `@types/node` spec in frontend/package.json, or fail saying why."""
+    manifest = json.loads(FRONTEND_PACKAGE_JSON.read_text(encoding="utf-8"))
+    found = {
+        section: (manifest.get(section) or {})["@types/node"]
+        for section in _TYPES_NODE_SECTIONS
+        if "@types/node" in (manifest.get(section) or {})
+    }
+    assert found, (
+        "frontend/package.json declares @types/node in neither `dependencies` "
+        "nor `devDependencies`. Without it TypeScript falls back to whatever "
+        "@types/node a transitive dep drags in — an unpinned, unreviewed "
+        "version of the very thing this test exists to hold to the runtime "
+        "(#413)."
+    )
+    assert len(found) == 1, (
+        f"frontend/package.json declares @types/node twice: {found}. npm accepts "
+        "this and so does `npm ci`, so two majors can sit in one manifest with "
+        "every check green — measured during the #413 review. Keep exactly one "
+        "declaration, in devDependencies."
+    )
+    return next(iter(found.values()))
+
+
+def test_types_node_major_matches_the_pin() -> None:
+    """@types/node is the version TypeScript believes the runtime is (#413).
+
+    Not a runtime pin, which is why this file recorded it as a blind spot for
+    two majors instead of guarding it. But a types package is a claim about the
+    runtime, and a false one fails in the direction no runtime check can see:
+    the compiler is checking against a DIFFERENT API surface from the one that
+    runs, and every test still passes because none of this survives to
+    execution. (Stated as the class it is. No such error has been OBSERVED in
+    this repo — `tsc` reported zero errors before and after the bump — so the
+    hazard is the drift itself, not a defect on record.) It also bounds what
+    the toolchain can take: at ^20 the repo could not accept vitest 5, whose
+    peer range is `^22.0.0 || >=24.0.0`.
+
+    Which change turns this RED: setting frontend/package.json's
+    `@types/node` back to `^20.16.0` (or any major other than .nvmrc's).
+    """
+    declared = _declared_types_node()
+    assert _TYPES_NODE_RANGE.fullmatch(declared.strip()), (
+        f"frontend/package.json @types/node is {declared!r}. It must be bounded "
+        "to ONE major (`^26.5.1`, `~26.5.1` or an exact `26.5.1`). A floor like "
+        "`>=26`, or a multi-major `||` range, satisfies the comparison below "
+        "today while letting npm resolve a major nobody reconciled with "
+        f"{NVMRC_WORKFLOW_PATH}."
+    )
+    assert _major(declared) == _pinned_major(), (
+        f"frontend/package.json @types/node is {declared!r} but "
+        f"{NVMRC_WORKFLOW_PATH} pins Node {_pinned_major()}, so TypeScript is "
+        f"checking the frontend against Node {_major(declared)}'s API surface "
+        "while CI, the Docker image and production all run "
+        f"{_pinned_major()}. Bump @types/node to the same major in this PR."
     )
 
 
@@ -685,9 +799,13 @@ def test_the_guards_own_blind_spots_are_written_down() -> None:
     Adversarial review found ways to build the SPA on an unpinned Node that no
     static scan here can catch. The dangerous one is dated, not hypothetical: a
     job that runs ``npm run build`` with NO ``setup-node`` step uses the runner
-    image's preinstalled Node. ubuntu-24.04 ships 22.23.2 — which matches today
-    by luck — and ubuntu-26.04 ships 24.x, so the day ``ubuntu-latest`` rolls
-    over, such a job silently builds on 24 while .nvmrc says 22.
+    image's preinstalled Node. Every job that sets Node up today runs on
+    ``ubuntu-latest``, measured as ubuntu-24.04, whose preinstalled Node this
+    register records as 22.x — so such a job would build on the wrong major
+    immediately. It does not have to wait for the image to roll, which is what
+    this said while .nvmrc still held 22. (Not every job in the repo is
+    ubuntu-latest — ``ci.yml``'s ``shell-tests`` is a matrix that includes
+    macos-latest — but none of those build the SPA.)
 
     This test asserts nothing about the workflows. It exists so the limitation
     is in the file a maintainer reads, rather than discovered the hard way.
@@ -734,6 +852,12 @@ def test_every_node_version_in_the_repo_agrees() -> None:
         majors[str(path.relative_to(REPO_ROOT))] = _major(tag)
     manifest = json.loads(FRONTEND_PACKAGE_JSON.read_text(encoding="utf-8"))
     majors["frontend/package.json engines.node"] = _major(manifest["engines"]["node"])
+    # #413: the types belong to the population too. The dedicated test above
+    # carries the shape rule and the better message; this is what stops the
+    # POPULATION from quietly shrinking back to "the runtimes only". Routed
+    # through the same resolver, so a deleted key fails on that resolver's
+    # named assertion rather than on a bare KeyError from this line.
+    majors["frontend/package.json @types/node"] = _major(_declared_types_node())
 
     assert len(set(majors.values())) == 1, (
         "Node major versions disagree across the repo (#231):\n"
