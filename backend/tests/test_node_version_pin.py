@@ -138,14 +138,24 @@ _UNGUARDABLE: tuple[str, ...] = (
     "match. The day a real `container: node:` job lands, that mutant dies — "
     "until then there is no positive observation to make.",
     "What @types/node RESOLVES to, as opposed to the range package.json declares. "
-    "test_types_node_major_matches_the_pin reads the declared range only, so two "
-    "things are out of its reach: an `overrides`/`resolutions` block redirecting "
-    "the install (frontend/package.json has neither today — verified, its only "
-    "keys are name/version/private/type/description/engines/scripts/dependencies/"
-    "devDependencies), and package-lock.json naming a different version from the "
-    "range. The lockfile case is covered MECHANICALLY rather than here: `npm ci` "
-    "refuses a lockfile that disagrees with package.json, and both CI jobs run "
-    "`npm ci`. A local `npm install --force` is not covered by either.",
+    "test_types_node_major_matches_the_pin reads the declared range only. Two of "
+    "the three ways that could diverge turn out to be closed by the tooling, and "
+    "saying so is the point of this register — an overstated blind spot is as "
+    "much a bookkeeping error as a missing one. (a) An `overrides` block "
+    "redirecting the install: npm FORECLOSES it. Measured during #422 review — "
+    'adding `"overrides": {"@types/node": "20.19.43"}` beside the '
+    "`^26.5.1` devDependency fails the install outright with `npm error code "
+    "EOVERRIDE / Override for @types/node@^26.5.1 conflicts with direct "
+    "dependency`. npm accepts an override on a DIRECT dependency only when the "
+    "specs match exactly, i.e. only when it cannot redirect anything. "
+    "`resolutions` is a yarn key npm ignores entirely. (b) package-lock.json "
+    "naming a version outside the range: covered MECHANICALLY — `npm ci` refuses "
+    "such a lockfile (`npm error Invalid: lock file's @types/node@20.19.43 does "
+    "not satisfy @types/node@26.5.1`), and every job that installs runs `npm ci`: "
+    "frontend.yml:47, frontend.yml:101, frontend-live-e2e.yml:108, plus the "
+    "external quality-gate (enumerated, not counted). (c) THE REAL RESIDUE: a "
+    "local `npm install --force`, which overrides both refusals and is reachable "
+    "by no check in this repo.",
 )
 
 # Hand-counted off the tuple above. Truthiness alone is not a guard: measured,
@@ -157,7 +167,11 @@ _UNGUARDABLE: tuple[str, ...] = (
 # than leaving as a silent no-op: one entry CLOSED (@types/node is now enforced
 # by test_types_node_major_matches_the_pin and carried in the population of
 # test_every_node_version_in_the_repo_agrees) and one OPENED (that new guard
-# reads the declared range, not what npm resolves). Closing a blind spot with a
+# reads the declared range, not what npm resolves). The opened one is NARROWER
+# than it first read: #422 review measured that npm forecloses the `overrides`
+# route and `npm ci` forecloses the stale-lockfile route, leaving only a local
+# `npm install --force`. It is still a real hole, so the entry stays and the
+# number stays — but it is one hole, not three. Closing a blind spot with a
 # guard that has its own is the normal case, and the register is only honest if
 # the new one goes in the same edit.
 _UNGUARDABLE_COUNT = 5
@@ -422,12 +436,21 @@ def test_package_json_engine_floor_matches_the_pin() -> None:
 # ──────────────────────── the types that describe it ────────────────────────
 
 # Range forms that keep @types/node INSIDE one major: a caret, a tilde, or an
-# exact version. Deliberately NOT `>=<major>`, which is the correct shape for
-# `engines.node` (a floor: "this or newer runs it") and the wrong one here.
-# `>=26` reads as agreement with the pin while silently accepting 27 and 28 —
-# the same class of trap as `node-version` overriding `node-version-file`
+# exact version, at any precision — `^26`, `^26.5`, `^26.5.1`, `26.5.1`,
+# `~26.5.1`, `26.5.1-rc.1`. Deliberately NOT `>=<major>`, which is the correct
+# shape for `engines.node` (a floor: "this or newer runs it") and the wrong one
+# here. `>=26` reads as agreement with the pin while silently accepting 27 and
+# 28 — the same class of trap as `node-version` overriding `node-version-file`
 # above, where the authoritative-looking value is not the one that applies.
-_TYPES_NODE_RANGE = re.compile(r"[\^~]?\d+\.\d+\.\d+")
+#
+# The minor and patch components are OPTIONAL on purpose. An earlier version of
+# this pattern demanded all three, which rejected `^26` — the very bare-major
+# convention this file MANDATES for `.nvmrc` twenty lines up — and failed it
+# with a message asserting the range was not bounded to one major, when it was.
+# Measured during #422 review: `^26`, `26.x` and `^26.0.0-rc.1` each resolve
+# only inside major 26 and each turned the required `pytest + lint` check red.
+# A guard that reddens on a correct manifest is a guard someone deletes.
+_TYPES_NODE_RANGE = re.compile(r"[\^~]?\d+(?:\.(?:\d+|x)(?:\.(?:\d+|x)[\w.+-]*)?)?")
 
 # Both manifest sections npm reads for a direct dependency. BOTH, not just
 # `devDependencies`: adversarial review measured that a guard reading only
