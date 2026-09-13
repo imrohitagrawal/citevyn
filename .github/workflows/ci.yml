@@ -102,10 +102,21 @@ jobs:
         #
         # Note the number excludes `postgres`-marked tests, which run in their own
         # job without coverage — so it describes the hermetic suite, not the union.
-        run: >-
-          uv run pytest -m "not postgres" -v
-          --cov=app --cov-report=term-missing:skip-covered
-          --cov-report=xml:artifacts/coverage.xml
+        #
+        # The `rm -f` is load-bearing, not tidiness. pytest-cov writes NO file when
+        # coverage collects nothing, and does not fail — so any earlier report left
+        # in the directory would be read by the next step as if it were this run's,
+        # and the gate would pass having compared a measurement of a different tree.
+        # Deleting first means "no measurement" always reaches the gate as "no
+        # report". A hosted runner's workspace is fresh today, so this closes the
+        # hole before a cache or a self-hosted runner opens it; the gate's own
+        # freshness check on the report's `timestamp` is the partner that bites if
+        # this line is ever dropped.
+        run: |
+          rm -f artifacts/coverage.xml
+          uv run pytest -m "not postgres" -v \
+            --cov=app --cov-report=term-missing:skip-covered \
+            --cov-report=xml:artifacts/coverage.xml
       # THIS IS BLOCKING, from the commit that introduces it (#321), and it is the
       # promotion #308 promised rather than a new policy. #308 shipped coverage
       # advisory and named its own condition: "only once a baseline is recorded and

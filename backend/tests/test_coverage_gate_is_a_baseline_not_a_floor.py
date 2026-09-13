@@ -61,6 +61,7 @@ EFFECTIVE configuration, not one spelling of it.
 from __future__ import annotations
 
 import configparser
+import json
 import os
 import re
 import tempfile
@@ -76,6 +77,7 @@ _MAKEFILE = _REPO / "Makefile"
 _PYPROJECT = _REPO / "backend" / "pyproject.toml"
 _BACKEND = _REPO / "backend"
 _GATE_SCRIPT = "scripts/coverage_baseline.py"
+_BASELINE = _BACKEND / "coverage-baseline.json"
 
 
 # `--cov=app` as a whole token. Anchored on a word boundary so `--cov=app/api`
@@ -114,6 +116,30 @@ def _pytest_step() -> dict:
     matches = [s for s in steps if "uv run pytest" in str(s.get("run", ""))]
     assert len(matches) == 1, f"expected exactly one `uv run pytest` step, found {len(matches)}"
     return matches[0]
+
+
+def _cannot_fail_the_job(step: dict) -> str | None:
+    """Why ``step`` could not red its job, or ``None`` if it can.
+
+    A step that RUNS but cannot fail anything is the "blocking on day one" claim
+    made false while every wiring assertion agrees. `tests/test_gating_workflows.py`
+    already catches `continue-on-error` across the gating jobs; this adds the three
+    shapes specific to one step's own command, and keeps the reason local to the
+    test that depends on it.
+    """
+    if step.get("continue-on-error"):
+        return "the step sets `continue-on-error`, so its failure cannot red the job"
+    if "if" in step:
+        return f"the step is conditional (`if: {step['if']}`), so it may not run at all"
+    run = str(step.get("run", ""))
+    # `cmd || true`, `cmd ; true`, `set +e`, or the whole body commented out. The
+    # default shell is `bash -e`, so a trailing `|| true` is all it takes.
+    for needle in ("|| true", "||true", "; true", "set +e", "|| :"):
+        if needle in run:
+            return f"the command is neutered with {needle!r}, so a failure is swallowed"
+    if not [line for line in run.splitlines() if line.strip() and not line.strip().startswith("#")]:
+        return "the command body is empty or entirely commented out"
+    return None
 
 
 def _coverage_recipe() -> str:
@@ -176,6 +202,10 @@ def test_no_coverage_threshold_is_configured_anywhere() -> None:
             "report:omit": config.report_omit,
             "report:include": config.report_include,
         }
+        exclusions = {
+            "report:exclude_lines/exclude_also": list(config.exclude_list),
+            "report:partial_branches/partial_also": list(config.partial_list),
+        }
     finally:
         os.chdir(cwd)
     assert resolved == 0, (
@@ -193,6 +223,32 @@ def test_no_coverage_threshold_is_configured_anywhere() -> None:
         f"coverage.py resolves a narrowed measurement scope: "
         f"{ {k: v for k, v in narrowing.items() if v} }. That lowers the uncovered-line "
         "count the #321 baseline gate compares, without a single line being covered."
+    )
+    # ...and EXCLUSION is the second, sharper way to shrink it — sharper because it
+    # needs no path at all. An adversarial review landed three lines of
+    # `[tool.coverage.report] exclude_also = ["^def ", "^    def ", "^class "]` in
+    # `pyproject.toml` and watched `lines-valid` collapse 5,585 -> 2,222 while the
+    # gate printed "98.2% ... 39 missed against a baseline of 182" and exited 0,
+    # with every test in this file green. The five attributes above did not see it,
+    # and the comment that used to sit here claimed they closed "every config-file
+    # route at once" — which was FALSE, and is corrected rather than narrowed away.
+    #
+    # Asserted EQUAL to coverage.py's own defaults, not merely non-empty: the
+    # defaults already contain `pragma: no cover`, an `...` body and
+    # `if TYPE_CHECKING:`, so "is empty" would be wrong and "is truthy" would
+    # accept any addition. Equality accepts exactly what shipped with the library.
+    resolved_excludes = exclusions["report:exclude_lines/exclude_also"]
+    assert resolved_excludes == list(coverage.config.DEFAULT_EXCLUDE), (
+        "coverage.py resolves a NON-DEFAULT exclusion list: "
+        f"{exclusions['report:exclude_lines/exclude_also']}. Every line an exclusion "
+        "matches leaves `lines-valid` entirely, so it lowers the uncovered-line count "
+        "the #321 gate compares without one line being covered."
+    )
+    assert exclusions["report:partial_branches/partial_also"] == list(
+        coverage.config.DEFAULT_PARTIAL
+    ), (
+        "coverage.py resolves a NON-DEFAULT partial-branch list: "
+        f"{exclusions['report:partial_branches/partial_also']}."
     )
 
     # 2. pytest's own addopts, which coverage.py cannot see.
@@ -267,36 +323,168 @@ def test_the_threshold_check_would_actually_notice() -> None:
 
 
 def test_the_narrowing_check_would_actually_notice() -> None:
-    """Partner for the resolved omit/include/source assertion above.
+    """Partner for the resolved narrowing/exclusion assertions above.
 
-    That assertion reads five coverage.py attributes and requires every one to be
-    empty. If any of them were misnamed, the getattr would still return something
-    falsy — ``None`` — and the check would pass by looking at nothing. So resolve a
-    config that DOES narrow the scope and prove the same expression sees it.
+    Those assertions read seven coverage.py attributes. If any were misnamed, the
+    lookup would still return something falsy — ``None`` — and the check would pass
+    by looking at nothing. So resolve a config that DOES narrow or exclude and
+    prove the same expressions see it.
+
+    Discovered through a BARE ``Coverage()`` with the cwd set to a directory
+    holding a ``pyproject.toml``, not through ``config_file=``. That is the exact
+    path the real assertion uses, and ``pyproject.toml`` is the file this repo
+    actually has — an earlier version passed a ``.coveragerc`` explicitly, which
+    would have stayed green if coverage.py ever stopped reading pyproject by
+    default, leaving the real check blind.
     """
     import coverage
 
-    for setting, attribute in (
-        ("omit", "run_omit"),
-        ("include", "run_include"),
-        ("source", "source"),
-    ):
+    def _resolve(toml_body: str, attribute: str) -> object:
         with tempfile.TemporaryDirectory() as tmp:
-            rc = Path(tmp) / ".coveragerc"
-            rc.write_text(f"[run]\n{setting} = app/api/*\n", encoding="utf-8")
-            resolved = getattr(coverage.Coverage(config_file=str(rc)).config, attribute)
-            assert resolved, (
-                f"coverage.py's `{attribute}` did not pick up a [run] {setting} — the "
-                "narrowing check above is reading an attribute that never populates."
-            )
+            (Path(tmp) / "pyproject.toml").write_text(toml_body, encoding="utf-8")
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                return getattr(coverage.Coverage().config, attribute)
+            finally:
+                os.chdir(cwd)
 
-    # ...and the report-side spellings, which are separate attributes.
-    for setting, attribute in (("omit", "report_omit"), ("include", "report_include")):
-        with tempfile.TemporaryDirectory() as tmp:
-            rc = Path(tmp) / ".coveragerc"
-            rc.write_text(f"[report]\n{setting} = app/api/*\n", encoding="utf-8")
-            resolved = getattr(coverage.Coverage(config_file=str(rc)).config, attribute)
-            assert resolved, f"coverage.py's `{attribute}` did not pick up a [report] {setting}"
+    for section, setting, attribute in (
+        ("run", "omit", "run_omit"),
+        ("run", "include", "run_include"),
+        ("run", "source", "source"),
+        ("report", "omit", "report_omit"),
+        ("report", "include", "report_include"),
+    ):
+        body = f'[tool.coverage.{section}]\n{setting} = ["app/api/*"]\n'
+        assert _resolve(body, attribute), (
+            f"coverage.py's `{attribute}` did not pick up a [{section}] {setting} from "
+            "a pyproject.toml — the narrowing check above reads an attribute that "
+            "never populates, or pyproject discovery has stopped working."
+        )
+
+    # The exclusion pair, which is asserted EQUAL to the defaults rather than
+    # empty — so the partner has to show the resolved value actually CHANGES.
+    widened = _resolve('[tool.coverage.report]\nexclude_also = ["^def "]\n', "exclude_list")
+    assert widened != list(coverage.config.DEFAULT_EXCLUDE), (
+        "an `exclude_also` in pyproject.toml did not change the resolved exclude_list"
+    )
+    widened_partial = _resolve(
+        '[tool.coverage.report]\npartial_also = ["^while "]\n', "partial_list"
+    )
+    assert widened_partial != list(coverage.config.DEFAULT_PARTIAL), (
+        "a `partial_also` in pyproject.toml did not change the resolved partial_list"
+    )
+
+
+def _pragma_suppressions() -> list[str]:
+    """Every ``pragma: no cover`` / ``no branch`` line under ``app/``, as file:line.
+
+    Matched with coverage.py's OWN regexes, selected from the resolved exclusion
+    lists by naming "pragma" — so the scanner cannot drift from what coverage
+    actually honours, and a hand-written approximation of the pragma syntax cannot
+    quietly disagree with it. The structural exclusions in the same lists (an
+    ``...`` body, ``if TYPE_CHECKING:``) are deliberately NOT counted: they are
+    not deliberate suppressions, adding a Protocol method should not need a
+    baseline bump, and they are pinned by the equality assertion above anyway.
+    """
+    import coverage
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(_BACKEND)
+        config = coverage.Coverage().config
+        patterns = [
+            re.compile(p)
+            for p in list(config.exclude_list) + list(config.partial_list)
+            if "pragma" in p.lower()
+        ]
+    finally:
+        os.chdir(cwd)
+    assert patterns, "no pragma-shaped exclusion regex in coverage.py's resolved config"
+
+    hits: list[str] = []
+    for path in sorted((_BACKEND / "app").rglob("*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if any(pattern.search(line) for pattern in patterns):
+                hits.append(f"{path.relative_to(_BACKEND)}:{number}")
+    return hits
+
+
+def test_coverage_suppressions_do_not_grow_past_the_recorded_count() -> None:
+    """The cheapest walk under the #321 gate, and the one nothing else catches.
+
+    Proven end to end by an adversarial review on a real copy of this branch: add
+    a genuinely untested helper to `app/api/routes/health.py` and the count goes
+    182 -> 185 and the gate FAILS, as designed. Append ` # pragma: no cover` to its
+    `def` line and the very same helper measures 182 again — the lines leave
+    `lines-valid` entirely — and the gate prints "PASSED: no increase in uncovered
+    lines" and exits 0. Ruff, pyright and every other test stay green.
+
+    `pragma: no cover` is a DEFAULT coverage.py exclusion, so the equality
+    assertion in `test_no_coverage_threshold_is_configured_anywhere` cannot help:
+    nothing about the configuration changes. What changes is the source. So the
+    suppressions get the same treatment as the uncovered lines themselves — a
+    recorded count, in the same file, that must not INCREASE.
+
+    This is not a ban. Every one of the existing suppressions is a defensible
+    `except Exception:` on a shutdown path. It is a requirement that adding one be
+    DELIBERATE: bump `exclusion_pragmas` in `backend/coverage-baseline.json` in the
+    same commit and say which line and why, exactly as raising `missed` requires.
+    """
+    recorded = json.loads(_BASELINE.read_text(encoding="utf-8"))["exclusion_pragmas"]
+    found = _pragma_suppressions()
+    assert len(found) <= recorded, (
+        f"{len(found)} coverage suppressions under app/, against "
+        f"{recorded} recorded in {_BASELINE.name}. A `pragma: no cover` removes its "
+        "line from `lines-valid` entirely, so uncovered code added under one is "
+        "INVISIBLE to the #321 gate — the count stays put and the build goes green. "
+        "If the suppression is genuinely right, raise `exclusion_pragmas` in the same "
+        f"commit and say why.\nFound:\n  " + "\n  ".join(found)
+    )
+    # The other direction is a note, not a failure: removing one is an improvement,
+    # and the recorded number should follow it down.
+    if len(found) < recorded:
+        print(
+            f"NOTE: {len(found)} suppressions against {recorded} recorded — lower "
+            f"`exclusion_pragmas` in {_BASELINE.name} to lock the improvement in."
+        )
+
+
+def test_the_suppression_scanner_finds_the_suppressions_that_are_there() -> None:
+    """Partner: a scanner that matched nothing would satisfy `<= recorded` forever.
+
+    This repo HAS suppressions, all of them `except Exception:` on shutdown or
+    defensive paths, so the scanner must return a non-empty list of real file:line
+    references — and each one must actually contain the pragma when read back.
+    """
+    found = _pragma_suppressions()
+    assert found, (
+        "the suppression scanner found NOTHING. Either every `pragma: no cover` was "
+        "removed from app/ (in which case lower `exclusion_pragmas` to 0 and delete "
+        "this partner), or the scanner is broken and the guard above is vacuous."
+    )
+    for reference in found:
+        path, _, number = reference.rpartition(":")
+        line = (_BACKEND / path).read_text(encoding="utf-8").splitlines()[int(number) - 1]
+        assert "pragma" in line.lower(), f"{reference} does not hold a pragma: {line!r}"
+
+    # ...and it must NOT fire on ordinary code, or it would be a tripwire that
+    # forbids the word rather than the suppression.
+    import coverage
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(_BACKEND)
+        patterns = [
+            re.compile(p)
+            for p in list(coverage.Coverage().config.exclude_list)
+            if "pragma" in p.lower()
+        ]
+    finally:
+        os.chdir(cwd)
+    for benign in ("x = 1", "# a comment about pragmas", 'raise ValueError("no cover")'):
+        assert not any(p.search(benign) for p in patterns), benign
 
 
 def test_the_merge_gating_job_runs_the_baseline_comparison_after_measuring() -> None:
@@ -333,6 +521,26 @@ def test_the_merge_gating_job_runs_the_baseline_comparison_after_measuring() -> 
     # The script it names must exist, or the step fails for the wrong reason and
     # this test would still pass.
     assert (_BACKEND / _GATE_SCRIPT).is_file(), f"{_GATE_SCRIPT} does not exist"
+
+    # The step must also be ABLE to fail the job. Found by review: with only the
+    # assertions above, FIVE separate neuterings left the whole suite green —
+    # `continue-on-error: true`, `if: ${{ false }}`, appending `|| true`,
+    # commenting the body out, and the same `|| true` on the Makefile recipe. A
+    # gate that runs and cannot red anything is the "BLOCKING on day one" claim
+    # made false while every test agrees.
+    assert _cannot_fail_the_job(steps[gates[0]]) is None, _cannot_fail_the_job(steps[gates[0]])
+    # ...and the same for the step that MEASURES. Neutering pytest disables the
+    # gate just as completely, since a gate with no report to read is a gate that
+    # never disagrees with anything.
+    assert _cannot_fail_the_job(steps[measures[0]]) is None, _cannot_fail_the_job(
+        steps[measures[0]]
+    )
+
+    # `defaults.run.working-directory: backend` is what makes the step's relative
+    # paths resolve. Without it the script is not found and the failure is a
+    # confusing one, not the gate speaking.
+    workflow = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    assert workflow["jobs"]["test"]["defaults"]["run"]["working-directory"] == "backend"
 
 
 def test_ci_uploads_the_report_from_the_path_it_writes() -> None:
@@ -382,6 +590,35 @@ def test_a_local_target_runs_the_same_comparison_ci_runs() -> None:
     recipe = match.group(0)
     assert _GATE_SCRIPT in recipe, "`make coverage-gate` no longer runs the comparison script"
     assert not _mentions_threshold(recipe), "`make coverage-gate` grew a threshold"
+    # ...and it must still be able to FAIL. `cd backend && uv run ... || true` runs
+    # the gate, prints the verdict, and exits 0.
+    assert _cannot_fail_the_job({"run": recipe}) is None, _cannot_fail_the_job({"run": recipe})
+
+
+def test_the_defusal_detector_would_actually_notice() -> None:
+    """Partner for `_cannot_fail_the_job`: prove each shape it claims to catch is caught.
+
+    Without this it could be returning ``None`` for everything, and every assertion
+    that uses it would pass by agreeing with nothing. These are the five neuterings
+    an adversarial review landed on the real workflow while the whole suite stayed
+    green.
+    """
+    real = {"run": "uv run python scripts/coverage_baseline.py"}
+    assert _cannot_fail_the_job(real) is None, "the detector rejects the REAL step"
+
+    for neutered in (
+        {**real, "continue-on-error": True},
+        {**real, "if": "${{ false }}"},
+        {"run": "uv run python scripts/coverage_baseline.py || true"},
+        {"run": "uv run python scripts/coverage_baseline.py ; true"},
+        {"run": "set +e\nuv run python scripts/coverage_baseline.py"},
+        {"run": "# uv run python scripts/coverage_baseline.py"},
+        {"run": ""},
+    ):
+        assert _cannot_fail_the_job(neutered) is not None, neutered
+
+    # `continue-on-error: false` is the explicit, harmless spelling and must pass.
+    assert _cannot_fail_the_job({**real, "continue-on-error": False}) is None
 
 
 def test_pytest_cov_is_a_declared_dev_dependency() -> None:

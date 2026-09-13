@@ -72,6 +72,11 @@ coverage: ## Measure backend line coverage (report; `make coverage-gate` compare
 	@# Deliberately mirrors `make test` so the number describes the suite people
 	@# actually run: same marker exclusion, same env -u, same in-memory SQLite.
 	@# A different invocation would measure a different program.
+	@# The rm is load-bearing, not tidiness: pytest-cov writes NO file when coverage
+	@# collects nothing AND does not fail, so an earlier report left here would be
+	@# read by `make coverage-gate` as if it were this run's. Deleting first means
+	@# "no measurement" always surfaces as "no report".
+	rm -f backend/artifacts/coverage.xml
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q \
 		--cov=app --cov-report=term-missing:skip-covered --cov-report=xml:artifacts/coverage.xml

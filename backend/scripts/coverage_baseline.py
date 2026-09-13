@@ -30,12 +30,21 @@ WHAT THIS GATE CANNOT SEE, stated rather than implied:
   * Deleting uncovered code lowers ``missed`` just as adding a test does, so a
     change that deletes N uncovered lines and adds N new uncovered ones passes.
     That is inherent to a count and is accepted.
-  * Shrinking the measured program (``--cov=app/api``, a ``[tool.coverage.run]
-    omit``) lowers ``missed`` without covering anything. The zero-lines check
-    below only catches the total collapse. The partial case is closed in the
-    guard test instead, which pins the resolved ``omit``/``include``/``source``
-    config and the exact ``--cov=app`` token — not here, because this script sees
-    only the report, not the invocation that produced it.
+  * Shrinking the measured program lowers ``missed`` without covering anything,
+    and this script cannot see it: it reads the report, never the invocation or
+    the source that produced it. The zero-lines check below catches only a TOTAL
+    collapse. The partial cases live in
+    ``tests/test_coverage_gate_is_a_baseline_not_a_floor.py``, and an adversarial
+    review proved the first version of that list incomplete — three lines of
+    ``[tool.coverage.report] exclude_also`` collapsed ``lines-valid`` 5,585 ->
+    2,222 with every test green, and a ``# pragma: no cover`` hid a genuinely
+    untested helper outright. So the guard now pins FOUR things, not two: the
+    exact ``--cov=app`` token, the resolved ``omit``/``include``/``source``, the
+    resolved exclusion lists against coverage.py's own defaults, and a recorded
+    count of ``pragma: no cover`` lines under ``app/``. That list is what it
+    covers today — it is not a proof that no further route exists.
+  * Code outside ``app/`` is not measured at all, this script included. Logic
+    parked in ``backend/scripts/`` contributes nothing to the number it produces.
 
 NON-VACUITY. pytest exits 0 when coverage collects NOTHING: rename ``app``, or
 omit it, and you get a green job, a CoverageWarning nobody reads, and no XML at
@@ -48,12 +57,29 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPORT = Path("artifacts/coverage.xml")
 BASELINE = Path("coverage-baseline.json")
+
+# How far coverage.py's own `timestamp` may be from now before the report is
+# treated as LEFTOVER rather than fresh. See `_read_report`: pytest-cov does not
+# write the file at all when coverage collects nothing, and does not fail either,
+# so an older report sitting in the directory would be compared as if it were
+# this run's. Two hours is far beyond any real gap (CI writes it in the step
+# immediately before; `make coverage-gate` seconds before) and far under
+# "yesterday's run", which is the case worth catching.
+_MAX_REPORT_AGE_SECONDS = 2 * 60 * 60
+
+# A plain non-negative decimal integer, and nothing else. `int()` alone accepts
+# `1_585`, `+5585`, surrounding whitespace and non-ASCII digits, and truncates a
+# float — spellings coverage.py never emits, so accepting them only widens what a
+# hand-edited file can say.
+_PLAIN_INT_RE = re.compile(r"\A[0-9]+\Z")
 
 _WHERE = (
     "\n\n_Baseline lives in `backend/coverage-baseline.json`; the comparison is "
@@ -67,12 +93,20 @@ def _emit(markdown: str) -> None:
     Both, deliberately. The summary is where a human looks; the log is where a
     FAILING step is read. The previous shape redirected stdout into the summary
     file, which left the job log silent on exactly the runs that matter.
+
+    The summary write CANNOT change the verdict. Letting an OSError out of here
+    would turn a passing run red whenever `$GITHUB_STEP_SUMMARY` is unwritable —
+    a coverage gate that fails because a log file could not be appended to.
     """
-    print(markdown)
+    print(markdown, flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
+    if not summary:
+        return
+    try:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(markdown + "\n")
+    except OSError as exc:
+        print(f"(could not append to GITHUB_STEP_SUMMARY: {exc})", flush=True)
 
 
 def _fail(body: str) -> int:
@@ -91,17 +125,22 @@ def _read_baseline() -> tuple[int, str] | str:
         data = json.loads(BASELINE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         return f"**The baseline file is not valid JSON** (`{BASELINE}`): {exc}."
+    except OSError as exc:
+        return f"**The baseline file could not be read** (`{BASELINE}`): {exc}."
     if not isinstance(data, dict):
         return f"**The baseline file is not a JSON object** (`{BASELINE}`)."
-    try:
-        missed = int(data["missed"])
-        covered = int(data["covered"])
-        valid = int(data["valid"])
-    except (KeyError, TypeError, ValueError) as exc:
-        return (
-            f"**The baseline file is malformed** (`{BASELINE}`): it needs integer "
-            f"`missed`, `covered` and `valid` keys ({exc})."
-        )
+    values: list[int] = []
+    for key in ("missed", "covered", "valid"):
+        value = data.get(key)
+        # `isinstance(True, int)` is True, and `int("1_585")` is 1585 — so require
+        # a real JSON integer rather than anything int() would swallow.
+        if not isinstance(value, int) or isinstance(value, bool):
+            return (
+                f"**The baseline file is malformed** (`{BASELINE}`): `{key}` must be "
+                f"a JSON integer, got {value!r}."
+            )
+        values.append(value)
+    missed, covered, valid = values
     if missed < 0 or valid <= 0 or covered < 0 or covered > valid:
         return f"**The baseline file holds impossible numbers**: {covered=}, {valid=}, {missed=}."
     # Cross-check the recorded arithmetic. A hand-edited baseline that lowers
@@ -129,6 +168,31 @@ def _read_report() -> tuple[int, int] | str:
         root = ET.parse(REPORT).getroot()
     except ET.ParseError as exc:
         return f"**The coverage report is not parseable XML** (`{REPORT}`): {exc}."
+    except OSError as exc:
+        return f"**The coverage report could not be read** (`{REPORT}`): {exc}."
+
+    # FRESHNESS, before anything is compared. pytest-cov writes no file at all
+    # when coverage collects nothing, and does not fail — so an EARLIER report
+    # left in the directory would be read as this run's, and the gate would pass
+    # having compared a measurement of a different tree. Both writers now delete
+    # the file before measuring; this is the guard that bites if either ever
+    # stops, and it reads the artifact rather than trusting a command line.
+    raw_stamp = root.get("timestamp")
+    if raw_stamp is None or not _PLAIN_INT_RE.match(raw_stamp):
+        return (
+            f"**The coverage report has no usable `timestamp`** (`{REPORT}`): "
+            f"got {raw_stamp!r}. Without it a leftover report from an earlier run "
+            "cannot be told from this one's, so it is refused rather than trusted."
+        )
+    age = abs(time.time() - int(raw_stamp) / 1000)
+    if age > _MAX_REPORT_AGE_SECONDS:
+        return (
+            f"**The coverage report is stale** (`{REPORT}`, written "
+            f"{age / 3600:.1f} hours from now). Coverage measured nothing this run "
+            "and an older report was left behind, or the clock moved. Re-measure: "
+            "`make coverage-gate`."
+        )
+
     raw_covered = root.get("lines-covered")
     raw_valid = root.get("lines-valid")
     if raw_covered is None or raw_valid is None:
@@ -136,13 +200,12 @@ def _read_report() -> tuple[int, int] | str:
             f"**The coverage report has no line totals** (`{REPORT}`): expected "
             "`lines-covered` and `lines-valid` attributes on the root element."
         )
-    try:
-        covered, valid = int(raw_covered), int(raw_valid)
-    except ValueError:
+    if not _PLAIN_INT_RE.match(raw_covered) or not _PLAIN_INT_RE.match(raw_valid):
         return (
             f"**The coverage report's line totals are not integers** (`{REPORT}`): "
             f"lines-covered={raw_covered!r}, lines-valid={raw_valid!r}."
         )
+    covered, valid = int(raw_covered), int(raw_valid)
     if valid <= 0:
         return (
             "**0 lines measured.** Coverage collected no data, so there is nothing "
@@ -165,6 +228,18 @@ def main() -> int:
         return _fail(report)
     covered, valid = report
 
+    # A baseline claiming more uncovered lines than the program HAS is not a
+    # loose baseline, it is a disabled gate — and the arithmetic cross-check in
+    # `_read_baseline` does not catch it, because editing all three numbers
+    # consistently is no harder than editing one. Bound it against reality.
+    if baseline_missed > valid:
+        return _fail(
+            f"**The baseline is impossible against this run**: it records "
+            f"`missed={baseline_missed:,}`, but the whole measured program is only "
+            f"{valid:,} lines. A baseline above the line count can never be "
+            "exceeded, so the gate would be permanently green."
+        )
+
     missed = valid - covered
     headline = (
         f"**{covered / valid:.1%}** of {valid:,} lines covered — "
@@ -177,9 +252,13 @@ def main() -> int:
             headline + "\n\n**FAILED: uncovered lines went UP by "
             f"{missed - baseline_missed:,}.** Every line this change added is not "
             "executed by any test. Cover them, or — if the new code is genuinely "
-            "untestable here — raise `missed` in the baseline file in the same "
-            "commit and say why. This gate is a count of uncovered lines, never a "
-            "percentage floor (#308, #321)."
+            "untestable here — set `missed`, `covered` AND `valid` in "
+            "`backend/coverage-baseline.json` to this run's numbers "
+            f"(`missed: {missed}`, `covered: {covered}`, `valid: {valid}`) in the "
+            "same commit and say why. All three, together: editing `missed` alone "
+            "leaves the file internally inconsistent and fails the next run. This "
+            "gate is a count of uncovered lines, never a percentage floor "
+            "(#308, #321)."
         )
 
     if missed < baseline_missed:

@@ -2,6 +2,8 @@
   "missed": 182,
   "covered": 5403,
   "valid": 5585,
+  "exclusion_pragmas": 7,
+  "exclusion_pragmas_note": "How many `# pragma: no cover` / `no branch` lines exist under backend/app/. A pragma removes its line from `lines-valid` ENTIRELY, so uncovered code added under one is invisible to the `missed` count above -- proven: a genuinely untested helper moved missed 182 -> 185 and failed the gate, and the same helper with a pragma on its def line measured 182 again and PASSED. So suppressions get the same treatment as uncovered lines: a recorded count that must not increase. Not a ban -- all seven are defensible `except Exception:` on shutdown/defensive paths. Enforced by tests/test_coverage_gate_is_a_baseline_not_a_floor.py, not by the gate script, which sees only the report.",
   "measured_at_sha": "b5a3c1036c44e59575f956224af75aad36c8578f",
   "measured_on": "2026-09-13",
   "gate": "missed must not INCREASE. Not a percentage floor -- see #308 and #321.",
