@@ -264,7 +264,11 @@ demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 	@# out of .env and never exercises the bundle.
 	@#
 	@# Both #430 spellings are read out of infra/docker/.env, new one winning, so
-	@# this target works either side of the Fly secret rename. Read in a
+	@# this target works either side of the Fly secret rename. `:-` treats an empty
+	@# variable as absent here, a local-build convenience and NOT the rule Settings
+	@# applies (it treats empty as present and refuses to boot) — see
+	@# infra/docker/scripts/_env_guard.sh, the one gate that mirrors it exactly.
+	@# Read in a
 	@# subshell so the rest of the prod secret set is not exported into this make
 	@# process (same reasoning as _env_guard.sh and deploy_verify.sh's read_env).
 	@set -e; \

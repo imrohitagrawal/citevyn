@@ -74,7 +74,7 @@ export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\
  *     and `tests/shell/test_check_bundle_key.sh` are built on that exact shape,
  *     and quietly "fixing" it here would blind the checker that catches it.
  *
- * All seven combinations are pinned in `src/test/api.publicClientToken.test.ts`.
+ * Every combination is pinned in `src/test/publicClientToken.test.ts`.
  */
 const PUBLIC_CLIENT_TOKEN =
   import.meta.env.VITE_PUBLIC_CLIENT_TOKEN ||

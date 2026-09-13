@@ -189,8 +189,17 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # --verify-only usable against a locally-run api whose key lives elsewhere
 # (e.g. backend/.env) without editing the prod env file.
 # Both #430 spellings, new one winning, and the ENVIRONMENT beats the .env file
-# for each in turn -- the same precedence Settings applies. `:-` throughout, so an
-# empty variable falls through instead of pinning the whole chain to "".
+# for each in turn. The ORDER matches what Settings resolves -- pydantic exhausts
+# a source's aliases before moving to the next source, so env-new, env-old,
+# file-new, file-old.
+#
+# The EMPTINESS rule deliberately differs, and saying so is the point: `:-` here
+# treats an empty variable as absent and falls through. Settings does NOT -- an
+# empty variable is PRESENT, so AliasChoices selects it and min_length rejects it.
+# This script is not a boot gate; its job is to find a bearer to probe WITH, and
+# refusing to run because an unrelated variable was exported empty would help
+# nobody. The gate that must agree with Settings exactly is
+# infra/docker/scripts/_env_guard.sh, which uses `${VAR+set}` for that reason.
 DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
 if [[ -z "${DEMO_KEY}" ]]; then
     DEMO_KEY="$(read_env CITEVYN_PUBLIC_CLIENT_TOKEN)"
@@ -307,7 +316,7 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     esac
 
     # ── Frontend bundle vs the demo key ────────────────────────────────────
-    # Vite bakes VITE_API_DEMO_KEY into the bundle at BUILD time
+    # Vite bakes the client token into the bundle at BUILD time
     # (frontend/src/lib/api.ts), defaulting to "local-demo-key". Every probe in
     # this gate curls with the key from .env, so a bundle built against the
     # OLD default passes the whole gate while every real browser request 401s.
@@ -485,7 +494,7 @@ verify_suite() {
         record PASS "${phase}: POST /v1/sessions"
     elif [[ "${LAST_SESSION_RATE_LIMITED}" == "1" ]]; then
         # The gate rate-limited ITSELF. Every demo call in this script shares one
-        # bucket with every demo visitor, because require_demo_api_key returns a
+        # bucket with every demo visitor, because require_public_client_token returns a
         # CONSTANT user id (#203). One full run spends ~16 demo calls against a
         # 30/hour cap, so a second run inside the hour exhausts it and the
         # remaining probes fail for a reason that has nothing to do with the

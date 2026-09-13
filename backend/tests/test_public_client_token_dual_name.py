@@ -153,6 +153,54 @@ def test_an_empty_value_is_taken_literally_and_rejected_by_min_length() -> None:
         )
 
 
+def test_an_empty_ENVIRONMENT_variable_is_present_and_beats_a_strong_other_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The distinction every shell consumer had to be corrected for (#430 review).
+
+    ``AliasChoices`` selects the first alias PRESENT in the environment, and an
+    exported-but-empty variable IS present -- so an empty
+    ``CITEVYN_PUBLIC_CLIENT_TOKEN`` wins over a perfectly good
+    ``CITEVYN_DEMO_API_KEY`` and the app refuses to boot rather than falling
+    through. That is NOT the same rule as the shell's ``${VAR:-fallback}``, which
+    treats empty as absent.
+
+    Three reviewers independently found ``_env_guard.sh`` blessing exactly this
+    ``.env`` while the api died at boot on it. The guard now uses ``${VAR+set}``;
+    ``tests/shell/test_env_guard.sh`` case 11s is the other half of this pair, and
+    this is the half that pins the BEHAVIOUR the guard has to mirror.
+
+    The kwarg case above cannot stand in for this one: it proves pydantic rejects
+    an empty VALUE, not that an empty ENVIRONMENT VARIABLE counts as present. If
+    pydantic-settings ever started treating an empty env var as unset, that test
+    would stay green and this one would go red -- which is the whole point, because
+    the shell guard would then be wrong in the other direction.
+    """
+    monkeypatch.setenv(_NEW, "")
+    monkeypatch.setenv(_OLD, "a-strong-old-token-0123456789")
+    with pytest.raises(ValueError) as excinfo:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+    message = str(excinfo.value)
+    assert "at least 1 character" in message, message
+    assert _NEW in message, message
+
+
+def test_an_UNSET_new_name_does_fall_through_to_a_strong_old_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partner for the case above: UNSET and EMPTY must behave differently.
+
+    Without this, "empty new name is rejected" would be satisfied by a Settings
+    that ignored the new alias entirely, and the migration would not work at all.
+    """
+    monkeypatch.delenv(_NEW, raising=False)
+    monkeypatch.setenv(_OLD, "a-strong-old-token-0123456789")
+    assert (
+        Settings(_env_file=None).public_client_token  # type: ignore[call-arg]
+        == "a-strong-old-token-0123456789"
+    )
+
+
 def test_a_kwarg_by_field_name_is_not_silently_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     """``populate_by_name=True`` is required, and its absence is SILENT.
 
@@ -232,6 +280,17 @@ def test_the_production_error_names_the_variable_to_set(monkeypatch: pytest.Monk
         Settings(_env_file=None)  # type: ignore[call-arg]
     message = str(excinfo.value)
     assert _NEW in message, f"the error does not name {_NEW}:\n{message}"
+    # POSITION, not mere presence. Review defeated the presence-only version: the
+    # message mentions BOTH names (it has to -- it tells the operator the old one
+    # is still read), so a message rewritten to "CITEVYN_DEMO_API_KEY must be set
+    # ... (CITEVYN_PUBLIC_CLIENT_TOKEN is also read)" -- exactly the mutation this
+    # test's docstring claims to catch -- kept an `_NEW in message` assertion GREEN.
+    # The subject of the sentence is what an operator acts on, so that is what is
+    # pinned.
+    assert message.index(_NEW) < message.index(_OLD), (
+        "the deprecated name is named BEFORE the new one, so the sentence tells the "
+        f"operator to set the variable being retired:\n{message}"
+    )
     assert "the publicly-known default" in message, (
         "the error no longer distinguishes the default from a short value, which is "
         "the half that tells an operator whether they set nothing or set it badly"

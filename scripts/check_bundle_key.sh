@@ -51,11 +51,16 @@
 # ------------------------------
 # CITEVYN_PUBLIC_CLIENT_TOKEN first, then the deprecated CITEVYN_DEMO_API_KEY, so
 # the same script works before and after the Fly secret is renamed. New wins when
-# both are set — the same precedence Settings applies, deliberately, because a
-# checker that disagreed with the server about which value is live would report a
-# PASS on a bundle the server rejects. An EMPTY new variable falls through to the
-# old one rather than failing, matching the frontend's `||`; an empty value is
-# indistinguishable from an unset one to the operator who forgot to export it.
+# both are set — the same ORDER Settings applies, deliberately, because a checker
+# that disagreed with the server about which value is live would report a PASS on
+# a bundle the server rejects.
+#
+# The EMPTINESS rule differs from Settings on purpose. `:-` treats an empty
+# variable as absent and falls through to the old name; Settings treats it as
+# PRESENT and refuses to boot. This script is not a boot gate — it needs a needle
+# to search the bundle for, and it has its own hard failure below when no usable
+# value is found either way. The gate that must mirror Settings exactly is
+# infra/docker/scripts/_env_guard.sh, which uses `${VAR+set}`.
 #
 # USAGE
 #   CITEVYN_PUBLIC_CLIENT_TOKEN="$tok" ./scripts/check_bundle_key.sh < bundle.js

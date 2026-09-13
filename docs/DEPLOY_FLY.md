@@ -279,9 +279,25 @@ both names means no single step can produce that state.
 **The cutover, in order.** Each step is safe to stop after.
 
 ```bash
-fly secrets set CITEVYN_PUBLIC_CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')" --app citevyn
+# Wake the machine first. It scales to zero, and `fly ssh console` against a
+# sleeping machine returns EMPTY — the same trap §4.1 opens with.
+curl -sS -o /dev/null https://citevyn.stackclimb.com/health
+
+CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
+
+fly secrets set CITEVYN_PUBLIC_CLIENT_TOKEN="${CLIENT_TOKEN:?empty — the machine is asleep or the old secret is already gone; curl /health above, then retry}" --app citevyn
 fly secrets list --app citevyn
 ```
+
+> **The `:?` here matters more than anywhere else in this runbook**, because this
+> is the one command that WRITES production configuration. An empty capture would
+> set the new secret to `""` — and an empty variable is *present*, so
+> `AliasChoices` selects it, `min_length=1` rejects it, and the app refuses to
+> boot while the strong old secret sits there unread. `fly secrets set` restarts
+> the machine, so that is a crash-loop, not a 401. Assigning to a variable first
+> and guarding with `:?` aborts the shell before `fly secrets set` runs. Do not
+> collapse it back to an inline `$(…)`: a command substitution has no way to fail
+> on empty, which is the same rule §4.1 states at length.
 
 1. **Set the new secret to the SAME value the old one holds** (the command
    above). Copying rather than rotating is deliberate: the browser bundles
@@ -292,19 +308,32 @@ fly secrets list --app citevyn
    ignores the old one.
 2. **Deploy** (§4.1). The command there already passes the value under **both**
    build-argument names, so the bundle is correct either way.
-3. **Verify** with the bundle check in §4.1 and the smoke test in §7.
-4. **Only then** unset the old secret and merge the follow-up PR that deletes the
-   old name from the code:
+3. **Verify** with the bundle check in §4.1 and the smoke test in §4.4.
+4. **Only then** unset the old secret:
 
    ```bash
    fly secrets unset CITEVYN_DEMO_API_KEY --app citevyn
    ```
 
-> **Do not run step 4 before the follow-up PR is merged and deployed, or step 1
-> before reading this paragraph.** Between them the app is correct under either
-> name, which is the entire point; outside that window it is not. `fly secrets
-> list` prints names and digests, never values — the digests are how you confirm
-> step 1 copied rather than rotated.
+   The follow-up PR that deletes the old name from the code can merge before or
+   after this — while both names are read, either order is safe. What is **not**
+   safe is unsetting the old secret before step 1 has actually copied the value.
+
+> **`fly secrets list` prints names and digests, never values** — the digests are
+> how you confirm step 1 copied rather than rotated. If the two digests differ,
+> you rotated: go back and set the new secret to the old secret's value, or
+> redeploy immediately, because every already-served bundle carries the old one.
+>
+> **The removal PR must also delete the deprecated name from**, at minimum:
+> `backend/app/core/config.py` (the `AliasChoices` entry), `frontend/src/lib/api.ts`,
+> `infra/docker/Dockerfile.api` (the second `ARG` **and** the second `--build-arg`
+> in §4.1 above), `scripts/check_bundle_key.sh`, `infra/docker/scripts/_env_guard.sh`,
+> `infra/docker/scripts/deploy_verify.sh`, `Makefile`, and the fixtures in
+> `tests/shell/test_deploy_verify_skip_state.sh` and
+> `tests/shell/test_rollback_drill_plan.sh`, which still pin the old spelling.
+> `backend/tests/test_public_client_token_dual_name.py` and
+> `backend/tests/test_settings_env_vars_are_documented.py` both go RED the moment
+> the alias is gone, and their failure messages name what to clean up.
 
 ---
 
