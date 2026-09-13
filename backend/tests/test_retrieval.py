@@ -8,11 +8,14 @@ fuses the scores and short-circuits the exact-lookup intent.
 from __future__ import annotations
 
 import contextlib
+import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from app.embeddings import EmbedderIdentity, IndexStampStatus
 from app.guardrails.domain import Domain
+from app.models import Chunk, Document, DocumentStatus, IndexStatus, IndexVersion
 from app.retrieval.exact import ExactRetriever
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.keyword import KeywordRetriever
@@ -151,6 +154,216 @@ async def test_keyword_retriever_requires_two_token_matches(session) -> None:
     # 2-token floor should reject the hit.
     hits = await r.retrieve("Obtain Gemini credentials", product_area="gemini_api")
     assert hits == []
+
+
+# --------------------------------------------------------------------------
+# #370: the distinct-token relevance floor must be measured over EVERY chunk
+# that matched the query, not over the window that survived the SQL row cap.
+# --------------------------------------------------------------------------
+
+
+async def _seed_capped_area(
+    session,
+    *,
+    chunks: int,
+    index_version: str = "v-370",
+    index_status: IndexStatus = IndexStatus.active,
+    doc_status: DocumentStatus = DocumentStatus.active,
+    product_area: str = "claude_code",
+    rare_token_area: str | None = None,
+    rare_token_index_version: str | None = None,
+    rare_token_doc_status: DocumentStatus | None = None,
+    document_id: uuid.UUID | None = None,
+    first_chunk_order: int = 0,
+) -> uuid.UUID:
+    """Seed one product area in which the COMMON query token is everywhere and
+    the DISCRIMINATING token lives only in the LAST chunk by ``chunk_order``.
+
+    The rare-token chunk can be diverted into another product area / index
+    version / document status so a test can prove the uncapped floor check keeps
+    every scope filter the capped query has.
+    """
+    now = datetime.now(UTC)
+    existing = await session.get(IndexVersion, index_version)
+    if existing is None:
+        session.add(
+            IndexVersion(
+                index_version=index_version,
+                status=index_status,
+                source_version_hash=f"sha256:{index_version}",
+                created_at=now,
+                promoted_at=now if index_status is IndexStatus.active else None,
+            )
+        )
+    doc_id = document_id or uuid.uuid4()
+    session.add(
+        Document(
+            document_id=doc_id,
+            index_version=index_version,
+            source_name="docs.claude.com",
+            product_area=product_area,
+            source_url=f"https://docs.claude.com/{doc_id}",
+            title="Claude Code",
+            identity_checksum=f"sha256:doc-{doc_id}",
+            status=doc_status,
+            last_fetched_at=now,
+            last_indexed_at=now,
+        )
+    )
+
+    rare_area = rare_token_area or product_area
+    rare_index = rare_token_index_version or index_version
+    rare_doc_status = rare_token_doc_status or doc_status
+    rare_doc_id = doc_id
+    if (rare_area, rare_index, rare_doc_status) != (product_area, index_version, doc_status):
+        if rare_index != index_version and await session.get(IndexVersion, rare_index) is None:
+            session.add(
+                IndexVersion(
+                    index_version=rare_index,
+                    status=IndexStatus.candidate,
+                    source_version_hash=f"sha256:{rare_index}",
+                    created_at=now,
+                    promoted_at=None,
+                )
+            )
+        rare_doc_id = uuid.uuid4()
+        session.add(
+            Document(
+                document_id=rare_doc_id,
+                index_version=rare_index,
+                source_name="docs.claude.com",
+                product_area=rare_area,
+                source_url=f"https://docs.claude.com/{rare_doc_id}",
+                title="Claude Code (other scope)",
+                identity_checksum=f"sha256:doc-{rare_doc_id}",
+                status=rare_doc_status,
+                last_fetched_at=now,
+                last_indexed_at=now,
+            )
+        )
+
+    for i in range(chunks):
+        last = i == chunks - 1
+        session.add(
+            Chunk(
+                chunk_id=uuid.uuid4(),
+                document_id=rare_doc_id if last else doc_id,
+                product_area=rare_area if last else product_area,
+                section_path=f"/s{i}",
+                heading=f"H{i}",
+                parent_heading=None,
+                chunk_text=(
+                    f"Section {i}: the sandbox restricts which model may run."
+                    if last
+                    else f"Section {i}: choosing a model for your run."
+                ),
+                context_summary=f"summary {i}",
+                chunk_order=first_chunk_order + i,
+                content_checksum=f"sha256:chunk-{doc_id}-{i}",
+            )
+        )
+    await session.flush()
+    return doc_id
+
+
+async def test_the_keyword_floor_is_measured_over_every_match_not_the_capped_window(
+    session,
+) -> None:
+    """#370: 21 chunks all carry ``model``; only the 21st carries ``sandbox``.
+
+    At the production cap (``retrieval_max_candidates=20``) the SQL window holds
+    20 rows, all of them ``model``-only, so the two-distinct-token floor saw ONE
+    token, demanded two, and threw away 20 rows the query had matched — the
+    keyword arm returned nothing, and so did the hybrid layer that depends on it
+    as the fallback when the vector arm degrades (``test_hybrid_retrieve_answers
+    _from_keyword_on_mismatch``).
+
+    RED if ``KeywordRetriever`` measures the floor over the capped rows again.
+    """
+    await _seed_capped_area(session, chunks=21)
+
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    hits = await arm.retrieve("sandbox model", product_area="claude_code", limit=20)
+    assert len(hits) == 20, "the arm must keep the rows the query matched"
+
+    # The consumer, at the production limits (config.py retrieval_top_k=6 /
+    # retrieval_max_candidates=20) — the arm zeroing propagated all the way out.
+    hybrid = HybridRetriever(session, active_index_version="v-370")
+    result = await hybrid.retrieve(
+        "sandbox model",
+        product_area="claude_code",
+        intent=Intent.faq,
+        limit=20,
+        top_k=6,
+    )
+    assert len(result.hits) == 6
+    assert all(h.retrieval_type.value == "keyword" for h in result.hits)
+
+
+async def test_the_keyword_floor_stops_stepping_at_the_row_cap(session) -> None:
+    """The pre-fix behaviour was a STEP at ``limit``, not a ramp: every cap below
+    the corpus size returned 0 and the first cap at/above it returned everything.
+
+    RED if the floor is measured over the capped window again — the sweep goes
+    back to ``[0, 0, 0, 0, 26, 26]``.
+    """
+    await _seed_capped_area(session, chunks=26)
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    sweep = [
+        len(await arm.retrieve("sandbox model", product_area="claude_code", limit=limit))
+        for limit in (22, 23, 24, 25, 26, 27)
+    ]
+    assert sweep == [22, 23, 24, 25, 26, 26], sweep
+
+
+async def test_the_uncapped_floor_check_stays_inside_the_product_area(session) -> None:
+    """The rescue query must carry the SAME scope filters as the capped query.
+
+    ``sandbox`` here lives in ``gemini_api``; a ``claude_code`` search must not be
+    rescued by it. RED if the uncapped check drops the ``product_area`` predicate.
+    """
+    await _seed_capped_area(session, chunks=21, rare_token_area="gemini_api")
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+
+
+async def test_the_uncapped_floor_check_stays_inside_the_active_index(session) -> None:
+    """``sandbox`` lives in a NON-active index version. RED if the uncapped check
+    drops the ``Document.index_version`` predicate."""
+    await _seed_capped_area(session, chunks=21, rare_token_index_version="v-370-building")
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+
+
+async def test_the_uncapped_floor_check_ignores_deprecated_documents(session) -> None:
+    """``sandbox`` lives in a deprecated document. RED if the uncapped check drops
+    the ``Document.status == active`` predicate."""
+    await _seed_capped_area(session, chunks=21, rare_token_doc_status=DocumentStatus.deprecated)
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+
+
+async def test_the_keyword_arm_orders_by_a_total_key_across_documents(session) -> None:
+    """``chunk_order`` restarts at 0 per document, so a product area spanning two
+    documents has TIES at every rank and the cap's cut point was left to the
+    planner — the same query against the same corpus could return different rows
+    run to run, making the #370 zeroing intermittent.
+
+    Both documents below carry identical ``chunk_order`` values and the
+    HIGH-uuid document is inserted FIRST, so an ``ORDER BY chunk_order`` with no
+    tiebreaker returns it first. RED if the ``document_id``/``chunk_id``
+    tiebreaker is removed from the ORDER BY.
+    """
+    low = uuid.UUID("00000000-0000-4000-8000-000000000001")
+    high = uuid.UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
+    # Insert the HIGH id first: without the tiebreaker its rows sort first.
+    await _seed_capped_area(session, chunks=3, document_id=high)
+    await _seed_capped_area(session, chunks=3, document_id=low)
+
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    hits = await arm.retrieve("model", product_area="claude_code", limit=6)
+    assert len(hits) == 6
+    assert [h.document_id for h in hits] == [low, high, low, high, low, high]
 
 
 async def test_stub_embedder_deterministic() -> None:
