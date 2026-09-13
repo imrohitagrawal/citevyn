@@ -269,6 +269,30 @@ if ! (
     # (``dev-only-change-me``): empty, absent, and the PUBLISHED code default
     # ``local-admin-key`` (config.py:71) all passed the guard, and the admin key
     # is the one that can promote an index and read the budget.
+    # Does the .env FILE declare this variable? (Not: is it set in this shell.)
+    #
+    # The container is fed by `env_file`, so a declaration in the FILE is the
+    # only thing that reaches the app -- see the long note below. Matching
+    # compose's own declaration shape:
+    #
+    #   * anchored at column 0 modulo leading whitespace, so a mention inside a
+    #     comment or a value does not count;
+    #   * `#` anywhere before the name disqualifies the line -- a commented-out
+    #     `# CITEVYN_PUBLIC_CLIENT_TOKEN=` is documentation, not a declaration,
+    #     and `infra/docker/prod.env.example` uses that form deliberately;
+    #   * `export ` accepted, because a .env written for `source` still parses;
+    #   * the trailing `=` is what makes the match exact, so
+    #     `CITEVYN_PUBLIC_CLIENT_TOKEN_EXTRA=` can never satisfy a query for
+    #     `CITEVYN_PUBLIC_CLIENT_TOKEN`. A CRLF file is handled because `=`
+    #     precedes the `\r`.
+    #
+    # `grep -E` with the name interpolated is safe here: every caller passes a
+    # literal CITEVYN_* identifier, and `[A-Za-z0-9_]` carries no regex meaning.
+    _declared_in_env_file() {  # $1 = variable name -> 0 if the .env declares it
+        grep -qE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" \
+            "${_GUARD_COMPOSE_DIR}/.env" 2>/dev/null
+    }
+
     _assert_strong_key() {  # $1 = var name, $2 = published default, $3 = raw value
         local _name="$1" _default="$2" _val _lc
         _val="$(_strip "${3:-}")"
@@ -302,7 +326,36 @@ if ! (
     # would test a value the app is not going to use, and pass a deploy that then
     # crash-loops -- which is the exact failure this whole block exists to prevent.
     #
-    # PRESENCE, not non-emptiness -- `${VAR+set}` and NOT `-n "${VAR:-}"`.
+    # WHICH NAME SUPPLIES THE VALUE IS DECIDED FROM THE .env FILE ALONE.
+    #
+    # The root cause of two defects, one in each direction, found by reviewing
+    # the first version of this block. This function SOURCES the .env into a
+    # subshell that INHERITS the caller's environment, so `${VAR+set}` and
+    # `${VAR:-}` both see a MERGE of (the file, the operator's shell). The api
+    # container sees neither merge: `infra/docker/docker-compose.yml` passes this
+    # value through `env_file` and mentions the variable nowhere else, so the ONLY
+    # thing that reaches the app is what the FILE declares. Resolving against the
+    # merge is wrong in both directions, and both were reproduced:
+    #
+    #   * FALSE REJECT -- .env holds a strong CITEVYN_DEMO_API_KEY, and the
+    #     operator happens to have `CITEVYN_PUBLIC_CLIENT_TOKEN=` exported in
+    #     their shell. The deploy is fine (the container gets the old name from
+    #     the file) and the guard blocked it.
+    #   * FALSE PASS -- .env declares NO token, but a strong one is exported in
+    #     the shell. The guard passed; the container got nothing, fell back to
+    #     the published `local-demo-key`, and production refuses to boot on it.
+    #
+    # `_declared_in_env_file` asks the file, which is the same source the
+    # container reads, so the guard's verdict is about the deployment rather than
+    # about the terminal it was typed in.
+    #
+    # SCOPE, STATED: only the client token is resolved this way. POSTGRES_PASSWORD
+    # and CITEVYN_ADMIN_API_KEY above still read the merged view and so still
+    # carry the FALSE PASS half of this bug. That is pre-existing, unchanged here,
+    # and deliberately out of scope for a rename -- widening it touches every
+    # prod-deploy path at once. Tracked in docs/BACKLOG.md under #430.
+    #
+    # PRESENCE, not non-emptiness, once the file is the subject.
     #
     # This is the whole finding of the #430 review round, reproduced by three
     # independent reviewers and then by hand. pydantic's ``AliasChoices`` selects
@@ -320,43 +373,38 @@ if ! (
     # declares the new name EMPTY, so an operator who copies the template and
     # pastes back only their old line lands exactly here.
     #
-    # `${VAR+set}` is true for a variable that is set to anything INCLUDING the
-    # empty string, and is bash 3.2 clean (macOS). With it the guard agrees with
-    # ``Settings`` on all nine combinations of {unset, empty, value}^2 -- MEASURED
-    # side by side against a real Settings(), and pinned by cases 11o-11u in
-    # tests/shell/test_env_guard.sh.
+    # A DECLARED-BUT-EMPTY line is PRESENT, exactly as pydantic sees it:
+    # ``AliasChoices`` selects the first alias present in the environment, and
+    # ``CITEVYN_PUBLIC_CLIENT_TOKEN=`` reaches the container as an empty string,
+    # which ``min_length=1`` rejects. So a declared-empty new name must NOT fall
+    # through to the old one -- measured on the first draft, which did fall
+    # through, reported PASS, and left the api crash-looping on
+    # ``string_too_short`` after the 60s health poll had burned.
     #
-    # RECORDED SO IT IS NOT READ AS A COVERAGE HOLE: `+set` on the SECOND branch
-    # (the deprecated name) is a STATEMENT OF INTENT, not a behavioural
-    # difference, and a mutant reverting it to `:-` SURVIVES BY DESIGN. The old
-    # name is the LAST candidate, so when it is empty the `elif` and the `else`
-    # produce the same `_token_value=""` and the same rejection. Measured across
-    # old = {unset, empty, whitespace, default, short, strong} with the new name
-    # unset: byte-identical output and exit code under both spellings. It is
-    # written `+set` for symmetry with the branch above, where the difference IS
-    # behavioural and IS killed by case 11s.
+    # The VALUE still comes from the SOURCED variable rather than from the raw
+    # line, so quote peeling and CRLF trimming (``_strip`` below) keep working;
+    # sourcing overwrites any inherited value for a name the file declares, so
+    # for a declared name the two agree by construction.
     #
-    # The NAME reported on failure is whichever one supplied the value, so the
-    # remediation points at the line the operator has to edit rather than at the
-    # variable this script would prefer they used.
-    if [[ -n "${CITEVYN_PUBLIC_CLIENT_TOKEN+set}" ]]; then
+    # The NAME reported on failure is whichever line supplied the value, so the
+    # remediation points at the line the operator has to edit -- except when the
+    # effective value is EMPTY, where there is no line worth pointing at and they
+    # need to be told which variable to SET. That is never the one being retired.
+    # The emptiness test uses the STRIPPED value, so a whitespace-only
+    # ``CITEVYN_DEMO_API_KEY="   "`` is reported as the new name too rather than
+    # as "CITEVYN_DEMO_API_KEY is not set", which was both wrong words and the
+    # wrong variable.
+    if _declared_in_env_file CITEVYN_PUBLIC_CLIENT_TOKEN; then
         _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
-        _token_value="${CITEVYN_PUBLIC_CLIENT_TOKEN}"
-    elif [[ -n "${CITEVYN_DEMO_API_KEY+set}" ]]; then
+        _token_value="${CITEVYN_PUBLIC_CLIENT_TOKEN:-}"
+    elif _declared_in_env_file CITEVYN_DEMO_API_KEY; then
         _token_name=CITEVYN_DEMO_API_KEY
-        _token_value="${CITEVYN_DEMO_API_KEY}"
+        _token_value="${CITEVYN_DEMO_API_KEY:-}"
     else
         _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
         _token_value=""
     fi
-    # The VALUE is chosen by presence above, and that selection is load-bearing --
-    # it is what makes the guard agree with Settings. The NAME is only what the
-    # error message says, and for an EMPTY value the supplier is the wrong thing
-    # to name: there is no value to correct, so the operator needs to be told
-    # which variable to SET, and that is never the one being retired. A non-empty
-    # but weak value still reports its supplier, because there the message is
-    # pointing at a line that exists and has to be edited.
-    if [[ -z "${_token_value}" ]]; then
+    if [[ -z "$(_strip "${_token_value}")" ]]; then
         _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
     fi
     _assert_strong_key "${_token_name}" local-demo-key "${_token_value}"

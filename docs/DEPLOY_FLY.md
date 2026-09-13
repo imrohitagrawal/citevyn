@@ -295,7 +295,11 @@ fly secrets list --app citevyn
 > `AliasChoices` selects it, `min_length=1` rejects it, and the app refuses to
 > boot while the strong old secret sits there unread. `fly secrets set` restarts
 > the machine, so that is a crash-loop, not a 401. Assigning to a variable first
-> and guarding with `:?` aborts the shell before `fly secrets set` runs. Do not
+> and guarding with `:?` stops `fly secrets set` from running at all. (In a
+> *non-interactive* shell it also exits the shell; an interactive one survives
+> and carries on to the next line, so do not rely on the abort to stop a whole
+> block — the guarded command itself is what does not run. Traced in bash and
+> zsh, interactive and not.) Do not
 > collapse it back to an inline `$(…)`: a command substitution has no way to fail
 > on empty, which is the same rule §4.1 states at length.
 

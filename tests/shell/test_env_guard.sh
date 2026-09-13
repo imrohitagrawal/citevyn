@@ -74,6 +74,41 @@ FAILURES=()
 # Writes the env-content into a fresh temp .env, then sources the guard
 # against a temp compose dir (containing only the .env) and checks the
 # outer-shell exit code and stderr.
+# Sibling of assert_guard that DELIBERATELY does not scrub CITEVYN_*, because its
+# whole subject is what the guard does when a variable is exported in the
+# OPERATOR'S SHELL but not declared in the .env FILE (#430 review).
+#
+# assert_guard unsets the namespace in the child -- correct for every other case,
+# and precisely why no existing case could see this class of bug. The container is
+# fed by `env_file` (infra/docker/docker-compose.yml names this variable nowhere
+# else), so the file is the only thing that reaches the app and the guard's
+# verdict must not depend on the terminal it was typed in.
+#
+#   $1 desc  $2 want_rc  $3 want_msg  $4 .env content  $5.. env assignments
+assert_guard_with_ambient_env() {
+    local desc="$1" want_rc="$2" want_msg="$3" content="$4"; shift 4
+    local tmpdir got_rc=0 got_err="" ok=1
+    tmpdir="$(mktemp -d)"
+    printf '%s' "$content" > "${tmpdir}/.env"
+    got_err="$(env -u CITEVYN_PUBLIC_CLIENT_TOKEN -u CITEVYN_DEMO_API_KEY "$@" \
+        bash -c 'source "$1" "$2"' _ "${GUARD}" "${tmpdir}" 2>&1)" || got_rc=$?
+    if [[ "${got_rc}" != "${want_rc}" ]]; then
+        ok=0
+        FAILURES+=("  [${desc}] expected rc=${want_rc}, got rc=${got_rc}")
+    fi
+    if [[ "${ok}" -eq 1 && -n "${want_msg}" ]] && ! grep -qF -- "${want_msg}" <<<"${got_err}"; then
+        ok=0
+        FAILURES+=("  [${desc}] expected stderr to contain '${want_msg}'")
+        FAILURES+=("    actual stderr: ${got_err}")
+    fi
+    rm -rf "${tmpdir}"
+    if [[ "${ok}" -eq 1 ]]; then
+        PASS=$((PASS + 1)); echo "  ok  ${desc}"
+    else
+        FAIL=$((FAIL + 1)); echo "  FAIL ${desc}"
+    fi
+}
+
 assert_guard() {
     local desc="$1" want_rc="$2" want_msg="$3" content="$4"
     local tmpdir
@@ -459,12 +494,95 @@ assert_guard "a declared AND filled-in new name is accepted alongside a strong o
     "" \
     "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'"CITEVYN_DEMO_API_KEY=a-different-strong-old-value-here"$'\n'
 
-# 11u. UNSET new + EMPTY old. Settings sees the old name present-and-empty and
-#      raises; the guard must reject too rather than fall through to the default.
-assert_guard "empty OLD name with no new name is rejected" \
+# (The "unset new + empty old" case is already case 11b-ii above, which asserts
+#  the stronger message. A second copy was written here and removed: review
+#  showed it byte-identical to 11b-ii's fixture with a weaker assertion, and no
+#  mutant killed it alone, so it was coverage theatre rather than coverage.)
+
+# 11v. A WEAK BUT NON-EMPTY value reports ITS OWN line, not the variable the
+#      script would prefer. Without this, making the name override unconditional
+#      passes every other case -- measured -- and an operator whose .env line
+#      reads `CITEVYN_DEMO_API_KEY=local-demo-key` is told to go fix
+#      CITEVYN_PUBLIC_CLIENT_TOKEN, a line that does not exist in their file.
+assert_guard "a weak OLD value names the OLD variable (the line to edit)" \
     1 \
-    "is not set" \
-    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY="$'\n'
+    "error: CITEVYN_DEMO_API_KEY is still the publicly-known default" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=local-demo-key"$'\n'
+
+# 11w. ...and its mirror: an EMPTY effective value names the variable to SET.
+#      `_strip` runs first, so whitespace-only counts as empty here. The earlier
+#      draft tested the RAW value and emitted
+#      "CITEVYN_DEMO_API_KEY is not set" for `CITEVYN_DEMO_API_KEY="   "` --
+#      wrong words (it IS set) and the wrong variable (the retired one).
+assert_guard "a whitespace-only value names the variable to SET" \
+    1 \
+    "error: CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=\"   \""$'\n'
+
+# ── 11x-11z: the .env FILE is the subject, never the operator's shell ────────
+#
+# The api container is fed by `env_file`, and infra/docker/docker-compose.yml
+# names this variable nowhere else -- so what the FILE declares is the only thing
+# that reaches the app. Resolving against the shell instead is wrong in BOTH
+# directions, and both were reproduced against the real guard before this block
+# existed. assert_guard cannot express these: it scrubs CITEVYN_* in the child,
+# which is exactly why the class was invisible.
+
+# 11x. FALSE REJECT. The .env is fine; the operator merely happens to have the
+#      new name exported EMPTY (deploy_verify.sh documents exporting these names
+#      as a supported workflow). The container gets the strong old value from the
+#      file either way, so blocking this deploy is a red gate on a correct
+#      deployment. RED if the resolution goes back to reading the environment.
+assert_guard_with_ambient_env "an exported EMPTY new name does not block a good .env" \
+    0 "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n' \
+    CITEVYN_PUBLIC_CLIENT_TOKEN=
+
+# 11y. FALSE PASS, the dangerous direction. Nothing in the .env, a strong value
+#      only in the shell: the container receives NO token, falls back to the
+#      published local-demo-key, and production refuses to boot. The guard must
+#      reject. RED if the resolution reads the environment.
+assert_guard_with_ambient_env "a token exported ONLY in the shell does not satisfy the guard" \
+    1 "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
+    "${BASE_OK}${REST_NO_DEMO}" \
+    CITEVYN_PUBLIC_CLIENT_TOKEN=a-strong-token-only-in-the-shell
+
+# 11y-ii. The SAME false pass through the DEPRECATED name, which 11y alone does
+#      not cover -- found by mutation: reverting only the `elif` branch to
+#      `${CITEVYN_DEMO_API_KEY+set}` survived every other case. It is not an
+#      equivalent mutant, it is an uncovered hole: a strong OLD token exported in
+#      the shell, with nothing in the .env, would pass the guard while the
+#      container received no token at all.
+assert_guard_with_ambient_env "a DEPRECATED token exported only in the shell does not satisfy the guard" \
+    1 "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
+    "${BASE_OK}${REST_NO_DEMO}" \
+    CITEVYN_DEMO_API_KEY=a-strong-old-token-only-in-the-shell
+
+# 11z. The partner that stops 11x/11y being satisfied by "always read the file
+#      and always reject": the same ambient export alongside a .env that DOES
+#      declare the new name must pass, and on the FILE's value.
+assert_guard_with_ambient_env "a declared new name wins over anything in the shell" \
+    0 "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n' \
+    CITEVYN_PUBLIC_CLIENT_TOKEN=local-demo-key
+
+# 11aa. A COMMENTED-OUT declaration is documentation, not a declaration.
+#       prod.env.example uses that form deliberately, so a guard that counted it
+#       would reject every operator who copied the template and filled in the old
+#       name. RED if `_declared_in_env_file` drops its `#` exclusion.
+assert_guard "a commented-out new name does not count as declared" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""# CITEVYN_PUBLIC_CLIENT_TOKEN="$'\n'"CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n'
+
+# 11ab. ...and an exact-match partner: a LONGER name must not satisfy a query for
+#       the shorter one. Without the trailing `=` in the pattern,
+#       CITEVYN_PUBLIC_CLIENT_TOKEN_EXTRA= would be read as declaring the token,
+#       and the guard would then assert on an empty value and reject a good .env.
+assert_guard "a longer variable name does not count as the token declaration" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN_EXTRA=whatever"$'\n'"CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n'
 
 # ─────────────── C2b: CITEVYN_ADMIN_API_KEY strength (#200) ───────────────
 # The admin key had the IDENTICAL gap: it was only ever compared against the

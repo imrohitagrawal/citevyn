@@ -351,12 +351,23 @@ fi
 #    Consequently the explicit `DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-...}"`
 #    line above `read_env` changes only PRECEDENCE (it is what makes an exported
 #    override beat the .env, which the comment there claims), never whether a
-#    token is FOUND. A mutant deleting the new name from that line therefore
-#    SURVIVES these five cases -- confirmed by running it -- and killing it would
-#    need a fixture that observes the value on the wire, which `--verify-only`
-#    against a dead port cannot provide. The ORDER is instead pinned where it is
-#    observable: in Settings (backend/tests/test_public_client_token_dual_name.py)
-#    and in the bundle checker (tests/shell/test_check_bundle_key.sh section 5b).
+#    token is FOUND.
+#
+#    TWO mutants therefore survive this block, and the second is the honest one
+#    an earlier draft of this note left out:
+#      * deleting the NEW name from that line            -> survives
+#      * replacing the WHOLE line with `DEMO_KEY=""`     -> survives
+#    Both because `read_env` finds the value regardless. So the two cases named
+#    "resolves from the env under the NEW/OLD name" are really observing
+#    `read_env`'s inheritance, not the line they are named after. Killing either
+#    needs a fixture that observes the value ON THE WIRE, which `--verify-only`
+#    against a dead port cannot provide.
+#
+#    What DOES bite here: dropping either `.env` read, and any change that makes
+#    the chain resolve unconditionally (the refusal partner). And the ORDER is
+#    pinned where it is observable -- in Settings
+#    (backend/tests/test_public_client_token_dual_name.py) and in the bundle
+#    checker (tests/shell/test_check_bundle_key.sh section 5b).
 _tok_fixture() {  # $1 = .env token line (may be empty), $2.. = env assignments
     local envline="$1"; shift
     printf '%s\nCITEVYN_PUBLIC_HOST=127.0.0.1\n' "${envline}" > "${FIX}/infra/docker/.env"
