@@ -6,7 +6,7 @@ Every request that reaches a session/message route resolves to exactly one
 ``app.api.routes.messages._require_session``, ADR-0004 PR 1). Before this
 module existed, every caller resolved to the constant ``demo_user``, so
 ownership was a no-op. This is deliberately separate from the **audit**
-identity (``require_demo_api_key`` -> the constant ``DEMO_USER_ID``, which
+identity (``require_public_client_token`` -> the constant ``DEMO_USER_ID``, which
 :func:`app.core.rate_limit.rate_limited_demo` still returns unchanged): the
 demo bearer proves "this is a legitimate demo client", while the cookie
 proves "this is the same visitor as last time". Conflating the two would

@@ -46,7 +46,7 @@ def _production_settings(**overrides: object) -> Settings:
         environment="production",
         llm_provider="anthropic",
         anthropic_api_key="test-anthropic-key",
-        demo_api_key="a-strong-demo-key-not-the-default-1234",
+        public_client_token="a-strong-demo-key-not-the-default-1234",
         admin_api_key="a-strong-admin-key-not-the-default-1234",
         _env_file=None,
         **overrides,  # type: ignore[arg-type]
@@ -315,7 +315,7 @@ def test_docs_endpoints_are_disabled_in_production(
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "anthropic")
     monkeypatch.setenv("CITEVYN_ANTHROPIC_API_KEY", "test-anthropic-key")
     monkeypatch.setenv("CITEVYN_EMBEDDING_PROVIDER", "stub")
-    monkeypatch.setenv("CITEVYN_DEMO_API_KEY", "a-strong-demo-key-not-the-default-1234")
+    monkeypatch.setenv("CITEVYN_PUBLIC_CLIENT_TOKEN", "a-strong-demo-key-not-the-default-1234")
     monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "a-strong-admin-key-not-the-default-1234")
     get_settings.cache_clear()
     try:

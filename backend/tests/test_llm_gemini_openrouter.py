@@ -377,7 +377,7 @@ def test_factory_gemini_no_keys_production_raises() -> None:
             _settings(
                 environment="production",
                 admin_api_key="prod-strong-admin-secret",
-                demo_api_key="prod-strong-demo-secret",
+                public_client_token="prod-strong-demo-secret",
                 gemini_api_key=None,
                 openrouter_api_key=None,
             )

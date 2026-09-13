@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ────────────────────────────────────────────────────────────────────────────
-# check_bundle_key.sh — assert a SERVED browser bundle carries the demo bearer
-# the running server will actually accept (#296).
+# check_bundle_key.sh — assert a SERVED browser bundle carries the public client
+# token the running server will actually accept (#296).
 #
 # WHY THIS EXISTS
 # ---------------
-# `infra/docker/Dockerfile.api` bakes VITE_API_DEMO_KEY into the JS bundle at
+# `infra/docker/Dockerfile.api` bakes the client token into the JS bundle at
 # BUILD time. If the deploy passes the wrong value — or none — every browser
 # call 401s while /health stays green. That is release v6 (2026-09-02): the
 # site was down for about an hour behind a healthy health check.
@@ -47,9 +47,24 @@
 # which are enough to tell two keys apart in an incident and useless to an
 # attacker.
 #
+# WHICH VARIABLE IT READS (#430)
+# ------------------------------
+# CITEVYN_PUBLIC_CLIENT_TOKEN first, then the deprecated CITEVYN_DEMO_API_KEY, so
+# the same script works before and after the Fly secret is renamed. New wins when
+# both are set — the same ORDER Settings applies, deliberately, because a checker
+# that disagreed with the server about which value is live would report a PASS on
+# a bundle the server rejects.
+#
+# The EMPTINESS rule differs from Settings on purpose. `:-` treats an empty
+# variable as absent and falls through to the old name; Settings treats it as
+# PRESENT and refuses to boot. This script is not a boot gate — it needs a needle
+# to search the bundle for, and it has its own hard failure below when no usable
+# value is found either way. The gate that must mirror Settings exactly is
+# infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE.
+#
 # USAGE
-#   CITEVYN_DEMO_API_KEY="$key" ./scripts/check_bundle_key.sh < bundle.js
-#   curl -sS "$BASE/$CHUNK" | CITEVYN_DEMO_API_KEY="$key" ./scripts/check_bundle_key.sh
+#   CITEVYN_PUBLIC_CLIENT_TOKEN="$tok" ./scripts/check_bundle_key.sh < bundle.js
+#   curl -sS "$BASE/$CHUNK" | CITEVYN_PUBLIC_CLIENT_TOKEN="$tok" ./scripts/check_bundle_key.sh
 #
 # EXIT CODES
 #   0  the bundle carries the expected key
@@ -66,11 +81,14 @@ fi
 
 if [[ $# -gt 0 ]]; then
     echo "error: this script takes no arguments; it reads the bundle on stdin" >&2
-    echo "usage: CITEVYN_DEMO_API_KEY=... $0 < bundle.js" >&2
+    echo "usage: CITEVYN_PUBLIC_CLIENT_TOKEN=... $0 < bundle.js" >&2
     exit 2
 fi
 
-KEY="${CITEVYN_DEMO_API_KEY:-}"
+# `:-` on the new name, so an EMPTY new variable falls through to the deprecated
+# one instead of short-circuiting the whole check into its own [FAIL]. Whichever
+# ends up empty, the partner check below still refuses to run.
+KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
 
 # ── Partner check: the expected key must exist AND be a plausible key ──────
 # Without this, the presence test below degenerates towards `index($0, "")`,
@@ -83,14 +101,20 @@ KEY="${CITEVYN_DEMO_API_KEY:-}"
 #   "a"   -- one character; matches every bundle ever built
 #
 # The floor is 16 because that is what `Settings._is_weak_secret` already
-# enforces for CITEVYN_DEMO_API_KEY in production, so no key this gate will
+# enforces for CITEVYN_PUBLIC_CLIENT_TOKEN in production, so no token this gate will
 # ever legitimately see is shorter. Borrowing the existing threshold keeps one
 # definition of "too weak to be real" rather than inventing a second.
 _MIN_KEY_LENGTH=16
 _STRIPPED="${KEY//[[:space:]]/}"
 
 if [[ -z "${_STRIPPED}" ]]; then
-    echo "[FAIL] CITEVYN_DEMO_API_KEY is empty, unset, or whitespace only." >&2
+    # The phrase "whitespace only" is load-bearing, not styling:
+    # tests/shell/test_check_bundle_key.sh greps for it to tell THIS rejection
+    # apart from the unrelated "key not found in bundle" exit, which also
+    # returns 1. Without that distinction a mutant that deleted the whitespace
+    # strip still printed ok.
+    echo "[FAIL] the expected token is empty, unset, or whitespace only." >&2
+    echo "       (Read from CITEVYN_PUBLIC_CLIENT_TOKEN, then CITEVYN_DEMO_API_KEY.)" >&2
     echo "       Nothing to look for, so this check cannot pass — and a blank" >&2
     echo "       needle would match almost any bundle, reporting a false PASS." >&2
     echo "       The usual cause is that the Fly machine had scaled to zero and" >&2
@@ -105,9 +129,10 @@ fi
 # existed. It is exempt by name rather than by lowering the floor, because
 # lowering the floor to 14 would be an arbitrary number chosen to fit one
 # string. It cannot be abused in production: Settings refuses to boot with this
-# value when CITEVYN_ENVIRONMENT=production (_reject_default_demo_key_in_production).
+# value when CITEVYN_ENVIRONMENT=production
+# (_reject_weak_public_client_token_in_production).
 if [[ "${#KEY}" -lt "${_MIN_KEY_LENGTH}" && "${KEY}" != "local-demo-key" ]]; then
-    echo "[FAIL] CITEVYN_DEMO_API_KEY is ${#KEY} characters; production requires at" >&2
+    echo "[FAIL] the public client token is ${#KEY} characters; production requires at" >&2
     echo "       least ${_MIN_KEY_LENGTH} (app/core/config.py: _is_weak_secret). A key this short is" >&2
     echo "       either truncated or not a real key, and a short needle can match a" >&2
     echo "       bundle by coincidence — which would be a false PASS." >&2
@@ -138,22 +163,23 @@ fi
 # is a literal substring test — no regex metacharacter can change its meaning,
 # which matters because a generated key may contain '.', '+' or '/'.
 if printf '%s' "${BUNDLE}" | KEY="${KEY}" awk 'index($0, ENVIRON["KEY"]) { found = 1 } END { exit !found }'; then
-    echo "[PASS] the served bundle carries the expected demo key" \
+    echo "[PASS] the served bundle carries the expected client token" \
          "(length ${#KEY}, sha256 ${KEY_FP}…)"
     exit 0
 fi
 
-echo "[FAIL] the served bundle does NOT carry the expected demo key" \
+echo "[FAIL] the served bundle does NOT carry the expected client token" \
      "(length ${#KEY}, sha256 ${KEY_FP}…)." >&2
 echo "       Every browser API call will return 401 while /health stays green." >&2
 echo "       This is #296. Rebuild and redeploy with the build argument:" >&2
-echo "         fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY=\"\${DEMO_KEY:?}\" ..." >&2
+echo "         fly deploy --app citevyn --build-arg VITE_PUBLIC_CLIENT_TOKEN=\"\${CLIENT_TOKEN:?}\" ..." >&2
 echo "       See docs/DEPLOY_FLY.md §4.1." >&2
 
 # Name the two known shapes, to save an incident a debugging round-trip. Both
 # are reported as the same failure above; this only sharpens the diagnosis.
 if printf '%s' "${BUNDLE}" | grep -qF 'local-demo-key'; then
     echo "       Diagnosis: the bundle carries the PUBLIC DEFAULT 'local-demo-key'," >&2
-    echo "       so --build-arg VITE_API_DEMO_KEY was not passed at all (the v6 shape)." >&2
+    echo "       so neither --build-arg VITE_PUBLIC_CLIENT_TOKEN nor VITE_API_DEMO_KEY" >&2
+    echo "       was passed at all (the v6 shape)." >&2
 fi
 exit 1

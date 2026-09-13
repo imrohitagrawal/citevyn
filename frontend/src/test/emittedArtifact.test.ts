@@ -88,7 +88,7 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
    * `{...process.env, VITE_API_LIVE: "true"}`, and review defeated it with a
    * one-line plugin — `if (process.env.VITEST) return html;`. vitest sets
    * `VITEST`, `VITEST_WORKER_ID`, `VITEST_POOL_ID` and `NODE_ENV=test`; the
-   * Dockerfile sets none of them and does set `VITE_API_DEMO_KEY`. So the
+   * Dockerfile sets none of them and does set the client-token args. So the
    * argv matched while the PROCESS did not, and a third-party stylesheet
    * reached `/app/frontend_dist/index.html` with all 30 tests here green.
    *
@@ -100,6 +100,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
   const SHIPPED_BUILD_ENV: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? "",
+    // Both #430 names, at the Dockerfile's ARG defaults. The new one is EMPTY on
+    // purpose: that is the state of every build that does not pass it, so this
+    // guard builds the bundle through the fallback path the deploy is actually
+    // on today rather than through a path no image is built with.
+    VITE_PUBLIC_CLIENT_TOKEN: "",
     VITE_API_DEMO_KEY: "local-demo-key",
     VITE_API_LIVE: "true",
   };
@@ -217,6 +222,7 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
         .map((m) => [m[1], m[2].trim()] as const),
     );
     for (const [name, value] of Object.entries({
+      VITE_PUBLIC_CLIENT_TOKEN: "",
       VITE_API_DEMO_KEY: "local-demo-key",
       VITE_API_LIVE: "true",
     })) {

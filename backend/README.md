@@ -33,7 +33,7 @@ dependencies because the `pyproject.toml` for Slice 1 lives in `backend/`.
 Set the demo API key with:
 
 ```bash
-export CITEVYN_DEMO_API_KEY="local-demo-key"
+export CITEVYN_PUBLIC_CLIENT_TOKEN="local-demo-key"
 ```
 
 If unset, local development and tests use `local-demo-key`.

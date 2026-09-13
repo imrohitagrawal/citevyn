@@ -188,7 +188,26 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # An explicit env override wins over the compose .env. This is what makes
 # --verify-only usable against a locally-run api whose key lives elsewhere
 # (e.g. backend/.env) without editing the prod env file.
-DEMO_KEY="${CITEVYN_DEMO_API_KEY:-$(read_env CITEVYN_DEMO_API_KEY)}"
+# Both #430 spellings, new one winning, and the ENVIRONMENT beats the .env file
+# for each in turn. The ORDER matches what Settings resolves -- pydantic exhausts
+# a source's aliases before moving to the next source, so env-new, env-old,
+# file-new, file-old.
+#
+# The EMPTINESS rule deliberately differs, and saying so is the point: `:-` here
+# treats an empty variable as absent and falls through. Settings does NOT -- an
+# empty variable is PRESENT, so AliasChoices selects it and min_length rejects it.
+# This script is not a boot gate; its job is to find a bearer to probe WITH, and
+# refusing to run because an unrelated variable was exported empty would help
+# nobody. The gate that must agree with Settings exactly is
+# infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE
+# for that reason -- the same source the container is fed from.
+DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
+if [[ -z "${DEMO_KEY}" ]]; then
+    DEMO_KEY="$(read_env CITEVYN_PUBLIC_CLIENT_TOKEN)"
+fi
+if [[ -z "${DEMO_KEY}" ]]; then
+    DEMO_KEY="$(read_env CITEVYN_DEMO_API_KEY)"
+fi
 PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
 VERSION="${VERSION_REQUESTED:-$(git describe --tags --exact-match 2>/dev/null || echo '')}"
@@ -251,7 +270,7 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null \
         || die "VERSION='${VERSION}' is not an existing git tag (the gate deploys a tagged release, not a branch)"
     [[ -n "${BASE_URL}" ]] || die "BASE_URL is unset and CITEVYN_PUBLIC_HOST is empty in ${COMPOSE_DIR}/.env"
-    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_DEMO_API_KEY is unset in ${COMPOSE_DIR}/.env"
+    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_PUBLIC_CLIENT_TOKEN is unset in ${COMPOSE_DIR}/.env (the deprecated CITEVYN_DEMO_API_KEY is also accepted)"
 
     # A dirty tree must be caught BEFORE we redeploy production — otherwise we
     # ship uncommitted local edits and only discover it when the rollback
@@ -298,7 +317,7 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     esac
 
     # ── Frontend bundle vs the demo key ────────────────────────────────────
-    # Vite bakes VITE_API_DEMO_KEY into the bundle at BUILD time
+    # Vite bakes the client token into the bundle at BUILD time
     # (frontend/src/lib/api.ts), defaulting to "local-demo-key". Every probe in
     # this gate curls with the key from .env, so a bundle built against the
     # OLD default passes the whole gate while every real browser request 401s.
@@ -360,10 +379,10 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         bundle_diagnosis="$(
             { find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
                 -exec cat {} + 2>/dev/null || true; } \
-            | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
+            | CITEVYN_PUBLIC_CLIENT_TOKEN="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
         )"
         if [[ "${bundle_diagnosis}" == "[PASS]"* ]]; then
-            record PASS "frontend bundle carries the current demo key"
+            record PASS "frontend bundle carries the current client token"
         else
             # The checker distinguishes "carries the PUBLIC DEFAULT" from
             # "empty fetch" from "key absent", and a missing/non-executable
@@ -476,7 +495,7 @@ verify_suite() {
         record PASS "${phase}: POST /v1/sessions"
     elif [[ "${LAST_SESSION_RATE_LIMITED}" == "1" ]]; then
         # The gate rate-limited ITSELF. Every demo call in this script shares one
-        # bucket with every demo visitor, because require_demo_api_key returns a
+        # bucket with every demo visitor, because require_public_client_token returns a
         # CONSTANT user id (#203). One full run spends ~16 demo calls against a
         # 30/hour cap, so a second run inside the hour exhausts it and the
         # remaining probes fail for a reason that has nothing to do with the
@@ -584,7 +603,7 @@ deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deplo
 # zero-probe guard below.
 if [[ "${VERIFY_ONLY}" == "1" ]]; then
     [[ -n "${BASE_URL}" ]] || die "--verify-only needs BASE_URL (or CITEVYN_PUBLIC_HOST)"
-    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_DEMO_API_KEY"
+    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_PUBLIC_CLIENT_TOKEN (or the deprecated CITEVYN_DEMO_API_KEY)"
     echo "==> --verify-only: probing ${BASE_URL} (no deploy, no rollback)"
     verify_suite "verify-only"
     echo

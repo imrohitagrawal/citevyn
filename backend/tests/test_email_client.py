@@ -157,7 +157,7 @@ def _production(**overrides: object) -> dict[str, object]:
         environment="production",
         llm_provider="anthropic",
         anthropic_api_key="test-key",
-        demo_api_key="a-strong-demo-key-not-the-default-1234",
+        public_client_token="a-strong-demo-key-not-the-default-1234",
         admin_api_key="a-strong-admin-key-not-the-default-1234",
         **overrides,
     )

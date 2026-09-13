@@ -3,14 +3,14 @@ from typing import Annotated
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.core.security import require_demo_api_key
+from app.core.security import require_public_client_token
 
 
 def _protected_app() -> FastAPI:
     app = FastAPI()
 
     @app.get("/protected")
-    def protected(user_id: Annotated[str, Depends(require_demo_api_key)]) -> dict[str, str]:
+    def protected(user_id: Annotated[str, Depends(require_public_client_token)]) -> dict[str, str]:
         return {"user_id": user_id}
 
     return app

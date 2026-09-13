@@ -43,17 +43,35 @@
 #   in-bundle ``knowledgeBase`` instead of the real backend — a demo that looks
 #   perfect and never touches the API. That is the single worst outcome here,
 #   so it is passed explicitly rather than defaulted.
-# * VITE_API_DEMO_KEY is baked in at build time. It is not a secret from the
-#   browser's point of view (any visitor can read it out of the bundle); it is
-#   the same anti-nuisance bearer the rate limiter buckets on. It defaults to
-#   the local value so a plain ``docker build`` still works, and the deploy
-#   passes the production key.
+# * The public client token is baked in at build time. It is not a secret from
+#   the browser's point of view (any visitor can read it out of the bundle); it
+#   is the anti-nuisance bearer the rate limiter buckets on, a CSRF guard, and
+#   not an identity control. See ``docs/SECURITY_MODEL.md`` and #430.
+#
+#   TWO ARGUMENTS ACCEPT IT DURING THE #430 RENAME, and their DEFAULTS DIFFER on
+#   purpose:
+#
+#     VITE_PUBLIC_CLIENT_TOKEN  the new name. Defaults to EMPTY, because it is
+#                               not passed by every caller yet and an empty value
+#                               is how ``frontend/src/lib/api.ts`` is told to fall
+#                               through to the old one. Giving it the local
+#                               default instead would make it WIN over a
+#                               correctly-passed VITE_API_DEMO_KEY and ship
+#                               ``local-demo-key`` to production — release v6's
+#                               outage (#296), manufactured by the rename.
+#     VITE_API_DEMO_KEY         the name being retired. Keeps the local default
+#                               so a plain ``docker build`` still works unchanged.
+#
+#   The precedence lives in the frontend (`||` on the new, `??` on the old) and is
+#   pinned case by case in ``frontend/src/test/publicClientToken.test.ts``. Both
+#   are threaded into the build below, so a deploy mid-migration may pass either.
 #
 # VITE_API_BASE_URL is deliberately NOT set: it defaults to "", which makes
 # apiFetch use relative paths. Same-origin is the whole point of serving the
 # bundle from the API — no CORS, no second hostname.
 FROM node:26-bookworm-slim AS frontend
 
+ARG VITE_PUBLIC_CLIENT_TOKEN=
 ARG VITE_API_DEMO_KEY=local-demo-key
 ARG VITE_API_LIVE=true
 
@@ -65,7 +83,8 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
-RUN VITE_API_DEMO_KEY="${VITE_API_DEMO_KEY}" \
+RUN VITE_PUBLIC_CLIENT_TOKEN="${VITE_PUBLIC_CLIENT_TOKEN}" \
+    VITE_API_DEMO_KEY="${VITE_API_DEMO_KEY}" \
     VITE_API_LIVE="${VITE_API_LIVE}" \
     npm run build \
     && test -f dist/index.html   # fail the build loudly rather than ship an empty mount

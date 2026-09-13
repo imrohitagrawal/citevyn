@@ -409,7 +409,7 @@ import sys
 p = sys.argv[1]; s = open(p, encoding="utf8").read()
 # The Dockerfile stops using `npm run build` while the words survive in a
 # COMMENT — the exact edit that defeated the whole-file substring check.
-i = s.index("RUN VITE_API_DEMO_KEY=")
+i = s.index("RUN VITE_PUBLIC_CLIENT_TOKEN=")
 j = s.index(chr(10) + chr(10), i)
 repl = ("# Historically this was `npm run build`; now built directly." + chr(10)
         + "RUN npx vite build --manifest --mode staging " + chr(92) + chr(10)

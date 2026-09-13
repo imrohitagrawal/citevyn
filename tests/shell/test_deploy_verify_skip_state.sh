@@ -326,9 +326,80 @@ else
     fail "deploy_verify.sh has a syntax error"
 fi
 
+# ── The #430 two-name token resolution, all FOUR sources deploy_verify.sh reads.
+#
+#    The fixture above feeds the token in under the DEPRECATED name, which is the
+#    migration path and must keep working -- but on its own it leaves the NEW name
+#    exercised by no test at all, in the one script that gates a production deploy.
+#    These four cases close that: env-new, env-old, .env-new, .env-old, plus the
+#    neither case that proves the chain can still FAIL (without it, a resolution
+#    that returned a constant would satisfy all four).
+#
+#    `--verify-only` against a dead port is enough: the token is resolved at
+#    PREFLIGHT, so "got past preflight" is the observable, and the probes failing
+#    afterwards is irrelevant to what is being tested here.
+#
+#    SCOPE, STATED HONESTLY -- what these five cases CANNOT see. The observable is
+#    "a token was found", never WHICH value was found, so precedence between two
+#    sources holding DIFFERENT values for the same name is invisible here.
+#    Measured, and the reason the gap is structural rather than an oversight:
+#    `read_env` sources the .env with `set -a` INTO A SUBSHELL THAT INHERITS THE
+#    CALLER'S ENVIRONMENT, so it returns the .env value when the .env sets the
+#    name and the ambient value otherwise --
+#        ambient only  -> `from-the-ambient-environment`
+#        .env also set -> `from-the-dotenv-file`
+#    Consequently the explicit `DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-...}"`
+#    line above `read_env` changes only PRECEDENCE (it is what makes an exported
+#    override beat the .env, which the comment there claims), never whether a
+#    token is FOUND.
+#
+#    TWO mutants therefore survive this block, and the second is the honest one
+#    an earlier draft of this note left out:
+#      * deleting the NEW name from that line            -> survives
+#      * replacing the WHOLE line with `DEMO_KEY=""`     -> survives
+#    Both because `read_env` finds the value regardless. So the two cases named
+#    "resolves from the env under the NEW/OLD name" are really observing
+#    `read_env`'s inheritance, not the line they are named after. Killing either
+#    needs a fixture that observes the value ON THE WIRE, which `--verify-only`
+#    against a dead port cannot provide.
+#
+#    What DOES bite here: dropping either `.env` read, and any change that makes
+#    the chain resolve unconditionally (the refusal partner). And the ORDER is
+#    pinned where it is observable -- in Settings
+#    (backend/tests/test_public_client_token_dual_name.py) and in the bundle
+#    checker (tests/shell/test_check_bundle_key.sh section 5b).
+_tok_fixture() {  # $1 = .env token line (may be empty), $2.. = env assignments
+    local envline="$1"; shift
+    printf '%s\nCITEVYN_PUBLIC_HOST=127.0.0.1\n' "${envline}" > "${FIX}/infra/docker/.env"
+    ( cd "${FIX}" && env -u CITEVYN_DEMO_API_KEY -u CITEVYN_PUBLIC_CLIENT_TOKEN \
+        PATH="${FIX}/bin:${PATH}" BASE_URL="http://127.0.0.1:1" "$@" \
+        ./infra/docker/scripts/deploy_verify.sh --verify-only 2>&1 )
+}
+_tok_case() {  # $1 = description, $2 = expect resolved|unresolved, $3 = .env line, $4.. env
+    local desc="$1" expect="$2" envline="$3"; shift 3
+    local out resolved
+    out="$(_tok_fixture "${envline}" "$@")"
+    if printf '%s' "${out}" | grep -q 'is unset\|needs CITEVYN'; then resolved=unresolved; else resolved=resolved; fi
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if [[ "${resolved}" == "${expect}" ]]; then
+        echo "  ok   — ${desc}"
+    else
+        echo "  FAIL — ${desc} (got ${resolved}, wanted ${expect})"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+_tok_case "token resolves from the env under the NEW name"  resolved   "# none" CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey
+_tok_case "token resolves from the env under the OLD name"  resolved   "# none" CITEVYN_DEMO_API_KEY=fixturekey
+_tok_case "token resolves from .env under the NEW name"     resolved   "CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey"
+_tok_case "token resolves from .env under the OLD name"     resolved   "CITEVYN_DEMO_API_KEY=fixturekey"
+# The partner. Four "it resolved" assertions are all satisfied by a chain that
+# resolves unconditionally; this is the one that proves the chain can say no.
+_tok_case "neither name anywhere -> preflight REFUSES"      unresolved "# none"
+
 # ── Non-vacuity, pinned exactly. A slack floor lets a whole case be deleted
 #    silently; bump this deliberately when you add one.
-_EXPECTED_ASSERTIONS=39
+# 39 before #430; +5 for the two-name token resolution block above.
+_EXPECTED_ASSERTIONS=44
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
     FAILURES=$((FAILURES + 1))
