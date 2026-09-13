@@ -65,8 +65,32 @@ _OLD = "CITEVYN_DEMO_API_KEY"
 
 # Long enough to clear the 16-character production floor, and visibly distinct
 # from one another so a test cannot pass by reading the wrong variable.
-_VIA_NEW = "token-from-the-new-name-0123456789"
-_VIA_OLD = "token-from-the-old-name-0123456789"
+#
+# WORD-SHAPED ON PURPOSE, and every fixture value in this file follows it. An
+# earlier draft padded these with `-0123456789`; gitleaks' `generic-api-key` rule
+# scored that at 4.2 entropy and failed the required `quality-gate` check on a
+# value that is a literal in a test file and a secret nowhere.
+#
+# The fix is the test DATA, never an allowlist entry. Silencing a scanner to
+# accommodate a fixture is how a real leak gets waved through later, and #430 --
+# the issue this file exists for -- is about secret scanning being trustworthy.
+#
+# BOTH DIRECTIONS MEASURED, in a throwaway repo holding only this file (gitleaks
+# 8.30.1), because "the finding went away" on its own is exactly the shape of a
+# guard that stopped working:
+#   * this file as shipped                                 -> no leaks found
+#   * `public_client_token = "<openssl rand -base64 32>"`   -> leaks found: 1
+#   * `public_client_token = "client-token-long-enough..."` -> no leaks found
+# The middle line is the one that matters: a genuine secret in this exact
+# position is still caught. (A first attempt at that control planted the value
+# under `_PLANTED = ...` and found nothing -- the rule needs a keyword like
+# `token`/`key`/`secret` adjacent to the value, so a control without one proves
+# nothing. Recorded because it would have read as a passing check.)
+#
+# Keep new fixtures to lowercase words and hyphens: long enough for the
+# 16-character production floor, boring enough to score low.
+_VIA_NEW = "token-from-the-new-name-not-a-real-secret"
+_VIA_OLD = "token-from-the-old-name-not-a-real-secret"
 
 # The published default. Not a secret; it is printed in README.md and
 # .env.example, which is exactly why production refuses it.
@@ -177,7 +201,7 @@ def test_an_empty_ENVIRONMENT_variable_is_present_and_beats_a_strong_other_name(
     the shell guard would then be wrong in the other direction.
     """
     monkeypatch.setenv(_NEW, "")
-    monkeypatch.setenv(_OLD, "a-strong-old-token-0123456789")
+    monkeypatch.setenv(_OLD, "old-name-value-long-enough-for-the-floor")
     with pytest.raises(ValueError) as excinfo:
         Settings(_env_file=None)  # type: ignore[call-arg]
     message = str(excinfo.value)
@@ -194,10 +218,10 @@ def test_an_UNSET_new_name_does_fall_through_to_a_strong_old_one(
     that ignored the new alias entirely, and the migration would not work at all.
     """
     monkeypatch.delenv(_NEW, raising=False)
-    monkeypatch.setenv(_OLD, "a-strong-old-token-0123456789")
+    monkeypatch.setenv(_OLD, "old-name-value-long-enough-for-the-floor")
     assert (
         Settings(_env_file=None).public_client_token  # type: ignore[call-arg]
-        == "a-strong-old-token-0123456789"
+        == "old-name-value-long-enough-for-the-floor"
     )
 
 
@@ -211,8 +235,8 @@ def test_a_kwarg_by_field_name_is_not_silently_dropped(monkeypatch: pytest.Monke
     asserting against the wrong value.
     """
     monkeypatch.setenv(_NEW, _VIA_NEW)
-    settings = Settings(_env_file=None, public_client_token="kwarg-wins-0123456789")  # type: ignore[call-arg]
-    assert settings.public_client_token == "kwarg-wins-0123456789", (
+    settings = Settings(_env_file=None, public_client_token="kwarg-value-long-enough-for-the-floor")  # type: ignore[call-arg]
+    assert settings.public_client_token == "kwarg-value-long-enough-for-the-floor", (
         "the kwarg was dropped in favour of the environment -- populate_by_name "
         "is missing from Settings.model_config"
     )
@@ -240,7 +264,7 @@ def test_production_still_refuses_a_weak_token_under_either_name(
     """
     monkeypatch.setenv("CITEVYN_ENVIRONMENT", "production")
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "a-strong-admin-key-0123456789")
+    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "admin-key-long-enough-for-the-floor")
     monkeypatch.setenv(name, weak)
     with pytest.raises(ValueError):
         Settings(_env_file=None)  # type: ignore[call-arg]
@@ -258,10 +282,10 @@ def test_a_strong_token_boots_in_production_under_either_name(
     """
     monkeypatch.setenv("CITEVYN_ENVIRONMENT", "production")
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "a-strong-admin-key-0123456789")
-    monkeypatch.setenv(name, "a-strong-public-client-token-0123456789")
+    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "admin-key-long-enough-for-the-floor")
+    monkeypatch.setenv(name, "client-token-long-enough-for-the-floor")
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert settings.public_client_token == "a-strong-public-client-token-0123456789"
+    assert settings.public_client_token == "client-token-long-enough-for-the-floor"
 
 
 def test_the_production_error_names_the_variable_to_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +298,7 @@ def test_the_production_error_names_the_variable_to_set(monkeypatch: pytest.Monk
     """
     monkeypatch.setenv("CITEVYN_ENVIRONMENT", "production")
     monkeypatch.setenv("CITEVYN_LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "a-strong-admin-key-0123456789")
+    monkeypatch.setenv("CITEVYN_ADMIN_API_KEY", "admin-key-long-enough-for-the-floor")
     monkeypatch.setenv(_OLD, _PUBLISHED_DEFAULT)
     with pytest.raises(ValueError) as excinfo:
         Settings(_env_file=None)  # type: ignore[call-arg]
