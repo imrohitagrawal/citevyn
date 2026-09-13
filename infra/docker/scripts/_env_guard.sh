@@ -41,11 +41,12 @@
 #     published ``local-demo-key``, at least 16 chars) — see
 #     Settings._is_weak_secret in backend/app/core/config.py.
 #     Read from CITEVYN_PUBLIC_CLIENT_TOKEN, falling back to the
-#     deprecated CITEVYN_DEMO_API_KEY (#430) only when the new name
-#     is NOT SET AT ALL — the same rule pydantic's AliasChoices
-#     applies, so the guard cannot bless a value the app would not
-#     use. An empty CITEVYN_PUBLIC_CLIENT_TOKEN= is PRESENT and is
-#     therefore rejected, exactly as Settings rejects it
+#     deprecated CITEVYN_DEMO_API_KEY (#430) only when the .env FILE
+#     does not DECLARE the new name. The file is the subject because
+#     the container is fed by ``env_file`` and gets nothing else; a
+#     declared-but-empty CITEVYN_PUBLIC_CLIENT_TOKEN= is present for
+#     both compose and pydantic, and is rejected here exactly as
+#     Settings rejects it
 #   - exits non-zero with a remediation message if any fails
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -349,11 +350,23 @@ if ! (
     # container reads, so the guard's verdict is about the deployment rather than
     # about the terminal it was typed in.
     #
-    # SCOPE, STATED: only the client token is resolved this way. POSTGRES_PASSWORD
-    # and CITEVYN_ADMIN_API_KEY above still read the merged view and so still
-    # carry the FALSE PASS half of this bug. That is pre-existing, unchanged here,
-    # and deliberately out of scope for a rename -- widening it touches every
-    # prod-deploy path at once. Tracked in docs/BACKLOG.md under #430.
+    # SCOPE, STATED, and the two residuals differ in DIRECTION -- which an earlier
+    # draft of this comment got wrong by lumping them together as "the false pass
+    # half". Both are pre-existing, unchanged here, and deliberately out of scope
+    # for a rename; widening this touches every prod-deploy path at once.
+    #
+    #   * CITEVYN_ADMIN_API_KEY -- a genuine FALSE PASS, and reachable: with no
+    #     admin line in .env but a strong one exported in the shell, this guard
+    #     exits 0, compose passes the container NOTHING, and the api refuses to
+    #     boot. The same crash-loop-behind-a-green-preflight shape just repaired
+    #     for the token.
+    #   * POSTGRES_PASSWORD -- a FALSE REJECT, not a false pass. MEASURED: with no
+    #     POSTGRES_PASSWORD line in .env and the repo's own dev credential
+    #     exported, this guard rejects with "still has dev-only stub secrets",
+    #     pointing at a line the operator's file does not contain; the same .env
+    #     passes from a clean shell.
+    #
+    # Tracked in docs/BACKLOG.md under #430.
     #
     # PRESENCE, not non-emptiness, once the file is the subject.
     #
@@ -382,9 +395,25 @@ if ! (
     # ``string_too_short`` after the 60s health poll had burned.
     #
     # The VALUE still comes from the SOURCED variable rather than from the raw
-    # line, so quote peeling and CRLF trimming (``_strip`` below) keep working;
-    # sourcing overwrites any inherited value for a name the file declares, so
-    # for a declared name the two agree by construction.
+    # line, so quote peeling and CRLF trimming (``_strip`` below) keep working.
+    #
+    # WHERE THAT IS NOT EXACT, stated rather than claimed. An earlier draft of
+    # this comment said the two "agree by construction"; that was too strong.
+    # `grep`'s notion of DECLARED is not bash's notion of ASSIGNED, and the shape
+    # that separates them is a space before the `=`: for `NAME =x`,
+    # `docker compose config` renders the variable SET (measured) while bash reads
+    # it as a command, not an assignment.
+    #
+    # That divergence cannot be reached HERE, and the reason is worth writing
+    # down rather than assuming. Such a line makes `source` itself fail -- bash
+    # reports `NAME: command not found`, status 127 -- and the source-failure
+    # guard above exits before any of this runs, with a message naming the file
+    # and telling the operator to inspect it. MEASURED against the guard at
+    # b4cdfa6, BEFORE this rename: the same `.env` was already rejected the same
+    # way. So it is pre-existing behaviour of the source step, not something this
+    # resolution introduced, and the operator gets a better diagnosis than "is not
+    # set" would have been. Pinned by a case in tests/shell/test_env_guard.sh so a
+    # future change to the source step cannot silently alter it.
     #
     # The NAME reported on failure is whichever line supplied the value, so the
     # remediation points at the line the operator has to edit -- except when the

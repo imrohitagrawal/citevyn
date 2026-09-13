@@ -60,7 +60,7 @@
 # PRESENT and refuses to boot. This script is not a boot gate — it needs a needle
 # to search the bundle for, and it has its own hard failure below when no usable
 # value is found either way. The gate that must mirror Settings exactly is
-# infra/docker/scripts/_env_guard.sh, which uses `${VAR+set}`.
+# infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE.
 #
 # USAGE
 #   CITEVYN_PUBLIC_CLIENT_TOKEN="$tok" ./scripts/check_bundle_key.sh < bundle.js

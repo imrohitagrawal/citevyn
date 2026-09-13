@@ -190,7 +190,8 @@ def test_an_empty_ENVIRONMENT_variable_is_present_and_beats_a_strong_other_name(
     treats empty as absent.
 
     Three reviewers independently found ``_env_guard.sh`` blessing exactly this
-    ``.env`` while the api died at boot on it. The guard now uses ``${VAR+set}``;
+    ``.env`` while the api died at boot on it. The guard now resolves the name
+    from the ``.env`` FILE, the same source the container is fed from;
     ``tests/shell/test_env_guard.sh`` case 11s is the other half of this pair, and
     this is the half that pins the BEHAVIOUR the guard has to mirror.
 

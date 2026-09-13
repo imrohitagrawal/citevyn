@@ -479,7 +479,7 @@ assert_guard "a strong NEW name is accepted even when the old one is weak" \
 #      empty, so an operator who copies the template and pastes back only their
 #      existing CITEVYN_DEMO_API_KEY line lands here.
 #
-#      RED if the guard goes back to `-n "${VAR:-}"` from `${VAR+set}`.
+#      RED if the guard stops treating a declared-but-empty new name as present.
 assert_guard "empty NEW name is REJECTED even when the old one is strong" \
     1 \
     "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
@@ -574,6 +574,40 @@ assert_guard "a commented-out new name does not count as declared" \
     0 \
     "" \
     "${BASE_OK}${REST_NO_DEMO}""# CITEVYN_PUBLIC_CLIENT_TOKEN="$'\n'"CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n'
+
+# 11ac-11ae. The parser's three DOCUMENTED TOLERANCES, each of which was a
+#      surviving mutant until it had a case: dropping the leading-whitespace
+#      allowance, the `export ` alternative, or the whitespace-before-`=`
+#      allowance each left all previous cases green. A tolerance that no test
+#      asserts is a comment, not behaviour.
+#
+#      Each of these .env files declares the token ONLY in the tolerated shape,
+#      with a strong value, and must therefore PASS. If the tolerance is dropped
+#      the guard stops seeing a declaration, falls through to a file with no old
+#      name either, and rejects.
+assert_guard "an INDENTED declaration is still a declaration" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""    CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'
+
+assert_guard "an 'export'-prefixed declaration is still a declaration" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""export CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'
+
+# NB the third "tolerance" is NOT reached, and that is the point of this case.
+# `docker compose` accepts `NAME =value`; bash does not, and `source` fails on it
+# with `NAME: command not found` (status 127). The source-failure guard therefore
+# fires FIRST, before any token resolution, and names the real problem -- a
+# better diagnosis than "is not set" would have been. MEASURED against the guard
+# at b4cdfa6, before this rename: identical rejection, so it is pre-existing
+# behaviour of the source step rather than anything the #430 resolution
+# introduced. Pinned here so a future change to the source step cannot silently
+# turn a malformed .env into a token-resolution puzzle.
+assert_guard "a space before '=' fails at SOURCE, naming the file" \
+    1 \
+    "failed to source" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN =fixture-client-token-not-a-real-secret"$'\n'
 
 # 11ab. ...and an exact-match partner: a LONGER name must not satisfy a query for
 #       the shorter one. Without the trailing `=` in the pattern,

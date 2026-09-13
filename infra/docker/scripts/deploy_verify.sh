@@ -199,7 +199,8 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # This script is not a boot gate; its job is to find a bearer to probe WITH, and
 # refusing to run because an unrelated variable was exported empty would help
 # nobody. The gate that must agree with Settings exactly is
-# infra/docker/scripts/_env_guard.sh, which uses `${VAR+set}` for that reason.
+# infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE
+# for that reason -- the same source the container is fed from.
 DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
 if [[ -z "${DEMO_KEY}" ]]; then
     DEMO_KEY="$(read_env CITEVYN_PUBLIC_CLIENT_TOKEN)"
