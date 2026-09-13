@@ -64,6 +64,21 @@ def _like_literal(token: str) -> str:
     here. The floor may therefore decline to count a token the row query matched
     only through a wildcard — the conservative direction, and exactly what the
     Python half has always done.
+
+    ONE DIALECT EXCEPTION, stated because the equivalence above is otherwise
+    unqualified and would be wrong. ``ILIKE`` on aiosqlite is rendered as
+    ``lower() LIKE lower()``, and SQLite's ``lower()`` is ASCII-only — so for
+    NON-ASCII text ("MODÈLE") the two halves still disagree there, in the
+    SQL-stricter direction. Postgres, where ``lower()`` is locale-aware, agrees;
+    production runs Postgres and the SQLite URL is set only by the test
+    conftest, so this is a property of the hermetic harness, not of the product.
+    Escaping the wildcards is what removes the disagreement that DID reach
+    production inputs (``claude_code``, ``100%``).
+
+    The escape character is doubled BEFORE the wildcards are prefixed. That
+    order matters: prefixing first would insert escape characters that the
+    doubling pass would then double, corrupting every pattern containing ``%``
+    or ``_``.
     """
     out = token.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
     for wildcard in ("%", "_"):

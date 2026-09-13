@@ -367,17 +367,25 @@ async def test_the_uncapped_floor_is_not_consulted_when_the_window_is_not_full(
 
     monkeypatch.setattr(KeywordRetriever, "_tokens_present_in_scope", _spy)
 
-    # 3 matching chunks against limit=20: the window cannot be full, and the
+    # Precondition, NOT decoration. ``retrieve`` returns early at
+    # ``if not rows: return []`` when nothing matched, and on that path the
+    # rescue is unreachable whatever the guard says — so ``calls == []`` below
+    # would pass with the guard deleted. Prove the query really does match a
+    # SHORT window first.
+    window = await arm.retrieve("model", product_area="claude_code", limit=20)
+    assert 0 < len(window) < 20, f"need a non-empty window short of the cap, got {len(window)}"
+
+    # Same 3 matching chunks against limit=20: the window cannot be full, and the
     # query fails the floor (only "model" is present), so this is exactly the
     # case an unguarded rescue would reach.
     assert await arm.retrieve("absent model", product_area="claude_code", limit=20) == []
     assert calls == [], f"the rescue must not run on a short window, got {calls}"
 
     # Partner proving the spy is wired to something that DOES get called —
-    # otherwise the emptiness above would be vacuous.
+    # otherwise the emptiness above would be vacuous. (The patch installed above
+    # is still in force; re-patching would be a no-op.)
     await _seed_capped_area(session, chunks=21, index_version="v-370b")
     full = KeywordRetriever(session, active_index_version="v-370b")
-    monkeypatch.setattr(KeywordRetriever, "_tokens_present_in_scope", _spy)
     assert await full.retrieve("sandbox model", product_area="claude_code", limit=20)
     assert calls == [{"sandbox", "model"}], calls
 
@@ -516,10 +524,12 @@ async def test_the_sql_floor_matches_wildcards_and_the_escape_char_literally(ses
       an escape sequence: ``x/y`` becomes literal ``xy``, matching text that never
       contained the slash and missing text that did.
 
-    RED if ``escape=_LIKE_ESCAPE`` is dropped, or ``_like_literal`` stops
-    doubling ``_LIKE_ESCAPE``.
+    RED if ``escape=_LIKE_ESCAPE`` is dropped, if ``_like_literal`` stops
+    doubling ``_LIKE_ESCAPE``, or if it stops escaping EITHER wildcard — ``%``
+    on its own was unpinned until a reviewer mutated ``("%", "_")`` to
+    ``("_",)`` and nothing in the suite noticed.
     """
-    await _seed_literal_corpus(session, index_version="v-lit", tail="a_b and x/y")
+    await _seed_literal_corpus(session, index_version="v-lit", tail="a_b and x/y and 100% off")
     arm = KeywordRetriever(session, active_index_version="v-lit")
 
     # Positive: the tokens ARE present literally, past the window, so the SQL
@@ -530,8 +540,11 @@ async def test_the_sql_floor_matches_wildcards_and_the_escape_char_literally(ses
     assert await arm.retrieve("x/y widget", product_area="claude_code", limit=3), (
         "the escape character itself must be escaped, not read as an escape"
     )
+    assert await arm.retrieve("100% widget", product_area="claude_code", limit=3), (
+        "'%' must be escaped too — and an escaped '%' must still match a literal one"
+    )
     # Negative partner in the same corpus: a token that is genuinely absent is
-    # still rejected, so the two passes above are not a floor that says yes to
+    # still rejected, so the passes above are not a floor that says yes to
     # everything.
     assert await arm.retrieve("q_z widget", product_area="claude_code", limit=3) == []
 
@@ -544,6 +557,20 @@ async def test_the_sql_floor_matches_wildcards_and_the_escape_char_literally(ses
     )
     assert await other.retrieve("xy widget", product_area="claude_code", limit=3), (
         "positive control: the chunk carrying 'xy' IS reachable in this scope"
+    )
+
+    # The other direction for '%'. Unescaped, "100%" compiles to the pattern
+    # '%100%%', which matches "100 requests" — the #370 defect family for '%'
+    # instead of '_'. '%' survives the tokenizer ("100%" and "50%off" both keep
+    # it through ``rstrip("?!.,;:")`` and the ``isalnum`` filter), so this is a
+    # reachable input, not a contrived one.
+    await _seed_literal_corpus(session, index_version="v-lit3", tail="100 requests")
+    third = KeywordRetriever(session, active_index_version="v-lit3")
+    assert await third.retrieve("100% widget", product_area="claude_code", limit=3) == [], (
+        "'100 requests' must not satisfy the token '100%' — the unescaped-'%' bug"
+    )
+    assert await third.retrieve("requests widget", product_area="claude_code", limit=3), (
+        "positive control: the chunk carrying '100 requests' IS reachable here"
     )
 
 

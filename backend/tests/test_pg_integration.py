@@ -885,11 +885,15 @@ async def test_the_keyword_arm_answers_the_370_scenario_on_postgres(pg_schema: s
 
     So this runs the real ``KeywordRetriever`` against real Postgres: 21 chunks
     all carrying ``model``, only the last carrying ``sandbox``, at the production
-    cap of 20.
+    cap of 20 — plus a SECOND index version holding a deliberate tie, because
+    the #370 corpus has 21 distinct ``chunk_order`` values and therefore cannot
+    exercise a tiebreaker at all. (An earlier draft of this docstring claimed it
+    could; a reviewer measured that all three ORDER BY mutants SURVIVED against
+    it. The tie fixture below is what makes the claim true.)
 
     RED if the floor is measured over the capped window again (0 hits), if the
-    escape stops working (``a_b`` matching ``axb``), or if the cut stops being
-    the first 20 by ``chunk_order``.
+    escape stops working (``a_b`` matching ``axb``), or if either tiebreaker is
+    dropped from or reversed in the ORDER BY.
     """
     import uuid as _uuid
     from datetime import UTC, datetime
@@ -951,6 +955,69 @@ async def test_the_keyword_arm_answers_the_370_scenario_on_postgres(pg_schema: s
                         content_checksum=f"sha256:pg370-{i}",
                     )
                 )
+
+            # A SECOND index version whose rows tie on every ORDER BY key in
+            # turn, so the tiebreakers are exercised on the production planner
+            # rather than on SQLite's incidental insertion order. Two documents
+            # share chunk_order 0 and 1 (so document_id decides), and within the
+            # LOW document two chunks share chunk_order 0 (so chunk_id decides).
+            # Everything is inserted in the REVERSE of the required order, so an
+            # ORDER BY missing a key cannot land on the right answer by accident.
+            tie_doc_low = _uuid.UUID("11111111-1111-4111-8111-111111111111")
+            tie_doc_high = _uuid.UUID("99999999-9999-4999-8999-999999999999")
+            session.add(
+                IndexVersion(
+                    index_version="v-370tie",
+                    status=IndexStatus.active,
+                    source_version_hash="sha256:pg-370-tie",
+                    created_at=now,
+                    promoted_at=now,
+                )
+            )
+            await session.flush()
+            for tie_doc in (tie_doc_high, tie_doc_low):
+                session.add(
+                    Document(
+                        document_id=tie_doc,
+                        index_version="v-370tie",
+                        source_name="claude_code",
+                        product_area="claude_code",
+                        source_url=f"https://docs.claude.com/{tie_doc}",
+                        title="Ties",
+                        identity_checksum=f"{tie_doc.hex[:20]}",
+                        last_fetched_at=now,
+                        status=DocumentStatus.active,
+                    )
+                )
+            await session.flush()
+            # (document_id, chunk_order, chunk_id) of every tie row, in the order
+            # the total ORDER BY must produce. The chunk_ids deliberately
+            # CONTRADICT the document_id order inside each chunk_order group —
+            # the HIGH document's row carries the SMALLEST chunk_id — so sorting
+            # by (chunk_order, chunk_id) alone produces a different sequence.
+            # Without that contradiction the document_id key is not load-bearing
+            # and dropping it survives; measured, on this Postgres.
+            tie_rows = [
+                (tie_doc_low, 0, _uuid.UUID("00000000-0000-4000-8000-00000000000b")),
+                (tie_doc_low, 0, _uuid.UUID("00000000-0000-4000-8000-00000000000c")),
+                (tie_doc_high, 0, _uuid.UUID("00000000-0000-4000-8000-00000000000a")),
+                (tie_doc_low, 1, _uuid.UUID("00000000-0000-4000-8000-00000000000e")),
+                (tie_doc_high, 1, _uuid.UUID("00000000-0000-4000-8000-00000000000d")),
+            ]
+            for n, (tie_doc, order, chunk_id) in reversed(list(enumerate(tie_rows))):
+                session.add(
+                    Chunk(
+                        chunk_id=chunk_id,
+                        document_id=tie_doc,
+                        product_area="claude_code",
+                        section_path=f"/t{n}",
+                        heading=f"T{n}",
+                        chunk_text=f"Tie {n}: choosing a model for your run.",
+                        context_summary=f"tie {n}",
+                        chunk_order=order,
+                        content_checksum=f"sha256:pg370tie-{n}",
+                    )
+                )
             await session.commit()
 
         async with maker() as session:
@@ -971,5 +1038,18 @@ async def test_the_keyword_arm_answers_the_370_scenario_on_postgres(pg_schema: s
             # Positive control: the literal text IS there, so the emptiness above
             # is the escape and not an unseeded fixture.
             assert await arm.retrieve("axb cxd", product_area="claude_code", limit=20)
+
+            # TOTAL ORDER, on the production planner. Every key is load-bearing
+            # here: chunk_order 0 is shared across both documents (document_id
+            # decides) and twice within the low document (chunk_id decides).
+            tie_arm = KeywordRetriever(session, active_index_version="v-370tie")
+            ordered = await tie_arm.retrieve("model", product_area="claude_code", limit=5)
+            assert [(h.document_id, h.chunk_id) for h in ordered] == [
+                (doc, cid) for doc, _order, cid in tie_rows
+            ], [(str(h.document_id), str(h.chunk_id)) for h in ordered]
+            # And the CUT is deterministic, which is what a total key buys: the
+            # first three are the same three however many more exist.
+            cut = await tie_arm.retrieve("model", product_area="claude_code", limit=3)
+            assert [h.chunk_id for h in cut] == [cid for _d, _o, cid in tie_rows[:3]]
     finally:
         await engine.dispose()
