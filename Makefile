@@ -37,7 +37,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell coverage ci \
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell coverage coverage-gate ci \
         build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
@@ -68,10 +68,15 @@ test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLi
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
 
-coverage: ## Measure backend line coverage (REPORT only — never a gate; see #308)
+coverage: ## Measure backend line coverage (report; `make coverage-gate` compares it)
 	@# Deliberately mirrors `make test` so the number describes the suite people
 	@# actually run: same marker exclusion, same env -u, same in-memory SQLite.
 	@# A different invocation would measure a different program.
+	@# The rm is load-bearing, not tidiness: pytest-cov writes NO file when coverage
+	@# collects nothing AND does not fail, so an earlier report left here would be
+	@# read by `make coverage-gate` as if it were this run's. Deleting first means
+	@# "no measurement" always surfaces as "no report".
+	rm -f backend/artifacts/coverage.xml
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q \
 		--cov=app --cov-report=term-missing:skip-covered --cov-report=xml:artifacts/coverage.xml
@@ -80,6 +85,15 @@ coverage: ## Measure backend line coverage (REPORT only — never a gate; see #3
 	@echo "are CHECKED: a line in promotion_eval.py once measured 97% covered and"
 	@echo "still left 42 tests green when deleted. Use this to find code no test"
 	@echo "touches at all; use mutation testing to find code no test defends."
+
+coverage-gate: coverage ## Fail if uncovered lines went UP vs backend/coverage-baseline.json (#321)
+	@# The same comparison CI runs, on the same script and the same artifact.
+	@# Kept a SEPARATE target rather than folded into `coverage`: a local checkout
+	@# holding a `backend/.env` has several tests fail for an environment reason
+	@# unrelated to any change, which leaves lines unreached and would red this
+	@# gate for nobody's mistake. `coverage` therefore stays the plain report and
+	@# this is the opt-in parity check.
+	cd backend && uv run python scripts/coverage_baseline.py
 
 test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scripts)
 	@# Globs deliberately — a hardcoded list is how the suites drifted in the first

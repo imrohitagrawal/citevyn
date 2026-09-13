@@ -1,0 +1,13 @@
+{
+  "missed": 182,
+  "covered": 5403,
+  "valid": 5585,
+  "exclusion_pragmas": 7,
+  "exclusion_pragmas_note": "How many `# pragma: no cover` / `no branch` lines exist under backend/app/. A pragma removes its line from `lines-valid` ENTIRELY, so uncovered code added under one is invisible to the `missed` count above -- proven: a genuinely untested helper moved missed 182 -> 185 and failed the gate, and the same helper with a pragma on its def line measured 182 again and PASSED. So suppressions get the same treatment as uncovered lines: a recorded count that must not increase. Not a ban -- all seven are defensible `except Exception:` on shutdown/defensive paths. Enforced by tests/test_coverage_gate_is_a_baseline_not_a_floor.py, not by the gate script, which sees only the report.",
+  "measured_at_sha": "b5a3c1036c44e59575f956224af75aad36c8578f",
+  "measured_on": "2026-09-13",
+  "gate": "missed must not INCREASE. Not a percentage floor -- see #308 and #321.",
+  "how_it_was_measured": "The root lines-covered/lines-valid attributes of the backend-coverage artifact from six consecutive successful `main` CI runs (34447917136, 34449722396, 34710928493, 34715324929, 34721501302, 34722073332), every one of them bit-identical at covered=5403 / valid=5585, and reproduced locally on a clean worktree with no backend/.env via `make coverage` at the SHA above. `lines-valid` drifts as app/ grows (5562 -> 5567 -> 5585 across the runs before those), which is why the gate is the integer count and not the percentage.",
+  "why_covered_and_valid_go_stale_and_missed_does_not": "Only `missed` is compared. `covered` and `valid` are the pair AS MEASURED AT measured_at_sha, kept so a reader can reproduce the number, and they are EXPECTED to drift. Demonstrated on this very branch: merging PR #428 (171 changed lines in app/retrieval/keyword.py, unrelated to coverage) moved the measurement to covered=5416 / valid=5598 -- both up by 13 -- and left missed at 182 exactly. A percentage floor would have moved; the count did not. Do not refresh these two fields on every merge; refresh them only when you deliberately change `missed`.",
+  "how_to_change_it": "Lowering it locks in an improvement and needs no justification. RAISING it means shipping lines no test executes: do it in the same commit as the code, and say in the commit message which lines and why they are not testable here."
+}
