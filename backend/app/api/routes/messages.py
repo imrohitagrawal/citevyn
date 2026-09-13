@@ -12,7 +12,7 @@ Implements the two endpoints defined in ``docs/API_SPEC.md`` §5:
   single message for citation hydration on the client.
 
 Both endpoints require a valid bearer token via
-:func:`app.core.security.require_demo_api_key`. Ownership is checked
+:func:`app.core.security.require_public_client_token`. Ownership is checked
 against a separate, per-visitor principal resolved from a cookie
 (:func:`app.core.auth_sessions.resolve_principal`, ADR-0004 PR 3) — see
 ``app.api.routes.sessions`` for the full rationale.

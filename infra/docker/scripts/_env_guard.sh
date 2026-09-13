@@ -36,10 +36,16 @@
 #     on the prod host)
 #   - asserts CITEVYN_PUBLIC_HOST, CITEVYN_DATABASE_URL and a
 #     non-stub CITEVYN_LLM_PROVIDER are set
-#   - asserts CITEVYN_DEMO_API_KEY passes the same weak-secret
+#   - asserts the public client token passes the same weak-secret
 #     test the app applies in production (non-empty, not the
 #     published ``local-demo-key``, at least 16 chars) — see
-#     Settings._is_weak_secret in backend/app/core/config.py
+#     Settings._is_weak_secret in backend/app/core/config.py.
+#     Read from CITEVYN_PUBLIC_CLIENT_TOKEN, falling back to the
+#     deprecated CITEVYN_DEMO_API_KEY (#430) only when the new name
+#     is NOT SET AT ALL — the same rule pydantic's AliasChoices
+#     applies, so the guard cannot bless a value the app would not
+#     use. An empty CITEVYN_PUBLIC_CLIENT_TOKEN= is PRESENT and is
+#     therefore rejected, exactly as Settings rejects it
 #   - exits non-zero with a remediation message if any fails
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -243,7 +249,7 @@ if ! (
         echo "       Set CITEVYN_LLM_PROVIDER=gemini (or anthropic)." >&2
         exit 1
     fi
-    # CITEVYN_DEMO_API_KEY is the bearer every public /api/v1 request
+    # The public client token is the bearer every public /api/v1 request
     # carries. ``infra/docker/prod.env.example`` ships it EMPTY, and
     # Settings._is_weak_secret (backend/app/core/config.py) rejects an
     # empty / default / short value once CITEVYN_ENVIRONMENT=production
@@ -289,8 +295,71 @@ if ! (
             exit 1
         fi
     }
-    # The bearer every public /api/v1 request carries.
-    _assert_strong_key CITEVYN_DEMO_API_KEY  local-demo-key  "${CITEVYN_DEMO_API_KEY:-}"
+    # The bearer every public /api/v1 request carries (#430).
+    #
+    # Both spellings accepted, NEW ONE WINS, mirroring the AliasChoices order in
+    # Settings.public_client_token. A guard that resolved them the other way round
+    # would test a value the app is not going to use, and pass a deploy that then
+    # crash-loops -- which is the exact failure this whole block exists to prevent.
+    #
+    # PRESENCE, not non-emptiness -- `${VAR+set}` and NOT `-n "${VAR:-}"`.
+    #
+    # This is the whole finding of the #430 review round, reproduced by three
+    # independent reviewers and then by hand. pydantic's ``AliasChoices`` selects
+    # the first alias PRESENT in the environment, and an exported-but-empty
+    # variable IS present: with ``CITEVYN_PUBLIC_CLIENT_TOKEN=`` and a strong
+    # ``CITEVYN_DEMO_API_KEY=`` in the same .env, ``Settings()`` raises
+    # ``string_too_short`` and never consults the old value at all.
+    #
+    # An `-n` test treats empty as absent, so it fell through to the strong old
+    # value and reported PASS -- MEASURED: guard exit 0, `docker compose config`
+    # injecting ``CITEVYN_PUBLIC_CLIENT_TOKEN: ""``, and ``Settings()`` refusing to
+    # construct from that same environment. That is precisely the "guard green,
+    # api dies at boot AFTER the 60s health poll has burned" failure this whole
+    # block exists to pre-empt, and the ingredient ships: prod.env.example
+    # declares the new name EMPTY, so an operator who copies the template and
+    # pastes back only their old line lands exactly here.
+    #
+    # `${VAR+set}` is true for a variable that is set to anything INCLUDING the
+    # empty string, and is bash 3.2 clean (macOS). With it the guard agrees with
+    # ``Settings`` on all nine combinations of {unset, empty, value}^2 -- MEASURED
+    # side by side against a real Settings(), and pinned by cases 11o-11u in
+    # tests/shell/test_env_guard.sh.
+    #
+    # RECORDED SO IT IS NOT READ AS A COVERAGE HOLE: `+set` on the SECOND branch
+    # (the deprecated name) is a STATEMENT OF INTENT, not a behavioural
+    # difference, and a mutant reverting it to `:-` SURVIVES BY DESIGN. The old
+    # name is the LAST candidate, so when it is empty the `elif` and the `else`
+    # produce the same `_token_value=""` and the same rejection. Measured across
+    # old = {unset, empty, whitespace, default, short, strong} with the new name
+    # unset: byte-identical output and exit code under both spellings. It is
+    # written `+set` for symmetry with the branch above, where the difference IS
+    # behavioural and IS killed by case 11s.
+    #
+    # The NAME reported on failure is whichever one supplied the value, so the
+    # remediation points at the line the operator has to edit rather than at the
+    # variable this script would prefer they used.
+    if [[ -n "${CITEVYN_PUBLIC_CLIENT_TOKEN+set}" ]]; then
+        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
+        _token_value="${CITEVYN_PUBLIC_CLIENT_TOKEN}"
+    elif [[ -n "${CITEVYN_DEMO_API_KEY+set}" ]]; then
+        _token_name=CITEVYN_DEMO_API_KEY
+        _token_value="${CITEVYN_DEMO_API_KEY}"
+    else
+        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
+        _token_value=""
+    fi
+    # The VALUE is chosen by presence above, and that selection is load-bearing --
+    # it is what makes the guard agree with Settings. The NAME is only what the
+    # error message says, and for an EMPTY value the supplier is the wrong thing
+    # to name: there is no value to correct, so the operator needs to be told
+    # which variable to SET, and that is never the one being retired. A non-empty
+    # but weak value still reports its supplier, because there the message is
+    # pointing at a line that exists and has to be edited.
+    if [[ -z "${_token_value}" ]]; then
+        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
+    fi
+    _assert_strong_key "${_token_name}" local-demo-key "${_token_value}"
     # The key that can promote an index, read the budget, and inspect jobs.
     _assert_strong_key CITEVYN_ADMIN_API_KEY local-admin-key "${CITEVYN_ADMIN_API_KEY:-}"
 ); then

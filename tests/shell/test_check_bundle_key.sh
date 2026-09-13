@@ -9,9 +9,9 @@
 # measured.
 #
 # HOW THE FIXTURES WERE OBTAINED (2026-09-06, `vite build` at 0146c56):
-#   VITE_API_DEMO_KEY unset      -> bundle contains  ,Cf="local-demo-key"
-#   VITE_API_DEMO_KEY=""         -> bundle contains  ,Cf=""
-#   VITE_API_DEMO_KEY=<a value>  -> bundle contains  ,Cf="<a value>"
+#   no token build arg        -> bundle contains  ,Cf="local-demo-key"
+#   VITE_API_DEMO_KEY=""      -> bundle contains  ,Cf=""
+#   a token build arg=<value> -> bundle contains  ,Cf="<a value>"
 # and the corresponding `docker build --build-arg VITE_API_DEMO_KEY=""`
 # leaves the ARG EMPTY rather than falling back to its default, which is why
 # the middle row exists at all. `Cf` is a minifier-assigned name and changes
@@ -161,11 +161,65 @@ else
 fi
 
 # unset, not merely empty
-OUT="$(bundle_with "${GOOD_KEY}" | env -u CITEVYN_DEMO_API_KEY "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${GOOD_KEY}" | env -u CITEVYN_DEMO_API_KEY -u CITEVYN_PUBLIC_CLIENT_TOKEN "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "an UNSET expected key FAILS"
 else
     fail "an unset expected key passed — the gate is vacuous"
+fi
+
+# ── 5b. BOTH #430 spellings (see docs/DEPLOY_FLY.md §3.1). The checker has to
+#       work either side of the Fly secret rename, and it has to resolve the two
+#       the SAME WAY the server does — a checker that disagreed with Settings
+#       about which value is live would report [PASS] on a bundle the server
+#       401s, which is the precise failure this script exists to prevent.
+NEW_KEY="new-name-key-0123456789abcdef"
+OLD_KEY="old-name-key-0123456789abcdef"
+
+OUT="$(bundle_with "${NEW_KEY}" | env -u CITEVYN_DEMO_API_KEY CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 0 ]]; then
+    pass "CITEVYN_PUBLIC_CLIENT_TOKEN alone is read (the new name)"
+else
+    fail "the new name was not read (rc=${RC}): ${OUT}"
+fi
+
+OUT="$(bundle_with "${OLD_KEY}" | env -u CITEVYN_PUBLIC_CLIENT_TOKEN CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 0 ]]; then
+    pass "CITEVYN_DEMO_API_KEY alone is still read (the deprecated name)"
+else
+    fail "the deprecated name stopped being read (rc=${RC}): ${OUT}"
+fi
+
+# PRECEDENCE, asserted in the direction that can FAIL. Both set, and the bundle
+# carries only the OLD value: the checker must resolve the NEW one and report a
+# mismatch. Asserting the pass direction instead (bundle carries the new value)
+# would stay green under either precedence, since the old value would simply be
+# ignored -- proving nothing.
+OUT="$(bundle_with "${OLD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 1 ]]; then
+    pass "the NEW name wins when both are set (a stale bundle is caught)"
+else
+    fail "the checker read the deprecated name while both were set — it would bless a bundle the server rejects (rc=${RC}): ${OUT}"
+fi
+
+# ...and its non-vacuity partner: the same pair over a bundle that DOES carry
+# the new value must pass, or the case above would be satisfied by a checker
+# that rejects every both-set invocation.
+OUT="$(bundle_with "${NEW_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 0 ]]; then
+    pass "both set, bundle carries the new value -> PASS (partner)"
+else
+    fail "a correct both-set invocation was rejected (rc=${RC}): ${OUT}"
+fi
+
+# An EMPTY new name must FALL THROUGH to the old one, not short-circuit the
+# whole check into its own [FAIL]. This is the state of any .env that declares
+# the new variable without filling it in, and the frontend's `||` does the same.
+OUT="$(bundle_with "${OLD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+if [[ ${RC} -eq 0 ]]; then
+    pass "an EMPTY new name falls through to the deprecated one"
+else
+    fail "an empty new name short-circuited the fallback (rc=${RC}): ${OUT}"
 fi
 
 # ── 6. An empty bundle (a 404 fetched into the pipe) must FAIL, not read as
@@ -223,7 +277,8 @@ fi
 # PINNED EXACTLY, not a floor. Under `>= 14` with 16 running, two whole cases
 # could be deleted and the suite still printed "all passed" — demonstrated in
 # review. Bump this deliberately when you add a case.
-_EXPECTED_ASSERTIONS=20
+# 20 before #430; +5 for the two-name resolution block (section 5b).
+_EXPECTED_ASSERTIONS=25
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."
     echo "         A case was added or removed: update _EXPECTED_ASSERTIONS on purpose."

@@ -105,15 +105,15 @@ cd backend && uv run uvicorn app.main:app --reload
 curl -s http://localhost:8000/health
 
 # 6. Ask a question. Asking is a two-step flow: open a session, then
-#    post a message to it. Use whatever key matches your
-#    CITEVYN_DEMO_API_KEY; .env.example ships ``local-demo-key``.
+#    post a message to it. Use whatever value matches your
+#    CITEVYN_PUBLIC_CLIENT_TOKEN; .env.example ships ``local-demo-key``.
 SESSION_ID=$(curl -s -X POST http://localhost:8000/v1/sessions \
-     -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+     -H "Authorization: Bearer $CITEVYN_PUBLIC_CLIENT_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"channel":"chat"}' | jq -r .session_id)
 
 curl -s -X POST "http://localhost:8000/v1/sessions/$SESSION_ID/messages" \
-     -H "Authorization: Bearer $CITEVYN_DEMO_API_KEY" \
+     -H "Authorization: Bearer $CITEVYN_PUBLIC_CLIENT_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"message":"How do I install Claude Code?","answer_style":"short"}' | jq
 ```
@@ -137,9 +137,9 @@ build if a new setting arrives in neither. The production subset lives in
 
 | Var                              | Required        | Purpose                                           |
 |----------------------------------|-----------------|---------------------------------------------------|
-| `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or under-16-character demo/admin key (those two keys only). `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
+| `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or under-16-character public client token / admin key (those two only). `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
 | `CITEVYN_DATABASE_URL`           | yes             | Async SQLAlchemy URL (Postgres or SQLite)         |
-| `CITEVYN_DEMO_API_KEY`           | yes             | `Authorization: Bearer` token for `/v1/*` demo routes |
+| `CITEVYN_PUBLIC_CLIENT_TOKEN`    | yes             | `Authorization: Bearer` token for `/v1/*` demo routes. PUBLIC by design — baked into the browser bundle, so every visitor can read it; it is a CSRF guard plus a rate-limit turnstile, not an identity control. Renamed from `CITEVYN_DEMO_API_KEY` in #430, which is still read during the migration |
 | `CITEVYN_ADMIN_API_KEY`          | yes             | `X-Admin-API-Key` header value for `/v1/admin/*` (not bearer) |
 | `CITEVYN_REDIS_URL`              | recommended     | Enables the Redis rate limiter (production)       |
 | `CITEVYN_LLM_PROVIDER`           | optional        | `stub` (default) or `anthropic`                   |
@@ -253,7 +253,7 @@ citevyn/
 
 ## 8. HTTP API
 
-Demo routes authenticate with `Authorization: Bearer $CITEVYN_DEMO_API_KEY`;
+Demo routes authenticate with `Authorization: Bearer $CITEVYN_PUBLIC_CLIENT_TOKEN`;
 admin routes use the `X-Admin-API-Key` header (**not** bearer).
 
 | Endpoint                    | Auth   | Purpose                                       |

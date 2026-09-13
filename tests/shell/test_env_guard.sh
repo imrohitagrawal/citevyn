@@ -25,7 +25,8 @@
 #  10. CITEVYN_ACME_EMAIL='ops@example.com' (single-quoted) is accepted
 #      with quotes stripped — regression for the bash-quote-preservation
 #      bypass
-#  11. CITEVYN_DEMO_API_KEY weak-secret check (#200): empty / absent /
+#  11. public client token weak-secret check (#200), under BOTH #430 names:
+#      empty / absent /
 #      'local-demo-key' / case-variant / trailing-space / quoted / 15-char
 #      are rejected; 16-char, whitespace-padded strong, and a strong key
 #      merely CONTAINING the default are accepted
@@ -46,10 +47,10 @@ GUARD="${REPO_ROOT}/infra/docker/scripts/_env_guard.sh"
 # Reject-cases do NOT need this: the harness also asserts the stderr substring,
 # so a wrong-reason rejection already fails.
 #
-# CITEVYN_DEMO_API_KEY joined this set when the guard grew the weak-secret check
+# The public client token joined this set when the guard grew the weak-secret check
 # that mirrors Settings._is_weak_secret (#200). The value below is 32 hex chars,
 # i.e. what ``openssl rand -hex 16`` produces, so it clears the 16-char floor.
-REST_OK="CITEVYN_PUBLIC_HOST=citevyn.example.com"$'\n'"CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:s3cret@db:5432/citevyn"$'\n'"CITEVYN_LLM_PROVIDER=gemini"$'\n'"CITEVYN_DEMO_API_KEY=fixture-demo-key-not-a-real-secret"$'\n'
+REST_OK="CITEVYN_PUBLIC_HOST=citevyn.example.com"$'\n'"CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:s3cret@db:5432/citevyn"$'\n'"CITEVYN_LLM_PROVIDER=gemini"$'\n'"CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'
 
 # The same prefix WITHOUT the demo key, for the demo-key cases: each supplies its
 # own CITEVYN_DEMO_API_KEY line. Sourcing sets the variable, so a fixture that
@@ -256,8 +257,8 @@ assert_guard ".env with stray non-zero command is rejected" \
     "failed to source" \
     "POSTGRES_PASSWORD=realprodsecret"$'\n'"CITEVYN_ADMIN_API_KEY=fixture-admin-key-not-a-real-secret"$'\n'"CITEVYN_ACME_EMAIL=ops@example.com"$'\n'"false"$'\n'
 
-# ─────────────────────── 11: CITEVYN_DEMO_API_KEY (#200) ───────────────────
-# prod.env.example ships CITEVYN_DEMO_API_KEY empty and the app rejects a weak
+# ─────────────── 11: the public client token (#200, renamed in #430) ───────
+# prod.env.example ships the token empty and the app rejects a weak
 # value once CITEVYN_ENVIRONMENT=production (which compose pins). Before #200
 # the guard did not look at it at all, so a template-copying operator sailed
 # through, deploy.sh burned its 60s health poll, and the real cause
@@ -267,15 +268,27 @@ assert_guard ".env with stray non-zero command is rejected" \
 # (case- and whitespace-insensitive) / under 16 chars are all rejected.
 
 # 11a. Absent entirely — the literal prod.env.example-minus-the-field case.
-assert_guard "missing CITEVYN_DEMO_API_KEY is rejected" \
+# The message must name the NEW variable: an operator who has set NEITHER should
+# be sent to the name they are supposed to use from now on, not the one being
+# retired. Cases 11c-11n below all feed the value in under the DEPRECATED name and
+# still expect full validation, which is what proves the old spelling has not
+# quietly stopped being checked; 11o-11u cover the new name, the precedence, and
+# the empty-vs-unset distinction that pydantic draws and an `-n` test does not.)
+assert_guard "missing public client token is rejected" \
     1 \
-    "CITEVYN_DEMO_API_KEY is not set" \
+    "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
     "${BASE_OK}${REST_NO_DEMO}"
 
 # 11b. Present but empty — exactly what prod.env.example ships.
+assert_guard "empty CITEVYN_PUBLIC_CLIENT_TOKEN= is rejected" \
+    1 \
+    "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN="$'\n'
+
+# 11b-ii. The DEPRECATED name, present but empty, is the same case.
 assert_guard "empty CITEVYN_DEMO_API_KEY= is rejected" \
     1 \
-    "CITEVYN_DEMO_API_KEY is not set" \
+    "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
     "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY="$'\n'
 
 # 11c. The publicly-known default from the open-source repo.
@@ -377,6 +390,81 @@ assert_guard 'leading-whitespace short key is rejected on length' \
     1 \
     "shorter than the 16-character" \
     "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=\"           abcdef\""$'\n'
+
+# 11o. The NEW name alone is accepted. Without this the whole #430 rename could
+#      ship with the guard reading only the deprecated spelling, and the first
+#      operator to follow docs/DEPLOY_FLY.md §3.1 would be told their freshly-set
+#      secret "is not set" — a red gate on a correct deployment.
+assert_guard "strong CITEVYN_PUBLIC_CLIENT_TOKEN alone is accepted" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'
+
+# 11p. The NEW name is validated, not merely noticed. An implementation that
+#      accepted the new name by SKIPPING the check whenever it was present would
+#      pass 11o and let 'local-demo-key' into production under the new spelling —
+#      which is the rename creating the exact hole #200 closed.
+assert_guard "CITEVYN_PUBLIC_CLIENT_TOKEN=local-demo-key is rejected" \
+    1 \
+    "publicly-known" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN=local-demo-key"$'\n'
+
+# 11q. PRECEDENCE. Both names set, the NEW one weak and the OLD one strong: the
+#      guard must reject, because Settings resolves the new name and the app
+#      would crash-loop. A guard that took "any strong value under any name"
+#      passes this deploy and the api dies at boot — which is precisely the
+#      60s-health-poll failure the whole block exists to pre-empt.
+#      Its mirror is 11r: new strong, old weak, must be ACCEPTED.
+assert_guard "a weak NEW name beats a strong old one (guard follows Settings)" \
+    1 \
+    "publicly-known" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n'"CITEVYN_PUBLIC_CLIENT_TOKEN=local-demo-key"$'\n'
+
+# 11r. The mirror, and the non-vacuity partner for 11q: without it, a guard that
+#      simply rejected every both-names-set .env would pass 11q and block the one
+#      state every machine passes through during the §3.1 cutover.
+assert_guard "a strong NEW name is accepted even when the old one is weak" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY=local-demo-key"$'\n'"CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'
+
+# 11s. EMPTY NEW NAME + STRONG OLD NAME. The regression case, and the one the
+#      first draft of this guard got wrong.
+#
+#      pydantic's AliasChoices picks the first alias PRESENT in the environment,
+#      and an empty variable IS present -- so Settings raises `string_too_short`
+#      and NEVER consults the strong old value. An `-n` presence test in the shell
+#      treats empty as absent, fell through to the old value, and reported PASS.
+#      MEASURED on the first draft: guard exit 0, `docker compose config` injecting
+#      CITEVYN_PUBLIC_CLIENT_TOKEN: "", and Settings() refusing to construct from
+#      that same environment -- a green preflight in front of a crash-looping api,
+#      which is the exact failure mode section 11 exists to pre-empt.
+#
+#      The ingredient SHIPS: infra/docker/prod.env.example declares the new name
+#      empty, so an operator who copies the template and pastes back only their
+#      existing CITEVYN_DEMO_API_KEY line lands here.
+#
+#      RED if the guard goes back to `-n "${VAR:-}"` from `${VAR+set}`.
+assert_guard "empty NEW name is REJECTED even when the old one is strong" \
+    1 \
+    "CITEVYN_PUBLIC_CLIENT_TOKEN is not set" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN="$'\n'"CITEVYN_DEMO_API_KEY=fixture-client-token-not-a-real-secret"$'\n'
+
+# 11t. The partner that stops 11s being satisfied by "reject whenever the new name
+#      is declared at all". Same .env shape, new name FILLED IN: must pass.
+#      Without this, `_token_name=CITEVYN_PUBLIC_CLIENT_TOKEN; _token_value=""`
+#      unconditionally would satisfy 11s and block every correct deployment.
+assert_guard "a declared AND filled-in new name is accepted alongside a strong old one" \
+    0 \
+    "" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_PUBLIC_CLIENT_TOKEN=fixture-client-token-not-a-real-secret"$'\n'"CITEVYN_DEMO_API_KEY=a-different-strong-old-value-here"$'\n'
+
+# 11u. UNSET new + EMPTY old. Settings sees the old name present-and-empty and
+#      raises; the guard must reject too rather than fall through to the default.
+assert_guard "empty OLD name with no new name is rejected" \
+    1 \
+    "is not set" \
+    "${BASE_OK}${REST_NO_DEMO}""CITEVYN_DEMO_API_KEY="$'\n'
 
 # ─────────────── C2b: CITEVYN_ADMIN_API_KEY strength (#200) ───────────────
 # The admin key had the IDENTICAL gap: it was only ever compared against the

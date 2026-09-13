@@ -229,6 +229,41 @@ def _resolved_env_names() -> dict[str, str]:
     return resolved
 
 
+def _accepted_env_names() -> set[str]:
+    """EVERY variable name ``Settings`` will read, primary and deprecated alike.
+
+    ``_resolved_env_names`` returns the ONE name documentation must teach -- the
+    first of a field's ``AliasChoices``, which is by construction the one that
+    wins when several are set. That is the right subject for the coverage rule
+    and the wrong subject for the reverse rule.
+
+    The reverse rule asks "does this documented name read anything?". A field
+    mid-rename reads two: ``public_client_token`` accepts
+    ``CITEVYN_PUBLIC_CLIENT_TOKEN`` and, during the #430 migration, the
+    deprecated ``CITEVYN_DEMO_API_KEY``. Writing the old spelling down -- which
+    an operator running the old name NEEDS to find -- is not the
+    ``CITEVYN_LLM_API_KEY`` failure this guard exists to catch: that name read
+    NOTHING, and this one reads the same field.
+
+    Still a closed set: a name in neither this set nor ``_NON_SETTINGS_VARS``
+    fails, and ``test_the_alias_set_is_not_everything`` proves the widening did
+    not turn the rule into a tautology.
+
+    ``populate_by_name=True`` makes pydantic-settings append the FIELD NAME to
+    the alias list, so the raw names are filtered to the ``CITEVYN_``-prefixed
+    ones -- documentation never names a field, and admitting ``public_client_token``
+    as a "variable" would excuse a lowercase typo in a template.
+    """
+    source = EnvSettingsSource(Settings)
+    names: set[str] = set()
+    for field_name, field in Settings.model_fields.items():
+        for info in source._extract_field_info(field, field_name):  # noqa: SLF001
+            upper = info[1].upper()
+            if upper.startswith("CITEVYN_"):
+                names.add(upper)
+    return names
+
+
 def _declared_names(path: Path) -> set[str]:
     """Every ``CITEVYN_*`` variable DECLARED in ``path``.
 
@@ -527,7 +562,7 @@ def test_an_exempted_field_is_not_also_documented() -> None:
     [*(str(d) for d in _ENV_EXAMPLES), str(_README)],
 )
 def test_no_env_example_declares_a_variable_that_does_not_exist(source: str) -> None:
-    real = set(_resolved_env_names().values())
+    real = _accepted_env_names()
     if source == str(_README):
         written = _readme_table_names()
     else:
@@ -541,6 +576,43 @@ def test_no_env_example_declares_a_variable_that_does_not_exist(source: str) -> 
         f"`CITEVYN_ANTHROPIC_API_KEY` was meant.) If it is genuinely a non-Settings "
         f"variable, add it to _NON_SETTINGS_VARS with its consumer."
     )
+
+
+def test_the_alias_set_is_a_superset_of_the_primary_names() -> None:
+    """Partner: ``_accepted_env_names`` must not LOSE a name it used to admit.
+
+    The reverse guard used to read ``_resolved_env_names().values()``. Widening it
+    is only safe if the wider set still contains every primary name; a resolver
+    that returned, say, only deprecated aliases would make the reverse rule pass
+    while the documentation described nothing an operator can set.
+    """
+    primary = set(_resolved_env_names().values())
+    accepted = _accepted_env_names()
+    assert primary <= accepted, f"primary names missing from the alias set: {primary - accepted}"
+
+
+def test_the_alias_set_admits_the_deprecated_token_name_and_not_an_invented_one() -> None:
+    """The widening is scoped to names ``Settings`` genuinely reads (#430).
+
+    RED if ``public_client_token`` loses its ``CITEVYN_DEMO_API_KEY`` alias while
+    docs still teach it, and RED if ``_accepted_env_names`` ever degenerates into
+    "any CITEVYN_* name", which would make the reverse guard a tautology and let
+    the ``CITEVYN_LLM_API_KEY`` class of bug straight back in.
+    """
+    accepted = _accepted_env_names()
+    assert "CITEVYN_PUBLIC_CLIENT_TOKEN" in accepted
+    assert "CITEVYN_DEMO_API_KEY" in accepted, (
+        "the deprecated alias is gone, so the #430 migration is over -- delete the "
+        "old spelling from README.md and the env examples in the same change"
+    )
+    assert "CITEVYN_NOT_A_REAL_SETTING" not in accepted
+    assert "CITEVYN_LLM_API_KEY" not in accepted, (
+        "the exact name this guard was built to catch is being admitted again"
+    )
+    # Field names are not variables: a lowercase spelling in a template is a typo
+    # that reads nothing, and must keep failing.
+    assert not any(n != n.upper() for n in accepted)
+    assert "PUBLIC_CLIENT_TOKEN" not in accepted, "an unprefixed name reads nothing"
 
 
 def test_the_non_settings_allowlist_is_not_stale() -> None:

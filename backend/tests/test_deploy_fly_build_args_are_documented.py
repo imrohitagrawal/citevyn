@@ -984,7 +984,8 @@ _CODE_BLOCK_SHAPES: tuple[tuple[str, str, bool], ...] = (
 _ALLOWED_COPIES: tuple[tuple[str, str, str], ...] = (
     (
         "scripts/check_bundle_key.sh",
-        'fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY=\\"\\${DEMO_KEY:?}\\" ...',
+        "fly deploy --app citevyn --build-arg "
+        'VITE_PUBLIC_CLIENT_TOKEN=\\"\\${CLIENT_TOKEN:?}\\" ...',
         "an incident-remediation HINT printed to stderr when the SERVED bundle "
         "carries the wrong key. It deliberately ends in `...` rather than being "
         "runnable, and the line after it sends the operator to DEPLOY_FLY.md "

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -59,12 +59,49 @@ class Settings(BaseSettings):
         env_prefix="CITEVYN_",
         env_file=".env",
         extra="ignore",
+        # Required by ``public_client_token``'s ``validation_alias``. Setting a
+        # validation alias REPLACES the field name as an input key, so without
+        # this ``Settings(public_client_token=...)`` is SILENTLY IGNORED --
+        # measured: the kwarg vanished and the environment value was kept, with
+        # no error. Dozens of tests construct Settings that way. It widens
+        # nothing else: no other field carries an alias.
+        populate_by_name=True,
     )
 
     # --- Application / transport ---
     app_name: str = "CiteVyn Backend"
     environment: str = "local"
-    demo_api_key: str = Field(default="local-demo-key", min_length=1)
+    # The bearer the browser sends on every ``/v1/*`` call. PUBLIC by
+    # construction: ``infra/docker/Dockerfile.api`` bakes it into the JS bundle
+    # at build time, so any visitor can read it out of ``/assets/index-*.js``.
+    # Its job (``docs/SECURITY_MODEL.md`` §"Demo bearer") is a CSRF guard -- a
+    # cross-site request cannot set an ``Authorization`` header -- plus a
+    # turnstile for the rate limiter. It is explicitly NOT an identity control,
+    # and its security property does not depend on secrecy.
+    #
+    # It was called ``CITEVYN_DEMO_API_KEY`` and stored as a Fly *secret*
+    # alongside CITEVYN_ADMIN_API_KEY / _DATABASE_URL / _OPENROUTER_API_KEY /
+    # _RESEND_API_KEY, none of which may ever be disclosed. That mismatch caused
+    # two real errors -- the owner read a bundle-inlined token as a leaked
+    # provider key, and #416 was filed as a production-key exposure -- so the
+    # name now says what it is. See #430.
+    #
+    # BOTH names are accepted, new one first, so this is not a flag day: release
+    # v6 shipped a mismatched build arg and 401'd every browser call for about an
+    # hour (#296). The old name is removed in a follow-up, AFTER the Fly secret
+    # and the deploy build arg have moved. Aliases are written with the
+    # ``CITEVYN_`` prefix spelled out because ``env_prefix`` is NOT re-applied to
+    # an aliased field -- verified against a real Settings() round trip in
+    # ``backend/tests/test_public_client_token_dual_name.py``, which pins all
+    # five resolution cases rather than reasoning about them.
+    public_client_token: str = Field(
+        default="local-demo-key",
+        min_length=1,
+        validation_alias=AliasChoices(
+            "CITEVYN_PUBLIC_CLIENT_TOKEN",
+            "CITEVYN_DEMO_API_KEY",  # deprecated; accepted during the #430 migration
+        ),
+    )
     request_id_header: str = "X-Request-ID"
 
     # --- Admin auth (Slice 8) ---
@@ -94,8 +131,8 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = Field(default=3600, ge=1)
 
     # --- Per-visitor rate-limit identity (#203) ---
-    # The demo API key is SHARED by construction, so it can never identify a
-    # visitor: ``require_demo_api_key`` returns a constant, which meant every
+    # The public client token is SHARED by construction, so it can never identify
+    # a visitor: ``require_public_client_token`` returns a constant, which meant every
     # visitor on earth shared one bucket and 30 questions from one person locked
     # out everyone else for an hour.
     #
@@ -113,7 +150,7 @@ class Settings(BaseSettings):
     # Buckets are keyed on a SALTED HASH of the address — a raw IP is personal
     # data and must not sit in Redis. An unsalted hash of an IPv4 address is
     # trivially reversible (2^32 candidates), so the salt is what makes this
-    # meaningful. Empty means "fall back to the demo API key", which production
+    # meaningful. Empty means "fall back to the public client token", which production
     # already requires to be a strong secret (>=16 chars, not the default).
     rate_limit_key_salt: str = ""
     # Anti-nuisance backstop across ALL visitors, so a distributed source still
@@ -593,26 +630,40 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _reject_default_demo_key_in_production(self) -> "Settings":
+    def _reject_weak_public_client_token_in_production(self) -> "Settings":
         # ``local-demo-key`` is the dev default and is PUBLICLY KNOWN — it is
         # printed in this repo's README, .env.example and test suite. It is also
         # the bearer for every ``/v1/*`` route, i.e. the auth for the entire demo
         # surface, so accepting it in production means the demo is effectively
         # unauthenticated to anyone who has read the source.
         #
-        # The admin key has had this guard since Slice 8; the demo key never did,
-        # and ``infra/docker/prod.env.example`` did not even list the variable —
-        # so a production deploy silently inherited the default. Found by actually
-        # running ``make deploy-verify``, which requires the key and died without it.
+        # The admin key has had this guard since Slice 8; the public client token
+        # never did, and ``infra/docker/prod.env.example`` did not even list the
+        # variable — so a production deploy silently inherited the default. Found by
+        # actually running ``make deploy-verify``, which requires it and died without it.
+        #
+        # THE TOKEN BEING PUBLIC DOES NOT MAKE THIS GUARD OPTIONAL (#430). Publishing
+        # a value is not the same as publishing the SAME value as every other install:
+        # the default is shared by every reader of this repo, so accepting it in
+        # production hands the whole rate-limit turnstile to anyone who has cloned it.
+        # This validator is also what makes a botched rename fail LOUDLY rather than
+        # silently, which is the whole reason the migration can be done in two steps.
+        #
+        # The message names ``CITEVYN_PUBLIC_CLIENT_TOKEN`` — the variable an operator
+        # should SET today — even when the value arrived through the deprecated
+        # ``CITEVYN_DEMO_API_KEY`` alias. Naming the alias would tell a new operator to
+        # set the name being retired.
         if self.environment == "production" and _is_weak_secret(
-            self.demo_api_key, default="local-demo-key"
+            self.public_client_token, default="local-demo-key"
         ):
             raise ValueError(
-                "CITEVYN_DEMO_API_KEY must be set to a strong secret when "
-                "CITEVYN_ENVIRONMENT='production'. The value is "
+                "CITEVYN_PUBLIC_CLIENT_TOKEN must be set to a strong secret when "
+                "CITEVYN_ENVIRONMENT='production' (the deprecated alias "
+                "CITEVYN_DEMO_API_KEY is still read, but set the new name). "
+                "The value is "
                 + (
                     "the publicly-known default 'local-demo-key'"
-                    if self.demo_api_key.strip().lower() == "local-demo-key"
+                    if self.public_client_token.strip().lower() == "local-demo-key"
                     else "shorter than the 16-character minimum"
                 )
                 + " and is not allowed."

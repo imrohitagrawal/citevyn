@@ -16,7 +16,7 @@ the URL nests under a session; sharing one module would couple the
 two concerns unnecessarily.
 
 All three endpoints require a valid bearer token via
-:func:`app.core.security.require_demo_api_key`. Auth failures raise the
+:func:`app.core.security.require_public_client_token`. Auth failures raise the
 standard envelope from :func:`app.core.errors.error_response`, which the
 route does not need to intercept.
 

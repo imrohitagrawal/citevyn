@@ -29,12 +29,17 @@ ADMIN_USER_ID: str = "admin"
 DEMO_USER_ID: str = "demo_user"
 
 
-def require_demo_api_key(
+def require_public_client_token(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> str:
-    """Validate the bearer token and return the demo user id.
+    """Validate the public client token and return the demo user id.
+
+    The token is PUBLIC (baked into the browser bundle). What this buys is a
+    CSRF guard -- a cross-site request cannot set an ``Authorization`` header --
+    and a turnstile for the rate limiter; it is not an identity control. See
+    ``docs/SECURITY_MODEL.md`` and #430.
 
     Auth failures raise the standard envelope via
     :func:`app.core.errors.error_response` so the client can parse
@@ -52,7 +57,7 @@ def require_demo_api_key(
     # ``secrets.compare_digest`` to avoid a timing oracle, matching
     # ``require_admin_api_key`` below — a naive ``==``/``!=`` would let an
     # attacker measure prefix-match time to narrow down the key.
-    if not secrets.compare_digest(credentials.credentials, settings.demo_api_key):
+    if not secrets.compare_digest(credentials.credentials, settings.public_client_token):
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.auth_required,
@@ -112,5 +117,5 @@ __all__ = [
     "ADMIN_USER_ID",
     "DEMO_USER_ID",
     "require_admin_api_key",
-    "require_demo_api_key",
+    "require_public_client_token",
 ]

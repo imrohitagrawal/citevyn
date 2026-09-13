@@ -1,7 +1,7 @@
 """Tests for the OAuth ``Settings`` guards (ADR-0004 PR 12).
 
 Mirrors the existing production-guard test shape (e.g.
-``_reject_default_demo_key_in_production``) rather than introducing a new
+``_reject_weak_public_client_token_in_production``) rather than introducing a new
 pattern.
 """
 
@@ -55,7 +55,7 @@ def test_missing_redirect_base_url_is_rejected_in_production_when_configured() -
                 llm_provider="anthropic",
                 anthropic_api_key="test-key",
                 embedding_provider="stub",
-                demo_api_key="a-strong-demo-key-not-the-default-1234",
+                public_client_token="a-strong-demo-key-not-the-default-1234",
                 admin_api_key="a-strong-admin-key-not-the-default-1234",
                 github_oauth_client_id="id",
                 github_oauth_client_secret="secret",
@@ -70,7 +70,7 @@ def test_redirect_base_url_not_required_in_production_when_no_provider_configure
             llm_provider="anthropic",
             anthropic_api_key="test-key",
             embedding_provider="stub",
-            demo_api_key="a-strong-demo-key-not-the-default-1234",
+            public_client_token="a-strong-demo-key-not-the-default-1234",
             admin_api_key="a-strong-admin-key-not-the-default-1234",
         )
     )
@@ -83,7 +83,7 @@ def test_redirect_base_url_set_satisfies_the_production_guard() -> None:
             llm_provider="anthropic",
             anthropic_api_key="test-key",
             embedding_provider="stub",
-            demo_api_key="a-strong-demo-key-not-the-default-1234",
+            public_client_token="a-strong-demo-key-not-the-default-1234",
             admin_api_key="a-strong-admin-key-not-the-default-1234",
             github_oauth_client_id="id",
             github_oauth_client_secret="secret",
