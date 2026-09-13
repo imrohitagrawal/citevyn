@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import func, select
 
 from app.embeddings import EmbedderIdentity, IndexStampStatus
 from app.guardrails.domain import Domain
@@ -279,12 +280,23 @@ async def test_the_keyword_floor_is_measured_over_every_match_not_the_capped_win
     _from_keyword_on_mismatch``).
 
     RED if ``KeywordRetriever`` measures the floor over the capped rows again.
+
+    It asserts the IDENTITY of the window, not its size. A count alone let a
+    ``chunk_order.desc()`` mutant live: under ``desc`` the window is s1..s20, the
+    ``sandbox`` chunk is INSIDE it, the windowed floor already sees two tokens,
+    and the rescue this test exists to exercise never runs — while ``len(hits)``
+    stays 20 and the test stays green. Naming the rows pins the ascending cut
+    that puts the discriminating chunk out of reach, which is the whole scenario.
     """
     await _seed_capped_area(session, chunks=21)
 
     arm = KeywordRetriever(session, active_index_version="v-370")
     hits = await arm.retrieve("sandbox model", product_area="claude_code", limit=20)
     assert len(hits) == 20, "the arm must keep the rows the query matched"
+    assert [h.section_path for h in hits] == [f"/s{i}" for i in range(20)], (
+        "the window must be the FIRST 20 by chunk_order — a different cut means "
+        "the rescue path was not the thing under test"
+    )
 
     # The consumer, at the production limits (config.py retrieval_top_k=6 /
     # retrieval_max_candidates=20) — the arm zeroing propagated all the way out.
@@ -298,6 +310,265 @@ async def test_the_keyword_floor_is_measured_over_every_match_not_the_capped_win
     )
     assert len(result.hits) == 6
     assert all(h.retrieval_type.value == "keyword" for h in result.hits)
+
+
+async def test_the_rescued_window_excludes_the_chunk_that_justified_it(session) -> None:
+    """The documented residual, pinned so it is CHOSEN and not merely un-noticed.
+
+    The floor is a GATE on the whole result, not a ranking. The token that
+    rescues the query is — in this scenario by construction — in the chunk that
+    sorted past the cap, so it is precisely the chunk NOT returned. The arm hands
+    back 20 ``model`` chunks and no ``sandbox`` chunk.
+
+    Promoting it would be ranking, i.e. D4/D5 of #370, deliberately not built
+    here. RED if a future change starts reordering the window — which is the
+    signal that this residual was addressed and this test should be rewritten,
+    not deleted.
+    """
+    await _seed_capped_area(session, chunks=21)
+    arm = KeywordRetriever(session, active_index_version="v-370")
+    hits = await arm.retrieve("sandbox model", product_area="claude_code", limit=20)
+
+    assert hits, "precondition: the rescue fired and the arm answered"
+    assert not [h for h in hits if "sandbox" in h.chunk_text.lower()], (
+        "the rescuing chunk is past the cap, so it is not in the returned window"
+    )
+    # Partner: the chunk EXISTS and is reachable — the assertion above is not
+    # passing because the fixture forgot to seed it.
+    reachable = await arm.retrieve("sandbox model", product_area="claude_code", limit=21)
+    assert [h for h in reachable if "sandbox" in h.chunk_text.lower()], (
+        "positive control: widening the cap does surface the sandbox chunk"
+    )
+
+
+async def test_the_uncapped_floor_is_not_consulted_when_the_window_is_not_full(
+    session, monkeypatch
+) -> None:
+    """The rescue must not fire when the window came back short of ``limit``.
+
+    Two reasons, and the second is the one with teeth. (1) Cost: the aggregate is
+    a second scan of the scoped corpus, and the whole bound is that it runs only
+    on the path that was about to return nothing. (2) Correctness: ``rows`` IS
+    the entire match set when the window is short, so the Python floor already
+    has the complete answer, and consulting a second implementation of the same
+    predicate can only introduce disagreement.
+
+    RED if the ``len(rows) >= limit`` guard is removed or weakened to ``or``.
+    """
+    await _seed_capped_area(session, chunks=3)
+    arm = KeywordRetriever(session, active_index_version="v-370")
+
+    calls: list[set[str]] = []
+    original = KeywordRetriever._tokens_present_in_scope
+
+    async def _spy(self, tokens, scope):  # type: ignore[no-untyped-def]
+        calls.append(set(tokens))
+        return await original(self, tokens, scope)
+
+    monkeypatch.setattr(KeywordRetriever, "_tokens_present_in_scope", _spy)
+
+    # 3 matching chunks against limit=20: the window cannot be full, and the
+    # query fails the floor (only "model" is present), so this is exactly the
+    # case an unguarded rescue would reach.
+    assert await arm.retrieve("absent model", product_area="claude_code", limit=20) == []
+    assert calls == [], f"the rescue must not run on a short window, got {calls}"
+
+    # Partner proving the spy is wired to something that DOES get called —
+    # otherwise the emptiness above would be vacuous.
+    await _seed_capped_area(session, chunks=21, index_version="v-370b")
+    full = KeywordRetriever(session, active_index_version="v-370b")
+    monkeypatch.setattr(KeywordRetriever, "_tokens_present_in_scope", _spy)
+    assert await full.retrieve("sandbox model", product_area="claude_code", limit=20)
+    assert calls == [{"sandbox", "model"}], calls
+
+
+async def test_both_halves_of_the_floor_read_wildcards_the_same_way(session) -> None:
+    """The Python floor and the SQL floor must agree, or the arm's verdict would
+    depend on ``limit`` — on which of the two happened to run.
+
+    ``_`` is a LIKE wildcard and an ordinary character to Python's ``in``. The
+    query below contains ``_`` in both tokens and the corpus contains neither
+    literally, so the honest answer is "no" at EVERY cap. Before the patterns
+    were escaped, the SQL half said yes (``a_b`` matching ``axb``) and the answer
+    flipped from ``[]`` to a full window as ``limit`` crossed the corpus size.
+
+    Note ``claude_code`` — a real ``product_area`` string users type — carries the
+    same ``_``, so this is not a contrived input.
+
+    RED if ``_like_literal`` stops escaping, or the ``escape=`` argument is
+    dropped.
+    """
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="v-wild",
+            status=IndexStatus.active,
+            source_version_hash="sha256:wild",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc = Document(
+        document_id=uuid.uuid4(),
+        index_version="v-wild",
+        source_name="docs.test",
+        product_area="claude_code",
+        source_url="https://docs.test/wild",
+        title="Wildcards",
+        identity_checksum="sha256:wild-doc",
+        status=DocumentStatus.active,
+        last_fetched_at=now,
+        last_indexed_at=now,
+    )
+    session.add(doc)
+    for i in range(3):
+        session.add(
+            Chunk(
+                chunk_id=uuid.uuid4(),
+                document_id=doc.document_id,
+                product_area="claude_code",
+                section_path=f"/w{i}",
+                heading=f"W{i}",
+                parent_heading=None,
+                # "axb" and "cxd" match '%a_b%'/'%c_d%' under LIKE and match
+                # neither "a_b" nor "c_d" under Python's ``in``.
+                chunk_text=f"Part {i}: axb cxd only.",
+                context_summary=f"w{i}",
+                chunk_order=i,
+                content_checksum=f"sha256:wild-{i}",
+            )
+        )
+    await session.flush()
+
+    arm = KeywordRetriever(session, active_index_version="v-wild")
+    # limit=3 fills the window (rescue path); limit=9 does not (Python path).
+    # Both must give the same verdict.
+    capped = await arm.retrieve("a_b c_d", product_area="claude_code", limit=3)
+    uncapped = await arm.retrieve("a_b c_d", product_area="claude_code", limit=9)
+    assert capped == [] and uncapped == [], (capped, uncapped)
+
+    # Partner: the SAME corpus DOES answer a literal query, so the emptiness
+    # above is the floor's verdict and not an unseeded fixture.
+    assert await arm.retrieve("axb cxd", product_area="claude_code", limit=3)
+
+
+async def _seed_literal_corpus(session, *, index_version: str, tail: str) -> None:
+    """Three ``widget``-only chunks, then one carrying ``tail``.
+
+    The three fill a ``limit=3`` window with the common token alone, so the
+    windowed floor always falls short and the SQL floor is always the half that
+    decides — which is the half under test.
+    """
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version=index_version,
+            status=IndexStatus.active,
+            source_version_hash=f"sha256:{index_version}",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc_id = uuid.uuid4()
+    session.add(
+        Document(
+            document_id=doc_id,
+            index_version=index_version,
+            source_name="docs.test",
+            product_area="claude_code",
+            source_url=f"https://docs.test/{index_version}",
+            title="Literals",
+            identity_checksum=f"sha256:{index_version}-doc",
+            status=DocumentStatus.active,
+            last_fetched_at=now,
+            last_indexed_at=now,
+        )
+    )
+    for i, text in enumerate([*(["widget plain text."] * 3), f"widget {tail} here."]):
+        session.add(
+            Chunk(
+                chunk_id=uuid.uuid4(),
+                document_id=doc_id,
+                product_area="claude_code",
+                section_path=f"/l{i}",
+                heading=f"L{i}",
+                parent_heading=None,
+                chunk_text=text,
+                context_summary=f"l{i}",
+                chunk_order=i,
+                content_checksum=f"sha256:{index_version}-{i}",
+            )
+        )
+    await session.flush()
+
+
+async def test_the_sql_floor_matches_wildcards_and_the_escape_char_literally(session) -> None:
+    """Escaping is only half the job — the escaped pattern must still MATCH.
+
+    Two ways to get this wrong that an absence-only test cannot see, both found
+    by mutating and both fixed by the assertions here:
+
+    * drop ``escape=`` and the pattern ``%a/_b%`` stops meaning "literal ``a_b``"
+      and starts meaning "``a``, a slash, any character, ``b``" — so it matches
+      NOTHING, including text that really does contain ``a_b``. A test that only
+      checks a wildcard query returns ``[]`` is happy either way.
+    * forget to double the escape character and a token containing ``/`` reads as
+      an escape sequence: ``x/y`` becomes literal ``xy``, matching text that never
+      contained the slash and missing text that did.
+
+    RED if ``escape=_LIKE_ESCAPE`` is dropped, or ``_like_literal`` stops
+    doubling ``_LIKE_ESCAPE``.
+    """
+    await _seed_literal_corpus(session, index_version="v-lit", tail="a_b and x/y")
+    arm = KeywordRetriever(session, active_index_version="v-lit")
+
+    # Positive: the tokens ARE present literally, past the window, so the SQL
+    # floor must find them and the arm must answer.
+    assert await arm.retrieve("a_b widget", product_area="claude_code", limit=3), (
+        "an escaped pattern must still match the literal text it stands for"
+    )
+    assert await arm.retrieve("x/y widget", product_area="claude_code", limit=3), (
+        "the escape character itself must be escaped, not read as an escape"
+    )
+    # Negative partner in the same corpus: a token that is genuinely absent is
+    # still rejected, so the two passes above are not a floor that says yes to
+    # everything.
+    assert await arm.retrieve("q_z widget", product_area="claude_code", limit=3) == []
+
+    # The other direction for the escape character: text containing "xy" but NOT
+    # "x/y" must NOT satisfy the token "x/y".
+    await _seed_literal_corpus(session, index_version="v-lit2", tail="xy")
+    other = KeywordRetriever(session, active_index_version="v-lit2")
+    assert await other.retrieve("x/y widget", product_area="claude_code", limit=3) == [], (
+        "'xy' must not satisfy the token 'x/y' — that is the un-doubled escape bug"
+    )
+    assert await other.retrieve("xy widget", product_area="claude_code", limit=3), (
+        "positive control: the chunk carrying 'xy' IS reachable in this scope"
+    )
+
+
+async def test_a_repeated_token_cannot_satisfy_the_two_token_floor(session) -> None:
+    """``distinct_tokens = set(tokens)`` is load-bearing, on BOTH floors.
+
+    The source comment says a repeated content word ("api api") must not satisfy
+    the two-distinct-token floor. Nothing asserted it: de-duping could be dropped
+    and the whole suite stayed green. Demonstrated false acceptance — "gemini
+    gemini credentials" against a chunk carrying only "gemini" returns evidence
+    without de-duping and nothing without it.
+
+    RED if ``set(tokens)`` becomes ``tokens`` in either floor.
+    """
+    await _seed_capped_area(session, chunks=21)
+    arm = KeywordRetriever(session, active_index_version="v-370")
+
+    # "model" repeated is still ONE distinct token, and "absent" is nowhere in
+    # the corpus — so the floor must reject, on the rescue path (window full).
+    assert await arm.retrieve("model model absent", product_area="claude_code", limit=20) == []
+    # ...and on the Python path (window short).
+    assert await arm.retrieve("model model absent", product_area="claude_code", limit=99) == []
+    # Partner: two genuinely distinct present tokens DO pass, so the rejections
+    # above are the dedupe and not a broken fixture.
+    assert await arm.retrieve("model section", product_area="claude_code", limit=20)
 
 
 async def test_the_keyword_floor_stops_stepping_at_the_row_cap(session) -> None:
@@ -316,6 +587,31 @@ async def test_the_keyword_floor_stops_stepping_at_the_row_cap(session) -> None:
     assert sweep == [22, 23, 24, 25, 26, 26], sweep
 
 
+async def _assert_the_scope_rejected_a_real_fixture(session, arm) -> None:
+    """Partner for the three absence-asserting scope tests below.
+
+    Each of them asserts an EMPTY result, and an empty result is what a broken
+    fixture produces too: setting ``chunks=0`` leaves all three passing. So each
+    one also proves, here, that (a) the in-scope rows the rescue was measured
+    over really exist, (b) the diverted ``sandbox`` chunk really exists somewhere,
+    and (c) the query reached the rescue at all — i.e. the window was FULL, which
+    is the only state in which the predicate under test is consulted.
+    """
+    in_scope = await arm.retrieve("model", product_area="claude_code", limit=20)
+    assert len(in_scope) == 20, (
+        "positive control: the 20 in-scope rows the rescue measures over must exist, "
+        "and must fill the window so the rescue is actually reached"
+    )
+    assert not [h for h in in_scope if "sandbox" in h.chunk_text.lower()], (
+        "the diverted chunk must be OUT of this scope — otherwise the test is "
+        "asserting the wrong absence"
+    )
+    total = await session.scalar(
+        select(func.count()).select_from(Chunk).where(Chunk.chunk_text.ilike("%sandbox%"))
+    )
+    assert total == 1, f"positive control: the diverted sandbox chunk exists, got {total}"
+
+
 async def test_the_uncapped_floor_check_stays_inside_the_product_area(session) -> None:
     """The rescue query must carry the SAME scope filters as the capped query.
 
@@ -325,6 +621,10 @@ async def test_the_uncapped_floor_check_stays_inside_the_product_area(session) -
     await _seed_capped_area(session, chunks=21, rare_token_area="gemini_api")
     arm = KeywordRetriever(session, active_index_version="v-370")
     assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+    await _assert_the_scope_rejected_a_real_fixture(session, arm)
+    assert await arm.retrieve("sandbox model", product_area="gemini_api", limit=20), (
+        "positive control: the diverted chunk IS retrievable from its own area"
+    )
 
 
 async def test_the_uncapped_floor_check_stays_inside_the_active_index(session) -> None:
@@ -333,6 +633,11 @@ async def test_the_uncapped_floor_check_stays_inside_the_active_index(session) -
     await _seed_capped_area(session, chunks=21, rare_token_index_version="v-370-building")
     arm = KeywordRetriever(session, active_index_version="v-370")
     assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+    await _assert_the_scope_rejected_a_real_fixture(session, arm)
+    other = KeywordRetriever(session, active_index_version="v-370-building")
+    assert await other.retrieve("sandbox chunk", product_area="claude_code", limit=20) == [], (
+        "the candidate index holds only the one chunk, so its own floor rejects too"
+    )
 
 
 async def test_the_uncapped_floor_check_ignores_deprecated_documents(session) -> None:
@@ -341,6 +646,7 @@ async def test_the_uncapped_floor_check_ignores_deprecated_documents(session) ->
     await _seed_capped_area(session, chunks=21, rare_token_doc_status=DocumentStatus.deprecated)
     arm = KeywordRetriever(session, active_index_version="v-370")
     assert await arm.retrieve("sandbox model", product_area="claude_code", limit=20) == []
+    await _assert_the_scope_rejected_a_real_fixture(session, arm)
 
 
 async def test_the_keyword_arm_orders_by_a_total_key_across_documents(session) -> None:
@@ -351,8 +657,15 @@ async def test_the_keyword_arm_orders_by_a_total_key_across_documents(session) -
 
     Both documents below carry identical ``chunk_order`` values and the
     HIGH-uuid document is inserted FIRST, so an ``ORDER BY chunk_order`` with no
-    tiebreaker returns it first. RED if the ``document_id``/``chunk_id``
-    tiebreaker is removed from the ORDER BY.
+    tiebreaker returns it first. RED if the ``document_id`` tiebreaker is removed
+    from the ORDER BY.
+
+    HONEST LIMIT ON THIS TEST'S BITE: the assertion is correct on any engine, but
+    it goes RED without the tiebreaker only because SQLite happens to return an
+    un-tiebroken tie in insertion order. On Postgres the planner may choose
+    low-first, in which case removing ``document_id`` would survive HERE — which
+    is precisely why the pairing exists with
+    ``test_the_keyword_arm_answers_the_370_scenario_on_postgres``.
     """
     low = uuid.UUID("00000000-0000-4000-8000-000000000001")
     high = uuid.UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
@@ -364,6 +677,71 @@ async def test_the_keyword_arm_orders_by_a_total_key_across_documents(session) -
     hits = await arm.retrieve("model", product_area="claude_code", limit=6)
     assert len(hits) == 6
     assert [h.document_id for h in hits] == [low, high, low, high, low, high]
+
+
+async def test_the_keyword_arm_breaks_a_same_document_tie_on_chunk_id(session) -> None:
+    """``chunk_id`` is the LAST key, and it is reachable: ``chunks`` declares no
+    unique constraint on ``(document_id, chunk_order)``, so two chunks of one
+    document can share a ``chunk_order`` (a half-finished re-ingest does exactly
+    this). Without it the sort is not total and the cap's cut point is again the
+    planner's choice.
+
+    Every chunk below is in ONE document at ``chunk_order`` 0, so ``chunk_order``
+    and ``document_id`` are both exhausted and only ``chunk_id`` can order them.
+    The rows are inserted in DESCENDING id order, so insertion order and the
+    required order disagree.
+
+    RED if ``Chunk.chunk_id.asc()`` is dropped from the ORDER BY or reversed.
+    """
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="v-tie",
+            status=IndexStatus.active,
+            source_version_hash="sha256:tie",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    doc_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    session.add(
+        Document(
+            document_id=doc_id,
+            index_version="v-tie",
+            source_name="docs.test",
+            product_area="claude_code",
+            source_url="https://docs.test/tie",
+            title="Ties",
+            identity_checksum="sha256:tie-doc",
+            status=DocumentStatus.active,
+            last_fetched_at=now,
+            last_indexed_at=now,
+        )
+    )
+    ids = [uuid.UUID(f"{n:08x}-0000-4000-8000-000000000000") for n in (1, 2, 3)]
+    for n, chunk_id in reversed(list(enumerate(ids))):
+        session.add(
+            Chunk(
+                chunk_id=chunk_id,
+                document_id=doc_id,
+                product_area="claude_code",
+                section_path=f"/t{n}",
+                heading=f"T{n}",
+                parent_heading=None,
+                chunk_text=f"Tie {n}: choosing a model for your run.",
+                context_summary=f"t{n}",
+                chunk_order=0,  # every chunk ties on the primary key
+                content_checksum=f"sha256:tie-{n}",
+            )
+        )
+    await session.flush()
+
+    arm = KeywordRetriever(session, active_index_version="v-tie")
+    hits = await arm.retrieve("model", product_area="claude_code", limit=3)
+    assert [h.chunk_id for h in hits] == ids, [str(h.chunk_id) for h in hits]
+    # And the cut itself is deterministic, which is the point of a total key.
+    cut = await arm.retrieve("model", product_area="claude_code", limit=2)
+    assert [h.chunk_id for h in cut] == ids[:2]
 
 
 async def test_stub_embedder_deterministic() -> None:
