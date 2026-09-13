@@ -1,6 +1,6 @@
 """Per-visitor rate-limit identity (#203).
 
-The demo API key is shared by construction, so ``require_demo_api_key`` returns a
+The public client token is shared by construction, so ``require_public_client_token`` returns a
 CONSTANT. Keying the limiter on it gave every visitor on earth ONE bucket: 30
 questions from one person denied the demo to everyone else for a rolling hour,
 and because the bucket lives in Redis a restart no longer cleared it.
@@ -106,17 +106,17 @@ def test_salt_changes_the_key() -> None:
     assert a != b
 
 
-def test_salt_falls_back_to_the_demo_api_key_when_unset() -> None:
-    """Production already requires the demo key to be a strong, non-default secret."""
+def test_salt_falls_back_to_the_public_client_token_when_unset() -> None:
+    """Production already requires the token to be a strong, non-default secret."""
     a = _key(
         {"Fly-Client-IP": "203.0.113.7"},
         rate_limit_key_salt="",
-        demo_api_key="first-strong-demo-key",
+        public_client_token="first-strong-demo-key",
     )
     b = _key(
         {"Fly-Client-IP": "203.0.113.7"},
         rate_limit_key_salt="",
-        demo_api_key="second-strong-demo-key",
+        public_client_token="second-strong-demo-key",
     )
     assert a != b
 

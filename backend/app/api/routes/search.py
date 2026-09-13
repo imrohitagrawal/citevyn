@@ -8,7 +8,7 @@
   health module so it lives next to its sibling search route
   and so it can read the real :class:`IndexVersion` rows.
 
-Both endpoints sit behind :func:`require_demo_api_key` for the
+Both endpoints sit behind :func:`require_public_client_token` for the
 search route; the index-health route is unauthenticated so a
 load balancer can probe it.
 """
@@ -104,7 +104,7 @@ async def search_exact(
     The demo path runs as a single :data:`DEMO_USER_ID`; the
     per-user limiter still applies so a flood of exact searches
     doesn't starve the answer endpoint. The ``rate_limited_demo``
-    dependency chains :func:`require_demo_api_key` with
+    dependency chains :func:`require_public_client_token` with
     :func:`enforce_rate_limit` so every authenticated route
     shares one enforcement path.
     """

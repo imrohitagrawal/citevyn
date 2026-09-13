@@ -61,7 +61,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
-from app.core.security import require_admin_api_key, require_demo_api_key
+from app.core.security import require_admin_api_key, require_public_client_token
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -635,7 +635,7 @@ async def enforce_rate_limit(
 ) -> None:
     """Apply the rate limit for an authenticated request.
 
-    Routes that already use :func:`require_demo_api_key` (which
+    Routes that already use :func:`require_public_client_token` (which
     returns the user id string) call this directly, or — preferred
     — chain the :func:`rate_limited_demo` / :func:`rate_limited_admin`
     dependency so the limit is enforced uniformly across all
@@ -654,23 +654,23 @@ async def enforce_rate_limit(
 # FastAPI dependencies
 # ---------------------------------------------------------------------------
 #
-# Chained dependencies that wrap :func:`require_demo_api_key` /
+# Chained dependencies that wrap :func:`require_public_client_token` /
 # :func:`require_admin_api_key` with the rate limit. Routes add
-# ``Depends(rate_limited_demo)`` instead of ``Depends(require_demo_api_key)``
+# ``Depends(rate_limited_demo)`` instead of ``Depends(require_public_client_token)``
 # so the limit is enforced uniformly. A new authenticated route that
 # forgets to add the dependency is caught by the route test suite,
 # which asserts the dependency is in place.
 #
 # The dependency returns the same ``user_id`` string the auth
 # dependency returns, so existing route signatures are unchanged
-# (they replace ``require_demo_api_key`` with ``rate_limited_demo``).
+# (they replace ``require_public_client_token`` with ``rate_limited_demo``).
 
 
 # ---------------------------------------------------------------------------
 # Per-visitor identity for the DEMO bucket (#203)
 # ---------------------------------------------------------------------------
 #
-# The demo API key is shared by construction, so ``require_demo_api_key`` returns
+# The public client token is shared by construction, so ``require_public_client_token`` returns
 # a CONSTANT (``DEMO_USER_ID``). Keying the limiter on it gave every visitor on
 # earth ONE bucket: 30 questions from one person denied the demo to everyone else
 # for a rolling hour, and because the bucket lives in Redis a restart no longer
@@ -738,7 +738,7 @@ def client_rate_key(request: Request | None, settings: Settings) -> str:
 
     The address is HMAC'd, never stored raw: an IP is personal data, and an
     unsalted hash of an IPv4 address is reversible by brute force (2^32
-    candidates). The salt falls back to the demo API key, which production
+    candidates). The salt falls back to the public client token, which production
     already requires to be a strong, non-default secret.
     """
     raw = _client_address(request, settings)
@@ -746,7 +746,7 @@ def client_rate_key(request: Request | None, settings: Settings) -> str:
     if normalised is None:
         return _UNKNOWN_CLIENT_KEY
 
-    salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
+    salt = (settings.rate_limit_key_salt or settings.public_client_token or "").encode()
     digest = hmac.new(salt, normalised.encode(), hashlib.sha256).hexdigest()
     return f"demo_{digest[:32]}"
 
@@ -802,7 +802,7 @@ async def _apply_per_visitor_rate_limit(
 
 async def rate_limited_demo(
     request: Request,
-    user_id: Annotated[str, Depends(require_demo_api_key)],
+    user_id: Annotated[str, Depends(require_public_client_token)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> str:
@@ -828,7 +828,7 @@ async def rate_limited_oauth_navigation(
     and ``.../callback`` is reached by the PROVIDER's own redirect — neither
     request can carry a custom ``Authorization`` header, so both routes
     CANNOT use :func:`rate_limited_demo` (which requires one via
-    ``require_demo_api_key``). Using it anyway means every real click 401s
+    ``require_public_client_token``). Using it anyway means every real click 401s
     before the handler body ever runs — the whole feature is unreachable
     outside a test suite that hand-injects the header.
     ``rate_limited_demo``'s CSRF-guard role for the demo bearer (documented
@@ -870,7 +870,7 @@ def _email_bucket_key(prefix: str, email: str, settings: Settings) -> str:
     the #301 send interval (``mlinterval``) -- so they can never drift in how they
     hash an address; the prefix is what keeps them separate.
     """
-    salt = (settings.rate_limit_key_salt or settings.demo_api_key or "").encode()
+    salt = (settings.rate_limit_key_salt or settings.public_client_token or "").encode()
     digest = hmac.new(salt, email.encode(), hashlib.sha256).hexdigest()
     return f"{prefix}_{digest[:32]}"
 

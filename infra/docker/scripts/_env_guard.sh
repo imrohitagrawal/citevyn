@@ -36,10 +36,14 @@
 #     on the prod host)
 #   - asserts CITEVYN_PUBLIC_HOST, CITEVYN_DATABASE_URL and a
 #     non-stub CITEVYN_LLM_PROVIDER are set
-#   - asserts CITEVYN_DEMO_API_KEY passes the same weak-secret
+#   - asserts the public client token passes the same weak-secret
 #     test the app applies in production (non-empty, not the
 #     published ``local-demo-key``, at least 16 chars) — see
-#     Settings._is_weak_secret in backend/app/core/config.py
+#     Settings._is_weak_secret in backend/app/core/config.py.
+#     Read from CITEVYN_PUBLIC_CLIENT_TOKEN, falling back to the
+#     deprecated CITEVYN_DEMO_API_KEY (#430), new name winning —
+#     the same precedence Settings applies, so the guard cannot
+#     bless a value the app would not use
 #   - exits non-zero with a remediation message if any fails
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -243,7 +247,7 @@ if ! (
         echo "       Set CITEVYN_LLM_PROVIDER=gemini (or anthropic)." >&2
         exit 1
     fi
-    # CITEVYN_DEMO_API_KEY is the bearer every public /api/v1 request
+    # The public client token is the bearer every public /api/v1 request
     # carries. ``infra/docker/prod.env.example`` ships it EMPTY, and
     # Settings._is_weak_secret (backend/app/core/config.py) rejects an
     # empty / default / short value once CITEVYN_ENVIRONMENT=production
@@ -289,8 +293,35 @@ if ! (
             exit 1
         fi
     }
-    # The bearer every public /api/v1 request carries.
-    _assert_strong_key CITEVYN_DEMO_API_KEY  local-demo-key  "${CITEVYN_DEMO_API_KEY:-}"
+    # The bearer every public /api/v1 request carries (#430).
+    #
+    # Both spellings accepted, NEW ONE WINS, mirroring the AliasChoices order in
+    # Settings.public_client_token. A guard that resolved them the other way round
+    # would test a value the app is not going to use, and pass a deploy that then
+    # crash-loops -- which is the exact failure this whole block exists to prevent.
+    #
+    # `:-` rather than `-`, so an EMPTY new variable falls through to the old one
+    # instead of being asserted on and failing. An operator mid-migration who has
+    # added `CITEVYN_PUBLIC_CLIENT_TOKEN=` to .env without filling it in still has
+    # a working old value, and the app agrees: `Settings` only sees a name that is
+    # actually present in the environment.
+    #
+    # The NAME reported on failure is whichever one supplied the value, so the
+    # remediation points at the line the operator has to edit rather than at the
+    # variable this script would prefer they used.
+    if [[ -n "${CITEVYN_PUBLIC_CLIENT_TOKEN:-}" ]]; then
+        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
+        _token_value="${CITEVYN_PUBLIC_CLIENT_TOKEN}"
+    elif [[ -n "${CITEVYN_DEMO_API_KEY:-}" ]]; then
+        _token_name=CITEVYN_DEMO_API_KEY
+        _token_value="${CITEVYN_DEMO_API_KEY}"
+    else
+        # Neither present: report the name an operator should SET today, not the
+        # one being retired.
+        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
+        _token_value=""
+    fi
+    _assert_strong_key "${_token_name}" local-demo-key "${_token_value}"
     # The key that can promote an index, read the budget, and inspect jobs.
     _assert_strong_key CITEVYN_ADMIN_API_KEY local-admin-key "${CITEVYN_ADMIN_API_KEY:-}"
 ); then

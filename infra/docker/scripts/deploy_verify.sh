@@ -188,7 +188,16 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # An explicit env override wins over the compose .env. This is what makes
 # --verify-only usable against a locally-run api whose key lives elsewhere
 # (e.g. backend/.env) without editing the prod env file.
-DEMO_KEY="${CITEVYN_DEMO_API_KEY:-$(read_env CITEVYN_DEMO_API_KEY)}"
+# Both #430 spellings, new one winning, and the ENVIRONMENT beats the .env file
+# for each in turn -- the same precedence Settings applies. `:-` throughout, so an
+# empty variable falls through instead of pinning the whole chain to "".
+DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
+if [[ -z "${DEMO_KEY}" ]]; then
+    DEMO_KEY="$(read_env CITEVYN_PUBLIC_CLIENT_TOKEN)"
+fi
+if [[ -z "${DEMO_KEY}" ]]; then
+    DEMO_KEY="$(read_env CITEVYN_DEMO_API_KEY)"
+fi
 PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
 VERSION="${VERSION_REQUESTED:-$(git describe --tags --exact-match 2>/dev/null || echo '')}"
@@ -251,7 +260,7 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null \
         || die "VERSION='${VERSION}' is not an existing git tag (the gate deploys a tagged release, not a branch)"
     [[ -n "${BASE_URL}" ]] || die "BASE_URL is unset and CITEVYN_PUBLIC_HOST is empty in ${COMPOSE_DIR}/.env"
-    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_DEMO_API_KEY is unset in ${COMPOSE_DIR}/.env"
+    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_PUBLIC_CLIENT_TOKEN is unset in ${COMPOSE_DIR}/.env (the deprecated CITEVYN_DEMO_API_KEY is also accepted)"
 
     # A dirty tree must be caught BEFORE we redeploy production — otherwise we
     # ship uncommitted local edits and only discover it when the rollback
@@ -360,10 +369,10 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
         bundle_diagnosis="$(
             { find "${REPO_ROOT}/frontend/dist" -type f \( -name '*.js' -o -name '*.html' \) \
                 -exec cat {} + 2>/dev/null || true; } \
-            | CITEVYN_DEMO_API_KEY="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
+            | CITEVYN_PUBLIC_CLIENT_TOKEN="${DEMO_KEY}" "${REPO_ROOT}/scripts/check_bundle_key.sh" 2>&1
         )"
         if [[ "${bundle_diagnosis}" == "[PASS]"* ]]; then
-            record PASS "frontend bundle carries the current demo key"
+            record PASS "frontend bundle carries the current client token"
         else
             # The checker distinguishes "carries the PUBLIC DEFAULT" from
             # "empty fetch" from "key absent", and a missing/non-executable
@@ -584,7 +593,7 @@ deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deplo
 # zero-probe guard below.
 if [[ "${VERIFY_ONLY}" == "1" ]]; then
     [[ -n "${BASE_URL}" ]] || die "--verify-only needs BASE_URL (or CITEVYN_PUBLIC_HOST)"
-    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_DEMO_API_KEY"
+    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_PUBLIC_CLIENT_TOKEN (or the deprecated CITEVYN_DEMO_API_KEY)"
     echo "==> --verify-only: probing ${BASE_URL} (no deploy, no rollback)"
     verify_suite "verify-only"
     echo

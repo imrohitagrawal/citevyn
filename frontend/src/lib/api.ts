@@ -45,11 +45,40 @@ import { ApiClientError } from "./types";
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 /**
- * Demo bearer token. Mirrors the backend's
- * ``CITEVYN_DEMO_API_KEY`` default (``local-demo-key``). V1 will
- * swap this for a real auth flow.
+ * Public client token. Mirrors the backend's
+ * ``CITEVYN_PUBLIC_CLIENT_TOKEN`` default (``local-demo-key``).
+ *
+ * PUBLIC by construction: Vite bakes this into the bundle at build time, so
+ * every visitor can read it out of ``/assets/index-*.js``. It buys a CSRF guard
+ * — a cross-site request cannot set an ``Authorization`` header — and a
+ * rate-limit turnstile. It is not an identity control. See
+ * ``docs/SECURITY_MODEL.md``; V1 swaps it for a real auth flow.
+ *
+ * TWO BUILD ARGUMENTS, AND THE OPERATOR ORDER IS THE `||`/`??` SPLIT (#430).
+ * ``VITE_PUBLIC_CLIENT_TOKEN`` is the new name and ``VITE_API_DEMO_KEY`` the
+ * one being retired; both are declared in ``infra/docker/Dockerfile.api`` so a
+ * deploy mid-migration can pass either.
+ *
+ * `||` on the NEW one, `??` on the OLD one, and the asymmetry is deliberate:
+ *
+ *   * The new ARG defaults to EMPTY. `??` fires only on null/undefined, so with
+ *     `??` an unpassed new argument would bake `const K = ""` and win over a
+ *     correctly-passed old one — the browser would send a bare
+ *     `Authorization: Bearer ` and production would 401 every call while
+ *     `/health` stayed green. That is release v6's outage (#296) reached by a
+ *     new route, manufactured by the rename itself. `||` treats "" as absent
+ *     and falls through, which is the only reason two arguments can coexist.
+ *   * The old one keeps `??`, so its behaviour is byte-for-byte what shipped:
+ *     an explicitly-empty `VITE_API_DEMO_KEY=""` still bakes `""` rather than
+ *     silently becoming the published default. `scripts/check_bundle_key.sh`
+ *     and `tests/shell/test_check_bundle_key.sh` are built on that exact shape,
+ *     and quietly "fixing" it here would blind the checker that catches it.
+ *
+ * All seven combinations are pinned in `src/test/api.publicClientToken.test.ts`.
  */
-const API_DEMO_KEY = import.meta.env.VITE_API_DEMO_KEY ?? "local-demo-key";
+const PUBLIC_CLIENT_TOKEN =
+  import.meta.env.VITE_PUBLIC_CLIENT_TOKEN ||
+  (import.meta.env.VITE_API_DEMO_KEY ?? "local-demo-key");
 
 /** Default user id for session creation. */
 const API_DEMO_USER_ID = import.meta.env.VITE_API_DEMO_USER_ID ?? "demo_user";
@@ -134,8 +163,8 @@ export async function apiFetch<T>(
   }
   // Bearer token. The backend's auth dev-keys are documented in
   // ``docs/SECURITY_MODEL.md`` and configured via
-  // ``CITEVYN_DEMO_API_KEY`` on the server.
-  headers.set("Authorization", `Bearer ${API_DEMO_KEY}`);
+  // ``CITEVYN_PUBLIC_CLIENT_TOKEN`` on the server.
+  headers.set("Authorization", `Bearer ${PUBLIC_CLIENT_TOKEN}`);
 
   let response: Response;
   let text: string;
