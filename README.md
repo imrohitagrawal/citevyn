@@ -360,7 +360,8 @@ stack answers; there is no second hand-written catalog to keep in sync
 ```bash
 make demo          # one-shot stack bring-up
 make test          # backend suite, no DB needed
-make coverage      # same suite + a line-coverage report (measurement, NOT a gate)
+make coverage      # same suite + a line-coverage report (measurement, not a gate)
+make coverage-gate # ...then fail if uncovered lines went UP (what CI enforces)
 make smoke         # compose stack up, assert /health, tear down
 make verify        # lint + typecheck + test (the pre-merge gate)
 make db-down       # tear down the stack (keeps volumes)
@@ -414,11 +415,17 @@ the opt-in integration tests against a real Postgres if you set
   ratio removes the ambiguity instead of picking a winner, so a reader
   comparing this file against a CI log finds them consistent, not
   contradictory. `docs/TEST_STRATEGY.md` §4 states it the same way.
-  It is a **measurement, never a gate**: coverage shows which lines *ran*,
-  not which are *checked*. A line in `promotion_eval.py` once measured 97%
+  The PERCENTAGE is a measurement, never a gate: coverage shows which lines
+  *ran*, not which are *checked*. A line in `promotion_eval.py` once measured 97%
   covered and still left 42 tests green when deleted. Use it to find code no
-  test touches; use mutation testing to find code no test defends. What would
-  make it blocking is recorded beside the CI step (#308).
+  test touches; use mutation testing to find code no test defends.
+  What IS gated, since #321, is the COUNT of lines no test executes: it must not
+  INCREASE against `backend/coverage-baseline.json`, which is checked inside the
+  required `pytest + lint` job and by `make coverage-gate` locally. A count is
+  not a target — you cannot raise it by executing code without checking it — and
+  unlike a percentage it does not move when `app/` grows with covered code.
+  Lowering the baseline locks in an improvement; raising it means shipping lines
+  no test runs, and belongs in the same commit as the code, with a reason.
 
 - **Suite size** — the pytest suite's size is deliberately **not** written down
   here. (The Playwright and visual-snapshot rows in §3 still carry literal

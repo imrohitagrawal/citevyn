@@ -99,12 +99,12 @@ Cover:
 | Follow-up context correctness | >=90% |
 | Cache correctness | >=95% |
 | End-to-end golden pass rate | >=95% |
-| Backend line coverage | **measured, never gated** — see below |
+| Backend line coverage | **no increase in uncovered lines** — never a percentage — see below |
 
-### 4.1 Why line coverage is not in the table above
+### 4.1 Why coverage is the one row that is not a score
 
 Every other row is a *required score*. Coverage deliberately is not, and this is
-the one gate we argue AGAINST having.
+the one gate we argue AGAINST having in that shape.
 
 Coverage shows which lines **ran**, never which are **checked**. The repo has the
 scar: a line in `app/worker/promotion_eval.py` measured **97% covered** and was
@@ -112,8 +112,20 @@ executed by the suite, yet deleting it left all 42 promotion tests green. A
 percentage would have said nothing about that defect, and a required score invites
 tests written to move the number rather than to catch a defect.
 
-So `make coverage` and the CI step (#308) **report** a line-coverage figure and
-nothing fails on the number. Read it precisely. It covers the hermetic suite
+What IS enforced, since #321, is a count: the number of lines no test executes
+(`lines-valid` - `lines-covered`, read from `artifacts/coverage.xml`) must not
+INCREASE against the baseline recorded in `backend/coverage-baseline.json`. Equal
+passes; lower passes and says the baseline can be lowered. That is not a target
+anyone can chase — you cannot raise it by writing a test that executes code
+without checking it, and it does not move when `app/` grows with covered code,
+which a percentage does (`lines-valid` drifted 5562 -> 5567 -> 5585 across
+successive `main` runs with no change in test quality at all). The comparison is
+`backend/scripts/coverage_baseline.py`; it runs inside the already-required
+`pytest + lint` check, and `make coverage-gate` runs the same comparison locally.
+A missing, malformed or empty report FAILS it rather than comparing nothing.
+
+`make coverage` on its own stays the plain report. Read the figure precisely.
+It covers the hermetic suite
 (`-m "not postgres"`),
 because the `postgres`-marked tests run in their own job without coverage. It is
 not a whole-repo number.
@@ -129,10 +141,13 @@ identically; if you update one, update both.
 Use coverage to find code no test *touches*; use mutation
 testing to find code no test *defends*. Where the two disagree, mutation wins.
 
-What would make it blocking, stated so it cannot drift into permanence
-unexamined: only once a baseline is stable across three consecutive `main` runs,
-and then as **no decrease against that baseline** — never an absolute floor.
-Tracked in [#321](https://github.com/imrohitagrawal/citevyn/issues/321).
+#308 shipped the measurement advisory and stated its own promotion condition so
+it could not drift into permanence unexamined: only once a baseline is stable
+across three consecutive `main` runs, and then as **no regression against that
+baseline** — never an absolute floor. [#321](https://github.com/imrohitagrawal/citevyn/issues/321)
+closed that: the condition was over-satisfied (six consecutive successful `main`
+runs, bit-identical at `lines-covered=5403 / lines-valid=5585`), and the gate
+shipped BLOCKING in exactly that shape.
 
 ## 5. Golden Dataset
 
