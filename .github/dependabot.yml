@@ -1,13 +1,62 @@
-# Dependabot keeps the dependency graph current. Four ecosystems
-# are tracked: Python (uv), Docker base images, Docker Compose
+# Dependabot keeps the dependency graph current. Five ecosystems
+# are tracked: Python (uv), npm, Docker base images, Docker Compose
 # service images, and GitHub Actions.
 #
-# Cadence is weekly for Python and Docker, monthly for Actions —
-# Actions pins churn less often and we'd rather not have noisy
-# PRs on every release.
+# Cadence is weekly for Python and Docker, monthly for npm and
+# Actions — Actions pins churn less often and we'd rather not have
+# noisy PRs on every release; npm's cadence is argued at its own
+# block below.
+#
+# An ecosystem that is NOT listed here gets no version updates at
+# all. Security updates ignore this file entirely and open PRs
+# regardless, which is why a missing entry looks like "nothing to
+# update" rather than like a misconfiguration. ``npm`` was absent
+# until #423: ``frontend/`` had received only security PRs since
+# the repo began, and ``@types/node`` sat at ``^20.16.0`` while
+# ``frontend/.nvmrc`` had moved to ``26`` — six major numbers, three
+# even-numbered Node LTS generations — with nothing watching (#413).
+# (#423, and the first draft of this very comment, both said "two
+# majors". That was inherited and never checked. ``git log -p --
+# frontend/package.json`` shows one edit, ``^20.16.0`` -> ``^26.5.1``,
+# and settles it.) The tell was in
+# the PR titles — every backend/docker/CI Dependabot PR carries the
+# custom prefixes configured below (``deps(deps):``,
+# ``deps(dev)(deps-dev):``, ``deps(ci)(deps):``,
+# ``deps(docker)(deps):``) while every ``/frontend`` one carried
+# Dependabot's defaults (``chore(...)``, ``build(...)``), proving
+# they had never passed through this file.
+#
+# ``backend/tests/test_dependabot_config.py`` asserts the PARSED
+# structure of this file, not its text: a syntactically valid file
+# that lost an entry still fails there. A malformed
+# ``dependabot.yml`` is silently ignored by GitHub, so without that
+# guard the failure mode is an absence of PRs, which is
+# indistinguishable from having no updates available.
+#
+# Declared-but-INEFFECTIVE is the same outcome reached another way,
+# so that guard also rejects the keys that produce it silently —
+# ``ignore``, ``allow``, ``cooldown``, ``versioning-strategy``, a
+# group ``exclude-patterns`` or ``dependency-type``, and
+# ``open-pull-requests-limit: 0`` (which GitHub documents as the way
+# to switch an ecosystem off). None of them is banned on principle;
+# each is banned from arriving without a reviewer noticing, and the
+# way to use one deliberately is to take it out of that file's ban
+# list in the same commit. The guard also rejects an UNKNOWN key at
+# entry and group level, because a typo'd one is the cheapest way to
+# invalidate this file. What it cannot see is written down in the
+# test file's own ``_UNGUARDABLE`` register.
+#
+# GitHub itself validates this file on any PR that touches it: a
+# check run named ``.github/dependabot.yml`` from the ``dependabot``
+# app, "Dependabot config file validation". It is not a required
+# context, so read it rather than relying on the rollup.
 #
 # Auto-merge policy (since 2026-06-21):
-#   Branch protection on ``main`` requires 5 status checks (see
+#   Branch protection on ``main`` requires 10 status checks — this
+#   line said 5 until #423; ``gh api
+#   repos/imrohitagrawal/citevyn/branches/main/protection --jq
+#   '.required_status_checks.contexts | length'`` returns 10, with
+#   ``strict: true`` (see
 #   Settings → Branches → main). To enable auto-merge at the repo
 #   level, go to Settings → General → "Allow auto-merge" and
 #   enable it, then enable auto-merge on individual Dependabot PRs
@@ -77,6 +126,114 @@ updates:
     labels:
       - "dependencies"
       - "python"
+
+  # ──────────── Frontend (npm) ────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    target-branch: "main"
+    # MONTHLY, not weekly like the backend. ``main`` is protected
+    # with 10 required status checks and ``strict: true``, so
+    # merging any one PR makes every other open PR out-of-date and
+    # unmergeable until someone runs ``gh pr update-branch`` on it.
+    # A batch of npm PRs therefore costs O(n²) rebases, not O(n).
+    # Monthly keeps that queue payable while still being infinitely
+    # more than the zero scheduled updates ``frontend/`` got before
+    # #423. Raise it to weekly only if the backlog is routinely
+    # empty when the cron fires.
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "08:00"
+      timezone: "America/Los_Angeles"
+    # 3, below the backend's 5, for the same staleness reason: each
+    # open PR is one more that goes stale on every merge.
+    #
+    # There are FOUR groups below, so a month in which every group has
+    # work opens three PRs and holds the fourth — plus any major, which
+    # by design arrives standalone — to the next cycle. That is the
+    # intended trade: a queue that drains is worth more here than one
+    # that arrives complete, because each extra open PR costs a rebase
+    # on every merge. Raising this also means editing the assertion in
+    # backend/tests/test_dependabot_config.py, which is the friction
+    # that makes it a decision rather than a drift.
+    open-pull-requests-limit: 3
+    rebase-strategy: "auto"
+    # Same prefixes as the backend block. This is not cosmetics: the
+    # prefix is the only evidence in a PR title that the PR came
+    # through this file at all, and that is precisely how #423 was
+    # spotted. A ``chore(deps-dev):`` title on a ``/frontend`` PR
+    # from here on means a SECURITY update, which bypasses this
+    # config — worth knowing at a glance.
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+      include: scope
+    # Minor + patch are batched; ``update-types`` is what makes that
+    # true. A group WITHOUT it swallows majors too, and a major is
+    # the one bump that needs its own review and its own revert.
+    # ``applies-to: version-updates`` leaves security updates
+    # ungrouped so an advisory fix is never held behind a routine
+    # bump.
+    #
+    # Every pattern below names a package that is really declared in
+    # ``frontend/package.json``; a pattern that matches nothing
+    # groups nothing, silently. The guard test asserts the mapping.
+    groups:
+      frontend-runtime:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "react"
+          - "react-dom"
+      frontend-build:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "vite"
+          - "@vitejs/plugin-react"
+          - "typescript"
+          - "postcss"
+          - "stylelint"
+      frontend-test:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "vitest"
+          - "@playwright/test"
+          - "@testing-library/*"
+          - "jsdom"
+          - "js-yaml"
+      # ``@types/node`` lives here and is the one bump that can go
+      # RED on purpose:
+      # ``backend/tests/test_node_version_pin.py::test_types_node_major_matches_the_pin``
+      # requires its MAJOR to equal ``frontend/.nvmrc``. Minor and
+      # patch bumps stay inside the major and pass, which is why
+      # they are grouped. A major bump escapes this group (see
+      # ``update-types`` above), arrives as its own PR and FAILS the
+      # required ``pytest + lint`` check until ``.nvmrc``, the
+      # Dockerfiles and the workflows move with it. That is the
+      # guard doing its job, not a broken test — the runtime and the
+      # types that describe it must move together (#413). Fix the
+      # pin, do not weaken the guard.
+      frontend-types:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "@types/*"
+    # ``javascript`` rather than a made-up ``frontend``: Dependabot
+    # cannot create a label that does not exist in the repo, and
+    # these two are the ones that do (``gh label list``).
+    labels:
+      - "dependencies"
+      - "javascript"
 
   # ──────────── Docker base images ────────────
   - package-ecosystem: "docker"
