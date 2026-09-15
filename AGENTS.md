@@ -110,6 +110,50 @@ Run the review proactively — before declaring done, pushing, or opening/mergin
 without waiting to be asked. Address findings before moving on. Read `AGENTS.md`,
 `code_review.md`, and the session memory files at the start of every work session.
 
+### One writer per worktree — mutation is a WRITE phase
+
+Fan out reading. Never fan out writing. The trap is that the most valuable kind of
+review here **is** writing: proving a guard bites means breaking the code it guards,
+and "break it, run the suite, restore it" looks like review while behaving like
+construction.
+
+**The rule.** Any agent that will modify a file — to prove a mutant dies, to check a
+guard reddens, to run a build that writes artefacts — gets its **own** worktree. One
+writer per tree, no exceptions. Read-only agents may share a tree, and should be told
+so explicitly, including that they may not run a browser or a build that writes.
+
+**Why this is written down.** It was violated twice in one session (2026-09-12/13), by
+two agents that had both read this file:
+
+- Reviewing PR #424, eight reviewers were pointed at one worktree and told they could
+  mutate to prove guards bite. They overwrote each other. One measured the nudge timer
+  at `3000 -> 1000` while another had already set it to `10000`, and a third had changed
+  `maxDiffPixelRatio` underneath both. Every number from that review was void. The run
+  was killed, the tree restored by named path, and the review re-run with writers
+  isolated and Playwright serialised on port 3000 — after which every dimension
+  reported `HEAD unchanged, clean=True`.
+- The #370 lane independently did the same thing, caught it, and correctly refused to
+  report the contaminated measurement.
+
+**Why it is insidious.** The corruption is silent. You do not get an error; you get a
+number, and the number is wrong. A false SURVIVAL reads as "the guard is weak" and a
+false DEATH reads as "the guard works" — both are conclusions drawn from a file that
+said something different by the time the suite ran.
+
+**Practical consequences**
+
+- Serialise on any exclusive resource, not just the filesystem. `playwright.config.ts`
+  sets `reuseExistingServer: false`, so two Playwright runs collide on port 3000
+  whatever their worktrees.
+- Assert `git rev-parse HEAD` before and after every measurement, and end with
+  `git status --porcelain` empty. A reviewer in this repo once ran `git checkout` in a
+  shared tree and silently reverted someone's branch.
+- Confirm a mutation actually applied with a literal `grep -F` before believing its
+  result. `ruff format` and prettier rewrite files on save; `sed` fails on patterns
+  containing `|`; an anchor that has moved matches nothing. Each of those produced a
+  false survival in the same session.
+- Restore byte-identically and prove it with `cmp`, not by eye.
+
 ## Open-work awareness
 
 At the start of every work session, and before planning any new change, review the
