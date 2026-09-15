@@ -47,10 +47,9 @@ primary_region = "iad"
   # been REMOVED rather than corrected, and it must not come back:
   #
   #   * the real command also passes VITE_API_LIVE and the public client token
-  #     — VITE_PUBLIC_CLIENT_TOKEN, with the deprecated VITE_API_DEMO_KEY still
-  #     accepted during the #430 rename (#296 — omitting it ships the public
-  #     default and 401s every browser call for as long as nobody notices) —
-  #     and --local-only (#385);
+  #     — VITE_PUBLIC_CLIENT_TOKEN (#296 — omitting it ships the public default
+  #     and 401s every browser call for as long as nobody notices) — and
+  #     --local-only (#385);
   #   * that token is read from the RUNNING MACHINE at
   #     deploy time, which no committed file can do — so any copy living here
   #     can only ever be a partial one, which is exactly the trap the old

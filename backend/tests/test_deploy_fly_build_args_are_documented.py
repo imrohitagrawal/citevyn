@@ -36,8 +36,8 @@ an assertion can only be satisfied by something an operator would EXECUTE.
 
 WHY `fly.toml` IS NOT ACCEPTED AS AN ALTERNATIVE HOME
 ------------------------------------------------------
-``VITE_API_DEMO_KEY`` is a credential whose value must be read from the RUNNING
-machine at deploy time, which no committed file can do. (``test_fly_config.py``
+``VITE_PUBLIC_CLIENT_TOKEN`` is a credential-shaped value that must be read from
+the RUNNING machine at deploy time, which no committed file can do. (``test_fly_config.py``
 also forbids a plaintext credential in ``fly.toml``, but only in its ``[env]``
 TABLE -- both of its checks read ``fly_config["env"]``, and ``build.args``
 appears nowhere in it -- so that is a second reason, not the load-bearing one.)
@@ -74,8 +74,8 @@ def _production_rejected_defaults() -> set[str]:
     16-character floor, which this does not reproduce. Derived from `config.py`'s
     `_is_weak_secret(..., default="...")` calls rather than listed, because a
     hand-kept copy rots. A build arg may not be passed as a LITERAL equal to one
-    of these -- `--build-arg VITE_API_DEMO_KEY=local-demo-key` is a plain literal
-    with no expansion, and also the exact value that produced release v6.
+    of these -- `--build-arg VITE_PUBLIC_CLIENT_TOKEN=local-demo-key` is a plain
+    literal with no expansion, and also the exact value that produced release v6.
     """
     return set(re.findall(r'default="(local-[a-z-]+)"', _CONFIG.read_text(encoding="utf-8")))
 
@@ -86,7 +86,7 @@ def _production_rejected_defaults() -> set[str]:
 # that enumerates the BAD forms only catches the ones its author thought of.
 #
 # The value alternation ends in `\S*`, not `\S+`, so a bare
-# `--build-arg VITE_API_DEMO_KEY=` is CAPTURED as an empty value and rejected.
+# `--build-arg VITE_PUBLIC_CLIENT_TOKEN=` is CAPTURED as an empty value and rejected.
 # With `\S+` the regex did not match that form at all, so the argument was never
 # examined -- the most direct spelling of the #296 outage, passing both guards.
 #
@@ -104,7 +104,7 @@ _GUARDED_EXPANSION_RE = re.compile(r'^"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^{}]*\}"$')
 # A NON-EMPTY literal with no expansion syntax at all: `true`, `dev`, `1.2.3`,
 # optionally quoted with BALANCED quotes. The `+` and the balanced alternation
 # are both load-bearing: `^"?[A-Za-z0-9_.:/-]*"?$` matched the EMPTY string, so
-# `--build-arg VITE_API_DEMO_KEY=""` -- the #296 outage written verbatim -- was
+# `--build-arg VITE_PUBLIC_CLIENT_TOKEN=""` -- the #296 outage written verbatim -- was
 # accepted as a "plain literal", and a lone `"` slipped through the same way.
 _PLAIN_LITERAL_RE = re.compile(r'^(?:"[A-Za-z0-9_.:/-]+"|[A-Za-z0-9_.:/-]+)$')
 
@@ -269,7 +269,7 @@ def _deploy_commands() -> list[str]:
     """EVERY `fly deploy` command line in §4.1, not just the first.
 
     Taking the first matching block let an illustrative block above the real one
-    hide a command that dropped ``VITE_API_DEMO_KEY`` with the suite green.
+    hide a command that dropped ``VITE_PUBLIC_CLIENT_TOKEN`` with the suite green.
 
     Selected with :data:`_FLY_DEPLOY_COMMAND_RE`, the SAME matcher the repo-wide
     sweep uses, not a ``"fly deploy" in ln`` substring. The substring was a hole
@@ -324,8 +324,8 @@ _STRIP_CASES: tuple[tuple[str, str], ...] = (
     ("echo a\tb\t# c", "echo a\tb"),
     # The two payloads that defeated the hand-written lexer. Both are a real
     # bash comment; both were kept as "runnable" and satisfied a guard.
-    ('--label=say\\"hi  # --build-arg VITE_API_DEMO_KEY=x', '--label=say\\"hi'),
-    ("--label=$'a\\'b'  # --build-arg VITE_API_DEMO_KEY=x", "--label=$'a\\'b'"),
+    ('--label=say\\"hi  # --build-arg VITE_PUBLIC_CLIENT_TOKEN=x', '--label=say\\"hi'),
+    ("--label=$'a\\'b'  # --build-arg VITE_PUBLIC_CLIENT_TOKEN=x", "--label=$'a\\'b'"),
     ("echo a\\ b  # c", "echo a\\ b"),
     # A continuation must survive, or _runnable_bash cannot join the command.
     ('--build-arg X="${D:?why}" \\', '--build-arg X="${D:?why}" \\'),
@@ -371,10 +371,10 @@ def test_the_dockerfile_extraction_finds_the_baked_args_at_all() -> None:
     args = _baked_build_args()
     assert _frontend_stage(), "could not locate the `AS frontend` stage in Dockerfile.api"
     assert len(args) >= 2, f"expected at least 2 ARGs in the frontend stage, found {args}"
-    assert "VITE_API_DEMO_KEY" in args, (
-        f"VITE_API_DEMO_KEY is the argument whose absence caused #296; if it is no "
-        f"longer declared in the frontend stage this guard has lost its subject. "
-        f"Found: {args}"
+    assert "VITE_PUBLIC_CLIENT_TOKEN" in args, (
+        f"VITE_PUBLIC_CLIENT_TOKEN carries the bearer whose absence caused #296 (it "
+        f"was spelled VITE_API_DEMO_KEY then); if it is no longer declared in the "
+        f"frontend stage this guard has lost its subject. Found: {args}"
     )
 
 
@@ -532,7 +532,7 @@ def test_every_baked_build_arg_is_passed_by_the_deploy_command(arg: str) -> None
         f"a docs/DEPLOY_FLY.md §4.1 deploy command does not pass `--build-arg {arg}=`.\n"
         f"{arg} is declared in Dockerfile.api's frontend stage, so its value is baked "
         f"into the bundle every visitor downloads. Omitting it ships the Dockerfile's "
-        f"default -- which for VITE_API_DEMO_KEY is the publicly-known "
+        f"default -- which for VITE_PUBLIC_CLIENT_TOKEN is the publicly-known "
         f"`local-demo-key`, and production rejects it with 401 on every browser call "
         f"while /health stays green. That is #296.\nCommands found:\n" + "\n".join(cmds)
     )
@@ -568,8 +568,8 @@ def _classify(cmd: str) -> list[str]:
     Three rejection rules, each a scar:
       * not a guarded expansion and not a non-empty plain literal;
       * a literal equal to a default production refuses to boot with, so
-        `--build-arg VITE_API_DEMO_KEY=local-demo-key` -- release v6 written
-        into the runbook -- cannot pass as a "plain literal";
+        `--build-arg VITE_PUBLIC_CLIENT_TOKEN=local-demo-key` -- release v6
+        written into the runbook -- cannot pass as a "plain literal";
       * an unparsed `--build-arg` occurrence, because an extractor that skips
         its subject reports green rather than red.
     """
@@ -641,7 +641,7 @@ _VALUE_SHAPES: tuple[tuple[str, bool], ...] = (
 def test_the_build_arg_value_classifier_accepts_only_safe_shapes(
     value: str, acceptable: bool
 ) -> None:
-    offenders = _classify(f"fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY={value}")
+    offenders = _classify(f"fly deploy --app citevyn --build-arg VITE_PUBLIC_CLIENT_TOKEN={value}")
     if acceptable:
         assert not offenders, f"{value!r} is safe but was rejected: {offenders}"
     else:
@@ -662,9 +662,12 @@ def test_the_runbook_has_runnable_bash_blocks_at_all() -> None:
 def test_the_blind_absence_check_has_not_come_back() -> None:
     """`grep -c local-demo-key ... must print 0` PASSES on the broken bundle.
 
-    Measured: a bundle built with an empty `--build-arg VITE_API_DEMO_KEY`
-    contains neither the default nor any key, so that check prints 0 and reports
-    success on precisely the outage it was added to catch. Both halves below are
+    Measured (while `frontend/src/lib/api.ts` still joined its build arg with
+    `??`): a bundle built with an empty `--build-arg` contained neither the
+    default nor any key, so that check printed 0 and reported success on
+    precisely the outage it was added to catch. The `||` #430 left behind means
+    the empty case now bakes the default, but the absence form stays wrong for
+    its other reason -- it fails OPEN if the key moves into a lazy chunk. Both halves below are
     structural rather than substring, because both were defeated: quoting the
     pattern walked past a literal search, and demoting the replacement to a
     COMMENT satisfied its presence check while nothing ran it.
@@ -729,10 +732,9 @@ def test_the_smoke_call_sends_the_session_cookie() -> None:
     # The bearer must come from a variable the runbook actually sets. §4.4 used
     # $CITEVYN_DEMO_API_KEY, which the runbook never assigns in the operator's
     # shell, so the bearer was empty and /v1/sessions 401'd. Anchored at COLUMN 0
-    # and excluding continuation lines, because §3's block writes
-    # `  CITEVYN_DEMO_API_KEY=... \` as an indented ARGUMENT to `fly secrets set`
-    # -- a Fly secret, not a shell variable -- and matching the whole document
-    # accepted it.
+    # and excluding continuation lines, because §3's `fly secrets set` block
+    # writes `  CITEVYN_NAME=... \` as an indented ARGUMENT -- a Fly secret, not a
+    # shell variable -- and matching the whole document accepted it.
     assigned = "\n".join(
         ln for ln in _runnable_bash().splitlines() if not ln.rstrip().endswith("\\")
     )
@@ -1512,7 +1514,8 @@ def test_the_path_exemptions_exempt_only_what_they_name() -> None:
     assert not _is_sanctioned(
         "scripts/check_bundle_key.sh",
         150,
-        f"echo '{anchor}' ; fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY=local-demo-key",
+        f"echo '{anchor}' ; fly deploy --app citevyn "
+        f"--build-arg VITE_PUBLIC_CLIENT_TOKEN=local-demo-key",
     ), "a second command appended to the anchor's line must not ride its exemption"
 
     for unexempt in (
@@ -1603,7 +1606,7 @@ def test_the_staleness_rule_is_keyed_on_the_ANCHOR_not_on_any_deploy_line(
     RED if `_stale_allowlist_entries` drops its `if anchor in body` filter, or
     stops requiring exactly one match.
     """
-    anchor = "fly deploy --app citevyn --build-arg VITE_API_DEMO_KEY=X ..."
+    anchor = "fly deploy --app citevyn --build-arg VITE_PUBLIC_CLIENT_TOKEN=X ..."
     other = "fly deploy --app citevyn --build-arg VERSION=1.2.3"
     entry = (("hint.sh", anchor, "a reason"),)
 

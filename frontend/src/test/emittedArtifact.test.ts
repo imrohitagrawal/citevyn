@@ -100,12 +100,10 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
   const SHIPPED_BUILD_ENV: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? "",
-    // Both #430 names, at the Dockerfile's ARG defaults. The new one is EMPTY on
-    // purpose: that is the state of every build that does not pass it, so this
-    // guard builds the bundle through the fallback path the deploy is actually
-    // on today rather than through a path no image is built with.
-    VITE_PUBLIC_CLIENT_TOKEN: "",
-    VITE_API_DEMO_KEY: "local-demo-key",
+    // The Dockerfile's ARG defaults, so this guard builds the bundle the way a
+    // plain `docker build` does. The parity assertion below re-reads them out of
+    // Dockerfile.api, so this map cannot drift from what the image builds with.
+    VITE_PUBLIC_CLIENT_TOKEN: "local-demo-key",
     VITE_API_LIVE: "true",
   };
 
@@ -221,11 +219,11 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
         .filter((m): m is RegExpExecArray => m !== null)
         .map((m) => [m[1], m[2].trim()] as const),
     );
-    for (const [name, value] of Object.entries({
-      VITE_PUBLIC_CLIENT_TOKEN: "",
-      VITE_API_DEMO_KEY: "local-demo-key",
+    const expectedArgs: Record<string, string> = {
+      VITE_PUBLIC_CLIENT_TOKEN: "local-demo-key",
       VITE_API_LIVE: "true",
-    })) {
+    };
+    for (const [name, value] of Object.entries(expectedArgs)) {
       expect(
         args.get(name),
         `Dockerfile.api's frontend stage no longer declares ARG ${name}=${value}, so ` +
@@ -233,6 +231,18 @@ describe("the EMITTED page's render-blocking path reaches no third party (#365)"
       ).toBe(value);
       expect(SHIPPED_BUILD_ENV[name]).toBe(value);
     }
+    // ...and the set must be EXACT, not merely a superset. MEASURED while retiring
+    // VITE_API_DEMO_KEY (#430): re-adding that ARG to the stage left this whole file
+    // green, because a per-name lookup cannot see a name it was never given. An ARG the
+    // Dockerfile declares and this map omits is exactly the "SHIPPED_BUILD_ENV is stale"
+    // state the message above claims to catch — the bundle would then be built under an
+    // environment the image does not reproduce, and every assertion below would be
+    // measuring the wrong artifact.
+    expect(
+      [...args.keys()].sort(),
+      "Dockerfile.api's frontend stage declares an ARG that SHIPPED_BUILD_ENV does not, " +
+        "so this guard builds under a different environment than the image",
+    ).toEqual(Object.keys(expectedArgs).sort());
   });
 
   it("and the build does not depend on anything the image will not have", () => {

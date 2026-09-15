@@ -1,30 +1,31 @@
 /**
- * The two-name fallback for the bundled client token (#430).
+ * How the bundled client token resolves, now that one build arg carries it (#430).
  *
  * WHY THIS FILE EXISTS
  * --------------------
- * `CITEVYN_DEMO_API_KEY` / `VITE_API_DEMO_KEY` are being renamed to
+ * `CITEVYN_DEMO_API_KEY` / `VITE_API_DEMO_KEY` were renamed to
  * `CITEVYN_PUBLIC_CLIENT_TOKEN` / `VITE_PUBLIC_CLIENT_TOKEN`. The value is PUBLIC
  * — Vite bakes it into the bundle, so every visitor can read it — but it is the
- * bearer on every `/v1/*` call, so getting the fallback wrong takes the site down
- * behind a green `/health`. That is exactly release v6 (#296): a mismatched build
- * argument, 401 on every browser call, about an hour.
+ * bearer on every `/v1/*` call, so getting the resolution wrong takes the site
+ * down behind a green `/health`. That is exactly release v6 (#296): a mismatched
+ * build argument, 401 on every browser call, about an hour.
  *
- * `infra/docker/Dockerfile.api` declares BOTH build arguments during the
- * migration, so the bundle is built with both present and the precedence between
- * them is a real, shipped decision rather than a hypothetical.
+ * THE MIGRATION IS OVER. The Fly secret moved, and `infra/docker/Dockerfile.api`
+ * declares ONE `ARG VITE_PUBLIC_CLIENT_TOKEN=local-demo-key`. The dual-name cases
+ * went with the old argument; the retired spelling now has its own case proving
+ * it is INERT, because "we deleted it" is an absence and an absence asserted in
+ * prose is not asserted at all.
  *
- * WHY `||` AND `??` ARE DIFFERENT OPERATORS HERE
- * -----------------------------------------------
- * The NEW argument's ARG default is EMPTY. `??` fires only on null/undefined, so
- * under `??` an unpassed new argument would bake `""` and BEAT a correctly-passed
- * old one — the rename would manufacture the v6 outage. `||` treats `""` as
- * absent, which is the only reason the two can coexist.
- *
- * The OLD argument keeps `??`, so its behaviour is byte-for-byte what ships
- * today: `--build-arg VITE_API_DEMO_KEY=""` still bakes `""`, NOT the published
- * default. `scripts/check_bundle_key.sh` exists to catch that exact bundle, and
- * "fixing" it here would blind the checker rather than fix the deploy.
+ * WHY `||` AND NOT `??`
+ * ---------------------
+ * `??` fires only on null/undefined. Measured with docker, `--build-arg
+ * VITE_PUBLIC_CLIENT_TOKEN=""` does NOT fall back to the `ARG` default — it
+ * leaves the argument empty — so under `??` the bundle would carry `""`, the
+ * browser would send a bare `Authorization: Bearer `, and production would 401
+ * every call while `/health` stayed green. `||` treats `""` as absent, so the
+ * worst an empty argument can bake is the published default, which
+ * `scripts/check_bundle_key.sh` reports by name ("the bundle carries the PUBLIC
+ * DEFAULT … the v6 shape").
  *
  * WHY THE MODULE IS RE-IMPORTED PER CASE
  * --------------------------------------
@@ -36,15 +37,12 @@
  *
  * RED BITE (each assertion, and the one change that turns it red)
  * ---------------------------------------------------------------
- * * `new name alone` / `old name alone` — delete either operand from the chain.
- * * `the new name wins when both are set` — swap the two operands. With one name
- *   set they are indistinguishable, so only the both-set case can see the order.
- * * `an EMPTY new name falls through to the old one` — change the `||` to `??`.
- *   This is the assertion that stops the rename re-running #296; nothing else in
- *   either suite goes red for that one-character edit.
- * * `an EMPTY old name is still taken literally` — change the `??` to `||`.
- *   Turns red because the bundle would start carrying the published default
- *   where it used to carry `""`.
+ * * `the new name alone` — delete the operand from the chain.
+ * * `an EMPTY new name reaches the published default` — change the `||` to `??`.
+ *   This is the assertion that stops an empty build argument re-running #296;
+ *   nothing else in either suite goes red for that one-character edit.
+ * * `the retired name is inert` / `a retired name cannot rescue an empty new one`
+ *   — re-add `import.meta.env.VITE_API_DEMO_KEY` to the chain.
  * * `neither set` — change the `"local-demo-key"` default.
  * * `the header is what the chain resolved` — the partner for all of the above:
  *   every case reads the token through the REQUEST the server receives, not
@@ -54,7 +52,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const NEW_NAME = "VITE_PUBLIC_CLIENT_TOKEN";
-const OLD_NAME = "VITE_API_DEMO_KEY";
+/** The spelling #430 retired. Nothing reads it; the cases below prove that. */
+const RETIRED_NAME = "VITE_API_DEMO_KEY";
 
 /** The published default, mirrored from `Settings.public_client_token`. */
 const PUBLISHED_DEFAULT = "local-demo-key";
@@ -73,7 +72,7 @@ const PUBLISHED_DEFAULT = "local-demo-key";
 async function bearerFor(env: Record<string, string | undefined>): Promise<string> {
   vi.resetModules();
   vi.unstubAllEnvs();
-  for (const name of [NEW_NAME, OLD_NAME]) {
+  for (const name of [NEW_NAME, RETIRED_NAME]) {
     const value = env[name];
     if (value === undefined) {
       // `stubEnv(name, undefined)` DELETES the key, which is what "not passed"
@@ -123,61 +122,59 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe("the bundled public client token accepts both build-arg names (#430)", () => {
-  it("sends the NEW name when only it is set", async () => {
+describe("the bundled public client token reads one build-arg name (#430)", () => {
+  it("sends the NEW name when it is set", async () => {
     expect(await bearerFor({ [NEW_NAME]: "new-name-token" })).toBe("new-name-token");
   });
 
-  it("sends the OLD name when only it is set — this is what makes it a migration", async () => {
-    expect(await bearerFor({ [OLD_NAME]: "old-name-token" })).toBe("old-name-token");
-  });
-
-  it("prefers the NEW name when BOTH are set", async () => {
-    // The state every machine is in for one deploy: the new build arg is passed
-    // while the old one is still being passed too. If the OLD name won, the
-    // cutover would silently never happen.
-    expect(
-      await bearerFor({ [NEW_NAME]: "new-name-token", [OLD_NAME]: "old-name-token" }),
-    ).toBe("new-name-token");
-  });
-
-  it("falls through an EMPTY new name to a good old one (the #296 trap)", async () => {
-    // The Dockerfile's new ARG defaults to EMPTY, so this is the DEFAULT state of
-    // every deploy until the operator passes the new argument. Under `??` the
-    // bundle would carry "" and 401 every browser call behind a green /health.
-    expect(await bearerFor({ [NEW_NAME]: "", [OLD_NAME]: "old-name-token" })).toBe(
-      "old-name-token",
-    );
-  });
-
-  it("falls back to the published default when NEITHER is set", async () => {
+  it("falls back to the published default when it is NOT set", async () => {
     expect(await bearerFor({})).toBe(PUBLISHED_DEFAULT);
   });
 
-  it("still takes an EMPTY old name literally, exactly as it does today", async () => {
-    // NOT a bug being carried forward — the shape `check_bundle_key.sh` detects.
-    // Turning it into the default here would hide it from the only checker that
-    // looks at the SERVED bundle.
-    expect(await bearerFor({ [OLD_NAME]: "" })).toBe("");
-  });
-
-  it("takes both-empty literally too, rather than resurrecting the default", async () => {
-    expect(await bearerFor({ [NEW_NAME]: "", [OLD_NAME]: "" })).toBe("");
-  });
-
-  it("an EMPTY new name with NO old name still reaches the default", async () => {
+  it("reaches the published default on an EMPTY new name — never a bare Bearer", async () => {
+    // `--build-arg VITE_PUBLIC_CLIENT_TOKEN=""` does not fall back to the ARG
+    // default; docker leaves the argument empty. Under `??` this would bake ""
+    // and 401 every browser call behind a green /health — #296, reached through
+    // a different string. The `||` is what makes the default the worst case.
     expect(await bearerFor({ [NEW_NAME]: "" })).toBe(PUBLISHED_DEFAULT);
+  });
+});
+
+describe("the retired VITE_API_DEMO_KEY spelling is inert (#430 step 2)", () => {
+  it("is not read when it is the only name set", async () => {
+    // Asserting the DEFAULT, not merely "not the old value": where the value
+    // lands is the property, and "not X" would also hold for a typo'd fixture.
+    expect(await bearerFor({ [RETIRED_NAME]: "old-name-token" })).toBe(PUBLISHED_DEFAULT);
+  });
+
+  it("cannot rescue an EMPTY new name", async () => {
+    // The state a half-cleaned deploy is in. While the old operand existed this
+    // returned "old-name-token"; it is the case that changes direction, so it is
+    // the cheapest tripwire for an accidental restoration of the fallback.
+    expect(await bearerFor({ [NEW_NAME]: "", [RETIRED_NAME]: "old-name-token" })).toBe(
+      PUBLISHED_DEFAULT,
+    );
+  });
+
+  it("cannot override a good new name either", async () => {
+    expect(
+      await bearerFor({ [NEW_NAME]: "new-name-token", [RETIRED_NAME]: "old-name-token" }),
+    ).toBe("new-name-token");
   });
 });
 
 describe("non-vacuity partners", () => {
   it("distinguishes the two names, so no case can pass by reading the other", async () => {
     const viaNew = await bearerFor({ [NEW_NAME]: "sentinel-new" });
-    const viaOld = await bearerFor({ [OLD_NAME]: "sentinel-old" });
-    expect(viaNew).not.toBe(viaOld);
+    const viaRetired = await bearerFor({ [RETIRED_NAME]: "sentinel-retired" });
+    expect(viaNew).not.toBe(viaRetired);
+    // Direction, not just difference: without this the pair is satisfied by a
+    // chain that reads the retired name and ignores the new one.
+    expect(viaNew).toBe("sentinel-new");
+    expect(viaRetired).toBe(PUBLISHED_DEFAULT);
   });
 
-  it("a token that is neither operand can never be produced", async () => {
+  it("a token that is neither the operand nor the default can never be produced", async () => {
     // Partner for every `toBe` above: proves the helper reads the CHAIN and not
     // some constant that happens to match.
     const bearer = await bearerFor({ [NEW_NAME]: "only-this-one" });

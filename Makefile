@@ -256,17 +256,16 @@ demo: db-up migrate seed ## Bring up db, migrate, seed + ingest the corpus (one-
 
 demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 	@# The public client token is baked in at BUILD time by Vite
-	@# (frontend/src/lib/api.ts reads VITE_PUBLIC_CLIENT_TOKEN, falling back to the
-	@# deprecated VITE_API_DEMO_KEY, then to "local-demo-key").
+	@# (frontend/src/lib/api.ts reads VITE_PUBLIC_CLIENT_TOKEN, falling back to
+	@# "local-demo-key").
 	@# Nothing used to pass it, so once the env guard started REQUIRING a strong
 	@# token the bundle kept shipping the default and every browser request 401'd —
 	@# while deploy-verify stayed green, because it curls with the value straight
 	@# out of .env and never exercises the bundle.
 	@#
-	@# Both #430 spellings are read out of infra/docker/.env, new one winning, so
-	@# this target works either side of the Fly secret rename. `:-` treats an empty
-	@# variable as absent here, a local-build convenience and NOT the rule Settings
-	@# applies (it treats empty as present and refuses to boot) — see
+	@# The token is read out of infra/docker/.env. `:-` treats an empty variable as
+	@# absent here, a local-build convenience and NOT the rule Settings applies (it
+	@# treats empty as present and refuses to boot) — see
 	@# infra/docker/scripts/_env_guard.sh, the one gate that mirrors it exactly.
 	@# Read in a
 	@# subshell so the rest of the prod secret set is not exported into this make
@@ -274,7 +273,7 @@ demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 	@set -e; \
 	key=""; \
 	if [[ -f infra/docker/.env ]]; then \
-	    key="$$( set -a; . infra/docker/.env >/dev/null 2>&1; set +a; printf '%s' "$${CITEVYN_PUBLIC_CLIENT_TOKEN:-$${CITEVYN_DEMO_API_KEY:-}}" )"; \
+	    key="$$( set -a; . infra/docker/.env >/dev/null 2>&1; set +a; printf '%s' "$${CITEVYN_PUBLIC_CLIENT_TOKEN:-}" )"; \
 	    _peel() { \
 	        while [[ "$$1" =~ [[:space:]]$$ ]]; do set -- "$${1%%[[:space:]]}"; done; \
 	        while [[ "$$1" =~ ^[[:space:]] ]]; do set -- "$${1#?}"; done; \
@@ -292,7 +291,7 @@ demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 	if [[ -n "$${key}" ]]; then \
 	    echo "==> building with VITE_PUBLIC_CLIENT_TOKEN from infra/docker/.env"; \
 	else \
-	    echo "==> no CITEVYN_PUBLIC_CLIENT_TOKEN (or CITEVYN_DEMO_API_KEY) in infra/docker/.env; building with the local default"; \
+	    echo "==> no CITEVYN_PUBLIC_CLIENT_TOKEN in infra/docker/.env; building with the local default"; \
 	fi; \
 	cd frontend && npm ci && VITE_PUBLIC_CLIENT_TOKEN="$${key:-local-demo-key}" npm run build
 	@echo "Frontend bundle written to frontend/dist. Serve it behind the API, or open frontend/dist/index.html directly."

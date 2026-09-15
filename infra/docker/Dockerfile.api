@@ -48,31 +48,29 @@
 #   is the anti-nuisance bearer the rate limiter buckets on, a CSRF guard, and
 #   not an identity control. See ``docs/SECURITY_MODEL.md`` and #430.
 #
-#   TWO ARGUMENTS ACCEPT IT DURING THE #430 RENAME, and their DEFAULTS DIFFER on
-#   purpose:
+#   ONE ARGUMENT CARRIES IT: VITE_PUBLIC_CLIENT_TOKEN. The #430 rename is
+#   finished — the deprecated VITE_API_DEMO_KEY ARG and the CITEVYN_DEMO_API_KEY
+#   Fly secret behind it are both gone — so there is no second spelling to accept.
 #
-#     VITE_PUBLIC_CLIENT_TOKEN  the new name. Defaults to EMPTY, because it is
-#                               not passed by every caller yet and an empty value
-#                               is how ``frontend/src/lib/api.ts`` is told to fall
-#                               through to the old one. Giving it the local
-#                               default instead would make it WIN over a
-#                               correctly-passed VITE_API_DEMO_KEY and ship
-#                               ``local-demo-key`` to production — release v6's
-#                               outage (#296), manufactured by the rename.
-#     VITE_API_DEMO_KEY         the name being retired. Keeps the local default
-#                               so a plain ``docker build`` still works unchanged.
+#   The default is the publicly-known ``local-demo-key`` so a plain
+#   ``docker build`` still works unchanged. A deploy MUST pass the real value:
+#   ``backend/tests/test_deploy_fly_build_args_are_documented.py`` makes the §4.1
+#   runbook command carry every ARG declared here, because an ARG the deploy
+#   omits ships this default and production 401s every browser call behind a
+#   green /health (#296).
 #
-#   The precedence lives in the frontend (`||` on the new, `??` on the old) and is
-#   pinned case by case in ``frontend/src/test/publicClientToken.test.ts``. Both
-#   are threaded into the build below, so a deploy mid-migration may pass either.
+#   ``frontend/src/lib/api.ts`` joins it with `||`, NOT `??`, so an explicitly
+#   EMPTY ``--build-arg VITE_PUBLIC_CLIENT_TOKEN=""`` — which does not fall back
+#   to this ARG default — bakes the published default rather than ``""`` and a
+#   bare ``Authorization: Bearer ``. Pinned case by case in
+#   ``frontend/src/test/publicClientToken.test.ts``.
 #
 # VITE_API_BASE_URL is deliberately NOT set: it defaults to "", which makes
 # apiFetch use relative paths. Same-origin is the whole point of serving the
 # bundle from the API — no CORS, no second hostname.
 FROM node:26-bookworm-slim AS frontend
 
-ARG VITE_PUBLIC_CLIENT_TOKEN=
-ARG VITE_API_DEMO_KEY=local-demo-key
+ARG VITE_PUBLIC_CLIENT_TOKEN=local-demo-key
 ARG VITE_API_LIVE=true
 
 WORKDIR /fe
@@ -84,7 +82,6 @@ RUN npm ci
 
 COPY frontend/ ./
 RUN VITE_PUBLIC_CLIENT_TOKEN="${VITE_PUBLIC_CLIENT_TOKEN}" \
-    VITE_API_DEMO_KEY="${VITE_API_DEMO_KEY}" \
     VITE_API_LIVE="${VITE_API_LIVE}" \
     npm run build \
     && test -f dist/index.html   # fail the build loudly rather than ship an empty mount
