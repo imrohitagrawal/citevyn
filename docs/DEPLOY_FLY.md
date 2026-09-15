@@ -231,9 +231,9 @@ Notes on the list:
   reject the publicly-known defaults `local-demo-key` / `local-admin-key`,
   and anything under 16 characters, *at parse time* — so a missing value fails
   the release command rather than quietly shipping an unauthenticated demo.
-- **`CITEVYN_PUBLIC_CLIENT_TOKEN` was called `CITEVYN_DEMO_API_KEY` (#430), and
-  the old name is still read.** It is the one value in this list that is
-  **deliberately public**: it is baked into the JS bundle at build time, so any
+- **`CITEVYN_PUBLIC_CLIENT_TOKEN` was called `CITEVYN_DEMO_API_KEY` until #430,
+  and the old name is no longer read anywhere.** It is the one value in this list
+  that is **deliberately public**: it is baked into the JS bundle at build time, so any
   visitor can read it out of `/assets/index-*.js`. Its job is a CSRF guard — a
   cross-site request cannot set an `Authorization` header — plus a rate-limit
   turnstile; it is explicitly not an identity control, and its security property
@@ -243,7 +243,7 @@ Notes on the list:
   a reader to conclude a real credential had leaked. **Public is not the same as
   blank**: unset, the app falls back to `local-demo-key`, which is published in
   this repo and therefore identical for every reader of it, and production
-  refuses to boot on exactly that. The cutover is §3.1.
+  refuses to boot on exactly that.
 - **`CITEVYN_GEMINI_API_KEY` covers both roles.** `fly.toml` sets
   `CITEVYN_LLM_PROVIDER=gemini` and `CITEVYN_EMBEDDING_PROVIDER=gemini`, and
   both read this one key. The same guards refuse to boot with
@@ -262,83 +262,6 @@ Verify (this prints names and digests, never values):
 fly secrets list
 ```
 
-### 3.1 Renaming `CITEVYN_DEMO_API_KEY` → `CITEVYN_PUBLIC_CLIENT_TOKEN` (#430)
-
-**Where this stands today.** The app, the compose env guard, `deploy_verify.sh`,
-`scripts/check_bundle_key.sh` and the browser bundle all read **both** spellings,
-with the new one winning when both are present. Nothing is broken by doing
-nothing; the old Fly secret keeps working exactly as it does now. What remains is
-moving the stored value, and that is an owner action because it changes
-production configuration.
-
-**Why it is two steps and not one.** A flag day here re-runs release v6
-(2026-09-02): a mismatched build argument shipped, every browser call returned
-401 for about an hour, and `/health` stayed green throughout — #296. Accepting
-both names means no single step can produce that state.
-
-**The cutover, in order.** Each step is safe to stop after.
-
-```bash
-# Wake the machine first. It scales to zero, and `fly ssh console` against a
-# sleeping machine returns EMPTY — the same trap §4.1 opens with.
-curl -sS -o /dev/null https://citevyn.stackclimb.com/health
-
-CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
-
-fly secrets set CITEVYN_PUBLIC_CLIENT_TOKEN="${CLIENT_TOKEN:?empty — the machine is asleep or the old secret is already gone; curl /health above, then retry}" --app citevyn
-fly secrets list --app citevyn
-```
-
-> **The `:?` here matters more than anywhere else in this runbook**, because this
-> is the one command that WRITES production configuration. An empty capture would
-> set the new secret to `""` — and an empty variable is *present*, so
-> `AliasChoices` selects it, `min_length=1` rejects it, and the app refuses to
-> boot while the strong old secret sits there unread. `fly secrets set` restarts
-> the machine, so that is a crash-loop, not a 401. Assigning to a variable first
-> and guarding with `:?` stops `fly secrets set` from running at all. (In a
-> *non-interactive* shell it also exits the shell; an interactive one survives
-> and carries on to the next line, so do not rely on the abort to stop a whole
-> block — the guarded command itself is what does not run. Traced in bash and
-> zsh, interactive and not.) Do not
-> collapse it back to an inline `$(…)`: a command substitution has no way to fail
-> on empty, which is the same rule §4.1 states at length.
-
-1. **Set the new secret to the SAME value the old one holds** (the command
-   above). Copying rather than rotating is deliberate: the browser bundles
-   already deployed carry the current value, so changing it at the same time as
-   renaming it would 401 every visitor until the next build finished. Rotate
-   later, as its own change, if you want to.
-   `fly secrets set` restarts the machine; the app now reads the new name and
-   ignores the old one.
-2. **Deploy** (§4.1). The command there already passes the value under **both**
-   build-argument names, so the bundle is correct either way.
-3. **Verify** with the bundle check in §4.1 and the smoke test in §4.4.
-4. **Only then** unset the old secret:
-
-   ```bash
-   fly secrets unset CITEVYN_DEMO_API_KEY --app citevyn
-   ```
-
-   The follow-up PR that deletes the old name from the code can merge before or
-   after this — while both names are read, either order is safe. What is **not**
-   safe is unsetting the old secret before step 1 has actually copied the value.
-
-> **`fly secrets list` prints names and digests, never values** — the digests are
-> how you confirm step 1 copied rather than rotated. If the two digests differ,
-> you rotated: go back and set the new secret to the old secret's value, or
-> redeploy immediately, because every already-served bundle carries the old one.
->
-> **The removal PR must also delete the deprecated name from**, at minimum:
-> `backend/app/core/config.py` (the `AliasChoices` entry), `frontend/src/lib/api.ts`,
-> `infra/docker/Dockerfile.api` (the second `ARG` **and** the second `--build-arg`
-> in §4.1 above), `scripts/check_bundle_key.sh`, `infra/docker/scripts/_env_guard.sh`,
-> `infra/docker/scripts/deploy_verify.sh`, `Makefile`, and the fixtures in
-> `tests/shell/test_deploy_verify_skip_state.sh` and
-> `tests/shell/test_rollback_drill_plan.sh`, which still pin the old spelling.
-> `backend/tests/test_public_client_token_dual_name.py` and
-> `backend/tests/test_settings_env_vars_are_documented.py` both go RED the moment
-> the alias is gone, and their failure messages name what to clean up.
-
 ---
 
 ## 4. Deploy, migrate, seed, promote
@@ -352,36 +275,27 @@ curl -sS -o /dev/null https://citevyn.stackclimb.com/health
 
 VERSION="$(git describe --tags --always)"
 CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_PUBLIC_CLIENT_TOKEN' 2>/dev/null | tr -d '\r\n')"
-if [ -z "$CLIENT_TOKEN" ]; then
-  CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
-fi
 
 fly deploy --app citevyn --local-only \
   --build-arg VERSION="${VERSION:?git describe produced nothing — run this from the repo}" \
   --build-arg VITE_API_LIVE=true \
-  --build-arg VITE_PUBLIC_CLIENT_TOKEN="${CLIENT_TOKEN:?empty — the machine is asleep or neither secret is set; curl /health above, then retry}" \
-  --build-arg VITE_API_DEMO_KEY="${CLIENT_TOKEN:?empty — the machine is asleep or neither secret is set; curl /health above, then retry}"
+  --build-arg VITE_PUBLIC_CLIENT_TOKEN="${CLIENT_TOKEN:?empty — the machine is asleep or the secret is not set; curl /health above, then retry}"
 ```
 
-> **Why the token is read twice and passed twice (#430).** The secret is being
-> renamed from `CITEVYN_DEMO_API_KEY` to `CITEVYN_PUBLIC_CLIENT_TOKEN` (§3.1) and
-> this command has to work on both sides of that change, in one copy-pasteable
-> form. The `if [ -z ... ]` reads the new name off the running machine and falls
-> back to the old one, so it finds the value whichever secret is set. Both build
-> arguments are then passed the **same** value, because
-> `infra/docker/Dockerfile.api` declares both `ARG`s during the migration and the
-> repo's own guard (`test_every_baked_build_arg_is_passed_by_the_deploy_command`)
-> requires every baked argument to be passed — an `ARG` the deploy omits ships its
-> default, which is how #296 happened. Passing one value under two names is
-> exactly a no-op today and stops being one only when the follow-up PR deletes the
-> old argument, at which point this line loses its last `--build-arg`.
+> **One name, since #430 step 2.** The secret was `CITEVYN_DEMO_API_KEY` and the
+> build argument `VITE_API_DEMO_KEY`; both are gone, on the machine and in the
+> repo, so this command reads and passes exactly one value.
+> `infra/docker/Dockerfile.api` declares one `ARG` for it, and the repo's own
+> guard (`test_every_baked_build_arg_is_passed_by_the_deploy_command`) requires
+> every baked argument to appear here — an `ARG` the deploy omits ships its
+> default, which is how #296 happened.
 
-> **The client-token build arguments are not optional.** The frontend is built
+> **The client-token build argument is not optional.** The frontend is built
 > inside the image and the bearer is baked into the bundle at build time
-> (`infra/docker/Dockerfile.api`, `ARG VITE_PUBLIC_CLIENT_TOKEN=` and
-> `ARG VITE_API_DEMO_KEY=local-demo-key`). Drop them and the bundle carries the
-> public default, production rejects every browser call with 401 "Invalid bearer
-> token", and the site is down while `/health` stays green. This happened on
+> (`infra/docker/Dockerfile.api`, `ARG VITE_PUBLIC_CLIENT_TOKEN=local-demo-key`).
+> Drop it and the bundle carries the public default, production rejects every
+> browser call with 401 "Invalid bearer token", and the site is down while
+> `/health` stays green. This happened on
 > 2026-09-02 (release v6, fixed by v7) — see #296. The command reads the value
 > from the running machine so it never touches your shell history. The value is
 > public — it ships inside the bundle — but it is still not something to paste
@@ -391,20 +305,17 @@ fly deploy --app citevyn --local-only \
 >
 > **The `:?` is the mechanism, not decoration.** An empty substitution does
 > *not* fall back to the ARG default. Measured with docker: `--build-arg
-> VITE_API_DEMO_KEY=""` leaves the argument **empty**, Vite bakes `const K =
-> ""` (the `??` on that operand in `frontend/src/lib/api.ts` fires on
-> null/undefined, never on `""`), and the browser sends a bare
-> `Authorization: Bearer ` — the same 401 outage as v6, reached through a
-> different string. `${CLIENT_TOKEN:?…}` aborts the shell *before* `fly deploy`
-> runs, in both bash and zsh, so that build cannot start. Do not "simplify" it
-> back to an inline `$(…)`: a command substitution has no way to fail on empty.
->
-> The **new** argument is the one exception, and only inside the bundle: its `ARG`
-> default is empty and `frontend/src/lib/api.ts` joins it with `||`, so an
-> unpassed `VITE_PUBLIC_CLIENT_TOKEN` falls through to `VITE_API_DEMO_KEY`
-> instead of winning with `""`. That asymmetry is what lets both names coexist;
-> it is pinned case by case in `frontend/src/test/publicClientToken.test.ts` and
-> it does **not** excuse dropping the `:?` here.
+> VITE_PUBLIC_CLIENT_TOKEN=""` leaves the argument **empty**. While
+> `frontend/src/lib/api.ts` joined that operand with `??` the bundle then carried
+> `const K = ""` and the browser sent a bare `Authorization: Bearer ` — the same
+> 401 outage as v6, reached through a different string. That operand is `||`
+> since #430, so an empty argument now bakes `local-demo-key` instead, which is
+> still a bundle every browser call 401s on — it just fails with a clearer
+> diagnosis from `check_bundle_key.sh`. Either way `${CLIENT_TOKEN:?…}` aborts the
+> shell *before* `fly deploy` runs, in both bash and zsh, so that build cannot
+> start. Do not "simplify" it back to an inline `$(…)`: a command substitution has
+> no way to fail on empty. The cases are pinned in
+> `frontend/src/test/publicClientToken.test.ts`.
 
 > **`--local-only` is not optional either, and the signal you would check
 > LIES to you.** Without it `fly deploy` uploads the build context to a
@@ -464,8 +375,8 @@ curl -sS "$BASE/${CHUNK:?no entry chunk in the served index.html — is the app 
 > It printed `0` — reported success — on a bundle built with an empty build
 > argument, i.e. the exact failure the **"`:?` is the mechanism"** note earlier
 > in this section tells you to guard against — `--build-arg
-> VITE_API_DEMO_KEY=""`, which bakes `const K = ""` and 401s every browser
-> call. (Naming that note rather than saying "the paragraph above": three
+> VITE_PUBLIC_CLIENT_TOKEN=""`, which baked `const K = ""` and 401'd every
+> browser call. (Naming that note rather than saying "the paragraph above": three
 > `--local-only` paragraphs now sit between the two, so adjacency no longer
 > identifies it.) And an absence check fails *open*: if the key ever moves into a
 > lazily-imported chunk, "not found" still reads as a pass. `check_bundle_key.sh`
@@ -771,9 +682,6 @@ BASE=https://citevyn.stackclimb.com
 JAR=$(mktemp)
 ANSWER=$(mktemp)
 CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_PUBLIC_CLIENT_TOKEN' 2>/dev/null | tr -d '\r\n')"
-if [ -z "$CLIENT_TOKEN" ]; then
-  CLIENT_TOKEN="$(fly ssh console --app citevyn -C 'printenv CITEVYN_DEMO_API_KEY' 2>/dev/null | tr -d '\r\n')"
-fi
 
 SID=$(curl -sS -c "$JAR" -X POST "$BASE/v1/sessions" \
         -H "Authorization: Bearer ${CLIENT_TOKEN:?empty — the machine is asleep; curl /health first}" \

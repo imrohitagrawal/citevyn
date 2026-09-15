@@ -60,7 +60,7 @@ cp "${SCRIPTS}/_migration_gen.sh" infra/docker/scripts/_migration_gen.sh
 cp "${SCRIPTS}/_drill_lib.sh"     infra/docker/scripts/_drill_lib.sh
 # --dry-run exits before the env guard, so a stub .env is enough to get past the
 # preflight file check.
-printf 'CITEVYN_PUBLIC_HOST=citevyn.test\nCITEVYN_DEMO_API_KEY=k\n' > infra/docker/.env
+printf 'CITEVYN_PUBLIC_HOST=citevyn.test\nCITEVYN_PUBLIC_CLIENT_TOKEN=k\n' > infra/docker/.env
 
 OUT="$(./infra/docker/scripts/deploy_verify.sh --dry-run 2>&1)"; RC=$?
 if [[ "${RC}" -ne 0 ]]; then

@@ -139,7 +139,7 @@ build if a new setting arrives in neither. The production subset lives in
 |----------------------------------|-----------------|---------------------------------------------------|
 | `CITEVYN_ENVIRONMENT`            | yes, in prod    | `local` (default) or `production`. Not a label — it is the flag that turns on HSTS, the `Secure`/`__Host-` session cookie, withdrawal of `/docs` + the OpenAPI schema, refusal of a `stub` provider, and refusal of a default or under-16-character public client token / admin key (those two only). `fly.toml` and `docker-compose.yml` pin it; any other launch path needs it set |
 | `CITEVYN_DATABASE_URL`           | yes             | Async SQLAlchemy URL (Postgres or SQLite)         |
-| `CITEVYN_PUBLIC_CLIENT_TOKEN`    | yes             | `Authorization: Bearer` token for `/v1/*` demo routes. PUBLIC by design — baked into the browser bundle, so every visitor can read it; it is a CSRF guard plus a rate-limit turnstile, not an identity control. Renamed from `CITEVYN_DEMO_API_KEY` in #430, which is still read during the migration |
+| `CITEVYN_PUBLIC_CLIENT_TOKEN`    | yes             | `Authorization: Bearer` token for `/v1/*` demo routes. PUBLIC by design — baked into the browser bundle, so every visitor can read it; it is a CSRF guard plus a rate-limit turnstile, not an identity control |
 | `CITEVYN_ADMIN_API_KEY`          | yes             | `X-Admin-API-Key` header value for `/v1/admin/*` (not bearer) |
 | `CITEVYN_REDIS_URL`              | recommended     | Enables the Redis rate limiter (production)       |
 | `CITEVYN_LLM_PROVIDER`           | optional        | `stub` (default) or `anthropic`                   |

@@ -66,7 +66,7 @@
     "    fetches it on EVERY load. It went from UNCOUNTED to SANCTIONED.",
     "",
     "One more thing the measurement is honest about: Fly passes a PRODUCTION",
-    "VITE_API_DEMO_KEY while this builds with the default, so the deployed bundle",
+    "VITE_PUBLIC_CLIENT_TOKEN while this builds with the default, so the deployed bundle",
     "differs by that key's length delta (sub-100 B). Dockerfile parity was",
     "otherwise VERIFIED in review -- building the way infra/docker/Dockerfile.api",
     "does emitted the SAME content hash as buildCommand().",

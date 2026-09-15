@@ -16,14 +16,16 @@
 #
 # It asserts the ABSENCE of the old default, and that is the wrong shape twice:
 #
-#   1. It is blind to the failure its own runbook paragraph warned about.
-#      MEASURED with docker: `--build-arg VITE_API_DEMO_KEY=""` does NOT fall
-#      back to the ARG default — it leaves the arg EMPTY. Vite then bakes
-#      `const K = ""` (`??` in frontend/src/lib/api.ts does not fire on an
-#      empty string, only on null/undefined), the browser sends a bare
-#      `Authorization: Bearer `, and production 401s exactly as in v6 — but via
-#      a different string. `grep -c local-demo-key` prints 0 on that bundle and
-#      the operator is told everything is fine.
+#   1. It was blind to the failure its own runbook paragraph warned about.
+#      MEASURED with docker: `--build-arg VITE_PUBLIC_CLIENT_TOKEN=""` does NOT
+#      fall back to the ARG default — it leaves the arg EMPTY. While
+#      frontend/src/lib/api.ts joined that operand with `??` (which does not fire
+#      on an empty string, only on null/undefined) Vite baked `const K = ""`, the
+#      browser sent a bare `Authorization: Bearer `, and production 401'd exactly
+#      as in v6 — but via a different string. `grep -c local-demo-key` prints 0 on
+#      that bundle and the operator is told everything is fine. #430 changed that
+#      operand to `||`, so the empty case bakes the published default again; the
+#      shape below is what detects EITHER bundle.
 #
 #   2. An absence check fails OPEN under refactoring. If the key ever moves to
 #      a lazily-imported chunk, "not found" still reads as success. A presence
@@ -49,18 +51,17 @@
 #
 # WHICH VARIABLE IT READS (#430)
 # ------------------------------
-# CITEVYN_PUBLIC_CLIENT_TOKEN first, then the deprecated CITEVYN_DEMO_API_KEY, so
-# the same script works before and after the Fly secret is renamed. New wins when
-# both are set — the same ORDER Settings applies, deliberately, because a checker
-# that disagreed with the server about which value is live would report a PASS on
-# a bundle the server rejects.
+# CITEVYN_PUBLIC_CLIENT_TOKEN, and only that. The deprecated CITEVYN_DEMO_API_KEY
+# spelling was retired once the Fly secret moved, and reading it here would let
+# the checker disagree with the server about which value is live — a PASS on a
+# bundle the server rejects.
 #
 # The EMPTINESS rule differs from Settings on purpose. `:-` treats an empty
-# variable as absent and falls through to the old name; Settings treats it as
-# PRESENT and refuses to boot. This script is not a boot gate — it needs a needle
-# to search the bundle for, and it has its own hard failure below when no usable
-# value is found either way. The gate that must mirror Settings exactly is
-# infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE.
+# variable as absent; Settings treats it as PRESENT and refuses to boot. This
+# script is not a boot gate — it needs a needle to search the bundle for, and it
+# has its own hard failure below when no usable value is found. The gate that
+# must mirror Settings exactly is infra/docker/scripts/_env_guard.sh, which
+# resolves the name from the .env FILE.
 #
 # USAGE
 #   CITEVYN_PUBLIC_CLIENT_TOKEN="$tok" ./scripts/check_bundle_key.sh < bundle.js
@@ -85,10 +86,10 @@ if [[ $# -gt 0 ]]; then
     exit 2
 fi
 
-# `:-` on the new name, so an EMPTY new variable falls through to the deprecated
-# one instead of short-circuiting the whole check into its own [FAIL]. Whichever
-# ends up empty, the partner check below still refuses to run.
-KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
+# `:-` so an unset variable is an empty string rather than an `unbound variable`
+# abort under `set -u`. The partner check below turns that into a hard [FAIL]
+# with a diagnosis, which is more use to an operator than a bash error.
+KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-}"
 
 # ── Partner check: the expected key must exist AND be a plausible key ──────
 # Without this, the presence test below degenerates towards `index($0, "")`,
@@ -114,7 +115,7 @@ if [[ -z "${_STRIPPED}" ]]; then
     # returns 1. Without that distinction a mutant that deleted the whitespace
     # strip still printed ok.
     echo "[FAIL] the expected token is empty, unset, or whitespace only." >&2
-    echo "       (Read from CITEVYN_PUBLIC_CLIENT_TOKEN, then CITEVYN_DEMO_API_KEY.)" >&2
+    echo "       (Read from CITEVYN_PUBLIC_CLIENT_TOKEN.)" >&2
     echo "       Nothing to look for, so this check cannot pass — and a blank" >&2
     echo "       needle would match almost any bundle, reporting a false PASS." >&2
     echo "       The usual cause is that the Fly machine had scaled to zero and" >&2
@@ -179,7 +180,7 @@ echo "       See docs/DEPLOY_FLY.md §4.1." >&2
 # are reported as the same failure above; this only sharpens the diagnosis.
 if printf '%s' "${BUNDLE}" | grep -qF 'local-demo-key'; then
     echo "       Diagnosis: the bundle carries the PUBLIC DEFAULT 'local-demo-key'," >&2
-    echo "       so neither --build-arg VITE_PUBLIC_CLIENT_TOKEN nor VITE_API_DEMO_KEY" >&2
-    echo "       was passed at all (the v6 shape)." >&2
+    echo "       so --build-arg VITE_PUBLIC_CLIENT_TOKEN was not passed, or was" >&2
+    echo "       passed empty (the v6 shape)." >&2
 fi
 exit 1

@@ -188,25 +188,21 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # An explicit env override wins over the compose .env. This is what makes
 # --verify-only usable against a locally-run api whose key lives elsewhere
 # (e.g. backend/.env) without editing the prod env file.
-# Both #430 spellings, new one winning, and the ENVIRONMENT beats the .env file
-# for each in turn. The ORDER matches what Settings resolves -- pydantic exhausts
-# a source's aliases before moving to the next source, so env-new, env-old,
-# file-new, file-old.
+# ONE name since #430 step 2, so the order is just env-then-file: the deprecated
+# CITEVYN_DEMO_API_KEY spelling is read nowhere any more, and reading it here
+# would let this script probe with a bearer the server does not accept.
 #
 # The EMPTINESS rule deliberately differs, and saying so is the point: `:-` here
-# treats an empty variable as absent and falls through. Settings does NOT -- an
-# empty variable is PRESENT, so AliasChoices selects it and min_length rejects it.
+# treats an empty variable as absent and falls through to the .env file. Settings
+# does NOT -- an empty variable is PRESENT, and min_length=1 rejects it.
 # This script is not a boot gate; its job is to find a bearer to probe WITH, and
 # refusing to run because an unrelated variable was exported empty would help
 # nobody. The gate that must agree with Settings exactly is
 # infra/docker/scripts/_env_guard.sh, which resolves the name from the .env FILE
 # for that reason -- the same source the container is fed from.
-DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-${CITEVYN_DEMO_API_KEY:-}}"
+DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-}"
 if [[ -z "${DEMO_KEY}" ]]; then
     DEMO_KEY="$(read_env CITEVYN_PUBLIC_CLIENT_TOKEN)"
-fi
-if [[ -z "${DEMO_KEY}" ]]; then
-    DEMO_KEY="$(read_env CITEVYN_DEMO_API_KEY)"
 fi
 PUBLIC_HOST="$(read_env CITEVYN_PUBLIC_HOST)"
 
@@ -270,7 +266,7 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null \
         || die "VERSION='${VERSION}' is not an existing git tag (the gate deploys a tagged release, not a branch)"
     [[ -n "${BASE_URL}" ]] || die "BASE_URL is unset and CITEVYN_PUBLIC_HOST is empty in ${COMPOSE_DIR}/.env"
-    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_PUBLIC_CLIENT_TOKEN is unset in ${COMPOSE_DIR}/.env (the deprecated CITEVYN_DEMO_API_KEY is also accepted)"
+    [[ -n "${DEMO_KEY}" ]] || die "CITEVYN_PUBLIC_CLIENT_TOKEN is unset in ${COMPOSE_DIR}/.env"
 
     # A dirty tree must be caught BEFORE we redeploy production — otherwise we
     # ship uncommitted local edits and only discover it when the rollback
@@ -328,12 +324,15 @@ if [[ "${VERIFY_ONLY}" == "0" ]]; then
     #
     # This asserts PRESENCE of the expected key, not ABSENCE of the old
     # default. The absence form was blind to a second failure with the same
-    # symptom: a bundle built with an EMPTY `--build-arg VITE_API_DEMO_KEY`
-    # contains neither the default nor any key (measured -- docker leaves the
-    # arg empty rather than defaulting, and Vite bakes `""`), so
-    # `grep -F local-demo-key` finds nothing and the gate reports PASS over a
-    # bundle whose every request 401s. Same reasoning, and the same script, as
-    # docs/DEPLOY_FLY.md §4.1 -- see scripts/check_bundle_key.sh.
+    # symptom: while `frontend/src/lib/api.ts` still joined its build arg with
+    # `??`, a bundle built with an EMPTY `--build-arg` contained neither the
+    # default nor any key (measured -- docker leaves the arg empty rather than
+    # defaulting, and Vite baked `""`), so `grep -F local-demo-key` found nothing
+    # and the gate reported PASS over a bundle whose every request 401s. That
+    # operand is `||` since #430 so the empty case now bakes the default again,
+    # but the absence form stays wrong for the other reason: it fails OPEN if the
+    # key ever moves into a lazily-imported chunk. Same reasoning, and the same
+    # script, as docs/DEPLOY_FLY.md §4.1 -- see scripts/check_bundle_key.sh.
     #
     # #362: an absent frontend/dist used to record NEITHER pass nor fail. Three
     # branches now, one per real invocation context, and every one of them
@@ -603,7 +602,7 @@ deploy_at() {  # deploy_at <tag> — check out that tag's tree, then build+deplo
 # zero-probe guard below.
 if [[ "${VERIFY_ONLY}" == "1" ]]; then
     [[ -n "${BASE_URL}" ]] || die "--verify-only needs BASE_URL (or CITEVYN_PUBLIC_HOST)"
-    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_PUBLIC_CLIENT_TOKEN (or the deprecated CITEVYN_DEMO_API_KEY)"
+    [[ -n "${DEMO_KEY}" ]] || die "--verify-only needs CITEVYN_PUBLIC_CLIENT_TOKEN"
     echo "==> --verify-only: probing ${BASE_URL} (no deploy, no rollback)"
     verify_suite "verify-only"
     echo
