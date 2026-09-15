@@ -97,12 +97,31 @@ _NPM = ("npm", "/frontend")
 
 # Every label the repository actually has, verbatim from
 # ``gh label list --limit 100`` against imrohitagrawal/citevyn on 2026-09-15
-# (#436). Dependabot cannot CREATE a label: a requested name the repo does not
-# have is silently dropped, so a config asking for one is claiming something
-# that never happens. That is measurable at the CONSUMER and was measured --
-# PRs #433 and #434 (uv, requesting `python`), #227 (docker, requesting
-# `docker`) and #243 (github-actions, requesting `ci`) each landed carrying
-# `dependencies` alone, while #307 (npm, requesting `javascript`) carried both.
+# (#436).
+#
+# The mechanism, quoted from GitHub's Dependabot options reference, because an
+# earlier draft of this comment made the broader claim "Dependabot cannot create
+# a label" and that is FALSE. Dependabot DOES create its DEFAULT labels --
+# `dependencies` plus an ecosystem or language one -- "automatically, as
+# necessary in your repository". Proven in this repo: PR #10
+# (2026-06-20T15:39:48Z) carries `dependencies` and `github_actions` under
+# commit `ccf28b5`, three hours older, whose github-actions entry had no
+# `labels:` key at all. The rule that matters here is about the `labels:`
+# OPTION and is narrower: "The labels specified are used instead of the default
+# labels", and "If any of these labels is not defined in the repository, it is
+# ignored." A name inside `labels:` is never created.
+#
+# Measured at the CONSUMER rather than inferred. Negative controls: PRs #433 and
+# #434 (uv, asking for `python`), #227 (docker, asking for `docker`) and #243
+# (github-actions, asking for `ci`) each carry `dependencies` alone. Not all of
+# those merged -- #434 is open and #227 was closed unmerged -- which does not
+# weaken the evidence, since labels are applied when Dependabot OPENS a PR.
+# Positive controls: #438, #439 and #440, the first npm PRs opened after #435
+# added an npm entry asking for `javascript`, carry both. #307 is NOT a positive
+# control and an earlier draft wrongly cited it as one: it predates that entry
+# by twelve days, so its `javascript` came from the DEFAULT path above, and its
+# `chore(deps-dev):` title is the same signal #423 used to prove a PR never
+# passed through dependabot.yml.
 #
 # This is a SNAPSHOT, and the direction it fails in matters. No offline test
 # can run `gh label list`, so it catches a config drifting to an invented name
@@ -289,11 +308,17 @@ _UNGUARDABLE: tuple[str, ...] = (
     "`python`, `docker` and `ci` were all requested and none existed) but NOT "
     "a label someone later DELETES from the repo, which would leave this file "
     "green while Dependabot silently dropped it again.",
+    "Whether _LABELS_VERIFIED_PRESENT still describes the real repo. Adding an "
+    "invented name to it AND bumping _LABELS_VERIFIED_PRESENT_COUNT in the same "
+    "edit was measured fully green during #436's review -- the count is friction "
+    "that makes widening deliberate, not a gate that can refuse it. Nothing "
+    "offline can tell a name copied from `gh label list` from one somebody "
+    "wanted to be true.",
 )
 
 # Truthiness alone lets a single entry vanish in silence, which is how a
 # recorded limitation quietly stops being recorded.
-_UNGUARDABLE_COUNT = 5
+_UNGUARDABLE_COUNT = 6
 
 
 def _config() -> dict[str, Any]:
@@ -311,6 +336,38 @@ def _config() -> dict[str, Any]:
         "runs."
     )
     return data
+
+
+class _DuplicateKeyLoader(yaml.SafeLoader):
+    """``yaml.safe_load`` resolves a duplicated key to the LAST one, silently.
+
+    That is a bypass of every assertion in this module, not only the label ones:
+    write ``labels:`` twice with a phantom in the first list and a clean list in
+    the second, and the parsed config -- which is all these tests ever see --
+    shows only the clean one while the FILE still names the phantom. Adversarial
+    review of #436 measured exactly that shape green.
+
+    So one test, below, re-reads the file with this loader, which refuses any
+    mapping that names a key twice at any depth. It is deliberately NOT wired
+    into ``_config``: the other tests should keep reading the file the way
+    Dependabot's own parser resolves it, and this one asserts that the two
+    readings cannot diverge in the first place.
+    """
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise AssertionError(
+                    f"{DEPENDABOT_YML} names the key {key!r} twice in one mapping "
+                    f"(line {key_node.start_mark.line + 1}). YAML resolves that to "
+                    "the LAST occurrence without complaint, so every assertion in "
+                    "this module reads the survivor while the file still carries "
+                    "the other one."
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)
 
 
 def _updates() -> list[dict[str, Any]]:
@@ -847,15 +904,21 @@ def test_every_label_this_entry_requests_is_one_the_repo_has(
 ) -> None:
     """The npm test above holds ONE entry to two names. This holds EVERY entry
     to the whole snapshot, which is what #436 needed: `python` on uv, `docker`
-    on both docker entries and `ci` on github-actions were each requested from
-    the day the entry was written, and each was silently dropped on every PR
-    those entries ever opened. A config that asks for a label the repo does not
-    have is claiming something that does not happen.
+    on both docker entries and `ci` on github-actions were each requested and
+    each ignored, on every PR those entries ever opened. A config that asks for
+    a label the repo does not have is claiming something that does not happen.
 
-    The non-emptiness assertion is not decoration. `all(... in ...)` over an
-    empty list is True, so an entry that lost its `labels:` key entirely would
-    otherwise satisfy this test while carrying no label at all -- the vacuous
-    shape this repo has shipped before.
+    The non-emptiness assertion is not decoration, and it is also a POLICY
+    choice worth naming. `all(... in ...)` over an empty list is True, so an
+    entry that lost its `labels:` key would otherwise satisfy this test while
+    the file claimed nothing -- the vacuous shape this repo has shipped before.
+    But deleting the key is not the same as having no labels: GitHub's reference
+    says a declared `labels:` is "used instead of the default labels", so
+    dropping it hands the entry back to Dependabot's defaults, which include an
+    ecosystem label Dependabot CREATES if absent. Requiring a non-empty
+    `labels:` therefore pins this repo to "no new labels" (#436's decision).
+    Revisiting that means relaxing this assertion deliberately, which is the
+    point of making it explicit rather than implicit.
 
     Which change turns this RED: adding any label to any entry that is not in
     _LABELS_VERIFIED_PRESENT (reinstating `python`, `docker` or `ci` does it),
@@ -870,11 +933,11 @@ def test_every_label_this_entry_requests_is_one_the_repo_has(
     phantom = [label for label in labels if label not in _LABELS_VERIFIED_PRESENT]
     assert not phantom, (
         f"the {ecosystem} entry on {directory!r} requests {phantom!r}, which "
-        "`gh label list` does not return. Dependabot cannot create a label; it "
-        "drops it and opens the PR anyway, so the symptom is a PR that merely "
-        "looks under-labelled rather than any error (#436). Use a label the "
-        "repo has, or delete the request -- do NOT widen "
-        "_LABELS_VERIFIED_PRESENT to make this pass."
+        "`gh label list` does not return. A label named in `labels:` that the "
+        "repo has not defined is IGNORED -- not created -- and the PR opens "
+        "anyway, so the symptom is a PR that merely looks under-labelled "
+        "rather than any error (#436). Use a label the repo has, or delete the "
+        "request -- do NOT widen _LABELS_VERIFIED_PRESENT to make this pass."
     )
 
 
@@ -891,6 +954,15 @@ def test_the_verified_label_snapshot_cannot_be_emptied_or_quietly_shrunk() -> No
     Which change turns this RED: emptying or deleting _LABELS_VERIFIED_PRESENT,
     dropping `dependencies` or `github_actions` from it, or adding/removing any
     name without updating _LABELS_VERIFIED_PRESENT_COUNT in the same edit.
+
+    Two honest caveats, both measured during review rather than assumed. The
+    `for required` loop below has never been the SOLE cause of a red run: every
+    mutation that reaches it also moves the length, so the count assert fires
+    first. It is defense-in-depth against a same-length swap, not an
+    independently load-bearing check. And this test cannot refuse a WIDENING:
+    adding an invented name and bumping the count together was measured fully
+    green. That is recorded in _UNGUARDABLE; the count buys deliberateness, not
+    refusal.
     """
     assert _LABELS_VERIFIED_PRESENT, (
         "_LABELS_VERIFIED_PRESENT is empty. Every 'this label is real' check "
@@ -919,17 +991,23 @@ def test_the_labels_checked_are_a_real_population_not_an_empty_one() -> None:
     that had shed its labels everywhere would leave a green, shrunken run --
     which is what a vacuous guard looks like from the outside.
 
-    So count the labels the file actually names, across every entry, and assert
-    the population exists. `dependencies` is on all five entries today.
+    So collect the labels the file actually names, across every entry -- and
+    across EVERY entry, not only the recorded five, so a sixth entry smuggling
+    in a phantom label is caught by this even though the parametrised check
+    never visits it. `dependencies` is on all five entries today.
 
-    Which change turns this RED: deleting `labels:` from every entry.
+    Nothing is filtered out of that collection on the way in. An earlier draft
+    skipped non-string elements with `isinstance`, which is the silent-skip
+    shape this module exists to reject: a `labels:` list holding a mapping
+    would have been dropped from the population and never checked. Left
+    unfiltered, such an element reddens this test -- either as unhashable in
+    `set(...)` or as a name the snapshot does not contain.
+
+    Which change turns this RED: deleting `labels:` from every entry, adding a
+    phantom label anywhere including an unrecorded entry, or putting a
+    non-string under `labels:`.
     """
-    every_label = [
-        label
-        for entry in _updates()
-        for label in (entry.get("labels") or [])
-        if isinstance(label, str)
-    ]
+    every_label = [label for entry in _updates() for label in (entry.get("labels") or [])]
     assert every_label, (
         "dependabot.yml names no labels at all. Every label check in this "
         "module would then pass over an empty collection, which is the shape "
@@ -938,6 +1016,35 @@ def test_the_labels_checked_are_a_real_population_not_an_empty_one() -> None:
     assert set(every_label) <= _LABELS_VERIFIED_PRESENT, (
         f"labels in dependabot.yml that `gh label list` does not return: "
         f"{sorted(set(every_label) - _LABELS_VERIFIED_PRESENT)!r}"
+    )
+
+
+def test_no_key_is_declared_twice_so_the_parsed_file_is_the_whole_file() -> None:
+    """Every other test in this module reads the PARSED config, and YAML resolves
+    a duplicated key to the last one in silence. So `labels:` written twice --
+    a phantom list first, a clean list second -- leaves this whole file green
+    while the config still names the phantom. Adversarial review of #436
+    measured that shape green against the three new label guards.
+
+    This is the partner that makes "every label in the file is verified present"
+    a claim about the FILE and not merely about what survived the parse.
+
+    Which change turns this RED: declaring any key twice in one mapping
+    anywhere in dependabot.yml -- a second `labels:` on an entry, a second
+    `updates:` at the top level, a repeated group name.
+    """
+    text = DEPENDABOT_YML.read_text(encoding="utf-8")
+    deduped = yaml.load(text, Loader=_DuplicateKeyLoader)  # noqa: S506 - local subclass of SafeLoader
+    # The partner to an absence check: prove the loader actually walked a real
+    # mapping rather than reporting "no duplicates" over nothing.
+    assert isinstance(deduped, dict) and deduped.get("updates"), (
+        "the duplicate-key read produced no `updates:` mapping, so its clean "
+        "result says nothing. A guard that inspects an empty document always "
+        "passes."
+    )
+    assert deduped == yaml.safe_load(text), (
+        "the duplicate-rejecting read and the normal read disagree, which "
+        "should be impossible once the file has no duplicate keys."
     )
 
 
