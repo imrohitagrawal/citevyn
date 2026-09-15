@@ -95,6 +95,46 @@ _EXPECTED_ECOSYSTEMS: tuple[tuple[str, str], ...] = (
 
 _NPM = ("npm", "/frontend")
 
+# Every label the repository actually has, verbatim from
+# ``gh label list --limit 100`` against imrohitagrawal/citevyn on 2026-09-15
+# (#436). Dependabot cannot CREATE a label: a requested name the repo does not
+# have is silently dropped, so a config asking for one is claiming something
+# that never happens. That is measurable at the CONSUMER and was measured --
+# PRs #433 and #434 (uv, requesting `python`), #227 (docker, requesting
+# `docker`) and #243 (github-actions, requesting `ci`) each landed carrying
+# `dependencies` alone, while #307 (npm, requesting `javascript`) carried both.
+#
+# This is a SNAPSHOT, and the direction it fails in matters. No offline test
+# can run `gh label list`, so it catches a config drifting to an invented name
+# and does NOT catch a label someone later DELETES from the repo. Recorded in
+# _UNGUARDABLE. Widening this set is how a phantom label gets waved through, so
+# add to it only from a fresh `gh label list`, never to make a test pass.
+_LABELS_VERIFIED_PRESENT: frozenset[str] = frozenset(
+    {
+        "bug",
+        "documentation",
+        "duplicate",
+        "enhancement",
+        "good first issue",
+        "help wanted",
+        "invalid",
+        "question",
+        "wontfix",
+        "dependencies",
+        "github_actions",
+        "javascript",
+        "on-hold",
+        "full-eval",
+        "discussion",
+    }
+)
+
+# Truthiness alone is satisfied by a set holding one name, and every "is this
+# label real?" assertion below passes vacuously against an EMPTY set only if
+# the file names no labels at all -- which the per-entry check rules out.
+# Pin the hand-count so shrinking the snapshot to fit a config is deliberate.
+_LABELS_VERIFIED_PRESENT_COUNT = 15
+
 # Every option an ``updates:`` entry may carry, from GitHub's options reference
 # (docs.github.com/en/code-security/dependabot/working-with-dependabot/
 # dependabot-options-reference). Read TWICE, and the two reads of the same page
@@ -243,9 +283,12 @@ _UNGUARDABLE: tuple[str, ...] = (
     "Every pattern in the file today names a DIRECT dependency, so the question "
     "has not arisen.",
     "Whether `labels` name labels the repo really has. `gh label list` settles "
-    "it and no test can run it offline; the npm labels are pinned to the two "
-    "verified present when #423 shipped, which catches drift to an invented "
-    "name but not a label someone later DELETES from the repo.",
+    "it and no test can run it offline. Every label in the file is now checked "
+    "against _LABELS_VERIFIED_PRESENT, a snapshot of that command taken while "
+    "#436 shipped -- which catches drift to an invented name (the #436 defect: "
+    "`python`, `docker` and `ci` were all requested and none existed) but NOT "
+    "a label someone later DELETES from the repo, which would leave this file "
+    "green while Dependabot silently dropped it again.",
 )
 
 # Truthiness alone lets a single entry vanish in silence, which is how a
@@ -795,6 +838,106 @@ def test_the_npm_labels_stay_the_two_verified_present() -> None:
         "npm labels must stay `dependencies` + `javascript`. `gh label list` "
         "shows those two exist; `frontend` does not, and a label Dependabot "
         "cannot find is silently dropped."
+    )
+
+
+@pytest.mark.parametrize(("ecosystem", "directory"), _EXPECTED_ECOSYSTEMS)
+def test_every_label_this_entry_requests_is_one_the_repo_has(
+    ecosystem: str, directory: str
+) -> None:
+    """The npm test above holds ONE entry to two names. This holds EVERY entry
+    to the whole snapshot, which is what #436 needed: `python` on uv, `docker`
+    on both docker entries and `ci` on github-actions were each requested from
+    the day the entry was written, and each was silently dropped on every PR
+    those entries ever opened. A config that asks for a label the repo does not
+    have is claiming something that does not happen.
+
+    The non-emptiness assertion is not decoration. `all(... in ...)` over an
+    empty list is True, so an entry that lost its `labels:` key entirely would
+    otherwise satisfy this test while carrying no label at all -- the vacuous
+    shape this repo has shipped before.
+
+    Which change turns this RED: adding any label to any entry that is not in
+    _LABELS_VERIFIED_PRESENT (reinstating `python`, `docker` or `ci` does it),
+    or deleting an entry's `labels:` key.
+    """
+    labels = _entry(ecosystem, directory).get("labels")
+    assert isinstance(labels, list) and labels, (
+        f"the {ecosystem} entry on {directory!r} declares no non-empty "
+        "`labels:`. Every entry carries at least `dependencies`; without it "
+        "its PRs are indistinguishable from a human's in any label filter."
+    )
+    phantom = [label for label in labels if label not in _LABELS_VERIFIED_PRESENT]
+    assert not phantom, (
+        f"the {ecosystem} entry on {directory!r} requests {phantom!r}, which "
+        "`gh label list` does not return. Dependabot cannot create a label; it "
+        "drops it and opens the PR anyway, so the symptom is a PR that merely "
+        "looks under-labelled rather than any error (#436). Use a label the "
+        "repo has, or delete the request -- do NOT widen "
+        "_LABELS_VERIFIED_PRESENT to make this pass."
+    )
+
+
+def test_the_verified_label_snapshot_cannot_be_emptied_or_quietly_shrunk() -> None:
+    """The partner. The test above is an "every X is in SET" check, and the
+    classic way one of those stops meaning anything is for SET to be widened
+    until nothing fails it -- or for its own contents to drift so far from the
+    repo that it stops describing anything real.
+
+    `dependencies` is named explicitly because it is on every entry in the
+    file: if the snapshot were emptied, the per-entry test would redden on it
+    first, and this pins that relationship rather than leaving it to luck.
+
+    Which change turns this RED: emptying or deleting _LABELS_VERIFIED_PRESENT,
+    dropping `dependencies` or `github_actions` from it, or adding/removing any
+    name without updating _LABELS_VERIFIED_PRESENT_COUNT in the same edit.
+    """
+    assert _LABELS_VERIFIED_PRESENT, (
+        "_LABELS_VERIFIED_PRESENT is empty. Every 'this label is real' check "
+        "in this module reads it, and an empty allow-list turns them from a "
+        "guard into a blanket rejection nobody would ship -- so it would be "
+        "'fixed' by deleting the checks."
+    )
+    assert len(_LABELS_VERIFIED_PRESENT) == _LABELS_VERIFIED_PRESENT_COUNT, (
+        f"_LABELS_VERIFIED_PRESENT holds {len(_LABELS_VERIFIED_PRESENT)} "
+        f"names, _LABELS_VERIFIED_PRESENT_COUNT says "
+        f"{_LABELS_VERIFIED_PRESENT_COUNT}. Widening the snapshot is exactly "
+        "how a phantom label gets waved through: re-run `gh label list` and "
+        "update the count in the same edit."
+    )
+    for required in ("dependencies", "github_actions", "javascript"):
+        assert required in _LABELS_VERIFIED_PRESENT, (
+            f"{required!r} is used by dependabot.yml and `gh label list` "
+            "returns it. Removing it from the snapshot reddens a config that "
+            "is correct."
+        )
+
+
+def test_the_labels_checked_are_a_real_population_not_an_empty_one() -> None:
+    """The second partner, one level up. The per-entry check is parametrised,
+    so deleting a row makes the suite SMALLER rather than RED, and a config
+    that had shed its labels everywhere would leave a green, shrunken run --
+    which is what a vacuous guard looks like from the outside.
+
+    So count the labels the file actually names, across every entry, and assert
+    the population exists. `dependencies` is on all five entries today.
+
+    Which change turns this RED: deleting `labels:` from every entry.
+    """
+    every_label = [
+        label
+        for entry in _updates()
+        for label in (entry.get("labels") or [])
+        if isinstance(label, str)
+    ]
+    assert every_label, (
+        "dependabot.yml names no labels at all. Every label check in this "
+        "module would then pass over an empty collection, which is the shape "
+        "that has shipped as a guard here before."
+    )
+    assert set(every_label) <= _LABELS_VERIFIED_PRESENT, (
+        f"labels in dependabot.yml that `gh label list` does not return: "
+        f"{sorted(set(every_label) - _LABELS_VERIFIED_PRESENT)!r}"
     )
 
 

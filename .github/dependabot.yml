@@ -51,6 +51,26 @@
 # app, "Dependabot config file validation". It is not a required
 # context, so read it rather than relying on the rollup.
 #
+# LABELS (#436). Every name under a ``labels:`` key below is one
+# ``gh label list`` really returns. Dependabot cannot CREATE a
+# label; a name the repo does not have is silently dropped, so a
+# config asking for one is quietly lying about what its PRs will
+# carry. That was not a theory: ``python`` (uv), ``docker`` (both
+# docker entries) and ``ci`` (github-actions) were requested here
+# from the day each entry was written, and PRs #433, #434, #227 and
+# #243 all landed carrying ``dependencies`` and nothing else.
+# ``ci`` became ``github_actions``, which exists, so that entry now
+# gains the label it was always asking for. ``python`` and
+# ``docker`` were deleted rather than created: creating a label is
+# a repository SETTING, and only ONE label in this repo is
+# functional anyway -- ``full-eval``, which gates the paid judged
+# eval at ``.github/workflows/ci.yml:413``. Every other label is
+# for human filtering, and at this repo's Dependabot volume nobody
+# filters by ecosystem. ``dependencies`` is on every entry and is
+# the label that actually gets used.
+# ``test_dependabot_config.py`` holds every label in this file to
+# that verified-present snapshot.
+#
 # Auto-merge policy (since 2026-06-21):
 #   Branch protection on ``main`` requires 10 status checks — this
 #   line said 5 until #423; ``gh api
@@ -123,9 +143,10 @@ updates:
           - "ruff"
           - "pyright"
           - "fakeredis"
+    # ``python`` used to sit here and the repo has never had it, so
+    # every uv PR arrived with ``dependencies`` alone (#436).
     labels:
       - "dependencies"
-      - "python"
 
   # ──────────── Frontend (npm) ────────────
   - package-ecosystem: "npm"
@@ -264,9 +285,9 @@ updates:
       docker-base-images:
         patterns:
           - "*"
+    # No ``docker`` label: the repo has never had one (#436).
     labels:
       - "dependencies"
-      - "docker"
 
   # ──────────── Compose service images ────────────
   - package-ecosystem: "docker-compose"
@@ -286,9 +307,9 @@ updates:
     # ``infra/docker/docker-compose.yml`` (pgvector, redis,
     # caddy, postgres). Without this entry the service
     # images would silently rot.
+    # No ``docker`` label here either, same reason (#436).
     labels:
       - "dependencies"
-      - "docker"
 
   # ──────────── GitHub Actions ────────────
   - package-ecosystem: "github-actions"
@@ -304,6 +325,9 @@ updates:
     commit-message:
       prefix: "deps(ci)"
       include: scope
+    # ``github_actions``, not ``ci``: the underscored one is the
+    # label GitHub's own Dependabot seeds and the one this repo
+    # has. ``ci`` was requested here and never landed (#436).
     labels:
       - "dependencies"
-      - "ci"
+      - "github_actions"
