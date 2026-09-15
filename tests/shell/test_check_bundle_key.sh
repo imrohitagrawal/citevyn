@@ -9,12 +9,15 @@
 # measured.
 #
 # HOW THE FIXTURES WERE OBTAINED (2026-09-06, `vite build` at 0146c56):
-#   no token build arg        -> bundle contains  ,Cf="local-demo-key"
-#   VITE_API_DEMO_KEY=""      -> bundle contains  ,Cf=""
-#   a token build arg=<value> -> bundle contains  ,Cf="<a value>"
-# and the corresponding `docker build --build-arg VITE_API_DEMO_KEY=""`
-# leaves the ARG EMPTY rather than falling back to its default, which is why
-# the middle row exists at all. `Cf` is a minifier-assigned name and changes
+#   no token build arg                 -> bundle contains  ,Cf="local-demo-key"
+#   VITE_PUBLIC_CLIENT_TOKEN=""        -> bundle contains  ,Cf=""
+#   a token build arg=<value>           -> bundle contains  ,Cf="<a value>"
+# and the corresponding `docker build --build-arg VITE_PUBLIC_CLIENT_TOKEN=""`
+# leaves the ARG EMPTY rather than falling back to its default, which is why the
+# middle row exists at all. (That row was measured while api.ts joined the
+# operand with `??`; #430 made it `||`, so an empty arg now bakes the default
+# instead. The middle fixture is KEPT: it is still a bundle the checker must
+# reject, and it is what a lazily-restored `??` would produce again.) `Cf` is a minifier-assigned name and changes
 # every build — which is precisely why the checker greps for the KEY VALUE and
 # never for the variable, so these fixtures do not depend on it.
 #
@@ -59,7 +62,7 @@ fi
 
 # ── 1. The happy path. Without this, every 'must fail' case below could be
 #      satisfied by a script that fails unconditionally. ────────────────────
-OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 0 ]]; then
     pass "a bundle carrying the expected key PASSES"
 else
@@ -69,7 +72,7 @@ fi
 # ── 2. THE REGRESSION THIS FILE EXISTS FOR. An empty --build-arg bakes an
 #      empty string; the browser then sends `Authorization: Bearer ` and every
 #      call 401s. The old absence check printed 0 here and reported success.
-OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a bundle built with an EMPTY build arg FAILS (the #296 blind spot)"
 else
@@ -84,7 +87,7 @@ else
 fi
 
 # ── 3. The original v6 outage: the arg was not passed at all. ──────────────
-OUT="$(bundle_with "local-demo-key" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "local-demo-key" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a bundle carrying the public default FAILS (the v6 shape)"
 else
@@ -97,7 +100,7 @@ else
 fi
 
 # ── 4. A DIFFERENT non-empty key (rotated secret, wrong app) also fails. ───
-OUT="$(bundle_with "some-other-key-that-is-long-enough-x" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "some-other-key-that-is-long-enough-x" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a bundle carrying a DIFFERENT key FAILS"
 else
@@ -107,7 +110,7 @@ fi
 # ── 5. The vacuity trap: an empty EXPECTED key must not make the check pass
 #      on everything. `grep -F ""` matches any input, so without the partner
 #      guard this whole gate would be a no-op that always reports success.
-OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "an EMPTY expected key FAILS instead of matching everything"
 else
@@ -120,7 +123,7 @@ fi
 # 20 spaces: long enough to clear the 16-char floor, so this reaches the
 # whitespace guard itself. With a 3-char value the floor caught it first and
 # the whitespace guard could be deleted with the suite still green.
-OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="                    " "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "" | CITEVYN_PUBLIC_CLIENT_TOKEN="                    " "${CHECK}" 2>&1)"; RC=$?
 # The REASON is asserted, not just rc=1. Review deleted the whitespace-strip
 # from the checker and this case still printed ok: the mutant exited 1 too, for
 # the unrelated reason "key not found in bundle". A case that cannot tell those
@@ -135,7 +138,7 @@ fi
 # The same key against a bundle that CONTAINS runs of spaces — an indented
 # index.html, which deploy_verify.sh now cats. Without the whitespace guard
 # this is a false PASS, not merely a right answer for the wrong reason.
-OUT="$(printf '<html>\n                    <body>x</body>\n</html>' | CITEVYN_DEMO_API_KEY="                    " "${CHECK}" 2>&1)"; RC=$?
+OUT="$(printf '<html>\n                    <body>x</body>\n</html>' | CITEVYN_PUBLIC_CLIENT_TOKEN="                    " "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a whitespace key does NOT match an indented HTML bundle"
 else
@@ -143,7 +146,7 @@ else
 fi
 
 # A one-character key matches every bundle ever built.
-OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="a" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "" | CITEVYN_PUBLIC_CLIENT_TOKEN="a" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "a key below the 16-char production floor FAILS"
 else
@@ -153,7 +156,7 @@ fi
 # on a developer's machine. The length floor must not break `make deploy-verify`
 # against a local stack — a regression the first version of that floor caused,
 # caught by tests/shell/test_deploy_verify_bundle_gate.sh.
-OUT="$(bundle_with "local-demo-key" | CITEVYN_DEMO_API_KEY="local-demo-key" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "local-demo-key" | CITEVYN_PUBLIC_CLIENT_TOKEN="local-demo-key" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 0 ]]; then
     pass "the 14-char local default is accepted when it is genuinely the key"
 else
@@ -161,70 +164,75 @@ else
 fi
 
 # unset, not merely empty
-OUT="$(bundle_with "${GOOD_KEY}" | env -u CITEVYN_DEMO_API_KEY -u CITEVYN_PUBLIC_CLIENT_TOKEN "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${GOOD_KEY}" | env -u CITEVYN_PUBLIC_CLIENT_TOKEN -u CITEVYN_DEMO_API_KEY "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "an UNSET expected key FAILS"
 else
     fail "an unset expected key passed — the gate is vacuous"
 fi
 
-# ── 5b. BOTH #430 spellings (see docs/DEPLOY_FLY.md §3.1). The checker has to
-#       work either side of the Fly secret rename, and it has to resolve the two
-#       the SAME WAY the server does — a checker that disagreed with Settings
-#       about which value is live would report [PASS] on a bundle the server
-#       401s, which is the precise failure this script exists to prevent.
+# ── 5b. ONE #430 spelling. The rename is finished: the Fly secret moved and the
+#       deprecated CITEVYN_DEMO_API_KEY is read nowhere. The checker has to
+#       resolve the token the SAME WAY the server does -- a checker that read a
+#       name Settings ignores would report [PASS] on a bundle the server 401s,
+#       which is the precise failure this script exists to prevent. So the
+#       retired name is asserted INERT, in the direction that can fail.
 NEW_KEY="new-name-key-0123456789abcdef"
 OLD_KEY="old-name-key-0123456789abcdef"
 
 OUT="$(bundle_with "${NEW_KEY}" | env -u CITEVYN_DEMO_API_KEY CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 0 ]]; then
-    pass "CITEVYN_PUBLIC_CLIENT_TOKEN alone is read (the new name)"
+    pass "CITEVYN_PUBLIC_CLIENT_TOKEN alone is read (the only name)"
 else
     fail "the new name was not read (rc=${RC}): ${OUT}"
 fi
 
+# The retired name alone, over a bundle that DOES carry its value. A checker
+# that still read it would report [PASS] here; the one shipped has no needle at
+# all and must fail with the empty-key diagnosis. Asserting the rc alone is not
+# enough -- rc 1 is also "key not found in bundle" -- so the MESSAGE is checked,
+# the same distinction case 5c relies on.
 OUT="$(bundle_with "${OLD_KEY}" | env -u CITEVYN_PUBLIC_CLIENT_TOKEN CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -eq 0 ]]; then
-    pass "CITEVYN_DEMO_API_KEY alone is still read (the deprecated name)"
+if [[ ${RC} -eq 1 ]] && printf '%s' "${OUT}" | grep -q 'whitespace only'; then
+    pass "the retired CITEVYN_DEMO_API_KEY is NOT read (no needle, hard fail)"
 else
-    fail "the deprecated name stopped being read (rc=${RC}): ${OUT}"
+    fail "the retired name was read, or failed for the wrong reason (rc=${RC}): ${OUT}"
 fi
 
-# PRECEDENCE, asserted in the direction that can FAIL. Both set, and the bundle
-# carries only the OLD value: the checker must resolve the NEW one and report a
-# mismatch. Asserting the pass direction instead (bundle carries the new value)
-# would stay green under either precedence, since the old value would simply be
-# ignored -- proving nothing.
+# ...and it cannot override the live name either: both set, bundle carries only
+# the RETIRED value, so the checker must resolve the new one and report the
+# mismatch. Asserting the pass direction instead would stay green under either
+# resolution, since the retired value would simply be ignored -- proving nothing.
 OUT="$(bundle_with "${OLD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
-    pass "the NEW name wins when both are set (a stale bundle is caught)"
+    pass "a stale bundle is caught even with the retired name set alongside"
 else
-    fail "the checker read the deprecated name while both were set — it would bless a bundle the server rejects (rc=${RC}): ${OUT}"
+    fail "the checker read the retired name while both were set -- it would bless a bundle the server rejects (rc=${RC}): ${OUT}"
 fi
 
 # ...and its non-vacuity partner: the same pair over a bundle that DOES carry
-# the new value must pass, or the case above would be satisfied by a checker
+# the live value must pass, or the case above would be satisfied by a checker
 # that rejects every both-set invocation.
 OUT="$(bundle_with "${NEW_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${NEW_KEY}" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 0 ]]; then
-    pass "both set, bundle carries the new value -> PASS (partner)"
+    pass "both set, bundle carries the live value -> PASS (partner)"
 else
     fail "a correct both-set invocation was rejected (rc=${RC}): ${OUT}"
 fi
 
-# An EMPTY new name must FALL THROUGH to the old one, not short-circuit the
-# whole check into its own [FAIL]. This is the state of any .env that declares
-# the new variable without filling it in, and the frontend's `||` does the same.
+# An EMPTY live name is a hard [FAIL] now that there is nothing to fall through
+# TO. It used to fall through to the retired name; that path is gone, and this
+# is the case that changes direction -- the cheapest tripwire if it comes back.
 OUT="$(bundle_with "${OLD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="" CITEVYN_DEMO_API_KEY="${OLD_KEY}" "${CHECK}" 2>&1)"; RC=$?
-if [[ ${RC} -eq 0 ]]; then
-    pass "an EMPTY new name falls through to the deprecated one"
+if [[ ${RC} -eq 1 ]] && printf '%s' "${OUT}" | grep -q 'whitespace only'; then
+    pass "an EMPTY live name is a hard failure, with no fallback to the retired one"
 else
-    fail "an empty new name short-circuited the fallback (rc=${RC}): ${OUT}"
+    fail "an empty live name fell through to the retired name (rc=${RC}): ${OUT}"
 fi
 
 # ── 6. An empty bundle (a 404 fetched into the pipe) must FAIL, not read as
 #      'key absent'... which it also is, but for a reason the operator needs.
-OUT="$(printf '' | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(printf '' | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]] && printf '%s' "${OUT}" | grep -q 'empty'; then
     pass "an empty bundle FAILS and says the fetch produced nothing"
 else
@@ -236,9 +244,9 @@ fi
 #      a CI log, or a pasted incident report.
 for scenario in good bad; do
     if [[ "${scenario}" == good ]]; then
-        OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"
+        OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"
     else
-        OUT="$(bundle_with "" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" 2>&1)"
+        OUT="$(bundle_with "" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" 2>&1)"
     fi
     if printf '%s' "${OUT}" | grep -qF "${GOOD_KEY}"; then
         fail "the ${scenario} path PRINTED the key"
@@ -251,13 +259,13 @@ done
 #      must be compared literally, or a '.' would match any character and a
 #      near-miss bundle would pass.
 META_KEY='a+b.c/d$e*f[g]h-0123456789abcdef'
-OUT="$(bundle_with "${META_KEY}" | CITEVYN_DEMO_API_KEY="${META_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${META_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${META_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 0 ]]; then
     pass "a key with regex metacharacters matches itself"
 else
     fail "a key with metacharacters was rejected (rc=${RC}): ${OUT}"
 fi
-OUT="$(bundle_with 'aXbYcZdQeWfAgBh-0123456789abcdef' | CITEVYN_DEMO_API_KEY="${META_KEY}" "${CHECK}" 2>&1)"; RC=$?
+OUT="$(bundle_with 'aXbYcZdQeWfAgBh-0123456789abcdef' | CITEVYN_PUBLIC_CLIENT_TOKEN="${META_KEY}" "${CHECK}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 1 ]]; then
     pass "metacharacters are NOT treated as regex wildcards"
 else
@@ -265,7 +273,7 @@ else
 fi
 
 # ── 9. Argument misuse must not be mistaken for a pass. ────────────────────
-OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_DEMO_API_KEY="${GOOD_KEY}" "${CHECK}" "${GOOD_KEY}" 2>&1)"; RC=$?
+OUT="$(bundle_with "${GOOD_KEY}" | CITEVYN_PUBLIC_CLIENT_TOKEN="${GOOD_KEY}" "${CHECK}" "${GOOD_KEY}" 2>&1)"; RC=$?
 if [[ ${RC} -eq 2 ]]; then
     pass "passing the key as an argument is a usage error (exit 2), not a pass"
 else

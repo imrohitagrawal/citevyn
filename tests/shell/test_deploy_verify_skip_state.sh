@@ -270,7 +270,7 @@ has "A SKIP is NOT a pass" "--help explains what a SKIP verdict means" "${OUT}"
 FIX="${WORK}/fixture"
 mkdir -p "${FIX}/infra/docker/scripts" "${FIX}/scripts" "${FIX}/frontend/dist"
 cp "${GATE}" "${FIX}/infra/docker/scripts/deploy_verify.sh"
-printf 'CITEVYN_DEMO_API_KEY=fixturekey\nCITEVYN_PUBLIC_HOST=127.0.0.1\n' \
+printf 'CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey\nCITEVYN_PUBLIC_HOST=127.0.0.1\n' \
     > "${FIX}/infra/docker/.env"
 # _env_guard.sh and check_budget.sh are not reached under --verify-only, but
 # copy them so a future change that does reach them fails loudly, not on ENOENT.
@@ -292,7 +292,7 @@ printf '#!/bin/sh\nexit 0\n' > "${FIX}/bin/docker"
 chmod +x "${FIX}/bin/docker"
 
 OUT="$(PATH="${FIX}/bin:${PATH}" BASE_URL="http://127.0.0.1:1" \
-    CITEVYN_DEMO_API_KEY="fixturekey" \
+    CITEVYN_PUBLIC_CLIENT_TOKEN="fixturekey" \
     "${FIX}/infra/docker/scripts/deploy_verify.sh" --verify-only 2>&1)"; RC=$?
 
 # PARTNER, and the thing that makes the four assertions below non-vacuous: the
@@ -353,21 +353,20 @@ fi
 #    override beat the .env, which the comment there claims), never whether a
 #    token is FOUND.
 #
-#    TWO mutants therefore survive this block, and the second is the honest one
-#    an earlier draft of this note left out:
-#      * deleting the NEW name from that line            -> survives
-#      * replacing the WHOLE line with `DEMO_KEY=""`     -> survives
-#    Both because `read_env` finds the value regardless. So the two cases named
-#    "resolves from the env under the NEW/OLD name" are really observing
-#    `read_env`'s inheritance, not the line they are named after. Killing either
-#    needs a fixture that observes the value ON THE WIRE, which `--verify-only`
-#    against a dead port cannot provide.
+#    ONE mutant therefore survives this block, and it is stated rather than
+#    hidden: replacing the whole `DEMO_KEY="${CITEVYN_PUBLIC_CLIENT_TOKEN:-}"`
+#    line with `DEMO_KEY=""` survives, because `read_env` finds the value
+#    regardless. So "resolves from the env" is really observing `read_env`'s
+#    inheritance, not the line it is named after. Killing it needs a fixture that
+#    observes the value ON THE WIRE, which `--verify-only` against a dead port
+#    cannot provide.
 #
-#    What DOES bite here: dropping either `.env` read, and any change that makes
-#    the chain resolve unconditionally (the refusal partner). And the ORDER is
-#    pinned where it is observable -- in Settings
-#    (backend/tests/test_public_client_token_dual_name.py) and in the bundle
-#    checker (tests/shell/test_check_bundle_key.sh section 5b).
+#    What DOES bite here: dropping the `.env` read, and any change that makes the
+#    chain resolve unconditionally (the refusal partner). The retired
+#    CITEVYN_DEMO_API_KEY spelling is pinned INERT where that is observable -- in
+#    Settings (backend/tests/test_public_client_token_resolution.py) and in the
+#    bundle checker (tests/shell/test_check_bundle_key.sh section 5b) -- and by
+#    the two cases below.
 _tok_fixture() {  # $1 = .env token line (may be empty), $2.. = env assignments
     local envline="$1"; shift
     printf '%s\nCITEVYN_PUBLIC_HOST=127.0.0.1\n' "${envline}" > "${FIX}/infra/docker/.env"
@@ -388,13 +387,15 @@ _tok_case() {  # $1 = description, $2 = expect resolved|unresolved, $3 = .env li
         FAILURES=$((FAILURES + 1))
     fi
 }
-_tok_case "token resolves from the env under the NEW name"  resolved   "# none" CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey
-_tok_case "token resolves from the env under the OLD name"  resolved   "# none" CITEVYN_DEMO_API_KEY=fixturekey
-_tok_case "token resolves from .env under the NEW name"     resolved   "CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey"
-_tok_case "token resolves from .env under the OLD name"     resolved   "CITEVYN_DEMO_API_KEY=fixturekey"
-# The partner. Four "it resolved" assertions are all satisfied by a chain that
+_tok_case "token resolves from the env"                     resolved   "# none" CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey
+_tok_case "token resolves from .env"                        resolved   "CITEVYN_PUBLIC_CLIENT_TOKEN=fixturekey"
+# The RETIRED spelling is inert in BOTH sources (#430 step 2). These two are the
+# direction that can fail: while the fallback existed they resolved.
+_tok_case "the retired name in the env does NOT resolve"    unresolved "# none" CITEVYN_DEMO_API_KEY=fixturekey
+_tok_case "the retired name in .env does NOT resolve"       unresolved "CITEVYN_DEMO_API_KEY=fixturekey"
+# The partner. The "it resolved" assertions are all satisfied by a chain that
 # resolves unconditionally; this is the one that proves the chain can say no.
-_tok_case "neither name anywhere -> preflight REFUSES"      unresolved "# none"
+_tok_case "no token anywhere -> preflight REFUSES"          unresolved "# none"
 
 # ── Non-vacuity, pinned exactly. A slack floor lets a whole case be deleted
 #    silently; bump this deliberately when you add one.

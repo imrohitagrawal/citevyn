@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -86,21 +86,25 @@ class Settings(BaseSettings):
     # provider key, and #416 was filed as a production-key exposure -- so the
     # name now says what it is. See #430.
     #
-    # BOTH names are accepted, new one first, so this is not a flag day: release
-    # v6 shipped a mismatched build arg and 401'd every browser call for about an
-    # hour (#296). The old name is removed in a follow-up, AFTER the Fly secret
-    # and the deploy build arg have moved. Aliases are written with the
-    # ``CITEVYN_`` prefix spelled out because ``env_prefix`` is NOT re-applied to
-    # an aliased field -- verified against a real Settings() round trip in
-    # ``backend/tests/test_public_client_token_dual_name.py``, which pins all
-    # five resolution cases rather than reasoning about them.
+    # The rename shipped in two steps so there was no flag day (release v6 shipped
+    # a mismatched build arg and 401'd every browser call for about an hour,
+    # #296). STEP 2 IS THIS: the Fly secret and the deploy build argument have
+    # moved -- ``fly secrets list`` shows only ``CITEVYN_PUBLIC_CLIENT_TOKEN`` and
+    # ``printenv CITEVYN_DEMO_API_KEY`` exits 1 inside the running container -- so
+    # the deprecated alias is gone and the old name now reads NOTHING.
+    #
+    # The alias is kept (rather than relying on ``env_prefix``) because it is what
+    # makes pydantic report a bad value under ``CITEVYN_PUBLIC_CLIENT_TOKEN``, the
+    # variable an operator has to go and fix, instead of under the field name. It
+    # is written with the ``CITEVYN_`` prefix spelled out because ``env_prefix`` is
+    # NOT re-applied to an aliased field -- a bare ``"PUBLIC_CLIENT_TOKEN"`` would
+    # read nothing, SILENTLY, since the default is a legal value. Verified against
+    # a real Settings() round trip in
+    # ``backend/tests/test_public_client_token_resolution.py``.
     public_client_token: str = Field(
         default="local-demo-key",
         min_length=1,
-        validation_alias=AliasChoices(
-            "CITEVYN_PUBLIC_CLIENT_TOKEN",
-            "CITEVYN_DEMO_API_KEY",  # deprecated; accepted during the #430 migration
-        ),
+        validation_alias="CITEVYN_PUBLIC_CLIENT_TOKEN",
     )
     request_id_header: str = "X-Request-ID"
 
@@ -646,20 +650,14 @@ class Settings(BaseSettings):
         # a value is not the same as publishing the SAME value as every other install:
         # the default is shared by every reader of this repo, so accepting it in
         # production hands the whole rate-limit turnstile to anyone who has cloned it.
-        # This validator is also what makes a botched rename fail LOUDLY rather than
-        # silently, which is the whole reason the migration can be done in two steps.
-        #
-        # The message names ``CITEVYN_PUBLIC_CLIENT_TOKEN`` — the variable an operator
-        # should SET today — even when the value arrived through the deprecated
-        # ``CITEVYN_DEMO_API_KEY`` alias. Naming the alias would tell a new operator to
-        # set the name being retired.
+        # This validator is also what made a botched rename fail LOUDLY rather than
+        # silently, which is the whole reason the migration could be done in two steps.
         if self.environment == "production" and _is_weak_secret(
             self.public_client_token, default="local-demo-key"
         ):
             raise ValueError(
                 "CITEVYN_PUBLIC_CLIENT_TOKEN must be set to a strong secret when "
-                "CITEVYN_ENVIRONMENT='production' (the deprecated alias "
-                "CITEVYN_DEMO_API_KEY is still read, but set the new name). "
+                "CITEVYN_ENVIRONMENT='production'. "
                 "The value is "
                 + (
                     "the publicly-known default 'local-demo-key'"

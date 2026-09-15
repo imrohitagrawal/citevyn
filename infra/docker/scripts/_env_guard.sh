@@ -40,10 +40,10 @@
 #     test the app applies in production (non-empty, not the
 #     published ``local-demo-key``, at least 16 chars) — see
 #     Settings._is_weak_secret in backend/app/core/config.py.
-#     Read from CITEVYN_PUBLIC_CLIENT_TOKEN, falling back to the
-#     deprecated CITEVYN_DEMO_API_KEY (#430) only when the .env FILE
-#     does not DECLARE the new name. The file is the subject because
-#     the container is fed by ``env_file`` and gets nothing else; a
+#     Read from CITEVYN_PUBLIC_CLIENT_TOKEN, and only when the .env
+#     FILE DECLARES it (the deprecated CITEVYN_DEMO_API_KEY spelling
+#     was retired with #430 and is read nowhere any more). The file is
+#     the subject because the container is fed by ``env_file``; a
 #     declared-but-empty CITEVYN_PUBLIC_CLIENT_TOKEN= is present for
 #     both compose and pydantic, and is rejected here exactly as
 #     Settings rejects it
@@ -155,7 +155,7 @@ if ! (
         # BOTH ends, because the Python predicate this mirrors is
         # `value.strip()` (backend/app/core/config.py:54-55), which is
         # symmetric. Trailing-only was an ASYMMETRY BUG, not a simplification:
-        # CITEVYN_DEMO_API_KEY="  local-demo-key" is 16 chars with two leading
+        # CITEVYN_PUBLIC_CLIENT_TOKEN="  local-demo-key" is 16 chars with two leading
         # spaces, so it is neither == 'local-demo-key' nor < 16 — the guard
         # passed it, and then Python stripped both ends, saw the publicly-known
         # default, and crash-looped the api. Which is exactly the failure this
@@ -338,10 +338,10 @@ if ! (
     # thing that reaches the app is what the FILE declares. Resolving against the
     # merge is wrong in both directions, and both were reproduced:
     #
-    #   * FALSE REJECT -- .env holds a strong CITEVYN_DEMO_API_KEY, and the
-    #     operator happens to have `CITEVYN_PUBLIC_CLIENT_TOKEN=` exported in
-    #     their shell. The deploy is fine (the container gets the old name from
-    #     the file) and the guard blocked it.
+    #   * FALSE REJECT -- .env holds a strong token line, and the operator happens
+    #     to have `CITEVYN_PUBLIC_CLIENT_TOKEN=` (empty) exported in their shell.
+    #     The deploy is fine -- the container is fed from the file and never sees
+    #     the shell -- and the guard blocked it.
     #   * FALSE PASS -- .env declares NO token, but a strong one is exported in
     #     the shell. The guard passed; the container got nothing, fell back to
     #     the published `local-demo-key`, and production refuses to boot on it.
@@ -370,29 +370,17 @@ if ! (
     #
     # PRESENCE, not non-emptiness, once the file is the subject.
     #
-    # This is the whole finding of the #430 review round, reproduced by three
-    # independent reviewers and then by hand. pydantic's ``AliasChoices`` selects
-    # the first alias PRESENT in the environment, and an exported-but-empty
-    # variable IS present: with ``CITEVYN_PUBLIC_CLIENT_TOKEN=`` and a strong
-    # ``CITEVYN_DEMO_API_KEY=`` in the same .env, ``Settings()`` raises
-    # ``string_too_short`` and never consults the old value at all.
-    #
-    # An `-n` test treats empty as absent, so it fell through to the strong old
-    # value and reported PASS -- MEASURED: guard exit 0, `docker compose config`
-    # injecting ``CITEVYN_PUBLIC_CLIENT_TOKEN: ""``, and ``Settings()`` refusing to
-    # construct from that same environment. That is precisely the "guard green,
-    # api dies at boot AFTER the 60s health poll has burned" failure this whole
-    # block exists to pre-empt, and the ingredient ships: prod.env.example
-    # declares the new name EMPTY, so an operator who copies the template and
-    # pastes back only their old line lands exactly here.
-    #
     # A DECLARED-BUT-EMPTY line is PRESENT, exactly as pydantic sees it:
-    # ``AliasChoices`` selects the first alias present in the environment, and
     # ``CITEVYN_PUBLIC_CLIENT_TOKEN=`` reaches the container as an empty string,
-    # which ``min_length=1`` rejects. So a declared-empty new name must NOT fall
-    # through to the old one -- measured on the first draft, which did fall
-    # through, reported PASS, and left the api crash-looping on
-    # ``string_too_short`` after the 60s health poll had burned.
+    # which ``min_length=1`` rejects -- it is NOT the same as an absent line
+    # falling back to the field default. An `-n` test treats empty as absent and
+    # so reported PASS on exactly that .env -- MEASURED during #430: guard exit 0,
+    # `docker compose config` injecting ``CITEVYN_PUBLIC_CLIENT_TOKEN: ""``, and
+    # ``Settings()`` refusing to construct from that same environment. That is the
+    # "guard green, api dies at boot AFTER the 60s health poll has burned" failure
+    # this whole block exists to pre-empt, and the ingredient ships:
+    # prod.env.example declares the name EMPTY, so an operator who copies the
+    # template and never fills it in lands exactly here.
     #
     # The VALUE still comes from the SOURCED variable rather than from the raw
     # line, so quote peeling and CRLF trimming (``_strip`` below) keep working.
@@ -415,28 +403,15 @@ if ! (
     # set" would have been. Pinned by a case in tests/shell/test_env_guard.sh so a
     # future change to the source step cannot silently alter it.
     #
-    # The NAME reported on failure is whichever line supplied the value, so the
-    # remediation points at the line the operator has to edit -- except when the
-    # effective value is EMPTY, where there is no line worth pointing at and they
-    # need to be told which variable to SET. That is never the one being retired.
-    # The emptiness test uses the STRIPPED value, so a whitespace-only
-    # ``CITEVYN_DEMO_API_KEY="   "`` is reported as the new name too rather than
-    # as "CITEVYN_DEMO_API_KEY is not set", which was both wrong words and the
-    # wrong variable.
+    # The deprecated ``CITEVYN_DEMO_API_KEY`` fallback is GONE (#430 step 2): the
+    # Fly secret was unset and ``Settings`` no longer reads that name, so a guard
+    # that still accepted it would bless a .env the api boots and refuses.
     if _declared_in_env_file CITEVYN_PUBLIC_CLIENT_TOKEN; then
-        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
         _token_value="${CITEVYN_PUBLIC_CLIENT_TOKEN:-}"
-    elif _declared_in_env_file CITEVYN_DEMO_API_KEY; then
-        _token_name=CITEVYN_DEMO_API_KEY
-        _token_value="${CITEVYN_DEMO_API_KEY:-}"
     else
-        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
         _token_value=""
     fi
-    if [[ -z "$(_strip "${_token_value}")" ]]; then
-        _token_name=CITEVYN_PUBLIC_CLIENT_TOKEN
-    fi
-    _assert_strong_key "${_token_name}" local-demo-key "${_token_value}"
+    _assert_strong_key CITEVYN_PUBLIC_CLIENT_TOKEN local-demo-key "${_token_value}"
     # The key that can promote an index, read the budget, and inspect jobs.
     _assert_strong_key CITEVYN_ADMIN_API_KEY local-admin-key "${CITEVYN_ADMIN_API_KEY:-}"
 ); then

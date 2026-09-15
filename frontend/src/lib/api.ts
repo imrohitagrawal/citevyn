@@ -54,31 +54,24 @@ export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\
  * rate-limit turnstile. It is not an identity control. See
  * ``docs/SECURITY_MODEL.md``; V1 swaps it for a real auth flow.
  *
- * TWO BUILD ARGUMENTS, AND THE OPERATOR ORDER IS THE `||`/`??` SPLIT (#430).
- * ``VITE_PUBLIC_CLIENT_TOKEN`` is the new name and ``VITE_API_DEMO_KEY`` the
- * one being retired; both are declared in ``infra/docker/Dockerfile.api`` so a
- * deploy mid-migration can pass either.
+ * ONE BUILD ARGUMENT, AND `||` IS LOAD-BEARING WHERE `??` WOULD BE A BUG (#430).
+ * ``VITE_API_DEMO_KEY`` was the old spelling. It is gone — with its ``ARG`` in
+ * ``infra/docker/Dockerfile.api`` and the Fly secret behind it — so only
+ * ``VITE_PUBLIC_CLIENT_TOKEN`` is read.
  *
- * `||` on the NEW one, `??` on the OLD one, and the asymmetry is deliberate:
+ * `??` fires only on null/undefined, and — measured with docker — an empty
+ * `--build-arg VITE_PUBLIC_CLIENT_TOKEN=""` does NOT fall back to the ``ARG``
+ * default; it leaves the argument empty. Under `??` that bakes `const K = ""`,
+ * the browser sends a bare `Authorization: Bearer `, and production 401s every
+ * call while `/health` stays green — release v6's outage (#296) reached through a
+ * different string. `||` treats `""` as absent, so the worst an empty argument
+ * can bake is the published default, and `scripts/check_bundle_key.sh` names
+ * that bundle explicitly ("the bundle carries the PUBLIC DEFAULT … the v6
+ * shape") rather than reporting a generic mismatch.
  *
- *   * The new ARG defaults to EMPTY. `??` fires only on null/undefined, so with
- *     `??` an unpassed new argument would bake `const K = ""` and win over a
- *     correctly-passed old one — the browser would send a bare
- *     `Authorization: Bearer ` and production would 401 every call while
- *     `/health` stayed green. That is release v6's outage (#296) reached by a
- *     new route, manufactured by the rename itself. `||` treats "" as absent
- *     and falls through, which is the only reason two arguments can coexist.
- *   * The old one keeps `??`, so its behaviour is byte-for-byte what shipped:
- *     an explicitly-empty `VITE_API_DEMO_KEY=""` still bakes `""` rather than
- *     silently becoming the published default. `scripts/check_bundle_key.sh`
- *     and `tests/shell/test_check_bundle_key.sh` are built on that exact shape,
- *     and quietly "fixing" it here would blind the checker that catches it.
- *
- * Every combination is pinned in `src/test/publicClientToken.test.ts`.
+ * Every case is pinned in `src/test/publicClientToken.test.ts`.
  */
-const PUBLIC_CLIENT_TOKEN =
-  import.meta.env.VITE_PUBLIC_CLIENT_TOKEN ||
-  (import.meta.env.VITE_API_DEMO_KEY ?? "local-demo-key");
+const PUBLIC_CLIENT_TOKEN = import.meta.env.VITE_PUBLIC_CLIENT_TOKEN || "local-demo-key";
 
 /** Default user id for session creation. */
 const API_DEMO_USER_ID = import.meta.env.VITE_API_DEMO_USER_ID ?? "demo_user";

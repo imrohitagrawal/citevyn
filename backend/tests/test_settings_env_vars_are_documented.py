@@ -238,16 +238,16 @@ def _accepted_env_names() -> set[str]:
     and the wrong subject for the reverse rule.
 
     The reverse rule asks "does this documented name read anything?". A field
-    mid-rename reads two: ``public_client_token`` accepts
-    ``CITEVYN_PUBLIC_CLIENT_TOKEN`` and, during the #430 migration, the
-    deprecated ``CITEVYN_DEMO_API_KEY``. Writing the old spelling down -- which
-    an operator running the old name NEEDS to find -- is not the
-    ``CITEVYN_LLM_API_KEY`` failure this guard exists to catch: that name read
-    NOTHING, and this one reads the same field.
+    MID-RENAME reads two, and the wider set is what let documentation teach the
+    deprecated spelling while it still worked -- ``public_client_token`` accepted
+    ``CITEVYN_DEMO_API_KEY`` alongside ``CITEVYN_PUBLIC_CLIENT_TOKEN`` for the
+    length of #430 step 1. No field carries a second alias TODAY, so the two sets
+    coincide; the distinction is kept because the next rename needs it, and
+    because collapsing them would silently re-narrow the reverse rule.
 
     Still a closed set: a name in neither this set nor ``_NON_SETTINGS_VARS``
-    fails, and ``test_the_alias_set_is_not_everything`` proves the widening did
-    not turn the rule into a tautology.
+    fails, and ``test_the_alias_set_is_not_a_tautology`` proves the widening did
+    not turn the rule into one.
 
     ``populate_by_name=True`` makes pydantic-settings append the FIELD NAME to
     the alias list, so the raw names are filtered to the ``CITEVYN_``-prefixed
@@ -433,8 +433,8 @@ def test_a_longer_variable_does_not_satisfy_a_shorter_one(tmp_path: Path) -> Non
     """``CITEVYN_FOO_BAR=`` must NOT count as documenting ``CITEVYN_FOO``.
 
     A substring search would count it, and would have reported this whole class
-    of gap as smaller than it is -- ``CITEVYN_DEMO_API_KEY`` would be "found"
-    by ``CITEVYN_DEMO_API_KEY_HEADER``, and so on.
+    of gap as smaller than it is -- ``CITEVYN_ADMIN_API_KEY`` would be "found"
+    by ``CITEVYN_ADMIN_API_KEY_HEADER``, and so on.
     """
     sample = tmp_path / "sample.env.example"
     sample.write_text("CITEVYN_FOO_BAR=1\n# CITEVYN_BAZ=2\nCITEVYN_QUX mentioned in prose\n")
@@ -591,19 +591,24 @@ def test_the_alias_set_is_a_superset_of_the_primary_names() -> None:
     assert primary <= accepted, f"primary names missing from the alias set: {primary - accepted}"
 
 
-def test_the_alias_set_admits_the_deprecated_token_name_and_not_an_invented_one() -> None:
+def test_the_alias_set_is_not_a_tautology() -> None:
     """The widening is scoped to names ``Settings`` genuinely reads (#430).
 
-    RED if ``public_client_token`` loses its ``CITEVYN_DEMO_API_KEY`` alias while
-    docs still teach it, and RED if ``_accepted_env_names`` ever degenerates into
-    "any CITEVYN_* name", which would make the reverse guard a tautology and let
-    the ``CITEVYN_LLM_API_KEY`` class of bug straight back in.
+    RED if ``_accepted_env_names`` ever degenerates into "any CITEVYN_* name",
+    which would make the reverse guard a tautology and let the
+    ``CITEVYN_LLM_API_KEY`` class of bug straight back in. The retired
+    ``CITEVYN_DEMO_API_KEY`` is the concrete case: it read a real field until
+    #430 step 2 removed the alias, so it is the one name whose exclusion proves
+    the set tracks the CODE rather than the repo's vocabulary.
+
+    RED also if the alias comes back -- documentation would then be free to teach
+    the retired spelling again, which is the state this change ended.
     """
     accepted = _accepted_env_names()
     assert "CITEVYN_PUBLIC_CLIENT_TOKEN" in accepted
-    assert "CITEVYN_DEMO_API_KEY" in accepted, (
-        "the deprecated alias is gone, so the #430 migration is over -- delete the "
-        "old spelling from README.md and the env examples in the same change"
+    assert "CITEVYN_DEMO_API_KEY" not in accepted, (
+        "the retired #430 alias is being read again -- see "
+        "backend/tests/test_public_client_token_resolution.py, which pins the removal"
     )
     assert "CITEVYN_NOT_A_REAL_SETTING" not in accepted
     assert "CITEVYN_LLM_API_KEY" not in accepted, (

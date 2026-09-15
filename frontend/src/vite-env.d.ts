@@ -15,11 +15,6 @@ interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
   /** Public client token; mirrors the backend ``CITEVYN_PUBLIC_CLIENT_TOKEN``. */
   readonly VITE_PUBLIC_CLIENT_TOKEN?: string;
-  /**
-   * DEPRECATED spelling of the above, still read during the #430 migration.
-   * Removed once the Fly secret and the deploy build argument have moved.
-   */
-  readonly VITE_API_DEMO_KEY?: string;
   /** Default ``user_id`` used when creating a session. */
   readonly VITE_API_DEMO_USER_ID?: string;
   /** ``"true"`` switches the chat off canned answers onto the real backend. */
