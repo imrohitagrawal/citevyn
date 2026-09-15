@@ -1,10 +1,32 @@
-# Dependabot keeps the dependency graph current. Four ecosystems
-# are tracked: Python (uv), Docker base images, Docker Compose
+# Dependabot keeps the dependency graph current. Five ecosystems
+# are tracked: Python (uv), npm, Docker base images, Docker Compose
 # service images, and GitHub Actions.
 #
-# Cadence is weekly for Python and Docker, monthly for Actions —
-# Actions pins churn less often and we'd rather not have noisy
-# PRs on every release.
+# Cadence is weekly for Python and Docker, monthly for npm and
+# Actions — Actions pins churn less often and we'd rather not have
+# noisy PRs on every release; npm's cadence is argued at its own
+# block below.
+#
+# An ecosystem that is NOT listed here gets no version updates at
+# all. Security updates ignore this file entirely and open PRs
+# regardless, which is why a missing entry looks like "nothing to
+# update" rather than like a misconfiguration. ``npm`` was absent
+# until #423: ``frontend/`` had received only security PRs since
+# the repo began, and ``@types/node`` drifted two majors behind
+# ``frontend/.nvmrc`` with nothing watching (#413). The tell was in
+# the PR titles — every backend/docker/CI Dependabot PR carries the
+# custom prefixes configured below (``deps(deps):``,
+# ``deps(dev)(deps-dev):``, ``deps(ci)(deps):``,
+# ``deps(docker)(deps):``) while every ``/frontend`` one carried
+# Dependabot's defaults (``chore(...)``, ``build(...)``), proving
+# they had never passed through this file.
+#
+# ``backend/tests/test_dependabot_config.py`` asserts the PARSED
+# structure of this file, not its text: a syntactically valid file
+# that lost an entry still fails there. A malformed
+# ``dependabot.yml`` is silently ignored by GitHub, so without that
+# guard the failure mode is an absence of PRs, which is
+# indistinguishable from having no updates available.
 #
 # Auto-merge policy (since 2026-06-21):
 #   Branch protection on ``main`` requires 5 status checks (see
@@ -77,6 +99,105 @@ updates:
     labels:
       - "dependencies"
       - "python"
+
+  # ──────────── Frontend (npm) ────────────
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    target-branch: "main"
+    # MONTHLY, not weekly like the backend. ``main`` is protected
+    # with 10 required status checks and ``strict: true``, so
+    # merging any one PR makes every other open PR out-of-date and
+    # unmergeable until someone runs ``gh pr update-branch`` on it.
+    # A batch of npm PRs therefore costs O(n²) rebases, not O(n).
+    # Monthly keeps that queue payable while still being infinitely
+    # more than the zero scheduled updates ``frontend/`` got before
+    # #423. Raise it to weekly only if the backlog is routinely
+    # empty when the cron fires.
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "08:00"
+      timezone: "America/Los_Angeles"
+    # 3, below the backend's 5, for the same staleness reason: each
+    # open PR is one more that goes stale on every merge.
+    open-pull-requests-limit: 3
+    rebase-strategy: "auto"
+    # Same prefixes as the backend block. This is not cosmetics: the
+    # prefix is the only evidence in a PR title that the PR came
+    # through this file at all, and that is precisely how #423 was
+    # spotted. A ``chore(deps-dev):`` title on a ``/frontend`` PR
+    # from here on means a SECURITY update, which bypasses this
+    # config — worth knowing at a glance.
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+      include: scope
+    # Minor + patch are batched; ``update-types`` is what makes that
+    # true. A group WITHOUT it swallows majors too, and a major is
+    # the one bump that needs its own review and its own revert.
+    # ``applies-to: version-updates`` leaves security updates
+    # ungrouped so an advisory fix is never held behind a routine
+    # bump.
+    #
+    # Every pattern below names a package that is really declared in
+    # ``frontend/package.json``; a pattern that matches nothing
+    # groups nothing, silently. The guard test asserts the mapping.
+    groups:
+      frontend-runtime:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "react"
+          - "react-dom"
+      frontend-build:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "vite"
+          - "@vitejs/plugin-react"
+          - "typescript"
+          - "postcss"
+          - "stylelint"
+      frontend-test:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "vitest"
+          - "@playwright/test"
+          - "@testing-library/*"
+          - "jsdom"
+          - "js-yaml"
+      # ``@types/node`` lives here and is the one bump that can go
+      # RED on purpose:
+      # ``backend/tests/test_node_version_pin.py::test_types_node_major_matches_the_pin``
+      # requires its MAJOR to equal ``frontend/.nvmrc``. Minor and
+      # patch bumps stay inside the major and pass, which is why
+      # they are grouped. A major bump escapes this group (see
+      # ``update-types`` above), arrives as its own PR and FAILS the
+      # required ``pytest + lint`` check until ``.nvmrc``, the
+      # Dockerfiles and the workflows move with it. That is the
+      # guard doing its job, not a broken test — the runtime and the
+      # types that describe it must move together (#413). Fix the
+      # pin, do not weaken the guard.
+      frontend-types:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+        patterns:
+          - "@types/*"
+    # ``javascript`` rather than a made-up ``frontend``: Dependabot
+    # cannot create a label that does not exist in the repo, and
+    # these two are the ones that do (``gh label list``).
+    labels:
+      - "dependencies"
+      - "javascript"
 
   # ──────────── Docker base images ────────────
   - package-ecosystem: "docker"
