@@ -42,6 +42,7 @@ above is exactly the kind this guard has already been wrong about once.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 from pathlib import Path
 from typing import Any
@@ -53,30 +54,32 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPENDABOT_YML = REPO_ROOT / ".github" / "dependabot.yml"
 FRONTEND_PACKAGE_JSON = REPO_ROOT / "frontend" / "package.json"
 
-# Every manifest section that declares a DIRECT dependency. An earlier version
-# of this line listed only the first two and called them "both" sections npm
-# installs from, which is false: `optionalDependencies` are installed too, and
-# `peerDependencies` are declared directly whether or not npm installs them.
-# frontend/package.json has neither today, so the error was latent -- but a
-# package added under one would have sat outside this guard's population,
-# ungrouped, and invisible to the census below. All four are read.
+# The manifest sections DEPENDABOT reads, which is the only population that
+# matters here -- not the sections npm installs, and not the sections a human
+# would call "direct". Verbatim from dependabot-core,
+# npm_and_yarn/lib/dependabot/npm_and_yarn/file_parser.rb:
+#
+#   DEPENDENCY_TYPES = %w(dependencies devDependencies optionalDependencies).freeze
+#
+# This line has now been wrong twice in opposite directions, which is why it
+# carries its source. It first listed two sections and called them "both" that
+# npm installs from -- false, `optionalDependencies` are installed too. The
+# correction then over-shot and added `peerDependencies`, on npm's semantics
+# rather than Dependabot's: Dependabot does NOT parse that section, so demanding
+# a group for a package declared there would plant a pattern matching nothing --
+# exactly the silent no-op dependabot.yml's own comment warns about. Three
+# sections, from the parser.
 #
 # Deliberately NOT shared with test_node_version_pin.py's _TYPES_NODE_SECTIONS,
-# which is the same two strings for a DIFFERENT reason: that one is the set npm
+# which is two of these strings for a DIFFERENT reason: that one is the set npm
 # resolves a version from, so its guard fails when @types/node appears in more
-# than one of them. This one is "everywhere a direct dependency can hide", and
-# wants to be as wide as possible. Unifying them would couple two invariants
-# that should be free to move apart.
+# than one. Unifying them would couple two invariants that should be free to
+# move apart.
 #
 # A transitive package (browserslist, fast-uri, @vitest/mocker -- all three have
 # opened security PRs on this repo) appears in none of these and is reached only
 # by a security update, which ignores dependabot.yml.
-_DIRECT_SECTIONS = (
-    "dependencies",
-    "devDependencies",
-    "optionalDependencies",
-    "peerDependencies",
-)
+_DIRECT_SECTIONS = ("dependencies", "devDependencies", "optionalDependencies")
 
 # Every ecosystem this file is expected to declare, as (ecosystem, directory).
 # Recorded so that DELETING one is a test failure rather than a quiet loss of
@@ -92,101 +95,148 @@ _EXPECTED_ECOSYSTEMS: tuple[tuple[str, str], ...] = (
 
 _NPM = ("npm", "/frontend")
 
-# Keys that are VALID, parse cleanly, leave every other assertion in this file
-# green -- and switch scheduled updates off, wholly or in part. This is the
+# Every option an ``updates:`` entry may carry, from GitHub's options reference
+# (docs.github.com/en/code-security/dependabot/working-with-dependabot/
+# dependabot-options-reference). Read TWICE, and the two reads of the same page
+# did not return an identical index -- so this is their UNION, which is the safe
+# direction: the allow-list only has to be wide enough not to fail a legitimate
+# edit, while the BANNED subset below does the load-bearing work.
+#
+# `reviewers` is deliberately ABSENT. GitHub removed it from dependabot.yml in
+# 2025, replaced by CODEOWNERS, and it appears nowhere on the reference page. An
+# earlier version of this set listed it, which would have waved through a key
+# GitHub no longer accepts -- the exact "invalid file gets ignored" route this
+# check exists to close. Entry-level `patterns` is absent for the same reason:
+# it is a `groups.<name>` option and appears at entry level only inside one
+# multi-ecosystem example.
+#
+# An UNKNOWN key -- a typo like `registires:` for `registries:` -- is the
+# cheapest way to invalidate this file, and GitHub's response to an invalid file
+# is to ignore it, which is #423 again.
+_KNOWN_ENTRY_KEYS: frozenset[str] = frozenset(
+    {
+        "allow",
+        "assignees",
+        "commit-message",
+        "cooldown",
+        "directories",
+        "directory",
+        "enable-beta-ecosystems",
+        "exclude-paths",
+        "groups",
+        "ignore",
+        "insecure-external-code-execution",
+        "labels",
+        "milestone",
+        "multi-ecosystem-group",
+        "open-pull-requests-limit",
+        "package-ecosystem",
+        "pull-request-branch-name",
+        "rebase-strategy",
+        "registries",
+        "schedule",
+        "target-branch",
+        "vendor",
+        "versioning-strategy",
+    }
+)
+
+# Every key a ``groups.<name>`` block may carry, from the same reference.
+_KNOWN_GROUP_KEYS: frozenset[str] = frozenset(
+    {
+        "applies-to",
+        "dependency-type",
+        "exclude-patterns",
+        "group-by",
+        "patterns",
+        "update-types",
+    }
+)
+
+# The SUBSET of the documented options this repo refuses to accept silently.
+# Each is valid, parses cleanly, leaves every structural assertion in this file
+# green -- and switches scheduled updates off, wholly or in part. That is the
 # #423 outcome reached from the other direction: the entry is declared and
-# ineffective, which reads as "nothing to update" exactly like the absent entry
-# did. Adversarial review measured each of these surviving the first version of
-# this file, which asserted structure but never absence:
+# INEFFECTIVE, which reads as "nothing to update" exactly like the absent entry
+# did. Adversarial review measured every one of these surviving the first
+# version of this file, which asserted structure but never absence:
 #
-#   ignore: [{dependency-name: "*"}]      -- no version update ever opens again.
+#   ignore: [{dependency-name: "*"}]  -- no version update ever opens again.
 #   allow: [{dependency-type: "production"}]
-#   dependency-type: "production"         -- drops every devDependency, which
-#                                            here is the whole toolchain plus
-#                                            @types/node itself.
-#   open-pull-requests-limit: 0           -- GitHub documents zero as the way to
-#                                            "temporarily disable version
-#                                            updates for a package manager".
-#                                            Checked separately below, because
-#                                            the key must be PRESENT, not absent.
-#   versioning-strategy: ...              -- changes what gets written to the
-#                                            manifest at all.
+#                                     -- drops every devDependency, which here
+#                                        is the whole toolchain plus @types/node.
+#   cooldown: {default-days: 365}     -- every PR deferred a year.
+#   versioning-strategy: ...          -- changes what reaches the manifest.
+#   open-pull-requests-limit: 0       -- GitHub documents zero as the way to
+#                                        "temporarily disable version updates
+#                                        for a package manager". Checked
+#                                        SEPARATELY below, because that key must
+#                                        be PRESENT with a sane value, not absent.
 #
-# None of these is banned on principle; each is banned from arriving SILENTLY.
-# If one is genuinely wanted, delete it from this tuple in the same commit and
-# say why -- the same treatment `_INTENTIONALLY_NOT_ON_PUSH` gets in
-# test_ci_workflow_conditions.py.
+# These are a SUBSET of _KNOWN_ENTRY_KEYS on purpose, and that is the fix for a
+# defect review found in the first attempt: when the banned keys were held OUT
+# of the known set, following the documented escape hatch (delete the key from
+# this tuple) left the suite red on the UNKNOWN-key check, with a message
+# accusing the maintainer of a typo. A hatch that does not work is a guard
+# people delete.
+#
+# The hatch is now two adjacent edits in this file, both deliberate: drop the
+# key here, and drop it from the pinned set in
+# test_both_ban_lists_are_real_subsets_of_the_documented_options. Measured: the
+# second is the only failure that remains, and its message names the key and
+# says it was measured switching updates off -- which is the conversation the
+# pin exists to force. Deliberately NOT reduced to one edit: a ban that can
+# vanish from a single line is a ban that vanishes.
+#
+# `dependency-type` is NOT in this entry-level tuple. The first version put it
+# here on the belief that it was an entry-level option. It is not -- it exists
+# only under `allow[]` and under `groups.<name>`. At entry level the unknown-key
+# check already rejects it; at group level it is banned just below.
 _SILENT_DISABLE_KEYS: tuple[str, ...] = (
-    "ignore",
     "allow",
     "cooldown",
-    "dependency-type",
+    "ignore",
     "versioning-strategy",
 )
 
 # The group-level members of the same family, both measured surviving:
 # `exclude-patterns: ["*"]` leaves `patterns` intact, so every pattern-to-package
 # assertion below still passes while Dependabot groups nothing; a group
-# `dependency-type: development` makes `frontend-runtime` (react, react-dom, the
-# only two production dependencies) match nothing.
-_SILENT_DISABLE_GROUP_KEYS: tuple[str, ...] = ("exclude-patterns", "dependency-type")
-
-# Every key an `updates:` entry may carry. An UNKNOWN key -- a typo like
-# `registires:` for `registries:` -- is the cheapest way to invalidate this
-# file, and GitHub's response to an invalid file is to ignore it, which is #423
-# again. Whether Dependabot's schema truly rejects unknown keys is UNVERIFIED
-# offline and recorded in _UNGUARDABLE; asserting a closed set costs nothing
-# either way and turns a typo into a failing test instead of silence.
-#
-# Taken from GitHub's options reference (docs.github.com/code-security/
-# dependabot/working-with-dependabot/dependabot-options-reference). Keys this
-# repo bans outright are in _SILENT_DISABLE_KEYS above and are NOT listed here.
-_KNOWN_ENTRY_KEYS: frozenset[str] = frozenset(
-    {
-        "package-ecosystem",
-        "directory",
-        "directories",
-        "schedule",
-        "target-branch",
-        "open-pull-requests-limit",
-        "rebase-strategy",
-        "commit-message",
-        "groups",
-        "labels",
-        "milestone",
-        "assignees",
-        "reviewers",
-        "pull-request-branch-name",
-        "registries",
-        "insecure-external-code-execution",
-        "patterns",
-        "vendor",
-    }
-)
+# `dependency-type: development` makes `frontend-runtime` (react and react-dom,
+# the only two production dependencies) match nothing.
+_SILENT_DISABLE_GROUP_KEYS: tuple[str, ...] = ("dependency-type", "exclude-patterns")
 
 # What this file CANNOT see. Recorded house-style (test_node_version_pin.py's
 # `_UNGUARDABLE`) because the first version of this guard asserted completeness
 # and was wrong about it: adversarial review found five silent-disable shapes it
 # missed. A guard that does not write its holes down reads as having none.
 _UNGUARDABLE: tuple[str, ...] = (
-    "Whether GitHub ACCEPTS this file. Nothing in CI runs Dependabot, and there "
-    "is no validation endpoint. These tests assert the shape this repo intends; "
-    "the schema itself is checked only by GitHub, which reports a rejected file "
-    "in the repo's Dependabot UI and nowhere a test can read. Settling command "
-    "for a schema question: the options reference at "
-    "docs.github.com/code-security/dependabot/working-with-dependabot/"
+    "Whether GitHub ACCEPTS this file -- from in here. Nothing in CI runs "
+    "Dependabot and no test can ask. But it is NOT unobservable, which this "
+    "entry claimed until it was read against reality: a PR that touches "
+    "dependabot.yml gets a check run named `.github/dependabot.yml` from the "
+    "`dependabot` app, titled 'Dependabot config file validation'. It reported "
+    "`success` / 'All changes look good' on this file at 30cf1ad. It is not a "
+    "REQUIRED context, so it gates nothing -- read it on the PR. Settling "
+    "command: `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. For a "
+    "question about one option, the reference at docs.github.com/en/"
+    "code-security/dependabot/working-with-dependabot/"
     "dependabot-options-reference.",
     "Whether a scheduled run actually OPENS a PR. Dependabot may find nothing to "
     "update, hit its own errors, or be disabled at the repo or org level -- all "
     "of which look identical from in here. The observable proof is a PR whose "
     "title carries this file's `deps`/`deps(dev)` prefix rather than "
     "Dependabot's default `chore(...)`/`build(...)`.",
-    "Everything the four PRE-EXISTING entries configure beyond their existence, "
-    "their PR limit and the absence of a silent-disable key. Their schedules, "
-    "target branches and (except docker's, pinned below) their groups are "
-    "unasserted. Deliberate scope: #423 is about npm. The sharpest gap is "
-    "docker's `docker-base-images` group, which is why that ONE is pinned -- "
-    "test_node_version_pin.py's prose depends on it grouping every base image.",
+    "The four PRE-EXISTING entries' schedule VALUES, target branches and (except "
+    "docker's, pinned below) their groups. Every entry is now held to having a "
+    "`schedule.interval` at all, a PR limit of at least 1, no banned key and no "
+    "unrecognised key -- this entry said otherwise until review caught it, which "
+    "is a register making the false-completeness claim it exists to prevent. "
+    "What is unasserted is which weekday, which branch, and what the uv/"
+    "docker-compose/github-actions groups contain. Deliberate scope: #423 is "
+    "about npm. The sharpest gap was docker's `docker-base-images` group, which "
+    "is why that ONE is pinned -- test_node_version_pin.py's prose depends on it "
+    "grouping every base image.",
     "Transitive packages. `frontend/package-lock.json` is not read here, so a "
     "group pattern naming a transitive dependency would be reported as matching "
     "nothing even though Dependabot could reach it through a security update. "
@@ -268,16 +318,30 @@ def _direct_dependencies() -> dict[str, str]:
 
 
 def _matches(pattern: str, package: str) -> bool:
-    """Dependabot's group matcher: a literal name, or one trailing ``*``.
+    """Dependabot's group matcher, modelled as faithfully as possible.
 
-    Deliberately narrower than ``fnmatch``. This repo only writes exact names
-    and ``prefix/*`` wildcards, and a matcher that accepts more than the
-    patterns actually in the file would let a typo'd pattern pass by matching
-    something it should not.
+    Dependabot matches a `patterns:` entry with Ruby's ``File.fnmatch`` using
+    ``FNM_CASEFOLD`` and WITHOUT ``FNM_PATHNAME``: case-insensitive, and ``*``
+    crosses ``/``. ``fnmatchcase`` on two lower-cased strings is the Python
+    equivalent, and is deterministic -- plain ``fnmatch.fnmatch`` folds case per
+    OS, so it would compare differently on macOS and on the CI runner.
+
+    The first version was a hand-rolled exact-or-trailing-``*`` matcher,
+    case-SENSITIVE, argued as "narrower, so it fails safe". Review measured that
+    it does not, in one direction. Narrower is safe for the two
+    must-match-something assertions -- a pattern the model misses matches
+    nothing and reddens. It is UNSAFE for the must-not-match-twice one, where
+    narrower means MISSING a real overlap. Reproduced with a real mixed-case npm
+    package: pattern ``js*`` plus a package ``JSONStream``, and a later group
+    naming ``JSONStream`` directly. The narrow model saw one owner and passed;
+    Dependabot, folding case, sees two and silently assigns by YAML order --
+    verbatim the outcome the overlap test's message says it prevents.
+
+    Latent, since frontend/package.json has no mixed-case name today. Fixed by
+    modelling rather than by pinning, because "narrower" was the wrong safety
+    argument, not a wrong constant.
     """
-    if pattern.endswith("*"):
-        return package.startswith(pattern[:-1])
-    return package == pattern
+    return fnmatch.fnmatchcase(package.lower(), pattern.lower())
 
 
 def _npm_groups() -> dict[str, dict[str, Any]]:
@@ -391,9 +455,14 @@ def test_no_entry_carries_a_key_that_silently_disables_it(ecosystem: str, direct
     to distinguish "declared and effective" from "the word appears somewhere".
     It did not. This is the assertion that makes that sentence true.
 
-    Which change turns this RED: adding `ignore`, `allow`, `cooldown`,
-    `dependency-type` or `versioning-strategy` to any entry. If one is genuinely
-    wanted, take it out of _SILENT_DISABLE_KEYS in the same commit and say why.
+    Which change turns this RED: adding `allow`, `cooldown`, `ignore` or
+    `versioning-strategy` to any entry. If one is genuinely wanted, take it out
+    of _SILENT_DISABLE_KEYS and out of the pinned set in
+    test_both_ban_lists_are_real_subsets_of_the_documented_options, in the same
+    commit, and say why. Two adjacent lines, both of them a deliberate act. It
+    used to be worse: the banned keys were held OUT of _KNOWN_ENTRY_KEYS, so
+    using the hatch failed the UNKNOWN-key check and told the maintainer they
+    had made a typo.
     """
     entry = _entry(ecosystem, directory)
     present = sorted(key for key in _SILENT_DISABLE_KEYS if key in entry)
@@ -414,16 +483,36 @@ def test_no_entry_carries_an_unrecognised_key(ecosystem: str, directory: str) ->
     one-character edit.
 
     Which change turns this RED: misspelling any key in any entry, or adding a
-    key that is neither in _KNOWN_ENTRY_KEYS nor deliberately banned.
+    key that is not a documented `updates:` option.
     """
     entry = _entry(ecosystem, directory)
-    unknown = sorted(set(entry) - _KNOWN_ENTRY_KEYS - set(_SILENT_DISABLE_KEYS))
+    unknown = sorted(set(entry) - _KNOWN_ENTRY_KEYS)
     assert not unknown, (
-        f"the {ecosystem} entry on {directory} declares {unknown}, which is in "
-        "neither _KNOWN_ENTRY_KEYS nor the banned list. Either it is a typo, or "
-        "it is a real option this file has not seen before -- in which case add "
-        "it to _KNOWN_ENTRY_KEYS, having checked it in GitHub's options "
-        "reference."
+        f"the {ecosystem} entry on {directory} declares {unknown}, which is not "
+        "a documented `updates:` option. Either it is a typo -- an invalid file "
+        "is IGNORED by GitHub, not rejected loudly -- or it is a real option "
+        "this file has not seen before, in which case add it to "
+        "_KNOWN_ENTRY_KEYS having checked it in GitHub's options reference."
+    )
+
+
+@pytest.mark.parametrize(("ecosystem", "directory"), _EXPECTED_ECOSYSTEMS)
+def test_no_group_carries_an_unrecognised_key(ecosystem: str, directory: str) -> None:
+    """The same check one level down. `groups.<name>` takes six documented keys
+    and nothing else; a typo there invalidates the file just as completely.
+
+    Which change turns this RED: misspelling a key inside any group, in any
+    entry — `update_types` for `update-types`, `exclude_patterns`, `pattern`.
+    """
+    groups = _entry(ecosystem, directory).get("groups") or {}
+    offenders = {
+        name: sorted(set(group) - _KNOWN_GROUP_KEYS)
+        for name, group in groups.items()
+        if set(group) - _KNOWN_GROUP_KEYS
+    }
+    assert not offenders, (
+        f"the {ecosystem} entry on {directory} has groups declaring keys that "
+        f"are not documented `groups.<name>` options: {offenders}."
     )
 
 
@@ -433,18 +522,75 @@ def test_the_known_key_list_is_not_so_wide_it_accepts_anything() -> None:
     all, and the check "no unknown keys" reports success by finding NOTHING —
     the shape this repo has been bitten by.
 
-    Which change turns this RED: adding a banned key to _KNOWN_ENTRY_KEYS, or
-    widening it until a plainly invalid key is accepted.
+    Which change turns this RED: widening either known set until a plainly
+    invalid key is accepted, or re-adding `reviewers` (removed by GitHub in
+    2025) or an entry-level `patterns`.
     """
-    assert not (_KNOWN_ENTRY_KEYS & set(_SILENT_DISABLE_KEYS)), (
-        "a key cannot be both allowed and banned; _KNOWN_ENTRY_KEYS overlaps "
-        f"_SILENT_DISABLE_KEYS at {sorted(_KNOWN_ENTRY_KEYS & set(_SILENT_DISABLE_KEYS))}"
-    )
     for invented in ("registires", "package_ecosystem", "scheduel", ""):
         assert invented not in _KNOWN_ENTRY_KEYS, (
             f"{invented!r} is in _KNOWN_ENTRY_KEYS, so the unknown-key check "
-            "would accept it. That list must stay the documented options only."
+            "would accept it. That set must stay the documented options only."
         )
+    for retired in ("reviewers", "patterns"):
+        assert retired not in _KNOWN_ENTRY_KEYS, (
+            f"{retired!r} is back in _KNOWN_ENTRY_KEYS. `reviewers` was removed "
+            "from dependabot.yml by GitHub in 2025 (CODEOWNERS replaces it) and "
+            "`patterns` is a `groups.<name>` option, so allowing either at entry "
+            "level waves through a key GitHub does not accept -- and an invalid "
+            "file is IGNORED, which is #423."
+        )
+    for wrong_level in ("package-ecosystem", "schedule", "labels"):
+        assert wrong_level not in _KNOWN_GROUP_KEYS, (
+            f"{wrong_level!r} is an entry-level option and must not be accepted "
+            "inside a `groups.<name>` block."
+        )
+
+
+def test_both_ban_lists_are_real_subsets_of_the_documented_options() -> None:
+    """The partner that stops the two ban lists from being emptied in silence.
+
+    Every banned-key check reports success by finding NOTHING, so an empty ban
+    list makes them all pass on a config that is switched off. Measured: with
+    `_SILENT_DISABLE_GROUP_KEYS` emptied and `exclude-patterns: ["*"]` added to
+    all four npm groups, the whole module stayed green — Dependabot grouping
+    nothing, every assertion satisfied. That is the "a check that counts nothing
+    needs a partner proving the thing counted exists" rule, and this is the
+    partner.
+
+    Which change turns this RED: emptying either ban list, dropping one of the
+    four measured offenders from it, or banning a key that is not a documented
+    option (which would ban nothing, since the unknown-key check rejects it
+    first).
+    """
+    entry_bans = set(_SILENT_DISABLE_KEYS)
+    group_bans = set(_SILENT_DISABLE_GROUP_KEYS)
+    assert entry_bans and group_bans, (
+        "a ban list is empty, so its check passes on every config -- including "
+        "the ones it exists to reject."
+    )
+    assert entry_bans <= _KNOWN_ENTRY_KEYS, (
+        f"these banned entry keys are not documented options: "
+        f"{sorted(entry_bans - _KNOWN_ENTRY_KEYS)}. Banning an undocumented key "
+        "bans nothing -- the unknown-key check rejects it first -- and it breaks "
+        "the escape hatch, which is to delete the key from the ban list alone."
+    )
+    assert group_bans <= _KNOWN_GROUP_KEYS, (
+        f"these banned group keys are not documented `groups.<name>` options: "
+        f"{sorted(group_bans - _KNOWN_GROUP_KEYS)}."
+    )
+    # The specific offenders adversarial review MEASURED surviving. Pinned by
+    # name rather than by a count: a count says how many, not which, and the one
+    # that gets dropped is the one nobody notices.
+    assert {"allow", "cooldown", "ignore", "versioning-strategy"} <= entry_bans, (
+        f"an entry-level ban was dropped; the list is now {sorted(entry_bans)}. "
+        "Each of the four was measured switching updates off with every other "
+        "assertion in this module green."
+    )
+    assert {"dependency-type", "exclude-patterns"} <= group_bans, (
+        f"a group-level ban was dropped; the list is now {sorted(group_bans)}. "
+        "`exclude-patterns: ['*']` empties a group while leaving `patterns` -- "
+        "and so every pattern assertion here -- intact."
+    )
 
 
 @pytest.mark.parametrize(("ecosystem", "directory"), _EXPECTED_ECOSYSTEMS)
@@ -767,17 +913,24 @@ _MATCHER_CASES: tuple[tuple[str, str, bool], ...] = (
     ("@types/*", "@typescript-eslint/parser", False),
     ("@testing-library/*", "@testing-library/jest-dom", True),
     ("@testing-library/*", "@playwright/test", False),
-    # Case-sensitive on purpose. Dependabot folds case; this matcher does not,
-    # so it is NARROWER -- a pattern whose case is wrong matches nothing here
-    # and reddens test_every_npm_group_pattern_matches_a_real_frontend_package
-    # instead of passing quietly. Fails safe, and pinned so it stays that way.
-    ("React", "react", False),
-    ("@TYPES/*", "@types/node", False),
+    # Case-INSENSITIVE, because Dependabot passes FNM_CASEFOLD. These three
+    # rows are the ones that matter: with a case-sensitive model the last of
+    # them reports ONE owner where Dependabot sees two, and the group a package
+    # lands in is then decided by YAML order rather than by anything written
+    # down. That is the overlap test's stated failure, passing silently.
+    ("React", "react", True),
+    ("@TYPES/*", "@types/node", True),
+    ("js*", "JSONStream", True),
     # A bare `*` matches everything, which is how the docker entry groups every
     # base image.
     ("*", "react", True),
     ("*", "@types/node", True),
 )
+
+# Pinned by count as well as content. Every row above is a separate parametrised
+# test, so deleting one removes a test rather than failing one -- pytest reports
+# a smaller run, not a red one, and this repo has shipped that shape before.
+_MATCHER_CASE_COUNT = 13
 
 
 @pytest.mark.parametrize(("pattern", "package", "expected"), _MATCHER_CASES)
@@ -825,4 +978,27 @@ def test_the_guards_own_blind_spots_are_written_down() -> None:
         f"the blind-spot register holds {len(_UNGUARDABLE)} entries, "
         f"_UNGUARDABLE_COUNT says {_UNGUARDABLE_COUNT}. Adding or closing a "
         "blind spot is a deliberate act: update the count in the same edit."
+    )
+
+
+def test_the_matcher_table_has_not_lost_a_case() -> None:
+    """Each row of _MATCHER_CASES is its own parametrised test, so deleting one
+    makes the suite SMALLER rather than RED — and a smaller green run is exactly
+    what a vacuous guard looks like.
+
+    Which change turns this RED: deleting any row from _MATCHER_CASES without
+    updating _MATCHER_CASE_COUNT.
+    """
+    assert len(_MATCHER_CASES) == _MATCHER_CASE_COUNT, (
+        f"_MATCHER_CASES holds {len(_MATCHER_CASES)} rows, _MATCHER_CASE_COUNT "
+        f"says {_MATCHER_CASE_COUNT}. Adding or removing a case is a deliberate "
+        "act: update the count in the same edit."
+    )
+    # The case-folding rows specifically. They are the ones that encode a
+    # measured defect (see _matches), so name them rather than trusting the
+    # count to notice which row went missing.
+    assert ("js*", "JSONStream", True) in _MATCHER_CASES, (
+        "the case-folding overlap case is gone. It is the one that fails OPEN "
+        "if _matches is case-sensitive: the overlap census reports one owner "
+        "where Dependabot sees two."
     )

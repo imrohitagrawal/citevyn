@@ -35,14 +35,21 @@
 #
 # Declared-but-INEFFECTIVE is the same outcome reached another way,
 # so that guard also rejects the keys that produce it silently —
-# ``ignore``, ``allow``, ``cooldown``, ``dependency-type``,
-# ``versioning-strategy``, a group ``exclude-patterns``, and
+# ``ignore``, ``allow``, ``cooldown``, ``versioning-strategy``, a
+# group ``exclude-patterns`` or ``dependency-type``, and
 # ``open-pull-requests-limit: 0`` (which GitHub documents as the way
 # to switch an ecosystem off). None of them is banned on principle;
-# each is banned from arriving without a reviewer noticing. It also
-# rejects an UNKNOWN key, because a typo'd one is the cheapest way
-# to invalidate this file. What it cannot see is written down in the
+# each is banned from arriving without a reviewer noticing, and the
+# way to use one deliberately is to take it out of that file's ban
+# list in the same commit. The guard also rejects an UNKNOWN key at
+# entry and group level, because a typo'd one is the cheapest way to
+# invalidate this file. What it cannot see is written down in the
 # test file's own ``_UNGUARDABLE`` register.
+#
+# GitHub itself validates this file on any PR that touches it: a
+# check run named ``.github/dependabot.yml`` from the ``dependabot``
+# app, "Dependabot config file validation". It is not a required
+# context, so read it rather than relying on the rollup.
 #
 # Auto-merge policy (since 2026-06-21):
 #   Branch protection on ``main`` requires 10 status checks — this
