@@ -322,10 +322,13 @@ if ! (
     }
     # The bearer every public /api/v1 request carries (#430).
     #
-    # Both spellings accepted, NEW ONE WINS, mirroring the AliasChoices order in
-    # Settings.public_client_token. A guard that resolved them the other way round
-    # would test a value the app is not going to use, and pass a deploy that then
-    # crash-loops -- which is the exact failure this whole block exists to prevent.
+    # ONE spelling, mirroring Settings.public_client_token, which reads
+    # CITEVYN_PUBLIC_CLIENT_TOKEN and nothing else since #430 step 2. A guard that
+    # accepted a name the app does not read would test a value that is not going to
+    # be used, and pass a deploy that then crash-loops on the published default --
+    # which is the exact failure this whole block exists to prevent. That is why
+    # the deprecated CITEVYN_DEMO_API_KEY fallback had to go WITH the alias rather
+    # than be left behind as harmless leniency.
     #
     # WHICH NAME SUPPLIES THE VALUE IS DECIDED FROM THE .env FILE ALONE.
     #

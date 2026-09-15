@@ -399,7 +399,8 @@ _tok_case "no token anywhere -> preflight REFUSES"          unresolved "# none"
 
 # ── Non-vacuity, pinned exactly. A slack floor lets a whole case be deleted
 #    silently; bump this deliberately when you add one.
-# 39 before #430; +5 for the two-name token resolution block above.
+# 39 before #430; +5 for the token resolution block above (two resolve cases,
+#    two retired-name-is-inert cases, and the refusal partner).
 _EXPECTED_ASSERTIONS=44
 if [[ ${ASSERTIONS} -ne ${_EXPECTED_ASSERTIONS} ]]; then
     echo "  FAIL — ${ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}."

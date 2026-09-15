@@ -282,15 +282,55 @@ def test_a_kwarg_by_field_name_is_not_silently_dropped(monkeypatch: pytest.Monke
 
 @pytest.mark.parametrize(
     "weak",
-    [_PUBLISHED_DEFAULT, "LOCAL-DEMO-KEY", "  local-demo-key ", "short", ""],
-    ids=["default", "upper", "padded", "too-short", "empty"],
+    [_PUBLISHED_DEFAULT, "LOCAL-DEMO-KEY", "  local-demo-key ", "short"],
+    ids=["default", "upper", "padded", "too-short"],
 )
 def test_production_refuses_a_weak_token(monkeypatch: pytest.MonkeyPatch, weak: str) -> None:
-    """The publicly-known default, its case and whitespace variants, and anything short."""
+    """The publicly-known default, its case and whitespace variants, and anything short.
+
+    THE MESSAGE IS ASSERTED, not merely the raise, and `""` is deliberately NOT a
+    case here. Both come from the same finding: a bare ``pytest.raises(ValueError)``
+    cannot say WHICH validator fired, and review demonstrated it -- with
+    ``_reject_weak_public_client_token_in_production`` disabled, every id above went
+    red but an ``empty`` case stayed GREEN, because ``min_length=1`` rejects ``""``
+    in every environment and the production validator never sees it. It was filed
+    under a guard it does not exercise. The empty case has its own home in
+    ``test_an_empty_value_is_taken_literally_and_rejected_by_min_length`` and
+    ``test_an_empty_ENVIRONMENT_variable_is_present_and_raises``, both of which
+    assert the ``at least 1 character`` message that distinguishes the two.
+    """
     _production_env(monkeypatch)
     monkeypatch.setenv(_NEW, weak)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as excinfo:
         Settings(_env_file=None)  # type: ignore[call-arg]
+    message = str(excinfo.value)
+    assert "must be set to a strong secret" in message, (
+        "something other than _reject_weak_public_client_token_in_production raised, "
+        f"so this case is not exercising the guard it is filed under:\n{message}"
+    )
+
+
+def test_an_empty_token_is_rejected_BEFORE_the_production_guard_sees_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where the empty case actually belongs, with the message that proves it.
+
+    ``min_length=1`` fires first and in EVERY environment, so an empty value never
+    reaches the production validator. Recorded as its own case rather than dropped,
+    because "production refuses an empty token" is true and worth pinning -- it is
+    just not the production validator that does it, and a test that implied
+    otherwise would credit the wrong guard.
+    """
+    _production_env(monkeypatch)
+    monkeypatch.setenv(_NEW, "")
+    with pytest.raises(ValueError) as excinfo:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+    message = str(excinfo.value)
+    assert "at least 1 character" in message, message
+    assert "must be set to a strong secret" not in message, (
+        "the production validator answered for an empty value, so min_length no "
+        f"longer fires first and the ordering this case pins has changed:\n{message}"
+    )
 
 
 def test_a_strong_token_boots_in_production(monkeypatch: pytest.MonkeyPatch) -> None:

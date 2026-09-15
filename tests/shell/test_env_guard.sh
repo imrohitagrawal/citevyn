@@ -695,6 +695,21 @@ chmod_test
 
 # ─────────────────────── Summary ───────────────────────
 
+# Non-vacuity, pinned EXACTLY, the way tests/shell/test_check_bundle_key.sh and
+# tests/shell/test_deploy_verify_skip_state.sh already pin theirs. This suite is
+# the largest of the three and had no such guard until #430 step 2 reworked it
+# most heavily -- so a case silently deleted here left no trace at all, and a
+# suite that ran fewer assertions than its author thinks is exactly the shape
+# this repo keeps finding. A floor would not do: `-ge` cannot see a deletion
+# that lands alongside an addition, which is precisely what that rework was.
+# BUMP THIS DELIBERATELY when you add or remove a case.
+_EXPECTED_ASSERTIONS=57
+_RAN_ASSERTIONS=$((PASS + FAIL))
+if [[ "${_RAN_ASSERTIONS}" -ne "${_EXPECTED_ASSERTIONS}" ]]; then
+    FAIL=$((FAIL + 1))
+    FAILURES+=("  [assertion count] ${_RAN_ASSERTIONS} assertions ran; expected exactly ${_EXPECTED_ASSERTIONS}. Bump _EXPECTED_ASSERTIONS in the same commit as the case you added or removed.")
+fi
+
 echo
 echo "${PASS} passed, ${FAIL} failed"
 if [[ "${FAIL}" -gt 0 ]]; then

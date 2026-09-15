@@ -233,9 +233,10 @@ def _accepted_env_names() -> set[str]:
     """EVERY variable name ``Settings`` will read, primary and deprecated alike.
 
     ``_resolved_env_names`` returns the ONE name documentation must teach -- the
-    first of a field's ``AliasChoices``, which is by construction the one that
-    wins when several are set. That is the right subject for the coverage rule
-    and the wrong subject for the reverse rule.
+    first name pydantic-settings resolves for the field, which is by construction
+    the one that wins when several are set (the first entry of an
+    ``AliasChoices``, where a field has one; no field does today). That is the
+    right subject for the coverage rule and the wrong subject for the reverse rule.
 
     The reverse rule asks "does this documented name read anything?". A field
     MID-RENAME reads two, and the wider set is what let documentation teach the
