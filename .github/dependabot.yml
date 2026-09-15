@@ -51,6 +51,69 @@
 # app, "Dependabot config file validation". It is not a required
 # context, so read it rather than relying on the rollup.
 #
+# LABELS (#436). Every name under a ``labels:`` key below is one
+# ``gh label list`` really returns. The mechanism, from GitHub's
+# options reference, is narrower than "Dependabot cannot create a
+# label" -- an earlier draft of this comment said that and it is
+# FALSE. Two rules, both quoted from that page:
+#   1. "The labels specified are used INSTEAD of the default
+#      labels." Declaring ``labels:`` REPLACES the set Dependabot
+#      would otherwise apply -- ``dependencies`` plus an ecosystem
+#      or language label, which it "creates automatically, as
+#      necessary in your repository". That is where this repo's
+#      ``dependencies``, ``javascript`` and ``github_actions``
+#      labels came from: their descriptions are Dependabot's stock
+#      text, which nobody hand-types.
+#   2. "If any of these labels is not defined in the repository, it
+#      is IGNORED." A name inside ``labels:`` is never created.
+# Rule 1 is proven in this repo, not merely quoted: PR #10
+# (2026-06-20T15:39:48Z) carried ``dependencies`` AND
+# ``github_actions`` under commit ``ccf28b5``, three hours older,
+# whose github-actions entry had NO ``labels:`` key at all. Nobody
+# created those two by hand.
+# Rule 2 is the #436 defect: ``python`` (uv), ``docker`` (both
+# docker entries) and ``ci`` (github-actions) were requested here
+# and never landed. PRs #433 and #434 (uv), #227 (docker) and #243
+# (github-actions) each carry ``dependencies`` and nothing else.
+# The positive control is #438, #439 and #440 -- the first npm PRs
+# opened AFTER #435 added an npm entry asking for ``javascript``
+# (config merged 08:17Z, those PRs opened 08:19Z) -- which carry
+# both. NOT #307: it predates that entry by twelve days, so its
+# ``javascript`` came from rule 1's default path, and its
+# ``chore(deps-dev):`` title is this file's own evidence that it
+# never passed through here at all.
+# Deleting ``python`` and ``docker`` therefore changes NOTHING
+# about what Dependabot applies -- they were already ignored -- and
+# ``ci`` -> ``github_actions`` makes an inert request start
+# landing. Worth knowing before anyone proposes creating
+# ``python`` by hand: the default path would not apply it either,
+# because dependabot-core registers uv's language label as
+# ``python:uv`` (``uv/lib/dependabot/uv.rb``).
+# The deliberate tradeoff, written down because rule 1 makes it
+# invisible otherwise: keeping ``labels: ["dependencies"]`` on the
+# uv and docker entries SUPPRESSES the default ecosystem label
+# Dependabot would auto-create if the key were absent entirely.
+# That is the owner's call for #436 -- no new labels -- and not an
+# oversight. Deleting the key is how to revisit it, and the guard
+# forbids that today, on purpose.
+# Why no label was created by hand either: that is a repository
+# SETTING, and only ONE label here is read by automation --
+# ``full-eval``, which gates the paid judged eval at
+# ``.github/workflows/ci.yml:413``. Grepping every workflow finds
+# no other GitHub-label read (``release.yml``'s ``labels:`` are OCI
+# image labels, not these). Every other label, ``dependencies``
+# included, exists for human filtering only -- whether anyone
+# actually filters by it is not measured here and is not claimed.
+# ``dependencies`` stays on every entry because it is the one name
+# every Dependabot PR in this repo's history already carries.
+# One document disagrees with the ``full-eval`` sentence above:
+# ``docs/DEPENDABOT_TRIAGE.md`` describes a ``release-blocker``
+# label, an ``auto-label.yml`` and a ``nightly.yml``, none of which
+# the repo has. It is fiction, filed as #443, and it is not
+# evidence against the grep.
+# ``test_dependabot_config.py`` holds every label in this file to
+# that verified-present snapshot.
+#
 # Auto-merge policy (since 2026-06-21):
 #   Branch protection on ``main`` requires 10 status checks — this
 #   line said 5 until #423; ``gh api
@@ -123,9 +186,11 @@ updates:
           - "ruff"
           - "pyright"
           - "fakeredis"
+    # ``python`` used to sit here and the repo has never had it, so
+    # it was ignored and every uv PR arrived with ``dependencies``
+    # alone. Removing it changes nothing about what lands (#436).
     labels:
       - "dependencies"
-      - "python"
 
   # ──────────── Frontend (npm) ────────────
   - package-ecosystem: "npm"
@@ -264,9 +329,9 @@ updates:
       docker-base-images:
         patterns:
           - "*"
+    # No ``docker`` label: the repo has never had one (#436).
     labels:
       - "dependencies"
-      - "docker"
 
   # ──────────── Compose service images ────────────
   - package-ecosystem: "docker-compose"
@@ -286,9 +351,9 @@ updates:
     # ``infra/docker/docker-compose.yml`` (pgvector, redis,
     # caddy, postgres). Without this entry the service
     # images would silently rot.
+    # No ``docker`` label here either, same reason (#436).
     labels:
       - "dependencies"
-      - "docker"
 
   # ──────────── GitHub Actions ────────────
   - package-ecosystem: "github-actions"
@@ -304,6 +369,12 @@ updates:
     commit-message:
       prefix: "deps(ci)"
       include: scope
+    # ``github_actions``, not ``ci``: the underscored one is the
+    # label Dependabot itself seeded here (its description is
+    # Dependabot's stock "Pull requests that update GitHub Actions
+    # code") and the one `gh label list` returns. ``ci`` was
+    # requested here and, being undefined, ignored (#436). This is
+    # the one entry whose labelling actually CHANGES.
     labels:
       - "dependencies"
-      - "ci"
+      - "github_actions"
