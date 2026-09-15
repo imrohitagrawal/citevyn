@@ -293,9 +293,9 @@ fly deploy --app citevyn --local-only \
 > **The client-token build argument is not optional.** The frontend is built
 > inside the image and the bearer is baked into the bundle at build time
 > (`infra/docker/Dockerfile.api`, `ARG VITE_PUBLIC_CLIENT_TOKEN=local-demo-key`).
-> Drop it and the bundle carries the
-> public default, production rejects every browser call with 401 "Invalid bearer
-> token", and the site is down while `/health` stays green. This happened on
+> Drop it and the bundle carries the public default, production rejects every
+> browser call with 401 "Invalid bearer token", and the site is down while
+> `/health` stays green. This happened on
 > 2026-09-02 (release v6, fixed by v7) — see #296. The command reads the value
 > from the running machine so it never touches your shell history. The value is
 > public — it ships inside the bundle — but it is still not something to paste
