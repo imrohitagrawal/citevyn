@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # The bearer the browser sends on every ``/v1/*`` call. PUBLIC by
     # construction: ``infra/docker/Dockerfile.api`` bakes it into the JS bundle
     # at build time, so any visitor can read it out of ``/assets/index-*.js``.
-    # Its job (``docs/SECURITY_MODEL.md`` §"Demo bearer") is a CSRF guard -- a
+    # Its job (``docs/SECURITY_MODEL.md`` §4, "MVP Authentication") is a CSRF guard -- a
     # cross-site request cannot set an ``Authorization`` header -- plus a
     # turnstile for the rate limiter. It is explicitly NOT an identity control,
     # and its security property does not depend on secrecy.

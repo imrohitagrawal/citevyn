@@ -188,10 +188,9 @@ read_env() {  # read_env <KEY> -> normalized value on stdout (empty if unset)
 # An explicit env override wins over the compose .env. This is what makes
 # --verify-only usable against a locally-run api whose key lives elsewhere
 # (e.g. backend/.env) without editing the prod env file.
-# Both #430 spellings, new one winning, and the ENVIRONMENT beats the .env file
-# for each in turn. The ORDER matches what Settings resolves -- pydantic exhausts
-# a source's aliases before moving to the next source, so env-new, env-old,
-# file-new, file-old.
+# ONE name since #430 step 2, so the order is just env-then-file: the deprecated
+# CITEVYN_DEMO_API_KEY spelling is read nowhere any more, and reading it here
+# would let this script probe with a bearer the server does not accept.
 #
 # The EMPTINESS rule deliberately differs, and saying so is the point: `:-` here
 # treats an empty variable as absent and falls through to the .env file. Settings
