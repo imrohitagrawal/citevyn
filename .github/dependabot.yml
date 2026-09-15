@@ -12,8 +12,13 @@
 # regardless, which is why a missing entry looks like "nothing to
 # update" rather than like a misconfiguration. ``npm`` was absent
 # until #423: ``frontend/`` had received only security PRs since
-# the repo began, and ``@types/node`` drifted two majors behind
-# ``frontend/.nvmrc`` with nothing watching (#413). The tell was in
+# the repo began, and ``@types/node`` sat at ``^20.16.0`` while
+# ``frontend/.nvmrc`` had moved to ``26`` — six major numbers, three
+# even-numbered Node LTS generations — with nothing watching (#413).
+# (#423, and the first draft of this very comment, both said "two
+# majors". That was inherited and never checked. ``git log -p --
+# frontend/package.json`` shows one edit, ``^20.16.0`` -> ``^26.5.1``,
+# and settles it.) The tell was in
 # the PR titles — every backend/docker/CI Dependabot PR carries the
 # custom prefixes configured below (``deps(deps):``,
 # ``deps(dev)(deps-dev):``, ``deps(ci)(deps):``,
@@ -28,8 +33,23 @@
 # guard the failure mode is an absence of PRs, which is
 # indistinguishable from having no updates available.
 #
+# Declared-but-INEFFECTIVE is the same outcome reached another way,
+# so that guard also rejects the keys that produce it silently —
+# ``ignore``, ``allow``, ``cooldown``, ``dependency-type``,
+# ``versioning-strategy``, a group ``exclude-patterns``, and
+# ``open-pull-requests-limit: 0`` (which GitHub documents as the way
+# to switch an ecosystem off). None of them is banned on principle;
+# each is banned from arriving without a reviewer noticing. It also
+# rejects an UNKNOWN key, because a typo'd one is the cheapest way
+# to invalidate this file. What it cannot see is written down in the
+# test file's own ``_UNGUARDABLE`` register.
+#
 # Auto-merge policy (since 2026-06-21):
-#   Branch protection on ``main`` requires 5 status checks (see
+#   Branch protection on ``main`` requires 10 status checks — this
+#   line said 5 until #423; ``gh api
+#   repos/imrohitagrawal/citevyn/branches/main/protection --jq
+#   '.required_status_checks.contexts | length'`` returns 10, with
+#   ``strict: true`` (see
 #   Settings → Branches → main). To enable auto-merge at the repo
 #   level, go to Settings → General → "Allow auto-merge" and
 #   enable it, then enable auto-merge on individual Dependabot PRs
@@ -120,6 +140,15 @@ updates:
       timezone: "America/Los_Angeles"
     # 3, below the backend's 5, for the same staleness reason: each
     # open PR is one more that goes stale on every merge.
+    #
+    # There are FOUR groups below, so a month in which every group has
+    # work opens three PRs and holds the fourth — plus any major, which
+    # by design arrives standalone — to the next cycle. That is the
+    # intended trade: a queue that drains is worth more here than one
+    # that arrives complete, because each extra open PR costs a rebase
+    # on every merge. Raising this also means editing the assertion in
+    # backend/tests/test_dependabot_config.py, which is the friction
+    # that makes it a decision rather than a drift.
     open-pull-requests-limit: 3
     rebase-strategy: "auto"
     # Same prefixes as the backend block. This is not cosmetics: the
