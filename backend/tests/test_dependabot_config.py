@@ -42,8 +42,8 @@ above is exactly the kind this guard has already been wrong about once.
 
 from __future__ import annotations
 
-import fnmatch
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -318,30 +318,46 @@ def _direct_dependencies() -> dict[str, str]:
 
 
 def _matches(pattern: str, package: str) -> bool:
-    """Dependabot's group matcher, modelled as faithfully as possible.
+    """Dependabot's group matcher, ported line for line.
 
-    Dependabot matches a `patterns:` entry with Ruby's ``File.fnmatch`` using
-    ``FNM_CASEFOLD`` and WITHOUT ``FNM_PATHNAME``: case-insensitive, and ``*``
-    crosses ``/``. ``fnmatchcase`` on two lower-cased strings is the Python
-    equivalent, and is deterministic -- plain ``fnmatch.fnmatch`` folds case per
-    OS, so it would compare differently on macOS and on the CI runner.
+    Dependabot does NOT use ``File.fnmatch`` for group patterns. It uses its own
+    ``WildcardMatcher``, dependabot-core ``common/lib/wildcard_matcher.rb``,
+    called from ``common/lib/dependabot/dependency_group.rb``
+    (``patterns.any? { |rule| WildcardMatcher.match?(rule, dependency_name) }``)::
 
-    The first version was a hand-rolled exact-or-trailing-``*`` matcher,
-    case-SENSITIVE, argued as "narrower, so it fails safe". Review measured that
-    it does not, in one direction. Narrower is safe for the two
-    must-match-something assertions -- a pattern the model misses matches
-    nothing and reddens. It is UNSAFE for the must-not-match-twice one, where
-    narrower means MISSING a real overlap. Reproduced with a real mixed-case npm
-    package: pattern ``js*`` plus a package ``JSONStream``, and a later group
-    naming ``JSONStream`` directly. The narrow model saw one owner and passed;
-    Dependabot, folding case, sees two and silently assigns by YAML order --
-    verbatim the outcome the overlap test's message says it prevents.
+        regex_string = "a#{wildcard_string.downcase}a".split("*")
+                                                      .map { |p| Regexp.quote(p) }
+                                                      .join(".*").gsub(/^a|a$/, "")
+        regex = /^#{regex_string}$/
+        regex.match?(candidate_string.downcase)
 
-    Latent, since frontend/package.json has no mixed-case name today. Fixed by
-    modelling rather than by pinning, because "narrower" was the wrong safety
-    argument, not a wrong constant.
+    Both sides are downcased, and ``*`` becomes ``.*`` so it crosses ``/``. The
+    padding with ``a`` exists so a leading or trailing ``*`` does not produce an
+    empty split part, and is then stripped back off. ``Regexp.quote`` makes
+    every other character LITERAL -- so ``?`` and ``[...]``, which fnmatch
+    treats as metacharacters, match themselves here.
+
+    This function has now been wrong twice, in the same place, and the second
+    time is why it is a port rather than a description. First it was a
+    hand-rolled exact-or-trailing-``*`` matcher, case-SENSITIVE, argued as
+    "narrower, so it fails safe": measured NOT safe for the overlap census,
+    where narrower means MISSING a real overlap, so a package matched by two
+    groups is reported as matched by one and Dependabot assigns it by YAML
+    order. Then it was ``fnmatch`` on lower-cased strings, with a comment citing
+    ``File.fnmatch`` with ``FNM_CASEFOLD`` -- right about the case folding, and
+    a wrong citation: measured to disagree on ``("react?", "react-")``,
+    ``("[r]eact", "react")`` and ``("[r]eact", "[r]eact")``.
+
+    Both errors were latent -- zero disagreement across every pattern in
+    dependabot.yml against every package in frontend/package.json, on both
+    versions. They are fixed anyway, because "no impact today" is a statement
+    about today's manifest, and this file exists precisely because nobody was
+    watching that manifest.
     """
-    return fnmatch.fnmatchcase(package.lower(), pattern.lower())
+    padded = f"a{pattern.lower()}a"
+    body = ".*".join(re.escape(part) for part in padded.split("*"))
+    body = re.sub(r"^a|a$", "", body)
+    return re.fullmatch(body, package.lower()) is not None
 
 
 def _npm_groups() -> dict[str, dict[str, Any]]:
@@ -493,6 +509,36 @@ def test_no_entry_carries_an_unrecognised_key(ecosystem: str, directory: str) ->
         "is IGNORED by GitHub, not rejected loudly -- or it is a real option "
         "this file has not seen before, in which case add it to "
         "_KNOWN_ENTRY_KEYS having checked it in GitHub's options reference."
+    )
+
+
+@pytest.mark.parametrize(("ecosystem", "directory"), _EXPECTED_ECOSYSTEMS)
+def test_no_group_carries_a_key_that_silently_empties_it(ecosystem: str, directory: str) -> None:
+    """The group-level ban, applied to EVERY entry rather than only npm.
+
+    It first lived inside the npm-only group test, which left the docker
+    `docker-base-images` group open: `exclude-patterns: ["*"]` on it was
+    measured leaving the whole module green while the group matched nothing.
+    That group is the one keeping the uv builder and the slim runtime in ONE PR
+    -- split apart they can land at different interpreter majors and ship a
+    non-booting image (#34) -- and test_node_version_pin.py's prose depends on
+    it. The ban is per-entry now, so the pin below and this check cover both
+    halves: the group still exists, and it still has its reach.
+
+    Which change turns this RED: adding `exclude-patterns` or a group
+    `dependency-type` to any group of any entry.
+    """
+    groups = _entry(ecosystem, directory).get("groups") or {}
+    offenders = {
+        name: sorted(key for key in _SILENT_DISABLE_GROUP_KEYS if key in group)
+        for name, group in groups.items()
+        if any(key in group for key in _SILENT_DISABLE_GROUP_KEYS)
+    }
+    assert not offenders, (
+        f"the {ecosystem} entry on {directory} has groups carrying keys that "
+        f"subtract from `patterns` AFTER the matching this file checks: "
+        f"{offenders}. A group can then be empty in practice with every "
+        "assertion here green."
     )
 
 
@@ -762,24 +808,16 @@ def test_each_npm_group_batches_only_minor_and_patch_version_updates(group_name:
     version-updates` keeps a security fix from being held behind a routine bump.
 
     Which change turns this RED: deleting `update-types` or `applies-to` from
-    any npm group, adding "major" to an `update-types` list, or adding an
-    `exclude-patterns` / `dependency-type` that quietly empties the group.
+    any npm group, or adding "major" to an `update-types` list. The
+    group-emptying keys (`exclude-patterns`, a group `dependency-type`) used to
+    be checked here too; they moved to
+    test_no_group_carries_a_key_that_silently_empties_it, which covers every
+    entry rather than only npm.
     """
     group = _npm_groups()[group_name]
     assert group.get("applies-to") == "version-updates", (
         f"npm group {group_name!r} must set `applies-to: version-updates` so "
         "security updates stay ungrouped and ship on their own."
-    )
-    # The group-level silent-disable family. Both leave `patterns` in place, so
-    # every pattern-to-package assertion below still passes while Dependabot
-    # groups nothing -- measured green against the first draft of this module.
-    narrowing = sorted(key for key in _SILENT_DISABLE_GROUP_KEYS if key in group)
-    assert not narrowing, (
-        f"npm group {group_name!r} carries {narrowing}. `exclude-patterns` and a "
-        "group `dependency-type` subtract from `patterns` AFTER the matching "
-        "this file checks, so the group can be empty in practice with every "
-        "assertion here green. `exclude-patterns: ['@types/node']` would remove "
-        "the one package #413 exists for."
     )
     assert sorted(group.get("update-types") or []) == ["minor", "patch"], (
         f"npm group {group_name!r} has update-types "
@@ -906,14 +944,13 @@ _MATCHER_CASES: tuple[tuple[str, str, bool], ...] = (
     ("react", "react", True),
     ("react", "react-dom", False),
     ("react", "preact", False),
-    # A trailing `*` is a prefix match, and `/` is not a boundary for it --
-    # Dependabot's matcher is Ruby's File.fnmatch WITHOUT FNM_PATHNAME.
+    # A trailing `*` becomes `.*`, so `/` is not a boundary for it.
     ("@types/*", "@types/node", True),
     ("@types/*", "@types/react-dom", True),
     ("@types/*", "@typescript-eslint/parser", False),
     ("@testing-library/*", "@testing-library/jest-dom", True),
     ("@testing-library/*", "@playwright/test", False),
-    # Case-INSENSITIVE, because Dependabot passes FNM_CASEFOLD. These three
+    # Case-INSENSITIVE, because WildcardMatcher downcases both sides. These three
     # rows are the ones that matter: with a case-sensitive model the last of
     # them reports ONE owner where Dependabot sees two, and the group a package
     # lands in is then decided by YAML order rather than by anything written
@@ -925,12 +962,22 @@ _MATCHER_CASES: tuple[tuple[str, str, bool], ...] = (
     # base image.
     ("*", "react", True),
     ("*", "@types/node", True),
+    # `?` and `[...]` are LITERAL. `Regexp.quote` escapes everything that is not
+    # a `*`, so WildcardMatcher has exactly one metacharacter. An fnmatch-based
+    # model disagrees on all four of these rows, which is how the wrong citation
+    # in the previous version was found. npm names cannot contain `?` or `[`, so
+    # no real manifest reaches these -- they pin the matcher's contract, not a
+    # package.
+    ("react?", "react-", False),
+    ("react?", "react?", True),
+    ("[r]eact", "react", False),
+    ("[r]eact", "[r]eact", True),
 )
 
 # Pinned by count as well as content. Every row above is a separate parametrised
 # test, so deleting one removes a test rather than failing one -- pytest reports
 # a smaller run, not a red one, and this repo has shipped that shape before.
-_MATCHER_CASE_COUNT = 13
+_MATCHER_CASE_COUNT = 17
 
 
 @pytest.mark.parametrize(("pattern", "package", "expected"), _MATCHER_CASES)
