@@ -127,15 +127,24 @@ jobs:
       # to mean "the visual specs run in no CI job at all, and this line says so
       # out loud instead of letting a green demo job imply otherwise" -- they had
       # only `-darwin` baselines, so on ubuntu every screenshot would have failed
-      # as "snapshot missing". They have `-linux` baselines now, and they run in
-      # the `visual-e2e` job below. So this line no longer asserts that they run
-      # nowhere; it asserts they do not run HERE, in the REQUIRED job, where a
-      # font-rendering shift would block every merge. Its partner is the
-      # `visual_total == all_visual` line in `visual-e2e`'s own selection guard:
-      # this one says the required job is the default suite MINUS the visual
-      # tests, that one says the advisory job is EXACTLY the visual tests, and
-      # between them every test in `playwright.config.ts` runs in exactly one job.
-      # Deleting either half leaves a hole neither guard can see.
+      # as "snapshot missing". The `visual-e2e` job below is where they run now,
+      # so this line no longer asserts that they run nowhere; it asserts they do
+      # not run HERE, in the REQUIRED job, where a font-rendering shift would
+      # block every merge. Its partner is the `visual_total == all_visual` line
+      # in `visual-e2e`'s own selection guard: this one says the required job is
+      # the default suite MINUS the visual tests, that one says the advisory job
+      # is EXACTLY the visual tests, and between them every test in
+      # `playwright.config.ts` runs in exactly one job. Deleting either half
+      # leaves a hole neither guard can see.
+      #
+      # ┌─ NOT TRUE YET, and this note comes out with the commit that makes it
+      # │  true. `tests/visual.spec.ts-snapshots/` still holds only `-darwin`
+      # │  files, so `visual-e2e` fails every run with "snapshot missing" and
+      # │  "they run over there instead" is a DESIGN, not a fact. The `-linux`
+      # │  baselines are generated and held for the owner to look at before they
+      # │  are committed. Until that lands, #325 is only half fixed, and the half
+      # │  that is fixed is the wiring.
+      # └─
       #
       # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
       # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
@@ -328,8 +337,16 @@ jobs:
   # nothing kept honest — so `demo-e2e` above had to exclude them or every
   # screenshot on `ubuntu-latest` would have failed as "snapshot missing".
   #
-  # This job is the other half of the fix: `*-chromium-linux.png` baselines,
-  # generated in the SAME container image that runs here, compared on every PR.
+  # This job is the other half of the fix: it compares against
+  # `*-chromium-linux.png` baselines generated in the SAME container image that
+  # runs here, on every pull request.
+  #
+  # ┌─ AS OF THIS COMMIT THOSE BASELINES ARE NOT COMMITTED. They are generated
+  # │  and held for the owner to review the images first, so every run of this
+  # │  job fails with "snapshot missing" until they land. That is loud rather
+  # │  than harmful — the job is advisory — but it is the reason the branch is
+  # │  not finished. Delete this note in the commit that adds the PNGs.
+  # └─
   #
   # ADVISORY, DELIBERATELY. It is not a required status check on `main`, so it
   # can go red and a PR still merges. That is the right setting for a suite whose
@@ -362,6 +379,14 @@ jobs:
       # frontend/package-lock.json resolves. Pinned by
       # backend/tests/test_gating_workflows.py.
       image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # Same flag the regeneration command in `playwright.visual-ci.config.ts`
+      # uses, so the container that DRAWS a baseline and the container that
+      # COMPARES it are configured identically. It is Playwright's documented
+      # recommendation for Chromium (the default 64 MB /dev/shm can crash a tab);
+      # the driver already passes `--disable-dev-shm-usage`, so this is belt and
+      # braces — but two environments that differ at all is the thing a pixel
+      # suite cannot afford to argue about later.
+      options: --ipc=host
     # The suite measured 1.1 minutes of run time plus install; 20 matches the
     # demo job rather than inventing a second number, and caps a dev server that
     # accepts the port but never serves — which the webServer's own 120 s wait
@@ -393,10 +418,25 @@ jobs:
       # this step is where "the image no longer lays the browsers out where this
       # job expects" surfaces — loudly, before anything compares a pixel —
       # rather than as a puzzling Playwright error two steps later.
-      - name: Show the browser this job will compare with
+      #
+      # BOTH binaries, and the SHELL is the one that matters. An earlier version
+      # of this step printed only `chromium-*/chrome-linux*/chrome` under a name
+      # claiming it was "the browser this job will compare with". It is not:
+      # Playwright ≥1.49 launches the headless shell for a headless run
+      # (`playwright-core/lib/coreBundle.js`:
+      # `options.headless ? "chromium-headless-shell" : "chromium"`), and nothing
+      # in this repo's configs sets `headless: false`. So the pixels come from
+      # `chromium_headless_shell-*`. The two ship at the same version today
+      # (both `153.0.8010.12` at revision 1243, read out of the image), which is
+      # exactly why printing the wrong one looked right.
+      - name: Show the browsers this job could launch
         run: |
           set -euo pipefail
           npx playwright --version
+          # THIS is the renderer: headless is the default and nothing overrides it.
+          "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell --version
+          # Printed too, so a divergence between the two is visible rather than
+          # assumed away — a headful run would use this one.
           "$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux*/chrome --version
       # The SELECTION half of the partition this job and `demo-e2e` form.
       # `demo-e2e` asserts it selects the default suite MINUS its visual tests;

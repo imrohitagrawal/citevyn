@@ -325,12 +325,30 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
 
 Baselines are per platform. `*-chromium-darwin.png` is what a developer's local
 `npm run test:visual` compares against; `*-chromium-linux.png` is what this job
-compares against. They are not expected to be the same images — measured across
-the 22, macOS and Linux renders of the same unchanged page differ by 1.0% to 2.7%
-of their pixels, with `personas` also one pixel shorter on Linux. To regenerate
-the Linux set, see the header of `frontend/playwright.visual-ci.config.ts`; it
-must be done under `--platform linux/amd64`, because arm64 and amd64 renders
-differ for 12 of the 22.
+compares against. They are not expected to be the same images. Measured across
+the 22 with Playwright's own comparator, macOS and Linux renders of the same
+unchanged page differ by **0% to 2.68%** of the section's pixels:
+
+- `ticker-dark` and `ticker-light` are **pixel-identical** — the animated track
+  is masked, so what is left is flat surface. They are the control: a comparison
+  that reported a constant could not produce a zero here.
+- Seven are **over** the suite's own `maxDiffPixelRatio: 0.02` — `personas` ×2
+  (2.68%), `how-it-works` ×2, `comparison` ×2, `pricing-light`. That is not a
+  failure and does not make the Linux set unusable: the 2% budget is only ever
+  applied *within* a platform, and each platform compares against its own file.
+  Measured in the container, the Linux set passes 22/22 against itself.
+- `personas` is also **one pixel shorter** on Linux (1160×665 → 1160×664), which
+  is a layout difference rather than rasterisation and the one worth a look.
+
+The figure is a measure of how far apart CoreText and FreeType/Skia are on
+text-dense sections, nothing more.
+
+To regenerate the Linux set, see the header of
+`frontend/playwright.visual-ci.config.ts`; it must be done under
+`--platform linux/amd64`, because arm64 and amd64 renders differ for 12 of the
+22. As of the commit that added the job, the `-linux` baselines are generated but
+**not yet committed** — they are held for the owner to review the images — so the
+job fails every run with "snapshot missing" until they land.
 
 ### 12.3 Measured case for promoting the live check
 

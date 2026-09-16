@@ -21,12 +21,17 @@
  * `tests/visual.spec.ts-snapshots/` held only `*-chromium-darwin.png` — on
  * `ubuntu-latest` every screenshot would have failed as "snapshot missing".
  *
- * It is not true any more. The `*-chromium-linux.png` baselines exist and the
- * `visual-e2e` job in `.github/workflows/frontend.yml` compares against them on
- * every pull request. So the exclusion below no longer means "these tests run
- * nowhere". It means "these tests do not run in the REQUIRED job" — a different
- * and deliberate claim: `visual-e2e` is advisory, so a font-rendering shift
- * prompts someone to look at a diff image instead of blocking every merge.
+ * That reasoning no longer holds. The `visual-e2e` job in
+ * `.github/workflows/frontend.yml` runs these specs against `*-chromium-linux.png`
+ * baselines on every pull request, so the exclusion below no longer means "these
+ * tests run nowhere". It means "these tests do not run in the REQUIRED job" — a
+ * different and deliberate claim: `visual-e2e` is advisory, so a font-rendering
+ * shift prompts someone to look at a diff image instead of blocking every merge.
+ *
+ * ONE HALF IS STILL OUTSTANDING as of the commit that wrote this. The `-linux`
+ * baselines are generated but held for the owner to review the images before
+ * they are committed, so `visual-e2e` currently fails every run with "snapshot
+ * missing". The wiring is done; the pixels are not in the repo yet.
  *
  * The two configs are an exact partition of what `playwright.config.ts` selects.
  * Measured 2026-09-16 with `--list`: 230 here + 22 there = 252. Both halves are

@@ -235,6 +235,28 @@ _LIVE_SUITE_MEMBERSHIP: frozenset[tuple[str, str]] = frozenset(
 
 # What these guards CANNOT see. Named so the coverage claim stays honest.
 _UNGUARDABLE: tuple[str, ...] = (
+    "That HALF the partition assertion now lives in an ADVISORY job. The "
+    "REQUIRED demo job proves `ci_total == all_total - all_visual` and "
+    "`all_visual > 0`; only `visual-e2e` proves `visual_total == all_visual` and "
+    "`selected_visual == visual_total`. So if `playwright.visual-ci.config.ts` "
+    "breaks, the pull request still merges — the tests below EXECUTE both guard "
+    "bodies, but against synthetic listings, so nothing required ever runs them "
+    "on the real numbers. That is the price of the job being advisory, recorded "
+    "rather than argued away (#325).",
+    "Whether `visual-e2e` is still OUTSIDE branch protection. Everything here "
+    "treats it as advisory — the defusing rule, docs/TEST_STRATEGY.md §12.2, "
+    "and the deliberate absence of a `contexts[]=` command for it. If the owner "
+    "promoted it, nothing in this file would notice, and the next font-rendering "
+    "shift would block every merge with no warning. Same root cause as the "
+    "branch-protection entry below: a test cannot read that API (#325).",
+    "Whether the committed `*-chromium-linux.png` baselines were drawn by the "
+    "browser the container tag names, or on the right CPU architecture. "
+    "`test_the_visual_job_runs_the_browser_that_drew_its_baselines` pins the TAG "
+    "against the lockfile; it cannot open a PNG and ask what rendered it. "
+    "Measured while generating them: arm64 and amd64 renders differ for 12 of "
+    "the 22, so a regeneration on an Apple-silicon machine without "
+    "`--platform linux/amd64` would commit 12 wrong images and pass every rule "
+    "here. What catches it is the advisory job itself going red (#325).",
     "Branch protection itself. This file cannot read it (that needs a token and "
     "a network call from a test), so it cannot detect a context being REMOVED "
     "from the required list, nor confirm one was added. The measured snapshot in "
@@ -246,8 +268,12 @@ _UNGUARDABLE: tuple[str, ...] = (
     "title.",
     "A test whose title is built from a variable or a template literal with a "
     "substitution. The scan reads string literals; `test(`... ${x}`)` is skipped. "
-    "`visual.spec.ts` is the live example: one templated declaration that "
-    "Playwright expands to 22 selected tests.",
+    "`visual.spec.ts` is the live example. CORRECTED 2026-09-16: this entry said "
+    '"one templated declaration that Playwright expands to 22 selected tests". '
+    "The file declares TWO — the templated ``test(`${section.name}`)`` at :38, "
+    "which expands to 20 (10 sections x 2 themes), and a LITERAL "
+    '``test("chat-empty")`` at :51, which the scan reads perfectly well and '
+    "expands to 2. The blind spot is 20 of the 22, not all of them.",
     "JavaScript this file's comment stripper does not lex. `_strip_comments` "
     "understands string literals and comments, not regex literals or `${…}` "
     "substitutions. TWO CORRECTIONS, both re-derived 2026-09-09. (1) An earlier "
@@ -656,9 +682,10 @@ def test_a_gating_job_does_not_matrix_its_status_check_context(workflow: str, jo
     required context": ``ci.yml:shell-tests`` is matrixed ON PURPOSE — bash 3.2
     vs 5.x is the defect class it exists to catch — and its two expansions are
     the strings branch protection already holds, so the broader rule would go
-    red on the real repo on day one. None of the four gating jobs is matrixed
-    today; a future one that genuinely needs a matrix has to record its expanded
-    names in ``_REQUIRED_CONTEXT_WORKFLOWS`` and be argued for here.
+    red on the real repo on day one. None of the five gating jobs is matrixed
+    today (four until #325 added ``frontend.yml:visual-e2e``); a future one that
+    genuinely needs a matrix has to record its expanded names in
+    ``_REQUIRED_CONTEXT_WORKFLOWS`` and be argued for here.
 
     Turns red if: any job in ``GATING_JOBS`` gains a ``strategy:`` key.
     """
@@ -1262,9 +1289,13 @@ def test_the_test_title_scan_finds_the_whole_suite() -> None:
     (or the comment stripper) rotting under a syntax change.
 
     The number counts DECLARATIONS, not the selection. Measured 2026-09-08:
-    159 ``test("…")`` declarations in 9 spec files, which Playwright expands to
-    202 selected tests (`visual.spec.ts` builds its 22 from one templated
-    declaration, which this scan deliberately does not read). The earlier
+    159 ``test("…")`` declarations in 9 spec files, which Playwright expanded to
+    202 selected tests; re-measured 2026-09-16 the default config selects **252**
+    (`visual.spec.ts` builds 20 of its 22 from one templated declaration, which
+    this scan deliberately does not read). Both readings are of the SELECTION,
+    which this floor is not about — it counts DECLARATIONS — but leaving 202
+    standing beside the 252 that #325 asserts in two other files would be one
+    number with two values. The earlier
     ``>= 150`` floor sat nine below the real number while its message quoted the
     ~200 SELECTION count — two different things, and nine tests of headroom is a
     rot trap for ordinary test deletion. The floor below is ~25% under the
@@ -1780,6 +1811,20 @@ def _visual_job() -> dict[str, Any]:
     return jobs["visual-e2e"]
 
 
+#: The lockfile entries that decide which browser this job runs. ``npx playwright``
+#: resolves through ``@playwright/test`` -> ``playwright`` -> ``playwright-core``,
+#: and it is ``playwright-core`` that owns ``browsers.json`` — the revision-to-
+#: version table the container image is built from. npm pins transitives exactly,
+#: so all three move together in practice; asserting it is what makes "the image
+#: tag equals the installed Playwright" a statement about the BROWSER rather than
+#: about a package that merely re-exports one.
+_PLAYWRIGHT_LOCK_ENTRIES: tuple[str, ...] = (
+    "node_modules/@playwright/test",
+    "node_modules/playwright",
+    "node_modules/playwright-core",
+)
+
+
 def _installed_playwright_version() -> str:
     """The ``@playwright/test`` version ``npm ci`` actually installs.
 
@@ -1790,26 +1835,43 @@ def _installed_playwright_version() -> str:
     guard reading the manifest would compare the container tag against a floor
     nobody bumped while the browser underneath had already changed.
     """
-    data = json.loads(FRONTEND_PACKAGE_LOCK.read_text(encoding="utf-8"))
-    entry = (data.get("packages") or {}).get("node_modules/@playwright/test") or {}
-    version = entry.get("version")
-    assert isinstance(version, str) and version, (
-        "frontend/package-lock.json has no resolved version for "
-        "node_modules/@playwright/test, so the pin below would compare the "
-        "container image against nothing"
+    packages = json.loads(FRONTEND_PACKAGE_LOCK.read_text(encoding="utf-8")).get("packages") or {}
+    resolved: dict[str, Any] = {}
+    for name in _PLAYWRIGHT_LOCK_ENTRIES:
+        version = (packages.get(name) or {}).get("version")
+        assert isinstance(version, str) and version, (
+            f"frontend/package-lock.json has no resolved version for {name}, so "
+            "the pin below would compare the container image against nothing"
+        )
+        resolved[name] = version
+    # `playwright-core` is the one that actually ships `browsers.json`. If the
+    # three ever disagreed, `@playwright/test`'s number would name a package that
+    # merely re-exports a browser chosen by a different version.
+    assert len(set(resolved.values())) == 1, (
+        "the three Playwright packages in frontend/package-lock.json resolve to "
+        f"different versions: {resolved}. `playwright-core` owns browsers.json, "
+        "so the container tag has to follow THAT one — decide which is right and "
+        "regenerate the baselines in the matching image."
     )
-    return version
+    return resolved["node_modules/playwright-core"]
 
 
 def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     """A screenshot suite whose browser floats is a scheduled false red.
 
     ``tests/visual.spec.ts-snapshots/*-chromium-linux.png`` are pixels drawn by
-    one exact Chromium. Playwright pins that Chromium per release — 1.63.0 ships
-    revision 1243, ``Google Chrome for Testing 153.0.8010.12`` (read out of the
-    image itself while generating the baselines) — so the container tag and the
-    installed ``@playwright/test`` are two records of the same decision, in two
-    files, with nothing else comparing them.
+    one exact browser. Playwright pins it per release — 1.63.0 ships revision
+    1243, ``Google Chrome for Testing 153.0.8010.12``, read out of the image
+    itself while generating the baselines (from ``chromium_headless_shell-1243``,
+    which is what a headless run launches; the headful ``chromium-1243`` reports
+    the same version) — so the container tag and the installed Playwright are two
+    records of the same decision, in two files, with nothing else comparing them.
+
+    NOTE, true as of the commit that added this rule: no ``-chromium-linux.png``
+    is committed yet. They are generated and held for the owner to review the
+    images. This rule does not depend on them existing — it compares a tag
+    against a lockfile — but the sentence above describes what the pin is FOR,
+    not what the tree currently holds.
 
     Dependabot bumps ``@playwright/test`` on its own schedule and has no idea
     this tag exists. Left unpinned, the next minor bump silently swaps the
@@ -1847,6 +1909,51 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     )
 
 
+def test_the_regeneration_command_and_the_ci_container_agree() -> None:
+    """A baseline drawn in one container and compared in another is two environments.
+
+    ``playwright.visual-ci.config.ts`` documents the ``docker run`` that produces
+    the ``*-chromium-linux.png`` files; ``frontend.yml``'s ``visual-e2e`` declares
+    the container that compares them. They are the same decision written twice,
+    and nothing else compares the two — which is how the job shipped for one
+    review round with ``--ipc=host`` in the documented command and not in the
+    job (found by review, 2026-09-16; the mutant that removed it from the YAML
+    survived the whole suite).
+
+    ``--ipc=host`` is the one runtime flag that matters here: Playwright
+    documents it for Chromium because the default 64 MB ``/dev/shm`` can kill a
+    tab mid-screenshot. It is not believed to move a pixel — the driver already
+    passes ``--disable-dev-shm-usage`` — which is precisely why a divergence
+    would never announce itself, and why it is asserted rather than trusted.
+
+    Turns red if: ``options: --ipc=host`` leaves the job, or the documented
+    regeneration command stops passing it. Both directions, deliberately: a
+    regeneration run that differs from CI is the same defect as a CI run that
+    differs from regeneration.
+    """
+    source = VISUAL_PW_CONFIG.read_text(encoding="utf-8")
+    # PARTNER. Every assertion below is "this substring is present"; without a
+    # command to find them in, a docblock someone deleted would satisfy none of
+    # them and the test would fail for the right reason only by accident.
+    assert "docker run" in source and "--platform linux/amd64" in source, (
+        f"{VISUAL_PW_CONFIG.name} no longer documents a `docker run --platform "
+        "linux/amd64 ...` regeneration command. That command is the only record "
+        "of how the committed -linux baselines are produced, and the comparison "
+        "below would be over nothing."
+    )
+    container = _visual_job().get("container")
+    options = str((container or {}).get("options") or "") if isinstance(container, dict) else ""
+    in_command = "--ipc=host" in source
+    in_job = "--ipc=host" in options
+    assert in_command == in_job, (
+        f"`--ipc=host` is in the documented regeneration command: {in_command}; "
+        f"in {DEMO_WORKFLOW.name}:visual-e2e's `container.options` ({options!r}): "
+        f"{in_job}. The container that DRAWS a baseline and the container that "
+        "COMPARES it must be configured the same way, or a difference between "
+        "them is indistinguishable from a design change."
+    )
+
+
 def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
     """Partner to the pin above: the tag is only a pin if nothing overrides it.
 
@@ -1859,11 +1966,28 @@ def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
 
     Turns red if: a ``playwright install`` step is added to ``visual-e2e``.
     """
-    offenders = [
-        str(step.get("name") or step.get("run") or "")
-        for step in _steps(_visual_job())
-        if "playwright install" in str(step.get("run") or "")
-    ]
+
+    def install_steps(job: dict[str, Any]) -> list[str]:
+        return [
+            str(step.get("name") or step.get("run") or "")
+            for step in _steps(job)
+            if "playwright install" in str(step.get("run") or "")
+        ]
+
+    # THE PARTNER. `assert not offenders` is satisfied by a job with no steps at
+    # all, and by a detector that has stopped matching anything. `demo-e2e`
+    # legitimately runs `npx playwright install --with-deps chromium` — it has no
+    # container — so it is the positive control: if this scan cannot see it
+    # there, it cannot see it here either and the rule below is decorative.
+    demo_installs = install_steps(
+        (_load_workflow(DEMO_WORKFLOW.name).get("jobs") or {})["demo-e2e"]
+    )
+    assert len(demo_installs) == 1, (
+        f"the `playwright install` scan found {len(demo_installs)} such steps in "
+        "frontend.yml:demo-e2e, which runs exactly one. The detector has stopped "
+        "matching, so the rule below would pass over nothing."
+    )
+    offenders = install_steps(_visual_job())
     assert not offenders, (
         f"{DEMO_WORKFLOW.name}:visual-e2e runs `playwright install` ({offenders}). "
         "The container image already carries the browsers, and a second download "
@@ -2023,7 +2147,14 @@ def test_the_visual_selection_guard_accepts_a_healthy_listing(
     ("label", "visual_listing", "all_listing"),
     [
         # Nothing selected at all, while the default config still has visual
-        # tests. Caught by the `visual_total -eq all_visual` differential.
+        # tests. CORRECTION, reproduced in review 2026-09-16: an earlier version
+        # of this comment credited the `visual_total -eq all_visual`
+        # differential. It does not get there — `visual_total -gt 0` is the
+        # FIRST assertion and this case dies on it, emitting "selects 0 tests —
+        # this whole job is vacuous". That is not a duplicate of the case below:
+        # with `-gt 0` deleted this one still reddens on `0 -eq 2`, which is
+        # exactly why it did NOT expose the `-gt 0` gap and why
+        # `visual-spec-deleted` had to be added.
         (
             "a config that selects nothing",
             _listing([], 0, files=0),

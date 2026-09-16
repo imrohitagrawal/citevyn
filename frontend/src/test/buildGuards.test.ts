@@ -416,27 +416,41 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
    * same defect class as #366 one project over, and nothing here covered it.
    *
    * Guarded by SHAPE, not by a list of names: whatever `playwright*.config.ts`
-   * files exist in the root must all be in the program. Adding a name to this
-   * test as well as to the tsconfig would just be two places to forget.
+   * files sit directly in the root must all be in the program. Adding a name
+   * here as well as to the tsconfig would just be two places to forget.
+   *
+   * WHAT IT CANNOT SEE, stated rather than implied. The scan is one
+   * `readdirSync` of the frontend root against `/^playwright.*\.config\.ts$/`,
+   * so it misses a config in a SUBDIRECTORY, one written `.mts`/`.cts`/`.js`,
+   * and any config whose name does not start `playwright` (`e2e.config.ts`,
+   * `visual.config.ts`). Each of those would drop out of the type-check exactly
+   * as silently. The name is the only signal available without resolving what
+   * Playwright would load, which needs Playwright.
    *
    * Turns red if: a `playwright*.config.ts` is added to `frontend/` without
    * being added to `tsconfig.node.json`'s `include`. Measured 2026-09-16 by
-   * removing `playwright.visual-ci.config.ts` from that list.
+   * removing `playwright.visual-ci.config.ts` from that list — and separately,
+   * that the `include` entry is what does the work: with it present, planting
+   * `timeout: "not a number"` in that config made `npm run type-check` exit 2.
    */
-  it("every Playwright config in the frontend root is inside the program", () => {
+  it("every playwright*.config.ts in the frontend root is inside the program", () => {
     const onDisk = readdirSync(frontendRoot)
       .filter((f) => /^playwright.*\.config\.ts$/.test(f))
       .sort();
     // PARTNER for the "nothing is missing" assertion below: an empty directory
-    // listing, or a regex that stopped matching, satisfies it for free.
+    // listing, or a regex that stopped matching, satisfies it for free. Named,
+    // not counted — `playwright.config.ts` is the one config that cannot go away
+    // without the whole e2e suite going with it.
     expect(
       onDisk,
       "no playwright*.config.ts found in the frontend root — this guard is " +
         "checking an empty set",
     ).toContain("playwright.config.ts");
-    expect(onDisk.length).toBeGreaterThanOrEqual(2);
-    const inProgram = new Set(parsed.fileNames.map((f) => basename(f)));
-    const missing = onDisk.filter((f) => !inProgram.has(f));
+    // FULL PATHS, not basenames. `parsed.fileNames` is absolute; comparing
+    // `basename` would let an included `subdir/playwright.demo-ci.config.ts`
+    // satisfy the root file of the same name.
+    const inProgram = new Set(parsed.fileNames.map((f) => resolvePath(f)));
+    const missing = onDisk.filter((f) => !inProgram.has(join(frontendRoot, f)));
     expect(
       missing,
       "these Playwright configs are in frontend/ but not in " +

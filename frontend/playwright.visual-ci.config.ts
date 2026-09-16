@@ -23,9 +23,17 @@
  * ----------------------------------------------------------------------------
  * Playwright names a snapshot `<name>-<project>-<platform>.png`, so the darwin
  * baselines a developer regenerates locally are a different file set from the
- * linux ones CI compares against. Both are committed. They are NOT expected to
- * be identical images: macOS rasterises text through CoreText and Linux through
- * FreeType/Skia, so the same page differs by a few percent of its pixels.
+ * linux ones CI compares against. Both belong in the repo. They are NOT expected
+ * to be identical images: macOS rasterises text through CoreText and Linux
+ * through FreeType/Skia, and measured across the 22 the two renders of the same
+ * unchanged page differ by 0% to 2.68% of the section's pixels — `ticker` is
+ * pixel-identical in both themes (it is masked), and seven are over the suite's
+ * own 2% budget. That budget is never applied ACROSS platforms, so none of that
+ * is a failure: each platform compares against its own file.
+ *
+ * AS OF THE COMMIT THAT ADDED THIS FILE the `-linux` set is generated but NOT
+ * committed — it is held for the owner to look at the images first — so the
+ * `visual-e2e` job fails every run with "snapshot missing" until it lands.
  *
  * The linux set is only reproducible if the browser is pinned, which is what
  * the job's `container:` buys. Measured while generating the first set (#325):
@@ -36,8 +44,16 @@
  *     also produced byte-identical PNGs — Node is not an input to the render;
  *   - arm64 vs amd64 produced DIFFERENT pixels for 12 of the 22. The CPU
  *     architecture IS an input. GitHub's `ubuntu-latest` is x86_64, so the
- *     committed `-linux` baselines are amd64 baselines. Regenerating them on an
+ *     `-linux` baselines are amd64 baselines. Regenerating them on an
  *     Apple-silicon machine needs `docker run --platform linux/amd64`.
+ *
+ * WHICH BINARY ACTUALLY DRAWS THEM: `chromium_headless_shell`, not `chromium`.
+ * Playwright launches the headless shell whenever `headless` is true, and
+ * nothing in this repo sets it false (`playwright-core/lib/coreBundle.js`:
+ * `options.headless ? "chromium-headless-shell" : "chromium"`). The two ship at
+ * the same version — both `153.0.8010.12` at revision 1243 in this image — which
+ * is why an earlier version of the CI job printed the wrong one and looked
+ * right. It prints both now.
  *
  * REGENERATE THE LINUX BASELINES (from the repo root):
  *
