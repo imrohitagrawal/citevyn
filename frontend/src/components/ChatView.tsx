@@ -703,8 +703,11 @@ export function ChatView({
         </div>
         {/* #445. The chat composer's half of the empty-submit nudge, in the
             same place relative to its box as `.hero-nudge` is to the hero's,
-            and sharing ONE stylesheet rule with it so the two cannot be
-            restyled apart. */}
+            and sharing ONE stylesheet rule with it — `composerEmptyParity`
+            fails if they stop sharing it. NOT "cannot be restyled apart": a
+            later or more specific rule still overrides one of them, and nothing
+            compares the two computed colours. The guard holds the shared block,
+            not the rendered result. */}
         {chatNudge && (
           <p className="composer-nudge" aria-hidden="true">
             {EMPTY_SUBMIT_NUDGE_GLYPH} {EMPTY_SUBMIT_NUDGE}

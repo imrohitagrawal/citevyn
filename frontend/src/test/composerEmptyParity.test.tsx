@@ -52,6 +52,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { LandingPage } from "../components/LandingPage";
 import { isLiveMode, createSession, askQuestion } from "../lib/api";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import postcss, { Rule } from "postcss";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_GLYPH,
@@ -69,8 +73,14 @@ vi.mock("../lib/api", () => ({
   onUnauthorized: vi.fn(() => () => {}),
 }));
 
+// jsdom implements no `scrollIntoView`, and the duplicate-question flash calls
+// it. Stubbed the way `ChatView.test.tsx` already does, and put BACK afterwards
+// rather than left on the prototype for whatever runs next in this worker.
+const realScrollIntoView = Element.prototype.scrollIntoView;
+
 beforeEach(() => {
   vi.useFakeTimers();
+  Element.prototype.scrollIntoView = vi.fn();
   vi.mocked(isLiveMode).mockReturnValue(false);
   vi.mocked(createSession).mockReset();
   vi.mocked(askQuestion).mockReset();
@@ -78,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Element.prototype.scrollIntoView = realScrollIntoView;
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -587,6 +598,280 @@ describe("the empty-submit nudge does not swallow an in-flight refusal", () => {
       container.querySelector('.composer [role="status"]')?.textContent ?? "",
       "the region announced a stale nudge on a screen the reader had just opened",
     ).not.toBe(EMPTY_SUBMIT_NUDGE);
+  });
+});
+
+describe("both composers are SILENT but PRESENT before anything happens", () => {
+  it("each has exactly one live region, and it says nothing in the idle state", () => {
+    // WRITTEN BECAUSE TWO MUTANTS SURVIVED: making the hero's region
+    // conditional (created together with its text, the classic way to make an
+    // announcement not fire) and making it announce the sentence permanently.
+    // Every other test in this file looks at the page AFTER an empty submit,
+    // where a conditional region and a persistent one are indistinguishable —
+    // both are there, both carry the sentence. The idle state is the only place
+    // the difference is visible, and nothing was looking at it.
+    // RED WHEN: either region stops being rendered while idle, or starts
+    // saying something before a submit.
+    for (const c of COMPOSERS) {
+      const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+      c.open(container);
+      const scope = container.querySelector(c.scope);
+      expect(scope, `${c.label}: its scope is not on screen`).not.toBeNull();
+      const regions = scope!.querySelectorAll('[role="status"]');
+      expect(
+        regions.length,
+        `${c.label}: the live region is not in the tree before its text changes`,
+      ).toBe(1);
+      expect(regions[0].textContent, `${c.label}: the region is announcing while idle`).toBe("");
+      // The partner: nothing is up yet, so "says nothing" is the idle state and
+      // not a region that has already been and gone.
+      expect(scope!.querySelectorAll(c.nudge).length, `${c.label}: a nudge before any submit`).toBe(
+        0,
+      );
+      cleanup();
+    }
+  });
+});
+
+describe("the nudge outranks a refusal that is still standing", () => {
+  it("announces the nudge for an empty Enter made AFTER a refusal", async () => {
+    // NOT AN EQUIVALENT MUTANT, though it was reported as one. The reasoning
+    // offered was that `REFUSED_SUBMIT` clears `chatNudge`, so the two are
+    // mutually exclusive and the order in the view cannot be observed. That
+    // covers one direction only — a refusal arriving while a nudge is up.
+    //
+    // The other direction is reachable and was not covered: `refusedInFlight`
+    // is cleared ONLY by `SET_PENDING(0)`, so it stays true for the whole open
+    // window. Refuse a question, then press Enter on an empty box a second
+    // later, and both flags are true at once — the empty branch runs before the
+    // in-flight gate and never touches the refusal. Order decides, and getting
+    // it wrong tells the reader about a refusal from a moment ago instead of
+    // the thing they just did.
+    // RED WHEN: `refusedInFlight` is ordered ahead of `chatNudge` in ChatView's
+    // status region.
+    vi.mocked(isLiveMode).mockReturnValue(true);
+    vi.mocked(createSession).mockResolvedValue({
+      request_id: "r",
+      session_id: "s",
+      expires_at: "2026-07-11T12:00:00Z",
+    });
+    vi.mocked(askQuestion).mockImplementation(() => new Promise(() => {}));
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    const region = () => container.querySelector('.composer [role="status"]')?.textContent ?? "";
+
+    const hero = container.querySelector("#hero-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(hero, { target: { value: "First question" } });
+      fireEvent.keyDown(hero, { key: "Enter" });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    const input = container.querySelector(".chat-input") as HTMLInputElement;
+    // Partner: we are on the chat screen with a request genuinely open.
+    expect(input, "the chat composer is not on screen").not.toBeNull();
+    expect(container.querySelector(".pending-bubble")).not.toBeNull();
+
+    // A real question, refused because one is in flight.
+    act(() => {
+      fireEvent.change(input, { target: { value: "Second question" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    // Partner: the refusal really is standing, so the swap below has something
+    // to get wrong.
+    expect(region(), "the refusal was never announced").toContain("Not sent.");
+
+    // …and now an empty Enter, a second later. The refusal is still set,
+    // because only `SET_PENDING(0)` clears it and nothing has resolved.
+    act(() => {
+      vi.advanceTimersByTime(1000);
+      fireEvent.change(input, { target: { value: "" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    expect(
+      region(),
+      "a refusal from a moment ago outranked what the reader just did",
+    ).toBe(EMPTY_SUBMIT_NUDGE);
+    expect(container.querySelectorAll(".composer-nudge").length).toBe(1);
+  });
+});
+
+describe("a nudge does not outlive the screen that raised it", () => {
+  it("clears the HERO nudge when the screen changes", () => {
+    // WRITTEN BECAUSE A MUTANT SURVIVED: `SET_SCREEN` could stop clearing
+    // `heroNudge` and nothing saw it, even though the reducer comment says both
+    // flags go with the screen. Its chat twin was covered; this half was not.
+    // The route is the header CTA, which reaches `SET_SCREEN` through
+    // `enterChat(null)` WITHOUT going through `askHero` — so this is the one
+    // hero path `retireNudge("hero")` does not cover, and `SET_SCREEN` is the
+    // only thing standing behind it.
+    // RED WHEN: `SET_SCREEN` stops clearing `heroNudge`.
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    act(() => {
+      fireEvent.click(container.querySelector(".ask-button") as HTMLElement);
+    });
+    // Partner: the hero nudge really is up before the screen changes.
+    expect(container.querySelectorAll(".hero-nudge").length).toBe(1);
+
+    act(() => {
+      fireEvent.click(container.querySelector(".cta-button") as HTMLElement);
+      vi.advanceTimersByTime(300);
+    });
+    act(() => {
+      fireEvent.click(container.querySelector(".back-button") as HTMLElement);
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(
+      container.querySelectorAll(".hero-nudge").length,
+      "the landing page came back still warning about an ask from another screen",
+    ).toBe(0);
+    expect(
+      container.querySelector('section.hero [role="status"]')?.textContent ?? "",
+      "the hero region announced a stale nudge on a screen the reader had just returned to",
+    ).toBe("");
+  });
+});
+
+describe("a REAL submit retires the nudge", () => {
+  const regionText = (root: HTMLElement) =>
+    root.querySelector('.composer [role="status"]')?.textContent ?? "";
+  const openChat = (root: HTMLElement) =>
+    act(() => {
+      fireEvent.click(root.querySelector(".cta-button") as HTMLElement);
+    });
+  const typeAndEnter = (root: HTMLElement, value: string) => {
+    const input = root.querySelector(".chat-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(input, { target: { value } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+  };
+  const emptyEnter = (root: HTMLElement) =>
+    act(() => {
+      fireEvent.keyDown(root.querySelector(".chat-input")!, { key: "Enter" });
+    });
+
+  it("stops saying 'Nothing was sent.' about a question that WAS sent", () => {
+    // RED WHEN: `submitChat` stops retiring the nudge on the non-empty path.
+    // Nothing cleared `chatNudge` on a successful send — not the 3s timer, not
+    // `REFUSED_SUBMIT`, not `SET_SCREEN` — so for up to three seconds after an
+    // empty Enter, a real question sent inside that window left the region
+    // reading the empty-submit sentence while the question sat in the
+    // transcript streaming, AND suppressed that question's own "Searching the
+    // docs…" and "Answer ready." announcements. Same class of false statement
+    // to an AT user as #445 and #356 gap 2.
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    openChat(container);
+    emptyEnter(container);
+    // Partner: the nudge really is up, so its absence below is a retirement and
+    // not a submit that never registered.
+    expect(regionText(container)).toBe(EMPTY_SUBMIT_NUDGE);
+    expect(container.querySelectorAll(".composer-nudge").length).toBe(1);
+
+    typeAndEnter(container, "What is Claude Code?");
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    // Partner: the question really was sent, so what follows is about a live
+    // send and not about a submit the app dropped.
+    expect(sentAnything(container), "the question never reached the transcript").toBe(true);
+    expect(
+      regionText(container),
+      "the region told a screen reader nothing was sent, about a question that was",
+    ).not.toBe(EMPTY_SUBMIT_NUDGE);
+    expect(
+      container.querySelectorAll(".composer-nudge").length,
+      "the empty-box warning stayed on screen over a question that was sent",
+    ).toBe(0);
+  });
+
+  it("retires it on the DUPLICATE path too, which never bumps the send tick", () => {
+    // The reason the anchor is `submitChat` and not the `BUMP_SEND_TICK`
+    // reducer case, which was the first fix proposed. `send()` returns early on
+    // `flashExisting(existing)` for a question that was ALREADY ANSWERED
+    // (useLandingState.ts, the duplicate guard), and that branch dispatches no
+    // tick at all — so a tick-anchored clear leaves exactly the same false
+    // announcement on a path any user reaches by re-asking something.
+    // RED WHEN: the retirement moves to `BUMP_SEND_TICK`, or off the non-empty
+    // path in `submitChat`.
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    openChat(container);
+    typeAndEnter(container, "What is Claude Code?");
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    const answered = container.querySelectorAll(".message.user-msg").length;
+    expect(answered, "the first question was never asked").toBe(1);
+
+    emptyEnter(container);
+    expect(regionText(container)).toBe(EMPTY_SUBMIT_NUDGE);
+
+    // The SAME question again -> the duplicate guard flashes the existing
+    // bubble and returns, adding no message and bumping no tick.
+    typeAndEnter(container, "What is Claude Code?");
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+    // Partner proving this really took the duplicate path: no second bubble.
+    expect(
+      container.querySelectorAll(".message.user-msg").length,
+      "this was not the duplicate path — a second bubble was added",
+    ).toBe(answered);
+    expect(regionText(container), "the duplicate path left the false sentence up").not.toBe(
+      EMPTY_SUBMIT_NUDGE,
+    );
+    expect(container.querySelectorAll(".composer-nudge").length).toBe(0);
+  });
+});
+
+describe("the two nudges share one stylesheet rule", () => {
+  it("one declaration block carries BOTH selectors, and it is not empty", () => {
+    // WRITTEN BECAUSE A MUTANT SURVIVED: `.composer-nudge` could be dropped
+    // from the shared block entirely — leaving the chat warning unstyled, with
+    // none of the amber, the size or the fade — and every behavioural test in
+    // this file stayed green, because jsdom renders no stylesheet and the guard
+    // reads the DOM, not the paint.
+    //
+    // Parsed with postcss rather than grepped, the way
+    // `tokenThemeParity.test.ts` does: a regex over the file text cannot tell a
+    // selector from the same characters inside a comment, and the comments
+    // around this rule quote both selectors several times.
+    //
+    // WHAT THIS DOES NOT PROVE, said plainly because the comment it replaces
+    // claimed the pair "cannot be restyled apart" and that was false: a later
+    // or more specific rule still overrides one of them, and nothing here
+    // compares the two COMPUTED colours. What is guaranteed is that this block
+    // reaches both. The rendered result is
+    // `frontend/tests/contrast-floor.spec.ts`, which measures each nudge in a
+    // real browser.
+    // RED WHEN: either selector is dropped from the shared rule, they are split
+    // into two blocks, or the block is emptied.
+    const HERE = dirname(fileURLToPath(import.meta.url));
+    const path = join(HERE, "..", "styles", "landing.css");
+    const css = readFileSync(path, "utf8");
+
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+    const carrying: Rule[] = [];
+    postcss.parse(css, { from: path }).walkRules((rule: Rule) => {
+      const selectors = rule.selectors.map(norm);
+      if (selectors.includes(".hero-nudge") || selectors.includes(".composer-nudge")) {
+        carrying.push(rule);
+      }
+    });
+
+    // The partner. "Every rule mentioning a nudge also mentions the other" is
+    // vacuously true when NO rule mentions either — which is what a rename, a
+    // deleted block or a broken parse produces.
+    expect(carrying.length, "no rule in landing.css styles either nudge").toBe(1);
+    const [shared] = carrying;
+    expect(shared.selectors.map(norm).sort()).toEqual([".composer-nudge", ".hero-nudge"]);
+    // …and the one rule they share actually declares something. A shared empty
+    // block satisfies every assertion above and styles neither.
+    const declared = shared.nodes.filter((n) => n.type === "decl").length;
+    expect(declared, "the shared block declares nothing").toBeGreaterThan(0);
   });
 });
 

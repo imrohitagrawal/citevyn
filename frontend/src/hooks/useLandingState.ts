@@ -159,6 +159,18 @@ type Action =
 
 const HERO_ORDER = ["claude-code", "gemini-key", "codex-flag"];
 
+/**
+ * #445. Which timer slot and which action belong to each composer's
+ * empty-submit nudge. Module-level and static so `nudgeEmptySubmit` and
+ * `retireNudge` cannot pick different ones: raising a nudge on one flag and
+ * retiring it on another is the exact shape of the bug this pair exists to
+ * close. The refs are looked up beside it in the hook, being hook-scoped.
+ */
+const NUDGE_TARGETS = {
+  hero: { timer: "nudgeTimeout", action: "SET_HERO_NUDGE" },
+  chat: { timer: "chatNudgeTimeout", action: "SET_CHAT_NUDGE" },
+} as const;
+
 const initialState: AppState = {
   heroInput: "",
   chatInput: "",
@@ -198,10 +210,16 @@ function reducer(state: AppState, action: Action): AppState {
       // value captured at mount time. Modulus derives from the single
       // PLACEHOLDERS source so adding a phrase needs no other edit.
       return { ...state, phIndex: (state.phIndex + 1) % PLACEHOLDERS.length };
+    // Both return the SAME state object when nothing changes, so React bails
+    // out instead of re-rendering. That is what lets `retireNudge` be called
+    // unconditionally on every real submit — the overwhelmingly common case is
+    // "no nudge was up", and a fresh object there would cost an extra render on
+    // every question anyone asks. It also makes the 3s timer's own expiry free
+    // once something else has already cleared the flag.
     case "SET_HERO_NUDGE":
-      return { ...state, heroNudge: action.value };
+      return state.heroNudge === action.value ? state : { ...state, heroNudge: action.value };
     case "SET_CHAT_NUDGE":
-      return { ...state, chatNudge: action.value };
+      return state.chatNudge === action.value ? state : { ...state, chatNudge: action.value };
     case "SET_HIGHLIGHT":
       return { ...state, highlight: action.index };
     case "SET_OPEN_FAQ":
@@ -1173,17 +1191,56 @@ export function useLandingState() {
   // superseded — the shape the highlight timers a few lines up already guard
   // against with their own `?.stop()`.
   const nudgeEmptySubmit = useCallback((which: "hero" | "chat") => {
-    const composer =
-      which === "hero"
-        ? ({ ref: heroRef, timer: "nudgeTimeout", action: "SET_HERO_NUDGE" } as const)
-        : ({ ref: composerRef, timer: "chatNudgeTimeout", action: "SET_CHAT_NUDGE" } as const);
-    composer.ref.current?.focus();
-    timers.current[composer.timer]?.stop();
-    dispatch({ type: composer.action, value: true });
-    timers.current[composer.timer] = timeout(
-      () => dispatch({ type: composer.action, value: false }),
+    const { timer, action } = NUDGE_TARGETS[which];
+    (which === "hero" ? heroRef : composerRef).current?.focus();
+    timers.current[timer]?.stop();
+    dispatch({ type: action, value: true });
+    timers.current[timer] = timeout(
+      () => dispatch({ type: action, value: false }),
       EMPTY_SUBMIT_NUDGE_MS,
     );
+  }, []);
+
+  // #445 round 2. Retire a nudge because something REAL happened, rather than
+  // because its window ran out.
+  //
+  // Nothing did this, and the gap was a false statement to a screen-reader
+  // user: `chatNudge` was cleared only by the 3s timer, `REFUSED_SUBMIT` and
+  // `SET_SCREEN`, none of which fires on a successful send. So for up to three
+  // seconds after an empty Enter, a real question sent inside that window left
+  // the region reading "Nothing was sent." while the question sat in the
+  // transcript streaming — and, because the nudge outranks `pending` in the
+  // view, it swallowed that question's own "Searching the docs…" and "Answer
+  // ready." announcements too. The visible warning stayed up as well, so it was
+  // never only an assistive-technology problem.
+  //
+  // CALLED FROM `submitChat` / `askHero`, at the point the text is known
+  // non-empty — NOT from the `BUMP_SEND_TICK` reducer case, which was the first
+  // fix proposed and does not cover it. `send()` returns early on
+  // `flashExisting(existing)` for a question that was already ANSWERED, and
+  // that branch dispatches no tick at all; re-asking something you have asked
+  // before is an ordinary thing to do and would have kept the false sentence.
+  // The composer's own submit handler is the only anchor every real submit
+  // passes through.
+  //
+  // Stopping the timer here is HYGIENE, NOT A GUARDED BEHAVIOUR — verified by
+  // mutation, not assumed: deleting both lines leaves all 20 tests green. The
+  // slot is only ever overwritten by `nudgeEmptySubmit`, which stops whatever
+  // it finds first, so a handle left armed by this function can never fire into
+  // a later window. It is kept because "retire" that leaves a live timer behind
+  // is a trap for the next reader, not because anything reddens.
+  const retireNudge = useCallback((which: "hero" | "chat") => {
+    const { timer, action } = NUDGE_TARGETS[which];
+    timers.current[timer]?.stop();
+    timers.current[timer] = null;
+    // Unconditional, which is only cheap because the reducer returns the
+    // IDENTICAL state object when the flag is already false and React then
+    // bails out. That bail-out is an optimisation and nothing asserts it —
+    // measured: removing it leaves all 20 tests green, because it changes how
+    // many times the tree renders and not what it renders. Without it every
+    // question anyone asks costs one extra render for a flag that was already
+    // false.
+    dispatch({ type: action, value: false });
   }, []);
 
   const askHero = useCallback(() => {
@@ -1194,6 +1251,23 @@ export function useLandingState() {
       nudgeEmptySubmit("hero");
       return;
     }
+    // NO `retireNudge("hero")` HERE, and the asymmetry with `submitChat` is
+    // deliberate rather than the drift that produced #445 — so it is written
+    // down instead of left to be rediscovered.
+    //
+    // The hero retires its nudge through `enterChat` -> `SET_SCREEN`, which
+    // clears BOTH flags. That covers every real hero ask, because this branch
+    // always navigates and the hero exists only on the landing screen. The chat
+    // needs its own call for the opposite reason: a successful chat send does
+    // not change screen, so nothing would fire.
+    //
+    // A call was added here first, for symmetry, and MEASURED: deleting it left
+    // all 20 tests green, because `SET_SCREEN` covers the same state on every
+    // reachable path. Unguarded code that no test can distinguish is worse than
+    // a documented mechanism, so it went. The mechanism is held by
+    // `composerEmptyParity`'s "clears the HERO nudge when the screen changes",
+    // which drives the one hero path that does NOT come through here — the
+    // header CTA, which reaches `SET_SCREEN` via `enterChat(null)`.
     // Clear the hero box as the question is dispatched into chat (mirrors how
     // submitChat clears the chat composer), so a later "Back to landing" never
     // shows a stale question.
@@ -1243,6 +1317,14 @@ export function useLandingState() {
       nudgeEmptySubmit("chat");
       return;
     }
+    // Past the empty check the text is real, so any nudge still up is about a
+    // submit the reader has superseded. Retire it HERE, before the in-flight
+    // gate, so every real submit is covered by one line: the send below, the
+    // retry, the duplicate-question flash that returns early inside `send`, and
+    // the refusal just under this. `REFUSED_SUBMIT` clears the flag too, and
+    // that redundancy is deliberate — it keeps the refusal state internally
+    // consistent for any caller that reaches it another way.
+    retireNudge("chat");
     if (inFlight.current) {
       // #356 gap 2. The refusal used to be a bare `return`: measured with a
       // MutationObserver over the whole body, it produced ZERO DOM mutations on
@@ -1261,7 +1343,7 @@ export function useLandingState() {
     }
     setChatInput("");
     send(t);
-  }, [state.chatInput, send, nudgeEmptySubmit]);
+  }, [state.chatInput, send, nudgeEmptySubmit, retireNudge]);
 
   const onChatKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
