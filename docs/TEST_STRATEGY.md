@@ -246,9 +246,12 @@ when the question is out of scope.
 
 ### 12.1 Required status checks on `main`
 
-Nine contexts are required. Read with
-`gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks`
-(read 2026-09-08):
+**Ten** contexts are required. Re-read 2026-09-16 with
+
+```sh
+gh api repos/imrohitagrawal/citevyn/branches/main/protection \
+  --jq '.required_status_checks.contexts[]'
+```
 
 | Context | Produced by |
 |---|---|
@@ -259,18 +262,35 @@ Nine contexts are required. Read with
 | `quality-gate / quality-gate` | `pr-quality.yml` |
 | `type-check + unit tests + build` | `frontend.yml` |
 | `Demo-mode Playwright (no visual snapshots)` | `frontend.yml` |
+| `Live-mode Playwright (stub backend)` | `frontend-live-e2e.yml` |
 | `shell suites (bash 3.2 + 5.x) (ubuntu-latest)` | `ci.yml` |
 | `shell suites (bash 3.2 + 5.x) (macos-latest)` | `ci.yml` |
 
 `strict: true` (a branch must be up to date with `main` before merging) and
 `enforce_admins: true` (the rules apply to admins too).
 
+**This table said NINE until 2026-09-16, and omitted the live job.** `#379`
+succeeded — the owner promoted `Live-mode Playwright (stub backend)` some time
+after the 2026-09-08 reading — and nothing noticed, because a hand-copied
+snapshot in a document is checked by nobody. `.github/dependabot.yml` already
+said 10 in its auto-merge note, so the repo disagreed with itself in writing.
+
+It cannot drift silently again: `backend/tests/test_gating_workflows.py` holds
+`_REQUIRED_CONTEXT_WORKFLOWS` as the authoritative record and
+`test_the_strategy_doc_lists_exactly_the_recorded_contexts` compares **this
+table and the count in the sentence above it** against it, inside the required
+`pytest + lint` job. What no test can do is read branch protection itself, so
+both remain a hand reading — re-run the command when it matters.
+
 ### 12.2 What is advisory
 
-`Live-mode Playwright (stub backend)` (`frontend-live-e2e.yml`) is **advisory**:
-it is not in the list above, so it can go red and the pull request still merges.
+`Live-mode Playwright (stub backend)` **is no longer advisory** — it is in the
+table above as of the 2026-09-16 reading, which is what §12.3 to §12.5 were
+arguing for. The paragraph that used to stand here said the opposite; it was
+written before the promotion and never revisited.
 
-It is the only job that executes these five tests, in two spec files:
+It remains the only job that executes these five tests, in two spec files, and
+that is now a *blocking* coverage claim rather than an advisory one:
 
 | Test | What only this job proves |
 |---|---|
@@ -351,7 +371,12 @@ To regenerate the Linux set, see the header of
 **not yet committed** (#325-PENDING-BASELINES) — held for the owner to review the images — so the
 job fails every run with "snapshot missing" until they land.
 
-### 12.3 Measured case for promoting the live check
+### 12.3 The measured case for promoting the live check — made, and acted on
+
+**This case was accepted: the context is required as of the 2026-09-16 reading
+in §12.1.** The measurements are kept because they are the worked template for
+the next promotion argument (the visual-snapshot job in §12.2 is the standing
+candidate), not because the decision is still open.
 
 Every figure here is **timestamped and moving**. The invariant is what carries
 the argument, not the number: re-derive before quoting, and a *larger* run count
@@ -397,9 +422,15 @@ place would have blocked all of them.
 The filter has been removed; `backend/tests/test_gating_workflows.py` keeps it
 off.
 
-### 12.5 The promotion command (owner only)
+### 12.5 The promotion command (owner only) — ALREADY RUN
 
-This is a branch-protection change, so only the repo owner runs it.
+This is a branch-protection change, so only the repo owner runs it. **It has
+been run**: `Live-mode Playwright (stub backend)` is a required context as of the
+2026-09-16 reading in §12.1. The command is kept verbatim because it is the
+template for the next promotion, and because
+`backend/tests/test_gating_workflows.py` pins its `contexts[]=` argument equal to
+the live job's `name:` — a one-character drift there would wedge every pull
+request on a context nothing reports.
 
 ```sh
 gh api --method POST \
@@ -412,7 +443,7 @@ Use this endpoint, not the alternatives:
 - It **adds** one context and touches nothing else, so `strict: true` and
   `enforce_admins: true` are preserved because they are never sent.
 - `PATCH .../protection/required_status_checks` replaces the whole
-  required-status-checks object: every one of the nine contexts above has to be
+  required-status-checks object: every one of the ten contexts above has to be
   re-listed, and `strict` re-sent, or they are silently dropped.
 - `PUT .../branches/main/protection` (full protection) **replaces every field**.
   Omitting `enforce_admins` clears it — and it is `true` today, so that half is
@@ -424,10 +455,17 @@ Use this endpoint, not the alternatives:
 
 **Known trade-off in the recommended endpoint.** GitHub's docs attach a "Closing
 down notice" to the `contexts` parameter and point at `checks` for finer control.
-Concretely: all nine existing entries carry an `app_id` pin — `15368`
-(github-actions) on eight, `57789` (github-advanced-security) on `CodeQL` — while
-a context added through the `contexts` endpoint lands with `app_id: null`, which
-accepts a same-named check from **any** app. Read the pins with:
+Concretely: all ten entries carry an `app_id` pin — `15368` (github-actions) on
+nine, `57789` (github-advanced-security) on `CodeQL`. The worry was that a
+context added through the `contexts` endpoint lands with `app_id: null`, which
+would accept a same-named check from **any** app.
+
+**Measured 2026-09-16, after the live context was actually added: it did not
+happen.** `Live-mode Playwright (stub backend)` carries `15368` like the rest,
+and no entry is null. What this does *not* establish is which route the owner
+took — the UI and the endpoint are indistinguishable from here — so it is
+evidence that the current state is sound, not that the `contexts` endpoint is
+safe. Read the pins with:
 
 ```sh
 gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks \
@@ -436,7 +474,7 @@ gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_che
 
 The recommendation above still stands: the `checks` route is part of the same
 whole-object replace as `PATCH`, so taking it to gain one `app_id` pin means
-re-sending all nine entries and `strict` correctly, which is the larger risk. If
+re-sending all ten entries and `strict` correctly, which is the larger risk. If
 the pin is wanted, add the context first with the command above, then set it
 deliberately as a separate step.
 

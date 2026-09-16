@@ -355,15 +355,41 @@ jobs:
   # backend fix. Promoting it is a branch-protection change, which is the owner's
   # to make; see docs/TEST_STRATEGY.md §12.2 for where it is recorded as advisory.
   #
-  # `container:` IS THE PIN, and it is not optional. A snapshot suite compares
-  # pixels, so every input to the render has to be fixed or the baselines rot on
-  # a schedule nobody controls. Measured while generating the first linux set:
+  # `container:` IS THE PIN — but a TAG is not immutable, and the comment here
+  # used to imply it was ("every input to the render has to be fixed"). It is
+  # not: Microsoft republishes `v1.63.0-noble` when the base image is patched,
+  # and the base's font packages ARE a render input for a screenshot suite. What
+  # the tag actually buys is that the PLAYWRIGHT and BROWSER versions are fixed,
+  # which is the input that moves often and breaks loudly.
+  #
+  # The stronger form is available and this repo's guard ACCEPTS it:
+  # `mcr.microsoft.com/playwright:v1.63.0-noble@sha256:<digest>` is immutable, and
+  # `test_the_visual_job_runs_the_browser_that_drew_its_baselines` reads the
+  # version out of the tag part either way (#325, item 8). It is not adopted here
+  # because a digest has to be re-pinned by hand on every base patch and nothing
+  # in this repo automates that, so it would rot into a stale pin nobody rotates
+  # — a worse failure than the one it prevents. If the baselines ever start
+  # drifting without a Playwright bump, the base image is the first suspect and
+  # the digest is the fix.
+  #
+  # Measured while generating the first linux set:
   #   - two full runs in one amd64 container → byte-identical PNGs, all 22;
   #   - Node 24.20.0 (the image's own) vs Node 26.8.2 (what .nvmrc resolves to)
   #     → byte-identical PNGs, all 22. Node is not an input to the render, which
   #     is why `setup-node` below is safe despite floating within major 26;
   #   - arm64 vs amd64 → 12 of the 22 differ. The ARCHITECTURE is an input.
   #     `ubuntu-latest` is x86_64, so the committed baselines are amd64.
+  # HEADS UP FOR A DEPENDABOT PR (#325, item 9). The pin below is enforced by a
+  # test in the REQUIRED `pytest + lint` job, so the next routine `frontend-test`
+  # bump turns a required check RED until this tag moves with it — and moving the
+  # tag alone is the WRONG fix, because it leaves 22 baselines drawn by the old
+  # browser. The full sequence is in the failing assertion's own message, in
+  # backend/tests/test_gating_workflows.py; short version: bump the tag,
+  # regenerate all 22 baselines on amd64 in the new image, have the owner look at
+  # them, commit tag and PNGs together. This is deliberate — an advisory pin
+  # would let the baselines silently stop matching the browser, which is the
+  # defect #325 exists to close.
+  #
   # The image tag must stay equal to the `playwright-core` version
   # frontend/package-lock.json RESOLVES. `playwright-core`, not
   # `@playwright/test`, because it is the package that owns `browsers.json` —

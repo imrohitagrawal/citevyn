@@ -82,14 +82,30 @@ TEST_STRATEGY = REPO_ROOT / "docs" / "TEST_STRATEGY.md"
 LIVE_JOB_NAME = "Live-mode Playwright (stub backend)"
 
 # Every required status check on `main`, mapped to the workflow that produces
-# it. Measured 2026-09-08:
+# it. THIS DICT IS THE AUTHORITATIVE RECORD in this repo: docs/TEST_STRATEGY.md
+# §12.1's table and its stated count are compared against it by
+# `test_the_strategy_doc_lists_exactly_the_recorded_contexts`, so the two can no
+# longer drift the way they had by 2026-09-16.
+#
+# Re-measured 2026-09-16 (previous reading 2026-09-08):
 #
 #   gh api repos/imrohitagrawal/citevyn/branches/main/protection \
-#     --jq .required_status_checks.contexts
+#     --jq '.required_status_checks.contexts[]'
 #
-# and cross-checked against the check-runs on PR #386
-# (`gh pr view 386 --json statusCheckRollup`), which is where the
-# `.workflowName` for each context comes from.
+# TEN contexts, not nine. `Live-mode Playwright (stub backend)` HAS BEEN
+# PROMOTED — #379's whole objective — some time between the two readings. The
+# 2026-09-08 snapshot outlived that change and this file went on describing the
+# live job as "not required yet" in two comments, which is what a snapshot with
+# no mechanical check does. `.github/dependabot.yml` already carried the correct
+# 10 (its auto-merge note), so the repo disagreed with itself; this is now the
+# side that is asserted.
+#
+# Also measured 2026-09-16, because §12.5 predicts otherwise: every one of the
+# ten carries an app_id pin — nine are `15368` (github-actions) and `CodeQL` is
+# `57789`. NONE is null, the live context included. Read with:
+#
+#   gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks \
+#     --jq '.checks[] | "\(.app_id)  \(.context)"'
 _REQUIRED_CONTEXT_WORKFLOWS: dict[str, str] = {
     "Analyze (python)": "codeql.yml",
     "alembic + postgres integration tests": "ci.yml",
@@ -97,6 +113,7 @@ _REQUIRED_CONTEXT_WORKFLOWS: dict[str, str] = {
     "quality-gate / quality-gate": "pr-quality.yml",
     "type-check + unit tests + build": "frontend.yml",
     "Demo-mode Playwright (no visual snapshots)": "frontend.yml",
+    "Live-mode Playwright (stub backend)": LIVE_WORKFLOW.name,
     "shell suites (bash 3.2 + 5.x) (ubuntu-latest)": "ci.yml",
     "shell suites (bash 3.2 + 5.x) (macos-latest)": "ci.yml",
 }
@@ -141,22 +158,27 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     # `Demo-mode Playwright (no visual snapshots)`. Required; carries the
     # #379 title-rename trap, which is the only check that bites TODAY.
     ("frontend.yml", "demo-e2e"),
-    # `Live-mode Playwright (stub backend)`. Not required yet; #379 is about
-    # keeping it eligible, which a defused job is not.
+    # `Live-mode Playwright (stub backend)`. REQUIRED as of the 2026-09-16
+    # reading above — #379 achieved what it set out to do. This comment said
+    # "not required yet" until then, which is what an un-checked snapshot decays
+    # into.
     (LIVE_WORKFLOW.name, "live-e2e"),
-    # `Visual snapshots (Linux baselines, advisory)` (#325). ADVISORY, and being
-    # in this tuple does not change that: this list is bookkeeping for ONE rule
-    # — "a job in it may not be defused" — and it has never been the same list as
-    # `_REQUIRED_CONTEXT_WORKFLOWS`. `live-e2e` above has sat here while not
-    # required since #379. Branch protection is the only thing that makes a check
-    # required, no test in this repo can read it (see `_UNGUARDABLE`), and
-    # changing it is the owner's call.
+    # `Visual snapshots (Linux baselines, advisory)` (#325). ADVISORY, and the
+    # ONLY advisory member of this tuple — the four above are all required as of
+    # 2026-09-16. Being in this list does not promote it: this list is the
+    # population of ONE rule, "a job in it may not be defused", and it is not the
+    # same list as `_REQUIRED_CONTEXT_WORKFLOWS`. Branch protection is the only
+    # thing that makes a check required, and changing it is the owner's call.
     #
-    # It earns a place for the same reason `live-e2e` does: a defused advisory
-    # job is not a weak signal, it is a fake one. `continue-on-error: true` here
-    # would leave a green check beside 22 screenshot comparisons that never ran,
-    # which reads as "the baselines are fine" to exactly the person who would
-    # otherwise go and look.
+    # An earlier version of this comment justified the entry by pointing at
+    # `live-e2e` "sitting here while advisory". That precedent was FALSE when it
+    # was written — live-e2e was already required — so the entry is argued on its
+    # own terms instead: a defused advisory job is not a weak signal, it is a
+    # fake one. `continue-on-error: true` here would leave a green check beside
+    # 22 screenshot comparisons that never ran, which reads as "the baselines are
+    # fine" to exactly the person who would otherwise go and look. An advisory
+    # check is read by a human deciding whether to investigate; that is precisely
+    # the audience a false green misleads.
     ("frontend.yml", "visual-e2e"),
 )
 
@@ -261,8 +283,14 @@ _UNGUARDABLE: tuple[str, ...] = (
     "here. What catches it is the advisory job itself going red (#325).",
     "Branch protection itself. This file cannot read it (that needs a token and "
     "a network call from a test), so it cannot detect a context being REMOVED "
-    "from the required list, nor confirm one was added. The measured snapshot in "
-    "_REQUIRED_CONTEXT_WORKFLOWS is a 2026-09-08 reading, not a live query.",
+    "from the required list, nor confirm one was added. The snapshot in "
+    "_REQUIRED_CONTEXT_WORKFLOWS is a 2026-09-16 hand reading, not a live query "
+    "— and the cost of that is now demonstrated rather than hypothetical: the "
+    "previous 2026-09-08 snapshot missed the promotion of `Live-mode Playwright "
+    "(stub backend)` entirely, and two comments in this file went on calling it "
+    "advisory until #325 re-measured. Anything asserted from this dict is only "
+    "as fresh as the last hand reading; re-run the `gh api` command above when "
+    "in doubt.",
     "A live-only test selected by its DESCRIBE title rather than its own test "
     'title. The static scan below reads `test("...")` titles only, so such a '
     "test would be missing from the membership set and would fail the pin — "
@@ -919,6 +947,106 @@ def test_the_documented_context_string_matches_the_job_name() -> None:
 
 
 # ─────────────────── the live job asserts EXECUTION, not selection ───────────────────
+
+
+# English number words the §12.1 sentence may use. Digits are accepted too. The
+# range is deliberately short: a repo with more than twenty required contexts has
+# a different problem than this rule is for.
+_NUMBER_WORDS: dict[str, int] = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+}
+
+
+def _strategy_section(heading: str) -> str:
+    """The text of one ``### x.y`` section of docs/TEST_STRATEGY.md."""
+    doc = TEST_STRATEGY.read_text(encoding="utf-8")
+    match = re.search(rf"^{re.escape(heading)}[^\n]*\n(?P<body>.*?)(?=^### |\Z)", doc, re.M | re.S)
+    assert match, f"docs/TEST_STRATEGY.md has no `{heading}` section"
+    return match.group("body")
+
+
+def test_the_strategy_doc_lists_exactly_the_recorded_contexts() -> None:
+    """One authoritative record, mechanically compared — not two hand copies.
+
+    The required-context list existed in THREE places by 2026-09-16 and two of
+    them were wrong: this file's ``_REQUIRED_CONTEXT_WORKFLOWS`` said eight
+    workflow contexts, ``docs/TEST_STRATEGY.md`` §12.1 said "Nine contexts are
+    required" over a nine-row table, README said the live job was advisory —
+    while ``gh api`` returned TEN and ``.github/dependabot.yml`` said 10 in its
+    auto-merge note. ``Live-mode Playwright (stub backend)`` had been promoted
+    (which is #379 succeeding) and every hand copy outlived the change.
+
+    A doc cannot be asserted against GitHub from a test — that needs a token and
+    a network call. What it CAN be asserted against is the record in this file,
+    so there is one place to update when branch protection moves and one rule
+    that reds if only some of them get updated.
+
+    Turns red if: a row is added to or removed from §12.1's table without the
+    same change here, or the count in the sentence above the table stops
+    matching the table.
+    """
+    body = _strategy_section("### 12.1")
+    # Table rows look like `| \`Context\` | produced by |`. Take the first cell,
+    # backticks stripped, skipping the header and the `|---|---|` separator.
+    rows = [
+        match.group("context").strip()
+        for match in re.finditer(r"^\|\s*`(?P<context>[^`]+)`\s*\|", body, re.M)
+    ]
+    recorded = set(_REQUIRED_CONTEXT_WORKFLOWS) | set(_REQUIRED_CONTEXTS_NOT_FROM_A_WORKFLOW)
+    # PARTNER. Both comparisons below are satisfied by an empty table if the row
+    # regex stops matching, and by an empty record if both dicts are emptied.
+    assert len(rows) >= 2, (
+        f"§12.1's context table parsed to {len(rows)} row(s) — the row regex has "
+        "stopped matching the table's markdown, so the comparison below would "
+        "pass over nothing"
+    )
+    assert len(recorded) >= 2, "the recorded required-context set is empty or near-empty"
+
+    assert set(rows) == recorded, (
+        "docs/TEST_STRATEGY.md §12.1's table and this file's recorded required "
+        "contexts disagree.\n"
+        f"  in the doc only:    {sorted(set(rows) - recorded)}\n"
+        f"  in this file only:  {sorted(recorded - set(rows))}\n"
+        "Branch protection is the truth; re-read it with `gh api "
+        "repos/imrohitagrawal/citevyn/branches/main/protection --jq "
+        "'.required_status_checks.contexts[]'` and update BOTH."
+    )
+    assert len(rows) == len(set(rows)), f"§12.1's table lists a context twice: {rows}"
+
+    # ...and the prose count above the table, which is the part a reader
+    # actually quotes. It said "Nine" over a nine-row table while ten were
+    # required, so the table and the sentence were consistent with each other
+    # and wrong together — only the comparison above catches that. This line
+    # catches the cheaper half: a row added without touching the sentence.
+    stated = re.search(r"^\*\*(?P<count>\w+)\*\* contexts are required", body, re.M)
+    assert stated, (
+        "§12.1 no longer opens with `**<count>** contexts are required`. That "
+        "sentence is what a reader quotes; without it this rule checks only the "
+        "table."
+    )
+    word = stated.group("count").lower()
+    value = int(word) if word.isdigit() else _NUMBER_WORDS.get(word)
+    assert value is not None, f"cannot read a number out of §12.1's {word!r}"
+    assert value == len(recorded), (
+        f"§12.1 says {stated.group('count')!r} contexts are required, but "
+        f"{len(recorded)} are recorded. The sentence and the table have to move "
+        "together."
+    )
 
 
 def test_the_live_job_reads_the_runs_own_json_stats() -> None:
@@ -1794,9 +1922,11 @@ def test_the_demo_selection_guard_still_fires_through_a_poisoned_title(
 # that something.
 #
 # The job is ADVISORY. Being guarded here does not promote it: branch protection
-# is the only thing that makes a check required, no test in this file can read it
-# (see `_UNGUARDABLE`), and `live-e2e` has been in `GATING_JOBS` while advisory
-# since #379.
+# is the only thing that makes a check required, and changing it is the owner's
+# call. (An earlier version of this note offered `live-e2e` as the precedent for
+# "in GATING_JOBS while advisory". That was false — live-e2e was already a
+# required context by then, measured 2026-09-16. `visual-e2e` is the only
+# advisory member of that tuple.)
 
 VISUAL_PW_CONFIG = FRONTEND / "playwright.visual-ci.config.ts"
 FRONTEND_PACKAGE_LOCK = FRONTEND / "package-lock.json"
@@ -1828,7 +1958,7 @@ _PLAYWRIGHT_LOCK_ENTRIES: tuple[str, ...] = (
 
 
 def _installed_playwright_version() -> str:
-    """The ``@playwright/test`` version ``npm ci`` actually installs.
+    """The ``playwright-core`` version ``npm ci`` actually installs.
 
     Read from ``package-lock.json``, not from ``package.json``. The manifest
     declares a RANGE (``^1.63.0``); the lockfile names the one version ``npm ci``
@@ -1875,13 +2005,23 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     against a lockfile — but the sentence above describes what the pin is FOR,
     not what the tree currently holds.
 
-    Dependabot bumps ``@playwright/test`` on its own schedule and has no idea
-    this tag exists. Left unpinned, the next minor bump silently swaps the
-    renderer under 22 committed baselines and the whole job reads as "the design
-    regressed".
+    Dependabot bumps ``@playwright/test`` on its own schedule (which drags
+    ``playwright-core`` with it) and has no idea this tag exists. Left unpinned,
+    the next minor bump silently swaps the renderer under 22 committed baselines
+    and the whole job reads as "the design regressed".
 
-    Turns red if: ``frontend/package-lock.json``'s ``@playwright/test`` version
-    and ``frontend.yml``'s ``visual-e2e`` container tag stop matching. The fix is
+    THE COST OF THIS RULE, stated because it lands on a REQUIRED check (#325,
+    item 9). This test runs in ``pytest + lint``. So the next routine
+    ``frontend-test`` dependabot PR turns a required check RED, and the fix is
+    not a one-line tag edit: it needs an amd64 regeneration of all 22 baselines
+    plus the owner looking at the images. The failure message below is written to
+    say that, because the dependabot PR is where a maintainer meets it. The
+    alternative — leaving the pin advisory — is worse: the baselines would
+    silently stop matching the browser, which is the defect #325 exists to close.
+
+    Turns red if: ``frontend/package-lock.json``'s ``playwright-core`` version
+    and ``frontend.yml``'s ``visual-e2e`` container tag stop matching, or the
+    three Playwright packages in the lockfile stop agreeing with each other. The fix is
     to regenerate the baselines in the NEW image and move both together.
     """
     container = _visual_job().get("container")
@@ -1892,7 +2032,18 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
         "`playwright install` fetches on the day, and the committed -linux "
         "baselines stop being reproducible."
     )
-    match = re.fullmatch(r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+", image.strip())
+    # The digest form is ACCEPTED (#325, item 8). `...-noble@sha256:<digest>` is
+    # strictly stronger than the tag: it is immutable, and the tag is not —
+    # Microsoft republishes these tags when the base image is patched, and the
+    # base's font packages are a render input for a screenshot suite. Refusing
+    # the digest would have put this required test between the repo and the best
+    # available pin, which is not a guard's job. The version is still read from
+    # the tag part, so the lockstep comparison works either way.
+    match = re.fullmatch(
+        r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+"
+        r"(?:@sha256:[0-9a-f]{64})?",
+        image.strip(),
+    )
     assert match, (
         f"{DEMO_WORKFLOW.name}:visual-e2e runs in {image!r}, which is not an "
         "`mcr.microsoft.com/playwright:v<version>-<distro>` tag. The pin below "
@@ -1903,11 +2054,26 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     assert match.group("version") == installed, (
         f"{DEMO_WORKFLOW.name}:visual-e2e runs in Playwright image "
         f"v{match.group('version')} while frontend/package-lock.json installs "
-        f"@playwright/test {installed}. The image's bundled Chromium is the one "
+        f"playwright-core {installed}. The image's bundled Chromium is the one "
         "that drew tests/visual.spec.ts-snapshots/*-chromium-linux.png; a "
         "mismatch means the job compares those pixels against a different "
         "renderer, and every diff it reports is about the version skew rather "
-        "than about this repo."
+        "than about this repo.\n"
+        "\n"
+        "IF YOU GOT HERE FROM A DEPENDABOT PR, this is not a one-line fix and "
+        "bumping the tag alone is the wrong move — it would leave 22 baselines "
+        "drawn by the old browser. The sequence is:\n"
+        "  1. edit the `image:` tag in .github/workflows/frontend.yml's "
+        "`visual-e2e` job to match the new version;\n"
+        "  2. regenerate every baseline in the NEW image, on amd64 — the command "
+        "is in the header of frontend/playwright.visual-ci.config.ts, and "
+        "`--platform linux/amd64` is not optional (arm64 renders differ for 12 "
+        "of the 22);\n"
+        "  3. have the owner look at the regenerated images before they are "
+        "committed, the same gate #325 used for the first set;\n"
+        "  4. commit the tag and the PNGs together.\n"
+        "If that is more than the bump is worth today, close the dependabot PR "
+        "rather than editing this test."
     )
 
 
@@ -1928,10 +2094,15 @@ def test_the_regeneration_command_and_the_ci_container_agree() -> None:
     passes ``--disable-dev-shm-usage`` — which is precisely why a divergence
     would never announce itself, and why it is asserted rather than trusted.
 
+    WHAT IT HOLDS, precisely. Two things, because agreement alone was not
+    enough: (1) PRESENCE — ``--ipc=host`` must appear in both places, so removing
+    it from BOTH is red rather than quietly green, which is what an
+    agreement-only check allowed; (2) AGREEMENT — the two must not diverge, which
+    is the case that actually happened (the flag was in the documented command
+    and not in the job).
+
     Turns red if: ``options: --ipc=host`` leaves the job, or the documented
-    regeneration command stops passing it. Both directions, deliberately: a
-    regeneration run that differs from CI is the same defect as a CI run that
-    differs from regeneration.
+    regeneration command stops passing it, or both do.
     """
     container = _visual_job().get("container")
     image = str((container or {}).get("image") or "") if isinstance(container, dict) else ""
@@ -1979,6 +2150,20 @@ def test_the_regeneration_command_and_the_ci_container_agree() -> None:
     )
     in_command = "--ipc=host" in command
     in_job = "--ipc=host" in options
+    # PRESENCE, not merely agreement (#325, item 4). `in_command == in_job` alone
+    # is satisfied by the flag being absent from BOTH, and nothing else in this
+    # repo asserts it exists at all — so the pair could quietly lose Playwright's
+    # documented Chromium setting with every test green. Asserting presence makes
+    # dropping it a decision someone has to argue for here, which is the right
+    # bar for a setting that only shows up as a crashed tab mid-screenshot.
+    assert in_command and in_job, (
+        f"`--ipc=host` must be present in BOTH the documented regeneration "
+        f"command (found: {in_command}) and {DEMO_WORKFLOW.name}:visual-e2e's "
+        f"`container.options` (found: {in_job}, value {options!r}). Playwright "
+        "documents it for Chromium because the default 64 MB /dev/shm can kill a "
+        "tab mid-screenshot. If dropping it is genuinely wanted, change this "
+        "assertion deliberately and say why — do not let it lapse from one side."
+    )
     assert in_command == in_job, (
         f"`--ipc=host` is in the documented regeneration command: {in_command}; "
         f"in {DEMO_WORKFLOW.name}:visual-e2e's `container.options` ({options!r}): "
@@ -2100,12 +2285,42 @@ def test_the_visual_config_selects_by_file_path_not_by_test_title() -> None:
         "`testIgnore`; a `grep:` in its place selects by TITLE and empties the "
         "job on a describe-block rename."
     )
-    assert "grep:" not in source, (
-        f"{VISUAL_PW_CONFIG.name} declares a `grep:`, which narrows the selection "
-        "by test title on top of the file match. The workflow's "
-        "`visual_total -eq all_visual` differential would then go red for a "
-        "reason that has nothing to do with the baselines."
+    # NOT `"grep:" not in source` (#325, item 5). This repo has a written scar
+    # about guards that check strings, and that one had both failure modes at
+    # once: `grepInvert: /hero/` narrows the selection just as effectively and
+    # contains no `grep:`, while the WORD appears legitimately in this file's own
+    # docblock ("the grep form silently stops matching"), so writing `grep:` in a
+    # comment would have reddened it for a reason unrelated to selection.
+    #
+    # So: strip comments and string literals with the same lexer the rest of this
+    # file uses, then look for the KEY rather than the word. `grep` and
+    # `grepInvert` are the only two Playwright options that narrow a selection by
+    # title, so the pair is the whole population.
+    stripped = _strip_comments(source)
+    narrowing = sorted(
+        {match.group("key") for match in re.finditer(r"\b(?P<key>grepInvert|grep)\s*:", stripped)}
     )
+    assert not narrowing, (
+        f"{VISUAL_PW_CONFIG.name} declares {narrowing}, which narrows the "
+        "selection by test TITLE on top of the file match. The workflow's "
+        "`visual_total -eq all_visual` differential would then go red for a "
+        "reason that has nothing to do with the baselines — and a describe-block "
+        "rename would silently change which snapshots are compared."
+    )
+    # PARTNER for the absence check above: prove the lexer did not simply blank
+    # the whole file, which would make `narrowing` empty for free. `testMatch`
+    # survives stripping because it is real code, not a comment.
+    assert "testMatch" in stripped, (
+        f"comment-stripping {VISUAL_PW_CONFIG.name} removed its `testMatch` "
+        "declaration too, so the check above passed over an empty file"
+    )
+
+    # WHAT THIS CANNOT SEE, stated rather than implied: a selection narrowed at
+    # RUN time (a `--grep` appended to the workflow's command line), a key built
+    # dynamically, or one arriving through a spread from another module. The
+    # run-time case is caught one layer out — the job's execution assertion
+    # accounts for every selected test against `VISUAL_TOTAL`, so a narrowed run
+    # fails the full account. The other two are not covered by anything.
 
 
 def _visual_selection_body() -> str:
@@ -2308,6 +2523,72 @@ def test_the_visual_execution_assertion_actually_fires(
             f"the visual execution assertion PASSED on {label} ({stats}). That "
             f"is a silent-green visual job.\n{result.stdout}\n{result.stderr}"
         )
+
+
+@pytest.mark.parametrize(
+    ("label", "ci_listing", "all_listing", "only_line"),
+    [
+        # ONLY `ci_visual -eq 0` can see this. A visual test leaked into the
+        # REQUIRED job's selection, and the totals still balance: the CI config
+        # selects 2, the default selects 3 with 1 visual, and 2 == 3 - 1. The
+        # differential is satisfied, `all_visual > 0` is satisfied. Delete the
+        # `ci_visual` line and this listing sails through — with the demo job now
+        # running baseline-less screenshots on ubuntu, which is the failure
+        # `playwright.demo-ci.config.ts` was created to prevent.
+        (
+            "a visual test leaking into the required job",
+            _listing([_DEMO_ORDINARY, _DEMO_VISUAL], 2, files=2),
+            _listing([_DEMO_ORDINARY, _DEMO_KEEPS_FOCUS, _DEMO_VISUAL], 3),
+            'test "$ci_visual" -eq 0',
+        ),
+        # ONLY `all_visual -gt 0` can see this. `visual.spec.ts` is gone
+        # entirely, so `ci_visual` is 0 (satisfied), `all_visual` is 0, and
+        # `ci_total == all_total - 0` is satisfied. Delete the `all_visual` line
+        # and deleting the whole spec file becomes a green way to satisfy "zero
+        # visual tests in the CI run" — the exclusion made vacuous rather than
+        # honoured.
+        (
+            "visual.spec.ts deleted, making the exclusion vacuous",
+            _listing([_DEMO_ORDINARY, _DEMO_KEEPS_FOCUS], 2, files=1),
+            _listing([_DEMO_ORDINARY, _DEMO_KEEPS_FOCUS], 2),
+            'test "$all_visual" -gt 0',
+        ),
+    ],
+    ids=["visual-leaked-into-ci", "visual-spec-deleted"],
+)
+def test_each_demo_partition_line_bites_on_its_own(
+    label: str, ci_listing: str, all_listing: str, only_line: str, tmp_path: Path
+) -> None:
+    """The two lines whose MEANING #325 re-purposed, each proved separately.
+
+    `ci_visual -eq 0` used to mean "the visual specs run in no CI job at all".
+    It now means "not in the REQUIRED job", with `visual-e2e`'s
+    `visual_total -eq all_visual` as its partner. Re-purposing a line is a good
+    moment to check it still does anything, and neither it nor `all_visual > 0`
+    had an executable proof — the new job's three equivalent lines did, which is
+    the wrong way round, since these two are the older and the load-bearing pair.
+
+    Each case is built so that EXACTLY ONE line rejects it: every other
+    assertion in the guard is satisfied. Measured 2026-09-16 by deleting each
+    line in turn from ``.github/workflows/frontend.yml`` — the matching case
+    turned green and the other stayed red, and the whole backend gating suite
+    stayed green with either line deleted, which is what made them worth pinning.
+
+    Turns red if: the line named in ``only_line`` is deleted or weakened.
+    """
+    # The guard must still CONTAIN the line this case is about, or the case is
+    # proving something about a script that no longer has it.
+    body = _demo_selection_body()
+    assert only_line in body, (
+        f"the demo selection guard no longer contains `{only_line}`, so this "
+        "case is not testing what its id says it is"
+    )
+    result, _ = _run_selection_guard(body, _demo_fixtures(ci_listing, all_listing), tmp_path)
+    assert result.returncode != 0, (
+        f"the demo selection guard PASSED on {label}. `{only_line}` is the only "
+        f"line that rejects it, so it is now doing nothing.\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
 
 
 _LIVE_REFUSES = "behavior.spec.ts:24:3 › Chat › composer refuses a second question (live only)"
