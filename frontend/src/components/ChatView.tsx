@@ -6,6 +6,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
+import {
+  EMPTY_SUBMIT_NUDGE,
+  EMPTY_SUBMIT_NUDGE_GLYPH,
+} from "../lib/composerNudge";
 
 interface ChatViewProps {
   messages: Array<{
@@ -52,6 +56,22 @@ interface ChatViewProps {
       `pending`, so the two cannot disagree. Rendered directly — this component
       keeps no copy of it, which is what makes a stale refusal unrepresentable. */
   refusedInFlight: boolean;
+  /** #445. True while the EMPTY-submit nudge is up for this composer. Its hero
+      twin is `heroNudge`; both are raised by the hook's single
+      `nudgeEmptySubmit`, so the two cannot drift apart ON THE BEHAVIOUR THE
+      PARITY GUARD RECORDS — focus, the visible warning, the announcement, and
+      that nothing was sent — without it going red. Not on colour, not on
+      real-browser timing, and not for a composer nobody added to its list; an
+      earlier draft of this line said "cannot drift apart" flat, which claims
+      all three. Distinct from `refusedInFlight`: empty is not a refusal, and
+      the refusal copy's promise that "anything you type is kept" is a false
+      statement about an empty box. */
+  chatNudge?: boolean;
+  /** The composer input, owned by the hook so it can focus the box it just
+      nudged — exactly as `heroRef` is on the landing side. OPTIONAL with a
+      local fallback below, so the component still renders standalone (the
+      component tests build it directly and do not care which box has focus). */
+  composerRef?: React.RefObject<HTMLInputElement>;
 }
 
 export function ChatView({
@@ -68,9 +88,12 @@ export function ChatView({
   highlightedIndex = -1,
   sendTick = 0,
   refusedInFlight,
+  chatNudge = false,
+  composerRef: composerRefProp,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
-  const composerRef = useRef<HTMLInputElement>(null);
+  const localComposerRef = useRef<HTMLInputElement>(null);
+  const composerRef = composerRefProp ?? localComposerRef;
   // Stick-to-bottom LATCH. Armed (true) means "keep pinning to the bottom as new
   // content streams in"; the first time the user scrolls UP it disarms, so streaming
   // chunks stop yanking them back down. It re-arms only when they return to the true
@@ -678,6 +701,15 @@ export function ChatView({
             ↑
           </button>
         </div>
+        {/* #445. The chat composer's half of the empty-submit nudge, in the
+            same place relative to its box as `.hero-nudge` is to the hero's,
+            and sharing ONE stylesheet rule with it so the two cannot be
+            restyled apart. */}
+        {chatNudge && (
+          <p className="composer-nudge" aria-hidden="true">
+            {EMPTY_SUBMIT_NUDGE_GLYPH} {EMPTY_SUBMIT_NUDGE}
+          </p>
+        )}
         {/* ALWAYS rendered, empty when idle. A live region has to be in the
             accessibility tree BEFORE its text changes, or the change is
             unreliable across screen readers — the pending bubble above was
@@ -686,11 +718,30 @@ export function ChatView({
             not: a reader who has scrolled up had the only explanation of the
             refusal off-screen. */}
         <p className="sr-only" role="status">
-          {refusedInFlight
-            ? REFUSED_TEXT
-            : pending
-              ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
-              : settled}
+          {/* #445 sits FIRST, ahead of the refusal — and the reducer makes the
+              order moot rather than load-bearing: `REFUSED_SUBMIT` clears
+              `chatNudge` in the same state object, so the two are never true
+              together. That is deliberate. Resolving the clash by ORDER alone
+              was the first shape, and a review reproduced it swallowing a real
+              refusal for good (see the reducer for the sequence). Order still
+              decides `chatNudge` vs `pending`, which DO coexist.
+
+              ONE COST, recorded rather than left for the next reader to find:
+              an answer landing inside the nudge's window has its "Answer ready"
+              announcement held until the nudge clears — up to 3s late. Nothing
+              is lost, because the region's text still changes when it clears
+              and `role="status"` fires on the change. Narrower still, a
+              SECOND answer inside the same window resets `settled` to "" first,
+              and that one arrival is never announced. Judged the better trade
+              than the alternative, which is a reader pressing Enter on an empty
+              box and hearing nothing at all. */}
+          {chatNudge
+            ? EMPTY_SUBMIT_NUDGE
+            : refusedInFlight
+              ? REFUSED_TEXT
+              : pending
+                ? "Searching the docs. Send is unavailable until this answer arrives; anything you type is kept."
+                : settled}
         </p>
         <p className="composer-hint">
           CiteVyn answers from the official docs.{" "}

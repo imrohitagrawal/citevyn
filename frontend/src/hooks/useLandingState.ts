@@ -21,6 +21,7 @@ import {
 } from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
+import { EMPTY_SUBMIT_NUDGE_MS } from "../lib/composerNudge";
 import { getAuthSnapshot } from "../lib/authStore";
 import { isModalDialogOpen } from "../lib/dialogStack";
 import { scrollToSection } from "../lib/scrollToSection";
@@ -74,6 +75,16 @@ interface AppState {
   chatInput: string;
   phIndex: number;
   heroNudge: boolean;
+  /** #445. The chat composer's half of the empty-submit nudge. A SEPARATE flag
+      from `heroNudge` rather than one shared boolean: the two composers are
+      never mounted together, so one flag would carry a nudge raised on the
+      landing page straight onto the chat screen.
+      Two flags do not on their own stop a nudge outliving its own screen — an
+      earlier draft of this comment claimed they did, and a review disproved it
+      by going chat -> landing -> chat inside the 3s window. `SET_SCREEN` is
+      what actually clears both; `REFUSED_SUBMIT` clears this one too. Raised
+      only by `nudgeEmptySubmit`, which owns both. */
+  chatNudge: boolean;
   highlight: number;
   openFaq: number;
   hero: HeroState;
@@ -125,6 +136,7 @@ type Action =
   | { type: "SET_CHAT_INPUT"; value: string }
   | { type: "ADVANCE_PLACEHOLDER" }
   | { type: "SET_HERO_NUDGE"; value: boolean }
+  | { type: "SET_CHAT_NUDGE"; value: boolean }
   | { type: "SET_HIGHLIGHT"; index: number }
   | { type: "SET_OPEN_FAQ"; index: number }
   | { type: "SET_HERO"; hero: Partial<HeroState> }
@@ -152,6 +164,7 @@ const initialState: AppState = {
   chatInput: "",
   phIndex: 0,
   heroNudge: false,
+  chatNudge: false,
   highlight: -1,
   openFaq: 0,
   hero: {
@@ -187,6 +200,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, phIndex: (state.phIndex + 1) % PLACEHOLDERS.length };
     case "SET_HERO_NUDGE":
       return { ...state, heroNudge: action.value };
+    case "SET_CHAT_NUDGE":
+      return { ...state, chatNudge: action.value };
     case "SET_HIGHLIGHT":
       return { ...state, highlight: action.index };
     case "SET_OPEN_FAQ":
@@ -231,7 +246,20 @@ function reducer(state: AppState, action: Action): AppState {
       // A highlight is a transient "here is your existing answer" tied to the
       // CURRENT ChatView mount. Leaving or entering the chat screen makes it stale,
       // and a stale one scrolls the next mount to an unrelated message (#302 review).
-      return { ...state, screen: action.screen, highlight: -1 };
+      // Both nudges go with it (#445 review). A nudge is a transient "that
+      // submit went nowhere" tied to the composer that raised it, and the flag
+      // outlived its screen: empty Enter in chat, "Back to landing", then the
+      // header CTA within the 3s window remounted `ChatView` with `chatNudge`
+      // still set, so a freshly-opened chat announced "Type a question first"
+      // about a submit the reader never made. `heroNudge` leaked the same way
+      // across enterChat and back, and had done since before this change.
+      return {
+        ...state,
+        screen: action.screen,
+        highlight: -1,
+        heroNudge: false,
+        chatNudge: false,
+      };
     case "SET_PENDING":
       // MIRRORS the ref; it does not track it in parallel. An earlier version
       // applied a delta here and a delta to the ref, which is two sources of
@@ -272,7 +300,30 @@ function reducer(state: AppState, action: Action): AppState {
     case "BUMP_SEND_TICK":
       return { ...state, sendTick: state.sendTick + 1 };
     case "REFUSED_SUBMIT":
-      return { ...state, refusedInFlight: true };
+      // CLEARS `chatNudge` in the SAME state object (#445 review). A refusal and
+      // an empty-submit nudge are both announced through ONE `role="status"`
+      // region, so whichever is rendered hides the other — and a review
+      // reproduced the bad direction in three user actions and no unusual
+      // timing: empty Enter while an answer is in flight raises the nudge for
+      // 3s; a REAL question typed half a second later is refused INTO that
+      // window and announced nothing; the window then closes, `SET_PENDING(0)`
+      // clears `refusedInFlight` below, and the refusal is destroyed before it
+      // is ever spoken. The reader pressed Enter on a question they had typed
+      // and was told nothing — the exact failure #356 gap 2 exists to prevent.
+      //
+      // Clearing here rather than ordering the two in the view makes the
+      // conflicting pair UNREPRESENTABLE instead of merely resolved, which is
+      // the same reason `refusedInFlight` lives beside `pending` rather than as
+      // a latch in `ChatView`. Safe in the other direction too: this action
+      // fires only when the user submits a question WITH text, so it is always
+      // strictly newer than the nudge and always the user's own doing.
+      //
+      // NOT done for `SET_PENDING`, deliberately. That fires when any request
+      // resolves, including one the reader never touched, so clearing there
+      // would let an answer landing 50ms after an empty Enter erase the nudge
+      // before it could be read — re-creating the silent empty submit this
+      // whole change exists to remove.
+      return { ...state, refusedInFlight: true, chatNudge: false };
     default:
       return state;
   }
@@ -377,6 +428,7 @@ interface TimerRefs {
   placeholderTimer: Timer | null;
   heroPause: Timer | null;
   nudgeTimeout: Timer | null;
+  chatNudgeTimeout: Timer | null;
   highlightRestart: Timer | null;
   highlightTimeout: Timer | null;
 }
@@ -389,6 +441,7 @@ export function useLandingState() {
     placeholderTimer: null,
     heroPause: null,
     nudgeTimeout: null,
+    chatNudgeTimeout: null,
     highlightRestart: null,
     highlightTimeout: null,
   });
@@ -401,6 +454,12 @@ export function useLandingState() {
   const chatStreams = useRef<Set<Timer>>(new Set());
 
   const heroRef = useRef<HTMLInputElement>(null);
+  // #445. The chat composer's input, owned HERE rather than inside `ChatView`,
+  // exactly as `heroRef` is — `nudgeEmptySubmit` has to focus whichever box was
+  // submitted empty, and a ref that lives in the view is not reachable from the
+  // hook. `ChatView` still creates its own as a fallback so that the component
+  // renders standalone.
+  const composerRef = useRef<HTMLInputElement>(null);
 
   // Toast surface for transport/rate-limit errors on the live path.
   const { toasts, addToast, removeToast } = useToast();
@@ -1100,16 +1159,39 @@ export function useLandingState() {
   // Hero "Ask" is self-contained: on a valid question it navigates into chat
   // itself; on empty input it focuses the box and nudges. Defined *after*
   // `enterChat` so its useCallback dependency is in scope (no temporal-dead-zone).
+  // #445. The EMPTY-SUBMIT signal, for whichever composer was submitted empty.
+  //
+  // ONE function, two call sites, because the bug this closes was two
+  // implementations of the same idea drifting apart: the hero had all of this
+  // and `submitChat` had a bare `return`. Anything added here — a longer
+  // window, a different flag, a second announcement — reaches both composers or
+  // neither, which is what the parity guard asserts through the rendered DOM.
+  //
+  // `timers.current[...]?.stop()` FIRST. Without it a second empty submit
+  // inside the window re-armed the handle while the FIRST timeout stayed live,
+  // so the nudge was cleared early by a timer the reader had already
+  // superseded — the shape the highlight timers a few lines up already guard
+  // against with their own `?.stop()`.
+  const nudgeEmptySubmit = useCallback((which: "hero" | "chat") => {
+    const composer =
+      which === "hero"
+        ? ({ ref: heroRef, timer: "nudgeTimeout", action: "SET_HERO_NUDGE" } as const)
+        : ({ ref: composerRef, timer: "chatNudgeTimeout", action: "SET_CHAT_NUDGE" } as const);
+    composer.ref.current?.focus();
+    timers.current[composer.timer]?.stop();
+    dispatch({ type: composer.action, value: true });
+    timers.current[composer.timer] = timeout(
+      () => dispatch({ type: composer.action, value: false }),
+      EMPTY_SUBMIT_NUDGE_MS,
+    );
+  }, []);
+
   const askHero = useCallback(() => {
     const q = state.heroInput.trim();
     if (!q) {
-      // Empty ask: focus the box, shake + amber border + inline warning
-      heroRef.current?.focus();
-      dispatch({ type: "SET_HERO_NUDGE", value: true });
-      timers.current.nudgeTimeout = timeout(
-        () => dispatch({ type: "SET_HERO_NUDGE", value: false }),
-        3000,
-      );
+      // Empty ask: focus the box, shake + amber border + inline warning, and
+      // announce it in the hero's persistent `role="status"` region.
+      nudgeEmptySubmit("hero");
       return;
     }
     // Clear the hero box as the question is dispatched into chat (mirrors how
@@ -1117,7 +1199,7 @@ export function useLandingState() {
     // shows a stale question.
     dispatch({ type: "SET_HERO_INPUT", value: "" });
     enterChat(q, { carryHeroText: false });
-  }, [state.heroInput, enterChat]);
+  }, [state.heroInput, enterChat, nudgeEmptySubmit]);
 
   const onHeroKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1146,7 +1228,21 @@ export function useLandingState() {
     // "Enter was pressed on an empty box". Neither order changes what is sent:
     // an empty submit was already a no-op on both sides of the gate.
     const t = state.chatInput.trim();
-    if (!t) return;
+    if (!t) {
+      // #445. This WAS a bare `return`, one line above the in-flight refusal
+      // whose own comment records that a bare `return` produces zero DOM
+      // mutations on both the Enter path and the click path. Someone fixed the
+      // silent return below and left this one, so the two composers disagreed
+      // on identical input: the hero nudged, the chat did nothing at all.
+      //
+      // NOT `REFUSED_SUBMIT`. Empty is not a refusal — there was no question to
+      // refuse — and the refusal copy promises "anything you type is kept",
+      // which is a false statement about an empty box. The test named "does not
+      // announce a refusal for an EMPTY submit while in flight" pins that
+      // distinction; this is the distinct signal it leaves room for.
+      nudgeEmptySubmit("chat");
+      return;
+    }
     if (inFlight.current) {
       // #356 gap 2. The refusal used to be a bare `return`: measured with a
       // MutationObserver over the whole body, it produced ZERO DOM mutations on
@@ -1165,7 +1261,7 @@ export function useLandingState() {
     }
     setChatInput("");
     send(t);
-  }, [state.chatInput, send]);
+  }, [state.chatInput, send, nudgeEmptySubmit]);
 
   const onChatKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -1365,6 +1461,7 @@ export function useLandingState() {
     chatSuggestions,
     openFaq: state.openFaq,
     heroRef,
+    composerRef,
     onHeroInput,
     onHeroKey,
     onAskHero: askHero,
