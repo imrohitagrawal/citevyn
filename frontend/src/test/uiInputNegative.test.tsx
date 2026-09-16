@@ -729,20 +729,45 @@ describe("§8b cells — AuthModal, all four modes", () => {
         ).toBe(1);
       });
 
-      // CELL: empty submit and whitespace-only. jsdom implements NEITHER the
-      // native `required` bubble nor constraint validation on submit, so this
-      // asserts the ATTRIBUTE and says so — see §8b's jsdom section. The
-      // behaviour itself is a browser guarantee, not something this suite proves.
-      it("empty submit: every required field advertises `required`", async () => {
+      // CELL: empty submit and whitespace-only.
+      //
+      // MEASURED, not assumed, because the first draft of this test asserted
+      // only `toBeRequired()` on the strength of "jsdom can't do constraint
+      // validation" — which is half wrong. jsdom DOES implement
+      // `checkValidity()` and `ValidityState`, and an empty required field
+      // really does report `valueMissing: true`. What jsdom does NOT do is run
+      // that validation as part of a submit (`HTMLFormElement.prototype.submit`
+      // is `notImplemented`) or show the native bubble.
+      //
+      // So this asserts the CONSTRAINT, not just the attribute: the attribute is
+      // what the markup says, `checkValidity()` is what the DOM concludes from
+      // it. The remaining gap — that a real browser BLOCKS the submit on that
+      // conclusion — is a browser guarantee this suite does not exercise, and
+      // §8b says so rather than pretending otherwise.
+      it("empty submit: every required field is invalid while empty", async () => {
         const user = userEvent.setup();
         await mode.arrive(user);
         const dialog = screen.getByRole("dialog");
         const inputs = Array.from(dialog.querySelectorAll("input"));
         expect(inputs.length, `${mode.label}: the form rendered no inputs`).toBeGreaterThan(0);
         for (const input of inputs) {
-          // `current_password` is the one optional field AT THE SCHEMA LEVEL,
-          // but the form only renders it when the server WILL require it.
+          // `current_password` is the one field optional AT THE SCHEMA LEVEL,
+          // but the form renders it only when the server WILL require it.
           expect(input, `${mode.label}: an input is submittable while empty`).toBeRequired();
+          const before = input.value;
+          input.value = "";
+          expect(
+            input.validity.valueMissing,
+            `${mode.label}: an emptied field does not report valueMissing`,
+          ).toBe(true);
+          expect(input.checkValidity(), `${mode.label}: an empty field reports VALID`).toBe(false);
+          // The partner: with content it must be valid again, so this cannot
+          // pass on a field that is invalid for some unrelated reason.
+          input.value = before || "x".repeat(12);
+          expect(
+            input.checkValidity(),
+            `${mode.label}: a FILLED field still reports invalid — the check is measuring something else`,
+          ).toBe(true);
         }
       });
     });

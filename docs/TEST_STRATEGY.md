@@ -271,17 +271,24 @@ and raw HTTP status numbers are not user-facing copy.
 
 ### What jsdom cannot prove, and what to do about it
 
-jsdom implements neither **native `required` bubbling** nor **constraint
-validation on submit**, and it does not enforce **`maxLength`** or `minLength` on
-programmatic value assignment. A jsdom test that appears to prove a browser is
-refusing an empty or over-long field is proving nothing.
+Measured against this repo's jsdom, not assumed — the first draft of this
+section was half wrong and said so about more than jsdom actually fails at:
+
+| Thing | jsdom | Consequence |
+|---|---|---|
+| `checkValidity()` / `validity.valueMissing` | **works** | An empty `required` field *can* be proven invalid in a unit test. Do that. |
+| Validation as part of submit | **absent** — `HTMLFormElement.prototype.submit` is `notImplemented` and `form.submit()` is a silent no-op | "The browser blocked the submit" is not provable here. |
+| Native validation bubble | absent | Not provable here. |
+| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | Over-length is not provable here at all. |
+| `validity.tooLong` | **always false** after a programmatic assignment (per spec it needs a dirty value from a user edit) | So `checkValidity()` does not rescue the over-length cell either. |
 
 So, for those:
 
-1. **Assert the attribute** and say in the test what that does and does not
-   prove. `toBeRequired()` proves the form *asks* the browser to refuse an empty
-   field. It does not prove any refusal happened; that is a browser guarantee
-   this suite does not exercise.
+1. **Assert the constraint where jsdom has one, the attribute where it does
+   not**, and say which you did. `toBeRequired()` only reports what the markup
+   says; `checkValidity() === false` reports what the DOM concludes from it, and
+   is the stronger claim available for the empty cell. Neither proves a real
+   browser *acted* on that conclusion — that gap is named, not papered over.
 2. **Put the behaviour in Playwright** where it is load-bearing enough to earn a
    real browser (`frontend/tests/behavior.spec.ts`).
 3. **Back it with a server-side test.** The browser is bypassable, so the bound
@@ -291,6 +298,31 @@ So, for those:
 
 A cell that cannot be honestly tested is written down here as untested. It is not
 skipped silently and it is not covered by a test that asserts something easier.
+
+### Mutation-testing a Python bound: clear `__pycache__`, and prove what loaded
+
+Found while proving §8b's own guards, and it cost a green suite that was not
+green. Restoring a mutated `.py` with `cp` leaves the file byte-identical —
+`cmp` clean, `git status` clean — but can leave a **stale `.pyc`** behind:
+CPython invalidates by the source's recorded mtime, and a mutate-then-restore
+inside the same timestamp can match it, so the interpreter keeps serving the
+MUTATED module. Here that left `_PASSWORD_MAX_LENGTH` reading **256** from cache
+while `auth.py` on disk said **128**, and three tests failed with no explanation
+visible in the diff.
+
+The failure mode is the dangerous direction too: had the cache held the
+*restored* value during a mutation run, the mutant would have reported SURVIVED
+and the guard would have looked weak when it was fine — or worse, held a
+*mutated* value during a clean run and reported DIED for a guard that never bit.
+
+So, when mutating Python:
+
+1. `find backend/app backend/tests -name __pycache__ -type d -exec rm -rf {} +`
+   before **and** after every mutation run.
+2. **Print what the interpreter actually loaded**, not what the file says —
+   `python -c "from app.api.routes.auth import _PASSWORD_MAX_LENGTH; print(...)"`
+   — and record it beside the mutation's result. A `grep -F` on the file proves
+   the edit landed on disk; only an import proves it reached the running code.
 
 ## 9. No-Answer Tests
 
