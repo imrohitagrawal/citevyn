@@ -3,8 +3,10 @@
 Produced by the four-lens test-maturity audit of 2026-09-16 (software test engineer,
 principal architect, principal automation engineer, engineering test manager), read-only
 at `0a7e1b5`, with every finding re-checked by a hostile skeptic. The ranked plan that
-came out of it is tracked as GitHub issues #447-#464 and #467, indexed in
-[`BACKLOG.md`](BACKLOG.md).
+came out of it is tracked as GitHub issues #447-#464, indexed in
+[`BACKLOG.md`](BACKLOG.md). Issue #467 is indexed alongside them but did not come from this
+audit: it was found reviewing PR #466, and concerns a rule (`TEST_STRATEGY` §8b) that did not
+exist at `0a7e1b5`.
 
 A silent hole reads as an oversight. A recorded decision reads as a decision. Each item
 below was considered, measured where measurement was cheap, and deliberately left undone.
@@ -26,11 +28,13 @@ playwright.config.ts:31 starts `npm run dev`, so a Lighthouse score there measur
 
 ### 4. Adding a WebKit (or any second) Playwright project to the required demo-e2e job
 
-Measured: the job runs 698s inside timeout-minutes: 20 with workers: 1 (run 35019295524), so a second project overruns the cap. Adding it to playwright.demo-ci.config.ts alone breaks the `ci_total == all_total - all_visual` differential; adding it to the shared base doubles the four `if (!isLive)` self-skips to eight, reddening frontend.yml's `stats["skipped"] != 4` and then the backend regex that pins that literal (test_gating_workflows.py:1877). If cross-engine signal is wanted it must be a separate advisory job with its own name, and it must exclude contrast-floor.spec.ts, faint-contrast.spec.ts and every contrast-kit.ts consumer, which are Chromium-pinned by construction (contrast-kit.ts:376 font-size quantisation, :444-447 -webkit-text-fill-color resolution, focus-ring.spec.ts:166 colour serialisation) and would produce false reds rather than signal.
+Measured: the suite STEP runs 698s and the whole job 747s, inside timeout-minutes: 20 (which applies to the job) with workers: 1 (run 35019295524), so a second project overruns the cap. Adding it to playwright.demo-ci.config.ts alone breaks the `ci_total == all_total - all_visual` differential; adding it to the shared base doubles the four `if (!isLive)` self-skips to eight, reddening frontend.yml's `stats["skipped"] != 4` and then the backend regex that pins that literal (test_gating_workflows.py:1877). If cross-engine signal is wanted it must be a separate advisory job with its own name, and it must exclude contrast-floor.spec.ts, faint-contrast.spec.ts and every contrast-kit.ts consumer, which are Chromium-pinned by construction (contrast-kit.ts:376 font-size quantisation, :444-447 -webkit-text-fill-color resolution, focus-ring.spec.ts:166 colour serialisation) and would produce false reds rather than signal.
 
-### 5. Emitting the five missing audit events now
+### 5. Emitting the six missing audit events now
 
-Three of them are already durably recorded elsewhere -- IngestionJob rows (worker/runner.py:253) and EvaluationRun rows (worker/promotion_eval.py:387), both readable through existing admin GETs -- so the gap is that audit_events is not the single queryable trail the doc implies, not that the events vanish. admin_auth_failure needs require_admin_api_key (core/security.py:70-113, a synchronous dependency with no AsyncSession) to change signature, which is an auth-dependency change. File the inventory issue instead.
+`AuditAction` defines ten members and writers exist for exactly four: `ask_question`, `auth_failed`, `login` and `promote_index`. Two of the six without writers are already durably recorded elsewhere — `IngestionJob` rows (`worker/runner.py:253`) and `EvaluationRun` rows (`worker/promotion_eval.py:387`), both readable through admin GETs — so emitting them as audit rows duplicates a record that already exists. The rest need either an auth-dependency signature change (`require_admin_api_key` is synchronous and has no `AsyncSession`, so an admin-auth-failure row is not implementable in place) or surfaces this round put out of bounds. Tracked in #462 instead, with the cheap half — a failed-password-login row, which is RED on today's HEAD and needs no mutation — folded into a later package.
+
+An earlier version of this entry said FIVE missing events and THREE already recorded. Both were counts of something enumerable, and both were wrong.
 
 ### 6. Changing the daily-cost-cap response from 500 to 503
 
