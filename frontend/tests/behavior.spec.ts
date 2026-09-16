@@ -1180,7 +1180,17 @@ test.describe("Wiring: suggestions + personas send their own label", () => {
 });
 
 test.describe("Chat composer + refusal/dedup content", () => {
-  test("send button sends on click and is a no-op on empty input", async ({ page }) => {
+  test("send button sends on click, and an empty click sends nothing but SAYS so", async ({
+    page,
+  }) => {
+    // The title used to end "is a no-op on empty input", and that is exactly
+    // what #445 was: the click produced zero DOM mutations, so a screen-reader
+    // user pressed the arrow and nothing whatsoever happened. Sending nothing
+    // is still correct; being silent about it was not. The count assertion is
+    // unchanged — it is the nudge assertions that are new, and they are what
+    // stops "no-op" being restored under a title that no longer says so.
+    // RED WHEN: `submitChat`'s empty branch goes back to a bare `return`, or
+    // the nudge stops reaching either the screen or the live region.
     await enterChat(page);
     const input = page.locator(".chat-input");
     await input.fill("What is Claude Code?");
@@ -1188,10 +1198,26 @@ test.describe("Chat composer + refusal/dedup content", () => {
     await expect(page.locator(".message.user-msg")).toHaveCount(1);
     await waitStreamDone(page);
     const before = await page.locator(".message.user-msg").count();
+    // Partner for every absence below: a real question DID reach the transcript
+    // just now, and no nudge is up, so what the empty click changes is visible.
+    expect(before).toBeGreaterThan(0);
+    await expect(page.locator(".composer-nudge")).toHaveCount(0);
+
     await input.fill("");
     await page.locator(".send-button").click();
+
+    await expect(page.locator(".composer-nudge")).toBeVisible();
+    await expect(page.locator('.composer [role="status"]')).toHaveText(
+      "Type a question first. Nothing was sent.",
+    );
+    // Focus went to the box it is talking about — measured, not assumed, and
+    // the one part of the nudge a jsdom test cannot prove reaches a browser.
+    await expect(input).toBeFocused();
     await page.waitForTimeout(250);
     expect(await page.locator(".message.user-msg").count()).toBe(before);
+
+    // …and it does not outstay its window, so the region hands back.
+    await expect(page.locator(".composer-nudge")).toHaveCount(0, { timeout: 5000 });
   });
 
   test("refusal shows the exact badge label + a non-empty body; dedup is case/whitespace-insensitive", async ({ page }) => {

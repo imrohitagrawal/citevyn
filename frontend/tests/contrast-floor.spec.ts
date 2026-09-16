@@ -199,6 +199,35 @@ async function showNudge(page: import("@playwright/test").Page) {
 }
 
 /**
+ * The CHAT composer's nudge (#445), which is the same amber on the same canvas
+ * and was an unmeasured surface for exactly as long as it took a reviewer to
+ * ask. It shares ONE declaration block with `.hero-nudge` in `landing.css` —
+ * but a shared rule is not a shared contrast reading, because contrast is
+ * foreground AND background, and the two agree only while both composite onto
+ * `--bg`. Nothing between `.composer-nudge` and `body` paints one today
+ * (`.composer`, `.chat-screen` and `[data-screen-label="Chat"]` all declare no
+ * background); the day one does, `.hero-nudge` stays green and this one does
+ * not, which is precisely the reading this call goes and takes.
+ *
+ * Same two traps as `showNudge` above, for the same reasons: a hard 3000 ms
+ * clear, so call it immediately before the measurement, and a `cv-fadeup` that
+ * starts at `opacity: 0`, which the compositor refuses to score.
+ *
+ * `aria-hidden` on the visible nudge does not hide it from here — the sweep
+ * measures computed style and client rects, not the accessibility tree.
+ */
+async function showChatNudge(page: import("@playwright/test").Page) {
+  await expect(page.locator(".chat-input")).toHaveValue("");
+  await page.locator(".send-button").click();
+  await expect(page.locator(".composer-nudge")).toBeVisible();
+  await expect
+    .poll(() => page.locator(".composer-nudge").evaluate((el) => getComputedStyle(el).opacity), {
+      timeout: 2000,
+    })
+    .toBe("1");
+}
+
+/**
  * Mount the two transport-failure badges where a real one would render.
  *
  * Demo mode never produces a 429 or a 5xx, so `ChatView`'s `errorKind` branches
@@ -352,9 +381,17 @@ for (const theme of THEMES) {
     test("the chat view, transport-failure badges included", async ({ page }) => {
       // RED WHEN: `.notice-rate-limit` or `.notice-error` goes back to its
       // hardcoded rgba() — verified, and the dark theme reports 3.17:1 and
-      // 2.67:1 respectively.
+      // 2.67:1 respectively. Also RED WHEN `.composer-nudge` (#445) is coloured
+      // below the floor, or the chat composer gains a background that darkens
+      // the ground under it — the whole-page sweep scores every text run on
+      // screen, so raising the nudge first is all it takes to include it.
       await enterChat(page);
       await mountSyntheticNotices(page);
+      // LAST, immediately before the sweep: the nudge clears itself on a hard
+      // 3000 ms timer, so anything between this and the measurement is a race
+      // the measurement loses silently — the probe simply finds nothing, on a
+      // slow machine only.
+      await showChatNudge(page);
       const sweep = await page.evaluate(() => window.__cv396.floorSweep());
       expectSweepAccountsForEverything("chat", sweep, 10);
       expect(reportFindings("chat", sweep)).toEqual([]);
