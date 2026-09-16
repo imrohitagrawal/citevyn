@@ -6,11 +6,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
-import { MAX_QUESTION_LENGTH } from "../lib/composerInput";
-import {
-  EMPTY_SUBMIT_NUDGE,
-  EMPTY_SUBMIT_NUDGE_GLYPH,
-} from "../lib/composerNudge";
+import { EMPTY_SUBMIT_NUDGE_GLYPH } from "../lib/composerNudge";
 
 interface ChatViewProps {
   messages: Array<{
@@ -69,7 +65,8 @@ interface ChatViewProps {
       all three. Distinct from `refusedInFlight`: empty is not a refusal, and
       the refusal copy's promise that "anything you type is kept" is a false
       statement about an empty box. */
-  chatNudge?: boolean;
+  /** #446 review: the MESSAGE to show, or null. */
+  chatNudge?: string | null;
   /** The composer input, owned by the hook so it can focus the box it just
       nudged — exactly as `heroRef` is on the landing side. OPTIONAL with a
       local fallback below, so the component still renders standalone (the
@@ -91,7 +88,7 @@ export function ChatView({
   highlightedIndex = -1,
   sendTick = 0,
   refusedInFlight,
-  chatNudge = false,
+  chatNudge = null,
   composerRef: composerRefProp,
 }: ChatViewProps) {
   const chatListRef = useRef<HTMLDivElement>(null);
@@ -667,12 +664,6 @@ export function ChatView({
             value={chatInput}
             onChange={onChatInput}
             onKeyDown={onChatKey}
-            // #446. The server's own ceiling (`AnswerRequest.message`,
-            // max_length=4000), mirrored so the browser stops what the server
-            // would reject. Without it the request went out, came back 422, and
-            // `submitChat` had ALREADY cleared the box — so the user lost a long
-            // question and was told the service was temporarily unavailable.
-            maxLength={MAX_QUESTION_LENGTH}
             placeholder="Ask about Claude, Codex, Gemini…"
             className="chat-input"
           />
@@ -728,7 +719,7 @@ export function ChatView({
             not the rendered result. */}
         {chatNudge && (
           <p className="composer-nudge" aria-hidden="true">
-            {EMPTY_SUBMIT_NUDGE_GLYPH} {EMPTY_SUBMIT_NUDGE}
+            {EMPTY_SUBMIT_NUDGE_GLYPH} {chatNudge}
           </p>
         )}
         {/* ALWAYS rendered, empty when idle. A live region has to be in the
@@ -757,7 +748,7 @@ export function ChatView({
               than the alternative, which is a reader pressing Enter on an empty
               box and hearing nothing at all. */}
           {chatNudge
-            ? EMPTY_SUBMIT_NUDGE
+            ? chatNudge
             : refusedInFlight
               ? REFUSED_TEXT
               : pending

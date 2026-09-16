@@ -45,7 +45,32 @@ export const MAX_QUESTION_LENGTH = 4000;
 export interface SubmitKeyEvent {
   key: string;
   keyCode?: number;
+  /**
+   * React's synthetic event nests the real one here. OPTIONAL, because a raw
+   * DOM `KeyboardEvent` has no such property at all.
+   */
   nativeEvent?: { isComposing?: boolean };
+  /**
+   * ...and a raw DOM `KeyboardEvent` carries the flag HERE instead.
+   *
+   * BOTH SHAPES ARE READ, and that is a fix for a real hole rather than
+   * defensive noise. With only `nativeEvent?.isComposing`, a raw DOM event is
+   * still structurally assignable to this interface — every required property
+   * matches and the missing one is optional — so a caller wired to a plain
+   * `addEventListener` compiles clean, `e.nativeEvent` is `undefined`, the
+   * composition check evaluates to `undefined`, and the IME guard is SKIPPED.
+   * No error, no warning: just a guard that quietly is not there.
+   *
+   * Measured before fixing: `isSubmitKey({ key: "Enter", isComposing: true })`
+   * returned `true`.
+   *
+   * That is the failure mode a shared helper is supposed to remove, so the
+   * helper must not reintroduce it. Making the wrong call a type error was the
+   * alternative and is worse here — React's synthetic event legitimately has
+   * `nativeEvent`, so a type that rejected the raw shape would have to reject
+   * one of the two real callers.
+   */
+  isComposing?: boolean;
 }
 
 /**
@@ -76,9 +101,33 @@ export interface SubmitKeyEvent {
  * for that here — 229 is not a key, it is a sentinel meaning "the IME handled
  * this". There is no modern replacement for it on the browser that needs it.
  */
+/**
+ * THE TENSION THIS LEAVES, recorded because a future reader WILL trip on it.
+ *
+ * When this returns false the caller does nothing: no submit, no nudge, no DOM
+ * mutation at all. That is indistinguishable, from the outside, from the bare
+ * `return` that #445 was filed against — and #445's whole finding was that an
+ * unobservable no-op is a defect, because a screen-reader user presses a key and
+ * is told nothing.
+ *
+ * It is correct HERE, and the difference is who the keystroke belonged to. An
+ * Enter that confirms an IME candidate is not a submit the user made and had
+ * refused; it is a keystroke the input method consumed, and the composer never
+ * saw a submit at all. Announcing "nothing was sent" would be a false statement
+ * about an action that did not happen, and it would fire on every candidate a
+ * CJK user picks — several times per sentence.
+ *
+ * The empty and over-length refusals are the opposite case: there the user DID
+ * submit and was refused, so both announce. If you ever find yourself adding a
+ * nudge to this predicate's false branch, that is the distinction to check
+ * first.
+ */
 export function isSubmitKey(e: SubmitKeyEvent): boolean {
   if (e.key !== "Enter") return false;
-  if (e.nativeEvent?.isComposing) return false;
+  // Either shape — see `SubmitKeyEvent.isComposing`. React nests it, the DOM
+  // does not, and reading only one of the two silently disables this line for
+  // the other caller.
+  if (e.nativeEvent?.isComposing || e.isComposing) return false;
   if (e.keyCode === 229) return false;
   return true;
 }

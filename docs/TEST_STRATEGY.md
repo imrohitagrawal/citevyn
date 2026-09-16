@@ -229,11 +229,19 @@ negative tests at all.
 
 Every **input surface**: any `<input>` or `<textarea>` a person types into. The
 sweep lives in `frontend/src/test/uiInputNegative.test.tsx` and holds a registry
-of them. That registry is **not hand-kept**: the same file parses the components
-with the TypeScript compiler and fails when an element exists that the registry
-does not list. Adding a form field without sweeping it is a red test, not an
-oversight — a hand-kept list was how #445's first fix missed the suggestion
-chips, complete the day it was written and silently wrong a week later.
+of them. That registry is **not hand-kept**: the same file parses every `.ts`
+and `.tsx` under `src/` with the TypeScript compiler and fails when a field
+exists that the registry does not list.
+
+**Be precise about what that buys, because an earlier draft of this paragraph
+was not.** The guard enforces that a new field is *listed*. It does **not**
+enforce that the field is put through the seven cells — nothing mechanical can
+tell whether a cell is genuinely inapplicable or merely unwritten. So adding a
+form field without touching the registry is a red test; adding it to the
+registry and writing no cells is a review question, not a red test. The registry
+makes the omission *visible*, which is the property a hand-kept list lost — that
+is how the first attempt at #445 missed the suggestion chips, complete the day it
+was written and silently wrong a week later.
 
 ### The seven cells
 

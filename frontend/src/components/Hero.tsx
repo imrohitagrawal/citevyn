@@ -3,16 +3,14 @@
  */
 
 import type * as React from "react";
-import { MAX_QUESTION_LENGTH } from "../lib/composerInput";
-import {
-  EMPTY_SUBMIT_NUDGE,
-  EMPTY_SUBMIT_NUDGE_GLYPH,
-} from "../lib/composerNudge";
+import { EMPTY_SUBMIT_NUDGE_GLYPH } from "../lib/composerNudge";
 
 interface HeroProps {
   heroInput: string;
   heroPlaceholder: string;
-  heroNudge: boolean;
+  /** #446 review: the MESSAGE to show, or null. Was a boolean with the sentence
+      hard-coded below; two refusals share this mechanism now. */
+  heroNudge: string | null;
   heroBoxShake: boolean;
   heroRef: React.RefObject<HTMLInputElement>;
   onHeroInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -107,11 +105,6 @@ export function Hero({
               value={heroInput}
               onChange={onHeroInput}
               onKeyDown={onHeroKey}
-              // #446. The SAME ceiling the chat composer carries, from the same
-              // constant. The hero is the box most visitors type into first, and
-              // it had no limit at all — a pasted document went out as a question
-              // and came back 422 wearing a "temporarily unavailable" badge.
-              maxLength={MAX_QUESTION_LENGTH}
               placeholder={heroPlaceholder}
               style={{
                 flex: 1,
@@ -143,7 +136,7 @@ export function Hero({
               nothing, because the region carries the identical string. */}
           {heroNudge && (
             <p className="hero-nudge" aria-hidden="true">
-              {EMPTY_SUBMIT_NUDGE_GLYPH} {EMPTY_SUBMIT_NUDGE}
+              {EMPTY_SUBMIT_NUDGE_GLYPH} {heroNudge}
             </p>
           )}
           {/* #445. ALWAYS rendered, empty when idle — the same shape, and for
@@ -165,7 +158,7 @@ export function Hero({
               `.composer` some day and this sentence renders VISIBLY, twice,
               with nothing going red — the nudge is in no visual baseline. */}
           <p className="sr-only" role="status">
-            {heroNudge ? EMPTY_SUBMIT_NUDGE : ""}
+            {heroNudge ?? ""}
           </p>
 
           <div className="hero-chips">

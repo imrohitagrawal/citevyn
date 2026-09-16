@@ -54,3 +54,33 @@ export const EMPTY_SUBMIT_NUDGE_GLYPH = "⚠";
  * nudge is gone after it.
  */
 export const EMPTY_SUBMIT_NUDGE_MS = 3000;
+
+/**
+ * #446 review. The SECOND thing a composer refuses, sharing the first's
+ * mechanism, its window and its live region.
+ *
+ * WHY THIS EXISTS AT ALL — it is a regression this PR introduced and then had
+ * to undo. The first version put `maxLength={4000}` on both boxes. That stops
+ * the 422, and it does so by SILENTLY DESTROYING TEXT: paste a 5,000-character
+ * question and the browser clamps it to 4,000 with no event, no message and
+ * nothing on screen changing. The user then sends a question cut mid-sentence
+ * and gets a confident answer to the fragment. The previous behaviour was a
+ * badly-worded red badge — wrong, but LOUD. Trading a loud wrong signal for a
+ * quiet one is the exact defect #445 and #446 are both about, committed in the
+ * PR arguing against it.
+ *
+ * So the attribute is gone and the limit is enforced where it can be ANNOUNCED,
+ * at submit, before the box is cleared. The text stays on screen, which is what
+ * makes "shorten it" a true instruction rather than one aimed at an empty box.
+ *
+ * A FUNCTION, not a constant, because the honest sentence needs the actual
+ * length: "too long" leaves the reader guessing how much to cut.
+ *
+ * Same prosody rules as `EMPTY_SUBMIT_NUDGE`, for the same reason — two full
+ * stops, no em dash. `ChatView` records that NVDA's `locale/en/symbols.dic`
+ * gives `—` the level `most`, so a reader running punctuation above the default
+ * hears the dash read out mid-sentence.
+ */
+export function overLengthNudge(actual: number, limit: number): string {
+  return `Your question is ${actual} characters. The limit is ${limit}. Shorten it and send it again.`;
+}

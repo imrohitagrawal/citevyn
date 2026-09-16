@@ -235,7 +235,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
           heroInput={state.heroInput}
           heroPlaceholder={heroPlaceholder}
           heroNudge={state.heroNudge}
-          heroBoxShake={state.heroNudge}
+          heroBoxShake={state.heroNudge !== null}
           heroRef={heroRef}
           onHeroInput={onHeroInput}
           onHeroKey={onHeroKey}

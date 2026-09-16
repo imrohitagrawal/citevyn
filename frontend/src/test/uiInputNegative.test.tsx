@@ -40,6 +40,11 @@ import { isLiveMode, createSession, askQuestion, login, register, getCurrentUser
 import { requestMagicLink, updatePassword } from "../lib/authActions";
 import { ApiClientError } from "../lib/types";
 import { MAX_QUESTION_LENGTH, isSubmitKey } from "../lib/composerInput";
+import {
+  EMPTY_SUBMIT_NUDGE,
+  EMPTY_SUBMIT_NUDGE_GLYPH,
+  overLengthNudge,
+} from "../lib/composerNudge";
 
 vi.mock("../lib/api", () => ({
   API_BASE_URL: "",
@@ -98,10 +103,19 @@ afterEach(() => {
  * — an inserted field should force someone to look at this list.
  *
  * WHAT THIS REGISTRY DOES NOT SEE, said plainly rather than left for someone to
- * discover: `contentEditable`, `<select>`, a third-party widget that renders its
- * own field, and any input produced by a JSX factory call rather than written as
- * an element. Those are not covered by the guard below and would need their own
- * rows. Every input the app has today is a literal `<input>` in `src/`.
+ * discover: `contentEditable`, `<select>`, and a third-party component that
+ * renders its own field. Those would need their own rows.
+ *
+ * A JSX FACTORY CALL used to be on that list and is now covered — the traversal
+ * reads `createElement("input", …)` and the `jsx`/`jsxs` runtime form, and walks
+ * `.ts` files as well as `.tsx` because a `.ts` file cannot hold JSX and that is
+ * the only way a field could appear in one. It was a surviving mutant, and
+ * "only one spelling is supported" is how a guard grows a blind spot.
+ *
+ * Still not seen, and worth naming because it is the nearest remaining gap: a
+ * factory call whose tag is a VARIABLE (`createElement(tag, …)`) rather than a
+ * string literal. Nothing in this app does that, and resolving it would need the
+ * type checker rather than the syntax tree.
  */
 const SURFACES = [
   "components/AuthModal.tsx#0 (type=email)",
@@ -124,7 +138,13 @@ const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
  * change) left the test that exists to notice that entirely green.
  */
 function inputsIn(label: string, text: string): string[] {
-  const source = ts.createSourceFile(label, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const source = ts.createSourceFile(
+    label,
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    label.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
   const out: string[] = [];
   let ordinal = 0;
   const visit = (node: ts.Node): void => {
@@ -145,6 +165,30 @@ function inputsIn(label: string, text: string): string[] {
                 : "<none>";
         }
         out.push(`${label}#${ordinal++} (type=${type})`);
+      }
+    }
+    // A FIELD BUILT BY A FACTORY CALL, not written as an element:
+    // `createElement("input", …)`, or the `jsx`/`jsxs` runtime form. Found as a
+    // surviving mutant by the review's verifier — JSX-only traversal misses it,
+    // and it is the one way to add a real input to this app that the registry
+    // could not see. Detected here rather than written off, because the compiler
+    // makes it about ten lines and "we only support one spelling" is exactly how
+    // a guard develops a blind spot.
+    //
+    // A `.ts` file cannot contain JSX at all, so this is the ONLY way an input
+    // can appear there — which is why the walk now includes `.ts`.
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression.getText(source);
+      const isFactory =
+        callee === "createElement" ||
+        callee.endsWith(".createElement") ||
+        callee === "jsx" ||
+        callee === "jsxs";
+      const first = node.arguments[0];
+      if (isFactory && first && ts.isStringLiteral(first)) {
+        if (first.text === "input" || first.text === "textarea") {
+          out.push(`${label}#${ordinal++} (type=<factory>)`);
+        }
       }
     }
     ts.forEachChild(node, visit);
@@ -177,7 +221,14 @@ function collectInputSurfaces(): string[] {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         out.push(...walk(join(dir, entry.name), rel));
-      } else if (entry.name.endsWith(".tsx") && !entry.name.includes(".test.")) {
+      } else if (
+        (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts")) &&
+        !entry.name.includes(".test.") &&
+        !entry.name.endsWith(".d.ts")
+      ) {
+        // `.ts` TOO, for the factory-call case above: a `.ts` file cannot hold
+        // JSX, so a field there can only be built by `createElement`, and
+        // scanning only `.tsx` left that route unwatched.
         out.push(rel);
       }
     }
@@ -237,6 +288,26 @@ describe("§8b registry: the sweep cannot silently miss an input surface", () =>
     // And it finds nothing in a source that genuinely has no inputs, so a
     // traversal that returned a constant would fail here.
     expect(inputsIn("Empty.tsx", "export const Y = () => <div>no fields</div>;")).toEqual([]);
+
+    // THE FACTORY ROUTE, in a `.ts` file where JSX is impossible. This was a
+    // surviving mutant: the app could grow a real input the registry could not
+    // see. All three spellings, and a non-field factory call that must NOT be
+    // picked up — otherwise this would pass on a traversal that flags every call.
+    expect(
+      inputsIn(
+        "Sneaky.ts",
+        `import { createElement } from "react";
+         export const A = () => createElement("input", { type: "text" });
+         export const B = () => React.createElement("textarea", null);
+         export const C = () => jsx("input", {});
+         export const D = () => createElement("div", null);
+         export const E = () => notAFactory("input", {});`,
+      ),
+    ).toEqual([
+      "Sneaky.ts#0 (type=<factory>)",
+      "Sneaky.ts#1 (type=<factory>)",
+      "Sneaky.ts#2 (type=<factory>)",
+    ]);
   });
 });
 
@@ -250,10 +321,19 @@ interface Composer {
   input: string;
   /** The button that submits WITHOUT a keystroke — the paste-only cell needs it. */
   submitButton: string;
+  /** This composer's own subtree, so a cell cannot read the OTHER one's live
+      region and pass on it. Same selectors `composerEmptyParity` scopes by. */
+  scope: string;
 }
 
 const COMPOSERS: Composer[] = [
-  { label: "hero", open: () => {}, input: "#hero-input", submitButton: ".ask-button" },
+  {
+    label: "hero",
+    open: () => {},
+    input: "#hero-input",
+    submitButton: ".ask-button",
+    scope: "section.hero",
+  },
   {
     label: "chat",
     open: (root) => {
@@ -265,6 +345,7 @@ const COMPOSERS: Composer[] = [
     },
     input: ".chat-input",
     submitButton: ".send-button",
+    scope: ".composer",
   },
 ];
 
@@ -335,15 +416,77 @@ for (const c of COMPOSERS) {
       expect(input.value, `${c.label}: a refused whitespace submit cleared the box`).toBe(WHITESPACE);
     });
 
-    // CELL: over-length. The attribute is the whole client-side mechanism, and
-    // jsdom does NOT enforce it (see §8b) — so this asserts the attribute and
-    // the backend boundary test asserts the behaviour that matters.
-    it(`over-length: the box carries the server's ${MAX_QUESTION_LENGTH}-character ceiling`, () => {
-      const { input } = renderComposer(c);
-      expect(input, `${c.label}: no maxLength — the browser accepts what the server 422s`).toHaveAttribute(
-        "maxlength",
-        String(MAX_QUESTION_LENGTH),
+    // CELL: over-length. BEHAVIOURAL — refused, announced, and the text KEPT.
+    //
+    // THIS CELL IS A REGRESSION THIS PR CAUSED AND THEN UNDID, which is why it
+    // asserts what it does. The first version put `maxLength` on the box and
+    // asserted the ATTRIBUTE. That stops the 422 by silently destroying text: a
+    // pasted 5,000-character question is clamped to 4,000 with no event and
+    // nothing on screen changing, and the fragment then gets a confident answer.
+    // What it replaced was a badly-worded red badge — wrong, but LOUD. Trading a
+    // loud wrong signal for a quiet one is the defect this issue is about.
+    //
+    // So: no attribute, a refusal that is SAID, and the text left where the user
+    // can act on the instruction they were given.
+    it("over-length: refused with a true message, and the text is KEPT", async () => {
+      const { container, input } = renderComposer(c);
+      const tooLong = "x".repeat(MAX_QUESTION_LENGTH + 1);
+      act(() => {
+        fireEvent.change(input, { target: { value: tooLong } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      await flush();
+
+      expect(userMessages(container), `${c.label}: an OVER-LENGTH question was sent`).toBe(0);
+      // The box was NOT silently clamped on the way in.
+      expect(input.value.length, `${c.label}: the browser truncated the text in silence`).toBe(
+        MAX_QUESTION_LENGTH + 1,
       );
+      // And the refusal did not eat it either — "shorten it" has to be an
+      // instruction the user can actually follow.
+      expect(input.value, `${c.label}: a refused question was cleared`).toBe(tooLong);
+
+      const nudges = container.querySelectorAll(".hero-nudge, .composer-nudge");
+      expect(nudges.length, `${c.label}: over-length was refused SILENTLY`).toBe(1);
+      const expected = overLengthNudge(MAX_QUESTION_LENGTH + 1, MAX_QUESTION_LENGTH);
+      expect(nudges[0].textContent).toBe(`${EMPTY_SUBMIT_NUDGE_GLYPH} ${expected}`);
+      // Announced, not just drawn. The region is the one WP-1 built.
+      const region = container.querySelector(`${c.scope} [role="status"]`);
+      expect(region, `${c.label}: no live region`).not.toBeNull();
+      expect(region!.textContent, `${c.label}: the refusal was never announced`).toBe(expected);
+      // The message states the real numbers, so the reader knows how much to cut.
+      expect(expected).toContain(String(MAX_QUESTION_LENGTH + 1));
+      expect(expected).toContain(String(MAX_QUESTION_LENGTH));
+      // It is NOT the empty-submit sentence — one mechanism, two distinct truths.
+      expect(region!.textContent).not.toBe(EMPTY_SUBMIT_NUDGE);
+    });
+
+    it(`over-length: exactly ${MAX_QUESTION_LENGTH} characters still sends`, async () => {
+      // The partner. Without it the cell above passes on a composer that refuses
+      // EVERYTHING, and "nothing was sent" would read as success.
+      const { container, input } = renderComposer(c);
+      act(() => {
+        fireEvent.change(input, { target: { value: "y".repeat(MAX_QUESTION_LENGTH) } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      await flush();
+      expect(
+        userMessages(container),
+        `${c.label}: a question AT the limit was refused — the boundary is off by one`,
+      ).toBe(1);
+      expect(
+        container.querySelectorAll(".hero-nudge, .composer-nudge").length,
+        `${c.label}: a legal question raised the over-length warning`,
+      ).toBe(0);
+    });
+
+    // The attribute must NOT come back: it is what caused the silent clamp.
+    it("over-length: the box does NOT carry a maxLength attribute", () => {
+      const { input } = renderComposer(c);
+      expect(
+        input.getAttribute("maxlength"),
+        `${c.label}: maxLength is back — the browser will truncate a paste in silence again`,
+      ).toBeNull();
     });
 
     // CELL: paste-only. NO KEYDOWN ANYWHERE IN THIS TEST, and that is the entire
@@ -446,6 +589,21 @@ describe("§8b: isSubmitKey is the one rule both composers use", () => {
     expect(isSubmitKey({ key: "a" })).toBe(false);
     expect(isSubmitKey({ key: "Escape" })).toBe(false);
     expect(isSubmitKey({ key: " " })).toBe(false);
+  });
+
+  it("reads isComposing in BOTH shapes — React's and the raw DOM's", () => {
+    // A raw DOM `KeyboardEvent` puts `isComposing` at the top level and has no
+    // `nativeEvent`. Because that property was optional, such an event was
+    // structurally assignable with no type error while the guard silently did
+    // not run: this returned `true` before the fix.
+    expect(isSubmitKey({ key: "Enter", isComposing: true })).toBe(false);
+    // React's shape still works.
+    expect(isSubmitKey({ key: "Enter", nativeEvent: { isComposing: true } })).toBe(false);
+    // Neither shape composing: submits. Without this the two above pass on a
+    // predicate that returns false for everything.
+    expect(isSubmitKey({ key: "Enter", isComposing: false, nativeEvent: { isComposing: false } })).toBe(
+      true,
+    );
   });
 
   it("refuses both IME signals, independently", () => {
@@ -594,7 +752,16 @@ describe("§8b: a rejected question is described honestly", () => {
     // title alone and was named "shows a generic error" while the message it
     // never looked at was "Network error — is the backend running?".
     expect(toast.message).toContain(String(MAX_QUESTION_LENGTH));
-    expect(toast.message.toLowerCase()).toContain("shorten it");
+    expect(toast.message.toLowerCase()).toContain("fail the same way");
+    // NOT "shorten it and send it again". This branch is a backstop reached only
+    // when something bypassed the composers' own refusal, and by then
+    // `submitChat` has cleared the box — so that instruction would point at an
+    // empty composer. The cell below measures that the box really is empty here,
+    // which is what makes this assertion about copy-vs-screen and not taste.
+    expect(
+      toast.message.toLowerCase(),
+      "the 422 copy tells the user to shorten text that is no longer on screen",
+    ).not.toContain("shorten it and send it again");
     expect(
       toast.message.toLowerCase(),
       "the copy still promises the problem will pass on its own",
@@ -634,6 +801,46 @@ describe("§8b: a rejected question is described honestly", () => {
       container.textContent,
       "a validation failure must not wear the content-refusal badge either (#120)",
     ).not.toContain("NO SOURCE");
+  });
+
+  it("after a 422 the composer is EMPTY, and the copy does not pretend otherwise", async () => {
+    // THE CELL THE OTHER REFUSAL CELLS HAVE AND THIS ONE DID NOT. Every other
+    // refusal in this file asserts what the box holds afterwards — empty submit
+    // keeps the whitespace, in-flight keeps the question, over-length keeps the
+    // long text. The 422 path had no such assertion, and it is the one path
+    // where the text is genuinely GONE: `submitChat` clears before the request.
+    //
+    // This does not pretend that is good. It pins the real behaviour so the copy
+    // above can be held to it, and so the day someone restores the text this
+    // test reddens and the copy gets revisited in the same change.
+    vi.mocked(isLiveMode).mockReturnValue(true);
+    vi.mocked(askQuestion).mockRejectedValue(VALIDATION_422);
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    act(() => {
+      fireEvent.click(container.querySelector(".cta-button") as HTMLElement);
+    });
+    const input = container.querySelector(".chat-input") as HTMLInputElement;
+    // Under the client limit, so the composer does NOT refuse it — the 422 has
+    // to come from the server for this cell to be measuring the 422 path at all.
+    const question = "z".repeat(MAX_QUESTION_LENGTH - 1);
+    act(() => {
+      fireEvent.change(input, { target: { value: question } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    await settle();
+
+    expect(
+      container.querySelectorAll(".message.user-msg").length,
+      "the question never went out, so this is not the 422 path",
+    ).toBe(1);
+    expect(
+      (container.querySelector(".chat-input") as HTMLInputElement).value,
+      "the box is no longer empty after a 422 — revisit the 422 copy, which assumes it is",
+    ).toBe("");
+    const said = container.textContent ?? "";
+    expect(said, "the 422 copy asks the user to shorten text the box no longer holds").not.toContain(
+      "Shorten it and send it again",
+    );
   });
 
   it("a 401 is described as permanent too, not as a passing blip", async () => {
@@ -850,12 +1057,22 @@ describe("§8b cells — AuthModal, all four modes", () => {
     // a fifth member of the union is now a COMPILE error (missing key) and a
     // row for a mode that no longer exists is a compile error too. `tsc -b`
     // runs in CI, so this is enforced, not decorative.
-    expect(AUTH_MODES.map((m) => m.label).sort()).toEqual(
-      (Object.keys(AUTH_MODES_BY_LABEL) as AuthModalMode[]).sort(),
-    );
-    expect(AUTH_MODES.length, "a mode was dropped from the sweep").toBe(
-      Object.keys(AUTH_MODES_BY_LABEL).length,
-    );
+    // ONE assertion, and it is the one that can fail. An earlier draft also
+    // compared `AUTH_MODES.length` to `Object.keys(AUTH_MODES_BY_LABEL).length`
+    // under the message "a mode was dropped from the sweep" — but `AUTH_MODES`
+    // IS `Object.values(AUTH_MODES_BY_LABEL)`, so that is true of every object
+    // in existence. A check that cannot fail, carrying a message about a
+    // failure, is worse than no check: it reads as coverage.
+    //
+    // The real enforcement is `satisfies Record<AuthModalMode, AuthMode>` on the
+    // object itself, which `tsc -b` checks in CI — a fifth union member is a
+    // missing key. This runtime line adds the one thing the type cannot: that
+    // each entry's `label` actually matches the key it is filed under, so a
+    // copy-paste row cannot sweep the same mode twice under two keys.
+    for (const [key, mode] of Object.entries(AUTH_MODES_BY_LABEL)) {
+      expect(mode.label, `the entry filed under "${key}" describes mode "${mode.label}"`).toBe(key);
+    }
+    expect(AUTH_MODES.length, "the sweep ran over no modes at all").toBeGreaterThan(0);
   });
 
   for (const mode of AUTH_MODES) {
@@ -962,7 +1179,51 @@ describe("§8b cells — AuthModal, all four modes", () => {
     });
   }
 
-  // CELL: over-length, at both bounds the server declares.
+  // CELL: over-length, EVERY field in EVERY mode.
+  //
+  // A surviving mutant found by the review's independent verifier: the ceiling
+  // could be stripped from `set-password`'s current-password field and nothing
+  // reddened. The two tests below measured the email field and the
+  // login/register password field; set-password's two fields were typed into
+  // and never measured, and the backend parity guard pins AuthModal's CONSTANTS
+  // but not that any input USES them. So a whole mode's bounds were unguarded.
+  //
+  // This sweeps every rendered input in every mode instead of naming three of
+  // five by hand — the same reason the surface registry is derived rather than
+  // listed.
+  it("over-length: every auth field in every mode carries its server bound", async () => {
+    const user = userEvent.setup();
+    const seen: string[] = [];
+    for (const mode of AUTH_MODES) {
+      await mode.arrive(user);
+      const dialog = screen.getByRole("dialog");
+      const inputs = Array.from(dialog.querySelectorAll("input"));
+      expect(inputs.length, `${mode.label}: wrong field count`).toBe(mode.inputCount);
+      for (const input of inputs) {
+        const kind = input.getAttribute("type");
+        const max = input.getAttribute("maxlength");
+        expect(max, `${mode.label}: a ${kind} field has NO ceiling`).not.toBeNull();
+        expect(max, `${mode.label}: the ${kind} ceiling does not match the server`).toBe(
+          kind === "email" ? "255" : "128",
+        );
+        seen.push(`${mode.label}/${kind}`);
+      }
+      cleanup();
+      document.querySelectorAll("[data-test-trigger]").forEach((el) => el.remove());
+    }
+    // The partner: every field of every mode was actually reached. A loop that
+    // broke early, or a mode that rendered nothing, would otherwise pass.
+    expect(seen).toEqual([
+      "login/email",
+      "login/password",
+      "register/email",
+      "register/password",
+      "magic-link/email",
+      "set-password/password",
+      "set-password/password",
+    ]);
+  });
+
   it("over-length: email carries the server's 255 ceiling in every mode that asks for one", async () => {
     const user = userEvent.setup();
     for (const mode of AUTH_MODES.filter((m) => m.label !== "set-password")) {

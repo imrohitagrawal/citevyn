@@ -125,6 +125,30 @@ def test_register_rejects_short_password(in_memory_app: None) -> None:
     assert response.status_code == 422
 
 
+def _assert_validation_envelope(response, *, field: str) -> None:
+    """Assert the CONSUMER's view of a rejection, not just its status line.
+
+    #446 review: these tests asserted ``status_code == 422`` and nothing else,
+    which is a proxy. A client parses ``docs/API_SPEC.md`` §4's envelope, so a
+    422 that arrived as FastAPI's default ``{"detail": [...]}`` shape -- or with
+    the wrong code, or naming the wrong field -- would satisfy a status check
+    while breaking every caller. This repo has the scar written down: a guard
+    that pinned a constant while the emitted artefact went unchecked.
+
+    It also asserts the rejected VALUE is not echoed back: ``_redact_input``
+    replaces it with a length marker, and a boundary test is exactly where a
+    long secret-shaped string would leak if that ever regressed.
+    """
+    assert response.status_code == 422, response.text
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 -- NOT nested under "detail"
+    assert "detail" not in envelope, "FastAPI's default 422 shape leaked past the handler"
+    assert envelope["error"]["code"] == "validation_error"
+    assert envelope["request_id"]
+    body = response.text
+    assert field in body, f"the envelope does not say which field was rejected ({field})"
+    assert "redacted" in body, "the rejected value was echoed back instead of redacted"
+
+
 # ---------------------------------------------------------------------------
 # #446 — the register/login length boundaries (TEST_STRATEGY §8b, "over-length")
 #
@@ -156,7 +180,7 @@ def test_register_rejects_a_password_one_character_under_the_floor(in_memory_app
         json={"email": "under@example.com", "password": "a" * 7},
         headers={"Authorization": DEMO_BEARER},
     )
-    assert response.status_code == 422
+    _assert_validation_envelope(response, field="password")
 
 
 def test_register_accepts_a_password_at_the_128_character_ceiling(in_memory_app: None) -> None:
@@ -181,7 +205,7 @@ def test_register_rejects_a_password_one_character_over_the_ceiling(in_memory_ap
         json={"email": "over@example.com", "password": "a" * 129},
         headers={"Authorization": DEMO_BEARER},
     )
-    assert response.status_code == 422
+    _assert_validation_envelope(response, field="password")
 
 
 def test_register_rejects_an_email_one_character_over_the_255_ceiling(
@@ -201,7 +225,7 @@ def test_register_rejects_an_email_one_character_over_the_255_ceiling(
         json={"email": too_long, "password": "correct horse battery"},
         headers={"Authorization": DEMO_BEARER},
     )
-    assert response.status_code == 422
+    _assert_validation_envelope(response, field="email")
 
 
 def test_register_accepts_an_email_at_the_255_ceiling(in_memory_app: None) -> None:
@@ -245,7 +269,45 @@ def test_login_accepts_a_one_character_password_but_still_caps_it(
         json={"email": "shortpw@example.com", "password": "a" * 129},
         headers={"Authorization": DEMO_BEARER},
     )
-    assert over_ceiling.status_code == 422, "login has no ceiling at all"
+    _assert_validation_envelope(over_ceiling, field="password")
+
+
+def test_login_rejects_an_empty_password(in_memory_app: None) -> None:
+    """``LoginRequest.password`` is ``min_length=1``, so ZERO is refused.
+
+    #446 review: the login bound had only its upper edge tested. Without this,
+    ``min_length`` could be deleted from ``LoginRequest`` and nothing would
+    redden -- and an empty password must be a malformed REQUEST (422), never a
+    credential check (401), because 401 would mean the server hashed nothing and
+    still compared it.
+    """
+    client = _client()
+    assert _register(client, "emptypw@example.com", "correct horse battery").status_code == 201
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": "emptypw@example.com", "password": ""},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(response, field="password")
+
+
+def test_login_accepts_a_password_at_the_128_character_ceiling(in_memory_app: None) -> None:
+    """The ACCEPTED side of login's upper edge, which had only its rejection.
+
+    128 characters is a well-formed request, so it reaches the credential check
+    and comes back 401 for a wrong password -- never 422. Without this, the
+    ceiling could be lowered and ``...one_character_over_the_ceiling`` would
+    still pass, proving only that SOMETHING is refused.
+    """
+    client = _client()
+    assert _register(client, "atmax@example.com", "correct horse battery").status_code == 201
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": "atmax@example.com", "password": "a" * 128},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code == 401, "a password AT the ceiling was rejected as malformed"
+    assert response.json()["error"]["code"] != "validation_error"
 
 
 def test_register_duplicate_email_is_rejected(in_memory_app: None) -> None:

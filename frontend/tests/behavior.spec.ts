@@ -196,28 +196,48 @@ test.describe("Hero", () => {
     expect(await page.locator("#hero-input").inputValue()).toBe("test/");
   });
 
-  // #446 (TEST_STRATEGY §8b, "over-length"). THE HALF JSDOM CANNOT PROVE.
-  // jsdom does not enforce `maxLength` on a programmatic value assignment, so
-  // the unit sweep can only assert the ATTRIBUTE is there, and says so. What the
-  // attribute is FOR — the browser clamping over-length input so the request is
-  // never made and the box is never cleared under the user — takes a real
-  // browser. Without this, "the client carries the server's ceiling" is an
-  // attribute check wearing the clothes of a behaviour.
-  test("hero input truncates over-length text at the server's 4000-char ceiling", async ({
+  // #446 (TEST_STRATEGY §8b, "over-length"). THE HALF JSDOM CANNOT PROVE, and
+  // the half that caught a regression this PR introduced.
+  //
+  // The first version of this test asserted the OPPOSITE: that `maxLength`
+  // clamped a 4,500-character fill to 4,000. It passed — and that clamp was the
+  // bug. A real browser truncates a long paste silently, with no event and
+  // nothing on screen changing, so the user sends a question cut mid-sentence
+  // and gets a confident answer to the fragment. jsdom cannot show that either
+  // way, because it does not enforce `maxLength` at all; only a real browser
+  // can, which is why this test is the one that matters here.
+  //
+  // What is asserted now: the text SURVIVES, the submit is refused, and the
+  // refusal is both visible and in the live region.
+  test("over-length text is kept and refused out loud, never truncated in silence", async ({
     page,
   }) => {
     const hero = page.locator("#hero-input");
-    // fill() drives the browser's own input pipeline, so the maxLength clamp
-    // applies exactly as it does to typing and pasting.
-    await hero.fill("a".repeat(4500));
-    expect(await hero.inputValue()).toHaveLength(4000);
+    const tooLong = "a".repeat(4500);
+    await hero.fill(tooLong);
 
-    // The partner. Without it this passes on a box that holds nothing at all — a
-    // broken locator, a disabled input, a fill() that silently no-ops — which is
-    // the absence-read-as-success failure this repo has a scar for.
-    await hero.fill("a".repeat(3999));
-    expect(await hero.inputValue()).toHaveLength(3999);
+    // THE REGRESSION GUARD: a real browser must not have clamped this.
+    expect(await hero.inputValue()).toHaveLength(4500);
+
+    await page.locator(".ask-button").click();
+
+    // Nothing was sent — we are still on the landing screen.
+    await expect(page.locator('[data-screen-label="Chat"]')).toHaveCount(0);
+    // The text is still there to shorten, which is what the message asks for.
+    expect(await hero.inputValue()).toHaveLength(4500);
+    // Said, not just drawn: the hero's persistent live region carries it.
+    await expect(page.locator("section.hero .hero-nudge")).toHaveText(/4500 characters/);
+    await expect(page.locator('section.hero [role="status"]')).toHaveText(/4500 characters/);
+    await expect(page.locator('section.hero [role="status"]')).toHaveText(/limit is 4000/);
+
+    // THE PARTNER. Without it this passes on a composer that refuses
+    // everything, and "we are still on the landing screen" would read as
+    // success. 4000 is the last accepted length.
+    await hero.fill("b".repeat(4000));
+    await page.locator(".ask-button").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
   });
+
 });
 
 // ---------------------------------------------------------------------------
