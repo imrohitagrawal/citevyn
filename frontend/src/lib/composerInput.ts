@@ -67,8 +67,10 @@ export interface SubmitKeyEvent {
  *   - `keyCode === 229` is the legacy signal, and it is the ONLY one Safari
  *     gives: WebKit dispatches the confirming `keydown` with `isComposing`
  *     already false and the historical "IME in progress" keyCode of 229. A
- *     guard that checks only the standard property is therefore correct
- *     everywhere except Safari, i.e. broken on every iPhone.
+ *     guard that checks only the standard property is therefore wrong on
+ *     WebKit. How wide that is in practice is NOT measured here — this repo
+ *     has no iOS device in the loop — so the claim stays at "WebKit reports
+ *     the legacy code", which is what the second check is for.
  *
  * `keyCode` is deprecated for identifying WHICH key was pressed and is not used
  * for that here — 229 is not a key, it is a sentinel meaning "the IME handled

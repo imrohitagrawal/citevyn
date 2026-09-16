@@ -828,6 +828,23 @@ export function useLandingState() {
         title = "That question wasn't accepted";
         message = `A question can be at most ${MAX_QUESTION_LENGTH} characters. Shorten it and send it again — waiting will not help.`;
         errorKind = "rejected";
+      } else if (apiErr?.status === 401) {
+        // #446 review. A 401 is ALSO permanent, and dropping the verbatim
+        // catch-all is what exposed it: without a branch it inherits the generic
+        // "Please try again in a moment", which is the same false-transience
+        // this change set out to remove, just at a different status.
+        //
+        // NOT hypothetical in this repo. Fly release v6 shipped the default
+        // `VITE_API_DEMO_KEY` and 401'd every call on the site for about an
+        // hour; the on-screen string was how it was noticed. Retrying cannot fix
+        // a bad or missing key, so the copy must not ask the visitor to.
+        //
+        // Deliberately says nothing about keys, tokens or configuration: that is
+        // operator detail, and the visitor can act on none of it.
+        title = "CiteVyn can't answer right now";
+        message =
+          "This CiteVyn deployment is not accepting requests — retrying will not help. If you run this site, check its configuration; otherwise please report it.";
+        errorKind = "rejected";
       }
       // #446. NO `else if (apiErr) { message = apiErr.message }` — that catch-all
       // put the client's own transport strings in front of the user verbatim.

@@ -256,8 +256,10 @@ surface, say so in the test file; do not leave it unmentioned.
 input method editor is composing. A CJK writer presses Enter to *pick a
 candidate*; a bare `e.key === "Enter"` sends the half-composed phonetic text and
 clears the box. Check **both** signals: `nativeEvent.isComposing` (standard) and
-`keyCode === 229` (Safari reports `isComposing` false and only the legacy code,
-so a standards-only guard is broken on every iPhone). One shared predicate —
+`keyCode === 229` (WebKit reports `isComposing` false on the confirming keydown
+and only the legacy code, so a standards-only guard is wrong there; this repo has
+no iOS device in the loop, so the breadth of that is unmeasured and the guard
+checks both signals rather than relying on the claim). One shared predicate —
 `frontend/src/lib/composerInput.ts` — never a copy per composer.
 
 **What a rejection says.** A validation failure is **not** a transport failure.
@@ -271,30 +273,43 @@ and raw HTTP status numbers are not user-facing copy.
 
 ### What jsdom cannot prove, and what to do about it
 
-Measured against this repo's jsdom, not assumed — the first draft of this
-section was half wrong and said so about more than jsdom actually fails at:
+Measured against this repo's jsdom (25.0.1), not recalled. This table was wrong
+twice before it was right, in both directions, which is why it now cites the
+probe or the source line for each row:
 
 | Thing | jsdom | Consequence |
 |---|---|---|
-| `checkValidity()` / `validity.valueMissing` | **works** | An empty `required` field *can* be proven invalid in a unit test. Do that. |
-| Validation as part of submit | **absent** — `HTMLFormElement.prototype.submit` is `notImplemented` and `form.submit()` is a silent no-op | "The browser blocked the submit" is not provable here. |
-| Native validation bubble | absent | Not provable here. |
-| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | Over-length is not provable here at all. |
+| `checkValidity()` / `validity.valueMissing` | **works** | An empty `required` field can be proven invalid in a unit test. |
+| Validation as part of **submission** | **works** — `HTMLFormElement-impl.js` `requestSubmit()` runs `if (!this.hasAttributeNS(null, "novalidate") && !this.reportValidity()) return;` *before* firing `submit` | **The empty-submit cell is fully testable here.** Click the submit button on an empty form and assert no request was made. |
+| `HTMLFormElement.prototype.submit()` | `notImplemented` | A **red herring** — `submit()` never validates in *any* browser, per spec. The validating entry points are `requestSubmit()` and submit-button activation, and jsdom implements both. |
+| Native validation bubble | absent | Not provable here; nothing depends on it. |
+| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | Over-length is **not** provable here. |
 | `validity.tooLong` | **always false** after a programmatic assignment (per spec it needs a dirty value from a user edit) | So `checkValidity()` does not rescue the over-length cell either. |
 
-So, for those:
+Measured on the real `AuthModal`: clicking **Sign in** on the empty form gives
+**0 `submit` events and 0 calls to `login`**; filling it and clicking gives 1 of
+each. That is a behaviour test, not an attribute test, and it is the one to
+write.
 
-1. **Assert the constraint where jsdom has one, the attribute where it does
-   not**, and say which you did. `toBeRequired()` only reports what the markup
-   says; `checkValidity() === false` reports what the DOM concludes from it, and
-   is the stronger claim available for the empty cell. Neither proves a real
-   browser *acted* on that conclusion — that gap is named, not papered over.
+So:
+
+1. **Test the behaviour where jsdom supports it — which is more than it looks.**
+   The empty-submit cell asserts *the request was never made*, with a filled-form
+   partner proving the button works at all. `toBeRequired()` reports only what
+   the markup says and is not sufficient on its own; reach for an attribute
+   assertion only where the table above says the behaviour is genuinely absent
+   (today: over-length, and only over-length).
 2. **Put the behaviour in Playwright** where it is load-bearing enough to earn a
    real browser (`frontend/tests/behavior.spec.ts`).
 3. **Back it with a server-side test.** The browser is bypassable, so the bound
-   that matters is the server's. Every client limit in §8b has a backend boundary
-   test, and `backend/tests/test_ui_input_limits_match_the_api.py` reads the
-   Pydantic field metadata and fails if the two ever disagree.
+   that matters is the server's. `backend/tests/test_ui_input_limits_match_the_api.py`
+   reads the Pydantic field metadata and fails if the two ever disagree, and each
+   mirrored bound has a boundary test on both sides of the edge — **with one
+   exception, named rather than glossed**: `email`'s `min_length=3` has no
+   isolating backend test, because a 2-character address is rejected by
+   `_looks_like_email` first, so a test at that edge would pass for the wrong
+   reason. The client still mirrors the bound; the server still enforces it; what
+   is missing is a test that attributes the rejection to *that* rule.
 
 A cell that cannot be honestly tested is written down here as untested. It is not
 skipped silently and it is not covered by a test that asserts something easier.
