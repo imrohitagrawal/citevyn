@@ -144,6 +144,20 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     # `Live-mode Playwright (stub backend)`. Not required yet; #379 is about
     # keeping it eligible, which a defused job is not.
     (LIVE_WORKFLOW.name, "live-e2e"),
+    # `Visual snapshots (Linux baselines, advisory)` (#325). ADVISORY, and being
+    # in this tuple does not change that: this list is bookkeeping for ONE rule
+    # — "a job in it may not be defused" — and it has never been the same list as
+    # `_REQUIRED_CONTEXT_WORKFLOWS`. `live-e2e` above has sat here while not
+    # required since #379. Branch protection is the only thing that makes a check
+    # required, no test in this repo can read it (see `_UNGUARDABLE`), and
+    # changing it is the owner's call.
+    #
+    # It earns a place for the same reason `live-e2e` does: a defused advisory
+    # job is not a weak signal, it is a fake one. `continue-on-error: true` here
+    # would leave a green check beside 22 screenshot comparisons that never ran,
+    # which reads as "the baselines are fine" to exactly the person who would
+    # otherwise go and look.
+    ("frontend.yml", "visual-e2e"),
 )
 
 # Gating jobs deliberately NOT in the population above, with the reason. An
@@ -165,11 +179,20 @@ _NOT_HELD_TO_THE_DEFUSING_RULE: dict[str, str] = {
 # The ONLY step-level ``if:`` values tolerated inside a gating job, keyed by
 # ``(workflow, job id, step name)`` and compared BYTE-EXACTLY, never by
 # substring. Every one is an artifact-upload step: it carries no assertion, so
-# skipping it cannot weaken the gate. Values read out of the YAML on 2026-09-08.
+# skipping it cannot weaken the gate. Values read out of the YAML on 2026-09-08,
+# and re-read 2026-09-16 for the two entries #325 moved.
+#
+# ``frontend.yml:build:Upload dist artifact`` was REMOVED here in #325 because
+# the step itself was removed. Nothing consumed the `frontend-dist` artifact:
+# no ``actions/download-artifact`` step and no ``workflow_run`` trigger exists
+# anywhere under ``.github/``, and ``release.yml`` builds its image from source.
+# ``test_every_sanctioned_step_condition_still_names_a_real_step`` is what makes
+# leaving a stale entry behind impossible — it resolves every key against the
+# real YAML.
 _SANCTIONED_STEP_CONDITIONS: dict[tuple[str, str, str], str] = {
     ("ci.yml", "test", "Upload coverage report"): "${{ !cancelled() }}",
-    ("frontend.yml", "build", "Upload dist artifact"): "success()",
     ("frontend.yml", "demo-e2e", "Upload report + traces on failure"): "failure()",
+    ("frontend.yml", "visual-e2e", "Upload report + snapshot diffs on failure"): "failure()",
     (LIVE_WORKFLOW.name, "live-e2e", "Upload HTML report on failure"): "failure()",
 }
 
@@ -1430,18 +1453,21 @@ def test_the_title_scan_recognises_the_real_declaration_forms() -> None:
         )
 
 
-# ────────────── the two CI assertions, EXECUTED rather than grepped ──────────────
+# ──────────── the three CI assertions, EXECUTED rather than grepped ────────────
 #
 # Everything above reads the workflow YAML as text. A guard asserted by grep is
 # a guard nobody has ever run: the string can be present and the logic wrong, or
-# the logic right and the string moved. So these lift the two `run:` bodies out
-# of the YAML verbatim and EXECUTE them against synthetic Playwright reports,
-# once per failure mode they exist to catch.
+# the logic right and the string moved. So these lift the `run:` bodies out of
+# the YAML verbatim and EXECUTE them against synthetic Playwright reports, once
+# per failure mode they exist to catch. Three jobs have one: `live-e2e`,
+# `demo-e2e`, and `visual-e2e` (#325, further down with the rest of that job's
+# rules).
 #
 # The one substitution is the report path: the bodies hardcode
-# /tmp/live-results.json and /tmp/demo-results.json, which the real jobs write
-# and a test must not. The substitution is asserted to have actually applied,
-# so a renamed path fails loudly instead of testing an unmodified script.
+# /tmp/live-results.json, /tmp/demo-results.json and /tmp/visual-results.json,
+# which the real jobs write and a test must not. The substitution is asserted to
+# have actually applied, so a renamed path fails loudly instead of testing an
+# unmodified script.
 
 
 def _step_body(workflow: Path, job_id: str, step_name: str) -> str:
@@ -1533,10 +1559,10 @@ def test_the_live_execution_assertion_actually_fires(
         )
 
 
-# ──────────── the two SELECTION guards, EXECUTED rather than grepped ────────────
+# ─────────── the three SELECTION guards, EXECUTED rather than grepped ───────────
 #
-# These two step bodies shell out to `npx playwright test --list`, which a unit
-# test must not run (it is a browser toolchain and it takes ~20 s). So the `npx`
+# These step bodies shell out to `npx playwright test --list`, which a unit test
+# must not run (it is a browser toolchain and it takes ~20 s). So the `npx`
 # BINARY is shadowed by a bash function printing a synthetic `--list` fixture,
 # and the two `/tmp/*_list.txt` capture paths are redirected into tmp_path.
 # Everything else — the greps, the arithmetic, `set -euo pipefail`, the order of
@@ -1724,6 +1750,388 @@ def test_the_demo_selection_guard_still_fires_through_a_poisoned_title(
         "test while the default suite minus its visual tests is 2, so this is a "
         f"silent-green demo job.\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ──────────────────── the visual-snapshot job (#325) ────────────────────
+#
+# `visual-e2e` is the OTHER half of the demo job's `ci_visual -eq 0` line. That
+# line used to mean "the visual specs run in no CI job at all"; it now means "not
+# in the REQUIRED job", and the difference is only real if something asserts the
+# advisory job runs exactly the tests the required one drops. These rules are
+# that something.
+#
+# The job is ADVISORY. Being guarded here does not promote it: branch protection
+# is the only thing that makes a check required, no test in this file can read it
+# (see `_UNGUARDABLE`), and `live-e2e` has been in `GATING_JOBS` while advisory
+# since #379.
+
+VISUAL_PW_CONFIG = FRONTEND / "playwright.visual-ci.config.ts"
+FRONTEND_PACKAGE_LOCK = FRONTEND / "package-lock.json"
+
+
+def _visual_job() -> dict[str, Any]:
+    jobs = _load_workflow(DEMO_WORKFLOW.name).get("jobs") or {}
+    assert "visual-e2e" in jobs, (
+        f"{DEMO_WORKFLOW.name} no longer defines a `visual-e2e` job. The 22 "
+        "screenshot comparisons in frontend/tests/visual.spec.ts would then run "
+        "in NO job again — which is #325 — while the demo job's `ci_visual -eq 0` "
+        "line keeps passing, because it asserts their ABSENCE."
+    )
+    return jobs["visual-e2e"]
+
+
+def _installed_playwright_version() -> str:
+    """The ``@playwright/test`` version ``npm ci`` actually installs.
+
+    Read from ``package-lock.json``, not from ``package.json``. The manifest
+    declares a RANGE (``^1.63.0``); the lockfile names the one version ``npm ci``
+    installs. The two can diverge without anyone editing the manifest — ``npm
+    update`` moves the lock to 1.64.0 and ``^1.63.0`` still accepts it, so a
+    guard reading the manifest would compare the container tag against a floor
+    nobody bumped while the browser underneath had already changed.
+    """
+    data = json.loads(FRONTEND_PACKAGE_LOCK.read_text(encoding="utf-8"))
+    entry = (data.get("packages") or {}).get("node_modules/@playwright/test") or {}
+    version = entry.get("version")
+    assert isinstance(version, str) and version, (
+        "frontend/package-lock.json has no resolved version for "
+        "node_modules/@playwright/test, so the pin below would compare the "
+        "container image against nothing"
+    )
+    return version
+
+
+def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
+    """A screenshot suite whose browser floats is a scheduled false red.
+
+    ``tests/visual.spec.ts-snapshots/*-chromium-linux.png`` are pixels drawn by
+    one exact Chromium. Playwright pins that Chromium per release — 1.63.0 ships
+    revision 1243, ``Google Chrome for Testing 153.0.8010.12`` (read out of the
+    image itself while generating the baselines) — so the container tag and the
+    installed ``@playwright/test`` are two records of the same decision, in two
+    files, with nothing else comparing them.
+
+    Dependabot bumps ``@playwright/test`` on its own schedule and has no idea
+    this tag exists. Left unpinned, the next minor bump silently swaps the
+    renderer under 22 committed baselines and the whole job reads as "the design
+    regressed".
+
+    Turns red if: ``frontend/package-lock.json``'s ``@playwright/test`` version
+    and ``frontend.yml``'s ``visual-e2e`` container tag stop matching. The fix is
+    to regenerate the baselines in the NEW image and move both together.
+    """
+    container = _visual_job().get("container")
+    image = container.get("image") if isinstance(container, dict) else container
+    assert isinstance(image, str) and image, (
+        f"{DEMO_WORKFLOW.name}:visual-e2e declares no `container:` image (got "
+        f"{container!r}). Without it the job installs whatever browser "
+        "`playwright install` fetches on the day, and the committed -linux "
+        "baselines stop being reproducible."
+    )
+    match = re.fullmatch(r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+", image.strip())
+    assert match, (
+        f"{DEMO_WORKFLOW.name}:visual-e2e runs in {image!r}, which is not an "
+        "`mcr.microsoft.com/playwright:v<version>-<distro>` tag. The pin below "
+        "cannot read a version out of it, and a floating or `latest` tag is "
+        "exactly what this rule exists to refuse."
+    )
+    installed = _installed_playwright_version()
+    assert match.group("version") == installed, (
+        f"{DEMO_WORKFLOW.name}:visual-e2e runs in Playwright image "
+        f"v{match.group('version')} while frontend/package-lock.json installs "
+        f"@playwright/test {installed}. The image's bundled Chromium is the one "
+        "that drew tests/visual.spec.ts-snapshots/*-chromium-linux.png; a "
+        "mismatch means the job compares those pixels against a different "
+        "renderer, and every diff it reports is about the version skew rather "
+        "than about this repo."
+    )
+
+
+def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
+    """Partner to the pin above: the tag is only a pin if nothing overrides it.
+
+    ``npx playwright install`` inside the container downloads a second copy of
+    the browser into ``$PLAYWRIGHT_BROWSERS_PATH`` and Playwright then uses THAT.
+    The container tag would still read v1.63.0, this file would still be green,
+    and the browser drawing the comparison would be whichever one the install
+    step fetched. The demo and live jobs legitimately run that step — they have
+    no container — so the rule is scoped to this job.
+
+    Turns red if: a ``playwright install`` step is added to ``visual-e2e``.
+    """
+    offenders = [
+        str(step.get("name") or step.get("run") or "")
+        for step in _steps(_visual_job())
+        if "playwright install" in str(step.get("run") or "")
+    ]
+    assert not offenders, (
+        f"{DEMO_WORKFLOW.name}:visual-e2e runs `playwright install` ({offenders}). "
+        "The container image already carries the browsers, and a second download "
+        "silently replaces the pinned one — which defeats "
+        "test_the_visual_job_runs_the_browser_that_drew_its_baselines without "
+        "changing anything it reads."
+    )
+
+
+def test_the_visual_job_uploads_the_diff_images_not_just_the_report() -> None:
+    """The artifact IS the deliverable for this job, and one path carries it.
+
+    When a screenshot comparison fails, the only thing that separates "the design
+    moved" from "the renderer moved" is the pair of images Playwright writes to
+    ``test-results/``: ``<name>-actual.png`` and ``<name>-diff.png``. The HTML
+    report alone is navigation around them. Uploading only ``playwright-report``
+    would look complete and leave the reviewer with nothing to compare.
+
+    ``path:`` is repo-root-relative even though the run steps use
+    ``working-directory: frontend`` — ``working-directory`` applies to ``run:``
+    steps only, never to an action's ``with:`` inputs.
+    """
+    uploads = [
+        step
+        for step in _steps(_visual_job())
+        if str(step.get("uses") or "").startswith("actions/upload-")
+    ]
+    assert len(uploads) == 1, (
+        f"expected exactly one upload step in visual-e2e, found {len(uploads)}"
+    )
+    with_block = uploads[0].get("with") or {}
+    paths = [line.strip() for line in str(with_block.get("path", "")).splitlines() if line.strip()]
+    assert "frontend/test-results" in paths, (
+        f"visual-e2e uploads {paths}, which does not include "
+        "`frontend/test-results` — the directory holding every -actual.png and "
+        "-diff.png. Without it a failed run hands the reviewer a report with no "
+        "images to look at."
+    )
+    assert "frontend/playwright-report" in paths, (
+        f"visual-e2e uploads {paths}, which does not include "
+        "`frontend/playwright-report`. The run step passes `--reporter=list,json,"
+        "html`, and `--reporter` REPLACES the config's reporters, so the HTML "
+        "report lands in the base config's `playwright-report` — this path."
+    )
+    assert with_block.get("if-no-files-found") == "error", (
+        "visual-e2e's upload step must set `if-no-files-found: error`. The "
+        "default is `warn`, which is exactly how frontend.yml's dead "
+        "`frontend-dist` artifact survived unnoticed until #325 removed it."
+    )
+
+
+def test_the_visual_config_selects_by_file_path_not_by_test_title() -> None:
+    """A title-based selection here empties the job the day someone renames a describe.
+
+    ``playwright.demo-ci.config.ts`` records the same reasoning for its
+    ``testIgnore``. The two are complements — one excludes the file, the other
+    matches it — and if either switched to a ``grep`` over titles, a rename would
+    move one side of the partition without moving the other.
+    """
+    source = VISUAL_PW_CONFIG.read_text(encoding="utf-8")
+    assert re.search(r"^\s*testMatch:\s*/visual\\\.spec\\\.ts\$/", source, re.M), (
+        f"{VISUAL_PW_CONFIG.name} no longer declares "
+        "`testMatch: /visual\\.spec\\.ts$/`. That regex is what makes this "
+        "config the exact complement of playwright.demo-ci.config.ts's "
+        "`testIgnore`; a `grep:` in its place selects by TITLE and empties the "
+        "job on a describe-block rename."
+    )
+    assert "grep:" not in source, (
+        f"{VISUAL_PW_CONFIG.name} declares a `grep:`, which narrows the selection "
+        "by test title on top of the file match. The workflow's "
+        "`visual_total -eq all_visual` differential would then go red for a "
+        "reason that has nothing to do with the baselines."
+    )
+
+
+def _visual_selection_body() -> str:
+    return _step_body(DEMO_WORKFLOW, "visual-e2e", "Guard against a vacuous selection")
+
+
+def _visual_assertion_body() -> str:
+    return _step_body(DEMO_WORKFLOW, "visual-e2e", "Assert the suite actually executed")
+
+
+_VISUAL_HERO = "visual.spec.ts:38:7 › [light] visual regression › hero"
+_VISUAL_FOOTER = "visual.spec.ts:38:7 › [dark] visual regression › footer"
+_VISUAL_NONVISUAL = "landing.spec.ts:9:3 › Landing › renders the hero"
+# A visual test whose TITLE starts with the summary line's own prefix. It has to
+# carry "visual regression" as well, or it would trip the `selected_visual`
+# comparison for an unrelated reason and prove nothing about the anchor.
+_VISUAL_POISONED = "visual.spec.ts:38:7 › [light] visual regression › Total: 7 sources strip"
+
+
+def _visual_fixtures(visual: str, all_: str) -> list[tuple[str, str, str]]:
+    return [
+        ("playwright.visual-ci.config.ts", "/tmp/visual_list.txt", visual),
+        ("playwright.config.ts", "/tmp/all_list.txt", all_),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "visual_listing", "all_listing"),
+    [
+        (
+            "a clean listing",
+            _listing([_VISUAL_HERO, _VISUAL_FOOTER], 2, files=1),
+            _listing([_VISUAL_HERO, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+        (
+            "a visual test titled with the summary prefix",
+            _listing([_VISUAL_POISONED, _VISUAL_FOOTER], 2, files=1),
+            _listing([_VISUAL_POISONED, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+    ],
+    ids=["clean", "poisoned-title"],
+)
+def test_the_visual_selection_guard_accepts_a_healthy_listing(
+    label: str, visual_listing: str, all_listing: str, tmp_path: Path
+) -> None:
+    """Passing partner AND the direct statement of what ``^Total:`` buys.
+
+    Without a passing case, every failure case below is satisfied by a script
+    that rejects everything.
+
+    The ``poisoned-title`` case is what makes the anchor load-bearing here, and
+    it works differently from the demo job's twin. That one turns the shortfall
+    case green through a bash arithmetic syntax error that ``set -euo pipefail``
+    does not catch; this guard does no arithmetic, so the anchor's failure shows
+    up on the HEALTHY side instead. Measured 2026-09-16 by removing the two ``^``
+    characters from ``.github/workflows/frontend.yml``: ``visual_total`` becomes
+    the two lines ``7\\n2``, ``test "$visual_total" -gt 0`` dies with "integer
+    expression expected", and this case goes red — so an un-anchored guard
+    rejects a perfectly healthy selection and the job can never pass.
+
+    ``VISUAL_TOTAL`` is asserted BYTE-EXACT rather than "the step exited 0": a
+    multi-line value written into ``$GITHUB_ENV`` corrupts the file for every
+    later step in the job.
+
+    Turns red if: ``^Total:`` is un-anchored to ``Total:`` in
+    ``.github/workflows/frontend.yml``'s ``visual-e2e`` selection guard.
+    """
+    result, github_env = _run_selection_guard(
+        _visual_selection_body(), _visual_fixtures(visual_listing, all_listing), tmp_path
+    )
+    assert result.returncode == 0, (
+        f"the visual selection guard rejected {label}, which is a healthy "
+        f"selection:\n{result.stdout}\n{result.stderr}"
+    )
+    assert github_env == "VISUAL_TOTAL=2\n", (
+        f"the visual selection guard exported {github_env!r} for {label}; "
+        "expected exactly 'VISUAL_TOTAL=2\\n'. A multi-line value means the "
+        "`Total:` capture matched a test TITLE as well as the summary line, and "
+        "it corrupts $GITHUB_ENV for every later step."
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "visual_listing", "all_listing"),
+    [
+        # Nothing selected at all, while the default config still has visual
+        # tests. Caught by the `visual_total -eq all_visual` differential.
+        (
+            "a config that selects nothing",
+            _listing([], 0, files=0),
+            _listing([_VISUAL_HERO, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+        # THE case only `visual_total -gt 0` can see, and the reason that line is
+        # not redundant. `visual.spec.ts` is gone, so BOTH differentials read
+        # 0 == 0 and the job reports green having compared nothing. Measured
+        # 2026-09-16 by deleting the `-gt 0` line: every other case here stayed
+        # red and this one turned green — which is what "defence in depth" looks
+        # like right up until it is the only line left standing. (`--list` also
+        # exits 1 on an empty selection in a real run; the stub does not, which
+        # is what lets this case isolate the one comparison.)
+        (
+            "visual.spec.ts deleted, so both differentials read 0 == 0",
+            _listing([], 0, files=0),
+            _listing([_VISUAL_NONVISUAL], 1, files=1),
+        ),
+        # A visual test the visual config no longer selects. demo-ci IGNORES the
+        # same file, so this test now runs in NO job — #325 reopening itself, one
+        # test at a time.
+        (
+            "a visual test dropped from the visual config",
+            _listing([_VISUAL_HERO], 1, files=1),
+            _listing([_VISUAL_HERO, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+        # THE case `visual_total -eq all_visual` alone cannot see: one visual
+        # test dropped and one non-visual test pulled in. The totals still
+        # balance at 2 == 2; only `selected_visual -eq visual_total` catches it.
+        (
+            "a visual test swapped for a non-visual one",
+            _listing([_VISUAL_HERO, _VISUAL_NONVISUAL], 2, files=2),
+            _listing([_VISUAL_HERO, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+        # The same shortfall, under a title carrying the summary prefix. The
+        # anchor's own proof lives on the passing side (see the docstring there);
+        # this is here so the failure path is exercised through that title shape
+        # too rather than only through ordinary ones.
+        (
+            "a shortfall under a title containing the summary prefix",
+            _listing([_VISUAL_POISONED], 1, files=1),
+            _listing([_VISUAL_POISONED, _VISUAL_FOOTER, _VISUAL_NONVISUAL], 3),
+        ),
+    ],
+    ids=[
+        "empty",
+        "visual-spec-deleted",
+        "dropped-visual",
+        "swapped-for-non-visual",
+        "poisoned-shortfall",
+    ],
+)
+def test_the_visual_selection_guard_fires_on_every_way_the_partition_breaks(
+    label: str, visual_listing: str, all_listing: str, tmp_path: Path
+) -> None:
+    result, _ = _run_selection_guard(
+        _visual_selection_body(), _visual_fixtures(visual_listing, all_listing), tmp_path
+    )
+    assert result.returncode != 0, (
+        f"the visual selection guard PASSED on {label}. The visual specs would "
+        f"then be partly or wholly uncompared while the job reports "
+        f"green.\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "stats", "visual_total", "should_pass"),
+    [
+        # The happy path, and the partner that stops the four failures below
+        # from being satisfied by a script that rejects everything.
+        ("a clean visual run", _stats(expected=22), 22, True),
+        # Nothing in visual.spec.ts self-skips today, so a skip is always new.
+        # A mass `test.skip(true, ...)` is invisible to the selection guard,
+        # because `--list` COUNTS skipped tests.
+        ("the whole suite skipped", _stats(expected=0, skipped=22), 22, False),
+        ("a single unexplained skip", _stats(expected=21, skipped=1), 22, False),
+        # A missing -chromium-linux.png baseline lands here: Playwright writes
+        # the actual and fails the test.
+        ("a baseline that no longer matches", _stats(expected=21, unexpected=1), 22, False),
+        # `retries: 2` under CI. For a pixel suite a retry-only pass is the
+        # signature of a layout that has not settled — #325's own `how-it-works`
+        # symptom — so it must not report green.
+        ("a green-by-flake", _stats(expected=21, flaky=1), 22, False),
+        # Selection said 22, the run accounts for 20. This is what a threshold in
+        # place of the full account would let through.
+        ("two snapshots that never ran", _stats(expected=20), 22, False),
+    ],
+)
+def test_the_visual_execution_assertion_actually_fires(
+    label: str, stats: dict[str, int], visual_total: int, should_pass: bool, tmp_path: Path
+) -> None:
+    result = _run_assertion(
+        _visual_assertion_body(),
+        "/tmp/visual-results.json",
+        {"stats": stats},
+        tmp_path,
+        {"VISUAL_TOTAL": str(visual_total)},
+    )
+    if should_pass:
+        assert result.returncode == 0, (
+            f"the visual execution assertion rejected {label}, which is a "
+            f"healthy run:\n{result.stdout}\n{result.stderr}"
+        )
+    else:
+        assert result.returncode != 0, (
+            f"the visual execution assertion PASSED on {label} ({stats}). That "
+            f"is a silent-green visual job.\n{result.stdout}\n{result.stderr}"
+        )
 
 
 _LIVE_REFUSES = "behavior.spec.ts:24:3 › Chat › composer refuses a second question (live only)"

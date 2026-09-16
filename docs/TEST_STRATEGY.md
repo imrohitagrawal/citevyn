@@ -296,6 +296,42 @@ list entirely.
 `judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)` is also
 advisory and deliberately so: it is the paid job, gated behind a label.
 
+`Visual snapshots (Linux baselines, advisory)` (`frontend.yml`) is advisory too,
+and deliberately (#325). It runs the 22 screenshot comparisons in
+`frontend/tests/visual.spec.ts` — which before #325 ran in **no** CI job at all,
+because the only baselines committed were `*-chromium-darwin.png` and every
+screenshot on `ubuntu-latest` would have failed as "snapshot missing".
+
+Why advisory rather than required: this job's ordinary failure mode is "the
+design moved and the baselines have not been refreshed yet", which is a prompt to
+look at a diff image, not a reason to block an unrelated backend fix. Promoting
+it is a branch-protection change and therefore the owner's; there is no
+`contexts[]=` command for it here, on purpose.
+
+Two properties make it worth having at all, and both are asserted rather than
+described — by `backend/tests/test_gating_workflows.py`, inside the required
+`pytest + lint` job:
+
+- **It runs the browser that drew its baselines.** The job declares
+  `container: mcr.microsoft.com/playwright:v1.63.0-noble`, and that tag is pinned
+  equal to `frontend/package-lock.json`'s resolved `@playwright/test`. A
+  dependabot bump of one without the other would silently swap the renderer under
+  22 committed images.
+- **It is the exact complement of `Demo-mode Playwright (no visual snapshots)`.**
+  The demo job asserts it selects the default suite *minus* its visual tests; this
+  one asserts it selects *exactly* those visual tests. Measured with `--list` on
+  2026-09-16: 230 + 22 = 252. Between them, every test `playwright.config.ts`
+  selects runs in exactly one job.
+
+Baselines are per platform. `*-chromium-darwin.png` is what a developer's local
+`npm run test:visual` compares against; `*-chromium-linux.png` is what this job
+compares against. They are not expected to be the same images — measured across
+the 22, macOS and Linux renders of the same unchanged page differ by 1.0% to 2.7%
+of their pixels, with `personas` also one pixel shorter on Linux. To regenerate
+the Linux set, see the header of `frontend/playwright.visual-ci.config.ts`; it
+must be done under `--platform linux/amd64`, because arm64 and amd64 renders
+differ for 12 of the 22.
+
 ### 12.3 Measured case for promoting the live check
 
 Every figure here is **timestamped and moving**. The invariant is what carries
