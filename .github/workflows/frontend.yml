@@ -137,13 +137,13 @@ jobs:
       # `playwright.config.ts` runs in exactly one job. Deleting either half
       # leaves a hole neither guard can see.
       #
-      # ┌─ #325-PENDING-BASELINES — NOT TRUE YET, and this note comes out with the commit that
-      # │  true. `tests/visual.spec.ts-snapshots/` still holds only `-darwin`
-      # │  files, so `visual-e2e` fails every run with "snapshot missing" and
-      # │  "they run over there instead" is a DESIGN, not a fact. The `-linux`
-      # │  baselines are generated and held for the owner to look at before they
-      # │  are committed. Until that lands, #325 is only half fixed, and the half
-      # │  that is fixed is the wiring.
+      # ┌─ #325-PENDING-BASELINES — NOT TRUE YET. This note comes out with the
+      # │  commit that makes it true. `tests/visual.spec.ts-snapshots/` still
+      # │  holds only `-darwin` files, so `visual-e2e` fails every run with
+      # │  "snapshot missing", and "they run over there instead" is a DESIGN,
+      # │  not a fact. The `-linux` baselines are generated and held for the
+      # │  owner to look at before they are committed. Until that lands, #325 is
+      # │  only half fixed, and the half that is fixed is the wiring.
       # └─
       #
       # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
@@ -543,6 +543,17 @@ jobs:
       # Selection is not execution. `--list` COUNTS SKIPPED TESTS and Playwright
       # exits 0 when every selected test skips, so the guard above reads 22 while
       # the run executes nothing. Assert the run's own JSON stats instead.
+      #
+      # `python3` IS PRESENT BUT NOT PROMISED (#325, item 9). Measured in the
+      # image: `/usr/bin/python3`, Python 3.12.3. But Microsoft documents this
+      # image as a browser/Node environment and gives no contract for a Python
+      # interpreter, so a future rebuild could drop it — unlike the two jobs
+      # above, which run on `ubuntu-latest`, where GitHub does promise one.
+      # Recorded rather than rewritten in Node because the failure is LOUD and
+      # instant: under `set -euo pipefail` a missing `python3` kills this step
+      # before a single pixel is compared, on an ADVISORY job. It goes on the
+      # short list of things only the first real CI run can settle, next to
+      # whether an amd64 render under emulation matches a native runner.
       - name: Assert the suite actually executed
         run: |
           set -euo pipefail

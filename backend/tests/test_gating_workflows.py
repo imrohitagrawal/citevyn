@@ -340,11 +340,15 @@ _UNGUARDABLE: tuple[str, ...] = (
     "pins rather than from the bare variable. Settling command: run the demo "
     "suite twice, once with `CI=''` and once without, and diff the JSON "
     "report's `stats`. Not run — it is a full browser suite.",
-    "Branch protection's `checks[]` app_id pins. All nine existing contexts are "
-    "bound to an app (15368 github-actions, 57789 github-advanced-security); a "
-    "context added through the `contexts` endpoint lands with `app_id: null` "
-    "and would accept a same-named check from any app. Reading that needs a "
-    "token, so it is documented in docs/TEST_STRATEGY.md §12.5, not asserted.",
+    "Branch protection's `checks[]` app_id pins. All TEN contexts are bound to an "
+    "app — nine to 15368 (github-actions) and CodeQL to 57789 "
+    "(github-advanced-security), measured 2026-09-16. This entry said NINE, and "
+    "went on to state as a live worry that a context added through the "
+    "`contexts` endpoint lands with `app_id: null`; §12.5 was rewritten in the "
+    "same change to record that this did NOT happen to the one context added "
+    "since, so the file was giving two answers to one question. What remains "
+    "unguardable is unchanged: reading these pins needs a token, so nothing "
+    "asserts them, and nothing here can tell which route the owner used.",
     "Whether the live suite's assertions are any good. These guards prove it "
     "RUNS and that nothing silently drops out of it, not that it tests the right "
     "thing.",
@@ -1046,6 +1050,65 @@ def test_the_strategy_doc_lists_exactly_the_recorded_contexts() -> None:
         f"§12.1 says {stated.group('count')!r} contexts are required, but "
         f"{len(recorded)} are recorded. The sentence and the table have to move "
         "together."
+    )
+
+
+README = REPO_ROOT / "README.md"
+
+
+def test_the_readme_gate_table_does_not_call_a_required_check_advisory() -> None:
+    """The third drifted copy, and the only one that was still unguarded.
+
+    README's gate table is the most-read description of what blocks a merge, and
+    on 2026-09-16 its live-mode row said "advisory, not a required check" about a
+    context that branch protection had required for some time. §12.1 is held to
+    the record by ``test_the_strategy_doc_lists_exactly_the_recorded_contexts``;
+    this is the cheap equivalent for README.
+
+    It is deliberately NARROW. README's table is free prose with one row per
+    gate, so asserting its full contents against the record would fight the
+    document rather than guard it. What it catches is the one drift that
+    happened: a row naming a REQUIRED job while describing it as advisory.
+
+    The backticked job names are removed from the cell before the words are
+    looked for, so `Visual snapshots (Linux baselines, advisory)` — a job whose
+    NAME contains the word — cannot trip it, today or if it is ever promoted.
+
+    Turns red if: a README row names a context in _REQUIRED_CONTEXT_WORKFLOWS and
+    calls it advisory or not required.
+    """
+    lines = [
+        line for line in README.read_text(encoding="utf-8").splitlines() if line.startswith("|")
+    ]
+    offenders: list[str] = []
+    checked = 0
+    for line in lines:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        cell = cells[-1]
+        named = [n for n in re.findall(r"`([^`]+)`", cell) if n in _REQUIRED_CONTEXT_WORKFLOWS]
+        if not named:
+            continue
+        checked += 1
+        # Strip every backticked span, so a JOB NAME containing "advisory" is
+        # not mistaken for a claim about that job.
+        prose = re.sub(r"`[^`]*`", " ", cell).lower()
+        if "advisory" in prose or "not a required check" in prose:
+            offenders.append(f"{named} -> {cell}")
+    # PARTNER. The loop is "nothing is wrong" over whatever it happens to find;
+    # a table that stops parsing, or job names that stop matching the record,
+    # would satisfy it for free.
+    assert checked >= 2, (
+        f"README's gate table yielded {checked} row(s) naming a recorded "
+        "required context — the table or the backtick convention has changed, so "
+        "the rule below is checking almost nothing"
+    )
+    assert not offenders, (
+        "README's gate table calls a REQUIRED status check advisory:\n  "
+        + "\n  ".join(offenders)
+        + "\nBranch protection is the truth; docs/TEST_STRATEGY.md §12.1 is the "
+        "list, and backend/tests/test_gating_workflows.py is the record."
     )
 
 
@@ -1999,11 +2062,11 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     the same version) — so the container tag and the installed Playwright are two
     records of the same decision, in two files, with nothing else comparing them.
 
-    NOTE, true as of the commit that added this rule: no ``-chromium-linux.png``
-    is committed yet. They are generated and held for the owner to review the
-    images. This rule does not depend on them existing — it compares a tag
-    against a lockfile — but the sentence above describes what the pin is FOR,
-    not what the tree currently holds.
+    NOTE (#325-PENDING-BASELINES), true as of the commit that added this rule: no
+    ``-chromium-linux.png`` is committed yet. They are generated and held for the
+    owner to review the images. This rule does not depend on them existing — it
+    compares a tag against a lockfile — but the sentence above describes what the
+    pin is FOR, not what the tree currently holds.
 
     Dependabot bumps ``@playwright/test`` on its own schedule (which drags
     ``playwright-core`` with it) and has no idea this tag exists. Left unpinned,
@@ -2094,12 +2157,14 @@ def test_the_regeneration_command_and_the_ci_container_agree() -> None:
     passes ``--disable-dev-shm-usage`` — which is precisely why a divergence
     would never announce itself, and why it is asserted rather than trusted.
 
-    WHAT IT HOLDS, precisely. Two things, because agreement alone was not
-    enough: (1) PRESENCE — ``--ipc=host`` must appear in both places, so removing
-    it from BOTH is red rather than quietly green, which is what an
-    agreement-only check allowed; (2) AGREEMENT — the two must not diverge, which
-    is the case that actually happened (the flag was in the documented command
-    and not in the job).
+    WHAT IT HOLDS, precisely. ``--ipc=host`` must be PRESENT in both places.
+    That single rule subsumes the agreement one it replaced: two things that must
+    both be present cannot diverge, so the case that actually happened (the flag
+    in the documented command, absent from the job) fails on the job's side, and
+    the case an agreement-only check let through (absent from both) fails on
+    both. The name still says "agree" because the file-level agreement — the
+    documented command must name the SAME IMAGE the job runs — is asserted
+    separately, by the ``len(candidates) == 1`` line.
 
     Turns red if: ``options: --ipc=host`` leaves the job, or the documented
     regeneration command stops passing it, or both do.
@@ -2164,13 +2229,13 @@ def test_the_regeneration_command_and_the_ci_container_agree() -> None:
         "tab mid-screenshot. If dropping it is genuinely wanted, change this "
         "assertion deliberately and say why — do not let it lapse from one side."
     )
-    assert in_command == in_job, (
-        f"`--ipc=host` is in the documented regeneration command: {in_command}; "
-        f"in {DEMO_WORKFLOW.name}:visual-e2e's `container.options` ({options!r}): "
-        f"{in_job}. The container that DRAWS a baseline and the container that "
-        "COMPARES it must be configured the same way, or a difference between "
-        f"them is indistinguishable from a design change.\n  {command}"
-    )
+    # The `in_command == in_job` assertion that used to stand here is DELETED
+    # (#325, item 7). Once presence is asserted on both sides, equality can never
+    # fire: True == True is the only reachable state. Keeping it would have been
+    # a line no edit anywhere could turn red, which this repo deletes on sight —
+    # the same reason `test_the_pinned_required_contexts_are_json_serialisable_
+    # strings` went. Divergence is still caught, and by a STRICTER rule: the
+    # assertion above fails on either side losing the flag, naming which one.
 
 
 def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
@@ -2297,8 +2362,17 @@ def test_the_visual_config_selects_by_file_path_not_by_test_title() -> None:
     # `grepInvert` are the only two Playwright options that narrow a selection by
     # title, so the pair is the whole population.
     stripped = _strip_comments(source)
+    # Quoted keys count (#325, item 8): `"grep": /hero/` and `'grep': /hero/` are
+    # the same declaration to JavaScript, and a bare-word-only pattern read them
+    # as prose. The quote characters are optional and must MATCH, so `"grep':`
+    # is not treated as a key.
     narrowing = sorted(
-        {match.group("key") for match in re.finditer(r"\b(?P<key>grepInvert|grep)\s*:", stripped)}
+        {
+            match.group("key")
+            for match in re.finditer(
+                r"""(?P<q>["']?)(?P<key>grepInvert|grep)(?P=q)\s*:""", stripped
+            )
+        }
     )
     assert not narrowing, (
         f"{VISUAL_PW_CONFIG.name} declares {narrowing}, which narrows the "
@@ -2317,10 +2391,11 @@ def test_the_visual_config_selects_by_file_path_not_by_test_title() -> None:
 
     # WHAT THIS CANNOT SEE, stated rather than implied: a selection narrowed at
     # RUN time (a `--grep` appended to the workflow's command line), a key built
-    # dynamically, or one arriving through a spread from another module. The
-    # run-time case is caught one layer out — the job's execution assertion
-    # accounts for every selected test against `VISUAL_TOTAL`, so a narrowed run
-    # fails the full account. The other two are not covered by anything.
+    # dynamically (`[k]: /hero/`), or one arriving through a spread from another
+    # module. The run-time case is caught one layer out — the job's execution
+    # assertion accounts for every selected test against `VISUAL_TOTAL`, so a
+    # narrowed run fails the full account. The other two are not covered by
+    # anything. Quoted keys WERE in this list and are now caught instead.
 
 
 def _visual_selection_body() -> str:
@@ -2852,7 +2927,9 @@ def test_the_demo_rename_trap_reads_the_project_name_into_the_grep_string(
 
     Playwright greps the JOINED path and it STARTS with the project name —
     re-measured on 1.61.0 in this repo: ``--grep "^chromium behavior.spec.ts
-    Chat "`` selects 15 tests, ``--grep "spec.ts"`` selects all 202. The
+    Chat "`` selects 15 tests, ``--grep "spec.ts"`` selected all 202 when that
+    was measured on 2026-09-08 (the suite is 252 as of 2026-09-16 — the point is
+    that the grep path includes the file, not the size of the suite). The
     workflow rebuilds that string, but dropping ``projectName`` from the join
     changed no other test here, so a review-round mutant doing so survived.
 
@@ -2902,7 +2979,9 @@ def test_the_demo_rename_trap_matches_the_same_string_playwright_greps(tmp_path:
 
     Measured on Playwright 1.61.0 in this repo:
     ``--grep "^chromium behavior.spec.ts Chat "`` selects 15 tests and
-    ``--grep "spec.ts"`` selects the whole 202-test suite. So a test whose own
+    ``--grep "spec.ts"`` selected the whole suite — 202 tests when measured on
+    2026-09-08, 252 on 2026-09-16; what carries the point is that it matches
+    every test, not the number. So a test whose own
     title says nothing about live mode, but which sits under a describe block
     that does, IS selected by the live config — and the trap must not report it
     as an orphan.
