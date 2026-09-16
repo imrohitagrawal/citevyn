@@ -41,6 +41,20 @@ import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_LENGTH = 128;
 
+// #446. The email bounds were the half of this mirror nobody wrote down: the
+// password ceiling was mirrored AND tested while `email` carried `required` and
+// nothing else, so a 300-character address could be typed, submitted, and
+// rejected by `RegisterRequest` / `LoginRequest` / the magic-link body — all
+// three declare `min_length=3, max_length=255` — as a 422 the form gave the user
+// no way to predict.
+//
+// All four numbers here are tied to the Pydantic fields themselves by
+// `backend/tests/test_ui_input_limits_match_the_api.py`, which reads the field
+// metadata rather than keeping a second copy of the literal — so relaxing a
+// server bound without moving the form reddens a test instead of shipping quietly.
+const EMAIL_MIN_LENGTH = 3;
+const EMAIL_MAX_LENGTH = 255;
+
 export type AuthModalMode = "login" | "register" | "magic-link" | "set-password";
 
 // #301. After a successful send the server refuses another request for this long, so
@@ -437,6 +451,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
                   ref={firstFieldRef}
                   type="email"
                   required
+                  minLength={EMAIL_MIN_LENGTH}
+                  maxLength={EMAIL_MAX_LENGTH}
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}

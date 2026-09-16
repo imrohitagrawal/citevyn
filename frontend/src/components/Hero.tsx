@@ -3,6 +3,7 @@
  */
 
 import type * as React from "react";
+import { MAX_QUESTION_LENGTH } from "../lib/composerInput";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_GLYPH,
@@ -106,6 +107,11 @@ export function Hero({
               value={heroInput}
               onChange={onHeroInput}
               onKeyDown={onHeroKey}
+              // #446. The SAME ceiling the chat composer carries, from the same
+              // constant. The hero is the box most visitors type into first, and
+              // it had no limit at all — a pasted document went out as a question
+              // and came back 422 wearing a "temporarily unavailable" badge.
+              maxLength={MAX_QUESTION_LENGTH}
               placeholder={heroPlaceholder}
               style={{
                 flex: 1,

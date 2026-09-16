@@ -495,6 +495,16 @@ describe("useLandingState — live error path", () => {
     // A network/timeout failure is a transport error, NOT a content refusal (#120).
     expect(result.current.state.messages[1].errorKind).toBe("error");
     expect(result.current.state.messages[1].refusal).toBe(false);
+    // #446. THE ASSERTION THIS TEST WAS NAMED FOR AND DID NOT MAKE. It pinned the
+    // TITLE only, so "shows a GENERIC error" went green for two releases while
+    // the message it never looked at was the client's own internal sentence
+    // "Network error — is the backend running?" — rendered verbatim, naming a
+    // component the visitor has never heard of and asking them a question only an
+    // operator could answer. The title was a proxy; this is what the user reads.
+    expect(result.current.toasts[0].message).toBe(
+      "The request failed. Please try again in a moment.",
+    );
+    expect(result.current.toasts[0].message.toLowerCase()).not.toContain("backend");
   });
 
   it("retries session creation after it fails once, then succeeds", async () => {

@@ -472,6 +472,26 @@ short
 step_by_step
 ```
 
+Field limits (#446). These were enforced by the route from the first slice and
+documented nowhere, so a client had no way to know where the line was until it
+hit a 422:
+
+| Field | Limit | On violation |
+|---|---|---|
+| `message` | 1–4000 characters | `422` `validation_error` |
+
+The rejection is **permanent for that input** — an over-length `message` fails
+identically on every retry — so a client must not present it as a transient
+outage. The web UI mirrors the ceiling as a `maxLength` attribute on both
+question composers so the browser refuses what this route would refuse;
+`backend/tests/test_ui_input_limits_match_the_api.py` holds the two numbers
+together, and the boundary itself is tested at 4000 and 4001 in
+`backend/tests/test_messages_routes.py`.
+
+The 422 envelope does not echo the rejected text back: `_redact_input` replaces
+the offending value with a `<N chars redacted>` marker, so the body says how long
+the input was without repeating it.
+
 ### Response
 
 ```json

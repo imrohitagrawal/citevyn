@@ -218,6 +218,80 @@ impact on metrics
 9. No matching source evidence.
 10. Exact flag that does not exist.
 
+## 8b. Required UI-Input Negative Tests
+
+§8 is about what the answering layer does with a hostile question. Every one of
+its ten cases assumes the question already arrived. §8b is about the box it was
+typed into — a surface §8 never mentions, and which for a long time had no
+negative tests at all.
+
+### What this binds
+
+Every **input surface**: any `<input>` or `<textarea>` a person types into. The
+sweep lives in `frontend/src/test/uiInputNegative.test.tsx` and holds a registry
+of them. That registry is **not hand-kept**: the same file parses the components
+with the TypeScript compiler and fails when an element exists that the registry
+does not list. Adding a form field without sweeping it is a red test, not an
+oversight — a hand-kept list was how #445's first fix missed the suggestion
+chips, complete the day it was written and silently wrong a week later.
+
+### The seven cells
+
+Each surface is tested against all seven. Where a cell is meaningless for a
+surface, say so in the test file; do not leave it unmentioned.
+
+| Cell | What it means |
+|---|---|
+| Empty submit | Submitting a blank field must not send a request, and must produce something a screen reader announces. A bare `return` is not a behaviour — it produces zero DOM mutations (#445). |
+| Whitespace-only | Spaces and tabs are the empty case. The submit is refused **and the typed text is kept** — a refused input must never be cleared. |
+| Over-length | The client carries the server's own ceiling, and the server is tested at the boundary in both directions: the last accepted length AND the first rejected one. A rejection test alone proves only that *something* is refused, never that the documented limit is the one in force. |
+| Paste-only | Text that arrives entirely by paste, with no keystroke for the content, still submits and is still trimmed. Handlers that hang off `keydown` miss this. |
+| Rapid double-submit | The same input submitted twice with no gap sends one request, not two. |
+| Submit-while-in-flight | A submit during a pending request is refused, **announced**, and the text kept. Silent refusal is the defect, not the refusal. |
+| Submit-while-disabled | A control that advertises unavailable actually is. Note which mechanism does the refusing — `disabled`, `aria-disabled`, or a guard in the handler — because they are not interchangeable and only one of them is enforced by the browser. |
+
+### Two rules that are not cells
+
+**IME composition.** Any handler that submits on Enter must not submit while an
+input method editor is composing. A CJK writer presses Enter to *pick a
+candidate*; a bare `e.key === "Enter"` sends the half-composed phonetic text and
+clears the box. Check **both** signals: `nativeEvent.isComposing` (standard) and
+`keyCode === 229` (Safari reports `isComposing` false and only the legacy code,
+so a standards-only guard is broken on every iPhone). One shared predicate —
+`frontend/src/lib/composerInput.ts` — never a copy per composer.
+
+**What a rejection says.** A validation failure is **not** a transport failure.
+A 4xx the server raised against this specific input is permanent for that input,
+and copy implying it will pass on its own sends the user into an identical
+failure. Assert the **message the user reads**, never the toast title alone: the
+status-0 test in `useLandingState.test.tsx` was named "shows a generic error",
+pinned the title, and stayed green for two releases while the message it never
+looked at was `Network error — is the backend running?`. Client transport strings
+and raw HTTP status numbers are not user-facing copy.
+
+### What jsdom cannot prove, and what to do about it
+
+jsdom implements neither **native `required` bubbling** nor **constraint
+validation on submit**, and it does not enforce **`maxLength`** or `minLength` on
+programmatic value assignment. A jsdom test that appears to prove a browser is
+refusing an empty or over-long field is proving nothing.
+
+So, for those:
+
+1. **Assert the attribute** and say in the test what that does and does not
+   prove. `toBeRequired()` proves the form *asks* the browser to refuse an empty
+   field. It does not prove any refusal happened; that is a browser guarantee
+   this suite does not exercise.
+2. **Put the behaviour in Playwright** where it is load-bearing enough to earn a
+   real browser (`frontend/tests/behavior.spec.ts`).
+3. **Back it with a server-side test.** The browser is bypassable, so the bound
+   that matters is the server's. Every client limit in §8b has a backend boundary
+   test, and `backend/tests/test_ui_input_limits_match_the_api.py` reads the
+   Pydantic field metadata and fails if the two ever disagree.
+
+A cell that cannot be honestly tested is written down here as untested. It is not
+skipped silently and it is not covered by a test that asserts something easier.
+
 ## 9. No-Answer Tests
 
 The system must say:

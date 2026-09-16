@@ -21,6 +21,7 @@ import {
 } from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
+import { MAX_QUESTION_LENGTH, isSubmitKey } from "../lib/composerInput";
 import { EMPTY_SUBMIT_NUDGE_MS } from "../lib/composerNudge";
 import { getAuthSnapshot } from "../lib/authStore";
 import { isModalDialogOpen } from "../lib/dialogStack";
@@ -66,8 +67,15 @@ interface ChatMessage {
   suggestions?: Suggestion[];
   /** A TRANSPORT failure (rate limit / server / network) — distinct from a content
    *  refusal (#120). Drives a rate-limit / error notice badge instead of the
-   *  "NO SOURCE — REFUSED" badge, which must stay reserved for a genuine corpus miss. */
-  errorKind?: "rate_limit" | "error";
+   *  "NO SOURCE — REFUSED" badge, which must stay reserved for a genuine corpus miss.
+   *
+   *  #446 adds `"rejected"`, which is NOT a transport failure and is the reason
+   *  the union needed a third member rather than reusing `"error"`: a 422 means
+   *  the server looked at THIS input and refused it. `"error"` renders
+   *  "TEMPORARILY UNAVAILABLE", and every word of that is false here — nothing
+   *  is unavailable, and the rejection is permanent for that exact text, so the
+   *  implied "try again shortly" sends the user into an identical failure. */
+  errorKind?: "rate_limit" | "error" | "rejected";
 }
 
 interface AppState {
@@ -768,7 +776,7 @@ export function useLandingState() {
       // must NOT wear the "NO SOURCE — REFUSED" content-refusal badge — that badge means
       // "the corpus had no answer", which is wrong here (#120). ``errorKind`` drives a
       // distinct rate-limit / connection-error notice instead.
-      let errorKind: "rate_limit" | "error" = "error";
+      let errorKind: "rate_limit" | "error" | "rejected" = "error";
       if (apiErr?.isRateLimited()) {
         kind = "warning";
         errorKind = "rate_limit";
@@ -804,9 +812,32 @@ export function useLandingState() {
         title = "We couldn't get an answer";
         message =
           "We're having trouble reaching the answer service right now. Please try again in a moment — if it keeps happening, contact support.";
-      } else if (apiErr) {
-        message = apiErr.message || message;
+      } else if (apiErr?.status === 422) {
+        // #446. A 422 was NOT MAPPED AT ALL. It fell to the old catch-all below
+        // and came out wearing the transport badge, so an over-length question
+        // was reported as "⚠ TEMPORARILY UNAVAILABLE" — false on both words, and
+        // actively misleading, because the question is re-sendable and fails
+        // identically every time. The user was being told to wait for an outage
+        // that would never end.
+        //
+        // The only user-controllable field on this route is `message`
+        // (`min_length=1, max_length=4000`), and empty is already stopped by the
+        // composers, so over-length is the reachable case and the copy names it.
+        // The number comes from the shared constant the composers' `maxLength`
+        // uses, which a backend test ties to the Pydantic bound itself.
+        title = "That question wasn't accepted";
+        message = `A question can be at most ${MAX_QUESTION_LENGTH} characters. Shorten it and send it again — waiting will not help.`;
+        errorKind = "rejected";
       }
+      // #446. NO `else if (apiErr) { message = apiErr.message }` — that catch-all
+      // put the client's own transport strings in front of the user verbatim.
+      // Measured, not argued: a `fetch` rejection becomes a status-0
+      // `ApiClientError` whose message is "Network error — is the backend
+      // running?", and that whole sentence was rendered in the toast. It names
+      // an internal component and asks the VISITOR a question only an operator
+      // can answer. A response with no error envelope did the same with
+      // "Request failed with status <n>." An unmapped failure now keeps the
+      // generic default above; anything worth saying gets its own branch.
       addToast({ kind, title, message });
       // ``refusal: false`` — this is a transport error, not a content refusal; the
       // ``errorKind`` badge is what the bubble shows.
@@ -1031,7 +1062,7 @@ export function useLandingState() {
         refusal?: boolean;
         finalSources: Source[];
         finalSuggestions?: Suggestion[];
-        errorKind?: "rate_limit" | "error";
+        errorKind?: "rate_limit" | "error" | "rejected";
       },
     ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
@@ -1300,7 +1331,11 @@ export function useLandingState() {
 
   const onHeroKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") askHero();
+      // #446. `isSubmitKey`, not a bare `e.key === "Enter"`: the bare check
+      // submits a half-composed phonetic string when an IME user presses Enter
+      // to PICK a candidate. Shared with `onChatKey` below so the two composers
+      // cannot drift — see `lib/composerInput.ts`.
+      if (isSubmitKey(e)) askHero();
     },
     [askHero],
   );
@@ -1368,7 +1403,10 @@ export function useLandingState() {
 
   const onChatKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") submitChat();
+      // #446. The SAME predicate as `onHeroKey`, from the same module. These two
+      // lines were already identical and still diverged in every other respect;
+      // sharing the predicate is what keeps the IME fix on both screens.
+      if (isSubmitKey(e)) submitChat();
     },
     [submitChat],
   );

@@ -246,6 +246,100 @@ def test_post_message_rejects_bad_answer_style(seeded_app: TestClient) -> None:
     assert "answer_style" in envelope["error"]["message"]
 
 
+# ---------------------------------------------------------------------------
+# #446 — the `message` length boundary (TEST_STRATEGY §8b, "over-length")
+#
+# `AnswerRequest.message` has declared `min_length=1, max_length=4000` since
+# Slice 7 and NOTHING posted a body at either edge. The ceiling was a number in a
+# decorator that no test had ever made bite, so it could have been raised,
+# lowered or deleted in silence. Both composers now carry the same ceiling as a
+# `maxLength` attribute, and `test_ui_input_limits_match_the_api.py` ties the two
+# numbers together; these tests are what make the SERVER half real.
+# ---------------------------------------------------------------------------
+
+
+def test_post_message_accepts_a_message_at_the_4000_character_ceiling(
+    seeded_app: TestClient,
+) -> None:
+    """The LAST accepted length. Partner to the rejection test below.
+
+    Without this, ``max_length`` could be lowered to 10 and the 4001 test would
+    still pass -- an over-length test alone proves only that SOMETHING is
+    rejected, never that the documented limit is the one in force.
+    """
+    create = seeded_app.post(
+        "/v1/sessions",
+        json={"channel": "chat"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    session_id = create.json()["session_id"]
+
+    response = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "a" * 4000, "answer_style": "short"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+
+    assert response.status_code != 422, "a message AT the documented ceiling was rejected"
+    assert response.status_code == 200
+
+
+def test_post_message_rejects_a_message_one_character_over_the_ceiling(
+    seeded_app: TestClient,
+) -> None:
+    """4001 characters is refused, with the standard envelope.
+
+    RED if ``max_length`` is raised or removed from ``AnswerRequest.message``.
+    """
+    create = seeded_app.post(
+        "/v1/sessions",
+        json={"channel": "chat"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    session_id = create.json()["session_id"]
+
+    response = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "a" * 4001, "answer_style": "short"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+
+    assert response.status_code == 422
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 — NOT nested under "detail"
+    assert envelope["error"]["code"] == "validation_error"
+    # The user's 4001 characters must NOT be echoed back through the error
+    # envelope -- ``_redact_input`` replaces the offending value with a length
+    # marker. Asserted here because this is the first test that sends a body big
+    # enough for the echo to matter.
+    body = response.text
+    assert "a" * 100 not in body, "the rejected message was echoed back in the error envelope"
+    assert "4001" in body, "the envelope does not even say how long the input was"
+
+
+def test_post_message_rejects_an_empty_message(seeded_app: TestClient) -> None:
+    """``min_length=1``: the floor, which also had no test.
+
+    The composers stop this in the browser (#445), so it is unreachable from the
+    UI -- which is exactly why the server-side floor needs its own test rather
+    than relying on a client that can be bypassed.
+    """
+    create = seeded_app.post(
+        "/v1/sessions",
+        json={"channel": "chat"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    session_id = create.json()["session_id"]
+
+    response = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "", "answer_style": "short"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
 def test_post_message_returns_404_when_session_missing(in_memory_client: TestClient) -> None:
     response = in_memory_client.post(
         f"/v1/sessions/{uuid.uuid4()}/messages",

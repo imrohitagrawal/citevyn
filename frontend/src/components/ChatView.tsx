@@ -6,6 +6,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
+import { MAX_QUESTION_LENGTH } from "../lib/composerInput";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_GLYPH,
@@ -24,8 +25,10 @@ interface ChatViewProps {
     streaming?: boolean;
     refusal?: boolean;
     /** A transport failure (rate limit / server / network) — distinct from a content
-     *  refusal, so it shows a rate-limit / connection notice, not "NO SOURCE — REFUSED" (#120). */
-    errorKind?: "rate_limit" | "error";
+     *  refusal, so it shows a rate-limit / connection notice, not "NO SOURCE — REFUSED" (#120).
+     *  `"rejected"` (#446) is the odd one out and is NOT a transport failure: the
+     *  server read this input and refused it, permanently, for this exact text. */
+    errorKind?: "rate_limit" | "error" | "rejected";
     hasSources?: boolean;
     sources?: Array<{ n: string; title: string; url: string }>;
     /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
@@ -561,6 +564,15 @@ export function ChatView({
                   {m.errorKind === "error" && (
                     <div className="notice-badge notice-error">⚠ TEMPORARILY UNAVAILABLE</div>
                   )}
+                  {/* #446. Reuses `notice-error`'s styling deliberately — this IS
+                      an error and red is right; the only thing wrong with the
+                      badge above was the word TEMPORARILY, which promised an
+                      outage that would pass. Sharing the class also keeps this
+                      badge inside the existing chat contrast sweep rather than
+                      introducing an unswept colour. */}
+                  {m.errorKind === "rejected" && (
+                    <div className="notice-badge notice-error">⚠ NOT ACCEPTED</div>
+                  )}
                   {!m.errorKind && m.refusal && (
                     <div className="refusal-badge">
                       ⚠ NO SOURCE — REFUSED
@@ -655,6 +667,12 @@ export function ChatView({
             value={chatInput}
             onChange={onChatInput}
             onKeyDown={onChatKey}
+            // #446. The server's own ceiling (`AnswerRequest.message`,
+            // max_length=4000), mirrored so the browser stops what the server
+            // would reject. Without it the request went out, came back 422, and
+            // `submitChat` had ALREADY cleared the box — so the user lost a long
+            // question and was told the service was temporarily unavailable.
+            maxLength={MAX_QUESTION_LENGTH}
             placeholder="Ask about Claude, Codex, Gemini…"
             className="chat-input"
           />

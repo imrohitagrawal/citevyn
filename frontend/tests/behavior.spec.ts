@@ -195,6 +195,29 @@ test.describe("Hero", () => {
     await expect(page.locator("#hero-input")).toBeFocused();
     expect(await page.locator("#hero-input").inputValue()).toBe("test/");
   });
+
+  // #446 (TEST_STRATEGY §8b, "over-length"). THE HALF JSDOM CANNOT PROVE.
+  // jsdom does not enforce `maxLength` on a programmatic value assignment, so
+  // the unit sweep can only assert the ATTRIBUTE is there, and says so. What the
+  // attribute is FOR — the browser clamping over-length input so the request is
+  // never made and the box is never cleared under the user — takes a real
+  // browser. Without this, "the client carries the server's ceiling" is an
+  // attribute check wearing the clothes of a behaviour.
+  test("hero input truncates over-length text at the server's 4000-char ceiling", async ({
+    page,
+  }) => {
+    const hero = page.locator("#hero-input");
+    // fill() drives the browser's own input pipeline, so the maxLength clamp
+    // applies exactly as it does to typing and pasting.
+    await hero.fill("a".repeat(4500));
+    expect(await hero.inputValue()).toHaveLength(4000);
+
+    // The partner. Without it this passes on a box that holds nothing at all — a
+    // broken locator, a disabled input, a fill() that silently no-ops — which is
+    // the absence-read-as-success failure this repo has a scar for.
+    await hero.fill("a".repeat(3999));
+    expect(await hero.inputValue()).toHaveLength(3999);
+  });
 });
 
 // ---------------------------------------------------------------------------
