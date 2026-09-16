@@ -56,6 +56,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postcss, { Rule } from "postcss";
+import ts from "typescript";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_GLYPH,
@@ -187,10 +188,14 @@ interface Observation {
       "correct" nudge was not announced either before #445.
 
       LOAD-BEARING FOR THE HERO ONLY, said plainly so nobody reads the chat half
-      as protection it is not giving: the chat's region is pre-existing and
-      roughly twenty assertions in `ChatView.test.tsx` already call
-      `getByRole("status")`, which throws on more than one. The hero's region is
-      new here and nothing else asserts it. */
+      as protection it is not giving: the chat's region is pre-existing, and
+      `ChatView.test.tsx` reaches it through `getByRole("status")`, which throws
+      when there is more than one — so its existence and its uniqueness are
+      already pinned there. No number here on purpose: the first draft of this
+      line guessed "roughly twenty" and the real figure is 45, which is the
+      shape this repo has a scar for. The count is not what matters and it
+      drifts; the throw-on-multiple is what matters. The hero's region is new in
+      this change and nothing else asserts it. */
   statusRegionCount: number;
   announced: string;
   /** The visible warning duplicates the announced sentence verbatim, so it is
@@ -601,6 +606,305 @@ describe("the empty-submit nudge does not swallow an in-flight refusal", () => {
   });
 });
 
+describe("a suggestion chip retires the nudge, like every other real submit", () => {
+  it("does not keep saying 'Nothing was sent.' after a chip puts a question in the transcript", () => {
+    // FOUND BY REVIEW. The first fix anchored the retirement in `submitChat`,
+    // and `submitChat` is not the only path a real submit takes: the empty-chat
+    // suggestion chips call `send()` directly. The chips render on the empty
+    // chat screen and the composer is focused on mount, so "open chat, press
+    // Enter on the empty box, click a suggested question" is an ordinary
+    // first-run sequence reachable by keyboard alone — and it left the region
+    // announcing "Nothing was sent." about a question sitting in the transcript
+    // until the 3s timer alone cleared it.
+    // RED WHEN: the retirement leaves `send()` — including moving back up into
+    // `submitChat`, which is where it was when this was written.
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    act(() => {
+      fireEvent.click(container.querySelector(".cta-button") as HTMLElement);
+    });
+    const chip = container.querySelector(".suggestion-btn") as HTMLElement | null;
+    // Partner: the chips really are on screen, so a green result below cannot
+    // come from a button that was never there to click.
+    expect(chip, "the empty chat screen rendered no suggestion chips").not.toBeNull();
+
+    act(() => {
+      fireEvent.keyDown(container.querySelector(".chat-input")!, { key: "Enter" });
+    });
+    // Partner: the nudge really is up before the chip is used.
+    expect(
+      container.querySelector('.composer [role="status"]')?.textContent ?? "",
+    ).toBe(EMPTY_SUBMIT_NUDGE);
+
+    act(() => {
+      fireEvent.click(chip!);
+      vi.advanceTimersByTime(200);
+    });
+
+    // Partner: the chip really did submit, so what follows is about a live
+    // submit and not about a click that did nothing.
+    expect(sentAnything(container), "the chip put no question in the transcript").toBe(true);
+    expect(
+      container.querySelector('.composer [role="status"]')?.textContent ?? "",
+      "a chip submit left the region telling a screen reader nothing was sent",
+    ).not.toBe(EMPTY_SUBMIT_NUDGE);
+    expect(
+      container.querySelectorAll(".composer-nudge").length,
+      "the empty-box warning outlived a question the chip sent",
+    ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The CLASS: no path leaves a nudge standing over a question
+// ---------------------------------------------------------------------------
+
+/**
+ * Every way a user question reaches the transcript. A chip is not a composer,
+ * so `COMPOSERS` above cannot reach these — which is exactly how the chip path
+ * was missed when the retirement lived in `submitChat`.
+ *
+ * Each entry raises its screen's nudge FIRST, so every run has something to
+ * retire. The hand-kept list is this table's weakness and is written down
+ * rather than left implied; the structural guard below is what notices a path
+ * nobody added here.
+ */
+const SUBMIT_PATHS: { label: string; run: (root: HTMLElement) => void }[] = [
+  {
+    label: "chat composer, Enter",
+    run: (root) => {
+      openChatScreen(root);
+      raiseChatNudge(root);
+      const input = root.querySelector(".chat-input") as HTMLInputElement;
+      act(() => {
+        fireEvent.change(input, { target: { value: "What is Claude Code?" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+    },
+  },
+  {
+    label: "suggestion chip",
+    run: (root) => {
+      openChatScreen(root);
+      raiseChatNudge(root);
+      act(() => {
+        fireEvent.click(root.querySelector(".suggestion-btn") as HTMLElement);
+      });
+    },
+  },
+  {
+    label: "re-asking an ANSWERED question",
+    run: (root) => {
+      openChatScreen(root);
+      const input = () => root.querySelector(".chat-input") as HTMLInputElement;
+      act(() => {
+        fireEvent.change(input(), { target: { value: "What is Claude Code?" } });
+        fireEvent.keyDown(input(), { key: "Enter" });
+      });
+      act(() => {
+        vi.advanceTimersByTime(6000);
+      });
+      raiseChatNudge(root);
+      act(() => {
+        fireEvent.change(input(), { target: { value: "What is Claude Code?" } });
+        fireEvent.keyDown(input(), { key: "Enter" });
+      });
+    },
+  },
+  {
+    label: "hero ask, which navigates",
+    run: (root) => {
+      // The hero's own nudge, raised by an empty ask, then a real one.
+      act(() => {
+        fireEvent.click(root.querySelector(".ask-button") as HTMLElement);
+      });
+      expect(root.querySelectorAll(".hero-nudge").length, "no hero nudge to retire").toBe(1);
+      const hero = root.querySelector("#hero-input") as HTMLInputElement;
+      act(() => {
+        fireEvent.change(hero, { target: { value: "What is Claude Code?" } });
+        fireEvent.keyDown(hero, { key: "Enter" });
+      });
+    },
+  },
+];
+
+function openChatScreen(root: HTMLElement) {
+  act(() => {
+    fireEvent.click(root.querySelector(".cta-button") as HTMLElement);
+  });
+}
+
+function raiseChatNudge(root: HTMLElement) {
+  act(() => {
+    fireEvent.keyDown(root.querySelector(".chat-input")!, { key: "Enter" });
+  });
+  // The precondition every assertion in this section depends on: there IS a
+  // nudge standing when the path runs, so "none afterwards" means retired and
+  // not "never raised".
+  expect(root.querySelectorAll(".composer-nudge").length, "no chat nudge to retire").toBe(1);
+}
+
+/** Registered as each case runs. See the completeness test below. */
+const PATHS_RUN: string[] = [];
+
+describe("no path leaves a nudge standing over a question", () => {
+  for (const path of SUBMIT_PATHS) {
+    it(`${path.label}: the question lands and the warning does not survive it`, () => {
+      // RED WHEN: the retirement leaves `send()`. Each entry reaches `send()` a
+      // different way — the composer's handler, a chip's `select`, the
+      // duplicate guard's early return, and `enterChat`'s deferred call — so
+      // moving the clear up into any one caller reddens the others.
+      const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+      path.run(container);
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+      PATHS_RUN.push(path.label);
+
+      // Partner: a question really did land, so the absence below is a
+      // retirement and not a submit the app swallowed.
+      expect(sentAnything(container), `${path.label}: no question reached the transcript`).toBe(
+        true,
+      );
+      expect(
+        container.querySelectorAll(".hero-nudge, .composer-nudge").length,
+        `${path.label}: an empty-box warning outlived a question that was sent`,
+      ).toBe(0);
+      expect(
+        container.textContent,
+        `${path.label}: the page still says nothing was sent`,
+      ).not.toContain(EMPTY_SUBMIT_NUDGE);
+    });
+  }
+
+  it("ran every path in the table, not just the first", () => {
+    // The `continue` -> `break` survivor: the loop above generates one `it` per
+    // entry at collection time, and a loop that stopped early would simply
+    // register fewer tests — and a suite cannot fail a test it never ran.
+    // RED WHEN: the generator loop breaks, returns, or filters early.
+    expect(PATHS_RUN).toEqual(SUBMIT_PATHS.map((p) => p.label));
+    expect(PATHS_RUN.length).toBeGreaterThan(1);
+  });
+});
+
+describe("the retirement sits where user messages are APPENDED", () => {
+  // The structural half of the claim above. `SUBMIT_PATHS` is hand-kept, and a
+  // hand-kept list of paths is exactly what failed last time: the retirement
+  // was anchored in `submitChat`, everything anyone thought to drive went
+  // through `submitChat`, and the suggestion chips did not.
+  //
+  // So rather than trusting the list, this asserts the property that makes the
+  // list unnecessary: every place a user message is added to the transcript is
+  // inside `send()`, and `send()` retires the nudge. Then any caller — one in
+  // the table, one added tomorrow, one nobody remembers — is covered on the way
+  // through.
+  //
+  // Parsed with the TypeScript compiler rather than grepped. A regex cannot
+  // tell a `role: "user"` inside a comment from one in a dispatch, and the
+  // comments in that file quote both.
+  //
+  // WHAT WOULD REDDEN THIS LEGITIMATELY, said so the next reader is not
+  // puzzled: extracting the append into a helper called BY `send`. That is a
+  // fine refactor and this guard cannot see that the helper is still only
+  // reachable through `send` — it would need re-pointing at the new boundary,
+  // not deleting.
+  const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "hooks", "useLandingState.ts");
+  const text = readFileSync(SRC, "utf8");
+  const sf = ts.createSourceFile(SRC, text, ts.ScriptTarget.Latest, true);
+
+  /** [start, end) of the `send` callback's initializer. */
+  function sendRange(): [number, number] {
+    let range: [number, number] | null = null;
+    const walk = (n: ts.Node) => {
+      if (
+        ts.isVariableDeclaration(n) &&
+        ts.isIdentifier(n.name) &&
+        n.name.text === "send" &&
+        n.initializer
+      ) {
+        range = [n.initializer.getStart(sf), n.initializer.getEnd()];
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    expect(range, "no `send` declaration found in useLandingState.ts").not.toBeNull();
+    return range!;
+  }
+
+  /** Every object literal that is a `{ role: "user", … }` message. */
+  function userMessageSites(): number[] {
+    const out: number[] = [];
+    const walk = (n: ts.Node) => {
+      if (ts.isObjectLiteralExpression(n)) {
+        const isUser = n.properties.some(
+          (prop) =>
+            ts.isPropertyAssignment(prop) &&
+            ts.isIdentifier(prop.name) &&
+            prop.name.text === "role" &&
+            ts.isStringLiteralLike(prop.initializer) &&
+            prop.initializer.text === "user",
+        );
+        if (isUser) out.push(n.getStart(sf));
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    return out;
+  }
+
+  it("every `role: \"user\"` message is built inside send(), and send() retires the nudge", () => {
+    // RED WHEN: a new path appends a user message outside `send()`, or the
+    // `retireNudge` call leaves `send()` — which is precisely what "anchored in
+    // `submitChat`" was.
+    const [from, to] = sendRange();
+    expect(to, "the `send` callback parsed as empty").toBeGreaterThan(from);
+
+    const sites = userMessageSites();
+    // THE PARTNER. "All of them are inside `send`" is vacuously true of none,
+    // which is what a rename of `role`, a change to the message shape, or a
+    // broken parse produces.
+    expect(sites.length, "no user message is constructed anywhere in the hook").toBeGreaterThan(0);
+    const outsideOf = (lo: number, hi: number) =>
+      sites
+        .filter((pos) => pos < lo || pos >= hi)
+        .map((pos) => `line ${sf.getLineAndCharacterOfPosition(pos).line + 1}`);
+    expect(
+      outsideOf(from, to),
+      "a user message is appended OUTSIDE send(), so it bypasses the retirement",
+    ).toEqual([]);
+    // THE DETECTOR. Written because the mutant survived without it: neutering
+    // the filter so it reports nothing left this whole test green, which is
+    // indistinguishable from a real "everything is inside `send`". Running the
+    // SAME filter against a range that cannot contain anything must report every
+    // site — derived from the real sites rather than a literal, so a plant that
+    // stopped matching could not read as a pass.
+    expect(
+      outsideOf(0, 0).length,
+      "the range check reports nothing even when nothing can be in range",
+    ).toBe(sites.length);
+
+    // …and the thing they are all inside actually retires the nudge.
+    const calls: number[] = [];
+    const walk = (n: ts.Node) => {
+      if (
+        ts.isCallExpression(n) &&
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === "retireNudge"
+      ) {
+        calls.push(n.getStart(sf));
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(sf);
+    // Partner: `retireNudge` is called somewhere at all, so "inside send" is
+    // not satisfied by an empty set.
+    expect(calls.length, "retireNudge is never called").toBeGreaterThan(0);
+    expect(
+      calls.filter((pos) => pos >= from && pos < to).length,
+      "send() does not retire the nudge, so no caller of it does either",
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe("both composers are SILENT but PRESENT before anything happens", () => {
   it("each has exactly one live region, and it says nothing in the idle state", () => {
     // WRITTEN BECAUSE TWO MUTANTS SURVIVED: making the hero's region
@@ -694,6 +998,20 @@ describe("the nudge outranks a refusal that is still standing", () => {
       "a refusal from a moment ago outranked what the reader just did",
     ).toBe(EMPTY_SUBMIT_NUDGE);
     expect(container.querySelectorAll(".composer-nudge").length).toBe(1);
+
+    // THE PARTNER FOR THE ORDERING ITSELF. Without it this test passes on a
+    // state where there is nothing to order — if `refusedInFlight` had been
+    // cleared in the meantime, "the region reads the nudge" is trivially true
+    // and says nothing about precedence. Letting the window expire puts the
+    // refusal back on screen, which is only possible if it was set the whole
+    // time the nudge was covering it.
+    act(() => {
+      vi.advanceTimersByTime(EMPTY_SUBMIT_NUDGE_MS + 100);
+    });
+    expect(
+      region(),
+      "the refusal was not still standing, so the assertion above ordered nothing",
+    ).toContain("Not sent.");
   });
 });
 
@@ -788,6 +1106,48 @@ describe("a REAL submit retires the nudge", () => {
     ).toBe(0);
   });
 
+  it("hands back to SILENCE, not to the previous answer's sentence", () => {
+    // Raised in review as a possible cost of retiring: the region falls back to
+    // whatever is true underneath, and underneath is `settled` — "Answer ready.
+    // N sources cited." — which describes the PREVIOUS answer. Re-announcing it
+    // at the moment the reader sends a new question would be confusing at best.
+    //
+    // MEASURED RATHER THAN REASONED ABOUT — and the first draft of this comment
+    // got the mechanism wrong, which is worth leaving on the record. It claimed
+    // `ChatView`'s effect resets `settled` because the last message is the
+    // USER's; deleting that clause left this test green. The clause that
+    // actually holds it is `last.streaming`: by the time the region is read the
+    // demo answer has already begun streaming, so the last message is a
+    // streaming bot bubble, not the user's. Both `last.streaming` and the whole
+    // reset were mutated, and each turns this red.
+    //
+    // Either way the region reads EMPTY after the send, so the cost raised in
+    // review does not exist on this path — and this pins it, because it holds by
+    // an interaction between two files rather than by anything either states.
+    // RED WHEN: `ChatView` stops resetting `settled` once a new answer starts
+    // streaming, and a stale arrival announcement leaks through the handback.
+    const { container } = render(<LandingPage theme="light" onThemeChange={() => {}} />);
+    openChat(container);
+    const region = () => regionText(container);
+    typeAndEnter(container, "What is Claude Code?");
+    act(() => {
+      vi.advanceTimersByTime(8000);
+    });
+    // Partner: there IS a previous answer's sentence sitting in the region, so
+    // the emptiness below is a handback to silence and not an empty region that
+    // was never filled.
+    expect(region(), "no arrival announcement to leak").toContain("Answer ready.");
+
+    emptyEnter(container);
+    expect(region()).toBe(EMPTY_SUBMIT_NUDGE);
+
+    typeAndEnter(container, "How do I install Codex?");
+    expect(
+      region(),
+      "retiring the nudge re-announced the PREVIOUS answer over a new question",
+    ).toBe("");
+  });
+
   it("retires it on the DUPLICATE path too, which never bumps the send tick", () => {
     // The reason the anchor is `submitChat` and not the `BUMP_SEND_TICK`
     // reducer case, which was the first fix proposed. `send()` returns early on
@@ -812,10 +1172,32 @@ describe("a REAL submit retires the nudge", () => {
     // The SAME question again -> the duplicate guard flashes the existing
     // bubble and returns, adding no message and bumping no tick.
     typeAndEnter(container, "What is Claude Code?");
+    // PARTNER. "No second bubble" on its own does NOT prove the duplicate path:
+    // an in-flight REFUSAL also adds no bubble and satisfies every other
+    // assertion in this test, so without something only the flash produces,
+    // this could have been measuring the refusal branch and reporting it as the
+    // duplicate one. The highlight is raised by `flashExisting` and by nothing
+    // else on this path.
+    //
+    // Read after a SHORT advance, not immediately: `flashExisting` sets the
+    // highlight to -1 first and re-raises it on a restart timer, so sampling on
+    // the same tick reads the clear rather than the flash — and "0 highlighted"
+    // would then have been reported as "this was not the duplicate path".
+    act(() => {
+      vi.advanceTimersByTime(50);
+    });
+    expect(
+      container.querySelectorAll(".message.highlighted").length,
+      "nothing was flashed — this did not take the duplicate-question path",
+    ).toBeGreaterThan(0);
+    // …and it is not the refusal branch, which needs a request in flight.
+    expect(
+      container.querySelector(".pending-bubble"),
+      "a request was in flight, so this may have been the refusal path",
+    ).toBeNull();
     act(() => {
       vi.advanceTimersByTime(200);
     });
-    // Partner proving this really took the duplicate path: no second bubble.
     expect(
       container.querySelectorAll(".message.user-msg").length,
       "this was not the duplicate path — a second bubble was added",
@@ -854,24 +1236,53 @@ describe("the two nudges share one stylesheet rule", () => {
     const css = readFileSync(path, "utf8");
 
     const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-    const carrying: Rule[] = [];
-    postcss.parse(css, { from: path }).walkRules((rule: Rule) => {
-      const selectors = rule.selectors.map(norm);
-      if (selectors.includes(".hero-nudge") || selectors.includes(".composer-nudge")) {
-        carrying.push(rule);
-      }
-    });
+    // ONE collector, used by the comparison below AND by its detector, so the
+    // detector guards the code that actually runs. An earlier draft gave the
+    // detector its own inline copy of this loop and the mutant survived: the
+    // copy stayed correct while the real collector was neutered.
+    const rulesFor = (text: string, selector: string) => {
+      const out: Rule[] = [];
+      postcss.parse(text, { from: path }).walkRules((rule: Rule) => {
+        if (rule.selectors.map(norm).includes(selector)) out.push(rule);
+      });
+      return out;
+    };
+    const hero = rulesFor(css, ".hero-nudge");
+    const chat = rulesFor(css, ".composer-nudge");
 
-    // The partner. "Every rule mentioning a nudge also mentions the other" is
-    // vacuously true when NO rule mentions either — which is what a rename, a
-    // deleted block or a broken parse produces.
-    expect(carrying.length, "no rule in landing.css styles either nudge").toBe(1);
-    const [shared] = carrying;
-    expect(shared.selectors.map(norm).sort()).toEqual([".composer-nudge", ".hero-nudge"]);
-    // …and the one rule they share actually declares something. A shared empty
-    // block satisfies every assertion above and styles neither.
-    const declared = shared.nodes.filter((n) => n.type === "decl").length;
-    expect(declared, "the shared block declares nothing").toBeGreaterThan(0);
+    // SET EQUALITY, not a count of one. An earlier draft asserted "exactly one
+    // rule mentions a nudge", whose failure message read "no rule styles either
+    // nudge" — false in the greater-than-one direction — and which would have
+    // reddened on a perfectly good media-query override. What has to hold is
+    // not how many rules there are, it is that neither nudge has a rule the
+    // other does not.
+    // The partner: "the two sets are equal" is vacuously true of two empty
+    // sets, which is what a rename or a broken parse produces.
+    expect(hero.length, "no rule in landing.css styles .hero-nudge").toBeGreaterThan(0);
+    expect(chat, ".hero-nudge and .composer-nudge are styled by different rules").toEqual(hero);
+    // …and every rule they share actually declares something. A shared empty
+    // block satisfies everything above and styles neither.
+    for (const rule of hero) {
+      const declared = rule.nodes.filter((n) => n.type === "decl").length;
+      expect(declared, `the shared block \`${rule.selector}\` declares nothing`).toBeGreaterThan(
+        0,
+      );
+    }
+
+    // THE DETECTOR. Written because the mutant survived without it: building
+    // both lists from the SAME selector name makes them trivially equal, and
+    // the comparison above then passes whatever the stylesheet says. Splitting
+    // the pair in a COPY of the real file must be reported. The plant is
+    // derived from the parsed rule rather than written as a literal, so a plant
+    // that stopped applying could not read as a pass.
+    const split = css.replace(".hero-nudge,\n.composer-nudge {", ".hero-nudge {");
+    expect(split, "the plant changed nothing — the shared rule is spelled differently now").not.toBe(
+      css,
+    );
+    expect(
+      rulesFor(split, ".composer-nudge").length,
+      "splitting the rule was not detected — the collector is not looking for the selector it is given",
+    ).toBeLessThan(rulesFor(split, ".hero-nudge").length);
   });
 });
 

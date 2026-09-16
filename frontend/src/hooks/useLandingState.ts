@@ -893,8 +893,97 @@ export function useLandingState() {
     [live, sendLive],
   );
 
+  // #445. The EMPTY-SUBMIT signal, for whichever composer was submitted empty.
+  //
+  // ONE function, two call sites, because the bug this closes was two
+  // implementations of the same idea drifting apart: the hero had all of this
+  // and `submitChat` had a bare `return`. Anything added here — a longer
+  // window, a different flag, a second announcement — reaches both composers or
+  // neither, which is what the parity guard asserts through the rendered DOM.
+  //
+  // `timers.current[...]?.stop()` FIRST. Without it a second empty submit
+  // inside the window re-armed the handle while the FIRST timeout stayed live,
+  // so the nudge was cleared early by a timer the reader had already
+  // superseded — the shape the highlight timers a few lines up already guard
+  // against with their own `?.stop()`.
+  const nudgeEmptySubmit = useCallback((which: "hero" | "chat") => {
+    const { timer, action } = NUDGE_TARGETS[which];
+    (which === "hero" ? heroRef : composerRef).current?.focus();
+    timers.current[timer]?.stop();
+    dispatch({ type: action, value: true });
+    timers.current[timer] = timeout(
+      () => dispatch({ type: action, value: false }),
+      EMPTY_SUBMIT_NUDGE_MS,
+    );
+  }, []);
+
+  // #445 round 2. Retire a nudge because something REAL happened, rather than
+  // because its window ran out.
+  //
+  // Nothing did this, and the gap was a false statement to a screen-reader
+  // user: `chatNudge` was cleared only by the 3s timer, `REFUSED_SUBMIT` and
+  // `SET_SCREEN`, none of which fires on a successful send. So for up to three
+  // seconds after an empty Enter, a real question sent inside that window left
+  // the region reading "Nothing was sent." while the question sat in the
+  // transcript streaming — and, because the nudge outranks `pending` in the
+  // view, it swallowed that question's own "Searching the docs…" and "Answer
+  // ready." announcements too. The visible warning stayed up as well, so it was
+  // never only an assistive-technology problem.
+  //
+  // CALLED FROM THE TOP OF `send()`, which is the level this had to come down
+  // to. Two earlier homes were wrong, and both were wrong the same way — they
+  // covered the path in front of whoever was looking:
+  //
+  //   - the `BUMP_SEND_TICK` reducer case. `send()` returns early on
+  //     `flashExisting(existing)` for a question that was already ANSWERED, and
+  //     that branch dispatches no tick at all.
+  //   - `submitChat`. The composer is not the only thing that submits: the
+  //     empty-chat suggestion chips call `send()` directly. "Open chat, press
+  //     Enter on the empty box, click a suggested question" is an ordinary
+  //     first-run sequence reachable by keyboard alone, and it kept the false
+  //     sentence up for the full 3s. The comment that shipped with that fix
+  //     asserted the composer's handler was "the only anchor every real submit
+  //     passes through", which was untrue of the chips as it was written, and
+  //     saying it is part of why the gap went unseen.
+  //
+  // What makes `send()` the right level is not a claim about call sites, which
+  // is what the last two comments each got wrong. It is that `send()` is where
+  // a user message is APPENDED — both `ADD_MESSAGE` dispatches with
+  // `role: "user"` are inside it — so anything that puts a question in the
+  // transcript is here by construction rather than by a list someone maintains.
+  // That is asserted, not asserted-in-prose, by
+  // `composerEmptyParity`'s "no path leaves a nudge standing over a question".
+  //
+  // The `enterChat` path reaches this having already gone through `SET_SCREEN`,
+  // which cleared the flag; the repeat dispatch is free because the reducer
+  // returns the identical state object when nothing changes.
+  //
+  // Stopping the timer here is HYGIENE, NOT A GUARDED BEHAVIOUR — verified by
+  // mutation, not assumed: deleting both lines leaves all 20 tests green. The
+  // slot is only ever overwritten by `nudgeEmptySubmit`, which stops whatever
+  // it finds first, so a handle left armed by this function can never fire into
+  // a later window. It is kept because "retire" that leaves a live timer behind
+  // is a trap for the next reader, not because anything reddens.
+  const retireNudge = useCallback((which: "hero" | "chat") => {
+    const { timer, action } = NUDGE_TARGETS[which];
+    timers.current[timer]?.stop();
+    timers.current[timer] = null;
+    // Unconditional, which is only cheap because the reducer returns the
+    // IDENTICAL state object when the flag is already false and React then
+    // bails out. That bail-out is an optimisation and nothing asserts it —
+    // measured: removing it leaves all 20 tests green, because it changes how
+    // many times the tree renders and not what it renders. Without it every
+    // question anyone asks costs one extra render for a flag that was already
+    // false.
+    dispatch({ type: action, value: false });
+  }, []);
+
   const send = useCallback(
     (text: string) => {
+      // #445. A real question is arriving, so any empty-submit nudge still up
+      // describes a submit the reader has superseded. BEFORE the duplicate
+      // guard below, which returns early for an already-answered question.
+      retireNudge("chat");
       const norm = text.trim().toLowerCase();
 
       // Duplicate question guard
@@ -932,7 +1021,7 @@ export function useLandingState() {
 
       routeQuestion(text);
     },
-    [state.messages, routeQuestion, nextMessageId],
+    [state.messages, routeQuestion, nextMessageId, retireNudge],
   );
 
   const streamBot = useCallback(
@@ -1177,72 +1266,6 @@ export function useLandingState() {
   // Hero "Ask" is self-contained: on a valid question it navigates into chat
   // itself; on empty input it focuses the box and nudges. Defined *after*
   // `enterChat` so its useCallback dependency is in scope (no temporal-dead-zone).
-  // #445. The EMPTY-SUBMIT signal, for whichever composer was submitted empty.
-  //
-  // ONE function, two call sites, because the bug this closes was two
-  // implementations of the same idea drifting apart: the hero had all of this
-  // and `submitChat` had a bare `return`. Anything added here — a longer
-  // window, a different flag, a second announcement — reaches both composers or
-  // neither, which is what the parity guard asserts through the rendered DOM.
-  //
-  // `timers.current[...]?.stop()` FIRST. Without it a second empty submit
-  // inside the window re-armed the handle while the FIRST timeout stayed live,
-  // so the nudge was cleared early by a timer the reader had already
-  // superseded — the shape the highlight timers a few lines up already guard
-  // against with their own `?.stop()`.
-  const nudgeEmptySubmit = useCallback((which: "hero" | "chat") => {
-    const { timer, action } = NUDGE_TARGETS[which];
-    (which === "hero" ? heroRef : composerRef).current?.focus();
-    timers.current[timer]?.stop();
-    dispatch({ type: action, value: true });
-    timers.current[timer] = timeout(
-      () => dispatch({ type: action, value: false }),
-      EMPTY_SUBMIT_NUDGE_MS,
-    );
-  }, []);
-
-  // #445 round 2. Retire a nudge because something REAL happened, rather than
-  // because its window ran out.
-  //
-  // Nothing did this, and the gap was a false statement to a screen-reader
-  // user: `chatNudge` was cleared only by the 3s timer, `REFUSED_SUBMIT` and
-  // `SET_SCREEN`, none of which fires on a successful send. So for up to three
-  // seconds after an empty Enter, a real question sent inside that window left
-  // the region reading "Nothing was sent." while the question sat in the
-  // transcript streaming — and, because the nudge outranks `pending` in the
-  // view, it swallowed that question's own "Searching the docs…" and "Answer
-  // ready." announcements too. The visible warning stayed up as well, so it was
-  // never only an assistive-technology problem.
-  //
-  // CALLED FROM `submitChat` / `askHero`, at the point the text is known
-  // non-empty — NOT from the `BUMP_SEND_TICK` reducer case, which was the first
-  // fix proposed and does not cover it. `send()` returns early on
-  // `flashExisting(existing)` for a question that was already ANSWERED, and
-  // that branch dispatches no tick at all; re-asking something you have asked
-  // before is an ordinary thing to do and would have kept the false sentence.
-  // The composer's own submit handler is the only anchor every real submit
-  // passes through.
-  //
-  // Stopping the timer here is HYGIENE, NOT A GUARDED BEHAVIOUR — verified by
-  // mutation, not assumed: deleting both lines leaves all 20 tests green. The
-  // slot is only ever overwritten by `nudgeEmptySubmit`, which stops whatever
-  // it finds first, so a handle left armed by this function can never fire into
-  // a later window. It is kept because "retire" that leaves a live timer behind
-  // is a trap for the next reader, not because anything reddens.
-  const retireNudge = useCallback((which: "hero" | "chat") => {
-    const { timer, action } = NUDGE_TARGETS[which];
-    timers.current[timer]?.stop();
-    timers.current[timer] = null;
-    // Unconditional, which is only cheap because the reducer returns the
-    // IDENTICAL state object when the flag is already false and React then
-    // bails out. That bail-out is an optimisation and nothing asserts it —
-    // measured: removing it leaves all 20 tests green, because it changes how
-    // many times the tree renders and not what it renders. Without it every
-    // question anyone asks costs one extra render for a flag that was already
-    // false.
-    dispatch({ type: action, value: false });
-  }, []);
-
   const askHero = useCallback(() => {
     const q = state.heroInput.trim();
     if (!q) {
@@ -1317,14 +1340,12 @@ export function useLandingState() {
       nudgeEmptySubmit("chat");
       return;
     }
-    // Past the empty check the text is real, so any nudge still up is about a
-    // submit the reader has superseded. Retire it HERE, before the in-flight
-    // gate, so every real submit is covered by one line: the send below, the
-    // retry, the duplicate-question flash that returns early inside `send`, and
-    // the refusal just under this. `REFUSED_SUBMIT` clears the flag too, and
-    // that redundancy is deliberate — it keeps the refusal state internally
-    // consistent for any caller that reaches it another way.
-    retireNudge("chat");
+    // NO `retireNudge` here. It lived at this line for one round and was in the
+    // wrong place: the suggestion chips call `send()` without passing through
+    // this function at all. It now sits at the top of `send()`, where a user
+    // message is actually appended, so this path is covered on the way through.
+    // The refusal below is covered too, by `REFUSED_SUBMIT`, which clears the
+    // flag in the same state object — that branch returns before `send()`.
     if (inFlight.current) {
       // #356 gap 2. The refusal used to be a bare `return`: measured with a
       // MutationObserver over the whole body, it produced ZERO DOM mutations on
@@ -1343,7 +1364,7 @@ export function useLandingState() {
     }
     setChatInput("");
     send(t);
-  }, [state.chatInput, send, nudgeEmptySubmit, retireNudge]);
+  }, [state.chatInput, send, nudgeEmptySubmit]);
 
   const onChatKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
