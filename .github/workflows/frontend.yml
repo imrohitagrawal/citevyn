@@ -137,7 +137,7 @@ jobs:
       # `playwright.config.ts` runs in exactly one job. Deleting either half
       # leaves a hole neither guard can see.
       #
-      # ┌─ NOT TRUE YET, and this note comes out with the commit that makes it
+      # ┌─ #325-PENDING-BASELINES — NOT TRUE YET, and this note comes out with the commit that
       # │  true. `tests/visual.spec.ts-snapshots/` still holds only `-darwin`
       # │  files, so `visual-e2e` fails every run with "snapshot missing" and
       # │  "they run over there instead" is a DESIGN, not a fact. The `-linux`
@@ -341,7 +341,7 @@ jobs:
   # `*-chromium-linux.png` baselines generated in the SAME container image that
   # runs here, on every pull request.
   #
-  # ┌─ AS OF THIS COMMIT THOSE BASELINES ARE NOT COMMITTED. They are generated
+  # ┌─ #325-PENDING-BASELINES — AS OF THIS COMMIT THOSE BASELINES ARE NOT COMMITTED. Generated
   # │  and held for the owner to review the images first, so every run of this
   # │  job fails with "snapshot missing" until they land. That is loud rather
   # │  than harmful — the job is advisory — but it is the reason the branch is
@@ -364,18 +364,21 @@ jobs:
   #     is why `setup-node` below is safe despite floating within major 26;
   #   - arm64 vs amd64 → 12 of the 22 differ. The ARCHITECTURE is an input.
   #     `ubuntu-latest` is x86_64, so the committed baselines are amd64.
-  # The image tag must stay equal to the `@playwright/test` version
-  # frontend/package-lock.json RESOLVES — the lockfile, not package.json, which
-  # declares a RANGE (`^1.63.0`) that `npm update` can move within without
-  # touching the manifest at all. A bump of either without the other silently
-  # changes the browser that draws the pixels.
+  # The image tag must stay equal to the `playwright-core` version
+  # frontend/package-lock.json RESOLVES. `playwright-core`, not
+  # `@playwright/test`, because it is the package that owns `browsers.json` —
+  # the revision-to-version table this image is built from; the other two are
+  # asserted equal to it rather than trusted. And the LOCKFILE, not
+  # package.json, which declares a RANGE (`^1.63.0`) that `npm update` can move
+  # within without touching the manifest at all. A bump of either without the
+  # other silently changes the browser that draws the pixels.
   # `backend/tests/test_gating_workflows.py` pins the pair.
   visual-e2e:
     # Not a required context — see the block above before adding it to one.
     name: Visual snapshots (Linux baselines, advisory)
     runs-on: ubuntu-latest
     container:
-      # Keep in lockstep with the `@playwright/test` version
+      # Keep in lockstep with the `playwright-core` version
       # frontend/package-lock.json resolves. Pinned by
       # backend/tests/test_gating_workflows.py.
       image: mcr.microsoft.com/playwright:v1.63.0-noble
@@ -433,11 +436,28 @@ jobs:
         run: |
           set -euo pipefail
           npx playwright --version
+          # EXACTLY ONE match each, asserted rather than assumed. A bare glob is
+          # loud when it matches nothing (`set -e`), and silent when it matches
+          # TWO: the second path becomes a positional argument to the first
+          # binary, and `chrome --version /some/other/path` exits 0 printing one
+          # version — measured in this image — so the step would pass while
+          # naming a browser that is no longer the only one installed. That is
+          # the state an image shipping two chromium revisions would be in, and
+          # it is exactly when this step needs to speak up.
+          shopt -s nullglob
+          shells=("$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell)
+          chromes=("$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux*/chrome)
+          test "${#shells[@]}" -eq 1 || {
+            echo "::error::expected exactly one headless-shell binary under $PLAYWRIGHT_BROWSERS_PATH, found ${#shells[@]}: ${shells[*]-}";
+            exit 1; }
+          test "${#chromes[@]}" -eq 1 || {
+            echo "::error::expected exactly one chromium binary under $PLAYWRIGHT_BROWSERS_PATH, found ${#chromes[@]}: ${chromes[*]-}";
+            exit 1; }
           # THIS is the renderer: headless is the default and nothing overrides it.
-          "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell --version
+          "${shells[0]}" --version
           # Printed too, so a divergence between the two is visible rather than
           # assumed away — a headful run would use this one.
-          "$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux*/chrome --version
+          "${chromes[0]}" --version
       # The SELECTION half of the partition this job and `demo-e2e` form.
       # `demo-e2e` asserts it selects the default suite MINUS its visual tests;
       # this asserts it selects EXACTLY those visual tests. Neither half alone is

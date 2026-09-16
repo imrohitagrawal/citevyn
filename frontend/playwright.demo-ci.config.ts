@@ -28,7 +28,7 @@
  * different and deliberate claim: `visual-e2e` is advisory, so a font-rendering
  * shift prompts someone to look at a diff image instead of blocking every merge.
  *
- * ONE HALF IS STILL OUTSTANDING as of the commit that wrote this. The `-linux`
+ * #325-PENDING-BASELINES: ONE HALF IS STILL OUTSTANDING. The `-linux`
  * baselines are generated but held for the owner to review the images before
  * they are committed, so `visual-e2e` currently fails every run with "snapshot
  * missing". The wiring is done; the pixels are not in the repo yet.

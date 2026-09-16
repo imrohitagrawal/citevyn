@@ -249,9 +249,10 @@ _UNGUARDABLE: tuple[str, ...] = (
     "promoted it, nothing in this file would notice, and the next font-rendering "
     "shift would block every merge with no warning. Same root cause as the "
     "branch-protection entry below: a test cannot read that API (#325).",
-    "Whether the `*-chromium-linux.png` baselines (held for owner review as of "
-    "this commit, committed after it) were drawn by the "
-    "browser the container tag names, or on the right CPU architecture. "
+    "Whether the `*-chromium-linux.png` baselines were drawn by the browser the "
+    "container tag names, or on the right CPU architecture. "
+    "(#325-PENDING-BASELINES: they are held for owner review as of this commit "
+    "and land in the one after it.) "
     "`test_the_visual_job_runs_the_browser_that_drew_its_baselines` pins the TAG "
     "against the lockfile; it cannot open a PNG and ask what rendered it. "
     "Measured while generating them: arm64 and amd64 renders differ for 12 of "
@@ -2012,12 +2013,23 @@ def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
     # legitimately runs `npx playwright install --with-deps chromium` — it has no
     # container — so it is the positive control: if this scan cannot see it
     # there, it cannot see it here either and the rule below is decorative.
-    demo_installs = install_steps(
-        (_load_workflow(DEMO_WORKFLOW.name).get("jobs") or {})["demo-e2e"]
+    demo_job = (_load_workflow(DEMO_WORKFLOW.name).get("jobs") or {}).get("demo-e2e")
+    # `.get`, not `[...]`. A bare subscript raises a bare `KeyError: 'demo-e2e'`
+    # from inside a test about the VISUAL job, naming the wrong culprit for a
+    # rename whose real consequence is elsewhere: that job's `name:` is a
+    # required status check.
+    assert demo_job is not None, (
+        f"{DEMO_WORKFLOW.name} no longer defines a `demo-e2e` job, so this rule "
+        "has no positive control to calibrate its detector against."
     )
-    assert len(demo_installs) == 1, (
-        f"the `playwright install` scan found {len(demo_installs)} such steps in "
-        "frontend.yml:demo-e2e, which runs exactly one. The detector has stopped "
+    # `>= 1`, not `== 1`. The control's job is to prove the detector can SEE a
+    # real `playwright install` step. demo-e2e legitimately adding a second one
+    # (a browser beyond chromium) is not a defect in the VISUAL job and must not
+    # redden a rule about it.
+    demo_installs = install_steps(demo_job)
+    assert len(demo_installs) >= 1, (
+        "the `playwright install` scan found no such step in "
+        "frontend.yml:demo-e2e, which runs one. The detector has stopped "
         "matching, so the rule below would pass over nothing."
     )
     offenders = install_steps(_visual_job())

@@ -314,9 +314,10 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
 
 - **It runs the browser that drew its baselines.** The job declares
   `container: mcr.microsoft.com/playwright:v1.63.0-noble`, and that tag is pinned
-  equal to `frontend/package-lock.json`'s resolved `@playwright/test`. A
-  dependabot bump of one without the other would silently swap the renderer under
-  22 committed images.
+  equal to `frontend/package-lock.json`'s resolved **`playwright-core`** — the
+  package that owns `browsers.json`, with `@playwright/test` and `playwright`
+  asserted equal to it rather than trusted. A dependabot bump of one without the
+  other would silently swap the renderer under 22 committed images.
 - **It is the exact complement of `Demo-mode Playwright (no visual snapshots)`.**
   The demo job asserts it selects the default suite *minus* its visual tests; this
   one asserts it selects *exactly* those visual tests. Measured with `--list` on
@@ -347,7 +348,7 @@ To regenerate the Linux set, see the header of
 `frontend/playwright.visual-ci.config.ts`; it must be done under
 `--platform linux/amd64`, because arm64 and amd64 renders differ for 12 of the
 22. As of the commit that added the job, the `-linux` baselines are generated but
-**not yet committed** — they are held for the owner to review the images — so the
+**not yet committed** (#325-PENDING-BASELINES) — held for the owner to review the images — so the
 job fails every run with "snapshot missing" until they land.
 
 ### 12.3 Measured case for promoting the live check

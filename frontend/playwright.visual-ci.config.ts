@@ -31,7 +31,7 @@
  * own 2% budget. That budget is never applied ACROSS platforms, so none of that
  * is a failure: each platform compares against its own file.
  *
- * AS OF THE COMMIT THAT ADDED THIS FILE the `-linux` set is generated but NOT
+ * #325-PENDING-BASELINES: as of the commit that added this file the `-linux` set is generated but NOT
  * committed — it is held for the owner to look at the images first — so the
  * `visual-e2e` job fails every run with "snapshot missing" until it lands.
  *
@@ -74,10 +74,12 @@
  * host then fails on esbuild/rollup with a platform error that says nothing
  * about docker. `:ro` makes that mistake impossible rather than merely unlikely.
  *
- * The image tag must match the `@playwright/test` version `package-lock.json`
- * RESOLVES — not the range `package.json` declares — or the browser that draws
- * the baselines is not the browser CI compares them with.
- * `backend/tests/test_gating_workflows.py` pins the two together.
+ * The image tag must match the `playwright-core` version `package-lock.json`
+ * RESOLVES — `playwright-core` because it owns `browsers.json`, and the
+ * lockfile rather than the range `package.json` declares — or the browser that
+ * draws the baselines is not the browser CI compares them with.
+ * `backend/tests/test_gating_workflows.py` pins them together, and asserts
+ * `@playwright/test`, `playwright` and `playwright-core` all agree.
  */
 import base from "./playwright.config";
 import { defineConfig } from "@playwright/test";
