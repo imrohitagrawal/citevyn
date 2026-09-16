@@ -218,6 +218,156 @@ impact on metrics
 9. No matching source evidence.
 10. Exact flag that does not exist.
 
+## 8b. Required UI-Input Negative Tests
+
+§8 is about what the answering layer does with a hostile question. Every one of
+its ten cases assumes the question already arrived. §8b is about the box it was
+typed into — a surface §8 never mentions, and which for a long time had no
+negative tests at all.
+
+### What this binds
+
+Every **input surface**: any `<input>` or `<textarea>` a person types into. The
+sweep lives in `frontend/src/test/uiInputNegative.test.tsx` and holds a registry
+of them. That registry is **not hand-kept**: the same file parses every `.ts`
+and `.tsx` under `src/` with the TypeScript compiler and fails when a field
+exists that the registry does not list.
+
+**Be precise about what that buys, because an earlier draft of this paragraph
+was not.** The guard enforces that a new field is *listed*. It does **not**
+enforce that the field is put through the seven cells — nothing mechanical can
+tell whether a cell is genuinely inapplicable or merely unwritten. So adding a
+form field without touching the registry is a red test; adding it to the
+registry and writing no cells is a review question, not a red test. The registry
+makes the omission *visible*, which is the property a hand-kept list lost — that
+is how the first attempt at #445 missed the suggestion chips, complete the day it
+was written and silently wrong a week later.
+
+### The seven cells
+
+Each surface is tested against all seven. Where a cell is meaningless for a
+surface, say so in the test file; do not leave it unmentioned.
+
+| Cell | What it means |
+|---|---|
+| Empty submit | Submitting a blank field must not send a request, and must produce something a screen reader announces. A bare `return` is not a behaviour — it produces zero DOM mutations (#445). |
+| Whitespace-only | Spaces and tabs are the empty case. The submit is refused **and the typed text is kept** — a refused input must never be cleared. |
+| Over-length | The client refuses at **submit** and says so; it must **not** use a `maxLength` attribute. The server is tested at the boundary in both directions: the last accepted length AND the first rejected one — a rejection test alone proves only that *something* is refused, never that the documented limit is the one in force. **`maxLength` is banned here, and this is the one cell whose rule was learned the hard way** (#446, first round): the attribute makes the browser clamp a long paste with no event and nothing on screen changing, so the user sends a question cut mid-sentence and gets a confident answer to the fragment. That is a *worse* failure than the badly-worded error it was added to prevent, because it is silent. Refusing at submit keeps the text on screen — which is what makes "shorten it" a true instruction — and routes the refusal through the same announced mechanism as the empty cell. Client and server must also agree on **what a character is**; see the code-unit note below. |
+| Paste-only | Text that arrives entirely by paste, with no keystroke for the content, still submits and is still trimmed. Handlers that hang off `keydown` miss this. |
+| Rapid double-submit | The same input submitted twice with no gap sends one request, not two. |
+| Submit-while-in-flight | A submit during a pending request is refused, **announced**, and the text kept. Silent refusal is the defect, not the refusal. |
+| Submit-while-disabled | A control that advertises unavailable actually is. Note which mechanism does the refusing — `disabled`, `aria-disabled`, or a guard in the handler — because they are not interchangeable and only one of them is enforced by the browser. |
+
+### Two rules that are not cells
+
+**IME composition.** Any handler that submits on Enter must not submit while an
+input method editor is composing. A CJK writer presses Enter to *pick a
+candidate*; a bare `e.key === "Enter"` sends the half-composed phonetic text and
+clears the box. Check **both** signals: `nativeEvent.isComposing` (standard) and
+`keyCode === 229` (WebKit reports `isComposing` false on the confirming keydown
+and only the legacy code, so a standards-only guard is wrong there; this repo has
+no iOS device in the loop, so the breadth of that is unmeasured and the guard
+checks both signals rather than relying on the claim). One shared predicate —
+`frontend/src/lib/composerInput.ts` — never a copy per composer.
+
+**What a rejection says.** A validation failure is **not** a transport failure.
+A 4xx the server raised against this specific input is permanent for that input,
+and copy implying it will pass on its own sends the user into an identical
+failure. Assert the **message the user reads**, never the toast title alone: the
+status-0 test in `useLandingState.test.tsx` was named "shows a generic error",
+pinned the title, and stayed green for two releases while the message it never
+looked at was `Network error — is the backend running?`. Client transport strings
+and raw HTTP status numbers are not user-facing copy.
+
+### What jsdom cannot prove, and what to do about it
+
+Measured against this repo's jsdom (25.0.1), not recalled. This table was wrong
+twice before it was right, in both directions, which is why it now cites the
+probe or the source line for each row:
+
+| Thing | jsdom | Consequence |
+|---|---|---|
+| `checkValidity()` / `validity.valueMissing` | **works** | An empty `required` field can be proven invalid in a unit test. |
+| Validation as part of **submission** | **works** — `HTMLFormElement-impl.js` `requestSubmit()` runs `if (!this.hasAttributeNS(null, "novalidate") && !this.reportValidity()) return;` *before* firing `submit` | **The empty-submit cell is fully testable here.** Click the submit button on an empty form and assert no request was made. |
+| `HTMLFormElement.prototype.submit()` | `notImplemented` | A **red herring** — `submit()` never validates in *any* browser, per spec. The validating entry points are `requestSubmit()` and submit-button activation, and jsdom implements both. |
+| Native validation bubble | absent | Not provable here; nothing depends on it. |
+| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | An attribute-based limit is **untestable here**. That is a reason not to build one, not a reason to assert the attribute instead. |
+| `validity.tooLong` | **always false** after a programmatic assignment (per spec it needs a dirty value from a user edit) | So `checkValidity()` does not rescue an attribute-based limit either. |
+| A limit enforced in the **submit handler** | **fully testable** | Which is why §8b requires that shape. The over-length cell asserts the request was not made, the text survived, and the live region says so — all in jsdom, no browser needed. |
+
+Measured on the real `AuthModal`: clicking **Sign in** on the empty form gives
+**0 `submit` events and 0 calls to `login`**; filling it and clicking gives 1 of
+each. That is a behaviour test, not an attribute test, and it is the one to
+write.
+
+So:
+
+1. **Test the behaviour where jsdom supports it — which is more than it looks,
+   and prefer a design that makes it testable.** The empty-submit cell asserts
+   *the request was never made*, with a filled-form partner proving the button
+   works at all. The over-length cell asserts the same shape, and can only do so
+   because the limit lives in the submit handler rather than in an attribute.
+   `toBeRequired()` reports only what the markup says and is not sufficient on
+   its own.
+
+   **There is currently NO cell that falls back to an attribute assertion.** If
+   you find yourself reaching for one, the usual cause is a mechanism that is
+   untestable *and* silent — which is the same defect twice, and the reason the
+   over-length cell was rewritten rather than documented around. Check whether
+   you can move the rule into the handler instead; that is what #446 did.
+2. **Put the behaviour in Playwright** where it is load-bearing enough to earn a
+   real browser (`frontend/tests/behavior.spec.ts`).
+3. **Back it with a server-side test.** The browser is bypassable, so the bound
+   that matters is the server's. `backend/tests/test_ui_input_limits_match_the_api.py`
+   reads the Pydantic field metadata and fails if the two ever disagree, and each
+   mirrored bound has a boundary test on both sides of the edge — **with one
+   exception, named rather than glossed**: `email`'s `min_length=3` has no
+   isolating backend test, because a 2-character address is rejected by
+   `_looks_like_email` first, so a test at that edge would pass for the wrong
+   reason. The client still mirrors the bound; the server still enforces it; what
+   is missing is a test that attributes the rejection to *that* rule.
+
+A cell that cannot be honestly tested is written down here as untested. It is not
+skipped silently and it is not covered by a test that asserts something easier.
+
+### Known exception: the auth form still uses attributes
+
+`AuthModal`'s four bounds are enforced by `minLength`/`maxLength`, which the
+over-length cell above bans. This is recorded rather than quietly excused: the
+composers had a submit path that already owned an announced refusal, so moving
+the limit into the handler was a small change; the auth form has no such
+mechanism and building one is a feature, not a test fix. It is **not cosmetic** —
+a 140-character generated passphrase is silently truncated to 128, the account is
+created with the truncation, and the password manager then autofills the full
+string forever after. Tracked as its own issue. Until it is closed, the auth
+surface is the one place in the sweep whose over-length cell is an attribute
+assertion, and it says so at the field declarations.
+
+### Mutation-testing a Python bound: clear `__pycache__`, and prove what loaded
+
+Found while proving §8b's own guards, and it cost a green suite that was not
+green. Restoring a mutated `.py` with `cp` leaves the file byte-identical —
+`cmp` clean, `git status` clean — but can leave a **stale `.pyc`** behind:
+CPython invalidates by the source's recorded mtime, and a mutate-then-restore
+inside the same timestamp can match it, so the interpreter keeps serving the
+MUTATED module. Here that left `_PASSWORD_MAX_LENGTH` reading **256** from cache
+while `auth.py` on disk said **128**, and three tests failed with no explanation
+visible in the diff.
+
+The failure mode is the dangerous direction too: had the cache held the
+*restored* value during a mutation run, the mutant would have reported SURVIVED
+and the guard would have looked weak when it was fine — or worse, held a
+*mutated* value during a clean run and reported DIED for a guard that never bit.
+
+So, when mutating Python:
+
+1. `find backend/app backend/tests -name __pycache__ -type d -exec rm -rf {} +`
+   before **and** after every mutation run.
+2. **Print what the interpreter actually loaded**, not what the file says —
+   `python -c "from app.api.routes.auth import _PASSWORD_MAX_LENGTH; print(...)"`
+   — and record it beside the mutation's result. A `grep -F` on the file proves
+   the edit landed on disk; only an import proves it reached the running code.
+
 ## 9. No-Answer Tests
 
 The system must say:

@@ -195,6 +195,100 @@ test.describe("Hero", () => {
     await expect(page.locator("#hero-input")).toBeFocused();
     expect(await page.locator("#hero-input").inputValue()).toBe("test/");
   });
+
+  // #446 (TEST_STRATEGY §8b, "over-length"). THE HALF JSDOM CANNOT PROVE, and
+  // the half that caught a regression this PR introduced.
+  //
+  // The first version of this test asserted the OPPOSITE: that `maxLength`
+  // clamped a 4,500-character fill to 4,000. It passed — and that clamp was the
+  // bug. A real browser truncates a long paste silently, with no event and
+  // nothing on screen changing, so the user sends a question cut mid-sentence
+  // and gets a confident answer to the fragment. jsdom cannot show that either
+  // way, because it does not enforce `maxLength` at all; only a real browser
+  // can, which is why this test is the one that matters here.
+  //
+  // What is asserted now: the text SURVIVES, the submit is refused, and the
+  // refusal is both visible and in the live region.
+  test("over-length text is kept and refused out loud, never truncated in silence", async ({
+    page,
+  }) => {
+    // MEASURED IN-PAGE, NOT OVER ROUND TRIPS — the same fix, for the same
+    // reason, as the "~3s" test about 130 lines above. The nudge, the amber
+    // border and the live-region text are all cleared together by the app's
+    // hard 3 s timer, so a serial `expect(locator).toHaveText(...)` per
+    // assertion races that window: on a loaded machine correct behaviour reads
+    // as a failure. The first version of this test did exactly that.
+    //
+    // Everything is snapshotted in ONE synchronous in-page read, taken the
+    // instant the nudge appears. The poll afterwards only waits for that
+    // snapshot to EXIST; the values inside it are already frozen, so arriving
+    // late cannot corrupt them.
+    await watchPresence(page, "overlen", ".hero-nudge");
+    await page.evaluate(() => {
+      const w = window as unknown as { __cvOverlen?: Record<string, unknown> };
+      const tick = () => {
+        const nudge = document.querySelector(".hero-nudge");
+        if (!nudge) {
+          requestAnimationFrame(tick);
+          return;
+        }
+        const input = document.querySelector("#hero-input") as HTMLInputElement | null;
+        w.__cvOverlen = {
+          nudgeText: nudge.textContent ?? "",
+          statusText:
+            document.querySelector('section.hero [role="status"]')?.textContent ?? "",
+          inputLength: input ? input.value.length : -1,
+          onChatScreen: !!document.querySelector('[data-screen-label="Chat"]'),
+        };
+      };
+      requestAnimationFrame(tick);
+    });
+
+    const hero = page.locator("#hero-input");
+    const tooLong = "a".repeat(4500);
+    await hero.fill(tooLong);
+    // THE REGRESSION GUARD: a real browser must not have clamped this. jsdom
+    // cannot show either answer — it does not enforce `maxLength` at all — so
+    // this assertion only means something here.
+    expect(await hero.inputValue()).toHaveLength(4500);
+
+    await page.locator(".ask-button").click();
+
+    await expect
+      .poll(
+        async () =>
+          await page.evaluate(
+            () => (window as unknown as { __cvOverlen?: unknown }).__cvOverlen ?? null,
+          ),
+        { timeout: 10000, message: "the over-length nudge never appeared" },
+      )
+      .not.toBeNull();
+    const snap = (await page.evaluate(
+      () => (window as unknown as { __cvOverlen: Record<string, unknown> }).__cvOverlen,
+    )) as { nudgeText: string; statusText: string; inputLength: number; onChatScreen: boolean };
+
+    // Nothing was sent.
+    expect(snap.onChatScreen, "an over-length question navigated into chat").toBe(false);
+    // The text is still there to shorten, which is what the message asks for.
+    expect(snap.inputLength, "the refusal ate the text it told the user to shorten").toBe(4500);
+    // Said, not just drawn.
+    expect(snap.nudgeText).toContain("4500 characters");
+    expect(snap.statusText).toContain("4500 characters");
+    expect(snap.statusText).toContain("limit is 4000");
+
+    // The window really was open when the snapshot was taken, and really closes
+    // — measured on the page's own clock, not the runner's.
+    const windows = await readPresenceWindows(page, "overlen");
+    expect(windows.length, "the nudge never appeared at all").toBeGreaterThan(0);
+
+    // THE PARTNER. Without it this passes on a composer that refuses
+    // everything, and "did not navigate" would read as success. 4000 is the
+    // last accepted length.
+    await hero.fill("b".repeat(4000));
+    await page.locator(".ask-button").click();
+    await expect(page.locator('[data-screen-label="Chat"]')).toBeVisible();
+  });
+
 });
 
 // ---------------------------------------------------------------------------

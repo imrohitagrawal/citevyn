@@ -3,15 +3,14 @@
  */
 
 import type * as React from "react";
-import {
-  EMPTY_SUBMIT_NUDGE,
-  EMPTY_SUBMIT_NUDGE_GLYPH,
-} from "../lib/composerNudge";
+import { EMPTY_SUBMIT_NUDGE_GLYPH, hasNudge } from "../lib/composerNudge";
 
 interface HeroProps {
   heroInput: string;
   heroPlaceholder: string;
-  heroNudge: boolean;
+  /** #446 review: the MESSAGE to show, or null. Was a boolean with the sentence
+      hard-coded below; two refusals share this mechanism now. */
+  heroNudge: string | null;
   heroBoxShake: boolean;
   heroRef: React.RefObject<HTMLInputElement>;
   onHeroInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -135,9 +134,9 @@ export function Hero({
               the same sentence twice — once as static text here and once
               announced there. Hiding the visual copy costs a screen-reader user
               nothing, because the region carries the identical string. */}
-          {heroNudge && (
+          {hasNudge(heroNudge) && (
             <p className="hero-nudge" aria-hidden="true">
-              {EMPTY_SUBMIT_NUDGE_GLYPH} {EMPTY_SUBMIT_NUDGE}
+              {EMPTY_SUBMIT_NUDGE_GLYPH} {heroNudge}
             </p>
           )}
           {/* #445. ALWAYS rendered, empty when idle — the same shape, and for
@@ -159,7 +158,7 @@ export function Hero({
               `.composer` some day and this sentence renders VISIBLY, twice,
               with nothing going red — the nudge is in no visual baseline. */}
           <p className="sr-only" role="status">
-            {heroNudge ? EMPTY_SUBMIT_NUDGE : ""}
+            {hasNudge(heroNudge) ? heroNudge : ""}
           </p>
 
           <div className="hero-chips">

@@ -21,7 +21,12 @@ import {
 } from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
-import { EMPTY_SUBMIT_NUDGE_MS } from "../lib/composerNudge";
+import { MAX_QUESTION_LENGTH, isSubmitKey, questionLength } from "../lib/composerInput";
+import {
+  EMPTY_SUBMIT_NUDGE,
+  EMPTY_SUBMIT_NUDGE_MS,
+  overLengthNudge,
+} from "../lib/composerNudge";
 import { getAuthSnapshot } from "../lib/authStore";
 import { isModalDialogOpen } from "../lib/dialogStack";
 import { scrollToSection } from "../lib/scrollToSection";
@@ -66,15 +71,25 @@ interface ChatMessage {
   suggestions?: Suggestion[];
   /** A TRANSPORT failure (rate limit / server / network) — distinct from a content
    *  refusal (#120). Drives a rate-limit / error notice badge instead of the
-   *  "NO SOURCE — REFUSED" badge, which must stay reserved for a genuine corpus miss. */
-  errorKind?: "rate_limit" | "error";
+   *  "NO SOURCE — REFUSED" badge, which must stay reserved for a genuine corpus miss.
+   *
+   *  #446 adds `"rejected"`, which is NOT a transport failure and is the reason
+   *  the union needed a third member rather than reusing `"error"`: a 422 means
+   *  the server looked at THIS input and refused it. `"error"` renders
+   *  "TEMPORARILY UNAVAILABLE", and every word of that is false here — nothing
+   *  is unavailable, and the rejection is permanent for that exact text, so the
+   *  implied "try again shortly" sends the user into an identical failure. */
+  errorKind?: "rate_limit" | "error" | "rejected";
 }
 
 interface AppState {
   heroInput: string;
   chatInput: string;
   phIndex: number;
-  heroNudge: boolean;
+  /** #446 review: the MESSAGE, not a boolean. Two different refusals now share
+      this one mechanism (empty submit, and over-length), so the flag has to
+      carry which sentence is up. `null` means no nudge. */
+  heroNudge: string | null;
   /** #445. The chat composer's half of the empty-submit nudge. A SEPARATE flag
       from `heroNudge` rather than one shared boolean: the two composers are
       never mounted together, so one flag would carry a nudge raised on the
@@ -84,7 +99,7 @@ interface AppState {
       by going chat -> landing -> chat inside the 3s window. `SET_SCREEN` is
       what actually clears both; `REFUSED_SUBMIT` clears this one too. Raised
       only by `nudgeEmptySubmit`, which owns both. */
-  chatNudge: boolean;
+  chatNudge: string | null;
   highlight: number;
   openFaq: number;
   hero: HeroState;
@@ -135,8 +150,8 @@ type Action =
   | { type: "SET_HERO_INPUT"; value: string }
   | { type: "SET_CHAT_INPUT"; value: string }
   | { type: "ADVANCE_PLACEHOLDER" }
-  | { type: "SET_HERO_NUDGE"; value: boolean }
-  | { type: "SET_CHAT_NUDGE"; value: boolean }
+  | { type: "SET_HERO_NUDGE"; value: string | null }
+  | { type: "SET_CHAT_NUDGE"; value: string | null }
   | { type: "SET_HIGHLIGHT"; index: number }
   | { type: "SET_OPEN_FAQ"; index: number }
   | { type: "SET_HERO"; hero: Partial<HeroState> }
@@ -175,8 +190,8 @@ const initialState: AppState = {
   heroInput: "",
   chatInput: "",
   phIndex: 0,
-  heroNudge: false,
-  chatNudge: false,
+  heroNudge: null,
+  chatNudge: null,
   highlight: -1,
   openFaq: 0,
   hero: {
@@ -275,8 +290,8 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         screen: action.screen,
         highlight: -1,
-        heroNudge: false,
-        chatNudge: false,
+        heroNudge: null,
+        chatNudge: null,
       };
     case "SET_PENDING":
       // MIRRORS the ref; it does not track it in parallel. An earlier version
@@ -341,7 +356,7 @@ function reducer(state: AppState, action: Action): AppState {
       // would let an answer landing 50ms after an empty Enter erase the nudge
       // before it could be read — re-creating the silent empty submit this
       // whole change exists to remove.
-      return { ...state, refusedInFlight: true, chatNudge: false };
+      return { ...state, refusedInFlight: true, chatNudge: null };
     default:
       return state;
   }
@@ -768,7 +783,7 @@ export function useLandingState() {
       // must NOT wear the "NO SOURCE — REFUSED" content-refusal badge — that badge means
       // "the corpus had no answer", which is wrong here (#120). ``errorKind`` drives a
       // distinct rate-limit / connection-error notice instead.
-      let errorKind: "rate_limit" | "error" = "error";
+      let errorKind: "rate_limit" | "error" | "rejected" = "error";
       if (apiErr?.isRateLimited()) {
         kind = "warning";
         errorKind = "rate_limit";
@@ -804,9 +819,56 @@ export function useLandingState() {
         title = "We couldn't get an answer";
         message =
           "We're having trouble reaching the answer service right now. Please try again in a moment — if it keeps happening, contact support.";
-      } else if (apiErr) {
-        message = apiErr.message || message;
+      } else if (apiErr?.status === 422) {
+        // #446. A 422 was NOT MAPPED AT ALL. It fell to the old catch-all below
+        // and came out wearing the transport badge, so an over-length question
+        // was reported as "⚠ TEMPORARILY UNAVAILABLE" — false on both words, and
+        // actively misleading, because the question is re-sendable and fails
+        // identically every time. The user was being told to wait for an outage
+        // that would never end.
+        //
+        // The only user-controllable field on this route is `message`
+        // (`min_length=1, max_length=4000`), and empty is already stopped by the
+        // composers, so over-length is the reachable case and the copy names it.
+        // The number comes from the shared constant the composers' `maxLength`
+        // uses, which a backend test ties to the Pydantic bound itself.
+        // #446 review. The copy does NOT say "shorten it and send it again".
+        // This branch is now a BACKSTOP: the composers refuse an over-length
+        // question before the request, so reaching here means something got past
+        // them — and `submitChat` has already cleared the box by this point, so
+        // an instruction to shorten the text would point at an empty composer.
+        // The client-side refusal is where that instruction belongs, because
+        // that is the only path where the text is still on screen.
+        title = "That question wasn't accepted";
+        message = `The server rejected that question. A question can be at most ${MAX_QUESTION_LENGTH} characters, and retrying the same text will fail the same way.`;
+        errorKind = "rejected";
+      } else if (apiErr?.status === 401) {
+        // #446 review. A 401 is ALSO permanent, and dropping the verbatim
+        // catch-all is what exposed it: without a branch it inherits the generic
+        // "Please try again in a moment", which is the same false-transience
+        // this change set out to remove, just at a different status.
+        //
+        // NOT hypothetical in this repo. Fly release v6 shipped the default
+        // `VITE_API_DEMO_KEY` and 401'd every call on the site for about an
+        // hour; the on-screen string was how it was noticed. Retrying cannot fix
+        // a bad or missing key, so the copy must not ask the visitor to.
+        //
+        // Deliberately says nothing about keys, tokens or configuration: that is
+        // operator detail, and the visitor can act on none of it.
+        title = "CiteVyn can't answer right now";
+        message =
+          "This CiteVyn deployment is not accepting requests — retrying will not help. If you run this site, check its configuration; otherwise please report it.";
+        errorKind = "rejected";
       }
+      // #446. NO `else if (apiErr) { message = apiErr.message }` — that catch-all
+      // put the client's own transport strings in front of the user verbatim.
+      // Measured, not argued: a `fetch` rejection becomes a status-0
+      // `ApiClientError` whose message is "Network error — is the backend
+      // running?", and that whole sentence was rendered in the toast. It names
+      // an internal component and asks the VISITOR a question only an operator
+      // can answer. A response with no error envelope did the same with
+      // "Request failed with status <n>." An unmapped failure now keeps the
+      // generic default above; anything worth saying gets its own branch.
       addToast({ kind, title, message });
       // ``refusal: false`` — this is a transport error, not a content refusal; the
       // ``errorKind`` badge is what the bubble shows.
@@ -906,13 +968,20 @@ export function useLandingState() {
   // so the nudge was cleared early by a timer the reader had already
   // superseded — the shape the highlight timers a few lines up already guard
   // against with their own `?.stop()`.
-  const nudgeEmptySubmit = useCallback((which: "hero" | "chat") => {
+  //
+  // #446 review: takes the MESSAGE now. It was `nudgeEmptySubmit(which)` with
+  // the sentence hard-coded in the view. Over-length needs the same focus move,
+  // the same window, the same live region and the same visible warning, with a
+  // different sentence — so the message travels with the call instead of a
+  // second near-copy of this function growing beside it. That duplication is
+  // the whole reason #445 and #446 exist.
+  const nudgeComposer = useCallback((which: "hero" | "chat", message: string) => {
     const { timer, action } = NUDGE_TARGETS[which];
     (which === "hero" ? heroRef : composerRef).current?.focus();
     timers.current[timer]?.stop();
-    dispatch({ type: action, value: true });
+    dispatch({ type: action, value: message });
     timers.current[timer] = timeout(
-      () => dispatch({ type: action, value: false }),
+      () => dispatch({ type: action, value: null }),
       EMPTY_SUBMIT_NUDGE_MS,
     );
   }, []);
@@ -969,13 +1038,13 @@ export function useLandingState() {
     timers.current[timer]?.stop();
     timers.current[timer] = null;
     // Unconditional, which is only cheap because the reducer returns the
-    // IDENTICAL state object when the flag is already false and React then
+    // IDENTICAL state object when the flag is already null and React then
     // bails out. That bail-out is an optimisation and nothing asserts it —
     // measured: removing it leaves all 20 tests green, because it changes how
     // many times the tree renders and not what it renders. Without it every
     // question anyone asks costs one extra render for a flag that was already
-    // false.
-    dispatch({ type: action, value: false });
+    // null.
+    dispatch({ type: action, value: null });
   }, []);
 
   const send = useCallback(
@@ -1031,7 +1100,7 @@ export function useLandingState() {
         refusal?: boolean;
         finalSources: Source[];
         finalSuggestions?: Suggestion[];
-        errorKind?: "rate_limit" | "error";
+        errorKind?: "rate_limit" | "error" | "rejected";
       },
     ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
@@ -1271,7 +1340,24 @@ export function useLandingState() {
     if (!q) {
       // Empty ask: focus the box, shake + amber border + inline warning, and
       // announce it in the hero's persistent `role="status"` region.
-      nudgeEmptySubmit("hero");
+      nudgeComposer("hero", EMPTY_SUBMIT_NUDGE);
+      return;
+    }
+    // #446 review. OVER-LENGTH, refused HERE rather than clamped by the browser.
+    //
+    // The first version of this PR put `maxLength={MAX_QUESTION_LENGTH}` on the
+    // box. That stops the 422 by SILENTLY DESTROYING TEXT: a pasted
+    // 5,000-character question becomes a 4,000-character one with no event and
+    // nothing on screen changing, and the fragment gets a confident answer. The
+    // behaviour it replaced was a badly-worded red badge — wrong, but loud.
+    // Quiet-and-wrong is the defect this whole issue is about.
+    //
+    // BEFORE the clear below, so the text the user has to shorten is still
+    // there. That ordering is what makes the copy true; it is asserted, not
+    // assumed, by the "keeps the text" cell.
+    const lenQ = questionLength(q);
+    if (lenQ > MAX_QUESTION_LENGTH) {
+      nudgeComposer("hero", overLengthNudge(lenQ, MAX_QUESTION_LENGTH));
       return;
     }
     // NO `retireNudge("hero")` HERE, and the asymmetry with `submitChat` is
@@ -1296,11 +1382,15 @@ export function useLandingState() {
     // shows a stale question.
     dispatch({ type: "SET_HERO_INPUT", value: "" });
     enterChat(q, { carryHeroText: false });
-  }, [state.heroInput, enterChat, nudgeEmptySubmit]);
+  }, [state.heroInput, enterChat, nudgeComposer]);
 
   const onHeroKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") askHero();
+      // #446. `isSubmitKey`, not a bare `e.key === "Enter"`: the bare check
+      // submits a half-composed phonetic string when an IME user presses Enter
+      // to PICK a candidate. Shared with `onChatKey` below so the two composers
+      // cannot drift — see `lib/composerInput.ts`.
+      if (isSubmitKey(e)) askHero();
     },
     [askHero],
   );
@@ -1337,7 +1427,24 @@ export function useLandingState() {
       // which is a false statement about an empty box. The test named "does not
       // announce a refusal for an EMPTY submit while in flight" pins that
       // distinction; this is the distinct signal it leaves room for.
-      nudgeEmptySubmit("chat");
+      nudgeComposer("chat", EMPTY_SUBMIT_NUDGE);
+      return;
+    }
+    // #446 review. OVER-LENGTH, refused HERE rather than clamped by the browser.
+    //
+    // The first version of this PR put `maxLength={MAX_QUESTION_LENGTH}` on the
+    // box. That stops the 422 by SILENTLY DESTROYING TEXT: a pasted
+    // 5,000-character question becomes a 4,000-character one with no event and
+    // nothing on screen changing, and the fragment gets a confident answer. The
+    // behaviour it replaced was a badly-worded red badge — wrong, but loud.
+    // Quiet-and-wrong is the defect this whole issue is about.
+    //
+    // BEFORE the clear below, so the text the user has to shorten is still
+    // there. That ordering is what makes the copy true; it is asserted, not
+    // assumed, by the "keeps the text" cell.
+    const lenT = questionLength(t);
+    if (lenT > MAX_QUESTION_LENGTH) {
+      nudgeComposer("chat", overLengthNudge(lenT, MAX_QUESTION_LENGTH));
       return;
     }
     // NO `retireNudge` here. It lived at this line for one round and was in the
@@ -1364,11 +1471,14 @@ export function useLandingState() {
     }
     setChatInput("");
     send(t);
-  }, [state.chatInput, send, nudgeEmptySubmit]);
+  }, [state.chatInput, send, nudgeComposer]);
 
   const onChatKey = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") submitChat();
+      // #446. The SAME predicate as `onHeroKey`, from the same module. These two
+      // lines were already identical and still diverged in every other respect;
+      // sharing the predicate is what keeps the IME fix on both screens.
+      if (isSubmitKey(e)) submitChat();
     },
     [submitChat],
   );

@@ -125,6 +125,191 @@ def test_register_rejects_short_password(in_memory_app: None) -> None:
     assert response.status_code == 422
 
 
+def _assert_validation_envelope(response, *, field: str) -> None:
+    """Assert the CONSUMER's view of a rejection, not just its status line.
+
+    #446 review: these tests asserted ``status_code == 422`` and nothing else,
+    which is a proxy. A client parses ``docs/API_SPEC.md`` §4's envelope, so a
+    422 that arrived as FastAPI's default ``{"detail": [...]}`` shape -- or with
+    the wrong code, or naming the wrong field -- would satisfy a status check
+    while breaking every caller. This repo has the scar written down: a guard
+    that pinned a constant while the emitted artefact went unchecked.
+
+    It also asserts the rejected VALUE is not echoed back: ``_redact_input``
+    replaces it with a length marker, and a boundary test is exactly where a
+    long secret-shaped string would leak if that ever regressed.
+    """
+    assert response.status_code == 422, response.text
+    envelope = response.json()  # flat, per docs/API_SPEC.md §4 -- NOT nested under "detail"
+    assert "detail" not in envelope, "FastAPI's default 422 shape leaked past the handler"
+    assert envelope["error"]["code"] == "validation_error"
+    assert envelope["request_id"]
+    body = response.text
+    assert field in body, f"the envelope does not say which field was rejected ({field})"
+    assert "redacted" in body, "the rejected value was echoed back instead of redacted"
+
+
+# ---------------------------------------------------------------------------
+# #446 — the register/login length boundaries (TEST_STRATEGY §8b, "over-length")
+#
+# ``test_register_rejects_short_password`` above sends "short" (5 characters) and
+# was the ONLY length test on this route. It proves five is refused; it says
+# nothing about WHERE the line is, so ``_PASSWORD_MIN_LENGTH`` could be 6 or 60
+# and it would stay green. These tests sit ON each declared edge, both ways.
+#
+# ``AuthModal`` mirrors all four numbers as ``minLength`` / ``maxLength``
+# attributes, and ``test_ui_input_limits_match_the_api.py`` asserts they agree.
+# ---------------------------------------------------------------------------
+
+
+def test_register_accepts_a_password_at_the_8_character_floor(in_memory_app: None) -> None:
+    """The FIRST accepted password length -- the partner the old test lacked."""
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": "floor@example.com", "password": "a" * 8},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code != 422, "a password AT the documented floor was rejected"
+    assert response.status_code == 201
+
+
+def test_register_rejects_a_password_one_character_under_the_floor(in_memory_app: None) -> None:
+    """RED if ``_PASSWORD_MIN_LENGTH`` is lowered."""
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": "under@example.com", "password": "a" * 7},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(response, field="password")
+
+
+def test_register_accepts_a_password_at_the_128_character_ceiling(in_memory_app: None) -> None:
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": "ceil@example.com", "password": "a" * 128},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code != 422, "a password AT the documented ceiling was rejected"
+    assert response.status_code == 201
+
+
+def test_register_rejects_a_password_one_character_over_the_ceiling(in_memory_app: None) -> None:
+    """RED if ``_PASSWORD_MAX_LENGTH`` is raised or removed.
+
+    The ceiling is an input bound, not a cost control: Argon2id's work is fixed
+    by its own parameters, so a longer password does not make hashing slower. It
+    is here so the browser and the server agree on what is acceptable.
+    """
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": "over@example.com", "password": "a" * 129},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(response, field="password")
+
+
+def test_register_rejects_an_email_one_character_over_the_255_ceiling(
+    in_memory_app: None,
+) -> None:
+    """``email`` is ``min_length=3, max_length=255`` and had no boundary test at all.
+
+    The local part is padded so the address stays syntactically valid -- otherwise
+    this would go red on ``_looks_like_email`` and prove nothing about the length
+    bound it is named for.
+    """
+    local = "a" * (256 - len("@example.com"))
+    too_long = f"{local}@example.com"
+    assert len(too_long) == 256
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": too_long, "password": "correct horse battery"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(response, field="email")
+
+
+def test_register_accepts_an_email_at_the_255_ceiling(in_memory_app: None) -> None:
+    """The partner: 255 is accepted, so the test above pins 255 and not "long"."""
+    local = "a" * (255 - len("@example.com"))
+    at_limit = f"{local}@example.com"
+    assert len(at_limit) == 255
+    response = _client().post(
+        "/v1/auth/register",
+        json={"email": at_limit, "password": "correct horse battery"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code != 422, "an email AT the documented ceiling was rejected"
+    assert response.status_code == 201
+
+
+def test_login_accepts_a_one_character_password_but_still_caps_it(
+    in_memory_app: None,
+) -> None:
+    """``LoginRequest.password`` is ``min_length=1``, NOT 8, and that is deliberate.
+
+    An account created before the 8-character rule must still be able to sign in;
+    a floor of 8 here would lock those accounts out of their own recovery path.
+    ``AuthModal`` mirrors exactly this by omitting ``minLength`` in login mode
+    only. A one-character password is therefore a 401 (wrong password), never a
+    422 (malformed request) -- the difference matters, because a 422 would tell
+    the user to change their password rather than to correct it.
+    """
+    client = _client()
+    assert _register(client, "shortpw@example.com", "correct horse battery").status_code == 201
+
+    one_char = client.post(
+        "/v1/auth/login",
+        json={"email": "shortpw@example.com", "password": "a"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert one_char.status_code == 401, "login applied the REGISTER floor and 422'd instead"
+
+    over_ceiling = client.post(
+        "/v1/auth/login",
+        json={"email": "shortpw@example.com", "password": "a" * 129},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(over_ceiling, field="password")
+
+
+def test_login_rejects_an_empty_password(in_memory_app: None) -> None:
+    """``LoginRequest.password`` is ``min_length=1``, so ZERO is refused.
+
+    #446 review: the login bound had only its upper edge tested. Without this,
+    ``min_length`` could be deleted from ``LoginRequest`` and nothing would
+    redden -- and an empty password must be a malformed REQUEST (422), never a
+    credential check (401), because 401 would mean the server hashed nothing and
+    still compared it.
+    """
+    client = _client()
+    assert _register(client, "emptypw@example.com", "correct horse battery").status_code == 201
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": "emptypw@example.com", "password": ""},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    _assert_validation_envelope(response, field="password")
+
+
+def test_login_accepts_a_password_at_the_128_character_ceiling(in_memory_app: None) -> None:
+    """The ACCEPTED side of login's upper edge, which had only its rejection.
+
+    128 characters is a well-formed request, so it reaches the credential check
+    and comes back 401 for a wrong password -- never 422. Without this, the
+    ceiling could be lowered and ``...one_character_over_the_ceiling`` would
+    still pass, proving only that SOMETHING is refused.
+    """
+    client = _client()
+    assert _register(client, "atmax@example.com", "correct horse battery").status_code == 201
+    response = client.post(
+        "/v1/auth/login",
+        json={"email": "atmax@example.com", "password": "a" * 128},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert response.status_code == 401, "a password AT the ceiling was rejected as malformed"
+    assert response.json()["error"]["code"] != "validation_error"
+
+
 def test_register_duplicate_email_is_rejected(in_memory_app: None) -> None:
     """Deliberate email-existence leak per ADR-0004 (no email provider for always-202)."""
     _register(_client(), "carol@example.com", "correct horse battery")

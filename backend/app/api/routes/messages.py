@@ -53,8 +53,11 @@ class AnswerRequest(BaseModel):
     """Body for ``POST /v1/sessions/{session_id}/messages``.
 
     ``answer_style`` is restricted to the two values the MVP supports.
-    Anything else is rejected with a 400 so a typo doesn't silently
-    degrade quality.
+    Anything else is rejected so a typo doesn't silently degrade
+    quality -- with a **422** ``validation_error``, not a 400: this
+    docstring said 400 until #446, while ``app/core/errors.py`` has
+    mapped ``validation_error`` to 422 since the envelope was defined
+    and ``test_post_message_rejects_bad_answer_style`` asserts 422.
     """
 
     message: str = Field(min_length=1, max_length=4000)
