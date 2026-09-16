@@ -38,6 +38,40 @@
 export const MAX_QUESTION_LENGTH = 4000;
 
 /**
+ * How long a question is, counted the way the SERVER counts it.
+ *
+ * `String.prototype.length` counts UTF-16 code units. Pydantic's `max_length`
+ * counts what Python's `len()` counts, which is code POINTS. For every character
+ * outside the Basic Multilingual Plane — emoji, and a great deal of CJK
+ * Extension B — those two numbers differ by a factor of two.
+ *
+ * THE DIRECTION OF THAT ERROR REVERSED INSIDE THIS ISSUE, which is why it is a
+ * function now and not a `.length`:
+ *
+ *   - While the limit was a `maxLength` ATTRIBUTE, code units made the browser
+ *     STRICTER than the server. Wrong, but safe: it could only stop something
+ *     the server would also have stopped.
+ *   - Once the limit moved into the submit handler, the same `.length` started
+ *     REFUSING QUESTIONS THE SERVER WOULD ACCEPT. Measured: 2,500 emoji are
+ *     `len()` 2,500 to the server and `.length` 5,000 here, so the composer
+ *     refused a legal question — and told the user it was "5000 characters",
+ *     a number the server would never have agreed with.
+ *
+ * That is a false refusal aimed squarely at non-Latin writers, which is the same
+ * population the IME guard above exists for.
+ *
+ * `for...of` iterates a string by code point, so this counts the same units
+ * Python does. Not `Array.from(q).length`: that allocates an array the size of
+ * the question, and with the `maxLength` attribute gone the box can now hold an
+ * arbitrarily large paste.
+ */
+export function questionLength(text: string): number {
+  let n = 0;
+  for (const _ of text) n++;
+  return n;
+}
+
+/**
  * The minimal shape `isSubmitKey` needs. React's
  * `KeyboardEvent<HTMLInputElement>` is structurally assignable to it, and so is
  * a hand-built object in a test — which is the point of not naming React here.

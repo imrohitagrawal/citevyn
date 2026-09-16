@@ -6,7 +6,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { isSafeHref } from "../lib/safeHref";
-import { EMPTY_SUBMIT_NUDGE_GLYPH } from "../lib/composerNudge";
+import { EMPTY_SUBMIT_NUDGE_GLYPH, hasNudge } from "../lib/composerNudge";
 
 interface ChatViewProps {
   messages: Array<{
@@ -717,7 +717,7 @@ export function ChatView({
             later or more specific rule still overrides one of them, and nothing
             compares the two computed colours. The guard holds the shared block,
             not the rendered result. */}
-        {chatNudge && (
+        {hasNudge(chatNudge) && (
           <p className="composer-nudge" aria-hidden="true">
             {EMPTY_SUBMIT_NUDGE_GLYPH} {chatNudge}
           </p>
@@ -747,7 +747,7 @@ export function ChatView({
               and that one arrival is never announced. Judged the better trade
               than the alternative, which is a reader pressing Enter on an empty
               box and hearing nothing at all. */}
-          {chatNudge
+          {hasNudge(chatNudge)
             ? chatNudge
             : refusedInFlight
               ? REFUSED_TEXT

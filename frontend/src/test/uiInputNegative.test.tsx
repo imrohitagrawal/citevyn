@@ -39,10 +39,11 @@ import { __testOnly } from "../lib/authStore";
 import { isLiveMode, createSession, askQuestion, login, register, getCurrentUser } from "../lib/api";
 import { requestMagicLink, updatePassword } from "../lib/authActions";
 import { ApiClientError } from "../lib/types";
-import { MAX_QUESTION_LENGTH, isSubmitKey } from "../lib/composerInput";
+import { MAX_QUESTION_LENGTH, isSubmitKey, questionLength } from "../lib/composerInput";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_GLYPH,
+  hasNudge,
   overLengthNudge,
 } from "../lib/composerNudge";
 
@@ -480,6 +481,62 @@ for (const c of COMPOSERS) {
       ).toBe(0);
     });
 
+    // CELL: over-length, counted the way the SERVER counts. An emoji is ONE
+    // character to Pydantic's `len()` and TWO to `String.prototype.length`.
+    //
+    // The direction of this error reversed inside this issue. As a `maxLength`
+    // attribute, code units only made the browser stricter — wrong but safe.
+    // In the submit handler the same `.length` REFUSES QUESTIONS THE SERVER
+    // WOULD ACCEPT, and tells the user a number the server would never agree
+    // with. It aims that false refusal at exactly the writers the IME guard
+    // above exists for.
+    it("over-length: 2500 emoji are 2500 characters, not 5000, and still send", async () => {
+      const { container, input } = renderComposer(c);
+      const emoji = "\u{1F642}".repeat(2500);
+      // The premise, asserted rather than assumed: this string really does
+      // straddle the limit depending on which unit you count.
+      expect(emoji.length, "the test string does not exercise the difference").toBe(5000);
+      expect(questionLength(emoji)).toBe(2500);
+      expect(emoji.length).toBeGreaterThan(MAX_QUESTION_LENGTH);
+      expect(questionLength(emoji)).toBeLessThanOrEqual(MAX_QUESTION_LENGTH);
+
+      act(() => {
+        fireEvent.change(input, { target: { value: emoji } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      await flush();
+
+      expect(
+        userMessages(container),
+        `${c.label}: a legal emoji question was refused — the client is counting UTF-16 code units`,
+      ).toBe(1);
+      expect(
+        container.querySelectorAll(".hero-nudge, .composer-nudge").length,
+        `${c.label}: a legal question raised the over-length warning`,
+      ).toBe(0);
+    });
+
+    it("over-length: an emoji question that IS too long reports the code-point count", async () => {
+      // The partner. Without it the cell above passes on a composer that
+      // stopped enforcing the limit for astral text altogether.
+      const { container, input } = renderComposer(c);
+      const emoji = "\u{1F642}".repeat(MAX_QUESTION_LENGTH + 1);
+      act(() => {
+        fireEvent.change(input, { target: { value: emoji } });
+        fireEvent.keyDown(input, { key: "Enter" });
+      });
+      await flush();
+      expect(userMessages(container), `${c.label}: an over-length emoji question was sent`).toBe(0);
+      const region = container.querySelector(`${c.scope} [role="status"]`);
+      // 4001, the server's count — NOT 8002, the UTF-16 one.
+      expect(region!.textContent).toBe(
+        overLengthNudge(MAX_QUESTION_LENGTH + 1, MAX_QUESTION_LENGTH),
+      );
+      expect(region!.textContent, "the user is told a number the server would not agree with").not.toContain(
+        String((MAX_QUESTION_LENGTH + 1) * 2),
+      );
+    });
+
     // The attribute must NOT come back: it is what caused the silent clamp.
     it("over-length: the box does NOT carry a maxLength attribute", () => {
       const { input } = renderComposer(c);
@@ -582,6 +639,52 @@ for (const c of COMPOSERS) {
 // ---------------------------------------------------------------------------
 // 3. The composers' shared predicate, unit-level
 // ---------------------------------------------------------------------------
+
+describe("§8b: the two composers READ a nudge identically", () => {
+  // THE DIVERGENCE THIS CATCHES, which shipped and was caught in review: the
+  // hero rendered `{heroNudge ?? ""}` and the chat `{chatNudge ? chatNudge : …}`.
+  // `??` tests for null; truthiness also catches `""`. An empty-string message
+  // therefore showed in one composer and not the other — a disagreement inside
+  // the ONE mechanism #445 built so they could not disagree.
+  //
+  // `composerEmptyParity` could not see it: it drives only the empty-submit
+  // path, where the message is never empty. This drives the value SHAPE instead
+  // of the user path, which is the axis that broke.
+  it("hasNudge is the single reader, and it keys on null — not on truthiness", () => {
+    expect(hasNudge(null)).toBe(false);
+    // The case the two operators disagreed about. If this ever reads `false`,
+    // one composer will show a nudge the other hides.
+    expect(hasNudge("")).toBe(true);
+    expect(hasNudge(EMPTY_SUBMIT_NUDGE)).toBe(true);
+    expect(hasNudge(overLengthNudge(5000, 4000))).toBe(true);
+  });
+
+  it("NEITHER view reads the nudge value with its own operator", () => {
+    // A structural guard, because the failure was two files each deciding for
+    // themselves. It is not a substring search for a banned character: it
+    // asserts every read goes through the shared predicate, and it names the
+    // exact expressions that regressed.
+    const read = (f: string) =>
+      readFileSync(join(SRC_DIR, "components", f), "utf8")
+        .split("\n")
+        .filter((l) => !l.trimStart().startsWith("*") && !l.trimStart().startsWith("//"))
+        .join("\n");
+    const hero = read("Hero.tsx");
+    const chat = read("ChatView.tsx");
+
+    expect(hero).toContain("hasNudge(heroNudge)");
+    expect(chat).toContain("hasNudge(chatNudge)");
+    // The two spellings that diverged, banned by name.
+    expect(hero, "the hero reads the nudge with ?? again").not.toContain("heroNudge ??");
+    expect(chat, "the chat reads the nudge with ?? again").not.toContain("chatNudge ??");
+    expect(hero, "the hero tests the nudge for truthiness again").not.toMatch(/\{heroNudge\s*&&/);
+    expect(chat, "the chat tests the nudge for truthiness again").not.toMatch(/\{chatNudge\s*&&/);
+    // The partner: these negatives are over text that really does mention the
+    // flags, so they cannot pass on an empty read or a renamed prop.
+    expect(hero).toContain("heroNudge");
+    expect(chat).toContain("chatNudge");
+  });
+});
 
 describe("§8b: isSubmitKey is the one rule both composers use", () => {
   it("submits on a plain Enter and nothing else", () => {

@@ -269,6 +269,15 @@ def test_the_published_limit_matches_what_the_browser_enforces() -> None:
     Without this the doc could agree with the server while the browser refused at
     a different length -- which is the drift the whole file exists to catch, just
     with the documentation as the third party.
+
+    ONE NUMBER IS NOT THE SAME AS ONE RULE, and an earlier version of this
+    docstring asserted the stronger sentence without checking it. The numbers
+    agreeing says nothing about the UNITS they count, and for a while those
+    differed in a way that mattered: ``.length`` counts UTF-16 code units while
+    Pydantic counts code points, so 2,500 emoji were 5,000 to the browser and
+    2,500 to the server, and the composer refused a question the server would
+    have accepted. ``test_the_client_counts_characters_the_way_the_server_does``
+    below is what makes the units part true; this test only covers the numbers.
     """
     _, doc_max = _spec_message_limits()
     browser = _const(_read(_COMPOSER_INPUT), "MAX_QUESTION_LENGTH", _COMPOSER_INPUT)
@@ -289,3 +298,44 @@ def test_the_spec_parser_raises_rather_than_returning_a_default() -> None:
         pytest.raises(AssertionError, match="no `message` row found"),
     ):
         _spec_message_limits()
+
+
+def test_the_client_counts_characters_the_way_the_server_does() -> None:
+    """Same limit, same UNITS -- the half the number comparison cannot see.
+
+    Pydantic's ``max_length`` counts what ``len()`` counts: code points. The
+    browser must therefore not use ``String.prototype.length``, which counts
+    UTF-16 code units and double-counts every astral character.
+
+    RED if ``questionLength`` is deleted or the submit paths go back to
+    ``.length``. Asserted on the SOURCE because the units are a property of the
+    client, which this suite cannot execute -- the behavioural half lives in
+    ``uiInputNegative.test.tsx``, which drives a real astral string through the
+    real composer.
+    """
+    lib = _read(_COMPOSER_INPUT)
+    assert "export function questionLength(" in lib, "the client no longer has a code-point counter"
+    # `for...of` iterates by code point; `.length` does not. Pinning the
+    # mechanism, not just its name.
+    assert "for (const _ of text) n++;" in lib, "questionLength no longer iterates by code point"
+
+    hook = _read(_HOOK)
+    assert hook.count("questionLength(") == 2, (
+        "both composers must measure with questionLength (hero and chat); found "
+        f"{hook.count('questionLength(')}"
+    )
+    assert not re.search(r"\b[qt]\.length > MAX_QUESTION_LENGTH", hook), (
+        "a composer is back to counting UTF-16 code units, so it refuses "
+        "questions the server would accept"
+    )
+
+    # The partner, so this cannot pass by everything being absent: Python's own
+    # count really is the code-point count, and it really does disagree with a
+    # UTF-16 count for an astral character.
+    emoji = "\U0001f642" * 2500
+    assert len(emoji) == 2500, "len() is not counting code points"
+    utf16_units = sum(2 if ord(ch) > 0xFFFF else 1 for ch in emoji)
+    assert utf16_units == 5000, "the two counts do not actually differ here"
+    assert len(emoji) <= _model_bound(AnswerRequest, "message", "max_length"), (
+        "the server would reject this, so it is the wrong example"
+    )

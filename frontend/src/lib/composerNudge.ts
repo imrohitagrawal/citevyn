@@ -76,6 +76,12 @@ export const EMPTY_SUBMIT_NUDGE_MS = 3000;
  * A FUNCTION, not a constant, because the honest sentence needs the actual
  * length: "too long" leaves the reader guessing how much to cut.
  *
+ * `actual` must be a CODE POINT count (`questionLength`), not `.length`.
+ * The number in this sentence is the one the user is being asked to reduce,
+ * so it has to be the number the server is measuring — otherwise a reader
+ * pasting emoji is told to cut 5,000 characters from a question the server
+ * considers 2,500 long.
+ *
  * Same prosody rules as `EMPTY_SUBMIT_NUDGE`, for the same reason — two full
  * stops, no em dash. `ChatView` records that NVDA's `locale/en/symbols.dic`
  * gives `—` the level `most`, so a reader running punctuation above the default
@@ -83,4 +89,28 @@ export const EMPTY_SUBMIT_NUDGE_MS = 3000;
  */
 export function overLengthNudge(actual: number, limit: number): string {
   return `Your question is ${actual} characters. The limit is ${limit}. Shorten it and send it again.`;
+}
+
+
+/**
+ * Is a nudge showing? THE one reader of a nudge value, for both composers.
+ *
+ * #446 review. The two views diverged the moment the flag stopped being a
+ * boolean: `Hero` rendered `{heroNudge ?? ""}` and `ChatView` rendered
+ * `{chatNudge ? chatNudge : …}`. Null-coalescing tests for null; truthiness also
+ * catches `""`. So an empty-string message would have shown in the hero and
+ * fallen through in the chat — a divergence inside the ONE mechanism #445 built
+ * specifically so the two composers could not disagree, introduced by the change
+ * that generalised it.
+ *
+ * `composerEmptyParity` could not see it either, because it only drives the
+ * empty-submit path, where the message is never empty. A guard is only as wide
+ * as the inputs it drives.
+ *
+ * The fix is not "pick the right operator in both files" — that is the same
+ * remembering-to-agree that keeps failing. It is to have ONE reader, so there is
+ * no second operator to get wrong.
+ */
+export function hasNudge(message: string | null): boolean {
+  return message !== null;
 }

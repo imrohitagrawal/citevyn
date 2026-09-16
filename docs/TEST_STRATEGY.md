@@ -252,7 +252,7 @@ surface, say so in the test file; do not leave it unmentioned.
 |---|---|
 | Empty submit | Submitting a blank field must not send a request, and must produce something a screen reader announces. A bare `return` is not a behaviour — it produces zero DOM mutations (#445). |
 | Whitespace-only | Spaces and tabs are the empty case. The submit is refused **and the typed text is kept** — a refused input must never be cleared. |
-| Over-length | The client carries the server's own ceiling, and the server is tested at the boundary in both directions: the last accepted length AND the first rejected one. A rejection test alone proves only that *something* is refused, never that the documented limit is the one in force. |
+| Over-length | The client refuses at **submit** and says so; it must **not** use a `maxLength` attribute. The server is tested at the boundary in both directions: the last accepted length AND the first rejected one — a rejection test alone proves only that *something* is refused, never that the documented limit is the one in force. **`maxLength` is banned here, and this is the one cell whose rule was learned the hard way** (#446, first round): the attribute makes the browser clamp a long paste with no event and nothing on screen changing, so the user sends a question cut mid-sentence and gets a confident answer to the fragment. That is a *worse* failure than the badly-worded error it was added to prevent, because it is silent. Refusing at submit keeps the text on screen — which is what makes "shorten it" a true instruction — and routes the refusal through the same announced mechanism as the empty cell. Client and server must also agree on **what a character is**; see the code-unit note below. |
 | Paste-only | Text that arrives entirely by paste, with no keystroke for the content, still submits and is still trimmed. Handlers that hang off `keydown` miss this. |
 | Rapid double-submit | The same input submitted twice with no gap sends one request, not two. |
 | Submit-while-in-flight | A submit during a pending request is refused, **announced**, and the text kept. Silent refusal is the defect, not the refusal. |
@@ -291,8 +291,9 @@ probe or the source line for each row:
 | Validation as part of **submission** | **works** — `HTMLFormElement-impl.js` `requestSubmit()` runs `if (!this.hasAttributeNS(null, "novalidate") && !this.reportValidity()) return;` *before* firing `submit` | **The empty-submit cell is fully testable here.** Click the submit button on an empty form and assert no request was made. |
 | `HTMLFormElement.prototype.submit()` | `notImplemented` | A **red herring** — `submit()` never validates in *any* browser, per spec. The validating entry points are `requestSubmit()` and submit-button activation, and jsdom implements both. |
 | Native validation bubble | absent | Not provable here; nothing depends on it. |
-| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | Over-length is **not** provable here. |
-| `validity.tooLong` | **always false** after a programmatic assignment (per spec it needs a dirty value from a user edit) | So `checkValidity()` does not rescue the over-length cell either. |
+| `maxLength` on programmatic assignment | **not enforced** — assigning 10 characters to a `maxLength=5` input leaves `value.length === 10` | An attribute-based limit is **untestable here**. That is a reason not to build one, not a reason to assert the attribute instead. |
+| `validity.tooLong` | **always false** after a programmatic assignment (per spec it needs a dirty value from a user edit) | So `checkValidity()` does not rescue an attribute-based limit either. |
+| A limit enforced in the **submit handler** | **fully testable** | Which is why §8b requires that shape. The over-length cell asserts the request was not made, the text survived, and the live region says so — all in jsdom, no browser needed. |
 
 Measured on the real `AuthModal`: clicking **Sign in** on the empty form gives
 **0 `submit` events and 0 calls to `login`**; filling it and clicking gives 1 of
@@ -301,12 +302,19 @@ write.
 
 So:
 
-1. **Test the behaviour where jsdom supports it — which is more than it looks.**
-   The empty-submit cell asserts *the request was never made*, with a filled-form
-   partner proving the button works at all. `toBeRequired()` reports only what
-   the markup says and is not sufficient on its own; reach for an attribute
-   assertion only where the table above says the behaviour is genuinely absent
-   (today: over-length, and only over-length).
+1. **Test the behaviour where jsdom supports it — which is more than it looks,
+   and prefer a design that makes it testable.** The empty-submit cell asserts
+   *the request was never made*, with a filled-form partner proving the button
+   works at all. The over-length cell asserts the same shape, and can only do so
+   because the limit lives in the submit handler rather than in an attribute.
+   `toBeRequired()` reports only what the markup says and is not sufficient on
+   its own.
+
+   **There is currently NO cell that falls back to an attribute assertion.** If
+   you find yourself reaching for one, the usual cause is a mechanism that is
+   untestable *and* silent — which is the same defect twice, and the reason the
+   over-length cell was rewritten rather than documented around. Check whether
+   you can move the rule into the handler instead; that is what #446 did.
 2. **Put the behaviour in Playwright** where it is load-bearing enough to earn a
    real browser (`frontend/tests/behavior.spec.ts`).
 3. **Back it with a server-side test.** The browser is bypassable, so the bound
@@ -321,6 +329,19 @@ So:
 
 A cell that cannot be honestly tested is written down here as untested. It is not
 skipped silently and it is not covered by a test that asserts something easier.
+
+### Known exception: the auth form still uses attributes
+
+`AuthModal`'s four bounds are enforced by `minLength`/`maxLength`, which the
+over-length cell above bans. This is recorded rather than quietly excused: the
+composers had a submit path that already owned an announced refusal, so moving
+the limit into the handler was a small change; the auth form has no such
+mechanism and building one is a feature, not a test fix. It is **not cosmetic** —
+a 140-character generated passphrase is silently truncated to 128, the account is
+created with the truncation, and the password manager then autofills the full
+string forever after. Tracked as its own issue. Until it is closed, the auth
+surface is the one place in the sweep whose over-length cell is an attribute
+assertion, and it says so at the field declarations.
 
 ### Mutation-testing a Python bound: clear `__pycache__`, and prove what loaded
 

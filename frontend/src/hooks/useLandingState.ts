@@ -21,7 +21,7 @@ import {
 } from "../data/knowledgeBase";
 import { askQuestion, createSession, getSession, isLiveMode } from "../lib/api";
 import { citationsToSources } from "../lib/citations";
-import { MAX_QUESTION_LENGTH, isSubmitKey } from "../lib/composerInput";
+import { MAX_QUESTION_LENGTH, isSubmitKey, questionLength } from "../lib/composerInput";
 import {
   EMPTY_SUBMIT_NUDGE,
   EMPTY_SUBMIT_NUDGE_MS,
@@ -1355,8 +1355,9 @@ export function useLandingState() {
     // BEFORE the clear below, so the text the user has to shorten is still
     // there. That ordering is what makes the copy true; it is asserted, not
     // assumed, by the "keeps the text" cell.
-    if (q.length > MAX_QUESTION_LENGTH) {
-      nudgeComposer("hero", overLengthNudge(q.length, MAX_QUESTION_LENGTH));
+    const lenQ = questionLength(q);
+    if (lenQ > MAX_QUESTION_LENGTH) {
+      nudgeComposer("hero", overLengthNudge(lenQ, MAX_QUESTION_LENGTH));
       return;
     }
     // NO `retireNudge("hero")` HERE, and the asymmetry with `submitChat` is
@@ -1441,8 +1442,9 @@ export function useLandingState() {
     // BEFORE the clear below, so the text the user has to shorten is still
     // there. That ordering is what makes the copy true; it is asserted, not
     // assumed, by the "keeps the text" cell.
-    if (t.length > MAX_QUESTION_LENGTH) {
-      nudgeComposer("chat", overLengthNudge(t.length, MAX_QUESTION_LENGTH));
+    const lenT = questionLength(t);
+    if (lenT > MAX_QUESTION_LENGTH) {
+      nudgeComposer("chat", overLengthNudge(lenT, MAX_QUESTION_LENGTH));
       return;
     }
     // NO `retireNudge` here. It lived at this line for one round and was in the
