@@ -249,7 +249,8 @@ _UNGUARDABLE: tuple[str, ...] = (
     "promoted it, nothing in this file would notice, and the next font-rendering "
     "shift would block every merge with no warning. Same root cause as the "
     "branch-protection entry below: a test cannot read that API (#325).",
-    "Whether the committed `*-chromium-linux.png` baselines were drawn by the "
+    "Whether the `*-chromium-linux.png` baselines (held for owner review as of "
+    "this commit, committed after it) were drawn by the "
     "browser the container tag names, or on the right CPU architecture. "
     "`test_the_visual_job_runs_the_browser_that_drew_its_baselines` pins the TAG "
     "against the lockfile; it cannot open a PNG and ask what rendered it. "
@@ -1931,26 +1932,58 @@ def test_the_regeneration_command_and_the_ci_container_agree() -> None:
     regeneration run that differs from CI is the same defect as a CI run that
     differs from regeneration.
     """
-    source = VISUAL_PW_CONFIG.read_text(encoding="utf-8")
-    # PARTNER. Every assertion below is "this substring is present"; without a
-    # command to find them in, a docblock someone deleted would satisfy none of
-    # them and the test would fail for the right reason only by accident.
-    assert "docker run" in source and "--platform linux/amd64" in source, (
-        f"{VISUAL_PW_CONFIG.name} no longer documents a `docker run --platform "
-        "linux/amd64 ...` regeneration command. That command is the only record "
-        "of how the committed -linux baselines are produced, and the comparison "
-        "below would be over nothing."
-    )
     container = _visual_job().get("container")
+    image = str((container or {}).get("image") or "") if isinstance(container, dict) else ""
     options = str((container or {}).get("options") or "") if isinstance(container, dict) else ""
-    in_command = "--ipc=host" in source
+    assert image, (
+        f"{DEMO_WORKFLOW.name}:visual-e2e declares no container image, so there "
+        "is nothing for the documented command to agree with"
+    )
+
+    # The COMMAND, not the whole file, and identified by the IMAGE it runs.
+    #
+    # Searching the file would let `--ipc=host` be deleted from the `docker run`
+    # while a sentence elsewhere in the docblock still mentioned it: the string
+    # present, the command not passing it, this rule reporting agreement.
+    # Matching on `"docker run" in line` alone is not enough either — that was
+    # the first version of this and it was WRONG, caught by running it: the
+    # docblock also contains the prose "Apple-silicon machine needs `docker run
+    # --platform linux/amd64`", which sorts first and carries no flags, so the
+    # rule compared the CI container against a sentence.
+    #
+    # Requiring the image makes the selection unambiguous AND adds a third
+    # two-place agreement for free: the command a human runs to DRAW a baseline
+    # must name the same image the job that COMPARES it runs.
+    source = VISUAL_PW_CONFIG.read_text(encoding="utf-8")
+    joined = re.sub(r"\\\n\s*\*?\s*", " ", source)  # un-wrap the backslash continuations
+    candidates = [line for line in joined.splitlines() if "docker run" in line and image in line]
+    # PARTNER. Everything below is a substring check; over zero candidates the
+    # comparison would agree about nothing, and over two it would silently pick
+    # one. Exactly one is also the assertion that the documented command and the
+    # CI job name the SAME image.
+    assert len(candidates) == 1, (
+        f"expected exactly one documented `docker run ... {image} ...` command in "
+        f"{VISUAL_PW_CONFIG.name}, found {len(candidates)}. Either the "
+        "regeneration command is gone — it is the only record of how the -linux "
+        "baselines are produced — or it names a different image from the one "
+        "visual-e2e runs, which means baselines drawn by one browser and "
+        "compared by another."
+    )
+    command = candidates[0]
+    assert "--platform linux/amd64" in command, (
+        f"the documented regeneration command in {VISUAL_PW_CONFIG.name} no "
+        "longer passes `--platform linux/amd64`. GitHub's ubuntu-latest is "
+        "x86_64 and arm64 renders differ for 12 of the 22 snapshots, so without "
+        f"it an Apple-silicon machine commits 12 wrong images:\n  {command}"
+    )
+    in_command = "--ipc=host" in command
     in_job = "--ipc=host" in options
     assert in_command == in_job, (
         f"`--ipc=host` is in the documented regeneration command: {in_command}; "
         f"in {DEMO_WORKFLOW.name}:visual-e2e's `container.options` ({options!r}): "
         f"{in_job}. The container that DRAWS a baseline and the container that "
         "COMPARES it must be configured the same way, or a difference between "
-        "them is indistinguishable from a design change."
+        f"them is indistinguishable from a design change.\n  {command}"
     )
 
 
