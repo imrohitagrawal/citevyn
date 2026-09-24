@@ -42,7 +42,7 @@
  * test skipped while the job exited 0, a workflow whose job ran nothing.
  */
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { spawnSync } from "node:child_process";
 import { load } from "js-yaml";
@@ -402,6 +402,61 @@ describe("tsc -b keeps its emit out of the frontend root (#343)", () => {
     expect(rootSources.length).toBeGreaterThanOrEqual(5);
     expect(rootSources.map((f) => basename(f))).toContain("vite.config.ts");
     expect(rootSources.map((f) => basename(f))).toContain("vite.liveStub.ts");
+  });
+
+  /**
+   * #325: every Playwright config in the frontend root is type-checked.
+   *
+   * `tsconfig.node.json` lists its files by NAME, so a new config is outside
+   * the type-check until someone remembers to add it — and `tsc -b` reports
+   * nothing, because a file that is not in the program cannot produce an error.
+   * That is not hypothetical: `playwright.visual-ci.config.ts` was written,
+   * `npm run type-check` passed, and `tsc --listFiles` showed the file was
+   * never loaded. A config that silently drops out of the type-check is the
+   * same defect class as #366 one project over, and nothing here covered it.
+   *
+   * Guarded by SHAPE, not by a list of names: whatever `playwright*.config.ts`
+   * files sit directly in the root must all be in the program. Adding a name
+   * here as well as to the tsconfig would just be two places to forget.
+   *
+   * WHAT IT CANNOT SEE, stated rather than implied. The scan is one
+   * `readdirSync` of the frontend root against `/^playwright.*\.config\.ts$/`,
+   * so it misses a config in a SUBDIRECTORY, one written `.mts`/`.cts`/`.js`,
+   * and any config whose name does not start `playwright` (`e2e.config.ts`,
+   * `visual.config.ts`). Each of those would drop out of the type-check exactly
+   * as silently. The name is the only signal available without resolving what
+   * Playwright would load, which needs Playwright.
+   *
+   * Turns red if: a `playwright*.config.ts` is added to `frontend/` without
+   * being added to `tsconfig.node.json`'s `include`. Measured 2026-09-16 by
+   * removing `playwright.visual-ci.config.ts` from that list — and separately,
+   * that the `include` entry is what does the work: with it present, planting
+   * `timeout: "not a number"` in that config made `npm run type-check` exit 2.
+   */
+  it("every playwright*.config.ts in the frontend root is inside the program", () => {
+    const onDisk = readdirSync(frontendRoot)
+      .filter((f) => /^playwright.*\.config\.ts$/.test(f))
+      .sort();
+    // PARTNER for the "nothing is missing" assertion below: an empty directory
+    // listing, or a regex that stopped matching, satisfies it for free. Named,
+    // not counted — `playwright.config.ts` is the one config that cannot go away
+    // without the whole e2e suite going with it.
+    expect(
+      onDisk,
+      "no playwright*.config.ts found in the frontend root — this guard is " +
+        "checking an empty set",
+    ).toContain("playwright.config.ts");
+    // FULL PATHS, not basenames. `parsed.fileNames` is absolute; comparing
+    // `basename` would let an included `subdir/playwright.demo-ci.config.ts`
+    // satisfy the root file of the same name.
+    const inProgram = new Set(parsed.fileNames.map((f) => resolvePath(f)));
+    const missing = onDisk.filter((f) => !inProgram.has(join(frontendRoot, f)));
+    expect(
+      missing,
+      "these Playwright configs are in frontend/ but not in " +
+        "tsconfig.node.json's `include`, so `npm run type-check` never looks " +
+        "at them and a type error in one reaches CI as a runtime failure",
+    ).toEqual([]);
   });
 
   // THE PARTNER ASSERTION. The checks after it are all "X is absent"; this one
