@@ -54,11 +54,18 @@ tests with every assertion here passing:
   ``--deselect`` on that command. Pinned against in
   ``test_ci_workflow_conditions.py``, which is a YAML pin and so sees the file
   rather than the job's real command;
-* ``continue-on-error: true`` on that job's steps. ``ci.yml:postgres-migrations``
+* ``continue-on-error: true`` on that job's OTHER steps. ``ci.yml:postgres-migrations``
   is exempt from the defusing rule as a WHOLE JOB in
   ``test_gating_workflows.py``'s ``_NOT_HELD_TO_THE_DEFUSING_RULE``; the pytest
   step specifically is now pinned in ``test_ci_workflow_conditions.py``, the
-  job's other steps are not.
+  job's other steps are not;
+* a ``skipif`` TUNED TO THE PROBE. The probe below drives the module with a
+  sentinel URL, so a condition keyed on that sentinel — say ``skipif("probe" not
+  in os.environ.get("CITEVYN_PG_TEST_URL", ""))`` — resolves ``True`` unset and
+  ``False`` with the probe's own URL, satisfying both of its assertions, while
+  real CI (a URL with no ``probe`` in it) skips all 15 tests. Found by a
+  verification round. Not closable by picking a different sentinel: any FIXED
+  value can be keyed on. What would close it is the run-outcome check below.
 
 What this file DOES close is the hole #449 filed: the job can no longer report
 green because the DATABASE is absent, because the guard is a test the
@@ -331,7 +338,11 @@ def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, objec
         check=False,
     )
     assert result.returncode == 0, (
-        f"the import probe failed (with_url={with_url}):\n{result.stdout}\n{result.stderr}"
+        f"the import probe failed (with_url={with_url}). This is ALSO how a "
+        "module-scope `pytest.skip(..., allow_module_level=True)` shows up — it "
+        "raises on import, so the probe exits non-zero rather than reporting a "
+        "mark. That form skips all 15 tests too, so a failure here is a real "
+        f"signal even when the traceback is not about marks:\n{result.stdout}\n{result.stderr}"
     )
     marks: list[dict[str, object]] = json.loads(result.stdout.strip().splitlines()[-1])
     assert any(m["name"] == "postgres" for m in marks), (

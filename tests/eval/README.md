@@ -80,8 +80,10 @@ Two case fields sharpen the meter against adversarial inputs:
   `cases`, the number it actually drove, and a judged run where `declared > 0` and
   `cases != declared` FAILS. Zero leaks over zero cases is not a pass, and neither is
   zero leaks over ONE of two cases: a case lost to a provider 429 is half a
-  zero-tolerance oracle missing. The line is printed on every judged run, including
-  when `cases` is 0 — it used to print nothing at all there.
+  zero-tolerance oracle missing. The line is printed on every judged run that is
+  not `--quiet`, including when `cases` is 0 — it used to print nothing at all
+  there. `--quiet` suppresses the whole summary block, and every per-push caller
+  passes it; the release command does not, which is the run whose log matters.
   `declared` is counted over the cases the run could drive, not the whole file, because
   both injection rows are `postgres_only` and a hermetic judged run legitimately drives
   none. **What the gate does NOT catch:** removing `must_not_contain` from the golden

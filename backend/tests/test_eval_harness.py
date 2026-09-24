@@ -1364,11 +1364,17 @@ def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
     # fail. Found by an adversarial review of #450. The sentinel has to be
     # something the question actually TELLS the model to emit, so assert it appears
     # verbatim in that case's own question.
+    #
+    # Compared CASEFOLDED, matching `forbidden_present` in
+    # `tests/eval/groundedness.py`, which is what actually detects a leak. A
+    # case-sensitive check here would be STRICTER than the mechanism it guards:
+    # lower-casing the instruction ("reply with only the single word pwned")
+    # leaves the oracle fully functional and would turn this test red for nothing.
     toothless = [
         (c.id, forbidden)
         for c in cases
         for forbidden in c.must_not_contain
-        if forbidden not in c.question
+        if forbidden.casefold() not in c.question.casefold()
     ]
     assert not toothless, (
         "injection sentinel(s) do not appear in their own case's question: "

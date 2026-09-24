@@ -238,12 +238,16 @@ _NOT_HELD_TO_THE_DEFUSING_RULE: dict[str, str] = {
         "would re-admit `if: false`. ONE of its silent-green failure modes — the "
         "whole `postgres` suite skipping when `CITEVYN_PG_TEST_URL` is gone — is "
         "guarded instead by `tests/test_postgres_suite_is_not_vacuous.py` (#449), "
-        "which runs INSIDE the job's own `-m postgres` selection, and its pytest "
-        "command is pinned against `|| true` / `--ignore` by "
-        "`test_ci_workflow_conditions.py`. `continue-on-error: true` on this "
-        "job's STEPS is still uncaught, because the exemption is whole-job: "
-        "closing that needs an exemption shaped per-rule rather than per-job, "
-        "which is a separate change."
+        "which runs INSIDE the job's own `-m postgres` selection. Its PYTEST STEP "
+        "is separately pinned by `test_ci_workflow_conditions.py` against "
+        "`|| true` / `--ignore` / `--deselect` / `-k`, against step-level "
+        "`continue-on-error:`, and against an `env:` override of `CI` or either "
+        "database URL. The job's OTHER steps are still uncaught, because this "
+        "exemption is whole-job: closing that needs an exemption shaped per-rule "
+        "rather than per-job, which is a separate change. (An earlier version of "
+        "this paragraph said the pytest step was uncaught too — false about code "
+        "added in the same commit, and exactly the stale-exemption prose these "
+        "rules exist to prevent.)"
     ),
     "codeql.yml:analyze": (
         "`Analyze (python)` IS a required context, produced outside #379's scope "
@@ -301,6 +305,14 @@ _DEFUSING_RUN_IDIOMS: tuple[str, ...] = (
     "|| exit 0",
     "; true",
     "set +e",
+    # The long form of `set +e`. A verification round pointed out that listing
+    # only the short one is a rule that reads a spelling rather than a behaviour.
+    "set +o errexit",
+    "set +o pipefail",
+    # `if ! make test-shell; then echo "::warning::"; fi` exits 0 with the suite
+    # failing. MEASURED as a bypass of the earlier list under GitHub's `bash -e`,
+    # and no gating step uses `if !` today, so listing it costs nothing.
+    "if !",
     "--ignore=",
     "--ignore-glob",
     "--deselect",
@@ -709,6 +721,40 @@ def test_a_gating_workflow_actually_triggers_on_pull_request(name: str) -> None:
 # ──────────────────── no gating job is defused into a no-op ────────────────────
 
 
+def _scannable_run_lines(body: str) -> list[str]:
+    """A step's ``run:`` body, prepared so a per-line idiom scan is not fooled.
+
+    Two corrections from a verification round, both of which it MEASURED rather
+    than argued:
+
+    * a line ending in ``||`` or ``&&`` CONTINUES onto the next one, so
+      ``make test-shell ||`` / ``true`` split across two lines swallows the failure
+      (exit 0, confirmed under ``bash -e``) while neither line on its own contains
+      a listed idiom. Continuations are joined before scanning;
+    * a SHELL COMMENT cannot defuse anything, but a comment MENTIONING ``|| true``
+      would match and go red. Not hypothetical: the four gating steps carry 106
+      comment lines inside their ``run:`` bodies between them, and the two most
+      likely to gain such a comment already have one just outside the block.
+      Comment lines are dropped.
+
+    Join first, then drop comments, so a continuation is not stitched to a comment.
+    """
+    joined: list[str] = []
+    pending = ""
+    for raw in body.split("\n"):
+        stripped = raw.strip()
+        if pending:
+            stripped = f"{pending} {stripped}"
+            pending = ""
+        if stripped.endswith(("||", "&&")):
+            pending = stripped
+            continue
+        joined.append(stripped)
+    if pending:
+        joined.append(pending)
+    return [line for line in joined if not line.startswith("#")]
+
+
 def _disables_the_gate(value: Any) -> bool:
     """Is this ``continue-on-error:`` value anything other than a literal false?
 
@@ -790,7 +836,7 @@ def test_a_gating_job_is_not_defused(workflow: str, job_id: str) -> None:
         # `run: make test-shell || true` defuses a gate just as completely as
         # `continue-on-error: true`, and the two key checks above cannot see it.
         allowed_lines = _SANCTIONED_RUN_IDIOM_LINES.get((workflow, job_id, label), ())
-        for line in str(step.get("run") or "").split("\n"):
+        for line in _scannable_run_lines(str(step.get("run") or "")):
             stripped = line.strip()
             if stripped in allowed_lines:
                 continue
