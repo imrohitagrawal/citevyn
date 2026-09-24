@@ -168,9 +168,16 @@ def test_the_postgres_job_hands_pytest_a_real_database() -> None:
     assertion the job itself carries is
     ``tests/test_postgres_suite_is_not_vacuous.py``.
 
-    Turns red if: ``CITEVYN_PG_TEST_URL`` or ``CITEVYN_DATABASE_URL`` is removed
-    or renamed on the job's ``env:``, either stops being a ``postgresql`` URL, or
-    the job's pytest step stops selecting ``-m postgres``.
+    Turns red if: ``CITEVYN_PG_TEST_URL`` or ``CITEVYN_DATABASE_URL`` is removed or
+    renamed on the job's ``env:``, or either stops being a ``postgresql`` URL; the
+    job sets ``CI`` at all (that is the input the vacuity guard keys on, and GitHub
+    only sets it as a default); a STEP declares an ``env:`` overriding any of those
+    three (a step-level value beats the job map, so it can empty the URL for the one
+    step that runs the tests while the job map still looks correct); the pytest step
+    stops selecting ``-m postgres``, or gains ``|| true`` / ``--ignore`` /
+    ``--deselect`` / ``-k`` / ``continue-on-error``; or a SECOND pytest step appears
+    — including the ``--junit-xml`` outcome check this file's sibling recommends,
+    which reddens deliberately so the rules here are not left reading one of two.
     """
     job = _load(WORKFLOW_DIR / "ci.yml")["jobs"]["postgres-migrations"]
     env = job.get("env") or {}
@@ -192,7 +199,32 @@ def test_the_postgres_job_hands_pytest_a_real_database() -> None:
             f"ci.yml:postgres-migrations sets {key} to {env[key]!r}, which is not a postgresql URL"
         )
 
+    # `CI` is what tests/test_postgres_suite_is_not_vacuous.py keys its whole
+    # decision on, and GitHub only sets it as a DEFAULT. `CI: "false"` here — or on
+    # the pytest step — turns that guard into a permanent no-op with both URLs
+    # present and this rule otherwise green. Traced by an adversarial review of
+    # #449. There is no legitimate reason for this job to set `CI` at all.
+    assert "CI" not in env, (
+        f"ci.yml:postgres-migrations sets `CI: {env.get('CI')!r}` on its `env:`. "
+        "That overrides the runner default the vacuity guard in "
+        "tests/test_postgres_suite_is_not_vacuous.py reads, so the guard would pass "
+        "with no database. Remove it."
+    )
+
     steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    # Same three keys, one level down. A step-level `env:` beats the job-level map,
+    # and `CITEVYN_PG_TEST_URL:` with an empty/null value would satisfy every
+    # assertion above while the step itself runs without a usable database.
+    for step in steps:
+        step_env = step.get("env") or {}
+        overrides = sorted(set(step_env) & {"CI", "CITEVYN_PG_TEST_URL", "CITEVYN_DATABASE_URL"})
+        assert not overrides, (
+            f"step {str(step.get('name') or step.get('uses'))!r} in "
+            f"ci.yml:postgres-migrations declares a step-level `env:` overriding "
+            f"{overrides}. A step-level value beats the job-level map, so this can "
+            "empty or unset the database URL — or flip `CI` — for the step that "
+            "actually runs the tests, with the job-level `env:` still looking correct."
+        )
     pytest_steps = [s for s in steps if "pytest" in str(s.get("run") or "")]
     assert len(pytest_steps) == 1, (
         f"expected exactly one pytest step in ci.yml:postgres-migrations, found "
