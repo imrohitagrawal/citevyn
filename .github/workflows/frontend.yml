@@ -2,10 +2,11 @@ name: frontend
 
 # NO `paths:` FILTER, DELIBERATELY (#326).
 #
-# These two jobs are REQUIRED status checks on `main`. A path-filtered workflow
-# that does not trigger reports NOTHING -- so a required context sits forever at
-# "Expected — waiting for status to be reported" and the PR can never merge. A
-# docs-only change would be permanently blocked.
+# Two of this workflow's three jobs -- `build` and `demo-e2e`; `visual-e2e` is
+# advisory (#325) -- are REQUIRED status checks on `main`. A path-filtered
+# workflow that does not trigger reports NOTHING -- so a required context sits
+# forever at "Expected — waiting for status to be reported" and the PR can never
+# merge. A docs-only change would be permanently blocked.
 #
 # The usual dodges are a skip-shim workflow duplicating the job names on the
 # inverse filter (which double-reports when a PR touches both sides), or
@@ -67,18 +68,27 @@ jobs:
       # flag is ~860 B larger and is not what ships.
       - name: Bundle budget
         run: npm run check:bundle
-      - name: Upload dist artifact
-        if: success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: frontend-dist
-          path: frontend/dist
-          retention-days: 7
+      # The `frontend-dist` upload that used to sit here is GONE (#325). Nothing
+      # consumed it: `.github/` contains no `actions/download-artifact` step and
+      # no `workflow_run` trigger, and `release.yml` builds its image from source
+      # rather than from a published artifact. The only other occurrence of the
+      # name anywhere in the repo is a 2026-06-22 planning document. Its
+      # `if: success()` was decorative on top of that — a step with no condition
+      # already runs only on success — which is what an unexamined step looks
+      # like. What this evidence does NOT rule out is a human opening a run page
+      # and downloading the zip by hand. If that was the use, restore the step
+      # and say so here, because nothing in the tree records it.
 
   # The demo Playwright suite ran in NO CI job (#311). It is the suite that
   # should have caught #302, and 39 of its runs were failing on `main` from a
   # single CSS class collision that nobody could see, because nothing ran it.
   demo-e2e:
+    # DO NOT RENAME. This exact string is a REQUIRED status check on `main`, and
+    # branch protection stores it as an opaque string it never validates — so a
+    # rename does not error, it wedges every pull request on a context nothing
+    # will ever report. It still describes the job accurately after #325: the
+    # visual snapshots run in `visual-e2e` below, not here.
+    # `backend/tests/test_gating_workflows.py` pins it.
     name: Demo-mode Playwright (no visual snapshots)
     runs-on: ubuntu-latest
     # The base config's webServer waits up to 120s and the suite runs serially;
@@ -104,14 +114,32 @@ jobs:
       # A job that runs ZERO tests passes, and there are two distinct ways for that
       # to happen, so there are two guards.
       #
-      # SELECTION: `playwright.demo-ci.config.ts` excludes tests/visual.spec.ts (its
-      # baselines are -darwin only), and a testIgnore regex that over-matches would
-      # empty the whole run silently. Rather than a magic threshold, assert the
-      # EXACT differential: the CI config must select precisely the default config's
-      # suite minus its visual tests. That has no number to rot -- adding a spec file
-      # keeps it true, while losing one makes it false. The `all_visual > 0` line is
-      # the partner: without it, deleting visual.spec.ts outright would satisfy
-      # "zero visual tests in CI" just as well.
+      # SELECTION: `playwright.demo-ci.config.ts` excludes tests/visual.spec.ts, and
+      # a testIgnore regex that over-matches would empty the whole run silently.
+      # Rather than a magic threshold, assert the EXACT differential: the CI config
+      # must select precisely the default config's suite minus its visual tests.
+      # That has no number to rot -- adding a spec file keeps it true, while losing
+      # one makes it false. The `all_visual > 0` line is the partner: without it,
+      # deleting visual.spec.ts outright would satisfy "zero visual tests in CI"
+      # just as well.
+      #
+      # WHAT `ci_visual == 0` MEANS NOW, AND WHAT IT USED TO MEAN (#325). It used
+      # to mean "the visual specs run in no CI job at all, and this line says so
+      # out loud instead of letting a green demo job imply otherwise" -- they had
+      # only `-darwin` baselines, so on ubuntu every screenshot would have failed
+      # as "snapshot missing". The `visual-e2e` job below is where they run now,
+      # so this line no longer asserts that they run nowhere; it asserts they do
+      # not run HERE, in the REQUIRED job, where a font-rendering shift would
+      # block every merge. Its partner is the `visual_total == all_visual` line
+      # in `visual-e2e`'s own selection guard: this one says the required job is
+      # the default suite MINUS the visual tests, that one says the advisory job
+      # is EXACTLY the visual tests, and between them every test in
+      # `playwright.config.ts` runs in exactly one job. Deleting either half
+      # leaves a hole neither guard can see.
+      #
+      # Both halves of #325 are in place: this wiring, and the `-linux`
+      # baselines it points at. Verified in the job's own container against the
+      # merged tree before they landed — 22 expected, 0 unexpected.
       #
       # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
       # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
@@ -295,4 +323,294 @@ jobs:
           # The dead-artifact bug went unnoticed precisely because the default here
           # is `warn`. Fail instead: a debugging artifact that collects nothing is
           # worth knowing about on the first run, not the tenth.
+          if-no-files-found: error
+
+  # ─────────────────────────── the visual snapshots (#325) ───────────────────────────
+  #
+  # The 22 screenshots in `tests/visual.spec.ts` ran in NO CI job. They had only
+  # `*-chromium-darwin.png` baselines — a local artifact of one laptop that
+  # nothing kept honest — so `demo-e2e` above had to exclude them or every
+  # screenshot on `ubuntu-latest` would have failed as "snapshot missing".
+  #
+  # This job is the other half of the fix: it compares against
+  # `*-chromium-linux.png` baselines generated in the SAME container image that
+  # runs here, on every pull request.
+  #
+  # The baselines are committed. They were reviewed image by image before they
+  # landed, and the suite was re-run here against the merged tree to confirm the
+  # pins match the code: 22 expected, 0 unexpected, 0 flaky.
+  #
+  # ADVISORY, DELIBERATELY. It is not a required status check on `main`, so it
+  # can go red and a PR still merges. That is the right setting for a suite whose
+  # failure mode is "the design moved and the baselines have not been refreshed
+  # yet": a red here is a prompt to look at a diff image, not a reason to block a
+  # backend fix. Promoting it is a branch-protection change, which is the owner's
+  # to make; see docs/TEST_STRATEGY.md §12.2 for where it is recorded as advisory.
+  #
+  # `container:` IS THE PIN — but a TAG is not immutable, and the comment here
+  # used to imply it was ("every input to the render has to be fixed"). It is
+  # not: Microsoft republishes `v1.63.0-noble` when the base image is patched,
+  # and the base's font packages ARE a render input for a screenshot suite. What
+  # the tag actually buys is that the PLAYWRIGHT and BROWSER versions are fixed,
+  # which is the input that moves often and breaks loudly.
+  #
+  # The stronger form is available and this repo's guard ACCEPTS it:
+  # `mcr.microsoft.com/playwright:v1.63.0-noble@sha256:<digest>` is immutable, and
+  # `test_the_visual_job_runs_the_browser_that_drew_its_baselines` reads the
+  # version out of the tag part either way (#325, item 8). It is not adopted here
+  # because a digest has to be re-pinned by hand on every base patch and nothing
+  # in this repo automates that, so it would rot into a stale pin nobody rotates
+  # — a worse failure than the one it prevents. If the baselines ever start
+  # drifting without a Playwright bump, the base image is the first suspect and
+  # the digest is the fix.
+  #
+  # Measured while generating the first linux set:
+  #   - two full runs in one amd64 container → byte-identical PNGs, all 22;
+  #   - Node 24.20.0 (the image's own) vs Node 26.8.2 (what .nvmrc resolves to)
+  #     → byte-identical PNGs, all 22. Node is not an input to the render, which
+  #     is why `setup-node` below is safe despite floating within major 26;
+  #   - arm64 vs amd64 → 12 of the 22 differ. The ARCHITECTURE is an input.
+  #     `ubuntu-latest` is x86_64, so the committed baselines are amd64.
+  # HEADS UP FOR A DEPENDABOT PR (#325, item 9). The pin below is enforced by a
+  # test in the REQUIRED `pytest + lint` job, so the next routine `frontend-test`
+  # bump turns a required check RED until this tag moves with it — and moving the
+  # tag alone is the WRONG fix, because it leaves 22 baselines drawn by the old
+  # browser. The full sequence is in the failing assertion's own message, in
+  # backend/tests/test_gating_workflows.py; short version: bump the tag,
+  # regenerate all 22 baselines on amd64 in the new image, have the owner look at
+  # them, commit tag and PNGs together. This is deliberate — an advisory pin
+  # would let the baselines silently stop matching the browser, which is the
+  # defect #325 exists to close.
+  #
+  # The image tag must stay equal to the `playwright-core` version
+  # frontend/package-lock.json RESOLVES. `playwright-core`, not
+  # `@playwright/test`, because it is the package that owns `browsers.json` —
+  # the revision-to-version table this image is built from; the other two are
+  # asserted equal to it rather than trusted. And the LOCKFILE, not
+  # package.json, which declares a RANGE (`^1.63.0`) that `npm update` can move
+  # within without touching the manifest at all. A bump of either without the
+  # other silently changes the browser that draws the pixels.
+  # `backend/tests/test_gating_workflows.py` pins the pair.
+  visual-e2e:
+    # Not a required context — see the block above before adding it to one.
+    name: Visual snapshots (Linux baselines, advisory)
+    runs-on: ubuntu-latest
+    container:
+      # Keep in lockstep with the `playwright-core` version
+      # frontend/package-lock.json resolves. Pinned by
+      # backend/tests/test_gating_workflows.py.
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # Same flag the regeneration command in `playwright.visual-ci.config.ts`
+      # uses, so the container that DRAWS a baseline and the container that
+      # COMPARES it are configured identically. It is Playwright's documented
+      # recommendation for Chromium (the default 64 MB /dev/shm can crash a tab);
+      # the driver already passes `--disable-dev-shm-usage`, so this is belt and
+      # braces — but two environments that differ at all is the thing a pixel
+      # suite cannot afford to argue about later.
+      options: --ipc=host
+    # The suite measured 1.1 minutes of run time plus install; 20 matches the
+    # demo job rather than inventing a second number, and caps a dev server that
+    # accepts the port but never serves — which the webServer's own 120 s wait
+    # does not cover once it has started.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+        # `shell: bash`, and it is NOT decoration. A job that runs in a
+        # `container:` defaults to `sh -e {0}`, not the `bash -e {0}` every
+        # other job here gets, and dash has neither `-o pipefail` nor arrays.
+        # Measured on a real runner, which is the only place this shows up:
+        # the first push of this job died at its FIRST step with
+        # `set: Illegal option -o pipefail`, exit 2, before one snapshot was
+        # compared. Three steps below use `set -euo pipefail`, `arr=(...)`
+        # or `${#arr[@]}`. Guarded by
+        # `test_a_container_job_that_uses_bash_syntax_declares_bash`.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Single source of truth: frontend/.nvmrc, same as every other job
+          # here. The image ships its own Node, and `frontend/package.json`
+          # declares `engines: node >= 26`, so this step is what keeps the
+          # install inside the range the project supports. It is NOT a render
+          # input — see the byte-identical Node 24/26 measurement above.
+          node-version-file: frontend/.nvmrc
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      # NO `playwright install` step, unlike the two jobs above. The image already
+      # carries the browsers at $PLAYWRIGHT_BROWSERS_PATH, and downloading a
+      # second copy would be the one thing that could make this job's browser
+      # differ from the one that drew the baselines.
+      # Not only a log line: under `set -u` an unset PLAYWRIGHT_BROWSERS_PATH
+      # fails here, and under `set -e` a glob that matches nothing does too. So
+      # this step is where "the image no longer lays the browsers out where this
+      # job expects" surfaces — loudly, before anything compares a pixel —
+      # rather than as a puzzling Playwright error two steps later.
+      #
+      # BOTH binaries, and the SHELL is the one that matters. An earlier version
+      # of this step printed only `chromium-*/chrome-linux*/chrome` under a name
+      # claiming it was "the browser this job will compare with". It is not:
+      # Playwright ≥1.49 launches the headless shell for a headless run
+      # (`playwright-core/lib/coreBundle.js`:
+      # `options.headless ? "chromium-headless-shell" : "chromium"`), and nothing
+      # in this repo's configs sets `headless: false`. So the pixels come from
+      # `chromium_headless_shell-*`. The two ship at the same version today
+      # (both `153.0.8010.12` at revision 1243, read out of the image), which is
+      # exactly why printing the wrong one looked right.
+      - name: Show the browsers this job could launch
+        run: |
+          set -euo pipefail
+          npx playwright --version
+          # EXACTLY ONE match each, asserted rather than assumed. A bare glob is
+          # loud when it matches nothing (`set -e`), and silent when it matches
+          # TWO: the second path becomes a positional argument to the first
+          # binary, and `chrome --version /some/other/path` exits 0 printing one
+          # version — measured in this image — so the step would pass while
+          # naming a browser that is no longer the only one installed. That is
+          # the state an image shipping two chromium revisions would be in, and
+          # it is exactly when this step needs to speak up.
+          shopt -s nullglob
+          shells=("$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell)
+          chromes=("$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux*/chrome)
+          test "${#shells[@]}" -eq 1 || {
+            echo "::error::expected exactly one headless-shell binary under $PLAYWRIGHT_BROWSERS_PATH, found ${#shells[@]}: ${shells[*]-}";
+            exit 1; }
+          test "${#chromes[@]}" -eq 1 || {
+            echo "::error::expected exactly one chromium binary under $PLAYWRIGHT_BROWSERS_PATH, found ${#chromes[@]}: ${chromes[*]-}";
+            exit 1; }
+          # THIS is the renderer: headless is the default and nothing overrides it.
+          "${shells[0]}" --version
+          # Printed too, so a divergence between the two is visible rather than
+          # assumed away — a headful run would use this one.
+          "${chromes[0]}" --version
+      # The SELECTION half of the partition this job and `demo-e2e` form.
+      # `demo-e2e` asserts it selects the default suite MINUS its visual tests;
+      # this asserts it selects EXACTLY those visual tests. Neither half alone is
+      # enough: without this one, `testIgnore`/`testMatch` drift could drop a
+      # visual test from both configs at once and leave both jobs green.
+      #
+      # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
+      # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
+      # needs `|| true` — which then also swallows a CRASHED playwright, and the
+      # comparisons pass because the command produced no output at all. Writing
+      # to a file first lets `set -e` catch the producer's failure, so the
+      # `|| true` afterwards can only ever mean "grep found nothing".
+      - name: Guard against a vacuous selection
+        run: |
+          set -euo pipefail
+          npx playwright test -c playwright.visual-ci.config.ts --list --reporter=list > /tmp/visual_list.txt
+          npx playwright test -c playwright.config.ts           --list --reporter=list > /tmp/all_list.txt
+          # ANCHORED, for the reason spelled out in demo-e2e's copy: Playwright
+          # prints its summary line at column 0 while every listed test is
+          # indented two spaces, so `^` keeps a test TITLE containing
+          # "Total: 7 sources" out of the capture. Unanchored, `$(...)` becomes
+          # multi-line and `VISUAL_TOTAL` corrupts $GITHUB_ENV for every later
+          # step in this job.
+          visual_total=$(grep -oE '^Total: [0-9]+' /tmp/visual_list.txt | grep -oE '[0-9]+')
+          all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)
+          selected_visual=$(grep -c 'visual regression' /tmp/visual_list.txt || true)
+          echo "visual_total=$visual_total all_visual=$all_visual selected_visual=$selected_visual"
+          # Non-vacuity partner. Both differentials below are satisfied by 0 == 0,
+          # i.e. by a job that runs nothing and reports green. (`--list` also
+          # exits 1 on an empty selection under `set -e`, so this is defence in
+          # depth today — and the load-bearing line the day that changes.)
+          test "$visual_total" -gt 0 || {
+            echo "::error::playwright.visual-ci.config.ts selects 0 tests — this whole job is vacuous";
+            exit 1; }
+          # NOTHING IS MISSING: every visual test the default config has is here.
+          test "$visual_total" -eq "$all_visual" || {
+            echo "::error::this job selects $visual_total tests but the default config has $all_visual visual tests — testMatch drift is dropping one, and demo-e2e ignores the same file, so it would run in NO job";
+            exit 1; }
+          # NOTHING EXTRA CREPT IN: every test selected here IS a visual test.
+          # Without this line a testMatch that over-matches would pull the whole
+          # suite in, `visual_total -eq all_visual` would go red for the right
+          # reason — but a testMatch that pulls in a NON-visual spec while
+          # dropping a visual one keeps the totals equal and passes.
+          test "$selected_visual" -eq "$visual_total" || {
+            echo "::error::$selected_visual of the $visual_total tests this job selects are visual-regression tests — playwright.visual-ci.config.ts is selecting something else as well";
+            exit 1; }
+          echo "VISUAL_TOTAL=$visual_total" >> "$GITHUB_ENV"
+      # `--reporter` REPLACES the config's reporters rather than adding to them,
+      # so `html` MUST be listed here or the upload step below silently collects
+      # nothing. This config does not override `outputFolder`, so the report
+      # lands in the base config's `playwright-report` and no
+      # PLAYWRIGHT_HTML_OUTPUT_DIR is needed (unlike frontend-live-e2e.yml).
+      - name: Run the visual-snapshot suite
+        run: npx playwright test -c playwright.visual-ci.config.ts --reporter=list,json,html
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/visual-results.json
+      # Selection is not execution. `--list` COUNTS SKIPPED TESTS and Playwright
+      # exits 0 when every selected test skips, so the guard above reads 22 while
+      # the run executes nothing. Assert the run's own JSON stats instead.
+      #
+      # `python3` IS PRESENT BUT NOT PROMISED (#325, item 9). Measured in the
+      # image: `/usr/bin/python3`, Python 3.12.3. But Microsoft documents this
+      # image as a browser/Node environment and gives no contract for a Python
+      # interpreter, so a future rebuild could drop it — unlike the two jobs
+      # above, which run on `ubuntu-latest`, where GitHub does promise one.
+      # Recorded rather than rewritten in Node because the failure is LOUD and
+      # instant: under `set -euo pipefail` a missing `python3` kills this step
+      # before a single pixel is compared, on an ADVISORY job. It goes on the
+      # short list of things only the first real CI run can settle, next to
+      # whether an amd64 render under emulation matches a native runner.
+      - name: Assert the suite actually executed
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          report = json.load(open("/tmp/visual-results.json"))
+          stats = report["stats"]
+          selected = int(os.environ["VISUAL_TOTAL"])
+          print("stats:", stats, "selected:", selected)
+          # Account for EVERY selected test. A threshold here would be a magic
+          # number that rots; a full account has nothing to rot.
+          if stats["expected"] + stats["skipped"] + stats["unexpected"] + stats["flaky"] != selected:
+              print(f"::error::selected {selected} tests but the run accounts for "
+                    f"{stats['expected']}+{stats['skipped']}+{stats['unexpected']}+{stats['flaky']}")
+              sys.exit(1)
+          # ZERO, not "exactly N". Unlike demo-e2e, nothing in visual.spec.ts
+          # self-skips: there is no `if (!isLive)` guard in it and no
+          # `test.skip`. So any skip at all is new, and the honest response is to
+          # justify it here rather than let it quietly shrink what this job
+          # compares. This is also what catches a mass `test.skip(true, ...)`,
+          # which the selection guard cannot see.
+          if stats["skipped"]:
+              print(f"::error::{stats['skipped']} visual test(s) skipped; none self-skips "
+                    "today, so a skip here means the suite silently stopped comparing pixels")
+              sys.exit(1)
+          if stats["unexpected"]:
+              print(f"::error::{stats['unexpected']} unexpected failure(s). A missing "
+                    "*-chromium-linux.png baseline reports as a failure too — download the "
+                    "`playwright-report-visual` artifact and look at the -diff.png files "
+                    "before regenerating anything")
+              sys.exit(1)
+          # The base config sets `retries: 2` under CI, so a screenshot that
+          # matches only on the third attempt would otherwise report green. For a
+          # PIXEL suite that is the worst possible signal: it is precisely the
+          # symptom of a layout that has not settled, which is what #325 recorded
+          # about `how-it-works` oscillating 733/734/735 px on darwin.
+          if stats["flaky"]:
+              print(f"::error::{stats['flaky']} flaky snapshot(s) — matched only on retry. "
+                    "A screenshot that needs a retry is a layout that has not settled")
+              sys.exit(1)
+          print(f"all {selected} visual snapshots compared, none skipped, none flaky")
+          PY
+      # `test-results/` is the substance of this artifact, not `playwright-report`:
+      # it is where Playwright writes `<name>-actual.png` and `<name>-diff.png`,
+      # which are the only way to tell "the design moved" from "the renderer
+      # moved" without re-running anything.
+      - name: Upload report + snapshot diffs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-visual
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          # A debugging artifact that collects nothing is worth knowing about on
+          # the first run, not the tenth. The default is `warn`.
           if-no-files-found: error

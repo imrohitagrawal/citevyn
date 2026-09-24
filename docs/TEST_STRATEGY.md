@@ -396,9 +396,12 @@ when the question is out of scope.
 
 ### 12.1 Required status checks on `main`
 
-Nine contexts are required. Read with
-`gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks`
-(read 2026-09-08):
+**Ten** contexts are required. Re-read 2026-09-16 with
+
+```sh
+gh api repos/imrohitagrawal/citevyn/branches/main/protection \
+  --jq '.required_status_checks.contexts[]'
+```
 
 | Context | Produced by |
 |---|---|
@@ -409,18 +412,35 @@ Nine contexts are required. Read with
 | `quality-gate / quality-gate` | `pr-quality.yml` |
 | `type-check + unit tests + build` | `frontend.yml` |
 | `Demo-mode Playwright (no visual snapshots)` | `frontend.yml` |
+| `Live-mode Playwright (stub backend)` | `frontend-live-e2e.yml` |
 | `shell suites (bash 3.2 + 5.x) (ubuntu-latest)` | `ci.yml` |
 | `shell suites (bash 3.2 + 5.x) (macos-latest)` | `ci.yml` |
 
 `strict: true` (a branch must be up to date with `main` before merging) and
 `enforce_admins: true` (the rules apply to admins too).
 
+**This table said NINE until 2026-09-16, and omitted the live job.** `#379`
+succeeded — the owner promoted `Live-mode Playwright (stub backend)` some time
+after the 2026-09-08 reading — and nothing noticed, because a hand-copied
+snapshot in a document is checked by nobody. `.github/dependabot.yml` already
+said 10 in its auto-merge note, so the repo disagreed with itself in writing.
+
+It cannot drift silently again: `backend/tests/test_gating_workflows.py` holds
+`_REQUIRED_CONTEXT_WORKFLOWS` as the authoritative record and
+`test_the_strategy_doc_lists_exactly_the_recorded_contexts` compares **this
+table and the count in the sentence above it** against it, inside the required
+`pytest + lint` job. What no test can do is read branch protection itself, so
+both remain a hand reading — re-run the command when it matters.
+
 ### 12.2 What is advisory
 
-`Live-mode Playwright (stub backend)` (`frontend-live-e2e.yml`) is **advisory**:
-it is not in the list above, so it can go red and the pull request still merges.
+`Live-mode Playwright (stub backend)` **is no longer advisory** — it is in the
+table above as of the 2026-09-16 reading, which is what §12.3 to §12.5 were
+arguing for. The paragraph that used to stand here said the opposite; it was
+written before the promotion and never revisited.
 
-It is the only job that executes these five tests, in two spec files:
+It remains the only job that executes these five tests, in two spec files, and
+that is now a *blocking* coverage claim rather than an advisory one:
 
 | Test | What only this job proves |
 |---|---|
@@ -446,7 +466,69 @@ list entirely.
 `judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)` is also
 advisory and deliberately so: it is the paid job, gated behind a label.
 
-### 12.3 Measured case for promoting the live check
+`Visual snapshots (Linux baselines, advisory)` (`frontend.yml`) is advisory too,
+and deliberately (#325). It runs the 22 screenshot comparisons in
+`frontend/tests/visual.spec.ts` — which before #325 ran in **no** CI job at all,
+because the only baselines committed were `*-chromium-darwin.png` and every
+screenshot on `ubuntu-latest` would have failed as "snapshot missing".
+
+Why advisory rather than required: this job's ordinary failure mode is "the
+design moved and the baselines have not been refreshed yet", which is a prompt to
+look at a diff image, not a reason to block an unrelated backend fix. Promoting
+it is a branch-protection change and therefore the owner's; there is no
+`contexts[]=` command for it here, on purpose.
+
+Two properties make it worth having at all, and both are asserted rather than
+described — by `backend/tests/test_gating_workflows.py`, inside the required
+`pytest + lint` job:
+
+- **It runs the browser that drew its baselines.** The job declares
+  `container: mcr.microsoft.com/playwright:v1.63.0-noble`, and that tag is pinned
+  equal to `frontend/package-lock.json`'s resolved **`playwright-core`** — the
+  package that owns `browsers.json`, with `@playwright/test` and `playwright`
+  asserted equal to it rather than trusted. A dependabot bump of one without the
+  other would silently swap the renderer under 22 committed images.
+- **It is the exact complement of `Demo-mode Playwright (no visual snapshots)`.**
+  The demo job asserts it selects the default suite *minus* its visual tests; this
+  one asserts it selects *exactly* those visual tests. Measured with `--list` on
+  2026-09-16: 230 + 22 = 252. Between them, every test `playwright.config.ts`
+  selects runs in exactly one job.
+
+Baselines are per platform. `*-chromium-darwin.png` is what a developer's local
+`npm run test:visual` compares against; `*-chromium-linux.png` is what this job
+compares against. They are not expected to be the same images. Measured across
+the 22 with Playwright's own comparator, macOS and Linux renders of the same
+unchanged page differ by **0% to 2.68%** of the section's pixels:
+
+- `ticker-dark` and `ticker-light` are **pixel-identical** — the animated track
+  is masked, so what is left is flat surface. They are the control: a comparison
+  that reported a constant could not produce a zero here.
+- Seven are **over** the suite's own `maxDiffPixelRatio: 0.02` — `personas` ×2
+  (2.68%), `how-it-works` ×2, `comparison` ×2, `pricing-light`. That is not a
+  failure and does not make the Linux set unusable: the 2% budget is only ever
+  applied *within* a platform, and each platform compares against its own file.
+  Measured in the container, the Linux set passes 22/22 against itself.
+- `personas` is also **one pixel shorter** on Linux (1160×665 → 1160×664), which
+  is a layout difference rather than rasterisation and the one worth a look.
+
+The figure is a measure of how far apart CoreText and FreeType/Skia are on
+text-dense sections, nothing more.
+
+To regenerate the Linux set, see the header of
+`frontend/playwright.visual-ci.config.ts`; it must be done under
+`--platform linux/amd64`, because arm64 and amd64 renders differ for 12 of the
+22. The `-linux` baselines are committed. They were reviewed image by image first
+— the one snapshot whose dimensions changed between platforms, `personas` at
+665px to 664px, was traced to an unloaded serif (#471) and confirmed benign —
+and the suite was re-run in the job's own container against the merged tree,
+reporting 22 expected and 0 unexpected.
+
+### 12.3 The measured case for promoting the live check — made, and acted on
+
+**This case was accepted: the context is required as of the 2026-09-16 reading
+in §12.1.** The measurements are kept because they are the worked template for
+the next promotion argument (the visual-snapshot job in §12.2 is the standing
+candidate), not because the decision is still open.
 
 Every figure here is **timestamped and moving**. The invariant is what carries
 the argument, not the number: re-derive before quoting, and a *larger* run count
@@ -492,9 +574,15 @@ place would have blocked all of them.
 The filter has been removed; `backend/tests/test_gating_workflows.py` keeps it
 off.
 
-### 12.5 The promotion command (owner only)
+### 12.5 The promotion command (owner only) — ALREADY RUN
 
-This is a branch-protection change, so only the repo owner runs it.
+This is a branch-protection change, so only the repo owner runs it. **It has
+been run**: `Live-mode Playwright (stub backend)` is a required context as of the
+2026-09-16 reading in §12.1. The command is kept verbatim because it is the
+template for the next promotion, and because
+`backend/tests/test_gating_workflows.py` pins its `contexts[]=` argument equal to
+the live job's `name:` — a one-character drift there would wedge every pull
+request on a context nothing reports.
 
 ```sh
 gh api --method POST \
@@ -507,7 +595,7 @@ Use this endpoint, not the alternatives:
 - It **adds** one context and touches nothing else, so `strict: true` and
   `enforce_admins: true` are preserved because they are never sent.
 - `PATCH .../protection/required_status_checks` replaces the whole
-  required-status-checks object: every one of the nine contexts above has to be
+  required-status-checks object: every one of the ten contexts above has to be
   re-listed, and `strict` re-sent, or they are silently dropped.
 - `PUT .../branches/main/protection` (full protection) **replaces every field**.
   Omitting `enforce_admins` clears it — and it is `true` today, so that half is
@@ -519,10 +607,17 @@ Use this endpoint, not the alternatives:
 
 **Known trade-off in the recommended endpoint.** GitHub's docs attach a "Closing
 down notice" to the `contexts` parameter and point at `checks` for finer control.
-Concretely: all nine existing entries carry an `app_id` pin — `15368`
-(github-actions) on eight, `57789` (github-advanced-security) on `CodeQL` — while
-a context added through the `contexts` endpoint lands with `app_id: null`, which
-accepts a same-named check from **any** app. Read the pins with:
+Concretely: all ten entries carry an `app_id` pin — `15368` (github-actions) on
+nine, `57789` (github-advanced-security) on `CodeQL`. The worry was that a
+context added through the `contexts` endpoint lands with `app_id: null`, which
+would accept a same-named check from **any** app.
+
+**Measured 2026-09-16, after the live context was actually added: it did not
+happen.** `Live-mode Playwright (stub backend)` carries `15368` like the rest,
+and no entry is null. What this does *not* establish is which route the owner
+took — the UI and the endpoint are indistinguishable from here — so it is
+evidence that the current state is sound, not that the `contexts` endpoint is
+safe. Read the pins with:
 
 ```sh
 gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks \
@@ -531,7 +626,7 @@ gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_che
 
 The recommendation above still stands: the `checks` route is part of the same
 whole-object replace as `PATCH`, so taking it to gain one `app_id` pin means
-re-sending all nine entries and `strict` correctly, which is the larger risk. If
+re-sending all ten entries and `strict` correctly, which is the larger risk. If
 the pin is wanted, add the context first with the command above, then set it
 deliberately as a separate step.
 
