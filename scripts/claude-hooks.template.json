@@ -1,8 +1,8 @@
 {
   "_comment": [
     "Hooks this repository wants on every machine, in a form that survives a",
-    "fresh clone. `.claude/settings.json` is gitignored on purpose — it holds",
-    "machine-local permissions — so the hooks inside it were not reproducible",
+    "fresh clone. `.claude/settings.json` is gitignored on purpose \u2014 it holds",
+    "machine-local permissions \u2014 so the hooks inside it were not reproducible",
     "and scripts/setup-claude.sh could only report them missing.",
     "",
     "`scripts/setup-claude.sh` merges the entries below into that file by",
@@ -11,7 +11,13 @@
     "",
     "Why the discard guard is here rather than in a document: it exists because",
     "a written rule failed twice in one session. Leaving its wiring in an",
-    "unreproducible file would be the same mistake one level up."
+    "unreproducible file would be the same mistake one level up.",
+    "",
+    "The PostToolUse checkpoint answers what the discard guard alone cannot: the",
+    "guard saves your tree at the moment you try to throw it away, which means it",
+    "saves the good work WITH the line you deliberately broke. A checkpoint after",
+    "every edit means the one taken just before the break holds the work without",
+    "it \u2014 and you never had to decide, in advance, that the moment mattered."
   ],
   "PreToolUse": [
     {
@@ -21,6 +27,18 @@
           "type": "command",
           "statusMessage": "Checking for a discard of uncommitted work",
           "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\""
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Edit|Write|NotebookEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "statusMessage": "Checkpointing the tree",
+          "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\""
         }
       ]
     }
