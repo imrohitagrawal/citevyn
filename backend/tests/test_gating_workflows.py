@@ -282,6 +282,19 @@ _SANCTIONED_STEP_CONDITIONS: dict[tuple[str, str, str], str] = {
 #
 # Matched as substrings on purpose (these are shell text, not YAML values), so the
 # rule is deliberately broad and every legitimate use has to be recorded below.
+#
+# Three near-misses are deliberately ABSENT, each checked against the real step
+# bodies rather than reasoned about:
+#   * a bare `exit 0` — it WOULD swallow a verdict at the end of a body, but the
+#     string already appears inside PROSE in `frontend-live-e2e.yml`'s "Assert the
+#     suite actually executed" step ("it would otherwise exit 0 with no live
+#     coverage"), so the rule would go red on a comment. `|| exit 0` IS listed,
+#     which is the form that actually swallows;
+#   * `&& true` — it does not swallow. `false && true` exits 1, because `&&`
+#     short-circuits and the status is the left-hand command's;
+#   * `2>/dev/null` — hides stderr, not the exit code.
+# `set +e` IS listed and `set -e` is NOT: four gating steps open with
+# `set -euo pipefail`, which is the opposite of defusing.
 _DEFUSING_RUN_IDIOMS: tuple[str, ...] = (
     "|| true",
     "|| :",
