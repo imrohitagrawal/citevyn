@@ -167,6 +167,86 @@ def test_get_message_on_another_users_session_returns_404(
     assert response.status_code == 404
 
 
+def test_message_read_is_scoped_to_the_session_in_the_path(
+    in_memory_client: TestClient, other_users_session: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """One session, another session's message id — the *second* half of the
+    predicate in ``messages.py::_require_message`` (#452).
+
+    ``_require_session`` above it proves the caller owns the session in the
+    path. ``Message.session_id == session_id`` is then the only thing tying
+    the requested message to that session, and before this test it could be
+    deleted with the whole suite green:
+
+    * ``test_get_message_on_another_users_session_returns_404`` pairs the
+      victim's session with the victim's own message, so its 404 is raised by
+      the ownership check one call earlier and never reaches this predicate.
+    * ``test_messages_routes.py`` pairs a real session with ``uuid.uuid4()``,
+      a message id that exists in NO session, so it stays 404 either way.
+
+    So this test pairs the caller's OWN (owned, live) session with a message
+    belonging to a different session. The message row exists, the session is
+    the caller's, and only the scoping predicate can produce the 404.
+
+    The partner assertion in the same test fetches one of the caller's own
+    messages through its own session and requires 200: without it, a 404 from
+    an unseeded fixture, a mis-cased path or a broken cookie would read as a
+    passing access-control check.
+    """
+    _, other_users_message_id = other_users_session
+
+    # The caller's own session, created through the API so it is pinned to the
+    # cookie principal ``resolve_principal`` mints for this client.
+    create = in_memory_client.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert create.status_code == 201, create.text
+    own_session_id = uuid.UUID(create.json()["session_id"])
+
+    # A message in that session, seeded directly rather than through
+    # ``POST .../messages`` — this is an authorization test, not a test of the
+    # answer pipeline, and the pipeline would need a whole seeded corpus.
+    own_message_id = uuid.uuid4()
+
+    async def _seed_own_message() -> None:
+        factory = get_sessionmaker()
+        async with factory() as db:
+            db.add(
+                Message(
+                    message_id=own_message_id,
+                    session_id=own_session_id,
+                    role=MessageRole.user,
+                    content="a message the caller genuinely owns",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+    asyncio.run(_seed_own_message())
+
+    # Partner: the caller CAN read its own message through its own session.
+    # Stated first so a fixture that seeded nothing fails here, loudly, rather
+    # than making the cross-session assertion below pass for the wrong reason.
+    own = in_memory_client.get(
+        f"/v1/sessions/{own_session_id}/messages/{own_message_id}",
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert own.status_code == 200, own.text
+    assert own.json()["message_id"] == str(own_message_id)
+
+    # The guard: another session's message id, through the caller's own session.
+    crossed = in_memory_client.get(
+        f"/v1/sessions/{own_session_id}/messages/{other_users_message_id}",
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert crossed.status_code == 404, (
+        "a message belonging to another session was readable through the "
+        f"caller's own session: {crossed.status_code} {crossed.text}"
+    )
+    # 404, never 403 — same membership-oracle reason as the rest of this file.
+    assert crossed.json()["error"]["code"] == "not_found"
+
+
 def test_a_closed_session_is_unreadable_even_by_its_owner(in_memory_client: TestClient) -> None:
     """The expiry half of the predicate: DELETE only sets ``expires_at`` to
     now (no separate ``closed`` column) — a closed session must not stay

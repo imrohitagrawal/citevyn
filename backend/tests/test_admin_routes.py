@@ -117,35 +117,53 @@ def _add_passing_run(session, index_version: str, *, pass_rate: float = 1.0) -> 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "method,path",
-    [
-        ("GET", "/v1/admin/index_versions"),
-        ("GET", "/v1/admin/index_versions/v1"),
-        ("POST", "/v1/admin/index_versions/v1/promote"),
-        ("GET", "/v1/admin/evaluations"),
-        ("GET", "/v1/admin/ingestion_jobs"),
-    ],
-)
+# Every route in ``admin.py`` that carries ``Depends(rate_limited_admin)``.
+#
+# This list used to name five of the eight, and the two detail views —
+# ``evaluations/{run_id}`` and ``ingestion_jobs/{job_id}``, which serve
+# evaluation metrics and ingestion failure details — were never called without
+# a key (#451). ``/v1/admin/budget`` was covered by its own one-line assertion
+# further down this file; it is folded in here so there is one list.
+#
+# A hand-written list is what drifted in the first place, so it is no longer
+# the only check: ``tests/test_route_auth_inventory.py`` derives the same
+# population by walking the app's dependency graph and fails if this list and
+# the app disagree. This list stays because it is an independent, non-derived
+# second opinion on an access-control boundary.
+_ADMIN_ROUTES = [
+    ("GET", "/v1/admin/index_versions"),
+    ("GET", "/v1/admin/index_versions/v1"),
+    ("POST", "/v1/admin/index_versions/v1/promote"),
+    ("GET", "/v1/admin/evaluations"),
+    ("GET", f"/v1/admin/evaluations/{uuid.uuid4()}"),
+    ("GET", "/v1/admin/ingestion_jobs"),
+    ("GET", f"/v1/admin/ingestion_jobs/{uuid.uuid4()}"),
+    ("GET", "/v1/admin/budget"),
+]
+
+
+@pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
 def test_admin_routes_reject_missing_admin_key(admin_app, method, path) -> None:
-    """Every admin route returns 401 without ``X-Admin-API-Key``."""
+    """Every admin route returns 401 without ``X-Admin-API-Key``.
+
+    The envelope is asserted, not just the status: ``docs/API_SPEC.md`` §4
+    promises a flat ``{request_id, status, error}`` body, and RFC 7235 wants
+    the challenge header. A 401 carrying FastAPI's default
+    ``{"detail": ...}`` shape would mean ``error_response`` was bypassed —
+    the client parses one shape for every error or it parses two.
+    """
     with TestClient(admin_app) as client:
         response = client.request(method, path)
     assert response.status_code == 401, (
-        f"{method} {path} returned {response.status_code}, expected 401"
+        f"{method} {path} returned {response.status_code}, expected 401: {response.text}"
     )
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    body = response.json()
+    assert "detail" not in body, f"{method} {path} envelope is nested under 'detail': {body}"
+    assert body["error"]["code"] == "auth_required", f"{method} {path} -> {body['error']}"
 
 
-@pytest.mark.parametrize(
-    "method,path",
-    [
-        ("GET", "/v1/admin/index_versions"),
-        ("GET", "/v1/admin/index_versions/v1"),
-        ("POST", "/v1/admin/index_versions/v1/promote"),
-        ("GET", "/v1/admin/evaluations"),
-        ("GET", "/v1/admin/ingestion_jobs"),
-    ],
-)
+@pytest.mark.parametrize("method,path", _ADMIN_ROUTES)
 def test_admin_routes_reject_bad_admin_key(admin_app, method, path) -> None:
     """Wrong key returns 401, not 403 (timing-safe comparison)."""
     with TestClient(admin_app) as client:

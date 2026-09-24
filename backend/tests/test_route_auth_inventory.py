@@ -1,0 +1,570 @@
+"""Structural auth inventory over every route the app serves, plus an
+executed credential-less call for each route that requires a credential (#451).
+
+Why a structural inventory rather than more hand-written cases
+-------------------------------------------------------------
+Two hand-maintained lists already existed and had already drifted:
+
+* ``test_admin_routes.py``'s missing-key ``parametrize`` named five of the
+  eight routes carrying ``Depends(rate_limited_admin)``. ``/v1/admin/budget``
+  is covered by a separate one-line assertion in the same file, so the two
+  genuinely uncovered routes were ``GET /v1/admin/evaluations/{run_id}`` and
+  ``GET /v1/admin/ingestion_jobs/{job_id}`` — the evaluation-metrics and
+  ingestion-failure detail views.
+* An AST scan of every ``TestClient`` call in ``backend/tests`` found no
+  credential-less call at all to ``POST /v1/auth/register``,
+  ``POST /v1/auth/login``, ``POST /v1/auth/logout``, ``GET /v1/auth/me``,
+  ``POST /v1/auth/me/password``, ``POST /v1/auth/magic-link/request`` or
+  ``GET /v1/me/sessions``.
+
+So this module derives the population from the app instead of from a list a
+human has to remember to extend. The credential-less checks below are
+``parametrize``\\ d over the LIVE inventory, so a route added tomorrow is
+called without a credential tomorrow, with nobody editing this file.
+
+Deriving the population from the app is not, by itself, enough
+-------------------------------------------------------------
+A ``parametrize`` fed by a classifier silently shrinks when the classifier
+mis-reads a route: drop ``Depends(rate_limited_admin)`` from a handler and
+that route simply stops being generated, and the suite stays green. So the
+classes are ALSO pinned as exact expected sets below. Removing, swapping or
+forgetting an auth dependency moves a route between classes, and two of the
+three set assertions go red naming it.
+
+That is a deliberate tradeoff: adding a ``/v1`` route means adding a line
+here. The alternative — an inventory that accepts whatever it is handed — is
+the failure mode this file exists to close.
+
+The walk has to recurse
+-----------------------
+No route in this app depends on a credential check DIRECTLY.
+``require_public_client_token`` sits two levels down on the ``/v1/auth/*``
+routes (under ``rate_limited_demo``) and three levels down on the six routes
+that go through ``resolve_principal``; ``require_admin_api_key`` sits two
+levels down under ``rate_limited_admin``. A direct-dependency-only classifier
+would therefore put EVERY route in the credential-less class — which is what
+``test_each_auth_class_is_non_empty`` and the depth sentinels below catch.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import uuid
+from collections.abc import Generator
+from typing import Any
+
+import pytest
+from fastapi.dependencies.models import Dependant
+from fastapi.testclient import TestClient
+
+from app.core import db as db_module
+from app.core.config import get_settings
+from app.core.security import require_admin_api_key, require_public_client_token
+from app.main import create_app
+from app.models import Base
+
+ADMIN_HEADER = "X-Admin-API-Key"
+
+# Auth classes. The value is what the class MEANS, not just a label: a route
+# in ``ADMIN`` must 401 without ``X-Admin-API-Key``, a route in ``BEARER``
+# must 401 without ``Authorization``, and a route in ``OPEN`` is reachable
+# with no credential AT ALL and must be listed, with a reason, in
+# ``EXPECTED_OPEN`` below.
+ADMIN = "admin-api-key"
+BEARER = "public-bearer"
+OPEN = "no-credential"
+
+
+# ---------------------------------------------------------------------------
+# The walk
+# ---------------------------------------------------------------------------
+
+
+def _api_routes() -> tuple[list[Any], list[str]]:
+    """Return ``(routes_with_a_dependant, paths_without_one)``.
+
+    FastAPI >=0.140 wraps each ``include_router`` call in an internal
+    ``_IncludedRouter`` node; the real ``APIRoute`` objects live on its
+    ``original_router.routes``. Unwrapping both shapes is the same
+    defence ``test_session_ownership.py`` already carries — without it a
+    future FastAPI bump makes this whole module scan zero routes.
+
+    Routes with no ``dependant`` are returned separately rather than
+    dropped: silently skipping them is exactly how an unclassified route
+    would hide.
+    """
+    app = create_app()
+    flat: list[Any] = []
+    for route in app.routes:
+        original_router = getattr(route, "original_router", None)
+        flat.extend(original_router.routes if original_router is not None else [route])
+
+    with_dependant = [r for r in flat if getattr(r, "dependant", None) is not None]
+    without = [str(getattr(r, "path", r)) for r in flat if getattr(r, "dependant", None) is None]
+    return with_dependant, without
+
+
+def _depth_of(dependant: Dependant, target: Any, _depth: int = 1) -> int | None:
+    """Shallowest depth at which ``target`` appears in ``dependant``'s tree.
+
+    ``None`` when it does not appear. Depth 1 means a direct dependency of
+    the route. Recursion is the point of this helper — see the module
+    docstring — and ``test_the_walk_recurses_past_the_first_level`` pins
+    that it really does.
+    """
+    best: int | None = None
+    for sub in dependant.dependencies:
+        if sub.call is target:
+            best = _depth if best is None else min(best, _depth)
+        inner = _depth_of(sub, target, _depth + 1)
+        if inner is not None:
+            best = inner if best is None else min(best, inner)
+    return best
+
+
+def _classify(route: Any) -> str:
+    admin = _depth_of(route.dependant, require_admin_api_key) is not None
+    bearer = _depth_of(route.dependant, require_public_client_token) is not None
+    if admin and bearer:
+        # Never true today. If it becomes true, that is a real finding
+        # (two credential systems on one route), not something to classify
+        # away quietly.
+        raise AssertionError(
+            f"{sorted(route.methods)} {route.path} resolves BOTH credential checks"
+        )
+    if admin:
+        return ADMIN
+    if bearer:
+        return BEARER
+    return OPEN
+
+
+def _inventory() -> dict[tuple[str, str], str]:
+    """Map ``(method, path_template)`` to its auth class."""
+    routes, _ = _api_routes()
+    out: dict[tuple[str, str], str] = {}
+    for route in routes:
+        auth_class = _classify(route)
+        for method in sorted(route.methods):
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            out[(method, route.path)] = auth_class
+    return out
+
+
+INVENTORY = _inventory()
+
+
+def _class_members(auth_class: str) -> list[tuple[str, str]]:
+    return sorted(key for key, value in INVENTORY.items() if value == auth_class)
+
+
+# ---------------------------------------------------------------------------
+# The pinned expectation
+# ---------------------------------------------------------------------------
+
+EXPECTED_ADMIN: set[tuple[str, str]] = {
+    ("GET", "/v1/admin/budget"),
+    ("GET", "/v1/admin/evaluations"),
+    ("GET", "/v1/admin/evaluations/{run_id}"),
+    ("GET", "/v1/admin/index_versions"),
+    ("GET", "/v1/admin/index_versions/{index_version}"),
+    ("POST", "/v1/admin/index_versions/{index_version}/promote"),
+    ("GET", "/v1/admin/ingestion_jobs"),
+    ("GET", "/v1/admin/ingestion_jobs/{job_id}"),
+}
+
+EXPECTED_BEARER: set[tuple[str, str]] = {
+    ("POST", "/v1/auth/login"),
+    ("POST", "/v1/auth/logout"),
+    ("POST", "/v1/auth/magic-link/request"),
+    ("GET", "/v1/auth/me"),
+    ("POST", "/v1/auth/me/password"),
+    ("POST", "/v1/auth/register"),
+    ("GET", "/v1/me/sessions"),
+    ("POST", "/v1/search/exact"),
+    ("POST", "/v1/sessions"),
+    ("DELETE", "/v1/sessions/{session_id}"),
+    ("GET", "/v1/sessions/{session_id}"),
+    ("POST", "/v1/sessions/{session_id}/messages"),
+    ("GET", "/v1/sessions/{session_id}/messages/{message_id}"),
+}
+
+# Reachable with NO credential, by design. Each entry needs a reason, because
+# this is the list an attacker reads first.
+EXPECTED_OPEN: dict[tuple[str, str], str] = {
+    ("GET", "/about"): "public marketing/legal copy",
+    ("GET", "/health"): "liveness probe, called by the platform before any key exists",
+    ("GET", "/health/dependencies"): "readiness probe, same reason",
+    ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
+    # ADR-0004 PR 12 / the magic-link flow: these four are reached by a real
+    # top-level browser navigation or by a provider's own redirect, neither of
+    # which can set an ``Authorization`` header. They carry
+    # ``rate_limited_oauth_navigation`` instead, and their own
+    # state/PKCE/single-use-token mechanism is the guard.
+    ("GET", "/v1/auth/magic-link/confirm"): "email link; the URL token is the credential",
+    ("POST", "/v1/auth/magic-link/confirm"): "same flow; the body token is the credential",
+    ("GET", "/v1/auth/oauth/{provider}/start"): "browser navigation; state/PKCE guards it",
+    ("GET", "/v1/auth/oauth/{provider}/connect/start"): "same, account-linking entry point",
+    ("GET", "/v1/auth/oauth/{provider}/callback"): "provider redirect; state/PKCE guards it",
+}
+
+# Routes the framework registers that have no ``dependant`` to inspect.
+# Present only when ``openapi_url`` is set (it is ``None`` in production), so
+# this is a SUBSET assertion, not equality.
+FRAMEWORK_PATHS: set[str] = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+
+# Concrete values for every path parameter in the inventory. Keyed by the
+# parameter name so a new route reusing an existing name needs no edit, and
+# ``test_every_path_parameter_has_a_substitution`` fails loudly for a name
+# that is missing rather than leaving the route silently uncalled.
+PATH_PARAM_VALUES: dict[str, str] = {
+    "session_id": "00000000-0000-4000-8000-000000000001",
+    "message_id": "00000000-0000-4000-8000-000000000002",
+    "run_id": "00000000-0000-4000-8000-000000000003",
+    "job_id": "00000000-0000-4000-8000-000000000004",
+    "index_version": "v1",
+    "provider": "github",
+}
+
+_PARAM_RE = re.compile(r"\{([^}]+)\}")
+
+
+def _path_params(path: str) -> list[str]:
+    return _PARAM_RE.findall(path)
+
+
+def _concrete(path: str) -> str:
+    return _PARAM_RE.sub(lambda m: PATH_PARAM_VALUES[m.group(1)], path)
+
+
+# ---------------------------------------------------------------------------
+# Fixture: a client with a real (throwaway) database
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[TestClient, None, None]:
+    """A client over a file-backed sqlite DB.
+
+    The credential checks run ahead of ``get_session`` in every route's
+    dependency order, so a 401 never opens a connection — but giving the app
+    a working database means a REGRESSION that reorders the dependencies
+    shows up as the wrong status code rather than as a connection error that
+    could be mistaken for the 401 under test.
+    """
+    import app.core.rate_limit as rate_limit
+    import app.core.redis_client as redis_client
+    from app.llm import factory as llm_factory
+
+    db_module.reset_engine()
+    # Same rationale as ``tests/conftest.py``'s ``client`` fixture: these
+    # caches are process-wide, so a previous test's closed handle would leak
+    # into this app. Resetting the limiter also keeps the handful of
+    # credential-less routes this module calls (which DO consume the
+    # per-visitor bucket) from spending another module's quota.
+    rate_limit.reset_limiter()
+    redis_client.reset_redis_client()
+    llm_factory.reset_llm_client()
+    get_settings.cache_clear()
+    monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'inventory.db'}")
+    get_settings.cache_clear()
+    engine = db_module.get_engine()
+
+    async def _init_schema() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_init_schema())
+    try:
+        yield TestClient(create_app())
+    finally:
+        get_settings.cache_clear()
+        db_module.reset_engine()
+        monkeypatch.delenv("CITEVYN_DATABASE_URL", raising=False)
+
+
+# ---------------------------------------------------------------------------
+# The classifier cannot pass by classifying nothing
+# ---------------------------------------------------------------------------
+
+
+def test_each_auth_class_is_non_empty() -> None:
+    """The partner for every "no route is missing a guard" assertion below.
+
+    A classifier that returns an empty inventory, or that collapses every
+    route into one class, satisfies a "nothing is missing" check vacuously.
+    This is the check that the thing being counted exists. It is also what
+    catches a direct-dependency-only walk: with no recursion, ``ADMIN`` and
+    ``BEARER`` are both empty (see the module docstring).
+    """
+    assert INVENTORY, "the route walk found no routes at all"
+    for auth_class in (ADMIN, BEARER, OPEN):
+        assert _class_members(auth_class), (
+            f"auth class {auth_class!r} is empty — the walk is vacuous"
+        )
+
+
+@pytest.mark.parametrize(
+    "method,path,expected",
+    [
+        # Ordered deliberately: the first two entries are reachable by a walk
+        # that stops after two levels, so a classifier that ``break``s early
+        # still gets them right. The entries after them are not.
+        ("POST", "/v1/auth/login", BEARER),
+        ("GET", "/v1/admin/budget", ADMIN),
+        ("GET", "/v1/me/sessions", BEARER),
+        ("GET", "/v1/sessions/{session_id}/messages/{message_id}", BEARER),
+        ("GET", "/v1/admin/evaluations/{run_id}", ADMIN),
+        ("GET", "/health", OPEN),
+        ("GET", "/v1/auth/oauth/{provider}/start", OPEN),
+    ],
+)
+def test_named_sentinels_land_in_their_expected_class(
+    method: str, path: str, expected: str
+) -> None:
+    """Named routes, one per class, checked individually.
+
+    Each is its own test case rather than a loop, so nothing can be skipped
+    by an early exit, and a failure names the route.
+    """
+    assert (method, path) in INVENTORY, f"{method} {path} is not in the inventory at all"
+    assert INVENTORY[(method, path)] == expected
+
+
+def test_the_walk_recurses_past_the_first_level() -> None:
+    """No credential check is a DIRECT dependency of any route.
+
+    ``require_public_client_token`` is two levels down on ``/v1/auth/login``
+    (under ``rate_limited_demo``) and THREE levels down on ``/v1/me/sessions``
+    (under ``resolve_principal`` -> ``rate_limited_demo``). Both depths are
+    asserted here, and the shallower one first, so a walk that recursed
+    exactly one level further than the naive version — enough for
+    ``/v1/auth/login`` — still fails on ``/v1/me/sessions``.
+    """
+    routes, _ = _api_routes()
+    by_key = {(m, r.path): r for r in routes for m in r.methods}
+
+    login = by_key[("POST", "/v1/auth/login")]
+    me_sessions = by_key[("GET", "/v1/me/sessions")]
+    budget = by_key[("GET", "/v1/admin/budget")]
+
+    assert _depth_of(login.dependant, require_public_client_token) == 2
+    assert _depth_of(me_sessions.dependant, require_public_client_token) == 3
+    assert _depth_of(budget.dependant, require_admin_api_key) == 2
+
+    # And the claim that motivates all of the above: nothing is at depth 1.
+    shallow = [
+        f"{sorted(r.methods)} {r.path}"
+        for r in routes
+        if _depth_of(r.dependant, require_public_client_token) == 1
+        or _depth_of(r.dependant, require_admin_api_key) == 1
+    ]
+    assert not shallow, (
+        "a route now depends on a credential check directly; that is fine, but "
+        f"this test's rationale needs rewriting: {shallow}"
+    )
+
+
+def test_every_route_without_a_dependant_is_a_known_framework_path() -> None:
+    """Routes the classifier cannot inspect must be named, not ignored.
+
+    ``/openapi.json`` and friends have no ``dependant``. Dropping anything
+    without one would mean a future raw Starlette ``Route`` mounted on the app
+    escaped every class in this file without a single assertion noticing.
+    """
+    _, without_dependant = _api_routes()
+    unexpected = sorted(set(without_dependant) - FRAMEWORK_PATHS)
+    assert not unexpected, (
+        f"route(s) with no inspectable dependencies are not in FRAMEWORK_PATHS: {unexpected}"
+    )
+    # Partner: the framework paths really are present in this configuration,
+    # so the subtraction above is not trivially empty because the list was.
+    assert without_dependant, "no dependant-less routes found — the control for this test is gone"
+
+
+# ---------------------------------------------------------------------------
+# The classes are exactly what we expect
+# ---------------------------------------------------------------------------
+
+
+def test_the_admin_class_is_exactly_the_expected_set() -> None:
+    assert set(_class_members(ADMIN)) == EXPECTED_ADMIN
+
+
+def test_the_bearer_class_is_exactly_the_expected_set() -> None:
+    assert set(_class_members(BEARER)) == EXPECTED_BEARER
+
+
+def test_the_credential_less_class_is_exactly_the_expected_set() -> None:
+    """The one that bites hardest.
+
+    A new ``/v1`` route with no auth dependency, or an existing route whose
+    dependency is dropped or swapped for one that does not check a
+    credential, lands here and fails — with the route named. Every entry
+    carries a reason, so extending the list is a decision somebody makes on
+    purpose in a diff a reviewer can see.
+    """
+    assert set(_class_members(OPEN)) == set(EXPECTED_OPEN)
+    assert all(EXPECTED_OPEN.values()), "every credential-less route needs a stated reason"
+
+
+def test_every_path_parameter_has_a_substitution() -> None:
+    """Otherwise a templated route silently never gets called below."""
+    missing = sorted(
+        {
+            name
+            for _, path in INVENTORY
+            for name in _path_params(path)
+            if name not in PATH_PARAM_VALUES
+        }
+    )
+    assert not missing, f"add these to PATH_PARAM_VALUES: {missing}"
+    # Partner: the substitution map is exercised at all.
+    assert any(_path_params(path) for _, path in INVENTORY), "no templated routes — control gone"
+
+
+# ---------------------------------------------------------------------------
+# Executed credential-less calls, one test case per route
+# ---------------------------------------------------------------------------
+
+
+def _assert_auth_required(response: Any, label: str) -> None:
+    """Assert the whole thing the CLIENT receives, not just the status code.
+
+    ``docs/API_SPEC.md`` §4: the error body is flat ``{request_id, status,
+    error}`` — never nested under ``detail``, which is what FastAPI would
+    emit if ``error_response`` were bypassed. RFC 7235 wants the challenge
+    header on a 401.
+    """
+    assert response.status_code == 401, f"{label} returned {response.status_code}: {response.text}"
+    assert response.headers["WWW-Authenticate"] == "Bearer", label
+    body = response.json()
+    assert "detail" not in body, f"{label} envelope is nested under 'detail': {body}"
+    assert body["status"] == "error", label
+    assert body["request_id"], label
+    assert body["error"]["code"] == "auth_required", f"{label} -> {body['error']}"
+
+
+@pytest.mark.parametrize("method,path", _class_members(ADMIN))
+def test_every_admin_route_rejects_a_missing_admin_key(
+    client: TestClient, method: str, path: str
+) -> None:
+    """Derived from the live inventory, so a ninth admin route is covered the
+    day it is added. ``test_the_admin_class_is_exactly_the_expected_set`` is
+    what stops this parametrize shrinking silently instead."""
+    _assert_auth_required(client.request(method, _concrete(path)), f"{method} {path}")
+
+
+@pytest.mark.parametrize("method,path", _class_members(BEARER))
+def test_every_bearer_route_rejects_a_missing_bearer_token(
+    client: TestClient, method: str, path: str
+) -> None:
+    """No body is sent on the POSTs on purpose: the credential check must run
+    BEFORE request-body validation, or an unauthenticated caller learns the
+    body schema from a 422. A 422 here is a real finding — and it is what these
+    POST cases actually return once the bearer guard is removed, so the 401 is
+    the guard and not FastAPI's routing.
+
+    **Known limitation, one case.** ``GET /v1/auth/me`` answers 401
+    ``auth_required`` with a VALID public bearer too, because it additionally
+    requires a signed-in auth session. Its case here therefore passes whether
+    or not the bearer guard is present, and does not pin that guard on its own.
+    Measured: removing the missing-credential branch from
+    ``require_public_client_token`` turns the other twelve cases red and leaves
+    this one green. The twelve carry the proof; this one is coverage.
+    """
+    _assert_auth_required(client.request(method, _concrete(path)), f"{method} {path}")
+
+
+@pytest.mark.parametrize("method,path", _class_members(ADMIN))
+def test_every_admin_route_rejects_a_wrong_admin_key(
+    client: TestClient, method: str, path: str
+) -> None:
+    """401, not 403: a wrong key must be indistinguishable from a missing one
+    (``require_admin_api_key`` compares with ``secrets.compare_digest``)."""
+    response = client.request(method, _concrete(path), headers={ADMIN_HEADER: "wrong"})
+    _assert_auth_required(response, f"{method} {path}")
+
+
+@pytest.mark.parametrize("method,path", _class_members(BEARER))
+def test_every_bearer_route_rejects_a_wrong_bearer_token(
+    client: TestClient, method: str, path: str
+) -> None:
+    response = client.request(
+        method, _concrete(path), headers={"Authorization": "Bearer not-the-token"}
+    )
+    _assert_auth_required(response, f"{method} {path}")
+
+
+@pytest.mark.parametrize("method,path", _class_members(OPEN))
+def test_a_credential_less_route_does_not_answer_401(
+    client: TestClient, method: str, path: str
+) -> None:
+    """The counterpart to the two classes above, and the reason they mean
+    something: these routes must NOT 401. Without this, a change that made
+    every route 401 would leave every "rejects a missing credential"
+    assertion in this file green.
+
+    Only the status code's 401-ness is asserted — what these routes do with a
+    missing token, missing state or an empty index is each route's own test's
+    business.
+    """
+    response = client.request(method, _concrete(path), follow_redirects=False)
+    assert response.status_code != 401, (
+        f"{method} {path} is classified as credential-less but answered 401 — "
+        "either it gained a credential dependency (update EXPECTED_OPEN) or the "
+        "classifier is wrong"
+    )
+
+
+@pytest.mark.parametrize(
+    "method,path,expected_status",
+    [
+        ("GET", "/v1/me/sessions", 200),
+        ("POST", "/v1/sessions", 201),
+    ],
+)
+def test_a_bearer_route_accepts_the_bearer_token(
+    client: TestClient, method: str, path: str, expected_status: int
+) -> None:
+    """Absence-as-success partner for the 401 parametrizes.
+
+    Every executed check above asserts a REJECTION. A route that rejected
+    everything — a typo in the expected token, a dependency that always
+    raises, a 401 emitted by middleware ahead of the router — would pass all
+    of them. These accepted calls prove the 401s above are the gate closing
+    rather than the gate being welded shut.
+
+    Both routes are in the depth-3 ``resolve_principal`` group, which is also
+    the group whose bearer check the shallow walk described in the module
+    docstring would miss. ``GET /v1/auth/me`` is deliberately NOT used here:
+    it 401s with ``auth_required`` even WITH a valid public bearer, because it
+    additionally requires a signed-in auth session — which would have made
+    this partner pass while proving nothing.
+    """
+    body = {"channel": "chat"} if method == "POST" else None
+    response = client.request(
+        method,
+        path,
+        json=body,
+        headers={"Authorization": f"Bearer {get_settings().public_client_token}"},
+    )
+    assert response.status_code == expected_status, response.text
+
+
+def test_an_admin_route_accepts_the_admin_key(client: TestClient) -> None:
+    """Same partner, for the admin class."""
+    response = client.get(
+        "/v1/admin/index_versions", headers={ADMIN_HEADER: get_settings().admin_api_key}
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_uuid_substitutions_are_real_uuids() -> None:
+    """Guards the harness, not the app: a malformed value would make every
+    templated route above 422 on path validation instead of 401, and a 422
+    would look like a routing miss rather than a broken fixture."""
+    for name in ("session_id", "message_id", "run_id", "job_id"):
+        uuid.UUID(PATH_PARAM_VALUES[name])
