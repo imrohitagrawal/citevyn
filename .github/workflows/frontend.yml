@@ -416,6 +416,16 @@ jobs:
     defaults:
       run:
         working-directory: frontend
+        # `shell: bash`, and it is NOT decoration. A job that runs in a
+        # `container:` defaults to `sh -e {0}`, not the `bash -e {0}` every
+        # other job here gets, and dash has neither `-o pipefail` nor arrays.
+        # Measured on a real runner, which is the only place this shows up:
+        # the first push of this job died at its FIRST step with
+        # `set: Illegal option -o pipefail`, exit 2, before one snapshot was
+        # compared. Three steps below use `set -euo pipefail`, `arr=(...)`
+        # or `${#arr[@]}`. Guarded by
+        # `test_a_container_job_that_uses_bash_syntax_declares_bash`.
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

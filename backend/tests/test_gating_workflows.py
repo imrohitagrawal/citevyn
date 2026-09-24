@@ -3073,3 +3073,89 @@ def test_the_backlog_row_and_this_guard_agree_on_the_issue() -> None:
 # was not one. What it was reaching for — that the string the owner sends is the
 # string the job reports — is now actually checked, by
 # `test_the_documented_promotion_command_sends_the_real_job_name`.
+
+
+# `_BASH_ONLY_SYNTAX` is deliberately narrow: each entry is syntax that `dash`
+# (which is what `/bin/sh` is on the Ubuntu images these containers use) rejects
+# outright, not merely something bash does better. An entry that dash ACCEPTS
+# would make the rule below fire on a step that works, which is the false-red
+# half of the same mistake.
+_BASH_ONLY_SYNTAX: tuple[tuple[str, str], ...] = (
+    ("set -euo pipefail", "`-o pipefail` is a bash option; dash exits 2 on it"),
+    ("pipefail", "`pipefail` is a bash option; dash has no equivalent"),
+    ("=(", "array assignment `arr=(...)`; dash has no arrays"),
+    ("${#", "`${#arr[@]}` array length; dash has no arrays"),
+    ("[[", "`[[ ... ]]` is a bash keyword; dash has only `[`"),
+    ("<(", "process substitution; dash does not implement it"),
+)
+
+
+def test_a_container_job_that_uses_bash_syntax_declares_bash() -> None:
+    """A `container:` job defaults to `sh`, not `bash`, and dash rejects bashisms.
+
+    THE DEFECT, measured on a real runner rather than reasoned about. Every job
+    in this repository that runs on the host gets ``bash -e {0}`` for its
+    ``run:`` steps. A job with a ``container:`` gets ``sh -e {0}`` instead, and
+    on these images ``/bin/sh`` is dash. The first push of ``visual-e2e`` died
+    at its FIRST step with::
+
+        /__w/_temp/....sh: 1: set: Illegal option -o pipefail
+        ##[error]Process completed with exit code 2.
+
+    before a single snapshot was compared, and because the step that failed was
+    the browser probe rather than the suite, the job reported red for a reason
+    that had nothing to do with the pixels it exists to check. Nothing in the
+    repository could have caught it: the YAML is valid, the shell script is
+    valid bash, and no local run uses the container's default shell.
+
+    Turns red if: a `container:` job carrying bash-only syntax loses its
+    ``shell: bash``, or a new one is added without it.
+
+    Partner: the population is asserted non-empty, and each flagged step is
+    named with the syntax that flagged it, so a rule that silently matched
+    nothing cannot pass as a clean result.
+    """
+    workflow_files = sorted(p.name for p in WORKFLOW_DIR.glob("*.yml"))
+    assert workflow_files, f"no workflow files found under {WORKFLOW_DIR}"
+
+    container_jobs: list[tuple[str, str, dict[str, Any]]] = []
+    for name in workflow_files:
+        jobs = (_load_workflow(name).get("jobs") or {}).items()
+        container_jobs.extend((name, job_id, job) for job_id, job in jobs if job.get("container"))
+
+    assert container_jobs, (
+        "no job in any workflow declares a `container:`. If that is now true, "
+        "this rule guards nothing and should be deleted rather than left "
+        "passing vacuously; if it is not true, the glob above has drifted."
+    )
+
+    offenders: list[str] = []
+    checked: list[str] = []
+    for workflow, job_id, job in container_jobs:
+        job_shell = ((job.get("defaults") or {}).get("run") or {}).get("shell")
+        for step in job.get("steps") or []:
+            body = step.get("run")
+            if not body:
+                continue
+            step_name = step.get("name", "(unnamed)")
+            checked.append(f"{workflow}:{job_id}:{step_name}")
+            shell = step.get("shell") or job_shell
+            if shell and shell.split()[0] == "bash":
+                continue
+            for token, why in _BASH_ONLY_SYNTAX:
+                if token in body:
+                    offenders.append(
+                        f"{workflow}:{job_id} step {step_name!r} uses {token!r} "
+                        f"({why}) but resolves to shell {shell or 'sh (the container default)'!r}"
+                    )
+                    break
+
+    assert checked, (
+        "every container job was found but none of them has a `run:` step, so "
+        "this rule inspected nothing"
+    )
+    assert not offenders, (
+        "a container job runs bash-only syntax under the container default "
+        "shell, which is dash. Add `shell: bash` to the job's `defaults.run` "
+        "or to the step:\n  " + "\n  ".join(offenders)
+    )
