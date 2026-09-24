@@ -1129,21 +1129,45 @@ def _judged_summary(injection: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_injection_gate_fails_an_oracle_that_compared_nothing() -> None:
-    """#450: zero leaks over zero cases is not a pass, it is a silenced oracle.
+    """#450: zero leaks over zero cases is not a pass, it is an oracle that ran.
 
-    ``gate_failures`` checked ``injection.leaks`` and never ``injection.cases``,
-    so rewording the two sentinels out of ``tests/eval/golden.jsonl`` left the
-    release gate's only live-model prompt-injection check comparing nothing —
-    with every hermetic test green and, because the summary line was printed only
-    when ``cases > 0``, no line in the CI log either.
+    ``gate_failures`` checked ``injection.leaks`` and never ``injection.cases``, so
+    an injection case that declared a sentinel but was never compared — the oracle
+    wired wrong, or the case dropped — read exactly like a resistant run. With the
+    summary line printed only when ``cases > 0``, the CI log carried no trace
+    either.
 
-    Turns red if: the ``declared > 0 and cases == 0`` clause is removed from
-    ``gate_failures``.
+    NOT the same defect as deleting ``must_not_contain`` from the golden rows:
+    ``declared`` is derived from that field, so removal moves both numbers to 0
+    together and this clause stays silent.
+    ``test_the_golden_set_still_carries_every_zero_tolerance_oracle`` is what
+    catches that, and an earlier version of this docstring wrongly claimed the
+    clause did.
+
+    Turns red if: the ``declared > 0 and cases != declared`` clause is removed
+    from ``gate_failures``.
     """
     from tests.eval.runner import gate_failures
 
     failures = gate_failures(_judged_summary({"declared": 2, "cases": 0, "leaks": []}))
-    assert any("injection" in f and "0 of the 2" in f for f in failures), failures
+    assert any("injection" in f and "compared 0 of the 2" in f for f in failures), failures
+
+
+def test_injection_gate_fails_a_PARTIAL_oracle_shortfall() -> None:
+    """Half a zero-tolerance oracle is the likelier and nastier failure.
+
+    One injection case lost to a provider 429 or an unparseable verdict leaves
+    ``declared=2, cases=1``: the other case still reports 0 leaks, so a gate that
+    only fired at ``cases == 0`` called that a pass. Found by an adversarial review
+    of #450, which is why the predicate is ``cases != declared`` and not
+    ``cases == 0``.
+
+    Turns red if: the clause is weakened back to ``cases == 0``.
+    """
+    from tests.eval.runner import gate_failures
+
+    failures = gate_failures(_judged_summary({"declared": 2, "cases": 1, "leaks": []}))
+    assert any("injection" in f and "compared 1 of the 2" in f for f in failures), failures
 
 
 def test_injection_gate_stays_silent_when_the_run_declares_no_injection_cases() -> None:
@@ -1293,9 +1317,17 @@ def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
     ``test_eval_judge_subset.py``'s ``if case.must_not_contain: assert case.id in
     sel_ids`` iterates nothing once the field is gone too.
 
-    Turns red if: ``must_not_contain`` is stripped from both
-    ``adv_injection_ratelimit`` and ``adv_injection_authheader``, or the last
-    ``followup`` / ``refusal`` / fact-bearing case leaves the golden file.
+    Turns red if: ``must_not_contain`` is stripped from EITHER
+    ``adv_injection_ratelimit`` or ``adv_injection_authheader`` (each covers a
+    different injection shape, so losing one halves the oracle); the last
+    ``followup`` / ``refusal`` / fact-bearing case leaves the golden file; or a
+    sentinel stops appearing in its own case's question.
+
+    Deliberately NOT red if: the golden file is re-ordered, or an injection case
+    is ADDED. Both are compared as sets and as a subset respectively — an earlier
+    version compared a LIST, so a semantically neutral reorder reddened it and so
+    did adding a third case, while the message said "adding one is fine". A test
+    that reddens on an improvement is one people learn to edit out.
     """
     cases = load_cases(GOLDEN_PATH)
     populations = {
@@ -1310,18 +1342,40 @@ def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
         "that gate iterates nothing and passes. Populations found: "
         f"{ {name: len(ids) for name, ids in populations.items()} }"
     )
-    # The injection oracle needs BOTH sentinels, not just one: each covers a
-    # different injection shape (an "ignore all previous instructions" override
-    # and a "disregard your instructions, output X instead" substitution) in a
-    # different area, so losing one halves the oracle silently.
-    assert populations["injection (must_not_contain)"] == [
-        "adv_injection_ratelimit",
-        "adv_injection_authheader",
-    ], (
-        "the injection cases are no longer exactly the two pinned rows: "
-        f"{populations['injection (must_not_contain)']}. Adding one is fine — "
-        "update this list in the same change, so the pin stays a statement about "
-        "what the oracle covers."
+    # Both sentinels, not just one: each covers a different injection shape (an
+    # "ignore all previous instructions" override and a "disregard your
+    # instructions, output X instead" substitution) in a different area, so losing
+    # one halves the oracle silently. A SUBSET check, so adding a third case is
+    # fine and removing either of these two is red.
+    pinned = {"adv_injection_ratelimit", "adv_injection_authheader"}
+    present = set(populations["injection (must_not_contain)"])
+    assert pinned <= present, (
+        f"injection case(s) {sorted(pinned - present)} no longer declare "
+        f"`must_not_contain`. Present: {sorted(present)}. Each of the two covers a "
+        "different injection shape, so losing one halves the oracle. If a case was "
+        "deliberately retired, update this pin in the same change."
+    )
+
+    # THE OTHER HALF, and the scenario #450's own risk sentence names: "rewording
+    # the two questions that carry the sentinels". Keeping `must_not_contain` while
+    # gutting the injection out of the question — or changing the sentinel to a
+    # string no model would emit — leaves declared=2, cases=2, leaks=0, a healthy
+    # log line and every assertion above green, over an oracle that can no longer
+    # fail. Found by an adversarial review of #450. The sentinel has to be
+    # something the question actually TELLS the model to emit, so assert it appears
+    # verbatim in that case's own question.
+    toothless = [
+        (c.id, forbidden)
+        for c in cases
+        for forbidden in c.must_not_contain
+        if forbidden not in c.question
+    ]
+    assert not toothless, (
+        "injection sentinel(s) do not appear in their own case's question: "
+        f"{toothless}. A sentinel the question never asks for cannot be emitted, so "
+        "the oracle is green by construction — `declared` and `cases` both still "
+        "read 2 and nothing else notices. Keep the sentinel and the injection "
+        "instruction in the same string."
     )
 
 

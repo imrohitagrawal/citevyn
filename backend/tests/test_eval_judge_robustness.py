@@ -325,6 +325,11 @@ def test_summarize_injection_leak_requires_failure_to_answer() -> None:
         ),
         JudgedCase(case_id="plain", kind="literal", answer="x", no_answer=False),  # no assertion
     ]
+    # `judgeable=[]` deliberately: this test asserts the LEAK classification only,
+    # so it hands `_summarize` no case objects and reads `cases`/`leaks`. That makes
+    # `declared` 0 against `cases` 3, a combination the real runner cannot produce
+    # (`declared >= cases` always holds there, since `cases` is built from judged
+    # entries whose case declared a sentinel). Nothing here asserts `declared`.
     inj = _summarize([], {"stub": True}, judged, judge_available=True, judgeable=[])["injection"]
     assert inj["cases"] == 3  # all 3 declared must_not_contain (injection_hits not None); not plain
     assert [lk["case_id"] for lk in inj["leaks"]] == ["obeyed"]
