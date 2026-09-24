@@ -128,15 +128,20 @@ _UNGUARDABLE: tuple[str, ...] = (
     "supported: the literal FROM is what keeps Dependabot tracking the image.",
     "Node inside the external reusable workflow's own repository, and any Node a "
     "third-party action installs internally.",
-    "Whether _container_node_images() reads the REAL workflow directory. While "
-    "the repo has zero `container:` jobs its only observation over the real tree "
-    "is an empty `found`, so a mutant keyed on `directory == WORKFLOW_DIR` that "
+    "Whether _container_node_images() reads the REAL workflow directory. The "
+    "repo has exactly one `container:` job — frontend.yml:visual-e2e, added in "
+    "#325 on `mcr.microsoft.com/playwright`, which is not a node image — so its "
+    "only observation over the real tree is still an empty `found`, and a mutant "
+    "keyed on `directory == WORKFLOW_DIR` that "
     "returns no images AND fabricates the right `examined` list is behaviourally "
     "identical to the finder. The planted-tree test proves the SCAN works, and "
     "the join DOES pin the zero-arg call to whatever `_workflow_files()` returns "
     "— what neither can rule out is a mutant that also FABRICATES `examined` to "
     "match. The day a real `container: node:` job lands, that mutant dies — "
-    "until then there is no positive observation to make.",
+    "until then there is no positive observation to make. (visual-e2e narrows "
+    "this by one step only: the real tree now exercises the `container:` branch "
+    "and the node-image regex REJECTING a non-node image. It still produces no "
+    "entry in `found`, which is the observation this blind spot is about.)",
     "What @types/node RESOLVES to, as opposed to the range package.json declares. "
     "test_types_node_major_matches_the_pin reads the declared range only. Two of "
     "the three ways that could diverge turn out to be closed by the tooling, and "
@@ -199,8 +204,10 @@ def _workflow_files(directory: Path = WORKFLOW_DIR) -> list[Path]:
     Takes a ``directory`` for the same reason
     ``test_deploy_fly_build_args_are_documented._scanned_files`` takes a ``root``:
     so a test can drive the REAL scan over a copy of the real tree that has a
-    planted offender in it. The repo has zero jobs with a ``container:`` image,
-    so nothing else can tell a working scan from a dead one.
+    planted offender in it. The repo has exactly one job with a ``container:``
+    image (``frontend.yml:visual-e2e``, #325) and it is not a node image, so the
+    real tree still yields an empty ``found`` and nothing else can tell a working
+    scan from a dead one.
     """
     files = sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml"))
     assert files, f"no workflow files found under {directory}"
@@ -256,8 +263,10 @@ def _container_node_images(
 
     ``found`` is ``(workflow, job, tag)`` per node image. ``examined`` is every
     ``(workflow name, job name)`` this call actually VISITED, appended inside the
-    same loop — the repo has zero node containers, so ``found == []`` is the only
-    thing the real tree can observe and it is exactly what a dead scan returns.
+    same loop — the repo has one ``container:`` job and it is not a node image
+    (``frontend.yml:visual-e2e`` runs ``mcr.microsoft.com/playwright``), so
+    ``found == []`` is the only thing the real tree can observe and it is exactly
+    what a dead scan returns.
     ``examined`` is what a dead scan cannot fake: a separate enumerator would
     prove nothing, so it has to be collected here, by this loop, as it walks.
     """
@@ -587,8 +596,12 @@ def test_job_container_node_images_match_the_pin(path: Path, job_name: str, tag:
 # ─────────── the finders themselves, driven over a planted workflow ───────────
 #
 # #381: `test_job_container_node_images_match_the_pin` SKIPS with "got empty
-# parameter set" because no job in this repo uses `container:`. That is honest
-# today, but nothing proved `_container_node_images()` still WORKS — a dead
+# parameter set" because no job in this repo runs in a NODE container. Since
+# #325 one job does carry a `container:` — `frontend.yml:visual-e2e`, on
+# `mcr.microsoft.com/playwright` — so the real tree now exercises the
+# `container:` branch and the node-image regex REJECTING an image, but it still
+# contributes no parameter. That is honest today, but nothing proved
+# `_container_node_images()` still WORKS — a dead
 # finder returns the same empty list forever and the rule is disabled with no
 # visible change. `_setup_node_steps()` had the same hole one layer down: its
 # two existing partners only assert that SOME steps are found, so three ways of
@@ -674,13 +687,19 @@ _PLANTED_NON_NODE_JOBS = (
     "second-c-job-lookalike-behind-a-registry",  # myregistry.io/mynode:18
 )
 
-# The setup-node steps the real repo has, hand-counted from
-# `.github/workflows/` (3, in sorted-filename order). Update this line when a
-# workflow gains or loses a setup-node step.
+# The setup-node steps the real repo has, enumerated from `.github/workflows/`
+# in sorted-filename order. Update this line when a workflow gains or loses a
+# setup-node step. `frontend.yml:visual-e2e` joined in #325: it runs inside
+# Playwright's container image, whose own Node is 24.20.0, and
+# `frontend/package.json` declares `engines: node >= 26` — so the step is there
+# to keep the install inside the range the project supports, and it reads the
+# pin from `.nvmrc` like every other one (which is what
+# `test_setup_node_reads_the_pin_from_the_nvmrc` holds it to).
 _REAL_SETUP_NODE_STEPS = [
     ("frontend-live-e2e.yml", "live-e2e"),
     ("frontend.yml", "build"),
     ("frontend.yml", "demo-e2e"),
+    ("frontend.yml", "visual-e2e"),
 ]
 
 

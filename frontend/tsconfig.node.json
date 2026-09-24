@@ -20,5 +20,12 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "playwright.config.ts", "playwright.live.config.ts", "playwright.demo-ci.config.ts", "vite.liveStub.ts"]
+  "include": [
+    "vite.config.ts",
+    "playwright.config.ts",
+    "playwright.live.config.ts",
+    "playwright.demo-ci.config.ts",
+    "playwright.visual-ci.config.ts",
+    "vite.liveStub.ts"
+  ]
 }

@@ -38,10 +38,12 @@ Closed this round, each merged with post-merge CI green and deployed:
 
 ## The one thing that changed about HOW you work here
 
-**`main` now requires NINE status checks, not five.** (This line said "seven" and was
-wrong — read 2026-09-08,
+**`main` now requires TEN status checks, not five.** (This line said "seven",
+then "NINE"; both were wrong by the time anyone read them. Re-read 2026-09-16,
 `gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks --jq '.contexts|length'`
-returns `9`. The full list is in `docs/TEST_STRATEGY.md` §12.1.) Among them,
+returns `10`. The full list is in `docs/TEST_STRATEGY.md` §12.1, which is now
+compared against `backend/tests/test_gating_workflows.py`'s record by a test —
+so quote §12.1, not this line.) Among them,
 `type-check + unit tests + build` (which carries the frontend unit tests AND the bundle budget
 gate) and `Demo-mode Playwright (no visual snapshots)` are REQUIRED. `frontend.yml`
 deliberately has NO `paths:` filter — a path-filtered workflow that does not trigger reports
@@ -49,8 +51,9 @@ nothing, so a required context would hang forever on a docs-only PR.
 
 **Do not add path filters back — and this now applies to BOTH frontend workflows.** #379
 removed the `frontend/**` filter from `frontend-live-e2e.yml` for the same reason, so that
-`Live-mode Playwright (stub backend)` is eligible to be promoted. It is still **advisory**
-today; promotion is a branch-protection change and belongs to the owner.
+`Live-mode Playwright (stub backend)` was eligible to be promoted — and it **has been**:
+it is a required context as of the 2026-09-16 reading above. This line said "still advisory
+today" until then.
 `backend/tests/test_gating_workflows.py` (in the required `pytest + lint` job) fails if a
 filter comes back, if a gating job is defused with `continue-on-error:`/`if:`, or if the job
 name drifts from the context string the promotion command sends.
