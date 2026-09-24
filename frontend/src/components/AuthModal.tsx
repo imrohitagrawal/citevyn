@@ -41,6 +41,46 @@ import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_LENGTH = 128;
 
+// #446. The email bounds were the half of this mirror nobody wrote down: the
+// password ceiling was mirrored AND tested while `email` carried `required` and
+// nothing else, so a 300-character address could be typed, submitted, and
+// rejected by `RegisterRequest` / `LoginRequest` / the magic-link body — all
+// three declare `min_length=3, max_length=255` — as a 422 the form gave the user
+// no way to predict.
+//
+// All four numbers here are tied to the Pydantic fields themselves by
+// `backend/tests/test_ui_input_limits_match_the_api.py`, which reads the field
+// metadata rather than keeping a second copy of the literal — so relaxing a
+// server bound without moving the form reddens a test instead of shipping quietly.
+const EMAIL_MIN_LENGTH = 3;
+const EMAIL_MAX_LENGTH = 255;
+
+// KNOWN, DELIBERATE, AND NOT FIXED HERE (#446 review): these four bounds are
+// enforced by `minLength`/`maxLength` ATTRIBUTES, which is the exact mechanism
+// the same PR removed from the question composers for being SILENT. A browser
+// clamps an over-long value with no event and nothing on screen changing.
+//
+// So the defect class this issue exists to remove is still live on this surface,
+// and the email ceiling above was ADDED by that PR — the inconsistency is new,
+// not inherited. Written here rather than left to be rediscovered.
+//
+// WHY IT WAS NOT FIXED IN THAT PR: the composers had a submit path that already
+// owned a refusal, a shared nudge mechanism and a persistent `role="status"`
+// region, so moving the limit into the handler was a small change to an existing
+// behaviour. This form has none of those — `handleSubmit` refuses nothing, there
+// is no announced-refusal mechanism, and the `error` slot is driven by server
+// responses. Building one is a feature, not a review fix, and doing it inside a
+// testing PR would be the scope creep that hides real regressions.
+//
+// WHY IT IS NOT MERELY COSMETIC, so nobody reads this as "settled": password
+// managers generate long passphrases. A 140-character one is silently truncated
+// to 128 here, the account is created with the truncation, and the manager then
+// autofills the full string forever after — the user is locked out by a clamp
+// they never saw. That is strictly worse than the paste case this PR fixed,
+// because it is not recoverable by retyping.
+//
+// Tracked as its own issue rather than patched here.
+
 export type AuthModalMode = "login" | "register" | "magic-link" | "set-password";
 
 // #301. After a successful send the server refuses another request for this long, so
@@ -437,6 +477,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
                   ref={firstFieldRef}
                   type="email"
                   required
+                  minLength={EMAIL_MIN_LENGTH}
+                  maxLength={EMAIL_MAX_LENGTH}
                   autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}

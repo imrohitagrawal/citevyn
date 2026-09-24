@@ -68,6 +68,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
   const {
     state,
     heroRef,
+    composerRef,
     onHeroInput,
     onChatInput,
     onChatKey,
@@ -234,7 +235,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
           heroInput={state.heroInput}
           heroPlaceholder={heroPlaceholder}
           heroNudge={state.heroNudge}
-          heroBoxShake={state.heroNudge}
+          heroBoxShake={state.heroNudge !== null}
           heroRef={heroRef}
           onHeroInput={onHeroInput}
           onHeroKey={onHeroKey}
@@ -339,6 +340,8 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             highlightedIndex={state.highlight}
             sendTick={state.sendTick}
             refusedInFlight={state.refusedInFlight}
+            chatNudge={state.chatNudge}
+            composerRef={composerRef}
           />
         </div>
       )}

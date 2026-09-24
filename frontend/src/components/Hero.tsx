@@ -3,11 +3,14 @@
  */
 
 import type * as React from "react";
+import { EMPTY_SUBMIT_NUDGE_GLYPH, hasNudge } from "../lib/composerNudge";
 
 interface HeroProps {
   heroInput: string;
   heroPlaceholder: string;
-  heroNudge: boolean;
+  /** #446 review: the MESSAGE to show, or null. Was a boolean with the sentence
+      hard-coded below; two refusals share this mechanism now. */
+  heroNudge: string | null;
   heroBoxShake: boolean;
   heroRef: React.RefObject<HTMLInputElement>;
   onHeroInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -126,11 +129,37 @@ export function Hero({
             </button>
           </div>
 
-          {heroNudge && (
-            <p className="hero-nudge">
-              ⚠ Type a question first — or tap one of the examples below.
+          {/* `aria-hidden` (#445 review): this is a VERBATIM duplicate of the
+              live region below, so without it a reader browsing the page meets
+              the same sentence twice — once as static text here and once
+              announced there. Hiding the visual copy costs a screen-reader user
+              nothing, because the region carries the identical string. */}
+          {hasNudge(heroNudge) && (
+            <p className="hero-nudge" aria-hidden="true">
+              {EMPTY_SUBMIT_NUDGE_GLYPH} {heroNudge}
             </p>
           )}
+          {/* #445. ALWAYS rendered, empty when idle — the same shape, and for
+              the same reason, as the region beside the chat composer: a live
+              region has to be in the accessibility tree BEFORE its text
+              changes, and the visible `.hero-nudge` above is created together
+              with its own text, which is the classic way to make an
+              announcement not fire. That is why the "correct" composer was not
+              announced either, and why copying it verbatim into the chat would
+              have copied a silent fix.
+
+              The `⚠` stays OUT of this string. It is decoration for the eye;
+              inside a live region it is one more thing read aloud before the
+              sentence that matters.
+
+              `.sr-only` is declared once, unscoped, but filed under
+              `landing.css`'s "16. CHAT VIEW" section. The hero depends on it
+              from here, which nothing in that file says. Scope it to
+              `.composer` some day and this sentence renders VISIBLY, twice,
+              with nothing going red — the nudge is in no visual baseline. */}
+          <p className="sr-only" role="status">
+            {hasNudge(heroNudge) ? heroNudge : ""}
+          </p>
 
           <div className="hero-chips">
             {/* `--muted`, not `--faint` (#396). Real WORDS at 11px — small

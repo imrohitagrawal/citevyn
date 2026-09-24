@@ -323,7 +323,25 @@ body {
   color: var(--muted);
 }
 
-.hero-nudge {
+/* #445. ONE rule, both composers. `.hero-nudge` is the landing hero's and
+   `.composer-nudge` is the chat composer's; they are selectors on the same
+   declaration block rather than two blocks with the same contents, so a change
+   to this block reaches both. NOT "cannot be restyled apart" — an earlier draft
+   of this line said that and it is false: any later or more specific rule
+   (`.composer .composer-nudge { color: … }`) separates them, and nothing
+   compares the two computed colours. Making that bite needs a real guard that
+   reads `getComputedStyle` off both in one browser run; what is here is a
+   shared block, not an invariant.
+   WHAT IS AND IS NOT MEASURED, because "they share a rule so the contrast spec
+   covers both" is one inference too many to leave implied:
+   `frontend/tests/contrast-floor.spec.ts` measures `.hero-nudge` and only
+   `.hero-nudge`. The reading transfers because the two share this rule AND sit
+   on the same paint — `--color-warning` over `var(--bg)`, since neither
+   `.chat-screen` nor `[data-screen-label="Chat"]` declares a background and
+   `body` anchors the canvas to `--bg`. Change either of those and the transfer
+   stops holding while that spec stays green. */
+.hero-nudge,
+.composer-nudge {
   margin: 10px 0 0;
   max-width: 540px;
   font-size: 13px;
