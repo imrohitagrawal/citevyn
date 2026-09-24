@@ -99,15 +99,20 @@ test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scr
 	@# Globs deliberately — a hardcoded list is how the suites drifted in the first
 	@# place, one level up: the next suite added would simply be forgotten. Anything
 	@# dropped into tests/shell/ is picked up with no wiring.
-	@set -e; found=0; failed=0; \
+	@# The failure NAMES the suites. It used to report only a count, and a single
+	@# unreproducible failure was then undiagnosable: "1 of 13 FAILED" tells you
+	@# nothing about which one, and by the time you re-run it has passed.
+	@set -e; found=0; failed=0; names=""; \
 	for t in tests/shell/*.sh; do \
 		[ -e "$$t" ] || continue; \
 		found=$$((found+1)); \
 		echo "== $$t"; \
-		bash "$$t" || failed=$$((failed+1)); \
+		if bash "$$t"; then :; else \
+			rc=$$?; failed=$$((failed+1)); names="$$names\n  $$t (exit $$rc)"; \
+		fi; \
 	done; \
 	if [ "$$found" -eq 0 ]; then echo "no suites found in tests/shell/ — expected at least one" >&2; exit 1; fi; \
-	if [ "$$failed" -ne 0 ]; then echo "$$failed of $$found shell suite(s) FAILED" >&2; exit 1; fi; \
+	if [ "$$failed" -ne 0 ]; then printf "%s of %s shell suite(s) FAILED:%b\n" "$$failed" "$$found" "$$names" >&2; exit 1; fi; \
 	echo "all $$found shell suite(s) passed"
 
 test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL)
