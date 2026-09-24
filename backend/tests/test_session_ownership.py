@@ -45,7 +45,19 @@ OTHER_USER_ID = "other_user"
 def in_memory_client(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> Generator[TestClient, None, None]:
+    import app.core.rate_limit as rate_limit
+
     db_module.reset_engine()
+    # The limiter is process-wide and nothing in this fixture used to reset it,
+    # so every request this file makes spent the SAME 30/hour demo bucket as
+    # whatever module ran before it. Running this file together with
+    # ``test_messages_routes.py`` produced six 429-driven failures for that
+    # reason alone, with nothing here changed — reproduced at d4763d6 in a
+    # throwaway ``git archive`` tree, so it predates #451/#452. No test in this
+    # file asserts anything about rate limiting, so there is no accumulated
+    # state worth preserving. ``conftest.py``'s own ``client`` fixture has
+    # always done this; this fixture simply never did.
+    rate_limit.reset_limiter()
     get_settings.cache_clear()
     db_file = tmp_path / "session_ownership.db"
     monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{db_file}")

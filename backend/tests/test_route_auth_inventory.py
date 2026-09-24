@@ -38,12 +38,28 @@ the failure mode this file exists to close.
 The walk has to recurse
 -----------------------
 No route in this app depends on a credential check DIRECTLY.
-``require_public_client_token`` sits two levels down on the ``/v1/auth/*``
-routes (under ``rate_limited_demo``) and three levels down on the six routes
-that go through ``resolve_principal``; ``require_admin_api_key`` sits two
-levels down under ``rate_limited_admin``. A direct-dependency-only classifier
-would therefore put EVERY route in the credential-less class — which is what
-``test_each_auth_class_is_non_empty`` and the depth sentinels below catch.
+``require_public_client_token`` sits two levels down (under
+``rate_limited_demo``) on seven routes — the six ``/v1/auth/*`` bearer routes
+**and** ``POST /v1/search/exact`` — and three levels down (under
+``resolve_principal`` -> ``rate_limited_demo``) on the other six:
+``GET /v1/me/sessions`` plus the five session/message routes. Seven plus six
+is the whole bearer class of thirteen. ``require_admin_api_key`` sits two
+levels down under ``rate_limited_admin`` on all eight admin routes.
+
+A direct-dependency-only classifier would therefore put EVERY route in the
+credential-less class — which is what ``test_each_auth_class_is_non_empty``
+and the depth sentinels below catch.
+
+What this module does NOT assert
+--------------------------------
+The reason strings in ``EXPECTED_OPEN`` are prose, not assertions. Nothing
+here checks that OAuth ``state``/PKCE or a magic-link token actually rejects
+anything — ``GET /v1/auth/magic-link/confirm`` answers 200 with no token at
+all — and the three OAuth cases 404 in a test environment with no provider
+configured, so they never reach the redirect logic. They are a scope
+statement about why each route is credential-less by design; each mechanism
+is tested in its own module (``test_oauth_routes.py``,
+``test_magic_link_routes.py``).
 """
 
 from __future__ import annotations
@@ -57,6 +73,8 @@ from typing import Any
 import pytest
 from fastapi.dependencies.models import Dependant
 from fastapi.testclient import TestClient
+from starlette.routing import Mount
+from starlette.staticfiles import StaticFiles
 
 from app.core import db as db_module
 from app.core.config import get_settings
@@ -82,17 +100,34 @@ OPEN = "no-credential"
 
 
 def _api_routes() -> tuple[list[Any], list[str]]:
-    """Return ``(routes_with_a_dependant, paths_without_one)``.
+    """Return ``(routes_with_a_dependant, paths_of_dependant_less_ROUTES)``.
 
     FastAPI >=0.140 wraps each ``include_router`` call in an internal
     ``_IncludedRouter`` node; the real ``APIRoute`` objects live on its
     ``original_router.routes``. Unwrapping both shapes is the same
     defence ``test_session_ownership.py`` already carries — without it a
-    future FastAPI bump makes this whole module scan zero routes.
+    future FastAPI bump makes this whole module scan zero routes. The
+    unwrap goes exactly ONE level, which is all the app needs (ten flat
+    ``include_router`` calls, no nesting); a nested router would surface as
+    a dependant-less entry and fail loudly in
+    ``test_every_route_without_a_dependant_is_a_known_framework_path``
+    rather than slip through.
 
-    Routes with no ``dependant`` are returned separately rather than
-    dropped: silently skipping them is exactly how an unclassified route
-    would hide.
+    Dependant-less ROUTES are returned rather than dropped: silently
+    skipping them is exactly how an unclassified route would hide.
+
+    ``Mount`` is excluded, and that is not the same thing as dropping it.
+    ``app/main.py`` mounts the built frontend at ``/`` with ``StaticFiles``
+    whenever ``backend/frontend_dist`` exists, and a ``Mount``'s ``path`` is
+    the empty string once Starlette has normalised it. It serves static
+    files, has no endpoint to guard and cannot carry a dependency, so it is
+    not a member of any auth class — but it is asserted about on its own
+    terms in ``test_the_only_mount_is_the_static_frontend``, because
+    swallowing every ``Mount`` silently is how a future ``app.mount`` of a
+    real sub-application would escape this module. Without this the whole
+    file goes red with ``not in FRAMEWORK_PATHS: ['']`` — naming nothing —
+    on any checkout that has a ``frontend_dist`` (a live-OAuth setup
+    symlinks one).
     """
     app = create_app()
     flat: list[Any] = []
@@ -101,8 +136,22 @@ def _api_routes() -> tuple[list[Any], list[str]]:
         flat.extend(original_router.routes if original_router is not None else [route])
 
     with_dependant = [r for r in flat if getattr(r, "dependant", None) is not None]
-    without = [str(getattr(r, "path", r)) for r in flat if getattr(r, "dependant", None) is None]
+    without = [
+        str(getattr(r, "path", r))
+        for r in flat
+        if getattr(r, "dependant", None) is None and not isinstance(r, Mount)
+    ]
     return with_dependant, without
+
+
+def _mounts() -> list[Any]:
+    """Every ``Mount`` on the app, so none is excluded without being checked."""
+    app = create_app()
+    flat: list[Any] = []
+    for route in app.routes:
+        original_router = getattr(route, "original_router", None)
+        flat.extend(original_router.routes if original_router is not None else [route])
+    return [r for r in flat if isinstance(r, Mount)]
 
 
 def _depth_of(dependant: Dependant, target: Any, _depth: int = 1) -> int | None:
@@ -140,14 +189,26 @@ def _classify(route: Any) -> str:
     return OPEN
 
 
+IMPLICIT_METHODS = frozenset({"HEAD", "OPTIONS"})
+
+
 def _inventory() -> dict[tuple[str, str], str]:
-    """Map ``(method, path_template)`` to its auth class."""
+    """Map ``(method, path_template)`` to its auth class.
+
+    ``HEAD`` and ``OPTIONS`` are skipped because Starlette synthesises them
+    alongside a declared ``GET``; they are not separately declared routes.
+    Skipping is a silent drop, though, so
+    ``test_every_inspectable_route_contributes_to_the_inventory`` asserts no
+    route is left contributing nothing — a route declared only as
+    ``@router.head(...)`` would otherwise escape all three exact-set
+    assertions and every executed call without a word.
+    """
     routes, _ = _api_routes()
     out: dict[tuple[str, str], str] = {}
     for route in routes:
         auth_class = _classify(route)
         for method in sorted(route.methods):
-            if method in {"HEAD", "OPTIONS"}:
+            if method in IMPLICIT_METHODS:
                 continue
             out[(method, route.path)] = auth_class
     return out
@@ -342,6 +403,12 @@ def test_the_walk_recurses_past_the_first_level() -> None:
     asserted here, and the shallower one first, so a walk that recursed
     exactly one level further than the naive version — enough for
     ``/v1/auth/login`` — still fails on ``/v1/me/sessions``.
+
+    Measured, this is not a two-route claim: the depth-2 group is seven routes
+    (the six ``/v1/auth/*`` bearer routes plus ``POST /v1/search/exact``) and
+    the depth-3 group is six, which is the whole bearer class. The partition is
+    asserted below so the two named sentinels cannot be the only thing holding
+    it up.
     """
     routes, _ = _api_routes()
     by_key = {(m, r.path): r for r in routes for m in r.methods}
@@ -366,6 +433,134 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         f"this test's rationale needs rewriting: {shallow}"
     )
 
+    # The whole partition, not just the two sentinels — so the docstring's
+    # enumeration above is asserted rather than asserted-about-two-examples.
+    # (It was wrong once: an earlier draft said the depth-2 group was the
+    # ``/v1/auth/*`` routes and omitted ``POST /v1/search/exact``.)
+    by_depth: dict[int, set[tuple[str, str]]] = {}
+    for route in routes:
+        depth = _depth_of(route.dependant, require_public_client_token)
+        if depth is None:
+            continue
+        for method in route.methods:
+            if method not in IMPLICIT_METHODS:
+                by_depth.setdefault(depth, set()).add((method, route.path))
+
+    assert sorted(by_depth) == [2, 3], (
+        f"bearer depths are no longer exactly 2 and 3: {sorted(by_depth)}"
+    )
+    assert by_depth[2] == {
+        ("POST", "/v1/auth/login"),
+        ("POST", "/v1/auth/logout"),
+        ("POST", "/v1/auth/magic-link/request"),
+        ("GET", "/v1/auth/me"),
+        ("POST", "/v1/auth/me/password"),
+        ("POST", "/v1/auth/register"),
+        ("POST", "/v1/search/exact"),
+    }
+    assert by_depth[3] == {
+        ("GET", "/v1/me/sessions"),
+        ("POST", "/v1/sessions"),
+        ("GET", "/v1/sessions/{session_id}"),
+        ("DELETE", "/v1/sessions/{session_id}"),
+        ("POST", "/v1/sessions/{session_id}/messages"),
+        ("GET", "/v1/sessions/{session_id}/messages/{message_id}"),
+    }
+    # The two groups partition the bearer class exactly: 7 + 6 = 13.
+    assert by_depth[2] | by_depth[3] == EXPECTED_BEARER
+    assert not by_depth[2] & by_depth[3]
+
+
+def test_every_inspectable_route_contributes_to_the_inventory() -> None:
+    """No route may end up contributing zero ``(method, path)`` entries.
+
+    ``_inventory`` skips ``HEAD`` and ``OPTIONS``, which Starlette synthesises
+    alongside a declared ``GET``. A route declared ONLY with those methods
+    would therefore contribute nothing at all and escape all three exact-set
+    assertions, the non-emptiness check and every executed credential call —
+    silently, which is the one failure mode this module is built to prevent.
+
+    Measured today: the declared methods across the app are DELETE, GET and
+    POST only, so the skip is currently unreachable. This asserts it stays
+    that way instead of trusting it.
+    """
+    routes, _ = _api_routes()
+    contributes_nothing = {
+        f"{sorted(r.methods)} {r.path}" for r in routes if not set(r.methods) - IMPLICIT_METHODS
+    }
+    assert not contributes_nothing, (
+        "route(s) declare only HEAD/OPTIONS, so _inventory() drops them entirely "
+        f"and no auth assertion in this file can see them: {sorted(contributes_nothing)}"
+    )
+    # Partner: routes exist and they really do reach the inventory, so the
+    # emptiness asserted above is not emptiness of the whole population.
+    assert routes, "no inspectable routes at all"
+    assert len(INVENTORY) >= len(routes), (
+        f"{len(routes)} routes produced only {len(INVENTORY)} inventory entries"
+    )
+
+
+def test_the_credential_checks_the_classifier_knows_are_the_only_ones() -> None:
+    """``_classify`` hardcodes two credential dependencies. Pin that.
+
+    A third credential check added to ``app.core.security`` would leave its
+    routes classified ``OPEN``, and the fix this file's own docstring suggests
+    for an unexpected ``OPEN`` member — "add it to ``EXPECTED_OPEN`` with a
+    reason" — would then label a *guarded* route credential-less. That is a
+    wrong fix the file would have invited, so the assumption is asserted here
+    rather than left implicit.
+
+    Deliberately matched on the naming convention, not on a hand-copied list:
+    a new ``require_*`` in that module fails this and has to be triaged.
+    """
+    import app.core.security as security_module
+
+    requires = {
+        name
+        for name in dir(security_module)
+        if name.startswith("require_") and callable(getattr(security_module, name))
+    }
+    assert requires == {"require_public_client_token", "require_admin_api_key"}, (
+        "app.core.security gained or lost a require_* credential dependency; "
+        f"_classify() only knows two of them: {sorted(requires)}"
+    )
+
+
+def test_the_only_mount_is_the_static_frontend(tmp_path) -> None:
+    """``_api_routes`` excludes ``Mount``; this is what stops that being a drop.
+
+    ``app/main.py`` mounts the built SPA at ``/`` with ``StaticFiles`` when
+    ``backend/frontend_dist`` exists. It has no endpoint and cannot carry an
+    auth dependency, so it is in no auth class — but a future
+    ``app.mount("/internal", some_asgi_app)`` WOULD serve real endpoints, and
+    excluding every ``Mount`` blindly is how it would escape this module.
+
+    Asserted against a real mount rather than against the usual empty list:
+    ``frontend_dist`` is gitignored and absent in CI, so this test builds the
+    app with ``FRONTEND_DIST`` pointed at a tmp directory. Without that the
+    check would pass by having nothing to check.
+    """
+    import app.main as main_module
+
+    (tmp_path / "index.html").write_text("<html></html>")
+    original = main_module.FRONTEND_DIST
+    try:
+        main_module.FRONTEND_DIST = tmp_path
+        mounts = _mounts()
+        assert len(mounts) == 1, f"expected exactly the frontend mount, got {mounts}"
+        assert isinstance(mounts[0].app, StaticFiles), (
+            f"the mount at {mounts[0].path!r} is not StaticFiles but "
+            f"{type(mounts[0].app).__name__} — it may serve guarded endpoints, so it "
+            "cannot be excluded from the auth inventory without being classified"
+        )
+    finally:
+        main_module.FRONTEND_DIST = original
+
+    # Partner: with no frontend_dist there is genuinely no mount, so the
+    # single mount found above came from the fixture and not from somewhere
+    # this test does not control.
+    assert _mounts() == [], "a Mount exists even with no frontend_dist — investigate"
+
 
 def test_every_route_without_a_dependant_is_a_known_framework_path() -> None:
     """Routes the classifier cannot inspect must be named, not ignored.
@@ -379,8 +574,16 @@ def test_every_route_without_a_dependant_is_a_known_framework_path() -> None:
     assert not unexpected, (
         f"route(s) with no inspectable dependencies are not in FRAMEWORK_PATHS: {unexpected}"
     )
-    # Partner: the framework paths really are present in this configuration,
-    # so the subtraction above is not trivially empty because the list was.
+    # Partner: the framework paths really are present, so the subtraction above
+    # is not trivially empty because the list was.
+    #
+    # Unconditional on purpose. ``create_app`` passes ``openapi_url=None`` when
+    # ``environment == "production"``, which removes all four — but the suite
+    # cannot run in that mode at all: ``Settings`` refuses
+    # ``CITEVYN_LLM_PROVIDER=stub`` under ``CITEVYN_ENVIRONMENT=production``, so
+    # ``conftest.py`` fails to import (measured), and the only way past that is
+    # a real paid provider. Guarding this branch on the setting would add a
+    # false arm no test can ever execute.
     assert without_dependant, "no dependant-less routes found — the control for this test is gone"
 
 
@@ -430,16 +633,39 @@ def test_every_path_parameter_has_a_substitution() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _assert_auth_required(response: Any, label: str) -> None:
+def _assert_auth_required(response: Any, label: str, *, expect_bearer_challenge: bool) -> None:
     """Assert the whole thing the CLIENT receives, not just the status code.
 
     ``docs/API_SPEC.md`` §4: the error body is flat ``{request_id, status,
-    error}`` — never nested under ``detail``, which is what FastAPI would
-    emit if ``error_response`` were bypassed. RFC 7235 wants the challenge
-    header on a 401.
+    error}`` — never nested under ``detail``, which is what FastAPI would emit
+    if ``error_response`` were bypassed.
+
+    **The header assertion is the load-bearing one, and measurement says so.**
+    ``app/main.py`` installs a global handler that re-envelopes ANY
+    ``HTTPException`` into that same flat shape. Measured: replacing
+    ``error_response`` in ``require_admin_api_key`` with a bare
+    ``HTTPException(status_code=401, detail="...")`` produces a byte-identical
+    ``{request_id, status, error: {code: "auth_required", ...}}`` body — so the
+    ``detail`` / ``status`` / ``code`` assertions below CANNOT detect a bypassed
+    ``error_response``. A second mechanism supplies the same observation. The
+    only consumer-visible difference is the lost ``WWW-Authenticate`` header.
+    The envelope assertions stay because they pin the contract clients parse;
+    they are simply not what catches that particular regression.
+
+    ``expect_bearer_challenge`` splits the header check by class rather than
+    dropping it. RFC 7235 wants a challenge on every 401, so PRESENCE is
+    asserted for both classes. The literal value ``Bearer`` is only *correct*
+    on the bearer routes; ``app/core/errors.py`` sends it on the admin routes
+    too, whose credential is the ``X-Admin-API-Key`` header. Pinning that value
+    there would turn this test red on a correct RFC fix to the scheme — a test
+    locking in a defect — so the admin cases require the header to exist
+    without dictating what it says.
     """
     assert response.status_code == 401, f"{label} returned {response.status_code}: {response.text}"
-    assert response.headers["WWW-Authenticate"] == "Bearer", label
+    challenge = response.headers.get("WWW-Authenticate")
+    assert challenge, f"{label} 401 has no WWW-Authenticate challenge (RFC 7235)"
+    if expect_bearer_challenge:
+        assert challenge == "Bearer", f"{label} challenge is {challenge!r}, expected 'Bearer'"
     body = response.json()
     assert "detail" not in body, f"{label} envelope is nested under 'detail': {body}"
     assert body["status"] == "error", label
@@ -454,7 +680,11 @@ def test_every_admin_route_rejects_a_missing_admin_key(
     """Derived from the live inventory, so a ninth admin route is covered the
     day it is added. ``test_the_admin_class_is_exactly_the_expected_set`` is
     what stops this parametrize shrinking silently instead."""
-    _assert_auth_required(client.request(method, _concrete(path)), f"{method} {path}")
+    _assert_auth_required(
+        client.request(method, _concrete(path)),
+        f"{method} {path}",
+        expect_bearer_challenge=False,
+    )
 
 
 @pytest.mark.parametrize("method,path", _class_members(BEARER))
@@ -475,7 +705,11 @@ def test_every_bearer_route_rejects_a_missing_bearer_token(
     ``require_public_client_token`` turns the other twelve cases red and leaves
     this one green. The twelve carry the proof; this one is coverage.
     """
-    _assert_auth_required(client.request(method, _concrete(path)), f"{method} {path}")
+    _assert_auth_required(
+        client.request(method, _concrete(path)),
+        f"{method} {path}",
+        expect_bearer_challenge=True,
+    )
 
 
 @pytest.mark.parametrize("method,path", _class_members(ADMIN))
@@ -485,7 +719,7 @@ def test_every_admin_route_rejects_a_wrong_admin_key(
     """401, not 403: a wrong key must be indistinguishable from a missing one
     (``require_admin_api_key`` compares with ``secrets.compare_digest``)."""
     response = client.request(method, _concrete(path), headers={ADMIN_HEADER: "wrong"})
-    _assert_auth_required(response, f"{method} {path}")
+    _assert_auth_required(response, f"{method} {path}", expect_bearer_challenge=False)
 
 
 @pytest.mark.parametrize("method,path", _class_members(BEARER))
@@ -495,7 +729,7 @@ def test_every_bearer_route_rejects_a_wrong_bearer_token(
     response = client.request(
         method, _concrete(path), headers={"Authorization": "Bearer not-the-token"}
     )
-    _assert_auth_required(response, f"{method} {path}")
+    _assert_auth_required(response, f"{method} {path}", expect_bearer_challenge=True)
 
 
 @pytest.mark.parametrize("method,path", _class_members(OPEN))

@@ -130,14 +130,23 @@ def _add_passing_run(session, index_version: str, *, pass_rate: float = 1.0) -> 
 # population by walking the app's dependency graph and fails if this list and
 # the app disagree. This list stays because it is an independent, non-derived
 # second opinion on an access-control boundary.
+#
+# The two ids are FIXED constants, not ``uuid.uuid4()``. Generating them here
+# would run at import time and give the parametrized cases a different node id
+# on every collection, which breaks ``--lf``, ``--nf``, exact ``-k``/nodeid
+# selection and xdist's cross-worker collection check. Nothing needs them to
+# be unique: every request below is rejected before the id is ever looked up.
+_A_RUN_ID = "00000000-0000-4000-8000-00000000a001"
+_A_JOB_ID = "00000000-0000-4000-8000-00000000a002"
+
 _ADMIN_ROUTES = [
     ("GET", "/v1/admin/index_versions"),
     ("GET", "/v1/admin/index_versions/v1"),
     ("POST", "/v1/admin/index_versions/v1/promote"),
     ("GET", "/v1/admin/evaluations"),
-    ("GET", f"/v1/admin/evaluations/{uuid.uuid4()}"),
+    ("GET", f"/v1/admin/evaluations/{_A_RUN_ID}"),
     ("GET", "/v1/admin/ingestion_jobs"),
-    ("GET", f"/v1/admin/ingestion_jobs/{uuid.uuid4()}"),
+    ("GET", f"/v1/admin/ingestion_jobs/{_A_JOB_ID}"),
     ("GET", "/v1/admin/budget"),
 ]
 
@@ -146,18 +155,28 @@ _ADMIN_ROUTES = [
 def test_admin_routes_reject_missing_admin_key(admin_app, method, path) -> None:
     """Every admin route returns 401 without ``X-Admin-API-Key``.
 
-    The envelope is asserted, not just the status: ``docs/API_SPEC.md`` §4
-    promises a flat ``{request_id, status, error}`` body, and RFC 7235 wants
-    the challenge header. A 401 carrying FastAPI's default
-    ``{"detail": ...}`` shape would mean ``error_response`` was bypassed —
-    the client parses one shape for every error or it parses two.
+    RFC 7235 wants a challenge on every 401, so the presence of
+    ``WWW-Authenticate`` is asserted — measured to be the ONLY consumer-visible
+    difference when ``require_admin_api_key`` stops using ``error_response``,
+    because ``app/main.py``'s global handler re-envelopes a bare
+    ``HTTPException`` into a byte-identical body. Its VALUE is deliberately not
+    pinned: ``app/core/errors.py`` sends ``Bearer`` here even though the
+    credential is the ``X-Admin-API-Key`` header, and pinning that would turn
+    this test red on a correct RFC fix to the scheme. Same split, with the
+    measurement written out, in ``tests/test_route_auth_inventory.py``.
+
+    The envelope is still asserted: ``docs/API_SPEC.md`` §4 promises a flat
+    ``{request_id, status, error}`` body, and the client parses one shape for
+    every error or it parses two.
     """
     with TestClient(admin_app) as client:
         response = client.request(method, path)
     assert response.status_code == 401, (
         f"{method} {path} returned {response.status_code}, expected 401: {response.text}"
     )
-    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.headers.get("WWW-Authenticate"), (
+        f"{method} {path} 401 has no WWW-Authenticate challenge (RFC 7235)"
+    )
     body = response.json()
     assert "detail" not in body, f"{method} {path} envelope is nested under 'detail': {body}"
     assert body["error"]["code"] == "auth_required", f"{method} {path} -> {body['error']}"
