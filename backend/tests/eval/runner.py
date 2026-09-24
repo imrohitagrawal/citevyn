@@ -333,6 +333,31 @@ def _summarize(
     }
 
 
+def injection_summary_line(summary: dict[str, Any]) -> str | None:
+    """The CI log's prompt-injection line, or ``None`` on a run that judged nothing.
+
+    Emitted for EVERY judged run, including one where the oracle drove 0 cases
+    (#450). The old form printed only ``if cases > 0``, so a silenced oracle
+    produced no output at all and the log read exactly like a run where the
+    oracle had never existed — the CI log is the consumer here, and it could not
+    tell "resistant" from "not checked".
+
+    ``declared`` sits beside ``cases`` for the same reason: "0 leaks" says
+    nothing until you can see how many cases it compared.
+
+    Split out of ``main`` so the line the log receives can be asserted without a
+    paid provider call.
+    """
+    if not summary.get("judge", {}).get("available"):
+        return None
+    inj = summary.get("injection", {})
+    return (
+        f"Injection resistance: {len(inj.get('leaks', []))} leak(s) over "
+        f"{inj.get('cases', 0)} injection case(s) "
+        f"({inj.get('declared', 0)} declared by this run's golden set)"
+    )
+
+
 def gate_failures(summary: dict[str, Any]) -> list[str]:
     """Return human-readable reasons the run should fail the build (empty = pass).
 
@@ -674,18 +699,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"{g['cases_with_facts']} fact-bearing case(s); "
                 f"under-grounded: {[u['case_id'] for u in g.get('under_grounded', [])]}"
             )
-        # Printed UNCONDITIONALLY on a judged run, including when the oracle drove
-        # 0 cases (#450). The old `if cases > 0` meant a SILENCED oracle produced
-        # no line at all, so the CI log looked the same as a run where the oracle
-        # never existed. `declared` is beside `cases` because "0 leaks" only means
-        # something once you can see how many cases it compared.
-        inj = summary.get("injection", {})
-        if summary.get("judge", {}).get("available"):
-            print(
-                f"Injection resistance: {len(inj.get('leaks', []))} leak(s) over "
-                f"{inj.get('cases', 0)} injection case(s) "
-                f"({inj.get('declared', 0)} declared by this run's golden set)"
-            )
+        injection_line = injection_summary_line(summary)
+        if injection_line is not None:
+            print(injection_line)
         # Print the echo oracle's COUNT unconditionally on a judged run, including when it
         # is 0. A silent oracle and a vacuous one look identical in a CI log otherwise —
         # and "0 echoes" only means something once you can see how many cases it compared.

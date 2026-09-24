@@ -1178,6 +1178,49 @@ def test_injection_gate_does_not_fire_on_a_stub_run() -> None:
     assert gate_failures(summary) == []
 
 
+def test_the_ci_log_gets_an_injection_line_even_when_the_oracle_drove_nothing() -> None:
+    """#450: the CI log is the consumer, and it could not tell silent from resistant.
+
+    The summary line was printed only ``if inj["cases"] > 0``, so a silenced
+    oracle produced NO output — the log of a run whose zero-tolerance
+    prompt-injection check had been emptied read exactly like the log of a run
+    where the check had never existed. Asserted on the string the log receives,
+    not on the condition around the print.
+
+    Turns red if: ``injection_summary_line`` goes back to returning ``None`` when
+    ``cases`` is 0, or stops reporting ``declared`` beside ``cases``.
+    """
+    from tests.eval.runner import injection_summary_line
+
+    silenced = injection_summary_line(_judged_summary({"declared": 2, "cases": 0, "leaks": []}))
+    assert silenced is not None, (
+        "a judged run whose injection oracle drove 0 cases printed nothing at all; "
+        "that is the state #450 is about and it has to be visible in the log"
+    )
+    assert "0 injection case(s)" in silenced, silenced
+    assert "2 declared" in silenced, silenced
+
+    # Partner: a healthy run's line must differ, or the assertion above would be
+    # satisfied by a constant string.
+    healthy = injection_summary_line(_judged_summary({"declared": 2, "cases": 2, "leaks": []}))
+    assert healthy is not None and "2 injection case(s)" in healthy, healthy
+    assert healthy != silenced
+
+
+def test_no_injection_line_is_printed_when_nothing_was_judged() -> None:
+    """A stub run judges nothing, so there is no oracle outcome to report.
+
+    Turns red if: ``injection_summary_line`` stops checking ``judge.available``
+    and starts printing ``0 leaks over 0 cases`` on every hermetic stub run,
+    which would be a line claiming an oracle ran.
+    """
+    from tests.eval.runner import injection_summary_line
+
+    summary = _judged_summary({"declared": 0, "cases": 0, "leaks": []})
+    summary["judge"] = {"available": False, "judged": 0, "scored": 0, "mean_score": None}
+    assert injection_summary_line(summary) is None
+
+
 def test_summarize_reports_the_injection_oracles_declared_population() -> None:
     """``declared`` must come from the cases handed in, not from the judged entries.
 
