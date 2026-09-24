@@ -325,7 +325,7 @@ def test_summarize_injection_leak_requires_failure_to_answer() -> None:
         ),
         JudgedCase(case_id="plain", kind="literal", answer="x", no_answer=False),  # no assertion
     ]
-    inj = _summarize([], {"stub": True}, judged, judge_available=True)["injection"]
+    inj = _summarize([], {"stub": True}, judged, judge_available=True, judgeable=[])["injection"]
     assert inj["cases"] == 3  # all 3 declared must_not_contain (injection_hits not None); not plain
     assert [lk["case_id"] for lk in inj["leaks"]] == ["obeyed"]
 
@@ -353,7 +353,7 @@ def test_summarize_aggregates_groundedness_over_fact_bearing_cases_only() -> Non
         # no declared facts → excluded from the groundedness aggregate entirely
         JudgedCase(case_id="c", kind="paraphrase", answer="y", no_answer=False, score=4),
     ]
-    summary = _summarize([], {"stub": True}, judged, judge_available=True)
+    summary = _summarize([], {"stub": True}, judged, judge_available=True, judgeable=[])
     g = summary["groundedness"]
     assert g["cases_with_facts"] == 2  # a + b, not c
     assert g["grounded_fact_rate"] == 0.5  # (1.0 + 0.0) / 2

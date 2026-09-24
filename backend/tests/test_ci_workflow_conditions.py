@@ -147,6 +147,59 @@ def test_postgres_migrations_runs_on_push_and_still_guards_forks() -> None:
     )
 
 
+def test_the_postgres_job_hands_pytest_a_real_database() -> None:
+    """#449: one deleted env key turns the whole ``postgres`` suite into skips.
+
+    ``jobs.postgres-migrations`` ends with ``uv run pytest -m postgres -v``, and
+    every test that selects reads ``CITEVYN_PG_TEST_URL`` through a module-level
+    ``skipif``. Drop the key and the job reports green on ``15 skipped`` —
+    measured at ``d4763d6``, exit 0.
+
+    This is a YAML PIN, not a bite proof: it reads the workflow file, so it
+    cannot see the job's real environment. What it buys is WHERE the edit fails —
+    inside the fast, required ``pytest + lint`` job on the PR that makes it,
+    rather than in the Postgres job whose only symptom is a green run. The
+    assertion the job itself carries is
+    ``tests/test_postgres_suite_is_not_vacuous.py``.
+
+    Turns red if: ``CITEVYN_PG_TEST_URL`` or ``CITEVYN_DATABASE_URL`` is removed
+    or renamed on the job's ``env:``, either stops being a ``postgresql`` URL, or
+    the job's pytest step stops selecting ``-m postgres``.
+    """
+    job = _load(WORKFLOW_DIR / "ci.yml")["jobs"]["postgres-migrations"]
+    env = job.get("env") or {}
+
+    # ``CITEVYN_PG_TEST_URL`` is what the pytest ``postgres`` marker gates on;
+    # ``CITEVYN_DATABASE_URL`` is what ``db/env.py`` reads for alembic. They are
+    # separate keys pointed at the same service, so losing only the first leaves
+    # the migrations running for real while every integration test skips — the
+    # failure mode that looks most like health.
+    for key in ("CITEVYN_PG_TEST_URL", "CITEVYN_DATABASE_URL"):
+        assert key in env, (
+            f"ci.yml:postgres-migrations no longer sets {key} on its `env:`. "
+            "Without CITEVYN_PG_TEST_URL every `postgres`-marked test skips and "
+            "the required `alembic + postgres integration tests` context reports "
+            "green having run nothing; without CITEVYN_DATABASE_URL alembic has "
+            f"no target. Got: {sorted(env)}"
+        )
+        assert str(env[key]).startswith("postgresql"), (
+            f"ci.yml:postgres-migrations sets {key} to {env[key]!r}, which is not a postgresql URL"
+        )
+
+    steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    pytest_steps = [s for s in steps if "pytest" in str(s.get("run") or "")]
+    assert len(pytest_steps) == 1, (
+        f"expected exactly one pytest step in ci.yml:postgres-migrations, found "
+        f"{len(pytest_steps)}; this rule would otherwise be reading the wrong one"
+    )
+    command = str(pytest_steps[0]["run"])
+    assert "-m postgres" in command, (
+        f"ci.yml:postgres-migrations's pytest step runs {command!r}, which no "
+        "longer selects `-m postgres`. The marker is opt-in, so nothing in "
+        "test_pg_integration.py would run."
+    )
+
+
 def test_judged_eval_remains_the_release_gate() -> None:
     """The paid eval must still run on a v* tag — that is what gates a release.
 

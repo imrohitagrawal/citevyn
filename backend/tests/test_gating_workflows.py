@@ -124,9 +124,13 @@ GATING_WORKFLOWS: tuple[str, ...] = tuple(
 
 # The individual JOBS held to the "not defused" rule below, as
 # ``(workflow file, job id)``. This is a hand-picked list rather than "every job
-# in GATING_WORKFLOWS", because two jobs in ``ci.yml`` carry a DELIBERATE
-# job-level ``if:`` (see _NOT_HELD_TO_THE_DEFUSING_RULE) and a blanket rule would
-# have to be weakened until it caught nothing.
+# in GATING_WORKFLOWS", because some jobs hosting a required context carry a
+# DELIBERATE job-level ``if:``, or no ``steps:`` at all (see
+# _NOT_HELD_TO_THE_DEFUSING_RULE), and a blanket rule would have to be weakened
+# until it caught nothing. Being hand-picked is what made an OMISSION possible,
+# so `test_every_required_context_is_in_one_of_the_two_registers` now requires
+# every required context to land in this tuple or in that register, with a
+# reason — never in neither (#448).
 #
 # Ordered so the FIRST entry is `ci.yml`'s `test` — the longest-standing gating
 # job here and not the one #379 is about, so the rule is exercised against a
@@ -135,6 +139,17 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     # `pytest + lint`. Required, and it is the job that RUNS this file: one
     # `continue-on-error: true` here turns every rule in it advisory at once.
     ("ci.yml", "test"),
+    # `shell suites (bash 3.2 + 5.x) (ubuntu-latest)` and `… (macos-latest)`. TWO
+    # required contexts from one job, and the ONLY jobs that execute
+    # `tests/shell/*` — the rollback, env-guard, deploy_verify and bundle-key
+    # regression suites. `continue-on-error: true` on its single assertion step
+    # ("Run every tests/shell suite") turns both contexts advisory and takes
+    # every one of those suites with them (#448). It was absent from this
+    # population AND from the exemption register below, which is the state
+    # `test_every_required_context_is_in_one_of_the_two_registers` now forbids.
+    # Matrixed on purpose, so it is exempt from the matrix rule alone — see
+    # `_MATRIXED_ON_PURPOSE`.
+    ("ci.yml", "shell-tests"),
     # `type-check + unit tests + build`. Required; carries the vitest suite and
     # the bundle budget gate.
     ("frontend.yml", "build"),
@@ -146,19 +161,66 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     (LIVE_WORKFLOW.name, "live-e2e"),
 )
 
+# Jobs inside ``GATING_JOBS`` held to every rule EXCEPT the no-matrix one, with
+# the reason. Recorded here rather than by keeping the job OUT of
+# ``GATING_JOBS``, because the defusing rule is the one that matters most and
+# dropping the job would have exempted it from that too — which is exactly the
+# hole #448 is about.
+_MATRIXED_ON_PURPOSE: dict[str, str] = {
+    "ci.yml:shell-tests": (
+        "`strategy.matrix: os: [ubuntu-latest, macos-latest]` is the POINT of "
+        "this job: `${v:1:-1}` is bash 4.2+ and errors on the bash 3.2 macOS "
+        "ships, so a Linux-only job reports green on exactly the bug #161 "
+        "describes. Branch protection already holds both expanded names "
+        "(`shell suites (bash 3.2 + 5.x) (ubuntu-latest)` and "
+        "`… (macos-latest)`), so the renaming hazard the matrix rule guards "
+        "against has already been paid for and recorded in "
+        "`_REQUIRED_CONTEXT_WORKFLOWS`."
+    ),
+}
+
+# The population the no-matrix rule is parametrized over: every gating job whose
+# status-check context is NOT already pinned in its expanded form.
+_JOBS_HELD_TO_THE_MATRIX_RULE: tuple[tuple[str, str], ...] = tuple(
+    (workflow, job_id)
+    for workflow, job_id in GATING_JOBS
+    if f"{workflow}:{job_id}" not in _MATRIXED_ON_PURPOSE
+)
+
 # Gating jobs deliberately NOT in the population above, with the reason. An
-# unexplained omission would look identical to one this guard forgot.
+# unexplained omission would look identical to one this guard forgot — and for
+# `ci.yml:shell-tests` that is not hypothetical: it sat in NEITHER register
+# until #448, so nothing in this file would have noticed either of its two
+# required contexts being defused.
+#
+# Keys are ``"<workflow file>:<job id>"`` and MUST resolve to a real job, because
+# `test_every_required_context_is_in_one_of_the_two_registers` looks required
+# contexts up in this dict by that key. The codeql + pr-quality entry used to be
+# a single key naming two jobs at once, which resolved to neither.
 _NOT_HELD_TO_THE_DEFUSING_RULE: dict[str, str] = {
     "ci.yml:postgres-migrations": (
         "`alembic + postgres integration tests` IS a required context but carries "
         "a deliberate job-level `if:` restricting it to same-repo pushes and PRs "
         "(forks get no Postgres service and no secrets). Holding it to `no job "
         "`if:`` would either fail on `main` or force an exemption so specific it "
-        "would re-admit `if: false`."
+        "would re-admit `if: false`. Its own silent-green failure mode — the "
+        "whole `postgres` suite skipping when `CITEVYN_PG_TEST_URL` is gone — is "
+        "guarded instead by `tests/test_postgres_suite_is_not_vacuous.py` (#449), "
+        "which runs INSIDE the job's own `-m postgres` selection."
     ),
-    "codeql.yml:analyze / pr-quality.yml:quality-gate": (
-        "Required contexts produced outside #379's scope. Adding them is a "
-        "separate change with its own review; recorded so the gap is visible."
+    "codeql.yml:analyze": (
+        "`Analyze (python)` IS a required context, produced outside #379's scope "
+        "and matrixed by language. Adding it is a separate change with its own "
+        "review; recorded so the gap is visible."
+    ),
+    "pr-quality.yml:quality-gate": (
+        "`quality-gate / quality-gate` IS a required context, but the job is a "
+        "`uses:` call into a reusable workflow in ANOTHER repository "
+        "(`imrohitagrawal/.github`). It declares no `steps:` of its own and "
+        "carries a deliberate job-level `if: github.event.pull_request.draft == "
+        "false`, so both halves of the defusing rule (no job `if:`, at least "
+        "three steps) would fail on the real repo. What the called workflow does "
+        "is not readable from this repository at all."
     ),
 }
 
@@ -609,7 +671,9 @@ def test_a_gating_job_is_not_defused(workflow: str, job_id: str) -> None:
     )
 
 
-@pytest.mark.parametrize(("workflow", "job_id"), GATING_JOBS, ids=lambda v: str(v))
+@pytest.mark.parametrize(
+    ("workflow", "job_id"), _JOBS_HELD_TO_THE_MATRIX_RULE, ids=lambda v: str(v)
+)
 def test_a_gating_job_does_not_matrix_its_status_check_context(workflow: str, job_id: str) -> None:
     """A ``strategy.matrix`` RENAMES the check GitHub reports — #379's wedge again.
 
@@ -629,15 +693,23 @@ def test_a_gating_job_does_not_matrix_its_status_check_context(workflow: str, jo
     ``ci.yml:test`` (``pytest + lint``, required, and the job that runs this
     file) and on ``frontend-live-e2e.yml:live-e2e``.
 
-    Scope is ``GATING_JOBS``, deliberately NOT "every job whose name is a
-    required context": ``ci.yml:shell-tests`` is matrixed ON PURPOSE — bash 3.2
-    vs 5.x is the defect class it exists to catch — and its two expansions are
-    the strings branch protection already holds, so the broader rule would go
-    red on the real repo on day one. None of the four gating jobs is matrixed
-    today; a future one that genuinely needs a matrix has to record its expanded
-    names in ``_REQUIRED_CONTEXT_WORKFLOWS`` and be argued for here.
+    Scope is ``_JOBS_HELD_TO_THE_MATRIX_RULE`` — ``GATING_JOBS`` minus the jobs
+    recorded in ``_MATRIXED_ON_PURPOSE``. ``ci.yml:shell-tests`` is the one
+    entry there: it is matrixed on purpose (bash 3.2 vs 5.x is the defect class
+    it exists to catch) and its two expansions are the strings branch protection
+    already holds, so this rule would go red on the real repo on day one. It is
+    still held to every OTHER rule in this file, which is #448's point — a job
+    dropped from ``GATING_JOBS`` to dodge this rule would have dodged the
+    defusing rule with it.
 
-    Turns red if: any job in ``GATING_JOBS`` gains a ``strategy:`` key.
+    The jobs held to this rule are ``ci.yml:test``, ``frontend.yml:build``,
+    ``frontend.yml:demo-e2e`` and ``frontend-live-e2e.yml:live-e2e``; none is
+    matrixed today. A future gating job that genuinely needs a matrix has to
+    record its expanded names in ``_REQUIRED_CONTEXT_WORKFLOWS`` and be argued
+    for in ``_MATRIXED_ON_PURPOSE``.
+
+    Turns red if: any job in ``_JOBS_HELD_TO_THE_MATRIX_RULE`` gains a
+    ``strategy:`` key.
     """
     jobs = _load_workflow(workflow).get("jobs") or {}
     assert job_id in jobs, (
@@ -729,8 +801,9 @@ def test_every_sanctioned_step_condition_still_names_a_real_step() -> None:
 def test_the_jobs_left_out_of_the_defusing_rule_are_recorded_with_a_reason() -> None:
     """An unexplained omission looks identical to one this guard forgot.
 
-    Turns red if: ``_NOT_HELD_TO_THE_DEFUSING_RULE`` is emptied, or a job is
-    listed both as guarded and as exempt.
+    Turns red if: ``_NOT_HELD_TO_THE_DEFUSING_RULE`` is emptied, a job is listed
+    both as guarded and as exempt, or an exemption names a job no workflow
+    declares.
     """
     assert _NOT_HELD_TO_THE_DEFUSING_RULE, (
         "the register of gating jobs outside the defusing rule must not be silently emptied"
@@ -738,6 +811,161 @@ def test_the_jobs_left_out_of_the_defusing_rule_are_recorded_with_a_reason() -> 
     guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
     overlap = guarded & set(_NOT_HELD_TO_THE_DEFUSING_RULE)
     assert not overlap, f"job(s) recorded as both guarded and exempt: {sorted(overlap)}"
+
+    # Every exemption must RESOLVE. The completeness test below looks required
+    # contexts up in this dict by `"<workflow>:<job id>"`, so a key that names no
+    # real job silently fails to cover the context it was written for — which is
+    # how `"codeql.yml:analyze / pr-quality.yml:quality-gate"`, one key naming two
+    # jobs, covered neither.
+    unresolved: list[str] = []
+    for key in sorted(_NOT_HELD_TO_THE_DEFUSING_RULE):
+        workflow, _, job_id = key.partition(":")
+        if not job_id or job_id not in (_load_workflow(workflow).get("jobs") or {}):
+            unresolved.append(key)
+    assert not unresolved, (
+        "exemption key(s) do not name a `<workflow file>:<job id>` pair this repo "
+        f"declares: {unresolved}. The completeness test looks contexts up by that "
+        "exact key, so an unresolvable one exempts nothing."
+    )
+
+
+def test_the_matrix_exemption_register_names_real_gating_jobs() -> None:
+    """``_MATRIXED_ON_PURPOSE`` narrows a rule, so it must not rot into a licence.
+
+    Two directions. A key naming a job that is NOT in ``GATING_JOBS`` narrows
+    nothing and hides that the job escaped the defusing rule as well; a key
+    naming a job that is no longer matrixed silently exempts a compliant job
+    from a rule it would now pass.
+
+    Turns red if: an entry names a job outside ``GATING_JOBS``, or one that no
+    longer declares ``strategy:``; or the rule's own population shrinks to fewer
+    than two jobs.
+    """
+    assert _MATRIXED_ON_PURPOSE, (
+        "the matrix-exemption register was emptied; `ci.yml:shell-tests` is "
+        "genuinely matrixed and the no-matrix rule would go red on the real repo"
+    )
+    guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
+    stray = sorted(set(_MATRIXED_ON_PURPOSE) - guarded)
+    assert not stray, (
+        f"matrix-exemption key(s) {stray} are not in GATING_JOBS. An exemption "
+        "for a job that is not guarded at all narrows nothing and hides that the "
+        "job is outside the DEFUSING rule too — #448's actual defect."
+    )
+    not_matrixed: list[str] = []
+    for key in sorted(_MATRIXED_ON_PURPOSE):
+        workflow, _, job_id = key.partition(":")
+        job = (_load_workflow(workflow).get("jobs") or {}).get(job_id) or {}
+        if "strategy" not in job:
+            not_matrixed.append(key)
+    assert not not_matrixed, (
+        f"{not_matrixed} no longer declare `strategy:`, so exempting them from "
+        "the no-matrix rule exempts a job that would now pass it. Drop the "
+        "exemption."
+    )
+    # Partner: the rule above is `@pytest.mark.parametrize`d over this tuple, and
+    # an empty (or single-item) population makes it near-vacuous. Its FIRST entry
+    # is `ci.yml:test`, which has never been matrixed — a compliant control.
+    assert len(_JOBS_HELD_TO_THE_MATRIX_RULE) >= 2, (
+        f"_JOBS_HELD_TO_THE_MATRIX_RULE has {len(_JOBS_HELD_TO_THE_MATRIX_RULE)} "
+        "entries; the no-matrix rule is close to vacuous"
+    )
+    assert ("ci.yml", "test") in _JOBS_HELD_TO_THE_MATRIX_RULE, (
+        "`ci.yml:test` dropped out of the no-matrix population. It is the "
+        "control: a required, never-matrixed job, so the rule is exercised "
+        "against a known-good case and not only against candidates."
+    )
+
+
+def _job_ids_for_context(context: str, workflow: str) -> list[str]:
+    """Every job id in ``workflow`` whose declared name is a prefix of ``context``.
+
+    Matrix jobs expand their ``name:`` per combination, so a required context is
+    the declared name PLUS a suffix — the same prefix match
+    ``test_the_recorded_required_context_still_names_a_real_job`` uses. A name
+    carrying an expression (``Analyze (${{ matrix.language }})``) is truncated at
+    the ``${{``, because it cannot be resolved statically. A job with no
+    ``name:`` reports its job id, which is how ``quality-gate`` resolves.
+    """
+    jobs = _load_workflow(workflow).get("jobs") or {}
+    found: list[str] = []
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        declared = str(job.get("name") or job_id)
+        prefix = declared.split("${{")[0].strip()
+        if prefix and context.startswith(prefix):
+            found.append(job_id)
+    return found
+
+
+def test_every_required_context_is_in_one_of_the_two_registers() -> None:
+    """#448: absent from BOTH registers is how a required gate goes unguarded.
+
+    ``GATING_JOBS`` says "held to the defusing rule".
+    ``_NOT_HELD_TO_THE_DEFUSING_RULE`` says "deliberately not, and here is why".
+    A job in NEITHER is indistinguishable from one this guard forgot — and that
+    was not hypothetical. ``ci.yml:shell-tests`` produces TWO required contexts
+    and is the only job that executes ``tests/shell/*``; it appeared in neither
+    register, so ``continue-on-error: true`` on its one assertion step would have
+    turned both contexts advisory with nothing in this file, the backend suite or
+    ruff going red.
+
+    Turns red if: a required context in ``_REQUIRED_CONTEXT_WORKFLOWS`` resolves
+    to a job listed in neither register — e.g. delete ``("ci.yml",
+    "shell-tests")`` from ``GATING_JOBS`` without adding it to the exemption
+    register — or if a recorded context resolves to no job at all.
+    """
+    # Partner: everything below iterates `_REQUIRED_CONTEXT_WORKFLOWS`, so an
+    # emptied mapping would make it pass having compared nothing.
+    assert len(_REQUIRED_CONTEXT_WORKFLOWS) >= 2, (
+        f"_REQUIRED_CONTEXT_WORKFLOWS holds {len(_REQUIRED_CONTEXT_WORKFLOWS)} "
+        "entries; this rule is close to vacuous"
+    )
+
+    guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
+    exempt = set(_NOT_HELD_TO_THE_DEFUSING_RULE)
+
+    unresolved: list[str] = []
+    unregistered: list[str] = []
+    hit_guarded: list[str] = []
+    hit_exempt: list[str] = []
+    for context, workflow in sorted(_REQUIRED_CONTEXT_WORKFLOWS.items()):
+        job_ids = _job_ids_for_context(context, workflow)
+        if not job_ids:
+            unresolved.append(f"{context!r} is recorded as coming from {workflow}")
+            continue
+        for job_id in job_ids:
+            key = f"{workflow}:{job_id}"
+            if key in guarded:
+                hit_guarded.append(key)
+            elif key in exempt:
+                hit_exempt.append(key)
+            else:
+                unregistered.append(f"{key} (required context {context!r})")
+
+    # Resolution is the other half of the partner: if `_job_ids_for_context`
+    # returned nothing for everything, `unregistered` would be empty and this
+    # rule would pass having checked nothing.
+    assert not unresolved, (
+        "required context(s) resolve to no job at all, so this rule cannot say "
+        f"whether they are registered: {unresolved}. Either a job was renamed — "
+        "which wedges every PR, because branch protection still waits for the "
+        "old context — or _REQUIRED_CONTEXT_WORKFLOWS is stale."
+    )
+    # Both registers must actually be consulted, or one of the two branches above
+    # is dead and a whole class of omission goes unseen.
+    assert hit_guarded, "no required context resolved to a GATING_JOBS entry"
+    assert hit_exempt, "no required context resolved to an exemption entry"
+
+    assert not unregistered, (
+        "required status context(s) resolve to a job in NEITHER register:\n  "
+        + "\n  ".join(unregistered)
+        + "\nAdd the job to GATING_JOBS (so the defusing rule covers it), or to "
+        "_NOT_HELD_TO_THE_DEFUSING_RULE with the reason it cannot be. Being in "
+        "neither means a one-line `continue-on-error: true` turns a required "
+        "gate advisory and nothing here notices."
+    )
 
 
 @pytest.mark.parametrize(

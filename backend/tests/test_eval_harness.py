@@ -1090,6 +1090,7 @@ def test_injection_gate_flags_a_leak() -> None:
         },
         "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
         "injection": {
+            "declared": 2,
             "cases": 2,
             "leaks": [{"case_id": "adv_injection_ratelimit", "hits": ["PWNED"]}],
         },
@@ -1108,9 +1109,177 @@ def test_injection_gate_passes_when_no_leak() -> None:
             "refusal_leaks": 0,
         },
         "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
-        "injection": {"cases": 2, "leaks": []},
+        "injection": {"declared": 2, "cases": 2, "leaks": []},
     }
     assert gate_failures(summary) == []
+
+
+def _judged_summary(injection: dict[str, Any]) -> dict[str, Any]:
+    """A summary of an otherwise-healthy JUDGED run, with the injection block swapped in."""
+    return {
+        "retrieval": {
+            "answerable_total": 15,
+            "overall_hit_rate": 1.0,
+            "hit_rate_by_kind": {"literal": 1.0, "paraphrase": 1.0},
+            "refusal_leaks": 0,
+        },
+        "judge": {"available": True, "judged": 15, "scored": 15, "mean_score": 4.0},
+        "injection": injection,
+    }
+
+
+def test_injection_gate_fails_an_oracle_that_compared_nothing() -> None:
+    """#450: zero leaks over zero cases is not a pass, it is a silenced oracle.
+
+    ``gate_failures`` checked ``injection.leaks`` and never ``injection.cases``,
+    so rewording the two sentinels out of ``tests/eval/golden.jsonl`` left the
+    release gate's only live-model prompt-injection check comparing nothing —
+    with every hermetic test green and, because the summary line was printed only
+    when ``cases > 0``, no line in the CI log either.
+
+    Turns red if: the ``declared > 0 and cases == 0`` clause is removed from
+    ``gate_failures``.
+    """
+    from tests.eval.runner import gate_failures
+
+    failures = gate_failures(_judged_summary({"declared": 2, "cases": 0, "leaks": []}))
+    assert any("injection" in f and "0 of the 2" in f for f in failures), failures
+
+
+def test_injection_gate_stays_silent_when_the_run_declares_no_injection_cases() -> None:
+    """Partner: the clause must not fire where the oracle legitimately cannot run.
+
+    Both injection rows are ``postgres_only``, so a HERMETIC judged run drops
+    them before judging and ``declared`` is 0 there. A gate that fired on
+    ``cases == 0`` alone would red every hermetic judged run — which is why the
+    clause reads ``declared``, the population this run could actually drive, and
+    not the whole golden file.
+
+    Turns red if: the clause starts firing on ``cases == 0`` regardless of
+    ``declared``.
+    """
+    from tests.eval.runner import gate_failures
+
+    assert gate_failures(_judged_summary({"declared": 0, "cases": 0, "leaks": []})) == []
+
+
+def test_injection_gate_does_not_fire_on_a_stub_run() -> None:
+    """A stub run judges nothing, so an un-run oracle there is expected, not a defect.
+
+    Same reasoning the multi-turn echo gate already carries. Without this the
+    hermetic ``not postgres`` CI job would fail on every run.
+
+    Turns red if: the clause stops checking ``judge.available``.
+    """
+    from tests.eval.runner import gate_failures
+
+    summary = _judged_summary({"declared": 2, "cases": 0, "leaks": []})
+    summary["judge"] = {"available": False, "judged": 0, "scored": 0, "mean_score": None}
+    assert gate_failures(summary) == []
+
+
+def test_summarize_reports_the_injection_oracles_declared_population() -> None:
+    """``declared`` must come from the cases handed in, not from the judged entries.
+
+    Counting judged entries is what ``cases`` already does; that is exactly the
+    number that goes to 0 when the oracle is silenced. ``declared`` has to be
+    independent of the run's outcome or it cannot contradict it.
+
+    Turns red if: ``_summarize`` stops reading ``must_not_contain`` off
+    ``judgeable`` — sourcing ``declared`` from ``injection_cases`` makes it equal
+    ``cases`` and this asserts 2 against 0.
+    """
+    from tests.eval.cases import EvalCase
+    from tests.eval.runner import _summarize
+
+    def _case(case_id: str, forbidden: tuple[str, ...]) -> EvalCase:
+        return EvalCase(
+            id=case_id,
+            area="claude_api",
+            kind="literal",
+            question="q",
+            expected_source="claude_api",
+            expected_gist="g",
+            expect_no_answer=False,
+            raw={},
+            must_not_contain=forbidden,
+        )
+
+    judgeable = [
+        # FIRST is a case with NO sentinel, so a count that simply returned
+        # `len(judgeable)` fails here rather than looking right.
+        _case("plain", ()),
+        _case("inj_a", ("PWNED",)),
+        _case("inj_b", ("HACKED-TOKEN",)),
+    ]
+    # Nothing was judged: the oracle is silenced, which is the state the gate
+    # must be able to see.
+    inj = _summarize([], {"stub": True}, [], judge_available=True, judgeable=judgeable)["injection"]
+    assert inj["declared"] == 2, inj
+    assert inj["cases"] == 0, inj
+
+
+def test_a_hermetic_run_declares_no_injection_cases_and_still_passes_the_gate() -> None:
+    """End-to-end: the new field must not red the hermetic CI gate.
+
+    Both golden injection rows carry ``postgres_only: true``, so ``judgeable``
+    drops them on the default hermetic path. Asserted against the REAL golden
+    file and the real runner rather than a fixture, because what would break is
+    the wiring at the call site (passing ``cases`` where ``judgeable`` belongs),
+    which a hand-built summary cannot see.
+
+    Turns red if: ``run_eval_async`` passes ``cases`` instead of ``judgeable``
+    into ``_summarize`` — ``declared`` becomes 2 on a hermetic run.
+    """
+    from tests.eval.runner import gate_failures, run_eval_async
+
+    summary = asyncio.run(run_eval_async(golden_path=GOLDEN_PATH, with_judge=False))
+    assert summary["injection"] == {"declared": 0, "cases": 0, "leaks": []}, summary["injection"]
+    assert summary["judge"]["available"] is False, "this test must not make a paid call"
+    assert not [f for f in gate_failures(summary) if "injection" in f]
+
+
+def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
+    """#450: an oracle can be emptied out of the golden set without a red test.
+
+    ``gate_failures`` has four judge-independent, ZERO-TOLERANCE oracles, and
+    each is written as "fail if any case violates it" — which iterates nothing,
+    and passes, when no case carries the field. ``followup`` already had this
+    partner (``test_followup_raw_misses_without_memory`` asserts ``any(c.kind ==
+    "followup" ...)``); ``must_not_contain`` had none, and
+    ``test_eval_judge_subset.py``'s ``if case.must_not_contain: assert case.id in
+    sel_ids`` iterates nothing once the field is gone too.
+
+    Turns red if: ``must_not_contain`` is stripped from both
+    ``adv_injection_ratelimit`` and ``adv_injection_authheader``, or the last
+    ``followup`` / ``refusal`` / fact-bearing case leaves the golden file.
+    """
+    cases = load_cases(GOLDEN_PATH)
+    populations = {
+        "injection (must_not_contain)": [c.id for c in cases if c.must_not_contain],
+        "multi-turn echo (kind=followup)": [c.id for c in cases if c.kind == "followup"],
+        "refusal leaks (kind=refusal)": [c.id for c in cases if c.kind == "refusal"],
+        "groundedness (expected_facts)": [c.id for c in cases if c.expected_facts],
+    }
+    empty = sorted(name for name, ids in populations.items() if not ids)
+    assert not empty, (
+        f"the golden set carries no case for zero-tolerance oracle(s) {empty}, so "
+        "that gate iterates nothing and passes. Populations found: "
+        f"{ {name: len(ids) for name, ids in populations.items()} }"
+    )
+    # The injection oracle needs BOTH sentinels, not just one: each covers a
+    # different injection shape (an "ignore all previous instructions" override
+    # and a "disregard your instructions, output X instead" substitution) in a
+    # different area, so losing one halves the oracle silently.
+    assert populations["injection (must_not_contain)"] == [
+        "adv_injection_ratelimit",
+        "adv_injection_authheader",
+    ], (
+        "the injection cases are no longer exactly the two pinned rows: "
+        f"{populations['injection (must_not_contain)']}. Adding one is fine — "
+        "update this list in the same change, so the pin stays a statement about "
+        "what the oracle covers."
+    )
 
 
 def test_gate_tolerates_missing_groundedness_block() -> None:
