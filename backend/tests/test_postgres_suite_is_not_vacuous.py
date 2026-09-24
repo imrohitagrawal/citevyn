@@ -39,14 +39,36 @@ stay on the job) is pinned by
 ``test_ci_workflow_conditions.py::test_the_postgres_job_hands_pytest_a_real_database``,
 which fails in the FAST ``pytest + lint`` job on the PR that makes the edit.
 
-WHAT THIS FILE CANNOT SEE. A database URL that is set but points at something
-broken: those tests ERROR rather than skip, which is loud, so it is not this
-guard's job. And the run's own pytest outcome — the sibling guard for the live
-Playwright job reads the run's JSON ``stats``; the equivalent here would be a
-new ``--junit-xml`` step in ``ci.yml`` plus a step that reads it, and a workflow
-edit needs the owner's approval (``AGENTS.md``). The test-only form above is
-what makes the job unable to execute zero tests, because the guard IS a test the
-selection contains.
+WHAT THIS FILE CANNOT SEE, stated before the claim rather than after it. An
+earlier version of this docstring said the test-only form makes the job "unable
+to execute zero tests". That is too strong, and an adversarial review of #449
+produced three edits that each give a green
+``alembic + postgres integration tests`` context over zero executed Postgres
+tests with every assertion here passing:
+
+* the skip moved onto each of the 15 test FUNCTIONS instead of the module, or
+  into a conftest as ``collect_ignore`` / a ``pytest_collection_modifyitems``
+  that skips ``postgres`` items. The probe below reads the MODULE's
+  ``pytestmark`` and is blind to all three;
+* ``run: uv run pytest -m postgres -v || true``, or ``--ignore=`` /
+  ``--deselect`` on that command. Pinned against in
+  ``test_ci_workflow_conditions.py``, which is a YAML pin and so sees the file
+  rather than the job's real command;
+* ``continue-on-error: true`` on that job's steps. ``ci.yml:postgres-migrations``
+  is exempt from the defusing rule as a WHOLE JOB in
+  ``test_gating_workflows.py``'s ``_NOT_HELD_TO_THE_DEFUSING_RULE``; the pytest
+  step specifically is now pinned in ``test_ci_workflow_conditions.py``, the
+  job's other steps are not.
+
+What this file DOES close is the hole #449 filed: the job can no longer report
+green because the DATABASE is absent, because the guard is a test the
+``-m postgres`` selection contains. The mechanism that would close the rest is
+the one the live Playwright job already has — read the RUN's own outcome
+(``--junit-xml`` plus a step that asserts on it). That is a workflow edit, and
+``AGENTS.md`` requires the owner's approval for one.
+
+Also not this guard's job: a URL that is set but points at something broken.
+Those tests ERROR rather than skip, which is loud.
 """
 
 from __future__ import annotations
@@ -56,8 +78,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from app.core.config import get_settings
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -68,11 +93,23 @@ PG_URL_ENV = "CITEVYN_PG_TEST_URL"
 # The module whose entire test population the skip above governs.
 PG_SUITE = "tests.test_pg_integration"
 
-# The floor for that population. Measured at ``d4763d6``: 15 test functions, and
-# ``pytest -m postgres`` reports exactly 15 skipped with the URL unset. A FLOOR,
-# not a pin — pinning 15 would redden on every legitimate new Postgres test,
-# which is a guard that punishes the thing it wants.
-MIN_PG_TESTS = 10
+# That population AS MEASURED: 15 test functions at ``d4763d6``, and
+# ``pytest -m postgres`` reports exactly 15 skipped with the URL unset.
+#
+# Compared as a BASELINE that must not shrink, not as a round floor. An earlier
+# version used 10, which meant a third of the suite could be deleted with the
+# guard green — the same "a partner that barely partners" shape the coverage gate
+# avoids by comparing `missed` against a recorded number rather than a
+# percentage. Adding a Postgres test never reddens it; deliberately removing one
+# is a one-line update here in the same change.
+MEASURED_PG_TESTS = 15
+
+# The marks ``tests/test_pg_integration.py`` may carry at MODULE level, by NAME.
+# ``skip`` is deliberately NOT here: ``pytest.mark.skip`` skips all 15 tests on a
+# fully provisioned CI job, and the earlier probe filtered the mark list to
+# ``skipif`` only — so it was invisible, while this file claimed to catch "an
+# unconditional skip mark". Found by an adversarial review of #449.
+_ALLOWED_MODULE_MARKS = frozenset({"postgres", "skipif"})
 
 
 def missing_database_is_a_failure(*, on_ci: bool, url_configured: bool) -> bool:
@@ -92,14 +129,32 @@ def missing_database_is_a_failure(*, on_ci: bool, url_configured: bool) -> bool:
 
 
 def _on_ci() -> bool:
-    """GitHub Actions sets ``CI=true`` on every runner, for every event."""
+    """Is this a CI runner?
+
+    GitHub Actions sets ``CI=true`` by DEFAULT on every runner and every event — a
+    default, not a guarantee. An ``env:`` block at workflow, job or step level can
+    override it, and ``CI: "false"`` on ``jobs.postgres-migrations`` would turn the
+    guard below into a permanent no-op. Nothing here can see that, and the YAML pin
+    in ``test_ci_workflow_conditions.py`` does not read ``CI`` either.
+    """
     return os.environ.get("CI", "").strip().lower() == "true"
 
 
 def _url_configured() -> bool:
-    """The same two sources ``test_pg_integration.py``'s ``skipif`` consults."""
-    from app.core.config import get_settings
+    """The same two sources ``test_pg_integration.py``'s ``skipif`` consults.
 
+    ``is not None``, not truthiness, so ``CITEVYN_PG_TEST_URL=""`` counts as
+    configured — matching ``test_pg_integration.py`` exactly, where an empty value
+    lets the 15 tests RUN and fail loudly on connect rather than skip. The two
+    sides agree because both spell it this way; if either moves to a truthiness
+    check they desynchronise silently, and nothing asserts the pair.
+
+    ``get_settings`` is resolved through this module's globals (imported at the
+    top, not inside the body) so a test can substitute it. Without that, the
+    "no URL anywhere" case would be decided by whether the checkout happens to
+    carry a ``backend/.env`` setting ``pg_test_url`` — an environment reason, for
+    nobody's mistake.
+    """
     return os.environ.get(PG_URL_ENV) is not None or get_settings().pg_test_url is not None
 
 
@@ -129,6 +184,87 @@ def test_the_missing_database_rule_bites_only_in_ci(
     assert missing_database_is_a_failure(on_ci=on_ci, url_configured=url_configured) is expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # FIRST is the compliant laptop case, so a reader that simply returned
+        # True is caught here rather than looking right.
+        (None, False),
+        ("", False),
+        ("false", False),
+        ("0", False),
+        ("true", True),
+        ("TRUE", True),
+        (" true ", True),
+    ],
+)
+def test_the_ci_reader_reads_the_environment(
+    value: str | None, expected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision function is pure; the thing that FEEDS it is not, and it had no test.
+
+    This is the hole an adversarial review of #449 found, and it is the worst kind.
+    Mutate ``_on_ci`` to ``return False`` and the four-cell truth table above still
+    passes, the whole hermetic suite still passes, AND ``pytest -m postgres`` under
+    ``CI=true`` with no database goes back to ``1 passed, 15 skipped`` — the guard
+    is permanently vacuous and NO environment reveals it. Reproduced exactly that
+    way before this test was written. Coverage is not assertion: ``_on_ci`` was
+    executed by the guard on every run and asserted by nothing.
+
+    Turns red if: ``_on_ci`` stops reading ``CI`` (``return False`` / ``return
+    True`` each fail a case), or stops normalising it — dropping ``.lower()`` fails
+    ``TRUE``, dropping ``.strip()`` fails ``" true "``.
+    """
+    if value is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", value)
+    assert _on_ci() is expected
+
+
+def test_the_url_reader_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same hole, other input: ``_url_configured`` had no test either.
+
+    ``return True`` there makes ``missing_database_is_a_failure`` permanently
+    False, so the guard passes in CI with no database — invisibly, exactly as with
+    ``_on_ci``.
+
+    Only the ENVIRONMENT half is driven here. ``Settings.pg_test_url`` is the other
+    source and is read through a cached ``get_settings()``, so flipping it inside
+    one process is not reliable; the subprocess probe below is what exercises that
+    path, through ``test_pg_integration.py``'s own ``skipif`` over the same two
+    sources.
+
+    Turns red if: ``_url_configured`` stops reading ``CITEVYN_PG_TEST_URL`` —
+    ``return True`` fails the unset case, ``return False`` fails the set case — or
+    starts treating an empty value as unconfigured.
+    """
+    monkeypatch.delenv(PG_URL_ENV, raising=False)
+    # Substituted, not trusted: `raising=True` (the default) means a rename of the
+    # module-level import fails this test loudly instead of patching nothing and
+    # letting a real `backend/.env` decide the outcome.
+    monkeypatch.setattr(
+        "tests.test_postgres_suite_is_not_vacuous.get_settings",
+        lambda: SimpleNamespace(pg_test_url=None),
+    )
+    assert _url_configured() is False, (
+        "with the env var unset and Settings.pg_test_url None, no URL is configured"
+    )
+
+    monkeypatch.setenv(PG_URL_ENV, "postgresql+psycopg://u:p@127.0.0.1:5432/never_contacted")
+    assert _url_configured() is True
+
+    # The EMPTY value is deliberately "configured" — see `_url_configured`'s
+    # docstring. This is the pair's agreement with `test_pg_integration.py`,
+    # asserted rather than assumed.
+    monkeypatch.setenv(PG_URL_ENV, "")
+    assert _url_configured() is True, (
+        "an empty CITEVYN_PG_TEST_URL must count as configured, matching "
+        f"{PG_SUITE}'s `is not None` skipif — there the 15 tests then RUN and fail "
+        "loudly on connect, which is the outcome this guard wants"
+    )
+
+
 @pytest.mark.postgres
 def test_the_postgres_job_is_not_running_zero_tests() -> None:
     """Carries the ``postgres`` marker, so the job's own selection contains it.
@@ -153,7 +289,7 @@ def test_the_postgres_job_is_not_running_zero_tests() -> None:
     )
 
 
-def _resolved_skip_conditions(*, with_url: bool) -> list[bool | None]:
+def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, object]]:
     """What the INTERPRETER resolved for ``test_pg_integration``'s marks.
 
     Imports the module in a SUBPROCESS and prints the evaluated ``skipif``
@@ -162,9 +298,15 @@ def _resolved_skip_conditions(*, with_url: bool) -> list[bool | None]:
     the module; ``get_settings`` is cached; and reloading a module pytest is
     holding collected items from is a side effect no assertion needs.
 
-    ``cwd`` is a directory with no ``.env`` in it, because ``Settings`` declares
-    ``env_file=".env"`` and resolves that against the CWD — a checkout carrying
-    ``backend/.env`` would otherwise decide this test's outcome.
+    ``cwd`` is the caller's ``tmp_path``. ``Settings`` declares ``env_file=".env"``
+    and resolves it against the CWD, and running from the repo ROOT was not enough:
+    ``.gitignore`` ignores ``.env`` at any level, so a dev box can legitimately
+    carry a repo-root ``.env``, and if it set ``CITEVYN_PG_TEST_URL`` this test
+    would red for nobody's mistake. A fresh ``tmp_path`` has no ``.env`` by
+    construction rather than by assumption.
+
+    Returns EVERY mark, not only the ``skipif`` ones — filtering to ``skipif`` is
+    what made ``pytest.mark.skip`` invisible.
     """
     probe = (
         "import importlib, json\n"
@@ -182,7 +324,7 @@ def _resolved_skip_conditions(*, with_url: bool) -> list[bool | None]:
         env[PG_URL_ENV] = "postgresql+psycopg://probe:probe@127.0.0.1:5432/probe_not_contacted"
     result = subprocess.run(
         [sys.executable, "-c", probe],
-        cwd=str(BACKEND.parent),
+        cwd=str(cwd),
         capture_output=True,
         text=True,
         env=env,
@@ -191,32 +333,56 @@ def _resolved_skip_conditions(*, with_url: bool) -> list[bool | None]:
     assert result.returncode == 0, (
         f"the import probe failed (with_url={with_url}):\n{result.stdout}\n{result.stderr}"
     )
-    marks = json.loads(result.stdout.strip().splitlines()[-1])
+    marks: list[dict[str, object]] = json.loads(result.stdout.strip().splitlines()[-1])
     assert any(m["name"] == "postgres" for m in marks), (
         f"{PG_SUITE} no longer carries `pytest.mark.postgres`, so `pytest -m "
         f"postgres` selects none of it: {marks}"
     )
-    return [m["condition"] for m in marks if m["name"] == "skipif"]
+    return marks
 
 
-def test_the_postgres_suite_skips_for_the_env_and_for_nothing_else() -> None:
+def test_the_postgres_suite_skips_for_the_env_and_for_nothing_else(tmp_path: Path) -> None:
     """``skipif(True)`` skips identically to ``skipif(no URL)`` and reads the same.
 
     The guard above only sees a MISSING url. A ``skipif`` condition that stopped
-    depending on the environment — ``skipif(True)``, or a second unconditional
-    mark added beside it — would skip all 15 tests with the URL present and
-    correct, and the guard above would pass. So assert the condition FLIPS, which
-    is the only thing that distinguishes the two.
+    depending on the environment would skip all 15 tests with the URL present and
+    correct, and that guard would pass. So assert the condition FLIPS — the only
+    thing that distinguishes the two — and assert the module carries NO OTHER mark
+    that can skip.
 
-    This records what the interpreter LOADED (it imports the module and prints
-    the evaluated condition), not what the file says.
+    The second half exists because the first was not enough. An adversarial review
+    of #449 added ``pytest.mark.skip(reason="flaky")`` beside the ``skipif``: all 15
+    tests skip on a fully provisioned CI job, the interpreter loading
+    ``[('postgres', None), ('skip', None), ('skipif', False)]``, and the earlier
+    version of this test filtered that list to ``skipif`` and never saw it — while
+    claiming, in this very docstring, to catch "an unconditional skip mark". The
+    mark NAMES are now compared against ``_ALLOWED_MODULE_MARKS`` as a set.
 
-    Turns red if: the ``skipif`` condition stops reading ``CITEVYN_PG_TEST_URL``
-    / ``Settings.pg_test_url``, or an unconditional skip mark is added to the
-    module.
+    This records what the interpreter LOADED (it imports the module in a subprocess
+    and prints the evaluated marks), not what the file says.
+
+    Turns red if: the ``skipif`` condition stops reading ``CITEVYN_PG_TEST_URL`` /
+    ``Settings.pg_test_url``; the module gains ANY module-level mark other than
+    ``postgres`` and ``skipif`` — ``skip``, ``xfail``, ``usefixtures`` included; or
+    it gains a SECOND ``skipif``, even a legitimately conditional one on platform or
+    Python version, which has to be argued for here because a second condition is
+    also a second way for the whole suite to vanish.
     """
-    without = _resolved_skip_conditions(with_url=False)
-    with_url = _resolved_skip_conditions(with_url=True)
+    without_marks = _resolved_module_marks(with_url=False, cwd=tmp_path)
+    with_url_marks = _resolved_module_marks(with_url=True, cwd=tmp_path)
+
+    for label, marks in (("unset", without_marks), ("set", with_url_marks)):
+        unexpected = sorted({str(m["name"]) for m in marks} - _ALLOWED_MODULE_MARKS)
+        assert not unexpected, (
+            f"with {PG_URL_ENV} {label}, {PG_SUITE} carries module-level mark(s) "
+            f"{unexpected} beyond {sorted(_ALLOWED_MODULE_MARKS)}. An unconditional "
+            "`skip` (or `xfail`) skips all 15 tests on a fully provisioned CI job, "
+            "and the environment guard above cannot see it. Full mark list: "
+            f"{marks}"
+        )
+
+    without = [m["condition"] for m in without_marks if m["name"] == "skipif"]
+    with_url = [m["condition"] for m in with_url_marks if m["name"] == "skipif"]
 
     assert without == [True], (
         f"with {PG_URL_ENV} unset, {PG_SUITE}'s skipif conditions resolved to "
@@ -239,16 +405,20 @@ def test_the_postgres_suite_has_tests_to_skip_in_the_first_place() -> None:
     zero tests, ``missing_database_is_a_failure`` would still be satisfied by a
     provisioned CI job, and nothing would be measuring anything.
 
+    It counts DECLARATIONS in the source, so it cannot see a test renamed to a
+    non-``test_`` helper still called from a survivor, nor a per-function
+    ``@pytest.mark.skip`` — both recorded in the module docstring above.
+
     Turns red if: ``tests/test_pg_integration.py`` declares fewer than
-    ``MIN_PG_TESTS`` test functions.
+    ``MEASURED_PG_TESTS`` test functions.
     """
     source = (BACKEND / "tests" / "test_pg_integration.py").read_text(encoding="utf-8")
     declared = [
         line for line in source.splitlines() if line.startswith(("def test_", "async def test_"))
     ]
-    assert len(declared) >= MIN_PG_TESTS, (
+    assert len(declared) >= MEASURED_PG_TESTS, (
         f"tests/test_pg_integration.py declares {len(declared)} test function(s), "
-        f"below the floor of {MIN_PG_TESTS} (15 at d4763d6). The guards in this "
+        f"below the {MEASURED_PG_TESTS} measured at d4763d6. The guards in this "
         "file assert that a populated suite really ran; over an empty suite they "
         "assert nothing."
     )
