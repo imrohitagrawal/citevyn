@@ -553,13 +553,25 @@ def test_the_only_mount_is_the_static_frontend(tmp_path) -> None:
             f"{type(mounts[0].app).__name__} — it may serve guarded endpoints, so it "
             "cannot be excluded from the auth inventory without being classified"
         )
+        # Partner, and it has to run while FRONTEND_DIST is still under this
+        # test's control: point it at a path that does not exist and the mount
+        # goes away, which proves the single mount above came from the fixture
+        # rather than from something this test does not own.
+        #
+        # An earlier version asserted this AFTER the `finally` restored the real
+        # path, which made it a test of the developer's filesystem. On any
+        # checkout that HAS `backend/frontend_dist` — the live-OAuth local setup
+        # this repo documents, gitignored and so absent only in CI — it failed,
+        # with a message reading "even with no frontend_dist" about a machine
+        # where frontend_dist is exactly what is there. Reproduced by creating
+        # the directory and running this test: red before, green after.
+        main_module.FRONTEND_DIST = tmp_path / "definitely-not-built"
+        assert _mounts() == [], (
+            "a Mount exists with FRONTEND_DIST pointed at a nonexistent path, so "
+            "the mount found above did not come from this test's fixture"
+        )
     finally:
         main_module.FRONTEND_DIST = original
-
-    # Partner: with no frontend_dist there is genuinely no mount, so the
-    # single mount found above came from the fixture and not from somewhere
-    # this test does not control.
-    assert _mounts() == [], "a Mount exists even with no frontend_dist — investigate"
 
 
 def test_every_route_without_a_dependant_is_a_known_framework_path() -> None:
@@ -732,6 +744,53 @@ def test_every_bearer_route_rejects_a_wrong_bearer_token(
     _assert_auth_required(response, f"{method} {path}", expect_bearer_challenge=True)
 
 
+# The credential-less routes whose `!= 401` is carried by an unrelated 404:
+# with no OAuth provider configured under test they 404 before reaching their
+# own logic. Measured, not assumed. Each is pinned to 404 in the test below, so
+# the set cannot quietly become a list of routes nobody checks.
+_OAUTH_UNCONFIGURED_404: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/v1/auth/oauth/{provider}/start"),
+        ("GET", "/v1/auth/oauth/{provider}/callback"),
+        ("GET", "/v1/auth/oauth/{provider}/connect/start"),
+    }
+)
+
+
+def test_the_unconfigured_oauth_register_is_complete_and_reachable() -> None:
+    """The partner for ``_OAUTH_UNCONFIGURED_404``: it cannot be emptied.
+
+    Measured while writing it, which is why it exists: dropping one entry from
+    that frozenset does NOT redden the parametrized test, because the 404 pin
+    only fires for members. So the set could be shrunk to nothing and the
+    weaker `!= 401` assertion would go back to being silently carried by a 404,
+    which is the hole the register was added to close. This asserts the set is
+    exactly the OAuth routes the classifier calls credential-less, derived from
+    the inventory rather than hand-kept beside it.
+
+    Turns red if: an entry is removed from ``_OAUTH_UNCONFIGURED_404``, one is
+    added that is not a credential-less OAuth route, or an OAuth route leaves
+    the credential-less class.
+
+    It earned its place on the first run: the hand-written register had
+    ``POST .../unlink``, which is NOT credential-less, and was missing
+    ``GET .../connect/start``, which is. Two errors in three entries, caught
+    before the register could go on quietly excusing the wrong routes.
+    """
+    oauth_open = {(method, path) for method, path in _class_members(OPEN) if "/oauth/" in path}
+    assert oauth_open, (
+        "no OAuth route is classified credential-less any more, so this register "
+        "and the 404 pin it drives are guarding nothing — delete both or re-derive"
+    )
+    assert oauth_open == _OAUTH_UNCONFIGURED_404, (
+        "_OAUTH_UNCONFIGURED_404 has drifted from the credential-less OAuth routes.\n"
+        f"  registered, not credential-less OAuth: "
+        f"{sorted(_OAUTH_UNCONFIGURED_404 - oauth_open)}\n"
+        f"  credential-less OAuth, not registered: "
+        f"{sorted(oauth_open - _OAUTH_UNCONFIGURED_404)}"
+    )
+
+
 @pytest.mark.parametrize("method,path", _class_members(OPEN))
 def test_a_credential_less_route_does_not_answer_401(
     client: TestClient, method: str, path: str
@@ -744,6 +803,13 @@ def test_a_credential_less_route_does_not_answer_401(
     Only the status code's 401-ness is asserted — what these routes do with a
     missing token, missing state or an empty index is each route's own test's
     business.
+
+    WHAT THIS ASSERTION CANNOT SEE ON ITS OWN, recorded rather than left for the
+    next reader to measure: the OAuth paths answer 404 with no provider
+    configured under test, before reaching any logic of their own. For those,
+    ``!= 401`` is satisfied by that 404 and not by anything about credentials.
+    ``_OAUTH_UNCONFIGURED_404`` names them and pins the 404, so the day one
+    answers something else this file notices instead of shrugging.
     """
     response = client.request(method, _concrete(path), follow_redirects=False)
     assert response.status_code != 401, (
@@ -751,6 +817,14 @@ def test_a_credential_less_route_does_not_answer_401(
         "either it gained a credential dependency (update EXPECTED_OPEN) or the "
         "classifier is wrong"
     )
+    if (method, path) in _OAUTH_UNCONFIGURED_404:
+        assert response.status_code == 404, (
+            f"{method} {path} is registered as answering 404 with no OAuth provider "
+            f"configured, but answered {response.status_code}. While it sits in "
+            "_OAUTH_UNCONFIGURED_404 the `!= 401` assertion above is carried by that "
+            "404 rather than by the route's own credential handling; if the route "
+            "now really does handle a missing credential, take it out of the set."
+        )
 
 
 @pytest.mark.parametrize(
