@@ -273,8 +273,9 @@ _UNGUARDABLE: tuple[str, ...] = (
     "branch-protection entry below: a test cannot read that API (#325).",
     "Whether the `*-chromium-linux.png` baselines were drawn by the browser the "
     "container tag names, or on the right CPU architecture. "
-    "(#325-PENDING-BASELINES: they are held for owner review as of this commit "
-    "and land in the one after it.) "
+    "(They were reviewed image by image and re-run in the job's own container "
+    "against the merged tree before landing, but that is a one-off check by a "
+    "person, not a rule this file enforces.) "
     "`test_the_visual_job_runs_the_browser_that_drew_its_baselines` pins the TAG "
     "against the lockfile; it cannot open a PNG and ask what rendered it. "
     "Measured while generating them: arm64 and amd64 renders differ for 12 of "
@@ -2062,11 +2063,8 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
     the same version) — so the container tag and the installed Playwright are two
     records of the same decision, in two files, with nothing else comparing them.
 
-    NOTE (#325-PENDING-BASELINES), true as of the commit that added this rule: no
-    ``-chromium-linux.png`` is committed yet. They are generated and held for the
-    owner to review the images. This rule does not depend on them existing — it
-    compares a tag against a lockfile — but the sentence above describes what the
-    pin is FOR, not what the tree currently holds.
+    This rule does not depend on the baselines existing — it compares a tag
+    against a lockfile — so it held before they were committed and holds now.
 
     Dependabot bumps ``@playwright/test`` on its own schedule (which drags
     ``playwright-core`` with it) and has no idea this tag exists. Left unpinned,

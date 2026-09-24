@@ -31,9 +31,10 @@
  * own 2% budget. That budget is never applied ACROSS platforms, so none of that
  * is a failure: each platform compares against its own file.
  *
- * #325-PENDING-BASELINES: as of the commit that added this file the `-linux` set is generated but NOT
- * committed — it is held for the owner to look at the images first — so the
- * `visual-e2e` job fails every run with "snapshot missing" until it lands.
+ * The `-linux` set is committed. It was reviewed image by image before it
+ * landed: the owner looked, four reviewers opened all 22 comparisons, and the
+ * suite was re-run in this container against the merged tree — 22 expected, 0
+ * unexpected — so the pins match the code they were taken from.
  *
  * The linux set is only reproducible if the browser is pinned, which is what
  * the job's `container:` buys. Measured while generating the first set (#325):

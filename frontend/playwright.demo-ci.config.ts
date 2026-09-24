@@ -28,10 +28,8 @@
  * different and deliberate claim: `visual-e2e` is advisory, so a font-rendering
  * shift prompts someone to look at a diff image instead of blocking every merge.
  *
- * #325-PENDING-BASELINES: ONE HALF IS STILL OUTSTANDING. The `-linux`
- * baselines are generated but held for the owner to review the images before
- * they are committed, so `visual-e2e` currently fails every run with "snapshot
- * missing". The wiring is done; the pixels are not in the repo yet.
+ * Both halves are in place: the wiring and the `-linux` pixels. `visual-e2e`
+ * runs green against them, verified in the container against this tree.
  *
  * The two configs are an exact partition of what `playwright.config.ts` selects.
  * Measured 2026-09-16 with `--list`: 230 here + 22 there = 252. Both halves are

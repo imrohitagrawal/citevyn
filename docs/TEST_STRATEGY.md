@@ -517,9 +517,11 @@ text-dense sections, nothing more.
 To regenerate the Linux set, see the header of
 `frontend/playwright.visual-ci.config.ts`; it must be done under
 `--platform linux/amd64`, because arm64 and amd64 renders differ for 12 of the
-22. As of the commit that added the job, the `-linux` baselines are generated but
-**not yet committed** (#325-PENDING-BASELINES) — held for the owner to review the images — so the
-job fails every run with "snapshot missing" until they land.
+22. The `-linux` baselines are committed. They were reviewed image by image first
+— the one snapshot whose dimensions changed between platforms, `personas` at
+665px to 664px, was traced to an unloaded serif (#471) and confirmed benign —
+and the suite was re-run in the job's own container against the merged tree,
+reporting 22 expected and 0 unexpected.
 
 ### 12.3 The measured case for promoting the live check — made, and acted on
 

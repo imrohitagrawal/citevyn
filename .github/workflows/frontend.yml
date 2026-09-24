@@ -137,14 +137,9 @@ jobs:
       # `playwright.config.ts` runs in exactly one job. Deleting either half
       # leaves a hole neither guard can see.
       #
-      # ┌─ #325-PENDING-BASELINES — NOT TRUE YET. This note comes out with the
-      # │  commit that makes it true. `tests/visual.spec.ts-snapshots/` still
-      # │  holds only `-darwin` files, so `visual-e2e` fails every run with
-      # │  "snapshot missing", and "they run over there instead" is a DESIGN,
-      # │  not a fact. The `-linux` baselines are generated and held for the
-      # │  owner to look at before they are committed. Until that lands, #325 is
-      # │  only half fixed, and the half that is fixed is the wiring.
-      # └─
+      # Both halves of #325 are in place: this wiring, and the `-linux`
+      # baselines it points at. Verified in the job's own container against the
+      # merged tree before they landed — 22 expected, 0 unexpected.
       #
       # Output goes to FILES rather than through `$( ... 2>/dev/null )`. With the
       # pipeline form, `grep -c` legitimately returns 1 when the count is 0, so it
@@ -341,12 +336,9 @@ jobs:
   # `*-chromium-linux.png` baselines generated in the SAME container image that
   # runs here, on every pull request.
   #
-  # ┌─ #325-PENDING-BASELINES — AS OF THIS COMMIT THOSE BASELINES ARE NOT COMMITTED. Generated
-  # │  and held for the owner to review the images first, so every run of this
-  # │  job fails with "snapshot missing" until they land. That is loud rather
-  # │  than harmful — the job is advisory — but it is the reason the branch is
-  # │  not finished. Delete this note in the commit that adds the PNGs.
-  # └─
+  # The baselines are committed. They were reviewed image by image before they
+  # landed, and the suite was re-run here against the merged tree to confirm the
+  # pins match the code: 22 expected, 0 unexpected, 0 flaky.
   #
   # ADVISORY, DELIBERATELY. It is not a required status check on `main`, so it
   # can go red and a PR still merges. That is the right setting for a suite whose
