@@ -62,9 +62,16 @@ name: frontend-live-e2e
 # wrong in a way that blocks every PR. Always running it has the fewest moving
 # parts of the three. Do not add path filters back.
 #
-# STATUS: this workflow is now ELIGIBLE to be required; it is not yet required.
-# Promotion is a branch-protection change and belongs to the repo owner — the
-# exact command is in `docs/TEST_STRATEGY.md` §12.
+# STATUS: `Live-mode Playwright (stub backend)` IS a required status check on
+# `main` — measured 2026-09-16 with `gh api
+# repos/imrohitagrawal/citevyn/branches/main/protection --jq
+# '.required_status_checks.contexts[]'`, which returns ten contexts including
+# this one. #379's objective is met.
+#
+# This comment said "eligible to be required; it is not yet required" until then,
+# which is what a status line written before a decision decays into once the
+# decision is taken. The promotion command is kept in `docs/TEST_STRATEGY.md`
+# §12.5 as the record of what was run and the template for the next one.
 on:
   push:
     branches: [main]
