@@ -25,19 +25,20 @@ describe("docs-as-of stamps", () => {
     // Turns red if: the answer stamp uses the newest date, or a card loses its date.
     render(<AnswerBody text="Use `--model` [1] and [2]." sources={sources} />);
     expect(screen.getByText("Docs as of 1 Sep 2026")).toBeTruthy();
-    expect(screen.getByText("Docs fetched 20 Sep 2026")).toBeTruthy();
-    expect(screen.getByText("Docs fetched 1 Sep 2026")).toBeTruthy();
+    expect(screen.getByText("Source as of 20 Sep 2026")).toBeTruthy();
+    expect(screen.getByText("Source as of 1 Sep 2026")).toBeTruthy();
   });
 
   it("shows no stamp when no source carries a date", () => {
     // Turns red if: a missing date is rendered as a made-up one.
     render(<AnswerBody text="x [1]" sources={[{ n: "1", title: "A", url: "/a" }]} />);
     expect(screen.queryByText(/Docs as of/)).toBeNull();
-    expect(screen.queryByText(/Docs fetched/)).toBeNull();
+    expect(screen.queryByText(/Source as of/)).toBeNull();
     expect(screen.getByText("A")).toBeTruthy(); // partner: the card rendered
   });
 
   it("shows nothing while the answer is still streaming", () => {
+    // Turns red if: a half-written answer is stamped before its sources exist.
     render(<AnswerBody text="x [1]" streaming sources={sources} />);
     expect(screen.queryByText(/Docs as of/)).toBeNull();
   });
@@ -62,7 +63,7 @@ describe("copy", () => {
     // Turns red if: code spans stop being copy buttons, or copy the wrong value.
     render(<AnswerBody text="Run `claude --model opus` now." sources={[]} />);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Copy code: claude --model opus" }));
+      fireEvent.click(screen.getByRole("button", { name: "claude --model opus (copy)" }));
     });
     expect(writeText).toHaveBeenCalledWith("claude --model opus");
     expect(screen.getByTestId("copy-status").textContent).toBe("Copied");
@@ -79,6 +80,7 @@ describe("copy", () => {
   });
 
   it("offers no copy button while the answer is still streaming", () => {
+    // Turns red if: a half-written answer can be copied.
     render(<AnswerBody text="x" streaming sources={[]} />);
     expect(screen.queryByRole("button", { name: "Copy as Markdown" })).toBeNull();
   });
@@ -97,3 +99,41 @@ describe("groupSources — one card, one date", () => {
     expect(g.markers).toEqual(["1", "2"]); // partner: they really were grouped
   });
 });
+
+describe("copy — edge cases from review", () => {
+  it("reports a MISSING clipboard as a failure instead of throwing", async () => {
+    // Plain-http origins and some iframes have no navigator.clipboard at all.
+    // Turns red if: the handler calls writeText unguarded (a TypeError, and no
+    // "Copy failed" announcement).
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    render(<AnswerBody text="x" sources={[]} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copy as Markdown" }));
+    });
+    expect(screen.getByTestId("copy-status").textContent).toBe("Copy failed");
+  });
+
+  it("re-announces a second copy", async () => {
+    // A live region only speaks when its text CHANGES. Turns red if: the status
+    // is not cleared before each copy, so copy #2 is silent.
+    render(<AnswerBody text="x" sources={[]} />);
+    const status = screen.getByTestId("copy-status");
+    const seen: string[] = [];
+    const obs = new MutationObserver(() => seen.push(status.textContent ?? ""));
+    obs.observe(status, { childList: true, characterData: true, subtree: true });
+    const btn = screen.getByRole("button", { name: "Copy as Markdown" });
+    await act(async () => fireEvent.click(btn));
+    await act(async () => fireEvent.click(btn));
+    obs.disconnect();
+    expect(seen.filter((t) => t === "Copied")).toHaveLength(2);
+  });
+
+  it("names a code button by its code, so the sentence still reads as text", () => {
+    // Turns red if: an aria-label replaces the code ("Copy code: …").
+    render(<AnswerBody text="Run `ls -la` now." sources={[]} />);
+    const btn = screen.getByRole("button", { name: "ls -la (copy)" });
+    expect(btn.getAttribute("aria-label")).toBeNull();
+    expect(btn.querySelector("code")?.textContent).toBe("ls -la");
+  });
+});
+

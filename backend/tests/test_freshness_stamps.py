@@ -1,11 +1,14 @@
 """Freshness stamps: "docs as of <date>" on every answer and citation (ADR-0005 §6).
 
-The only honest per-source fact is ``documents.last_fetched_at``: when the worker
-last fetched that page. An index's ``created_at`` says when the index was built,
-not how old the text is.
+The honest per-source fact is ``documents.content_as_of``: the day our copy of
+that source was last updated (the sources are hand-written summaries shipped in
+the repo; see ``test_source_content_dates.py``). It is stamped at ingest, so it
+travels with the indexed text. Neither the ingest run's clock
+(``last_fetched_at``: every deploy re-ingests) nor an index's ``created_at`` says
+how old the text is.
 
-* Each citation carries ``docs_as_of``: its own document's fetch date
-  (``YYYY-MM-DD``, UTC).
+* Each citation carries ``docs_as_of``: its own document's ``content_as_of``
+  (``YYYY-MM-DD``).
 * The answer carries ``docs_as_of``: the OLDEST of its citations' dates, because
   that is the one bound that holds for every source the answer used ("every
   source here was fetched on or after this date").
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import date
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -32,8 +35,8 @@ from app.retrieval.types import RetrievedChunk, chunk_to_citation
 from tests.test_messages_routes import in_memory_client, seeded_app  # noqa: F401 (fixtures)
 
 DEMO = {"Authorization": "Bearer local-demo-key"}
-OLD = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-NEW = datetime(2026, 9, 20, 23, 30, tzinfo=UTC)
+OLD = date(2026, 9, 1)
+NEW = date(2026, 9, 20)
 
 
 def _date_documents(old_area: str) -> dict[str, str]:
@@ -49,8 +52,8 @@ def _date_documents(old_area: str) -> dict[str, str]:
             docs = (await session.execute(select(Document))).scalars().all()
             expected: dict[str, str] = {}
             for doc in docs:
-                doc.last_fetched_at = OLD if doc.product_area == old_area else NEW
-                expected[doc.source_url] = doc.last_fetched_at.date().isoformat()
+                doc.content_as_of = OLD if doc.product_area == old_area else NEW
+                expected[doc.source_url] = doc.content_as_of.isoformat()
             await session.commit()
             return expected
 
@@ -82,7 +85,7 @@ def test_the_answer_is_dated_by_its_oldest_citation(seeded_app: TestClient) -> N
     body = _ask(seeded_app, "How do I configure Claude Code permissions?")
     dates = sorted(c["docs_as_of"] for c in body["citations"])  # type: ignore[union-attr]
     assert body["docs_as_of"] == dates[0]
-    assert body["docs_as_of"] == OLD.date().isoformat()
+    assert body["docs_as_of"] == OLD.isoformat()
 
 
 async def test_a_cached_answer_keeps_its_dates(session: Any) -> None:
@@ -104,8 +107,8 @@ async def test_a_cached_answer_keeps_its_dates(session: Any) -> None:
     await _seed_index_version(session)
     hits = await _evidence(session, count=2)
     dated = [
-        hits[0].model_copy(update={"fetched_at": NEW}),
-        hits[1].model_copy(update={"fetched_at": OLD}),
+        hits[0].model_copy(update={"content_as_of": NEW}),
+        hits[1].model_copy(update={"content_as_of": OLD}),
     ]
     orchestrator = Orchestrator(
         _settings(), session, llm=StubLLMClient(), retriever=_FakeRetriever(dated)
@@ -162,5 +165,5 @@ def test_a_citation_without_a_known_fetch_date_says_null() -> None:
         source_url="https://example.com",
     )
     assert chunk_to_citation(chunk)["docs_as_of"] is None
-    dated = chunk.model_copy(update={"fetched_at": NEW})
+    dated = chunk.model_copy(update={"content_as_of": NEW})
     assert chunk_to_citation(dated)["docs_as_of"] == "2026-09-20"

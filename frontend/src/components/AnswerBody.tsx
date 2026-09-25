@@ -74,15 +74,12 @@ function renderSpans(
       // Click to copy (ADR-0005 §6). A button, so it is reachable and operable by
       // keyboard; the <code> inside keeps the text semantics and the styling.
       return (
-        <button
-          key={k}
-          type="button"
-          className="answer-code-copy"
-          aria-label={`Copy code: ${span.value}`}
-          title="Copy"
-          onClick={() => copy(span.value)}
-        >
+        // No aria-label: it would REPLACE the code in the sentence a screen reader
+        // reads ("Run, Copy code: x, now"). The name is the code itself plus a
+        // hidden "(copy)".
+        <button key={k} type="button" className="answer-code-copy" onClick={() => copy(span.value)}>
           <code className="answer-code">{span.value}</code>
+          <span className="sr-only"> (copy)</span>
         </button>
       );
     }
@@ -184,10 +181,16 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
   // the result of a copy; visible text alone would only reach sighted users.
   const [copyStatus, setCopyStatus] = useState("");
   const copy = (value: string) => {
-    navigator.clipboard.writeText(value).then(
-      () => setCopyStatus("Copied"),
-      () => setCopyStatus("Copy failed"),
-    );
+    // Cleared first so a repeat copy re-announces ("Copied" -> "Copied" is no
+    // change to a live region). Wrapped so a MISSING clipboard (plain http, some
+    // iframes) lands in the failure branch instead of throwing.
+    setCopyStatus("");
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(value))
+      .then(
+        () => setCopyStatus("Copied"),
+        () => setCopyStatus("Copy failed"),
+      );
   };
 
   const groups = groupSources(sources);
@@ -236,7 +239,7 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
               <div className="source-info">
                 <div className="source-title">{g.title}</div>
                 <div className="source-url">{g.url}</div>
-                {g.asOf && <div className="source-asof">Docs fetched {formatDocsDate(g.asOf)}</div>}
+                {g.asOf && <div className="source-asof">Source as of {formatDocsDate(g.asOf)}</div>}
               </div>
             </div>
           ))}

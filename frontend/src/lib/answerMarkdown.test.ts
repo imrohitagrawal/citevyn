@@ -49,3 +49,18 @@ describe("dates", () => {
     expect(oldestDate([])).toBeUndefined();
   });
 });
+
+describe("answerMarkdown — hostile titles and links", () => {
+  it("escapes brackets in a title and drops an unsafe link", () => {
+    // Turns red if: a ] in a title ends the link early, or a javascript: URL is
+    // written into the copied Markdown as a link.
+    const md = answerMarkdown("x [1] [2]", [
+      { title: "Arrays [T]", url: "https://d/a", markers: ["1"] },
+      { title: "Bad", url: "javascript:alert(1)", markers: ["2"] },
+    ]);
+    expect(md).toContain("- [1] [Arrays \\[T\\]](https://d/a)");
+    expect(md).toContain("- [2] Bad");
+    expect(md).not.toContain("javascript:");
+  });
+});
+

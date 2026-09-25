@@ -461,6 +461,7 @@ class IngestionRunner:
             existing.title = source.title
             existing.source_url = source.source_url or source.location
             existing.identity_checksum = _checksum(source.name + source.title)
+            existing.content_as_of = source.content_as_of
             return existing
         document = Document(
             index_version=self._index_version,
@@ -473,6 +474,7 @@ class IngestionRunner:
             identity_checksum=_checksum(source.name + source.title),
             last_fetched_at=datetime.now(UTC),
             last_indexed_at=datetime.now(UTC),
+            content_as_of=source.content_as_of,
             status=DocumentStatus.active,
         )
         session.add(document)

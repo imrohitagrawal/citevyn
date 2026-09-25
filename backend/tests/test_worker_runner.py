@@ -184,6 +184,29 @@ async def test_run_is_idempotent_on_existing_document(
     assert len(docs) == 1
 
 
+async def test_ingest_stamps_the_sources_content_date_on_new_and_existing_rows(
+    session: AsyncSession, runner: IngestionRunner
+) -> None:
+    """ADR-0005 §6: the document carries the source's ``content_as_of``, not the
+    ingest run's clock, and a re-ingest refreshes it (a later copy of the source
+    means a later date). Turns red if: either upsert branch drops the stamp."""
+    import dataclasses
+    from datetime import date
+
+    spec = get_source("gemini_api")
+    assert spec.content_as_of is not None  # partner: the shipped spec has a date
+    await _run(runner, session, source=spec)
+    doc = (
+        await session.execute(select(Document).where(Document.source_name == "gemini_api"))
+    ).scalar_one()
+    assert doc.content_as_of == spec.content_as_of
+
+    newer = dataclasses.replace(spec, content_as_of=date(2026, 9, 26))
+    await _run(runner, session, source=newer)
+    await session.refresh(doc)
+    assert doc.content_as_of == date(2026, 9, 26)
+
+
 # ---------------------------------------------------------------------------
 # Failure path
 # ---------------------------------------------------------------------------

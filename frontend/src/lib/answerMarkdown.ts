@@ -13,7 +13,7 @@ export interface DatedSourceGroup {
   asOf?: string;
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS = "JanFebMarAprMayJunJulAugSepOctNovDec";
 
 /**
  * `2026-09-01` -> `1 Sep 2026`. Parsed by hand rather than through `Date`, so the
@@ -22,7 +22,7 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
  */
 export function formatDocsDate(iso: string): string {
   const [y, m, d] = iso.split("-");
-  return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`;
+  return `${Number(d)} ${MONTHS.slice(Number(m) * 3 - 3, Number(m) * 3)} ${y}`;
 }
 
 /** The oldest known date: the one bound that holds for every source. ISO days sort as strings. */
@@ -31,13 +31,18 @@ export function oldestDate(dates: (string | undefined)[]): string | undefined {
   return known[0];
 }
 
+import { isSafeHref } from "./safeHref";
+
 /** The answer, then every source it cites with its link and date. */
 export function answerMarkdown(text: string, groups: DatedSourceGroup[]): string {
   if (groups.length === 0) return text;
   const asOf = oldestDate(groups.map((g) => g.asOf));
   const lines = [text, "", asOf ? `Sources (docs as of ${formatDocsDate(asOf)}):` : "Sources:"];
   for (const g of groups) {
-    const label = g.url ? `[${g.title}](${g.url})` : g.title;
+    // Brackets in a title would end the link text early; an unsafe URL (not
+    // http(s) or relative) is left out of the link, as the source card does.
+    const title = g.title.replace(/[[\]]/g, "\\$&");
+    const label = isSafeHref(g.url) ? `[${title}](${g.url})` : title;
     const date = g.asOf ? ` — docs as of ${formatDocsDate(g.asOf)}` : "";
     lines.push(`- [${g.markers.join(", ")}] ${label}${date}`);
   }

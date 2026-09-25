@@ -546,9 +546,12 @@ the input was without repeating it.
 
 #### Freshness: `docs_as_of` (ADR-0005 §6)
 
-- `citations[].docs_as_of`: when the worker last fetched that citation's
-  document (`documents.last_fetched_at`), as a UTC day `YYYY-MM-DD`. `null`
-  when unknown. Absent on answers cached or stored before the field existed.
+- `citations[].docs_as_of`: the day CiteVyn's copy of that citation's source
+  was last updated (`documents.content_as_of`, stamped at ingest from
+  `SourceSpec.content_as_of`), as `YYYY-MM-DD`. The sources are hand-written
+  summaries of the official docs shipped in the repo, so this is NOT the ingest
+  run's date (every deploy re-ingests). `null` when unknown; absent on answers
+  cached or stored before the field existed.
 - `docs_as_of` (top level): the OLDEST of the citations' dates, because that
   is the one bound that holds for every source the answer used. `null` when no
   citation carries a date, and always `null` on a refusal (no sources).

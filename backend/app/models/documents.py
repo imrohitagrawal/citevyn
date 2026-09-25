@@ -8,10 +8,10 @@ distinguish the active index from candidates.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import GUID, Base, StrEnumType
@@ -47,6 +47,10 @@ class Document(Base):
     identity_checksum: Mapped[str] = mapped_column(String(128), nullable=False)
     last_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # "Docs as of" (ADR-0005 §6, migration 0014): the day the repo's copy of this
+    # source was last updated, from ``SourceSpec.content_as_of``. NOT
+    # ``last_fetched_at``, which is the ingest run's clock. NULL = unknown.
+    content_as_of: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[DocumentStatus] = mapped_column(StrEnumType(DocumentStatus), nullable=False)
 
     index_version_ref: Mapped[IndexVersion] = relationship(
