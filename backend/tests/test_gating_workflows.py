@@ -106,6 +106,13 @@ LIVE_JOB_NAME = "Live-mode Playwright (stub backend)"
 #
 #   gh api repos/imrohitagrawal/citevyn/branches/main/protection/required_status_checks \
 #     --jq '.checks[] | "\(.app_id)  \(.context)"'
+#
+# RE-DERIVED INDEPENDENTLY on 2026-09-24 by the #448 work, which reached the same
+# ten. Worth keeping both readings: a completeness test is only as complete as the
+# population it is complete over, nothing in CI can read branch protection
+# (`_UNGUARDABLE` records that), so this list is a manual step and
+# `test_every_required_context_is_in_one_of_the_two_registers` is only as good as
+# the last person to run the command above.
 _REQUIRED_CONTEXT_WORKFLOWS: dict[str, str] = {
     "Analyze (python)": "codeql.yml",
     "alembic + postgres integration tests": "ci.yml",
@@ -117,6 +124,24 @@ _REQUIRED_CONTEXT_WORKFLOWS: dict[str, str] = {
     "shell suites (bash 3.2 + 5.x) (ubuntu-latest)": "ci.yml",
     "shell suites (bash 3.2 + 5.x) (macos-latest)": "ci.yml",
 }
+
+# The size of the two registers AS MEASURED, compared as a BASELINE that must not
+# shrink silently — the same shape as `backend/coverage-baseline.json`'s `missed`,
+# and for the same reason. A floor of "at least 2" against a real population of
+# nine is a partner that barely partners: six rows could be deleted, and with them
+# the completeness rule's whole reach, while every assertion here stayed green.
+#
+# Re-derive the first with:
+#   gh api repos/imrohitagrawal/citevyn/branches/main/protection \
+#     --jq '.required_status_checks.contexts | length'
+# → 10 on 2026-09-24, of which one (`CodeQL`) is produced by no workflow and lives
+# in `_REQUIRED_CONTEXTS_NOT_FROM_A_WORKFLOW`, leaving 9 here.
+#
+# A context the owner genuinely DEMOTES, or a gating job genuinely retired, is a
+# deliberate one-line update to these numbers in the same change — which is the
+# point. Shrinking either register is how the rules below quietly stop reaching.
+_MEASURED_REQUIRED_CONTEXTS_FROM_A_WORKFLOW = 9
+_MEASURED_GATING_JOBS = 5
 
 # Required contexts that NO workflow in this repo produces, with the reason.
 # Listing them keeps the mapping above honest: an unexplained gap would look
@@ -141,9 +166,13 @@ GATING_WORKFLOWS: tuple[str, ...] = tuple(
 
 # The individual JOBS held to the "not defused" rule below, as
 # ``(workflow file, job id)``. This is a hand-picked list rather than "every job
-# in GATING_WORKFLOWS", because two jobs in ``ci.yml`` carry a DELIBERATE
-# job-level ``if:`` (see _NOT_HELD_TO_THE_DEFUSING_RULE) and a blanket rule would
-# have to be weakened until it caught nothing.
+# in GATING_WORKFLOWS", because some jobs hosting a required context carry a
+# DELIBERATE job-level ``if:``, or no ``steps:`` at all (see
+# _NOT_HELD_TO_THE_DEFUSING_RULE), and a blanket rule would have to be weakened
+# until it caught nothing. Being hand-picked is what made an OMISSION possible,
+# so `test_every_required_context_is_in_one_of_the_two_registers` now requires
+# every required context to land in this tuple or in that register, with a
+# reason — never in neither (#448).
 #
 # Ordered so the FIRST entry is `ci.yml`'s `test` — the longest-standing gating
 # job here and not the one #379 is about, so the rule is exercised against a
@@ -152,6 +181,17 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     # `pytest + lint`. Required, and it is the job that RUNS this file: one
     # `continue-on-error: true` here turns every rule in it advisory at once.
     ("ci.yml", "test"),
+    # `shell suites (bash 3.2 + 5.x) (ubuntu-latest)` and `… (macos-latest)`. TWO
+    # required contexts from one job, and the ONLY jobs that execute
+    # `tests/shell/*` — the rollback, env-guard, deploy_verify and bundle-key
+    # regression suites. `continue-on-error: true` on its single assertion step
+    # ("Run every tests/shell suite") turns both contexts advisory and takes
+    # every one of those suites with them (#448). It was absent from this
+    # population AND from the exemption register below, which is the state
+    # `test_every_required_context_is_in_one_of_the_two_registers` now forbids.
+    # Matrixed on purpose, so it is exempt from the matrix rule alone — see
+    # `_MATRIXED_ON_PURPOSE`.
+    ("ci.yml", "shell-tests"),
     # `type-check + unit tests + build`. Required; carries the vitest suite and
     # the bundle budget gate.
     ("frontend.yml", "build"),
@@ -162,6 +202,8 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     # reading above — #379 achieved what it set out to do. This comment said
     # "not required yet" until then, which is what an un-checked snapshot decays
     # into.
+    # A defused job here now WEDGES merges rather than merely forfeiting a
+    # candidate, which is the practical difference promotion made.
     (LIVE_WORKFLOW.name, "live-e2e"),
     # `Visual snapshots (Linux baselines, advisory)` (#325). ADVISORY, and the
     # ONLY advisory member of this tuple — the four above are all required as of
@@ -182,19 +224,75 @@ GATING_JOBS: tuple[tuple[str, str], ...] = (
     ("frontend.yml", "visual-e2e"),
 )
 
+# Jobs inside ``GATING_JOBS`` held to every rule EXCEPT the no-matrix one, with
+# the reason. Recorded here rather than by keeping the job OUT of
+# ``GATING_JOBS``, because the defusing rule is the one that matters most and
+# dropping the job would have exempted it from that too — which is exactly the
+# hole #448 is about.
+_MATRIXED_ON_PURPOSE: dict[str, str] = {
+    "ci.yml:shell-tests": (
+        "`strategy.matrix: os: [ubuntu-latest, macos-latest]` is the POINT of "
+        "this job: `${v:1:-1}` is bash 4.2+ and errors on the bash 3.2 macOS "
+        "ships, so a Linux-only job reports green on exactly the bug #161 "
+        "describes. Branch protection already holds both expanded names "
+        "(`shell suites (bash 3.2 + 5.x) (ubuntu-latest)` and "
+        "`… (macos-latest)`), so the renaming hazard the matrix rule guards "
+        "against has already been paid for and recorded in "
+        "`_REQUIRED_CONTEXT_WORKFLOWS`."
+    ),
+}
+
+# The population the no-matrix rule is parametrized over: every gating job whose
+# status-check context is NOT already pinned in its expanded form.
+_JOBS_HELD_TO_THE_MATRIX_RULE: tuple[tuple[str, str], ...] = tuple(
+    (workflow, job_id)
+    for workflow, job_id in GATING_JOBS
+    if f"{workflow}:{job_id}" not in _MATRIXED_ON_PURPOSE
+)
+
 # Gating jobs deliberately NOT in the population above, with the reason. An
-# unexplained omission would look identical to one this guard forgot.
+# unexplained omission would look identical to one this guard forgot — and for
+# `ci.yml:shell-tests` that is not hypothetical: it sat in NEITHER register
+# until #448, so nothing in this file would have noticed either of its two
+# required contexts being defused.
+#
+# Keys are ``"<workflow file>:<job id>"`` and MUST resolve to a real job, because
+# `test_every_required_context_is_in_one_of_the_two_registers` looks required
+# contexts up in this dict by that key. The codeql + pr-quality entry used to be
+# a single key naming two jobs at once, which resolved to neither.
 _NOT_HELD_TO_THE_DEFUSING_RULE: dict[str, str] = {
     "ci.yml:postgres-migrations": (
         "`alembic + postgres integration tests` IS a required context but carries "
         "a deliberate job-level `if:` restricting it to same-repo pushes and PRs "
         "(forks get no Postgres service and no secrets). Holding it to `no job "
         "`if:`` would either fail on `main` or force an exemption so specific it "
-        "would re-admit `if: false`."
+        "would re-admit `if: false`. ONE of its silent-green failure modes — the "
+        "whole `postgres` suite skipping when `CITEVYN_PG_TEST_URL` is gone — is "
+        "guarded instead by `tests/test_postgres_suite_is_not_vacuous.py` (#449), "
+        "which runs INSIDE the job's own `-m postgres` selection. Its PYTEST STEP "
+        "is separately pinned by `test_ci_workflow_conditions.py` against "
+        "`|| true` / `--ignore` / `--deselect` / `-k`, against step-level "
+        "`continue-on-error:`, and against an `env:` override of `CI` or either "
+        "database URL. The job's OTHER steps are still uncaught, because this "
+        "exemption is whole-job: closing that needs an exemption shaped per-rule "
+        "rather than per-job, which is a separate change. (An earlier version of "
+        "this paragraph said the pytest step was uncaught too — false about code "
+        "added in the same commit, and exactly the stale-exemption prose these "
+        "rules exist to prevent.)"
     ),
-    "codeql.yml:analyze / pr-quality.yml:quality-gate": (
-        "Required contexts produced outside #379's scope. Adding them is a "
-        "separate change with its own review; recorded so the gap is visible."
+    "codeql.yml:analyze": (
+        "`Analyze (python)` IS a required context, produced outside #379's scope "
+        "and matrixed by language. Adding it is a separate change with its own "
+        "review; recorded so the gap is visible."
+    ),
+    "pr-quality.yml:quality-gate": (
+        "`quality-gate / quality-gate` IS a required context, but the job is a "
+        "`uses:` call into a reusable workflow in ANOTHER repository "
+        "(`imrohitagrawal/.github`). It declares no `steps:` of its own and "
+        "carries a deliberate job-level `if: github.event.pull_request.draft == "
+        "false`, so both halves of the defusing rule (no job `if:`, at least "
+        "three steps) would fail on the real repo. What the called workflow does "
+        "is not readable from this repository at all."
     ),
 }
 
@@ -216,6 +314,86 @@ _SANCTIONED_STEP_CONDITIONS: dict[tuple[str, str, str], str] = {
     ("frontend.yml", "demo-e2e", "Upload report + traces on failure"): "failure()",
     ("frontend.yml", "visual-e2e", "Upload report + snapshot diffs on failure"): "failure()",
     (LIVE_WORKFLOW.name, "live-e2e", "Upload HTML report on failure"): "failure()",
+}
+
+# Shell idioms that swallow a failure or narrow a selection INSIDE a step's
+# ``run:`` body. `continue-on-error:` is not the only three words that defuse a
+# gate — `run: make test-shell || true` turns both `shell suites …` contexts green
+# with every ops-script suite failing, and the ``if``/``continue-on-error`` rule
+# below reads two KEYS and cannot see it. Found by an adversarial review of #448,
+# whose headline risk is "turned advisory by a one-line YAML edit"; this was still
+# a one-line YAML edit that does it.
+#
+# Matched as substrings on purpose (these are shell text, not YAML values), so the
+# rule is deliberately broad and every legitimate use has to be recorded below.
+#
+# Three near-misses are deliberately ABSENT, each checked against the real step
+# bodies rather than reasoned about:
+#   * a bare `exit 0` — it WOULD swallow a verdict at the end of a body, but the
+#     string already appears inside PROSE in `frontend-live-e2e.yml`'s "Assert the
+#     suite actually executed" step ("it would otherwise exit 0 with no live
+#     coverage"), so the rule would go red on a comment. `|| exit 0` IS listed,
+#     which is the form that actually swallows;
+#   * `&& true` — it does not swallow. `false && true` exits 1, because `&&`
+#     short-circuits and the status is the left-hand command's;
+#   * `2>/dev/null` — hides stderr, not the exit code.
+# `set +e` IS listed and `set -e` is NOT: four gating steps open with
+# `set -euo pipefail`, which is the opposite of defusing.
+_DEFUSING_RUN_IDIOMS: tuple[str, ...] = (
+    "|| true",
+    "|| :",
+    "|| exit 0",
+    "; true",
+    "set +e",
+    # The long form of `set +e`. A verification round pointed out that listing
+    # only the short one is a rule that reads a spelling rather than a behaviour.
+    "set +o errexit",
+    "set +o pipefail",
+    # `if ! make test-shell; then echo "::warning::"; fi` exits 0 with the suite
+    # failing. MEASURED as a bypass of the earlier list under GitHub's `bash -e`,
+    # and no gating step uses `if !` today, so listing it costs nothing.
+    "if !",
+    "--ignore=",
+    "--ignore-glob",
+    "--deselect",
+    "continue-on-error",
+)
+
+# The ONLY lines inside a gating job's ``run:`` that may carry one of the idioms
+# above, keyed by ``(workflow, job id, step name)`` and compared BYTE-EXACTLY
+# against the stripped line, never by substring. Read out of the YAML on
+# 2026-09-24.
+#
+# All three are `grep -c` COUNTERS inside a command substitution: `grep` exits 1
+# when it matches nothing, which is a legitimate zero and not a failure, and the
+# count is asserted on immediately afterwards. They are sanctioned because they
+# cannot swallow the step's own verdict.
+#
+# What they DO hide is already known and tracked rather than re-discovered here: a
+# `|| true` on a producer conceals a CRASHED producer, not merely a zero count, so
+# a `grep` reading a file that was never written reports 0 and looks like a clean
+# count. That is a property of these three lines, not a reason to widen the rule.
+_SANCTIONED_RUN_IDIOM_LINES: dict[tuple[str, str, str], tuple[str, ...]] = {
+    ("frontend.yml", "demo-e2e", "Guard against a vacuous selection"): (
+        "ci_visual=$(grep -c 'visual regression' /tmp/ci_list.txt || true)",
+        "all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)",
+    ),
+    (LIVE_WORKFLOW.name, "live-e2e", "Guard against a vacuous selection"): (
+        "all_live_titled=$(grep -ciE 'live only' /tmp/all_list.txt || true)",
+    ),
+    # #325 added `visual-e2e` to GATING_JOBS, which brought it under this rule
+    # for the first time. Same shape as the demo job two entries up: `grep -c`
+    # exits 1 when the count is ZERO while still printing `0`, so without
+    # `|| true` the step would die on the very reading it exists to take. The
+    # `|| true` therefore cannot hide a weak gate here, because the zero it
+    # preserves is exactly what the next line refuses:
+    # `test "$visual_total" -gt 0`, with `test "$visual_total" -eq "$all_visual"`
+    # beside it. Sanctioned verbatim rather than by pattern, so a line that
+    # merely LOOKS like a counter does not inherit the exemption.
+    ("frontend.yml", "visual-e2e", "Guard against a vacuous selection"): (
+        "all_visual=$(grep -c 'visual regression' /tmp/all_list.txt || true)",
+        "selected_visual=$(grep -c 'visual regression' /tmp/visual_list.txt || true)",
+    ),
 }
 
 # The five tests the live suite selects, pinned as (spec file, test title).
@@ -353,6 +531,42 @@ _UNGUARDABLE: tuple[str, ...] = (
     "Whether the live suite's assertions are any good. These guards prove it "
     "RUNS and that nothing silently drops out of it, not that it tests the right "
     "thing.",
+    "A job name SHORTENED to a prefix of its required context. "
+    "`_job_ids_for_context` matches on `context.startswith(prefix)`, because that "
+    "is what makes `Analyze (python)` and the two matrix-expanded shell contexts "
+    "resolve at all — so renaming `ci.yml:test` from `pytest + lint` to `pytest` "
+    "still resolves, and both the completeness rule and "
+    "`test_the_recorded_required_context_still_names_a_real_job` stay green while "
+    "GitHub reports `pytest` and branch protection waits for `pytest + lint` "
+    "forever. Found by an adversarial review of #448. NOT silent (it wedges every "
+    "PR, loudly) but the stated purpose of those two rules is unmet. "
+    "`ci.yml:shell-tests` is incidentally covered, by "
+    "`test_the_matrix_rule_names_a_key_github_really_uses`'s "
+    '`startswith(f"{bare} (")`; the other three gating jobs have no equivalent. '
+    "Closing it needs an exact-name pin per non-matrixed context, which would "
+    "have to be argued against the matrix cases.",
+    "A `strategy.matrix` SHRUNK rather than added. `ci.yml:shell-tests` reduced to "
+    "`os: [ubuntu-latest]` still declares `strategy`, so the matrix-exemption "
+    "register's `not_matrixed` check passes, and `_REQUIRED_CONTEXT_WORKFLOWS` "
+    "still lists both expansions, so nothing compares the matrix VALUES to the "
+    "recorded expansions. bash 3.2 coverage — #161's whole defect class — would be "
+    "gone. Consequence is a permanent wedge on the never-reported macos context, "
+    "so loud rather than silent.",
+    "A `postgres`-suite skip moved somewhere this file and #449's guard cannot "
+    "see: `@pytest.mark.skip` on each of the 15 test FUNCTIONS rather than the "
+    "module, `collect_ignore` in a conftest, or a "
+    "`pytest_collection_modifyitems` that skips `postgres` items. Each gives a "
+    "green `alembic + postgres integration tests` context over zero executed "
+    "tests. The settling mechanism is the same one the live job already has — read "
+    "the RUN's own outcome (`--junit-xml` plus a step that asserts on it), which "
+    "is a workflow edit and so needs the owner. Recorded in "
+    "`tests/test_postgres_suite_is_not_vacuous.py` too.",
+    "Anything under `tests/shell/`. Nothing in this repository asserts which shell "
+    "suites exist or that any given case executes — `Makefile`'s runner only fails "
+    "when it finds ZERO suites, so deleting one, or re-adding an early `skip` "
+    "branch inside one, is green. #448 made `test_rollback_policy_warn.sh`'s case "
+    "3 hermetic; nothing pins that it stays so. A shell-suite inventory guard is a "
+    "separate change.",
 )
 
 _PATHS_KEYS = ("paths", "paths-ignore")
@@ -599,6 +813,40 @@ def test_a_gating_workflow_actually_triggers_on_pull_request(name: str) -> None:
 # ──────────────────── no gating job is defused into a no-op ────────────────────
 
 
+def _scannable_run_lines(body: str) -> list[str]:
+    """A step's ``run:`` body, prepared so a per-line idiom scan is not fooled.
+
+    Two corrections from a verification round, both of which it MEASURED rather
+    than argued:
+
+    * a line ending in ``||`` or ``&&`` CONTINUES onto the next one, so
+      ``make test-shell ||`` / ``true`` split across two lines swallows the failure
+      (exit 0, confirmed under ``bash -e``) while neither line on its own contains
+      a listed idiom. Continuations are joined before scanning;
+    * a SHELL COMMENT cannot defuse anything, but a comment MENTIONING ``|| true``
+      would match and go red. Not hypothetical: the four gating steps carry 106
+      comment lines inside their ``run:`` bodies between them, and the two most
+      likely to gain such a comment already have one just outside the block.
+      Comment lines are dropped.
+
+    Join first, then drop comments, so a continuation is not stitched to a comment.
+    """
+    joined: list[str] = []
+    pending = ""
+    for raw in body.split("\n"):
+        stripped = raw.strip()
+        if pending:
+            stripped = f"{pending} {stripped}"
+            pending = ""
+        if stripped.endswith(("||", "&&")):
+            pending = stripped
+            continue
+        joined.append(stripped)
+    if pending:
+        joined.append(pending)
+    return [line for line in joined if not line.startswith("#")]
+
+
 def _disables_the_gate(value: Any) -> bool:
     """Is this ``continue-on-error:`` value anything other than a literal false?
 
@@ -628,10 +876,18 @@ def test_a_gating_job_is_not_defused(workflow: str, job_id: str) -> None:
     ``if:`` is judged BYTE-EXACTLY against ``_SANCTIONED_STEP_CONDITIONS``, not
     by substring: ``failure() || true`` contains ``failure()``.
 
+    Three words are not the only way. ``run: make test-shell || true`` turns both
+    ``shell suites …`` contexts green with every ops-script suite failing, and the
+    ``if``/``continue-on-error`` checks read two KEYS, so they cannot see it. The
+    ``run:`` body is therefore scanned for ``_DEFUSING_RUN_IDIOMS``, with the
+    three legitimate ``grep -c`` counters recorded byte-exactly in
+    ``_SANCTIONED_RUN_IDIOM_LINES``.
+
     Turns red if: any gating job gains an ``if:``, gains a
     ``continue-on-error:`` that is not literal ``false``, or any of its steps
     does — except the four artifact-upload steps listed in
-    ``_SANCTIONED_STEP_CONDITIONS`` with exactly their recorded condition.
+    ``_SANCTIONED_STEP_CONDITIONS`` with exactly their recorded condition — or if
+    any step's ``run:`` body gains an unsanctioned failure-swallowing idiom.
     """
     jobs = _load_workflow(workflow).get("jobs") or {}
     assert job_id in jobs, (
@@ -669,6 +925,23 @@ def test_a_gating_job_is_not_defused(workflow: str, job_id: str) -> None:
                 f"{step['continue-on-error']!r}`, so whatever it asserts can "
                 "fail without failing the job."
             )
+        # `run: make test-shell || true` defuses a gate just as completely as
+        # `continue-on-error: true`, and the two key checks above cannot see it.
+        allowed_lines = _SANCTIONED_RUN_IDIOM_LINES.get((workflow, job_id, label), ())
+        for line in _scannable_run_lines(str(step.get("run") or "")):
+            stripped = line.strip()
+            if stripped in allowed_lines:
+                continue
+            for idiom in _DEFUSING_RUN_IDIOMS:
+                if idiom in stripped:
+                    violations.append(
+                        f"step {label!r} has `{idiom}` in its `run:` body, on the "
+                        f"line {stripped!r}. That swallows a failure (or narrows a "
+                        "selection) inside the step, so the step exits 0 and the "
+                        "gate is green having asserted nothing. If this line "
+                        "genuinely cannot weaken the gate — a `grep -c` counter, "
+                        "say — add it to _SANCTIONED_RUN_IDIOM_LINES verbatim."
+                    )
         if "if" in step:
             sanctioned = _SANCTIONED_STEP_CONDITIONS.get((workflow, job_id, label))
             if sanctioned is None:
@@ -693,7 +966,9 @@ def test_a_gating_job_is_not_defused(workflow: str, job_id: str) -> None:
     )
 
 
-@pytest.mark.parametrize(("workflow", "job_id"), GATING_JOBS, ids=lambda v: str(v))
+@pytest.mark.parametrize(
+    ("workflow", "job_id"), _JOBS_HELD_TO_THE_MATRIX_RULE, ids=lambda v: str(v)
+)
 def test_a_gating_job_does_not_matrix_its_status_check_context(workflow: str, job_id: str) -> None:
     """A ``strategy.matrix`` RENAMES the check GitHub reports — #379's wedge again.
 
@@ -713,16 +988,22 @@ def test_a_gating_job_does_not_matrix_its_status_check_context(workflow: str, jo
     ``ci.yml:test`` (``pytest + lint``, required, and the job that runs this
     file) and on ``frontend-live-e2e.yml:live-e2e``.
 
-    Scope is ``GATING_JOBS``, deliberately NOT "every job whose name is a
-    required context": ``ci.yml:shell-tests`` is matrixed ON PURPOSE — bash 3.2
-    vs 5.x is the defect class it exists to catch — and its two expansions are
-    the strings branch protection already holds, so the broader rule would go
-    red on the real repo on day one. None of the five gating jobs is matrixed
-    today (four until #325 added ``frontend.yml:visual-e2e``); a future one that
-    genuinely needs a matrix has to record its expanded names in
+    Scope is ``_JOBS_HELD_TO_THE_MATRIX_RULE`` — ``GATING_JOBS`` minus the jobs
+    recorded in ``_MATRIXED_ON_PURPOSE``. ``ci.yml:shell-tests`` is the one
+    entry there: it is matrixed on purpose (bash 3.2 vs 5.x is the defect class
+    it exists to catch) and its two expansions are the strings branch protection
+    already holds, so this rule would go red on the real repo on day one. It is
+    still held to every OTHER rule in this file, which is #448's point — a job
+    dropped from ``GATING_JOBS`` to dodge this rule would have dodged the
+    defusing rule with it.
+    ``GATING_JOBS`` holds five jobs since #325 added ``frontend.yml:visual-e2e``;
+    of the four left after the exemption, none is matrixed today. A future gating
+    job that genuinely needs a matrix has to record its expanded names in
     ``_REQUIRED_CONTEXT_WORKFLOWS`` and be argued for here.
 
-    Turns red if: any job in ``GATING_JOBS`` gains a ``strategy:`` key.
+
+    Turns red if: any job in ``_JOBS_HELD_TO_THE_MATRIX_RULE`` gains a
+    ``strategy:`` key.
     """
     jobs = _load_workflow(workflow).get("jobs") or {}
     assert job_id in jobs, (
@@ -811,11 +1092,46 @@ def test_every_sanctioned_step_condition_still_names_a_real_step() -> None:
     )
 
 
+def test_every_sanctioned_run_idiom_line_is_still_in_the_yaml() -> None:
+    """A stale exemption is a licence nothing uses — and a widening one.
+
+    ``_SANCTIONED_RUN_IDIOM_LINES`` names exact shell lines. If one is edited or
+    deleted, the entry stops matching and becomes dead weight that a future
+    reviewer reads as "these idioms are fine here". Resolve every entry against
+    the real ``run:`` body instead.
+
+    Turns red if: an entry names a step that no longer exists, or a line the
+    step's ``run:`` body no longer contains verbatim; or the register is emptied
+    (the rule above would then reject the three legitimate ``grep -c`` counters
+    and go red on the real repo).
+    """
+    assert _SANCTIONED_RUN_IDIOM_LINES, (
+        "the sanctioned-run-idiom register was emptied; the three `grep -c || "
+        "true` counters in the two selection guards are legitimate and the rule "
+        "above would go red on the real repo"
+    )
+    unresolved: list[str] = []
+    for (workflow, job_id, step_name), lines in sorted(_SANCTIONED_RUN_IDIOM_LINES.items()):
+        job = (_load_workflow(workflow).get("jobs") or {}).get(job_id) or {}
+        found = [s for s in _steps(job) if str(s.get("name") or "") == step_name]
+        if len(found) != 1:
+            unresolved.append(f"{workflow}:{job_id} has {len(found)} step(s) named {step_name!r}")
+            continue
+        body = {ln.strip() for ln in str(found[0].get("run") or "").split("\n")}
+        for line in lines:
+            if line not in body:
+                unresolved.append(f"{workflow}:{job_id}:{step_name} no longer contains {line!r}")
+    assert not unresolved, "sanctioned run-idiom lines no longer match the YAML:\n  " + "\n  ".join(
+        unresolved
+    )
+
+
 def test_the_jobs_left_out_of_the_defusing_rule_are_recorded_with_a_reason() -> None:
     """An unexplained omission looks identical to one this guard forgot.
 
-    Turns red if: ``_NOT_HELD_TO_THE_DEFUSING_RULE`` is emptied, or a job is
-    listed both as guarded and as exempt.
+    Turns red if: ``_NOT_HELD_TO_THE_DEFUSING_RULE`` is emptied, a job is listed
+    both as guarded and as exempt, or an exemption names a job no workflow
+    declares.
     """
     assert _NOT_HELD_TO_THE_DEFUSING_RULE, (
         "the register of gating jobs outside the defusing rule must not be silently emptied"
@@ -823,6 +1139,176 @@ def test_the_jobs_left_out_of_the_defusing_rule_are_recorded_with_a_reason() -> 
     guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
     overlap = guarded & set(_NOT_HELD_TO_THE_DEFUSING_RULE)
     assert not overlap, f"job(s) recorded as both guarded and exempt: {sorted(overlap)}"
+
+    # Every exemption must RESOLVE. The completeness test below looks required
+    # contexts up in this dict by `"<workflow>:<job id>"`, so a key that names no
+    # real job silently fails to cover the context it was written for — which is
+    # how `"codeql.yml:analyze / pr-quality.yml:quality-gate"`, one key naming two
+    # jobs, covered neither.
+    unresolved: list[str] = []
+    for key in sorted(_NOT_HELD_TO_THE_DEFUSING_RULE):
+        workflow, _, job_id = key.partition(":")
+        if not job_id or job_id not in (_load_workflow(workflow).get("jobs") or {}):
+            unresolved.append(key)
+    assert not unresolved, (
+        "exemption key(s) do not name a `<workflow file>:<job id>` pair this repo "
+        f"declares: {unresolved}. The completeness test looks contexts up by that "
+        "exact key, so an unresolvable one exempts nothing."
+    )
+
+
+def test_the_matrix_exemption_register_names_real_gating_jobs() -> None:
+    """``_MATRIXED_ON_PURPOSE`` narrows a rule, so it must not rot into a licence.
+
+    Two directions. A key naming a job that is NOT in ``GATING_JOBS`` narrows
+    nothing and hides that the job escaped the defusing rule as well; a key
+    naming a job that is no longer matrixed silently exempts a compliant job
+    from a rule it would now pass.
+
+    Turns red if: an entry names a job outside ``GATING_JOBS``, or one that no
+    longer declares ``strategy:``; or the rule's own population shrinks to fewer
+    than two jobs.
+    """
+    assert _MATRIXED_ON_PURPOSE, (
+        "the matrix-exemption register was emptied; `ci.yml:shell-tests` is "
+        "genuinely matrixed and the no-matrix rule would go red on the real repo"
+    )
+    guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
+    stray = sorted(set(_MATRIXED_ON_PURPOSE) - guarded)
+    assert not stray, (
+        f"matrix-exemption key(s) {stray} are not in GATING_JOBS. An exemption "
+        "for a job that is not guarded at all narrows nothing and hides that the "
+        "job is outside the DEFUSING rule too — #448's actual defect."
+    )
+    not_matrixed: list[str] = []
+    for key in sorted(_MATRIXED_ON_PURPOSE):
+        workflow, _, job_id = key.partition(":")
+        job = (_load_workflow(workflow).get("jobs") or {}).get(job_id) or {}
+        if "strategy" not in job:
+            not_matrixed.append(key)
+    assert not not_matrixed, (
+        f"{not_matrixed} no longer declare `strategy:`, so exempting them from "
+        "the no-matrix rule exempts a job that would now pass it. Drop the "
+        "exemption."
+    )
+    # Partner: the rule above is `@pytest.mark.parametrize`d over this tuple, and
+    # an empty (or single-item) population makes it near-vacuous. Its FIRST entry
+    # is `ci.yml:test`, which has never been matrixed — a compliant control.
+    assert len(_JOBS_HELD_TO_THE_MATRIX_RULE) >= 2, (
+        f"_JOBS_HELD_TO_THE_MATRIX_RULE has {len(_JOBS_HELD_TO_THE_MATRIX_RULE)} "
+        "entries; the no-matrix rule is close to vacuous"
+    )
+    assert ("ci.yml", "test") in _JOBS_HELD_TO_THE_MATRIX_RULE, (
+        "`ci.yml:test` dropped out of the no-matrix population. It is the "
+        "control: a required, never-matrixed job, so the rule is exercised "
+        "against a known-good case and not only against candidates."
+    )
+
+
+def _job_ids_for_context(context: str, workflow: str) -> list[str]:
+    """Every job id in ``workflow`` whose declared name is a prefix of ``context``.
+
+    Matrix jobs expand their ``name:`` per combination, so a required context is
+    the declared name PLUS a suffix — the same prefix match
+    ``test_the_recorded_required_context_still_names_a_real_job`` uses. A name
+    carrying an expression (``Analyze (${{ matrix.language }})``) is truncated at
+    the ``${{``, because it cannot be resolved statically. A job with no
+    ``name:`` reports its job id, which is how ``quality-gate`` resolves.
+    """
+    jobs = _load_workflow(workflow).get("jobs") or {}
+    found: list[str] = []
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        declared = str(job.get("name") or job_id)
+        prefix = declared.split("${{")[0].strip()
+        if prefix and context.startswith(prefix):
+            found.append(job_id)
+    return found
+
+
+def test_every_required_context_is_in_one_of_the_two_registers() -> None:
+    """#448: absent from BOTH registers is how a required gate goes unguarded.
+
+    ``GATING_JOBS`` says "held to the defusing rule".
+    ``_NOT_HELD_TO_THE_DEFUSING_RULE`` says "deliberately not, and here is why".
+    A job in NEITHER is indistinguishable from one this guard forgot — and that
+    was not hypothetical. ``ci.yml:shell-tests`` produces TWO required contexts
+    and is the only job that executes ``tests/shell/*``; it appeared in neither
+    register, so ``continue-on-error: true`` on its one assertion step would have
+    turned both contexts advisory with nothing in this file, the backend suite or
+    ruff going red.
+
+    Turns red if: a required context in ``_REQUIRED_CONTEXT_WORKFLOWS`` resolves
+    to a job listed in neither register — e.g. delete ``("ci.yml",
+    "shell-tests")`` from ``GATING_JOBS`` without adding it to the exemption
+    register — or if a recorded context resolves to no job at all.
+    """
+    # Partner: everything below iterates `_REQUIRED_CONTEXT_WORKFLOWS`, so a
+    # SHRUNK mapping quietly shrinks this rule's reach. A floor of "at least 2"
+    # against a real nine would have let six rows be deleted — and with them the
+    # coverage of the jobs they name — while every assertion here stayed green.
+    # Compared as a baseline, not a floor: see _MEASURED_REQUIRED_CONTEXTS_FROM_A_WORKFLOW.
+    assert len(_REQUIRED_CONTEXT_WORKFLOWS) >= _MEASURED_REQUIRED_CONTEXTS_FROM_A_WORKFLOW, (
+        f"_REQUIRED_CONTEXT_WORKFLOWS holds {len(_REQUIRED_CONTEXT_WORKFLOWS)} "
+        f"entries, below the {_MEASURED_REQUIRED_CONTEXTS_FROM_A_WORKFLOW} measured "
+        "on 2026-09-24. Removing a row removes this rule's coverage of that "
+        "context. If the owner genuinely demoted one, re-derive the live list and "
+        "update the measured number in the same change."
+    )
+    # Same reasoning on the other side: moving jobs OUT of GATING_JOBS (into the
+    # exemption register, or nowhere) is how the defusing rule stops reaching
+    # them, and nothing else here caps that.
+    assert len(GATING_JOBS) >= _MEASURED_GATING_JOBS, (
+        f"GATING_JOBS holds {len(GATING_JOBS)} entries, below the "
+        f"{_MEASURED_GATING_JOBS} measured on 2026-09-24. Each removal takes a "
+        "gating job out of the defusing rule. If a job was genuinely retired, "
+        "update the measured number in the same change."
+    )
+
+    guarded = {f"{workflow}:{job_id}" for workflow, job_id in GATING_JOBS}
+    exempt = set(_NOT_HELD_TO_THE_DEFUSING_RULE)
+
+    unresolved: list[str] = []
+    unregistered: list[str] = []
+    hit_guarded: list[str] = []
+    hit_exempt: list[str] = []
+    for context, workflow in sorted(_REQUIRED_CONTEXT_WORKFLOWS.items()):
+        job_ids = _job_ids_for_context(context, workflow)
+        if not job_ids:
+            unresolved.append(f"{context!r} is recorded as coming from {workflow}")
+            continue
+        for job_id in job_ids:
+            key = f"{workflow}:{job_id}"
+            if key in guarded:
+                hit_guarded.append(key)
+            elif key in exempt:
+                hit_exempt.append(key)
+            else:
+                unregistered.append(f"{key} (required context {context!r})")
+
+    # Resolution is the other half of the partner: if `_job_ids_for_context`
+    # returned nothing for everything, `unregistered` would be empty and this
+    # rule would pass having checked nothing.
+    assert not unresolved, (
+        "required context(s) resolve to no job at all, so this rule cannot say "
+        f"whether they are registered: {unresolved}. Either a job was renamed — "
+        "which wedges every PR, because branch protection still waits for the "
+        "old context — or _REQUIRED_CONTEXT_WORKFLOWS is stale."
+    )
+    # Both registers must actually be consulted, or one of the two branches above
+    # is dead and a whole class of omission goes unseen.
+    assert hit_guarded, "no required context resolved to a GATING_JOBS entry"
+    assert hit_exempt, "no required context resolved to an exemption entry"
+
+    assert not unregistered, (
+        "required status context(s) resolve to a job in NEITHER register:\n  "
+        + "\n  ".join(unregistered)
+        + "\nAdd the job to GATING_JOBS (so the defusing rule covers it), or to "
+        "_NOT_HELD_TO_THE_DEFUSING_RULE with the reason it cannot be. Being in "
+        "neither means a one-line `continue-on-error: true` turns a required "
+        "gate advisory and nothing here notices."
+    )
 
 
 @pytest.mark.parametrize(

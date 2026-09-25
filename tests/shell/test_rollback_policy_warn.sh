@@ -21,7 +21,11 @@
 #   2. versions match             -> silent, exit 0, reaches the plan
 #   3. target predates config.py  -> silent, exit 0, reaches the plan
 #      (regression guard for the `|| true`: without it this exits 128 under
-#       `set -euo pipefail` — a warning turning into an incident-path outage)
+#       `set -euo pipefail` — a warning turning into an incident-path outage.
+#       The target is an ORPHAN commit this suite builds, not the repository's
+#       root commit: under CI's depth-1 checkout the root commit IS head and
+#       carries config.py, so the case skipped on both matrix legs and had never
+#       executed in CI — see the comment on case 3 below.)
 #   4. Field(default="...") form  -> still warns (the field's style may change)
 #   5. infra/docker/.env pins the version -> silent (an explicit pin beats the
 #      code default at runtime, so the rollback does not change the effective
@@ -108,12 +112,41 @@ git tag -f _t_same HEAD >/dev/null 2>&1
 _run _t_same; _assert "versions match -> silent, exit 0, proceeds" 0
 
 # 3. target predates config.py -> silent, MUST NOT abort (guards the `|| true`)
-git tag -f _t_root "$(git rev-list --max-parents=0 HEAD | head -1)" >/dev/null 2>&1
+#
+# This case used to tag the repository's ROOT commit and SKIP when that commit
+# already carried config.py. In CI it always did — and never for a reason about
+# this repository: ci.yml's shell-tests job uses `actions/checkout@v7` with no
+# `fetch-depth:`, so the checkout is depth-1 and `git rev-list --max-parents=0
+# HEAD` resolves to the grafted shallow root, i.e. HEAD itself. Measured in run
+# 35019295556: `skip — root commit already has config.py` on BOTH matrix legs.
+# The one case guarding the load-bearing `|| true` had therefore never executed
+# in CI while the suite reported all-passed. (Locally it DID run — this repo's
+# real root commit predates config.py — which is why the gap was invisible from a
+# laptop.)
+#
+# So BUILD the target instead of hoping history supplies one: an orphan commit
+# (no parents, no `backend/` at all) carrying a single placeholder blob. That is
+# independent of clone depth, so both matrix legs exercise the same thing.
+_build_pre_config_commit() {  # -> prints the commit sha
+    local blob tree
+    blob="$(printf 'a tree deliberately predating backend/app/core/config.py\n' |
+        git hash-object -w --stdin)"
+    # A SEPARATE index file, so the clone's real index is untouched and case 4's
+    # `git commit -am` still stages what it means to.
+    rm -f "${WORK}/orphan.index"
+    GIT_INDEX_FILE="${WORK}/orphan.index" \
+        git update-index --add --cacheinfo "100644,${blob},PLACEHOLDER"
+    tree="$(GIT_INDEX_FILE="${WORK}/orphan.index" git write-tree)"
+    printf 'test: a tree predating backend/app/core/config.py\n' | git commit-tree "${tree}"
+}
+git tag -f _t_root "$(_build_pre_config_commit)" >/dev/null 2>&1
 if git show "_t_root:backend/app/core/config.py" >/dev/null 2>&1; then
-    echo "  skip — root commit already has config.py; cannot exercise the missing-file path"
+    # A FAILURE, not a skip. A case that can quietly decline to run is the exact
+    # defect this rewrite closes, so if the fixture cannot be built, say so in red.
+    fail "target predates config.py -> could not build a tree WITHOUT config.py"
 else
-    # --allow-migration-mismatch: the root commit also predates db/versions, so
-    # the #195 migration guard would refuse first and this case would never
+    # --allow-migration-mismatch: the orphan commit carries no db/versions either,
+    # so the #195 migration guard would refuse first and this case would never
     # reach the policy code it exists to exercise.
     _run _t_root --allow-migration-mismatch
     _assert "target predates config.py -> silent, exit 0, proceeds" 0
