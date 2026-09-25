@@ -41,6 +41,9 @@ def configure_cors(app: FastAPI, settings: Settings) -> None:
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=[
             "Authorization",
+            # ADR-0005 §3: the fixed header that replaces the public token. Our own
+            # cross-origin frontend (dev: Vite on :3000) must be allowed to send it.
+            "X-CiteVyn-Client",
             "X-Admin-API-Key",
             settings.request_id_header,
             "Content-Type",
