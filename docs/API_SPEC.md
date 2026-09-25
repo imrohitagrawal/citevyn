@@ -704,6 +704,22 @@ GET /v1/search/exact?q=--some-flag
 }
 ```
 
+## 7b. History export (ADR-0005 §6)
+
+```http
+GET /v1/me/export?format=json|markdown
+```
+
+Requires the demo bearer (§3); with `CITEVYN_ACCESS_MODEL_ENABLED` on, the
+`history` capability. Returns a file download (`Content-Disposition:
+attachment; filename="citevyn-history-YYYY-MM-DD.json|.md"`) holding every
+conversation the history drawer can show: the caller's own sessions that are not
+closed, newest first, at most 500. A closed session is a soft delete, so it is
+not exported. JSON carries `exported_at`, `truncated` (true when the 500 cap was
+hit) and `sessions[]` with `messages[]` (`role`, `content`, `created_at`,
+`citations[]` including `docs_as_of`). Markdown is the same content as a
+readable document and says so when truncated. Any other `format` is 422.
+
 ## 8. Feedback and the gap log (ADR-0005 §6)
 
 Trust must-haves: live without `CITEVYN_ACCESS_MODEL_ENABLED`. With it on, both

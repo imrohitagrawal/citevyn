@@ -20,7 +20,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { listMySessions } from "../lib/api";
+import { apiFetch, listMySessions } from "../lib/api";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { SessionSummary } from "../lib/types";
 
@@ -35,6 +35,28 @@ type LoadState = "loading" | "error" | "ready";
 export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loadState, setLoadState] = useState<LoadState>("loading");
+  // History export (ADR-0005 §6): the result is announced, never silent.
+  const [exportStatus, setExportStatus] = useState("");
+
+  const download = async (format: "json" | "markdown") => {
+    setExportStatus("");
+    try {
+      const data = await apiFetch<unknown>(`/v1/me/export?format=${format}`);
+      // Markdown comes back as text; JSON comes back parsed and is re-serialised.
+      const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+      const url = URL.createObjectURL(
+        new Blob([text], { type: format === "json" ? "application/json" : "text/markdown" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `citevyn-history-${new Date().toISOString().slice(0, 10)}.${format === "json" ? "json" : "md"}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportStatus("Download started.");
+    } catch {
+      setExportStatus("Could not download your history. Please try again.");
+    }
+  };
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -174,6 +196,27 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
             ))}
           </ul>
         )}
+        {loadState === "ready" && sessions.length > 0 && (
+          <div style={{ marginTop: "16px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            {(["markdown", "json"] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                className="answer-action"
+                onClick={() => void download(f)}
+              >
+                {f === "json" ? "Download as JSON" : "Download as Markdown"}
+              </button>
+            ))}
+          </div>
+        )}
+        <span
+          aria-live="polite"
+          data-testid="history-export-status"
+          style={{ display: "block", marginTop: "8px", fontSize: "13px", color: "var(--muted, #666)" }}
+        >
+          {exportStatus}
+        </span>
       </div>
     </div>,
     document.body,
