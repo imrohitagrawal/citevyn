@@ -7,19 +7,27 @@ server. The set of tables created must match ``docs/DATA_MODEL.md``.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
+import pkgutil
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from alembic.autogenerate import compare_metadata
 from alembic.command import downgrade as alembic_downgrade
 from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
+from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine
+from sqlalchemy import DefaultClause, Engine, MetaData, UniqueConstraint, create_engine, inspect
+from sqlalchemy.exc import IntegrityError, SAWarning
+from sqlalchemy.types import TypeEngine
 
-from app.models.documents import Document
+import app.models as app_models
+from app.models import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "db" / "alembic.ini"
@@ -491,25 +499,432 @@ def test_documents_identity_checksum_rename_round_trips(
     assert value == "sha256:keepme"
 
 
-def test_migrated_documents_table_matches_the_orm_model(
-    alembic_config: AlembicConfig,
-) -> None:
-    """Guard against model/migration drift on ``documents``.
+# ── #455: the migrated schema must match the ORM models ─────────────────────
+#
+# The hermetic suite builds its schema with ``Base.metadata.create_all``, NOT
+# alembic, and CI's ``alembic upgrade head`` step only proves the migrations
+# RUN -- it never looks at the models. So a model column, index or constraint
+# with no migration passed the whole suite and the CI upgrade step, and the
+# first place it would fail is a real deploy. These tests are the comparison.
+# They replace ``test_migrated_documents_table_matches_the_orm_model``, which
+# compared only the column NAMES of one table. Every drift it could see shows
+# up here as an add_column / remove_column item (checked by deleting
+# ``Document.title``: both went red); this also sees the other tables, types,
+# nullability, indexes, FKs and server defaults.
+#
+# The diff is not empty today, and the items that are left are listed below,
+# each one keyed exactly (op + table + name/columns + unique flag), never by a
+# loose string match, so a NEW item can never hide behind an old one.
+#
+# WHAT THE COMPARISON CANNOT SEE (it runs on SQLite, the only engine the
+# hermetic suite has):
+#   - anything a migration does only on Postgres: 0002's native ENUM types and
+#     0004's pgvector column and HNSW index sit behind a dialect check, so on
+#     SQLite they never run. A Postgres variant of this test does not exist.
+#   - CHECK constraints: alembic's autogenerate does not compare them. None
+#     exist in the models or migrations today.
+#   - server defaults: compared, and a ``modify_default`` key carries both
+#     rendered values, so a changed default on an allowlisted column is a NEW
+#     key, not the old entry. Only "the migration has one, the model has none"
+#     occurs today; how alembic compares two different non-empty defaults on
+#     SQLite was not measured.
+#   - an UNNAMED unique constraint: compare_metadata does not report one that
+#     only a migration creates. ``test_migrated_uniqueness_matches_the_orm_models``
+#     below compares uniqueness directly, because that is the permissive
+#     direction this guard exists for.
+# Types (compare_type) and nullability ARE compared, and on SQLite they add no
+# noise: zero modify_type / modify_nullable items at 57d8d4f. Changing
+# ``User.email`` to String(256), or to nullable=False, turns the test red.
 
-    The hermetic suite builds its schema with ``Base.metadata.create_all``, NOT
-    alembic — so a column renamed in the model but not in a migration passes
-    every other test in this repo and only explodes on a real Postgres deploy.
-    This test is the one place the two are compared.
+DiffKey = tuple[object, ...]
+
+# PERMISSIVE DIVERGENCE: the hermetic schema is LOOSER than production. See the
+# comment on the entry below.
+USERS_EMAIL_UNIQUE_INDEX: DiffKey = ("remove_index", "users", "ix_users_email", ("email",), True)
+
+# Every item compare_metadata reports at head, and why it is tolerated.
+# "remove_index" = the migration creates the index, the model does not declare
+# it. "add_fk" = the model declares the FK, the migration never created it.
+# "modify_default" = the migration sets a server default the model lacks.
+KNOWN_DRIFT: dict[DiffKey, str] = {
+    # PERMISSIVE DIVERGENCE (#455) -- the one that ships bugs. Migration 0008
+    # creates ``ix_users_email`` UNIQUE, but ``User.email`` has no ``unique=``
+    # and no ``__table_args__``. So every hermetic test runs on a schema that
+    # ACCEPTS two users with the same email, where production REJECTS the second.
+    # A code path that relies on the database to refuse a duplicate email is
+    # therefore untested. CLOSED BY: an owner-approved model change declaring the
+    # unique index on ``User.email`` (a schema-definition change, which is why it
+    # is not made here). When that lands, this entry goes stale, the stale-entry
+    # test below fails, and this entry must be deleted.
+    USERS_EMAIL_UNIQUE_INDEX: "PERMISSIVE DIVERGENCE: users.email unique only in production",
+    # STRICTER IN THE HERMETIC SCHEMA (latent). The model declares this FK and
+    # ``app.core.db`` turns SQLite FK enforcement on, but migration 0001 created
+    # ``evaluation_runs`` without it, so production accepts a run pointing at a
+    # missing index_version. Closed by a migration adding the FK.
+    (
+        "add_fk",
+        "evaluation_runs",
+        ("index_version",),
+        ("index_versions.index_version",),
+        "RESTRICT",
+    ): "STRICTER in tests: FK exists in the model, not in production",
+    # STRICTER IN THE HERMETIC SCHEMA (latent). Migration 0005 gives these
+    # columns a server default; the model uses Python-side ``default=`` instead,
+    # which every ORM insert applies. Only a raw SQL insert that omits the column
+    # behaves differently: production fills it, the hermetic schema refuses it.
+    ("modify_default", "provider_calls", "input_tokens", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "output_tokens", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "attempts", "'1'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "cost_usd", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "priced", "1", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "tokens_estimated", "0", None): (
+        "STRICTER in tests: server default"
+    ),
+    # HARMLESS: non-unique indexes the migrations create for query speed and the
+    # models never declared. No row is accepted or refused differently; only
+    # query plans differ. Closed by declaring ``index=True`` on the model column.
+    ("remove_index", "audit_events", "ix_audit_events_timestamp", ("timestamp",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "audit_events", "ix_audit_events_user_id", ("user_id",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "chunks", "ix_chunks_product_area", ("product_area",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "documents", "ix_documents_product_area", ("product_area",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "documents", "ix_documents_source_name", ("source_name",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "evaluation_runs", "ix_evaluation_runs_suite_name", ("suite_name",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "ingestion_jobs", "ix_ingestion_jobs_status", ("status",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    ("remove_index", "messages", "ix_messages_session_id", ("session_id",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+    (
+        "remove_index",
+        "retrieved_evidence",
+        "ix_retrieved_evidence_message_id",
+        ("message_id",),
+        False,
+    ): "HARMLESS: non-unique index only in production",
+    ("remove_index", "user_identities", "ix_user_identities_user_id", ("user_id",), False): (
+        "HARMLESS: non-unique index only in production"
+    ),
+}
+
+
+def _full_orm_metadata() -> MetaData:
+    """``Base.metadata`` with EVERY module under ``app.models`` imported.
+
+    A model registers its table only when its module is imported. Relying on
+    ``app.models/__init__`` (or on whatever earlier tests happened to import)
+    would let a model that is not listed there drop out of the comparison
+    silently, so import every module in the package by walking it.
+    """
+    for module in pkgutil.iter_modules(app_models.__path__):
+        importlib.import_module(f"{app_models.__name__}.{module.name}")
+    return Base.metadata
+
+
+def _diff_key(item: object) -> DiffKey:
+    """Reduce one compare_metadata item to an exact, hashable key."""
+    assert isinstance(item, tuple) and item, f"unexpected diff item shape: {item!r}"
+    op = item[0]
+    if op in ("add_index", "remove_index"):
+        index = item[1]
+        return (
+            op,
+            index.table.name,
+            index.name,
+            tuple(column.name for column in index.columns),
+            bool(index.unique),
+        )
+    if op in ("add_fk", "remove_fk"):
+        fk = item[1]
+        return (
+            op,
+            fk.parent.name,
+            tuple(fk.column_keys),
+            tuple(element.target_fullname for element in fk.elements),
+            fk.ondelete,
+        )
+    if op in ("add_table", "remove_table"):
+        return (op, item[1].name)
+    if op in ("add_column", "remove_column"):
+        return (op, item[2], item[3].name)
+    if op in ("add_constraint", "remove_constraint"):
+        constraint = item[1]
+        return (
+            op,
+            constraint.table.name,
+            constraint.name,
+            tuple(column.name for column in constraint.columns),
+        )
+    if op.startswith("modify_"):
+        # (op, schema, table, column, existing_kw, existing, new): keep BOTH
+        # values, so a changed default or type on an allowlisted column is a
+        # new key rather than a match for the old entry.
+        return (op, item[2], item[3], _render(item[5]), _render(item[6]))
+    # Unknown shape: keep it, fully rendered, so it can never match an entry.
+    return (op, repr(item))
+
+
+def _render(value: object) -> object:
+    """A stable, comparable form of a modify_* value (no object addresses)."""
+    if isinstance(value, DefaultClause):
+        arg = value.arg
+        return str(getattr(arg, "text", arg))
+    if isinstance(value, TypeEngine):
+        return repr(value)
+    return value
+
+
+def _diff_keys(diff: list[object]) -> list[DiffKey]:
+    """Flatten compare_metadata's output (modify_* ops arrive as lists) to keys."""
+    keys: list[DiffKey] = []
+    for entry in diff:
+        for item in entry if isinstance(entry, list) else [entry]:
+            keys.append(_diff_key(item))
+    return keys
+
+
+def _unexpected_and_stale(
+    keys: list[DiffKey], allowlist: dict[DiffKey, str]
+) -> tuple[list[DiffKey], list[DiffKey]]:
+    """(items in the diff but not allowlisted, allowlisted items not in the diff)."""
+    unexpected = [key for key in keys if key not in allowlist]
+    stale = [key for key in allowlist if key not in keys]
+    return unexpected, stale
+
+
+@pytest.fixture
+def migrated_schema_diff(alembic_config: AlembicConfig) -> list[DiffKey]:
+    """compare_metadata between ``alembic upgrade head`` and the full ORM metadata."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    metadata = _full_orm_metadata()
+    with engine.connect() as connection, warnings.catch_warnings():
+        # ``index_versions`` and ``evaluation_runs`` FK each other, so
+        # SQLAlchemy cannot topologically sort them and warns. The warning is
+        # about sort order only; the FK items are still compared (the
+        # ``add_fk`` entry above is exactly such an item).
+        warnings.filterwarnings(
+            "ignore", message="Cannot correctly sort tables", category=SAWarning
+        )
+        context = MigrationContext.configure(
+            connection,
+            opts={"compare_type": True, "compare_server_default": True},
+        )
+        diff = compare_metadata(context, metadata)
+    return _diff_keys(diff)
+
+
+def test_migrated_schema_matches_the_orm_models(migrated_schema_diff: list[DiffKey]) -> None:
+    """Every difference between the migrated schema and the models is listed.
+
+    RED WHEN: a ``mapped_column`` (or index, FK, table, type, nullability,
+    server default) is added to any model with no migration, or the reverse; or
+    when any ``KNOWN_DRIFT`` entry is deleted while the drift is still there.
+    """
+    unexpected, _ = _unexpected_and_stale(migrated_schema_diff, KNOWN_DRIFT)
+    assert not unexpected, (
+        "the ORM models and the migrated schema disagree on items that are not in "
+        f"KNOWN_DRIFT: {unexpected}. Write a migration for a model change (or the "
+        "model change for a migration). Add an entry only for a divergence you mean "
+        "to keep, and label which side is looser."
+    )
+    assert len(migrated_schema_diff) == len(set(migrated_schema_diff)), (
+        f"two diff items reduced to the same key, so one could hide: {migrated_schema_diff}"
+    )
+
+
+def test_every_known_drift_entry_is_still_real(migrated_schema_diff: list[DiffKey]) -> None:
+    """PARTNER: an allowlist entry whose drift is gone must be deleted.
+
+    Without this, an entry outlives its fix and later excuses the same drift
+    returning. RED WHEN: a migration or model change closes one of the listed
+    divergences (for example the owner adds the unique index to ``User.email``)
+    and the entry is left behind.
+    """
+    _, stale = _unexpected_and_stale(migrated_schema_diff, KNOWN_DRIFT)
+    assert not stale, f"these KNOWN_DRIFT entries no longer occur and must be deleted: {stale}"
+
+
+def test_the_orm_metadata_covers_every_migrated_table(alembic_config: AlembicConfig) -> None:
+    """PARTNER: the comparison cannot pass because a model dropped out of it.
+
+    compare_metadata only compares the tables it is given. RED WHEN: a table the
+    migrations create has no model in the metadata the comparison uses (for
+    example ``_full_orm_metadata`` stops importing the model modules).
     """
     alembic_upgrade(alembic_config, "head")
-
     engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
     with engine.connect() as connection:
-        rows = connection.exec_driver_sql("PRAGMA table_info(documents)").all()
-    migrated = {row[1] for row in rows}
+        migrated = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        } - {"alembic_version"}
+    modelled = set(_full_orm_metadata().tables)
+    # Not vacuous: the migrated schema really has the documented tables.
+    assert migrated >= EXPECTED_TABLES
+    assert modelled == migrated, (
+        f"only migrated: {sorted(migrated - modelled)}; "
+        f"only modelled: {sorted(modelled - migrated)}"
+    )
 
-    model = {column.name for column in Document.__table__.columns}
-    assert migrated == model, f"documents drift: migration={migrated} model={model}"
+
+def test_the_drift_checker_reports_every_offending_item_not_just_the_first() -> None:
+    """The comparison helper itself, on a fixture whose FIRST item is allowlisted.
+
+    RED WHEN: ``_unexpected_and_stale`` stops at the first item, or reports an
+    allowlisted item as unexpected.
+    """
+    allowed: DiffKey = ("remove_index", "t", "ix_ok", ("a",), False)
+    new_one: DiffKey = ("add_column", "t", "b")
+    new_two: DiffKey = ("remove_index", "t", "ix_ok", ("a",), True)  # same index, unique
+    gone: DiffKey = ("add_fk", "t", ("c",), ("u.c",), None)
+    unexpected, stale = _unexpected_and_stale(
+        [allowed, new_one, new_two], {allowed: "fine", gone: "fixed since"}
+    )
+    assert unexpected == [new_one, new_two]
+    assert stale == [gone]
+
+
+def _insert_two_users_with_one_email(engine: Engine) -> int:
+    """Insert two users sharing an email; return how many rows were stored.
+
+    Raises ``IntegrityError`` when the schema enforces email uniqueness.
+    """
+    with engine.begin() as connection:
+        for user_id in ("u-455-a", "u-455-b"):
+            connection.exec_driver_sql(
+                "INSERT INTO users (user_id, role, created_at, email) VALUES "
+                f"('{user_id}', 'demo_user', CURRENT_TIMESTAMP, 'same@example.com')"
+            )
+    with engine.connect() as connection:
+        return connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM users WHERE email = 'same@example.com'"
+        ).scalar_one()
+
+
+def test_users_email_uniqueness_matches_the_known_drift_entry(
+    alembic_config: AlembicConfig, tmp_path: Path
+) -> None:
+    """The PERMISSIVE DIVERGENCE on ``users.email``, measured by behaviour.
+
+    The migrated schema (production) must refuse a duplicate email. The
+    hermetic ``create_all`` schema must do whatever ``KNOWN_DRIFT`` says it
+    does: accept the duplicate while the entry is there, refuse it once the
+    owner closes the divergence and the entry is deleted. So this pins the
+    allowlist to reality in both states and never locks the defect in.
+
+    RED WHEN: migration 0008's unique index is dropped (production would accept
+    the duplicate), or ``User.email`` gains uniqueness while the entry remains.
+    """
+    alembic_upgrade(alembic_config, "head")
+    migrated = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    # Matched on the message: any IntegrityError (a new NOT NULL column, say)
+    # would otherwise pass this with the email uniqueness gone.
+    with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
+        _insert_two_users_with_one_email(migrated)
+
+    hermetic = create_engine(f"sqlite:///{tmp_path / 'create_all.db'}")
+    _full_orm_metadata().create_all(hermetic)
+    if USERS_EMAIL_UNIQUE_INDEX in KNOWN_DRIFT:
+        assert _insert_two_users_with_one_email(hermetic) == 2, (
+            "create_all now refuses a duplicate email, so the users.email divergence "
+            "is closed: delete its KNOWN_DRIFT entry"
+        )
+    else:
+        with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
+            _insert_two_users_with_one_email(hermetic)
+
+
+def _unique_column_sets(
+    tables: dict[str, set[tuple[str, ...]]],
+) -> set[tuple[str, tuple[str, ...]]]:
+    # Sorted: uniqueness over a column set does not depend on column order, so
+    # a reordered composite constraint is the same uniqueness, not a drift.
+    return {(table, tuple(sorted(columns))) for table, sets in tables.items() for columns in sets}
+
+
+# The uniqueness only the migrated schema has, and why it is tolerated. Tied to
+# the KNOWN_DRIFT entry above: the same PERMISSIVE DIVERGENCE, seen by the
+# uniqueness comparison rather than by compare_metadata.
+KNOWN_UNIQUENESS_DRIFT: set[tuple[str, tuple[str, ...]]] = (
+    {("users", ("email",))} if USERS_EMAIL_UNIQUE_INDEX in KNOWN_DRIFT else set()
+)
+
+
+def test_migrated_uniqueness_matches_the_orm_models(alembic_config: AlembicConfig) -> None:
+    """Every UNIQUE column set in production is UNIQUE in the hermetic schema.
+
+    compare_metadata misses an unnamed unique constraint that only a migration
+    creates, and that is exactly the looser-than-production case #455 is about:
+    create_all would accept a duplicate that production refuses. So compare the
+    unique column sets directly -- unique constraints and unique indexes as
+    reflected from the migrated DB, against UniqueConstraint, unique Index and
+    ``unique=True`` columns in the models. Primary keys are not included.
+
+    RED WHEN: a migration makes a column set unique that no model declares
+    unique (or the reverse), or when the ``users.email`` divergence is closed and
+    its KNOWN_DRIFT entry is left behind.
+    """
+    alembic_upgrade(alembic_config, "head")
+    inspector = inspect(create_engine(alembic_config.get_main_option("sqlalchemy.url")))
+    migrated: dict[str, set[tuple[str, ...]]] = {}
+    for table in inspector.get_table_names():
+        sets = {tuple(u["column_names"]) for u in inspector.get_unique_constraints(table)}
+        sets |= {tuple(i["column_names"]) for i in inspector.get_indexes(table) if i["unique"]}
+        migrated[table] = sets
+    modelled: dict[str, set[tuple[str, ...]]] = {}
+    for name, table in _full_orm_metadata().tables.items():
+        sets = {
+            tuple(column.name for column in constraint.columns)
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        sets |= {
+            tuple(column.name for column in index.columns)
+            for index in table.indexes
+            if index.unique
+        }
+        sets |= {(column.name,) for column in table.columns if column.unique}
+        modelled[name] = sets
+
+    only_migrated = _unique_column_sets(migrated) - _unique_column_sets(modelled)
+    only_modelled = _unique_column_sets(modelled) - _unique_column_sets(migrated)
+    # Not vacuous: reflection really found uniqueness on both sides, including a
+    # composite constraint that both declare.
+    assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(migrated)
+    assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(modelled)
+    assert only_migrated == KNOWN_UNIQUENESS_DRIFT, (
+        f"UNIQUE only in production (hermetic tests accept duplicates it refuses): "
+        f"{sorted(only_migrated - KNOWN_UNIQUENESS_DRIFT)}; listed but no longer "
+        f"diverging: {sorted(KNOWN_UNIQUENESS_DRIFT - only_migrated)}"
+    )
+    assert not only_modelled, (
+        f"UNIQUE only in the models, not in production: {sorted(only_modelled)}"
+    )
 
 
 def test_versions_directory_has_exactly_one_head(alembic_config: AlembicConfig) -> None:
