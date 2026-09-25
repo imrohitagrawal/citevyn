@@ -235,8 +235,11 @@ jobs:
       - name: Alembic upgrade head against Postgres
         # Exercises every migration (0001 initial schema,
         # 0002 promote StrEnum to native PG ENUM, 0003 add
-        # chunks.embedding) against a real Postgres engine. Any
-        # SQLAlchemy-vs-schema drift fails here.
+        # chunks.embedding) against a real Postgres engine. This
+        # proves the migrations RUN; it does not compare them with
+        # the SQLAlchemy models. That comparison is
+        # test_migrated_schema_matches_the_orm_models in
+        # backend/tests/test_migrations.py (#455), on SQLite.
         #
         # Run from ``backend/`` because that is where
         # ``uv sync`` created the venv (and installed
