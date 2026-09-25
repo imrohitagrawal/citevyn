@@ -862,7 +862,9 @@ def test_users_email_uniqueness_matches_the_known_drift_entry(
 def _unique_column_sets(
     tables: dict[str, set[tuple[str, ...]]],
 ) -> set[tuple[str, tuple[str, ...]]]:
-    return {(table, columns) for table, sets in tables.items() for columns in sets}
+    # Sorted: uniqueness over a column set does not depend on column order, so
+    # a reordered composite constraint is the same uniqueness, not a drift.
+    return {(table, tuple(sorted(columns))) for table, sets in tables.items() for columns in sets}
 
 
 # The uniqueness only the migrated schema has, and why it is tolerated. Tied to
