@@ -104,5 +104,19 @@ describe("LandingPage: a dialog that cannot load (#447)", () => {
     expect(alert).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Set one" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Try the demo" }).length).toBeGreaterThan(0);
+    // The toast must paint OVER the nudge card. Both are fixed to the bottom
+    // of the screen and overlap completely at phone width; the nudge is
+    // portaled after #root, so at an equal z-index it hides the only message
+    // telling the reader to reload. Read from the emitted inline styles. RED
+    // if ToastHost's z-index is lowered back to the nudge's.
+    const toastLayer = alert.closest('[aria-live="polite"]') as HTMLElement | null;
+    const nudgeCard = screen.getByText(/Add a password/).closest('[role="status"]') as HTMLElement | null;
+    expect(toastLayer).not.toBeNull();
+    expect(nudgeCard).not.toBeNull();
+    const toastZ = Number(toastLayer!.style.zIndex);
+    const nudgeZ = Number(nudgeCard!.style.zIndex);
+    // Partner: both z-indexes were really set, or NaN > NaN would hide it.
+    expect(Number.isInteger(toastZ) && Number.isInteger(nudgeZ) && nudgeZ > 0).toBe(true);
+    expect(toastZ).toBeGreaterThan(nudgeZ);
   });
 });
