@@ -339,3 +339,35 @@ def test_the_client_counts_characters_the_way_the_server_does() -> None:
     assert len(emoji) <= _model_bound(AnswerRequest, "message", "max_length"), (
         "the server would reject this, so it is the wrong example"
     )
+
+
+# ---------------------------------------------------------------------------
+# The feedback forms (ADR-0005 §6)
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_LIMITS = _REPO_ROOT / "frontend" / "src" / "lib" / "feedbackLimits.ts"
+_ANSWER_ACTIONS = _REPO_ROOT / "frontend" / "src" / "components" / "AnswerActions.tsx"
+
+
+@pytest.mark.parametrize(
+    ("const", "model_name", "field"),
+    [
+        ("MAX_FEEDBACK_COMMENT", "FeedbackRequest", "comment"),
+        ("MAX_SOURCE_NOTE", "SourceRequestBody", "note"),
+        ("MAX_SOURCE_URL", "SourceRequestBody", "requested_url"),
+    ],
+)
+def test_the_feedback_forms_carry_the_servers_ceilings(
+    const: str, model_name: str, field: str
+) -> None:
+    """RED if a feedback field's server ``max_length`` moves without the UI, or the
+    UI stops refusing on the constant (a declared-but-unused constant would pass
+    the comparison while the browser enforced nothing)."""
+    from app.api.routes import feedback
+
+    server = _model_bound(getattr(feedback, model_name), field, "max_length")
+    browser = _const(_read(_FEEDBACK_LIMITS), const, _FEEDBACK_LIMITS)
+    assert browser == server, f"{const} is {browser} in the UI but {server} on the server"
+    assert "tooLong(" in _read(_ANSWER_ACTIONS) and const in _read(_ANSWER_ACTIONS), (
+        f"AnswerActions does not refuse on {const}"
+    )

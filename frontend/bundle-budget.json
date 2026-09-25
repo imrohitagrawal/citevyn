@@ -427,8 +427,23 @@
     "    silent -- 1.34x the largest chunk that exists today, arriving with no",
     "    history to compare against. The key catches GROWTH past a line; it does",
     "    not ask whether a new surface should have been that size to begin with.",
-    "    That is a review question, and this file cannot answer it."
+    "    That is a review question, and this file cannot answer it.",
+    "",
+    "RAISED 64,479 -> 65,983 (ADR-0005 Phase 3B, 2026-09-26). Measured, shipping build:",
+    "  63,795 B  main after #498 (Phase 2), before the trust must-haves",
+    "  64,348 B  after Phase 3A (#499): +553 B -- 'docs as of' stamps on every answer",
+    "            and card, 'Copy as Markdown', click-to-copy code, and the copy status",
+    "            announcer. All of it renders on first paint of an answer, so eager.",
+    "  64,483 B  after Phase 3B: +135 B -- only the lazy() import, the error boundary",
+    "            and the answerRef plumbing; the feedback forms themselves are a lazy",
+    "            chunk (AnswerActions). The graph was 4 B over 64,479.",
+    "Why a raise and not a trim: the one sizeable eager candidate was moving",
+    "answerMarkdown behind a dynamic import, but its only use is inside a click",
+    "handler that writes the clipboard, and an awaited import before writeText can",
+    "lose the user activation Safari requires -- trading bytes for a copy that",
+    "silently fails. New ceiling = 64,483 + 1,500, restoring the ~2.4% headroom this",
+    "file already argues for (see '68,000' and the 69 B situation above)."
   ],
-  "eagerChunkGzipMaxBytes": 64479,
+  "eagerChunkGzipMaxBytes": 65983,
   "lazyChunkGzipMaxBytes": 6328
 }

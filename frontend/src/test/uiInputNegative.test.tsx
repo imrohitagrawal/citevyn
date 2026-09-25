@@ -36,7 +36,17 @@ import { LandingPage } from "../components/LandingPage";
 import { AuthModal, type AuthModalMode } from "../components/AuthModal";
 import { useLandingState } from "../hooks/useLandingState";
 import { __testOnly } from "../lib/authStore";
-import { isLiveMode, createSession, askQuestion, login, register, getCurrentUser } from "../lib/api";
+import {
+  isLiveMode,
+  createSession,
+  askQuestion,
+  login,
+  register,
+  getCurrentUser,
+  apiFetch,
+} from "../lib/api";
+import AnswerActions from "../components/AnswerActions";
+import { MAX_FEEDBACK_COMMENT, MAX_SOURCE_NOTE, MAX_SOURCE_URL } from "../lib/feedbackLimits";
 import { requestMagicLink, updatePassword } from "../lib/authActions";
 import { ApiClientError } from "../lib/types";
 import { MAX_QUESTION_LENGTH, isSubmitKey, questionLength } from "../lib/composerInput";
@@ -57,6 +67,7 @@ vi.mock("../lib/api", () => ({
   register: vi.fn(),
   logout: vi.fn(),
   onUnauthorized: vi.fn(() => () => {}),
+  apiFetch: vi.fn(),
 }));
 
 vi.mock("../lib/authActions", () => ({
@@ -119,6 +130,11 @@ afterEach(() => {
  * type checker rather than the syntax tree.
  */
 const SURFACES = [
+  // ADR-0005 §6 feedback forms. Cells: "§8b cells — AnswerActions" below.
+  "components/AnswerActions.tsx#0 (type=radio)",
+  "components/AnswerActions.tsx#1 (type=<none>)",
+  "components/AnswerActions.tsx#2 (type=url)",
+  "components/AnswerActions.tsx#3 (type=<none>)",
   "components/AuthModal.tsx#0 (type=email)",
   "components/AuthModal.tsx#1 (type=password)",
   "components/AuthModal.tsx#2 (type=password)",
@@ -1356,3 +1372,160 @@ describe("§8b cells — AuthModal, all four modes", () => {
     expect(within(dialog).getByLabelText("Password")).toHaveAttribute("maxlength", "128");
   });
 });
+
+// ---------------------------------------------------------------------------
+// §8b cells — AnswerActions (the feedback forms, ADR-0005 §6)
+// ---------------------------------------------------------------------------
+//
+// Four surfaces: #0 the reason radios, #1 the report comment, #2 the source
+// link, #3 the source note. Cell by cell:
+//
+// - Empty submit / whitespace-only: EVERY field here is optional, so there is no
+//   "refuse the empty submit" cell. The rule that applies is that empty and
+//   whitespace-only mean "not given": the request goes out WITHOUT the field
+//   (asserted below), never with "" or "   " (the server refuses an empty URL).
+// - Over-length: refused at submit, announced, text kept; no length attribute.
+//   Counted as code points, like the server (the emoji case below).
+// - Paste-only: the value arrives by an input event with no keystroke; submit
+//   still trims and sends it.
+// - Rapid double-submit and submit-while-in-flight: one request at a time.
+// - Submit-while-disabled: NOT APPLICABLE. No control in these forms is ever
+//   disabled; the in-flight guard refuses in the handler instead (tested).
+// - IME: the link field blocks Enter while composing (isSubmitKey); the two
+//   textareas never submit on Enter; the radios are not typed into.
+
+describe("§8b cells — AnswerActions", () => {
+  const REF = { sessionId: "s1", messageId: "m1", question: "How?" };
+  const status = () => screen.getByTestId("answer-actions-status").textContent;
+  const fetchMock = () => vi.mocked(apiFetch);
+
+  beforeEach(() => {
+    fetchMock().mockReset().mockResolvedValue({ request_id: "r" } as never);
+  });
+
+  const openReport = async () => {
+    render(<AnswerActions {...REF} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not helpful" })));
+    return screen.getByLabelText("What is wrong? (optional)") as HTMLTextAreaElement;
+  };
+  const openSource = async () => {
+    render(<AnswerActions {...REF} refusal />);
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Request this source" })),
+    );
+    return {
+      link: screen.getByLabelText("Link to the page (optional)") as HTMLInputElement,
+      note: screen.getByLabelText("Anything else? (optional)") as HTMLTextAreaElement,
+    };
+  };
+  const submit = async (name: string) =>
+    act(async () => fireEvent.click(screen.getByRole("button", { name })));
+  const sentBody = (i = 0) => JSON.parse(String(fetchMock().mock.calls[i][1]?.body));
+
+  it("no length attribute on any of the four fields", async () => {
+    // Turns red if: a maxLength attribute (silent clamping) comes back.
+    const { link, note } = await openSource();
+    cleanup();
+    const comment = await openReport();
+    for (const el of [link, note, comment]) expect(el.hasAttribute("maxlength")).toBe(false);
+  });
+
+  it("whitespace-only is 'not given': the request goes out without the field", async () => {
+    // Turns red if: "   " is sent as a comment instead of being dropped.
+    const comment = await openReport();
+    fireEvent.change(comment, { target: { value: "   \t " } });
+    await submit("Send report");
+    expect(sentBody()).toEqual({ rating: "down", reason: "wrong" });
+  });
+
+  it("over-length comment: refused at submit, announced, text kept; the limit itself is accepted", async () => {
+    // Turns red if: the limit is not checked, is checked off by one, or the text
+    // is cleared on refusal.
+    const comment = await openReport();
+    fireEvent.change(comment, { target: { value: "x".repeat(MAX_FEEDBACK_COMMENT + 1) } });
+    await submit("Send report");
+    expect(fetchMock()).not.toHaveBeenCalled();
+    expect(status()).toBe(
+      `The comment is too long: ${MAX_FEEDBACK_COMMENT + 1} of ${MAX_FEEDBACK_COMMENT} characters. Please shorten it.`,
+    );
+    expect(comment.value).toHaveLength(MAX_FEEDBACK_COMMENT + 1);
+    fireEvent.change(comment, { target: { value: "x".repeat(MAX_FEEDBACK_COMMENT) } });
+    await submit("Send report");
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+  });
+
+  it("over-length counts code points, like the server: 1,000 emoji are allowed", async () => {
+    // "😀" is 2 UTF-16 units and 1 code point. Turns red if: `.length` is used.
+    const comment = await openReport();
+    fireEvent.change(comment, { target: { value: "😀".repeat(MAX_FEEDBACK_COMMENT) } });
+    await submit("Send report");
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+  });
+
+  it("over-length link and note are refused and kept", async () => {
+    // Turns red if: either source-request field skips its limit.
+    const { link, note } = await openSource();
+    fireEvent.change(link, { target: { value: "https://d/" + "a".repeat(MAX_SOURCE_URL) } });
+    await submit("Send request");
+    expect(fetchMock()).not.toHaveBeenCalled();
+    expect(status()).toMatch(/^The link is too long/);
+    fireEvent.change(link, { target: { value: "" } });
+    fireEvent.change(note, { target: { value: "n".repeat(MAX_SOURCE_NOTE + 1) } });
+    await submit("Send request");
+    expect(fetchMock()).not.toHaveBeenCalled();
+    expect(status()).toMatch(/^The note is too long/);
+    expect(note.value).toHaveLength(MAX_SOURCE_NOTE + 1);
+  });
+
+  it("paste-only: a pasted link with no keystroke is trimmed and sent", async () => {
+    // Turns red if: the value is read from a key handler rather than the field.
+    const { link } = await openSource();
+    fireEvent.input(link, { target: { value: "  https://d/p  " } });
+    fireEvent.change(link, { target: { value: "  https://d/p  " } });
+    await submit("Send request");
+    expect(sentBody()).toEqual({ question: "How?", message_id: "m1", requested_url: "https://d/p" });
+  });
+
+  it("rapid double-submit: two clicks in one tick send ONE request", async () => {
+    // Turns red if: the in-flight guard reads state instead of a ref.
+    let release: () => void = () => {};
+    fetchMock().mockImplementation(() => new Promise((r) => (release = () => r({} as never))));
+    await openReport();
+    const btn = screen.getByRole("button", { name: "Send report" });
+    await act(async () => {
+      fireEvent.click(btn);
+      fireEvent.click(btn);
+    });
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    await act(async () => release());
+  });
+
+  it("submit-while-in-flight: refused, announced, and the text kept", async () => {
+    // Turns red if: a second submit during a pending request sends, or is silent.
+    let release: () => void = () => {};
+    fetchMock().mockImplementation(() => new Promise((r) => (release = () => r({} as never))));
+    const comment = await openReport();
+    fireEvent.change(comment, { target: { value: "first" } });
+    await submit("Send report");
+    fireEvent.change(comment, { target: { value: "second thoughts" } });
+    await submit("Send report");
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(status()).toBe("Still sending. Please wait a moment.");
+    expect(comment.value).toBe("second thoughts");
+    await act(async () => release());
+  });
+
+  it("IME: Enter while composing in the link field does not submit", async () => {
+    // Turns red if: the link field's Enter guard is removed (the browser would
+    // submit the form mid-composition).
+    const { link } = await openSource();
+    const composing = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    link.dispatchEvent(composing);
+    expect(composing.defaultPrevented).toBe(true);
+    const plain = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    link.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false); // partner: a plain Enter is left alone
+  });
+});
+

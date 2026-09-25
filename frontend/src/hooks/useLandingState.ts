@@ -80,6 +80,11 @@ interface ChatMessage {
    *  is unavailable, and the rejection is permanent for that exact text, so the
    *  implied "try again shortly" sends the user into an identical failure. */
   errorKind?: "rate_limit" | "error" | "rejected";
+  /** A live answer's backend ids and the question it answers, for feedback
+   *  (ADR-0005 §6). Absent on canned demo answers and errors. */
+  messageId?: string;
+  sessionId?: string;
+  question?: string;
 }
 
 interface AppState {
@@ -907,6 +912,9 @@ export function useLandingState() {
           // Graceful fallback (Phase 4a): surface nearest-doc suggestions the backend
           // offers on a no_answer/unsupported so the refusal isn't a dead end.
           finalSuggestions: resp.suggestions ?? [],
+          messageId: resp.message_id,
+          sessionId,
+          question: text,
         });
       } catch (err) {
         // A 404 means the backend session expired or was evicted; drop the
@@ -1101,6 +1109,9 @@ export function useLandingState() {
         finalSources: Source[];
         finalSuggestions?: Suggestion[];
         errorKind?: "rate_limit" | "error" | "rejected";
+        messageId?: string;
+        sessionId?: string;
+        question?: string;
       },
     ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
@@ -1640,6 +1651,12 @@ export function useLandingState() {
         // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
         // bubble has finished streaming and only when the backend offered any.
         docSuggestions: !m.streaming ? m.suggestions || [] : [],
+        // Only once finished: a vote on half-streamed text rates what the reader
+        // has not seen (ADR-0005 §6 feedback).
+        answerRef:
+          !m.streaming && m.messageId && m.sessionId
+            ? { messageId: m.messageId, sessionId: m.sessionId, question: m.question ?? "" }
+            : undefined,
       })),
     [state.messages, state.highlight],
   );

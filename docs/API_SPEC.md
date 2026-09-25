@@ -704,33 +704,56 @@ GET /v1/search/exact?q=--some-flag
 }
 ```
 
-## 8. Feedback Placeholder
+## 8. Feedback and the gap log (ADR-0005 §6)
 
-Not active in MVP, but the contract exists for V1.
+Trust must-haves: live without `CITEVYN_ACCESS_MODEL_ENABLED`. With it on, both
+user routes need the `feedback` capability (an account; `docs/ACCESS_POLICY.md`).
+Both act only on the caller's own conversations: a stranger's session or message
+is a 404. Free text is shown only to operators and is never logged.
+
+### Rate an answer, or report it as wrong
 
 ```http
-POST /v1/feedback
+PUT /v1/sessions/{session_id}/messages/{message_id}/feedback
 ```
 
-### Request
+```json
+{ "rating": "down", "reason": "outdated", "comment": "That flag was renamed." }
+```
+
+- `rating`: `up` or `down`. `message_id` must be an ANSWER (assistant message);
+  rating the user's own question is 422.
+- `reason` (only with `down`): `wrong`, `outdated`, `missing_source`, `unclear`,
+  `other`.
+- `comment`: optional, at most 1,000 characters (code points).
+- One vote per (answer, user): a second call replaces the first. `200` with
+  `{request_id, message_id, rating, reason}`.
+
+### Request a source (the gap log)
+
+```http
+POST /v1/source-requests
+```
 
 ```json
 {
-  "session_id": "sess_001",
-  "message_id": "msg_001",
-  "rating": "incorrect",
-  "comment": "The citation does not support the answer."
+  "question": "How do I use Claude Code with Bedrock?",
+  "message_id": "…",
+  "requested_url": "https://docs.anthropic.com/…",
+  "note": "Refused, but this page exists."
 }
 ```
 
-### Response
+- `question`: required, 1-2,000 characters. `message_id`: optional, must be in
+  one of the caller's own live sessions (else 404). `requested_url`: optional,
+  http(s) only, at most 2,048 characters. `note`: optional, at most 1,000.
+- `202` with `{request_id, source_request_id, status: "received"}`.
 
-```json
-{
-  "request_id": "req_005",
-  "status": "accepted"
-}
-```
+### Operator views (admin key)
+
+- `GET /v1/admin/feedback?rating=up|down&limit=` — votes and reports, newest
+  first, each with an `answer_excerpt` (the first 280 characters of the answer).
+- `GET /v1/admin/source_requests?limit=` — the gap log, newest first.
 
 ## 9. Admin: Trigger Ingestion
 

@@ -226,6 +226,46 @@ def test_bad_source_requests_are_refused(seeded_app: TestClient, body: dict[str,
     assert _rows(SourceRequest) == []
 
 
+@pytest.mark.parametrize(
+    ("route", "field", "limit"),
+    [
+        ("feedback", "comment", 1000),
+        ("source", "note", 1000),
+        ("source", "question", 2000),
+        ("source", "requested_url", 2048),
+    ],
+)
+def test_each_limit_is_the_one_in_force_in_both_directions(
+    seeded_app: TestClient,  # noqa: F811
+    route: str,
+    field: str,
+    limit: int,
+) -> None:
+    """TEST_STRATEGY §8b: the last accepted length AND the first rejected one.
+    A rejection alone proves only that SOMETHING is refused. Counted in code
+    points: an emoji is one character here, as it is in the browser.
+    Turns red if: a limit moves, or is off by one."""
+    sid, answer_id, _ = _answer(seeded_app)
+
+    def body(n: int) -> dict[str, object]:
+        if field == "requested_url":
+            value: str = "https://d/" + "a" * (n - len("https://d/"))
+        else:
+            value = "😀" * n
+        if route == "feedback":
+            return {"rating": "down", "reason": "other", field: value}
+        return {"question": "q", field: value} if field != "question" else {field: value}
+
+    def send(n: int) -> int:
+        if route == "feedback":
+            return _put(seeded_app, sid, answer_id, body(n)).status_code
+        return seeded_app.post("/v1/source-requests", json=body(n), headers=DEMO).status_code
+
+    ok = 200 if route == "feedback" else 202
+    assert send(limit) == ok
+    assert send(limit + 1) == 422
+
+
 # ---------------------------------------------------------------------------
 # The operator's view
 # ---------------------------------------------------------------------------

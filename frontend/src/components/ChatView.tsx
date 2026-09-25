@@ -3,10 +3,14 @@
  * sample answers in demo mode.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
+import { LazyChunkBoundary } from "./LazyChunkBoundary";
 import { isSafeHref } from "../lib/safeHref";
 import { EMPTY_SUBMIT_NUDGE_GLYPH, hasNudge } from "../lib/composerNudge";
+
+// Feedback controls load on demand: the eager bundle carries none of them.
+const AnswerActions = lazy(() => import("./AnswerActions"));
 
 interface ChatViewProps {
   messages: Array<{
@@ -29,6 +33,8 @@ interface ChatViewProps {
     sources?: Array<{ n: string; title: string; url: string }>;
     /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
     docSuggestions?: Array<{ title: string; url: string; product_area: string }>;
+    /** A finished live answer's ids, for feedback (ADR-0005 §6). */
+    answerRef?: { messageId: string; sessionId: string; question: string };
   }>;
   chatEmpty: boolean;
   chatSuggestions: Array<{ q: string; select: () => void }>;
@@ -621,6 +627,13 @@ export function ChatView({
                         ),
                       )}
                     </div>
+                  )}
+                  {m.answerRef && (
+                    <LazyChunkBoundary label="answer-actions">
+                      <Suspense fallback={null}>
+                        <AnswerActions {...m.answerRef} refusal={m.refusal} />
+                      </Suspense>
+                    </LazyChunkBoundary>
                   )}
                 </div>
               </div>

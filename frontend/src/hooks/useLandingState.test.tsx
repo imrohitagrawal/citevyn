@@ -120,6 +120,42 @@ describe("useLandingState — live send path", () => {
     expect(mockAskQuestion).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps each live answer's ids and question, so feedback can target it (ADR-0005 §6)", async () => {
+    // Turns red if: the backend message id, the session id or the question is not
+    // carried onto the answer, or is exposed before the answer finishes streaming
+    // (feedback on a half-written answer would rate text the reader has not seen).
+    mockAskQuestion.mockResolvedValue(askResponse({ message_id: "msg_42" }));
+    const { result } = renderHook(() => useLandingState());
+
+    act(() => result.current.send("How do permissions work?"));
+    await settle();
+
+    const view = result.current.chatView[1];
+    expect(view.answerRef).toEqual({
+      messageId: "msg_42",
+      sessionId: "sess-1",
+      question: "How do permissions work?",
+    });
+    expect(result.current.chatView[0].answerRef).toBeUndefined(); // partner: not on the question
+  });
+
+  it("offers no feedback target while the answer is still streaming", async () => {
+    // Turns red if: answerRef is exposed before the stream finishes (a vote on
+    // text the reader has not seen yet).
+    mockAskQuestion.mockResolvedValue(
+      askResponse({ message_id: "msg_7", answer: "word ".repeat(40).trim() }),
+    );
+    const { result } = renderHook(() => useLandingState());
+    act(() => result.current.send("How do permissions work?"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30);
+    });
+    expect(result.current.state.messages[1]?.streaming).toBe(true); // partner: mid-stream
+    expect(result.current.chatView[1].answerRef).toBeUndefined();
+    await settle();
+    expect(result.current.chatView[1].answerRef?.messageId).toBe("msg_7");
+  });
+
   it("marks an unsupported response as a refusal", async () => {
     mockAskQuestion.mockResolvedValue(
       askResponse({ answer: "Out of scope.", unsupported: true, no_answer: true, citations: [] }),
