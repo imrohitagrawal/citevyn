@@ -191,7 +191,9 @@ def test_a_source_request_needs_no_message(seeded_app: TestClient) -> None:  # n
         "/v1/source-requests", json={"question": "Gemini Live API?"}, headers=DEMO
     )
     assert res.status_code == 202
-    assert len(_rows(SourceRequest)) == 1
+    [row] = _rows(SourceRequest)
+    assert row.message_id is None
+    assert row.user_id.startswith("anon_")
 
 
 def test_a_source_request_cannot_point_at_someone_elses_message(seeded_app: TestClient) -> None:  # noqa: F811
@@ -214,6 +216,11 @@ def test_a_source_request_cannot_point_at_someone_elses_message(seeded_app: Test
         {"question": "x" * 2001},
         {"question": "q", "requested_url": "javascript:alert(1)"},
         {"question": "q", "requested_url": "ftp://example.com/x"},
+        {"question": "q", "requested_url": "https://user:pass@evil.example/"},
+        {"question": "q", "requested_url": "https://evil.com/\n<script>alert(1)</script>"},
+        {"question": "q", "requested_url": "https://evil.com/a\tb"},
+        {"question": "q", "requested_url": "https://\u202eevil.com"},
+        {"question": "q", "requested_url": "https://evil.com/a b"},
         {"question": "q", "note": "x" * 1001},
         {"question": "q", "message_id": "not-a-uuid"},
     ],
@@ -278,6 +285,7 @@ def test_the_operator_sees_feedback_with_the_answer_it_is_about(seeded_app: Test
     _put(seeded_app, sid, answer_id, {"rating": "down", "reason": "outdated"})
     res = seeded_app.get("/v1/admin/feedback", headers=ADMIN)
     assert res.status_code == 200
+    assert res.json()["count"] == 1
     [item] = res.json()["feedback"]
     assert item["message_id"] == answer_id
     assert (item["rating"], item["reason"]) == ("down", "outdated")
@@ -316,4 +324,82 @@ def test_with_the_access_model_on_anonymous_callers_cannot_leave_feedback(
         monkeypatch.delenv("CITEVYN_ACCESS_MODEL_ENABLED")
         get_settings.cache_clear()
     assert (vote.status_code, req.status_code) == (401, 401)
+    # The refusal must come from the capability check, not from the bearer check,
+    # which also answers 401 auth_required.
+    for res in (vote, req):
+        assert res.json()["error"]["details"] == {"capability": "feedback", "required_tier": "free"}
     assert uuid.UUID(answer_id)
+
+
+def test_a_source_request_on_an_expired_sessions_message_is_a_404(seeded_app: TestClient) -> None:  # noqa: F811
+    """The linked-message check is its own copy of the owner-and-not-expired rule.
+    Turns red if: it stops checking expiry."""
+    sid, answer_id, _ = _answer(seeded_app)
+    assert seeded_app.delete(f"/v1/sessions/{sid}", headers=DEMO).status_code == 204
+    res = seeded_app.post(
+        "/v1/source-requests", json={"question": "q", "message_id": answer_id}, headers=DEMO
+    )
+    assert res.status_code == 404
+
+
+def test_a_link_padded_with_spaces_is_measured_after_trimming(seeded_app: TestClient) -> None:  # noqa: F811
+    """Turns red if: the length limit counts surrounding whitespace the stored
+    value will not keep."""
+    _answer(seeded_app)
+    url = "https://d/" + "a" * (2048 - len("https://d/"))
+    res = seeded_app.post(
+        "/v1/source-requests", json={"question": "q", "requested_url": f"  {url}  "}, headers=DEMO
+    )
+    assert res.status_code == 202
+    assert _rows(SourceRequest)[0].requested_url == url
+
+
+def test_a_racing_second_vote_updates_instead_of_failing(
+    seeded_app: TestClient,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two PUTs for one answer can both see "no row yet" on Postgres (READ
+    COMMITTED); the second INSERT then hits the unique constraint. Simulated by
+    hiding the existing row from the first lookup. Turns red if: the route lets
+    the IntegrityError become a 500 instead of updating the row."""
+    from app.api.routes import feedback as fb
+
+    sid, answer_id, _ = _answer(seeded_app)
+    assert _put(seeded_app, sid, answer_id, {"rating": "up"}).status_code == 200
+    real = fb._find_vote
+    calls = {"n": 0}
+
+    async def racing(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real(*args, **kwargs)
+
+    monkeypatch.setattr(fb, "_find_vote", racing)
+    res = _put(seeded_app, sid, answer_id, {"rating": "down", "reason": "wrong"})
+    assert res.status_code == 200
+    [row] = _rows(AnswerFeedback)
+    assert (row.rating, row.reason) == ("down", "wrong")
+    assert calls["n"] == 2  # partner: the race path really ran
+
+
+def test_an_explicit_null_link_is_the_same_as_none(seeded_app: TestClient) -> None:  # noqa: F811
+    """A client may send ``"requested_url": null``. Turns red if: the validator
+    refuses or mangles an explicit null."""
+    _answer(seeded_app)
+    res = seeded_app.post(
+        "/v1/source-requests", json={"question": "q", "requested_url": None}, headers=DEMO
+    )
+    assert res.status_code == 202
+    assert _rows(SourceRequest)[0].requested_url is None
+
+
+def test_the_operator_can_filter_feedback_by_rating(seeded_app: TestClient) -> None:  # noqa: F811
+    """Turns red if: ``?rating=`` is ignored (the operator would read the praise
+    mixed into the complaints)."""
+    sid_a, answer_a, _ = _answer(seeded_app)
+    sid_b, answer_b, _ = _answer(seeded_app)
+    _put(seeded_app, sid_a, answer_a, {"rating": "up"})
+    _put(seeded_app, sid_b, answer_b, {"rating": "down", "reason": "wrong"})
+    downs = seeded_app.get("/v1/admin/feedback?rating=down", headers=ADMIN).json()["feedback"]
+    assert [f["message_id"] for f in downs] == [answer_b]
+    both = seeded_app.get("/v1/admin/feedback", headers=ADMIN).json()["feedback"]
+    assert len(both) == 2  # partner: without the filter both are there

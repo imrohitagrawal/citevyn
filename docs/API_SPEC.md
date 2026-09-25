@@ -755,6 +755,12 @@ POST /v1/source-requests
   first, each with an `answer_excerpt` (the first 280 characters of the answer).
 - `GET /v1/admin/source_requests?limit=` — the gap log, newest first.
 
+Both return `count`: the number of rows in THIS page (at most `limit`), not a
+grand total.
+
+`requested_url` must be a plain http(s) link: no spaces or control characters and
+no `user:password@`. Surrounding spaces are trimmed before the length check.
+
 ## 9. Admin: Trigger Ingestion
 
 ```http

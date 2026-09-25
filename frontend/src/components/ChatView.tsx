@@ -34,7 +34,12 @@ interface ChatViewProps {
     /** Nearest-doc suggestions on a graceful fallback (Phase 4a). */
     docSuggestions?: Array<{ title: string; url: string; product_area: string }>;
     /** A finished live answer's ids, for feedback (ADR-0005 §6). */
-    answerRef?: { messageId: string; sessionId: string; question: string };
+    answerRef?: {
+      messageId: string;
+      sessionId: string;
+      question: string;
+      offerSourceRequest: boolean;
+    };
   }>;
   chatEmpty: boolean;
   chatSuggestions: Array<{ q: string; select: () => void }>;
@@ -631,7 +636,7 @@ export function ChatView({
                   {m.answerRef && (
                     <LazyChunkBoundary label="answer-actions">
                       <Suspense fallback={null}>
-                        <AnswerActions {...m.answerRef} refusal={m.refusal} />
+                        <AnswerActions {...m.answerRef} />
                       </Suspense>
                     </LazyChunkBoundary>
                   )}

@@ -1,25 +1,31 @@
 /**
  * Feedback under a live answer (ADR-0005 §6 trust must-haves).
  *
- * - "Helpful" / "Not helpful" (thumbs up/down), exposed with `aria-pressed`.
- * - "Not helpful" opens "report wrong answer": a reason and an optional comment.
- *   Nothing is sent until the reader submits, so a mis-click costs nothing.
- * - On a refusal, "Request this source" logs the question (and an optional link)
- *   to the gap log.
+ * - "Helpful" is a toggle button (`aria-pressed`): pressing it saves a thumbs up.
+ * - "Report a problem" is a disclosure button (`aria-expanded` only; it saves
+ *   nothing by itself). It opens "report wrong answer": a reason and an optional
+ *   comment, sent only when the reader submits. After a report, a visible line
+ *   says so. A later "Helpful" replaces the report (one vote per answer).
+ * - "Request this source" is offered only when the answer was refused for want of
+ *   a source (not for an out-of-scope question): it logs the question, and an
+ *   optional link and note, to the gap log.
  *
- * Loaded lazily from ChatView, so the eager bundle carries none of this.
+ * Loaded lazily from ChatView, so the eager bundle carries none of this. Results
+ * are announced in an aria-live region scoped to this answer (not role="status":
+ * the chat owns the page's one status region, #356). After a successful submit,
+ * focus returns to the button that opened the form.
  *
  * Input rules (TEST_STRATEGY §8b): every text field is optional, so an empty or
  * whitespace-only field simply means "not given". Length is checked at SUBMIT,
  * counted the server's way, refused with an announcement, and the text is kept;
- * no length attribute clamps a paste. One request at a time: a submit while one
- * is in flight is refused and announced, which also makes a double-submit send
- * once.
- * Results are announced in an aria-live region scoped to this answer (not
- * role="status": the chat owns the page's one status region, #356).
+ * no length attribute clamps a paste. The link is checked here too (the form is
+ * `noValidate`, so the browser's own popup never replaces our announced message).
+ * One request at a time: a submit while one is in flight is refused and
+ * announced, which also makes a double-submit send once.
  */
 import { useRef, useState } from "react";
 import { apiFetch } from "../lib/api";
+import { ApiClientError } from "../lib/types";
 import { isSubmitKey, questionLength } from "../lib/composerInput";
 import { MAX_FEEDBACK_COMMENT, MAX_SOURCE_NOTE, MAX_SOURCE_URL } from "../lib/feedbackLimits";
 
@@ -36,19 +42,24 @@ interface Props {
   messageId: string;
   /** The reader's question, sent with a source request. */
   question: string;
-  refusal?: boolean;
+  /** Offer "Request this source": the answer was refused for want of a source. */
+  offerSourceRequest?: boolean;
 }
 
-export default function AnswerActions({ sessionId, messageId, question, refusal }: Props) {
+export default function AnswerActions({ sessionId, messageId, question, offerSourceRequest }: Props) {
   const [rating, setRating] = useState<"up" | "down" | null>(null);
   const [panel, setPanel] = useState<"report" | "source" | null>(null);
   const [reason, setReason] = useState("wrong");
-  const [text, setText] = useState("");
+  // Separate drafts: one shared field leaked a report comment into the gap log.
+  const [comment, setComment] = useState("");
+  const [note, setNote] = useState("");
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState("");
   // A ref, not state: two clicks in one tick both read the state from before the
   // first one ran, so a state flag would let both requests through.
   const busy = useRef(false);
+  const reportBtn = useRef<HTMLButtonElement>(null);
+  const sourceBtn = useRef<HTMLButtonElement>(null);
 
   /** Refuse (and announce) a field over its limit; keep the text. */
   const tooLong = (value: string, max: number, name: string) => {
@@ -69,8 +80,17 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
       await apiFetch(path, { method, body: JSON.stringify(body) });
       setStatus(done);
       return true;
-    } catch {
-      setStatus("Could not save that. Please try again.");
+    } catch (err) {
+      const code = err instanceof ApiClientError ? err.status : 0;
+      // A 422 is about THIS input and will fail the same way again, so it must not
+      // say "try again"; a 401 means the session is gone.
+      setStatus(
+        code === 422
+          ? "That was not accepted. Please check what you entered."
+          : code === 401
+            ? "Please sign in again to send feedback."
+            : "Could not save that. Please try again.",
+      );
       return false;
     } finally {
       busy.current = false;
@@ -80,34 +100,41 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
   const feedbackPath = `/v1/sessions/${sessionId}/messages/${messageId}/feedback`;
 
   const voteUp = async () => {
-    setPanel(null);
     if (await send(feedbackPath, "PUT", { rating: "up" }, "Thanks for the feedback.")) {
       setRating("up");
+      setPanel(null);
     }
   };
 
   const sendReport = async () => {
-    if (tooLong(text, MAX_FEEDBACK_COMMENT, "comment")) return;
-    const body = { rating: "down", reason, ...(text.trim() ? { comment: text.trim() } : {}) };
+    if (tooLong(comment, MAX_FEEDBACK_COMMENT, "comment")) return;
+    const body = { rating: "down", reason, ...(comment.trim() ? { comment: comment.trim() } : {}) };
     if (await send(feedbackPath, "PUT", body, "Thanks, we logged your report.")) {
       setRating("down");
       setPanel(null);
-      setText("");
+      setComment("");
+      reportBtn.current?.focus();
     }
   };
 
   const sendSourceRequest = async () => {
-    if (tooLong(url, MAX_SOURCE_URL, "link") || tooLong(text, MAX_SOURCE_NOTE, "note")) return;
+    const link = url.trim();
+    if (link && !/^https?:\/\/\S+$/i.test(link)) {
+      setStatus("The link must start with http:// or https://.");
+      return;
+    }
+    if (tooLong(link, MAX_SOURCE_URL, "link") || tooLong(note, MAX_SOURCE_NOTE, "note")) return;
     const body = {
       question,
       message_id: messageId,
-      ...(url.trim() ? { requested_url: url.trim() } : {}),
-      ...(text.trim() ? { note: text.trim() } : {}),
+      ...(link ? { requested_url: link } : {}),
+      ...(note.trim() ? { note: note.trim() } : {}),
     };
     if (await send("/v1/source-requests", "POST", body, "Thanks, we logged your request.")) {
       setPanel(null);
       setUrl("");
-      setText("");
+      setNote("");
+      sourceBtn.current?.focus();
     }
   };
 
@@ -118,16 +145,17 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
           Helpful
         </button>
         <button
+          ref={reportBtn}
           type="button"
           className="answer-action"
-          aria-pressed={rating === "down"}
           aria-expanded={panel === "report"}
           onClick={() => setPanel(panel === "report" ? null : "report")}
         >
-          Not helpful
+          Report a problem
         </button>
-        {refusal && (
+        {offerSourceRequest && (
           <button
+            ref={sourceBtn}
             type="button"
             className="answer-action"
             aria-expanded={panel === "source"}
@@ -137,10 +165,12 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
           </button>
         )}
       </div>
+      {rating === "down" && <p className="answer-actions-note">You reported this answer.</p>}
 
       {panel === "report" && (
         <form
           className="answer-form"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             void sendReport();
@@ -163,7 +193,7 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
           </fieldset>
           <label className="answer-form-field">
             What is wrong? (optional)
-            <textarea value={text} onChange={(e) => setText(e.target.value)} />
+            <textarea value={comment} onChange={(e) => setComment(e.target.value)} />
           </label>
           <button type="submit" className="answer-action">
             Send report
@@ -174,6 +204,7 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
       {panel === "source" && (
         <form
           className="answer-form"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             void sendSourceRequest();
@@ -194,7 +225,7 @@ export default function AnswerActions({ sessionId, messageId, question, refusal 
           </label>
           <label className="answer-form-field">
             Anything else? (optional)
-            <textarea value={text} onChange={(e) => setText(e.target.value)} />
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} />
           </label>
           <button type="submit" className="answer-action">
             Send request

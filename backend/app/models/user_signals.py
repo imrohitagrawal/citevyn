@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import GUID, Base
@@ -31,6 +31,8 @@ class AnswerFeedback(Base):
     __tablename__ = "answer_feedback"
     __table_args__ = (
         UniqueConstraint("message_id", "user_id", name="uq_answer_feedback_message_user"),
+        # The operator's list sorts newest first.
+        Index("ix_answer_feedback_updated_at", "updated_at"),
     )
 
     feedback_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
@@ -49,6 +51,8 @@ class AnswerFeedback(Base):
 
 class SourceRequest(Base):
     __tablename__ = "source_requests"
+    # The gap log lists newest first.
+    __table_args__ = (Index("ix_source_requests_created_at", "created_at"),)
 
     request_id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(

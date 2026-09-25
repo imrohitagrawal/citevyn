@@ -14,6 +14,7 @@ Free text is stored for operators (``GET /v1/admin/feedback`` and
 
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
@@ -22,6 +23,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Body, Depends, Path, Request, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.deps import requires
@@ -57,20 +59,47 @@ class SourceRequestBody(BaseModel):
     requested_url: str | None = Field(default=None, max_length=2048)
     note: str | None = Field(default=None, max_length=1000)
 
+    @field_validator("requested_url", mode="before")
+    @classmethod
+    def _trim(cls, value: object) -> object:
+        # Trimmed BEFORE the length limit, so surrounding spaces the stored value
+        # will not keep do not count against it.
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("requested_url")
     @classmethod
-    def _http_only(cls, value: str | None) -> str | None:
-        # Operators open these links from the admin view: only http(s).
+    def _plain_http_link(cls, value: str | None) -> str | None:
+        # Operators may open these links, so only a plain http(s) URL: no
+        # whitespace or control/format characters (a stored newline, tab or a
+        # right-to-left override can disguise a link) and no user:password@
+        # (https://docs.example.com@evil.example/ reads as the wrong host).
         if value is None:
             return None
-        parts = urlsplit(value.strip())
-        if parts.scheme not in ("http", "https") or not parts.netloc:
+        if any(ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf") for ch in value):
+            raise ValueError("requested_url must not contain spaces or control characters")
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("requested_url must be an http(s) URL")
-        return value.strip()
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("requested_url must not contain a user name or password")
+        return value
 
 
 def _request_id(request: Request) -> str:
     return str(request.state.request_id)
+
+
+async def _find_vote(
+    db: AsyncSession, message_id: uuid.UUID, user_id: str
+) -> AnswerFeedback | None:
+    return (
+        await db.execute(
+            select(AnswerFeedback).where(
+                AnswerFeedback.message_id == message_id,
+                AnswerFeedback.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
 
 
 @router.put(
@@ -104,29 +133,40 @@ async def put_feedback(
     # test can observe; it is kept for shareable answers (ADR-0005 Phase 6), which
     # will put other people in front of an answer, and it matches the table's
     # one-vote-per-(answer, user) constraint.
-    row = (
-        await db.execute(
-            select(AnswerFeedback).where(
-                AnswerFeedback.message_id == message_id,
-                AnswerFeedback.user_id == principal_id,
+    row = await _find_vote(db, message_id, principal_id)
+    if row is None:
+        db.add(
+            AnswerFeedback(
+                message_id=message_id,
+                user_id=principal_id,
+                rating=body.rating,
+                reason=body.reason,
+                comment=body.comment,
+                created_at=now,
+                updated_at=now,
             )
         )
-    ).scalar_one_or_none()
-    if row is None:
-        row = AnswerFeedback(
-            message_id=message_id, user_id=principal_id, created_at=now, rating=body.rating
-        )
-        db.add(row)
-    row.rating = body.rating
-    row.reason = body.reason
-    row.comment = body.comment
-    row.updated_at = now
-    await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # A concurrent vote (a double click) inserted the row between our
+            # lookup and our insert: on Postgres READ COMMITTED both see "none".
+            # Update the winner's row rather than answering 500.
+            await db.rollback()
+            row = await _find_vote(db, message_id, principal_id)
+            # The unique constraint that just refused our insert says it exists.
+            assert row is not None, "IntegrityError on insert, yet no vote row"
+    if row is not None:
+        row.rating = body.rating
+        row.reason = body.reason
+        row.comment = body.comment
+        row.updated_at = now
+        await db.commit()
     return {
         "request_id": request_id,
         "message_id": str(message_id),
-        "rating": row.rating,
-        "reason": row.reason,
+        "rating": body.rating,
+        "reason": body.reason,
     }
 
 

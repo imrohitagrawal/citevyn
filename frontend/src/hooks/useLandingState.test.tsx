@@ -135,8 +135,30 @@ describe("useLandingState — live send path", () => {
       messageId: "msg_42",
       sessionId: "sess-1",
       question: "How do permissions work?",
+      offerSourceRequest: false,
     });
     expect(result.current.chatView[0].answerRef).toBeUndefined(); // partner: not on the question
+  });
+
+  it("invites a source request only for an in-scope refusal", async () => {
+    // Turns red if: an out-of-scope refusal ("best laptop") invites gap-log
+    // requests, or an in-scope one does not.
+    const { result } = renderHook(() => useLandingState());
+    mockAskQuestion.mockResolvedValueOnce(
+      askResponse({ message_id: "a", no_answer: true, unsupported: false, citations: [] }),
+    );
+    act(() => result.current.send("How do I use Bedrock?"));
+    await settle();
+    mockAskQuestion.mockResolvedValueOnce(
+      askResponse({ message_id: "b", no_answer: true, unsupported: true, citations: [] }),
+    );
+    act(() => result.current.send("Best laptop?"));
+    await settle();
+    const refs = result.current.chatView.filter((v) => v.answerRef).map((v) => v.answerRef);
+    expect(refs.map((r) => [r?.messageId, r?.offerSourceRequest])).toEqual([
+      ["a", true],
+      ["b", false],
+    ]);
   });
 
   it("offers no feedback target while the answer is still streaming", async () => {
@@ -633,6 +655,23 @@ describe("useLandingState — resumeSession (ADR-0004 PR 10)", () => {
       ...over,
     };
   }
+
+  it("a resumed answer can be rated: it carries its ids and the question before it", async () => {
+    // Turns red if: resumed answers lose their backend message id (no feedback
+    // controls), or pair with the wrong question. Refusal state is not stored,
+    // so a resumed answer never offers a source request.
+    mockGetSession.mockResolvedValue(getSessionResponse({ session_id: "sess-r" }));
+    const { result } = renderHook(() => useLandingState());
+    await act(async () => {
+      await result.current.resumeSession("sess-r");
+    });
+    const bot = result.current.chatView.find((v) => v.answerRef);
+    expect(bot?.answerRef?.sessionId).toBe("sess-r");
+    expect(bot?.answerRef?.question).toBe("What is Claude Code?");
+    expect(bot?.answerRef?.messageId).toBeTruthy();
+    expect(bot?.answerRef?.offerSourceRequest).toBe(false);
+    expect(result.current.chatView[0].answerRef).toBeUndefined(); // partner: not on the question
+  });
 
   it("replaces the transcript wholesale and switches to the chat screen", async () => {
     mockGetSession.mockResolvedValue(getSessionResponse());

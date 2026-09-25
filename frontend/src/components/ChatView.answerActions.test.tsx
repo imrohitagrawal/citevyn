@@ -37,14 +37,19 @@ function renderWith(messages: Msg[]) {
 describe("feedback controls under an answer", () => {
   it("loads them under a finished live answer", async () => {
     // Turns red if: ChatView does not render the lazy controls for an answerRef.
-    renderWith([base({ answerRef: { messageId: "m1", sessionId: "s1", question: "q" } })]);
+    renderWith([
+      base({ answerRef: { messageId: "m1", sessionId: "s1", question: "q", offerSourceRequest: false } }),
+    ]);
     expect(await screen.findByRole("button", { name: "Helpful" })).toBeTruthy();
   });
 
-  it("offers 'Request this source' on a refused live answer", async () => {
-    // Turns red if: the refusal flag is not passed through to the controls.
+  it("offers 'Request this source' when the answerRef says so", async () => {
+    // Turns red if: offerSourceRequest is not passed through to the controls.
     renderWith([
-      base({ refusal: true, answerRef: { messageId: "m1", sessionId: "s1", question: "q" } }),
+      base({
+        refusal: true,
+        answerRef: { messageId: "m1", sessionId: "s1", question: "q", offerSourceRequest: true },
+      }),
     ]);
     expect(await screen.findByRole("button", { name: "Request this source" })).toBeTruthy();
   });

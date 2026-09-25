@@ -1380,8 +1380,12 @@ describe("§8b cells — AuthModal, all four modes", () => {
 // Four surfaces: #0 the reason radios, #1 the report comment, #2 the source
 // link, #3 the source note. Cell by cell:
 //
-// - Empty submit / whitespace-only: EVERY field here is optional, so there is no
-//   "refuse the empty submit" cell. The rule that applies is that empty and
+// - #0, the reason radios: not typed into. Over-length, whitespace, paste and IME
+//   are NOT APPLICABLE; a reason is always selected ("wrong" by default), so an
+//   empty submit sends that default. Double-submit and in-flight are the form's
+//   and are covered below.
+// - Empty submit / whitespace-only (#1-#3): every TEXT field is optional, so
+//   there is no "refuse the empty submit" cell. The rule that applies is that empty and
 //   whitespace-only mean "not given": the request goes out WITHOUT the field
 //   (asserted below), never with "" or "   " (the server refuses an empty URL).
 // - Over-length: refused at submit, announced, text kept; no length attribute.
@@ -1405,11 +1409,11 @@ describe("§8b cells — AnswerActions", () => {
 
   const openReport = async () => {
     render(<AnswerActions {...REF} />);
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not helpful" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Report a problem" })));
     return screen.getByLabelText("What is wrong? (optional)") as HTMLTextAreaElement;
   };
   const openSource = async () => {
-    render(<AnswerActions {...REF} refusal />);
+    render(<AnswerActions {...REF} offerSourceRequest />);
     await act(async () =>
       fireEvent.click(screen.getByRole("button", { name: "Request this source" })),
     );
@@ -1428,6 +1432,15 @@ describe("§8b cells — AnswerActions", () => {
     cleanup();
     const comment = await openReport();
     for (const el of [link, note, comment]) expect(el.hasAttribute("maxlength")).toBe(false);
+  });
+
+  it("whitespace-only link and note are 'not given' too", async () => {
+    // Turns red if: "  " is sent as a link (the server would 422 it) or a note.
+    const { link, note } = await openSource();
+    fireEvent.change(link, { target: { value: "   " } });
+    fireEvent.change(note, { target: { value: " \t " } });
+    await submit("Send request");
+    expect(sentBody()).toEqual({ question: "How?", message_id: "m1" });
   });
 
   it("whitespace-only is 'not given': the request goes out without the field", async () => {
@@ -1487,7 +1500,9 @@ describe("§8b cells — AnswerActions", () => {
   });
 
   it("rapid double-submit: two clicks in one tick send ONE request", async () => {
-    // Turns red if: the in-flight guard reads state instead of a ref.
+    // Turns red if: the in-flight guard is removed. (Whether a state flag instead
+    // of the ref would also pass here is not measured: React may re-render between
+    // the two clicks. The ref is kept because it cannot be stale.)
     let release: () => void = () => {};
     fetchMock().mockImplementation(() => new Promise((r) => (release = () => r({} as never))));
     await openReport();

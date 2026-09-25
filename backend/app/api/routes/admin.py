@@ -510,7 +510,8 @@ async def list_feedback(
     rows = (await db.execute(stmt)).all()
     return {
         "request_id": _request_id(request),
-        "total": len(rows),
+        # The number of rows in THIS page (capped by ``limit``), not a grand total.
+        "count": len(rows),
         "feedback": [
             {
                 "feedback_id": str(fb.feedback_id),
@@ -538,7 +539,8 @@ async def list_source_requests(
     rows = (await db.execute(stmt)).scalars().all()
     return {
         "request_id": _request_id(request),
-        "total": len(rows),
+        # The number of rows in THIS page (capped by ``limit``), not a grand total.
+        "count": len(rows),
         "source_requests": [
             {
                 "source_request_id": str(r.request_id),

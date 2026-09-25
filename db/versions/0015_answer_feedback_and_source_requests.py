@@ -84,6 +84,9 @@ def upgrade() -> None:
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
+    # Both operator lists sort newest first.
+    op.create_index("ix_answer_feedback_updated_at", "answer_feedback", ["updated_at"])
+    op.create_index("ix_source_requests_created_at", "source_requests", ["created_at"])
 
 
 def downgrade() -> None:
