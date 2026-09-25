@@ -185,6 +185,7 @@ _PROD_LLM: dict[str, object] = {
     "llm_provider": "gemini",
     "embedding_provider": "gemini",
     "gemini_api_key": "gk-test",
+    "openrouter_api_key": "or-test",
     "admin_api_key": "a-strong-admin-secret",
     "public_client_token": "a-strong-demo-secret",
     "_env_file": None,
@@ -224,6 +225,42 @@ def test_an_unpriced_model_is_still_allowed_outside_production() -> None:
     Turns red if: the check fires in every environment."""
     s = Settings(llm_provider="gemini", environment="local", gemini_model="gemini-flash-latest")
     assert s.gemini_model == "gemini-flash-latest"
+
+
+def test_an_unused_openrouter_model_does_not_block_production() -> None:
+    """With no OpenRouter key the factory builds no fallback, so its model is never
+    called and cannot spend. Turns red if: the check ignores whether the key is set."""
+    s = Settings(
+        **{**_PROD_LLM, "openrouter_api_key": None, "openrouter_model": "x/unpriced"}  # type: ignore[arg-type]
+    )
+    assert s.openrouter_model == "x/unpriced"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "Anthropic", "GEMINI", "claude"])
+def test_production_refuses_an_unknown_llm_provider(provider: str) -> None:
+    """#492 review: the factory falls through to the STUB for any provider name it
+    does not know, so ``openrouter`` (the spelling prod.env.example used to give)
+    or ``Anthropic`` served stub answers in production with nothing to catch it.
+
+    Turns red if: production accepts a provider name the factory does not build.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="is not allowed"):
+        Settings(**{**_PROD_LLM, "llm_provider": provider})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("provider", ["gemini", "router"])
+def test_production_accepts_every_provider_the_factory_builds(provider: str) -> None:
+    """Partner: the allowlist must not refuse a real provider.
+    Turns red if: a provider the factory builds is dropped from the allowlist."""
+    assert Settings(**{**_PROD_LLM, "llm_provider": provider}).llm_provider == provider  # type: ignore[arg-type]
+
+
+def test_production_accepts_anthropic_with_its_key() -> None:
+    """Partner for the third real provider. Turns red if: anthropic is refused."""
+    s = Settings(**{**_PROD_LLM, "llm_provider": "anthropic", "anthropic_api_key": "ak"})  # type: ignore[arg-type]
+    assert s.llm_provider == "anthropic"
 
 
 def test_known_models_is_non_empty_and_sorted() -> None:

@@ -572,16 +572,18 @@ class Settings(BaseSettings):
         # ``stub`` is the dev-only deterministic LLM. ``""`` is the
         # reserved router placeholder for Slice 9b. Both must never
         # reach production — the demo build would otherwise silently
-        # serve the stub answer. ``anthropic`` and ``gemini`` are
-        # the only production-allowed providers.
+        # serve the stub answer. So does ANY name the factory does not know:
+        # it falls through to the stub, so "openrouter" (the spelling
+        # prod.env.example once gave) or "Anthropic" served stub answers in
+        # production. An allowlist of the names the factory builds (#492 review).
         if self.environment != "production":
             return self
-        if self.llm_provider in ("stub", ""):
+        if self.llm_provider not in ("anthropic", "gemini", "router"):
             raise ValueError(
                 f"CITEVYN_LLM_PROVIDER={self.llm_provider!r} is not allowed "
                 "when CITEVYN_ENVIRONMENT='production'. Set "
-                "CITEVYN_LLM_PROVIDER to 'anthropic' or 'gemini' and "
-                "provide the matching API key."
+                "CITEVYN_LLM_PROVIDER to 'gemini', 'anthropic' or 'router' "
+                "(lowercase) and provide the matching API key."
             )
         return self
 
@@ -664,7 +666,11 @@ class Settings(BaseSettings):
         in_use: list[tuple[str, str, str]] = []
         if self.llm_provider == "gemini":
             in_use.append(("CITEVYN_GEMINI_MODEL", "gemini", self.gemini_model))
-        if self.llm_provider in ("gemini", "router"):
+        # OpenRouter is in use as the primary (router) or as Gemini's fallback,
+        # and the factory builds that fallback only when its key is set.
+        if self.llm_provider == "router" or (
+            self.llm_provider == "gemini" and self.openrouter_api_key
+        ):
             in_use.append(("CITEVYN_OPENROUTER_MODEL", "router", self.openrouter_model))
         if self.llm_provider == "anthropic":
             in_use.append(("CITEVYN_LLM_MODEL", "anthropic", self.llm_model))
