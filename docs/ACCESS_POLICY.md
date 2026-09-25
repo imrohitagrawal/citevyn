@@ -81,6 +81,7 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `POST` | `/v1/sessions` | `chat` |
 | `POST` | `/v1/sessions/{session_id}/messages` | `chat` |
 | `GET` | `/v1/me/sessions` | `history` |
+| `GET` | `/v1/me/export` | `history` |
 | `GET` | `/v1/sessions/{session_id}` | `history` |
 | `DELETE` | `/v1/sessions/{session_id}` | `history` |
 | `GET` | `/v1/sessions/{session_id}/messages/{message_id}` | `history` |

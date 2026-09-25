@@ -274,6 +274,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/auth/magic-link/confirm` | none | Redeem the link (form POST from that page; redirect) |
 | `POST /v1/auth/me/password` | demo | Set or change the signed-in account's password (revokes other sessions) |
 | `GET  /v1/me/sessions`      | demo   | List the caller's own chat sessions, newest first |
+| `GET  /v1/me/export`        | demo   | Download the caller's own history (`?format=json` or `markdown`) |
 | `POST /v1/sessions`         | demo   | Open a chat session                           |
 | `GET  /v1/sessions/{session_id}` | demo | Fetch a session                            |
 | `DELETE /v1/sessions/{session_id}` | demo | End a session                            |

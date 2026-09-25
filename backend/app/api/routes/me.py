@@ -19,10 +19,12 @@ anonymous callers.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,3 +96,121 @@ async def list_my_sessions(
 
 
 __all__ = ["router"]
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/me/export — history export (ADR-0005 §6 trust must-haves)
+# ---------------------------------------------------------------------------
+
+# Bounded like every list here. Far above the drawer's 50: an export is meant to
+# be the whole history, and the file says when it hit this cap.
+_MAX_EXPORT_SESSIONS = 500
+
+
+def _markdown(sessions: list[dict[str, Any]], truncated: bool) -> str:
+    lines = ["# CiteVyn conversation history", ""]
+    if truncated:
+        n = len(sessions)
+        lines += [
+            f"_This export holds only the newest {n} conversation{'s' if n != 1 else ''}._",
+            "",
+        ]
+    if not sessions:
+        lines.append("No conversations to export.")
+    for convo in sessions:
+        lines += [f"## Conversation of {convo['created_at'] or 'unknown date'}", ""]
+        for m in convo["messages"]:
+            who = "You" if m["role"] == "user" else "CiteVyn"
+            # Quoted line by line, so a message containing "## ..." or a fake
+            # "**CiteVyn:**" line cannot forge structure in the document.
+            quoted = "\n".join(f"> {ln}" for ln in str(m["content"]).split("\n"))
+            lines += [f"**{who}:**", "", quoted, ""]
+            if m["citations"]:
+                lines.append("Sources:")
+                for c in m["citations"]:
+                    date = f" (docs as of {c['docs_as_of']})" if c.get("docs_as_of") else ""
+                    title = str(c.get("title") or c.get("source_name") or "Source")
+                    lines.append(f"- [{title}]({c.get('url', '')}){date}")
+                lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+@router.get(
+    "/export",
+    dependencies=[Depends(requires(Capability.history))],
+    summary="Download the caller's own conversation history.",
+    description=(
+        "Every conversation the history drawer can show (the caller's own, not "
+        "closed), newest first, with each answer's citations and 'docs as of' "
+        "dates. JSON or Markdown, as a file download."
+    ),
+)
+async def export_my_history(
+    principal_id: Annotated[str, Depends(resolve_principal)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    fmt: Literal["json", "markdown"] = Query(default="json", alias="format"),  # noqa: B008
+) -> Response:
+    now = datetime.now(UTC)
+    rows = list(
+        (
+            await db.execute(
+                select(Session)
+                .where(Session.user_id == principal_id, Session.expires_at > now)
+                .order_by(Session.created_at.desc(), Session.session_id.desc())
+                .limit(_MAX_EXPORT_SESSIONS + 1)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    truncated = len(rows) > _MAX_EXPORT_SESSIONS
+    rows = rows[:_MAX_EXPORT_SESSIONS]
+    by_session: dict[Any, list[Message]] = {row.session_id: [] for row in rows}
+    if rows:
+        messages = (
+            await db.execute(
+                select(Message)
+                .where(Message.session_id.in_(list(by_session)))
+                .order_by(Message.created_at.asc(), Message.message_id.asc())
+            )
+        ).scalars()
+        for m in messages:
+            by_session[m.session_id].append(m)
+    sessions = [
+        {
+            "session_id": str(row.session_id),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "messages": [
+                {
+                    "role": "user" if str(m.role) == "user" else "assistant",
+                    "content": m.content,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                    "citations": m.citations or [],
+                }
+                for m in by_session[row.session_id]
+            ],
+        }
+        for row in rows
+    ]
+    stamp = now.strftime("%Y-%m-%d")
+    if fmt == "markdown":
+        return Response(
+            content=_markdown(sessions, truncated),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.md"',
+                "Cache-Control": "no-store",  # personal data
+            },
+        )
+    return Response(
+        content=json.dumps(
+            {"exported_at": now.isoformat(), "truncated": truncated, "sessions": sessions},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.json"',
+            "Cache-Control": "no-store",  # personal data
+        },
+    )

@@ -291,6 +291,7 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("POST", "/v1/sessions"): Capability.chat,
     ("POST", "/v1/sessions/{session_id}/messages"): Capability.chat,
     ("GET", "/v1/me/sessions"): Capability.history,
+    ("GET", "/v1/me/export"): Capability.history,
     ("GET", "/v1/sessions/{session_id}"): Capability.history,
     ("DELETE", "/v1/sessions/{session_id}"): Capability.history,
     ("GET", "/v1/sessions/{session_id}/messages/{message_id}"): Capability.history,
@@ -329,7 +330,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 34
+    assert len(EXPECTED_CAPABILITY) == 35
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -376,6 +377,7 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
     ("POST", "/v1/auth/register"),
+    ("GET", "/v1/me/export"),
     ("GET", "/v1/me/sessions"),
     ("POST", "/v1/search/exact"),
     ("POST", "/v1/source-requests"),
@@ -594,6 +596,7 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("POST", "/v1/search/exact"),
     }
     assert by_depth[3] == {
+        ("GET", "/v1/me/export"),
         ("GET", "/v1/me/sessions"),
         ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),
         ("POST", "/v1/source-requests"),
