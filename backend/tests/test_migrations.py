@@ -22,8 +22,9 @@ from alembic.command import upgrade as alembic_upgrade
 from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, MetaData, create_engine
+from sqlalchemy import DefaultClause, Engine, MetaData, UniqueConstraint, create_engine, inspect
 from sqlalchemy.exc import IntegrityError, SAWarning
+from sqlalchemy.types import TypeEngine
 
 import app.models as app_models
 from app.models import Base
@@ -522,9 +523,15 @@ def test_documents_identity_checksum_rename_round_trips(
 #     SQLite they never run. A Postgres variant of this test does not exist.
 #   - CHECK constraints: alembic's autogenerate does not compare them. None
 #     exist in the models or migrations today.
-#   - server defaults: compared, but the only shape measured is "the migration
-#     has one, the model has none". How alembic compares two different
-#     non-empty defaults on SQLite was not measured.
+#   - server defaults: compared, and a ``modify_default`` key carries both
+#     rendered values, so a changed default on an allowlisted column is a NEW
+#     key, not the old entry. Only "the migration has one, the model has none"
+#     occurs today; how alembic compares two different non-empty defaults on
+#     SQLite was not measured.
+#   - an UNNAMED unique constraint: compare_metadata does not report one that
+#     only a migration creates. ``test_migrated_uniqueness_matches_the_orm_models``
+#     below compares uniqueness directly, because that is the permissive
+#     direction this guard exists for.
 # Types (compare_type) and nullability ARE compared, and on SQLite they add no
 # noise: zero modify_type / modify_nullable items at 57d8d4f. Changing
 # ``User.email`` to String(256), or to nullable=False, turns the test red.
@@ -565,12 +572,24 @@ KNOWN_DRIFT: dict[DiffKey, str] = {
     # columns a server default; the model uses Python-side ``default=`` instead,
     # which every ORM insert applies. Only a raw SQL insert that omits the column
     # behaves differently: production fills it, the hermetic schema refuses it.
-    ("modify_default", "provider_calls", "input_tokens"): "STRICTER in tests: server default",
-    ("modify_default", "provider_calls", "output_tokens"): "STRICTER in tests: server default",
-    ("modify_default", "provider_calls", "attempts"): "STRICTER in tests: server default",
-    ("modify_default", "provider_calls", "cost_usd"): "STRICTER in tests: server default",
-    ("modify_default", "provider_calls", "priced"): "STRICTER in tests: server default",
-    ("modify_default", "provider_calls", "tokens_estimated"): "STRICTER in tests: server default",
+    ("modify_default", "provider_calls", "input_tokens", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "output_tokens", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "attempts", "'1'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "cost_usd", "'0'", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "priced", "1", None): (
+        "STRICTER in tests: server default"
+    ),
+    ("modify_default", "provider_calls", "tokens_estimated", "0", None): (
+        "STRICTER in tests: server default"
+    ),
     # HARMLESS: non-unique indexes the migrations create for query speed and the
     # models never declared. No row is accepted or refused differently; only
     # query plans differ. Closed by declaring ``index=True`` on the model column.
@@ -659,9 +678,22 @@ def _diff_key(item: object) -> DiffKey:
             tuple(column.name for column in constraint.columns),
         )
     if op.startswith("modify_"):
-        return (op, item[2], item[3])
+        # (op, schema, table, column, existing_kw, existing, new): keep BOTH
+        # values, so a changed default or type on an allowlisted column is a
+        # new key rather than a match for the old entry.
+        return (op, item[2], item[3], _render(item[5]), _render(item[6]))
     # Unknown shape: keep it, fully rendered, so it can never match an entry.
     return (op, repr(item))
+
+
+def _render(value: object) -> object:
+    """A stable, comparable form of a modify_* value (no object addresses)."""
+    if isinstance(value, DefaultClause):
+        arg = value.arg
+        return str(getattr(arg, "text", arg))
+    if isinstance(value, TypeEngine):
+        return repr(value)
+    return value
 
 
 def _diff_keys(diff: list[object]) -> list[DiffKey]:
@@ -810,7 +842,9 @@ def test_users_email_uniqueness_matches_the_known_drift_entry(
     """
     alembic_upgrade(alembic_config, "head")
     migrated = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
-    with pytest.raises(IntegrityError):
+    # Matched on the message: any IntegrityError (a new NOT NULL column, say)
+    # would otherwise pass this with the email uniqueness gone.
+    with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
         _insert_two_users_with_one_email(migrated)
 
     hermetic = create_engine(f"sqlite:///{tmp_path / 'create_all.db'}")
@@ -821,8 +855,74 @@ def test_users_email_uniqueness_matches_the_known_drift_entry(
             "is closed: delete its KNOWN_DRIFT entry"
         )
     else:
-        with pytest.raises(IntegrityError):
+        with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
             _insert_two_users_with_one_email(hermetic)
+
+
+def _unique_column_sets(
+    tables: dict[str, set[tuple[str, ...]]],
+) -> set[tuple[str, tuple[str, ...]]]:
+    return {(table, columns) for table, sets in tables.items() for columns in sets}
+
+
+# The uniqueness only the migrated schema has, and why it is tolerated. Tied to
+# the KNOWN_DRIFT entry above: the same PERMISSIVE DIVERGENCE, seen by the
+# uniqueness comparison rather than by compare_metadata.
+KNOWN_UNIQUENESS_DRIFT: set[tuple[str, tuple[str, ...]]] = (
+    {("users", ("email",))} if USERS_EMAIL_UNIQUE_INDEX in KNOWN_DRIFT else set()
+)
+
+
+def test_migrated_uniqueness_matches_the_orm_models(alembic_config: AlembicConfig) -> None:
+    """Every UNIQUE column set in production is UNIQUE in the hermetic schema.
+
+    compare_metadata misses an unnamed unique constraint that only a migration
+    creates, and that is exactly the looser-than-production case #455 is about:
+    create_all would accept a duplicate that production refuses. So compare the
+    unique column sets directly -- unique constraints and unique indexes as
+    reflected from the migrated DB, against UniqueConstraint, unique Index and
+    ``unique=True`` columns in the models. Primary keys are not included.
+
+    RED WHEN: a migration makes a column set unique that no model declares
+    unique (or the reverse), or when the ``users.email`` divergence is closed and
+    its KNOWN_DRIFT entry is left behind.
+    """
+    alembic_upgrade(alembic_config, "head")
+    inspector = inspect(create_engine(alembic_config.get_main_option("sqlalchemy.url")))
+    migrated: dict[str, set[tuple[str, ...]]] = {}
+    for table in inspector.get_table_names():
+        sets = {tuple(u["column_names"]) for u in inspector.get_unique_constraints(table)}
+        sets |= {tuple(i["column_names"]) for i in inspector.get_indexes(table) if i["unique"]}
+        migrated[table] = sets
+    modelled: dict[str, set[tuple[str, ...]]] = {}
+    for name, table in _full_orm_metadata().tables.items():
+        sets = {
+            tuple(column.name for column in constraint.columns)
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        sets |= {
+            tuple(column.name for column in index.columns)
+            for index in table.indexes
+            if index.unique
+        }
+        sets |= {(column.name,) for column in table.columns if column.unique}
+        modelled[name] = sets
+
+    only_migrated = _unique_column_sets(migrated) - _unique_column_sets(modelled)
+    only_modelled = _unique_column_sets(modelled) - _unique_column_sets(migrated)
+    # Not vacuous: reflection really found uniqueness on both sides, including a
+    # composite constraint that both declare.
+    assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(migrated)
+    assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(modelled)
+    assert only_migrated == KNOWN_UNIQUENESS_DRIFT, (
+        f"UNIQUE only in production (hermetic tests accept duplicates it refuses): "
+        f"{sorted(only_migrated - KNOWN_UNIQUENESS_DRIFT)}; listed but no longer "
+        f"diverging: {sorted(KNOWN_UNIQUENESS_DRIFT - only_migrated)}"
+    )
+    assert not only_modelled, (
+        f"UNIQUE only in the models, not in production: {sorted(only_modelled)}"
+    )
 
 
 def test_versions_directory_has_exactly_one_head(alembic_config: AlembicConfig) -> None:
