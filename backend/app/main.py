@@ -32,6 +32,7 @@ from app.answer.orchestrator import OrchestratorError
 from app.api.routes.about import router as about_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
 from app.api.routes.magic_link import router as magic_link_router
 from app.api.routes.me import router as me_router
@@ -133,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(messages_router)
     app.include_router(search_router)
     app.include_router(admin_router)
+    app.include_router(feedback_router)
     # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.
@@ -310,8 +312,15 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
     length marker so the client can still tell "the body was
     rejected" without seeing the contents.
     """
+    # ``ctx`` is dropped: a custom validator that raises ``ValueError`` puts the
+    # exception OBJECT there, which cannot be serialized, so the 422 became a 500
+    # (found adding the first custom validators, ADR-0005 Phase 3B). ``msg``
+    # already carries the same text.
     redacted_errors: list[dict[str, Any]] = [
-        ({**raw, "input": _redact_input(raw["input"])} if "input" in raw else dict(raw))
+        {
+            **{k: v for k, v in raw.items() if k != "ctx"},
+            **({"input": _redact_input(raw["input"])} if "input" in raw else {}),
+        }
         for raw in exc.errors()
     ]
     envelope = ErrorEnvelope(

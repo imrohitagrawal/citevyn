@@ -295,6 +295,10 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("DELETE", "/v1/sessions/{session_id}"): Capability.history,
     ("GET", "/v1/sessions/{session_id}/messages/{message_id}"): Capability.history,
     ("POST", "/v1/search/exact"): Capability.exact_search,
+    ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"): Capability.feedback,
+    ("POST", "/v1/source-requests"): Capability.feedback,
+    ("GET", "/v1/admin/feedback"): Capability.operate,
+    ("GET", "/v1/admin/source_requests"): Capability.operate,
     ("GET", "/v1/admin/budget"): Capability.operate,
     ("GET", "/v1/admin/evaluations"): Capability.operate,
     ("GET", "/v1/admin/evaluations/{run_id}"): Capability.operate,
@@ -325,7 +329,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 30
+    assert len(EXPECTED_CAPABILITY) == 34
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -355,6 +359,8 @@ def _class_members(auth_class: str) -> list[tuple[str, str]]:
 EXPECTED_ADMIN: set[tuple[str, str]] = {
     ("GET", "/v1/admin/budget"),
     ("GET", "/v1/admin/evaluations"),
+    ("GET", "/v1/admin/feedback"),
+    ("GET", "/v1/admin/source_requests"),
     ("GET", "/v1/admin/evaluations/{run_id}"),
     ("GET", "/v1/admin/index_versions"),
     ("GET", "/v1/admin/index_versions/{index_version}"),
@@ -372,6 +378,8 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("POST", "/v1/auth/register"),
     ("GET", "/v1/me/sessions"),
     ("POST", "/v1/search/exact"),
+    ("POST", "/v1/source-requests"),
+    ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),
     ("POST", "/v1/sessions"),
     ("DELETE", "/v1/sessions/{session_id}"),
     ("GET", "/v1/sessions/{session_id}"),
@@ -587,6 +595,8 @@ def test_the_walk_recurses_past_the_first_level() -> None:
     }
     assert by_depth[3] == {
         ("GET", "/v1/me/sessions"),
+        ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),
+        ("POST", "/v1/source-requests"),
         ("POST", "/v1/sessions"),
         ("GET", "/v1/sessions/{session_id}"),
         ("DELETE", "/v1/sessions/{session_id}"),

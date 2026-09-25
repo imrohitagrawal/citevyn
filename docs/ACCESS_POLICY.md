@@ -49,6 +49,7 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `chat` | — | yes | yes | Ask a live question |
 | `history` | — | yes | yes | Read or delete one's own conversations |
 | `exact_search` | — | yes | yes | Exact flag and command lookup |
+| `feedback` | — | yes | yes | Rate an answer, report it as wrong, request a missing source |
 | `operate` | — | — | — | Operator routes (admin API key) |
 | `weekly_digest` | — | yes | yes | The weekly "what changed" email (no route yet) |
 | `mcp_ask` | — | — | yes | Cited answers through the MCP server (no route yet) |
@@ -84,6 +85,10 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `DELETE` | `/v1/sessions/{session_id}` | `history` |
 | `GET` | `/v1/sessions/{session_id}/messages/{message_id}` | `history` |
 | `POST` | `/v1/search/exact` | `exact_search` |
+| `PUT` | `/v1/sessions/{session_id}/messages/{message_id}/feedback` | `feedback` |
+| `POST` | `/v1/source-requests` | `feedback` |
+| `GET` | `/v1/admin/feedback` | `operate` |
+| `GET` | `/v1/admin/source_requests` | `operate` |
 | `GET` | `/v1/admin/budget` | `operate` |
 | `GET` | `/v1/admin/evaluations` | `operate` |
 | `GET` | `/v1/admin/evaluations/{run_id}` | `operate` |

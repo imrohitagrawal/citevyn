@@ -44,6 +44,8 @@ class Capability(enum.StrEnum):
     history = "history"
     #: Exact flag / command lookup.
     exact_search = "exact_search"
+    #: Rate an answer, report it as wrong, request a missing source (ADR-0005 §6).
+    feedback = "feedback"
     #: Operator routes. Granted by the admin API key, never by a tier.
     operate = "operate"
 
@@ -91,6 +93,7 @@ _ACCOUNT = frozenset(
         Capability.chat,
         Capability.history,
         Capability.exact_search,
+        Capability.feedback,
         Capability.weekly_digest,
     }
 )

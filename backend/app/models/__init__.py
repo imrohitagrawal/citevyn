@@ -35,9 +35,12 @@ from app.models.provider_calls import ProviderCall
 from app.models.retrieved_evidence import RetrievedEvidence
 from app.models.sessions import Session
 from app.models.user_identities import UserIdentity
+from app.models.user_signals import AnswerFeedback, SourceRequest
 from app.models.users import User
 
 __all__ = [
+    "AnswerFeedback",
+    "SourceRequest",
     "GUID",
     "AnswerCache",
     "AuditAction",
