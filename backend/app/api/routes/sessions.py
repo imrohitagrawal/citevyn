@@ -38,6 +38,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
@@ -184,6 +186,7 @@ async def _get_session_or_404(
 
 @router.post(
     "",
+    dependencies=[Depends(requires(Capability.chat))],
     status_code=status.HTTP_201_CREATED,
     summary="Create a chat session.",
     description=(
@@ -248,6 +251,7 @@ async def create_session(
 
 @router.delete(
     "/{session_id}",
+    dependencies=[Depends(requires(Capability.history))],
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Close (soft-delete) a session.",
     description=(
@@ -280,6 +284,7 @@ async def close_session(
 
 @router.get(
     "/{session_id}",
+    dependencies=[Depends(requires(Capability.history))],
     summary="Fetch a session and its messages.",
     description=(
         "Per ``docs/API_SPEC.md`` §5. Returns the session metadata "

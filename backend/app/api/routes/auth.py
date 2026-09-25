@@ -29,6 +29,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.auth_sessions import (
     REGISTERED_USER_PREFIX,
     claim_and_login,
@@ -208,6 +210,7 @@ async def _auth_user_payload(
 
 @router.post(
     "/register",
+    dependencies=[Depends(requires(Capability.sign_in))],
     status_code=status.HTTP_201_CREATED,
     summary="Register a new account.",
     description=(
@@ -286,6 +289,7 @@ async def register(
 
 @router.post(
     "/login",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Log in to an existing account.",
     description=(
         "Verifies email + password and logs the caller in, claiming any "
@@ -341,6 +345,7 @@ async def login(
 
 @router.post(
     "/logout",
+    dependencies=[Depends(requires(Capability.sign_in))],
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Log out.",
     description="Revokes the current session cookie. Idempotent.",
@@ -372,6 +377,7 @@ async def logout(
 
 @router.post(
     "/me/password",
+    dependencies=[Depends(requires(Capability.manage_account))],
     summary="Set or change the signed-in account's password.",
     description=(
         "First-time set (an OAuth-created account that never set one) needs only "
@@ -520,6 +526,7 @@ async def update_password(
 
 @router.get(
     "/me",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Return the caller's identity.",
     description=(
         "Resolves the current session cookie WITHOUT minting a fresh one — "

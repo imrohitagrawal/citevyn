@@ -125,6 +125,17 @@ class Settings(BaseSettings):
     # when ``CITEVYN_REDIS_URL`` is set, in-process otherwise. The
     # in-process path is retained for hermetic tests and single-worker
     # development; production deploys MUST set ``CITEVYN_REDIS_URL``.
+    # --- Access model (ADR-0005) -------------------------------------------
+    # ONE switch for every paid or commercial behaviour: capability enforcement,
+    # trial counting, pricing, billing, BYOK. Default OFF: production behaves as
+    # before ADR-0005, anonymous chat included. Only the owner turns it on.
+    access_model_enabled: bool = False
+    # The allowances are policy settings, not constants (docs/ACCESS_POLICY.md).
+    # Free: answered questions, once per verified account. Pro: per month.
+    # Refusals and errors never count against either.
+    access_free_trial_answers: int = Field(default=25, ge=0)
+    access_pro_monthly_answers: int = Field(default=1000, ge=0)
+
     rate_limit_enabled: bool = True
     rate_limit_demo_user_per_hour: int = Field(default=30, ge=1)
     # ADR-0004 PR 11: a signed-in caller gets a higher limit, keyed on their

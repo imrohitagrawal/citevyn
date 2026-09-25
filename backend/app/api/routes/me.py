@@ -26,6 +26,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.auth_sessions import resolve_principal
 from app.core.db import get_session
 from app.models import Message, Session
@@ -44,6 +46,7 @@ def _request_id(request: Request) -> str:
 
 @router.get(
     "/sessions",
+    dependencies=[Depends(requires(Capability.history))],
     summary="List the caller's own chat sessions.",
     description=(
         "Newest first, capped at 50. Backs the history drawer (ADR-0004 "

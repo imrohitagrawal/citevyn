@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.answer.orchestrator import Orchestrator
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
@@ -151,6 +153,7 @@ def _utcnow() -> datetime:
 
 @router.post(
     "/{session_id}/messages",
+    dependencies=[Depends(requires(Capability.chat))],
     status_code=status.HTTP_200_OK,
     summary="Ask a question and receive a grounded answer.",
     description=(
@@ -203,6 +206,7 @@ async def post_message(
 
 @router.get(
     "/{session_id}/messages/{message_id}",
+    dependencies=[Depends(requires(Capability.history))],
     summary="Fetch a single message for citation hydration.",
     description=(
         "Returns the message and the per-chunk retrieval trace "

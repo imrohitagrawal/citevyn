@@ -76,6 +76,8 @@ from fastapi.testclient import TestClient
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
+from app.access.deps import capability_of
+from app.access.policy import Capability
 from app.core import db as db_module
 from app.core.config import get_settings
 from app.core.security import require_admin_api_key, require_public_client_token
@@ -215,6 +217,126 @@ def _inventory() -> dict[tuple[str, str], str]:
 
 
 INVENTORY = _inventory()
+
+
+# ---------------------------------------------------------------------------
+# Capabilities (ADR-0005 Phase 1): every route declares exactly one
+# ---------------------------------------------------------------------------
+
+
+def _capabilities_of(dependant: Dependant) -> list[Capability]:
+    """Every capability label anywhere in ``dependant``'s tree, in walk order.
+
+    Recursive for the same reason the credential walk is: a label hidden one
+    level down must still be seen, and TWO labels on one route (a router-level
+    one plus a route-level one) must be caught, not resolved by picking one.
+    """
+    found: list[Capability] = []
+    for sub in dependant.dependencies:
+        cap = capability_of(sub.call)
+        if cap is not None:
+            found.append(cap)
+        found.extend(_capabilities_of(sub))
+    return found
+
+
+def _route_capabilities() -> dict[tuple[str, str], list[Capability]]:
+    routes, _ = _api_routes()
+    out: dict[tuple[str, str], list[Capability]] = {}
+    for route in routes:
+        caps = _capabilities_of(route.dependant)
+        for method in sorted(route.methods):
+            if method not in IMPLICIT_METHODS:
+                out[(method, route.path)] = caps
+    return out
+
+
+def capability_inventory() -> dict[tuple[str, str], Capability]:
+    """``(method, path) -> capability`` for every route. Also read by
+    ``test_access_policy.py`` to check ``docs/ACCESS_POLICY.md``.
+
+    Raises rather than guessing when a route has zero or several labels.
+    """
+    out: dict[tuple[str, str], Capability] = {}
+    for key, caps in _route_capabilities().items():
+        if len(caps) != 1:
+            raise AssertionError(f"{key} declares {len(caps)} capabilities: {caps}")
+        out[key] = caps[0]
+    return out
+
+
+# Every route's capability, pinned. Removing a ``requires(...)`` from a route,
+# or changing which one it carries, turns this red naming the route.
+EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
+    ("GET", "/about"): Capability.public,
+    ("GET", "/health"): Capability.public,
+    ("GET", "/health/dependencies"): Capability.public,
+    ("GET", "/health/index"): Capability.public,
+    ("POST", "/v1/auth/register"): Capability.sign_in,
+    ("POST", "/v1/auth/login"): Capability.sign_in,
+    ("POST", "/v1/auth/logout"): Capability.sign_in,
+    ("GET", "/v1/auth/me"): Capability.sign_in,
+    ("POST", "/v1/auth/magic-link/request"): Capability.sign_in,
+    ("GET", "/v1/auth/magic-link/confirm"): Capability.sign_in,
+    ("POST", "/v1/auth/magic-link/confirm"): Capability.sign_in,
+    ("GET", "/v1/auth/oauth/{provider}/start"): Capability.sign_in,
+    ("GET", "/v1/auth/oauth/{provider}/connect/start"): Capability.sign_in,
+    ("GET", "/v1/auth/oauth/{provider}/callback"): Capability.sign_in,
+    ("POST", "/v1/auth/me/password"): Capability.manage_account,
+    ("POST", "/v1/sessions"): Capability.chat,
+    ("POST", "/v1/sessions/{session_id}/messages"): Capability.chat,
+    ("GET", "/v1/me/sessions"): Capability.history,
+    ("GET", "/v1/sessions/{session_id}"): Capability.history,
+    ("DELETE", "/v1/sessions/{session_id}"): Capability.history,
+    ("GET", "/v1/sessions/{session_id}/messages/{message_id}"): Capability.history,
+    ("POST", "/v1/search/exact"): Capability.exact_search,
+    ("GET", "/v1/admin/budget"): Capability.operate,
+    ("GET", "/v1/admin/evaluations"): Capability.operate,
+    ("GET", "/v1/admin/evaluations/{run_id}"): Capability.operate,
+    ("GET", "/v1/admin/index_versions"): Capability.operate,
+    ("GET", "/v1/admin/index_versions/{index_version}"): Capability.operate,
+    ("POST", "/v1/admin/index_versions/{index_version}/promote"): Capability.operate,
+    ("GET", "/v1/admin/ingestion_jobs"): Capability.operate,
+    ("GET", "/v1/admin/ingestion_jobs/{job_id}"): Capability.operate,
+}
+
+
+def test_every_route_declares_exactly_one_capability() -> None:
+    """The CI guard: an unlabelled route fails, and so does a doubly labelled one.
+
+    Turns red if: any route loses its ``requires(...)``, or gains a second one.
+    """
+    wrong = {key: caps for key, caps in _route_capabilities().items() if len(caps) != 1}
+    assert wrong == {}, f"routes without exactly one capability: {wrong}"
+
+
+def test_the_capability_labels_are_exactly_the_expected_map() -> None:
+    """Turns red if: a route's label changes, or a route is added or removed
+    without updating the pinned map (and ``docs/ACCESS_POLICY.md``)."""
+    assert capability_inventory() == EXPECTED_CAPABILITY
+
+
+def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
+    """Partner: the capability walk and the credential walk see the same routes,
+    so a route cannot escape one of them. Turns red if: they diverge."""
+    assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
+    assert len(EXPECTED_CAPABILITY) == 30
+
+
+def test_operate_is_exactly_the_admin_key_class() -> None:
+    """``operate`` is granted only by the admin key, so the two must coincide.
+    Turns red if: an admin route is labelled otherwise, or a non-admin route is
+    labelled ``operate``."""
+    operate = {k for k, c in EXPECTED_CAPABILITY.items() if c is Capability.operate}
+    assert operate == set(_class_members(ADMIN))
+
+
+def test_a_public_route_needs_no_credential() -> None:
+    """A ``public`` route behind a credential would be mislabelled.
+    Turns red if: a route labelled ``public`` requires the bearer or admin key."""
+    public = {k for k, c in EXPECTED_CAPABILITY.items() if c is Capability.public}
+    assert public  # partner: the check is not vacuous
+    assert all(INVENTORY[k] == OPEN for k in public)
 
 
 def _class_members(auth_class: str) -> list[tuple[str, str]]:
