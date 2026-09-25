@@ -522,3 +522,151 @@ async def test_advance_source_version_hash_publishes_the_new_fingerprint(
     assert row is not None
     assert row.source_version_hash == "sha256:corpus-after-edit"
     assert await _index_version_count(session) == 1
+
+
+# ---------------------------------------------------------------------------
+# A failed re-ingest must not wipe the previous generation (#461)
+# ---------------------------------------------------------------------------
+
+
+class _FixedTextFetcher:
+    """Returns the same raw text for every source — a stand-in for an edited file."""
+
+    def __init__(self, raw: str) -> None:
+        self._raw = raw
+
+    def fetch(self, source: SourceSpec) -> str:
+        return self._raw
+
+
+class _ExplodingEmbedder(StubEmbedder):
+    """Embeds nothing: every batch raises, as a provider outage would mid-run."""
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("simulated embedder outage")
+
+
+def _relevelled(source: SourceSpec) -> str:
+    """The shipped file with every ``## `` section demoted to ``### ``.
+
+    The #461 scenario: a corpus edit that re-levels headings leaves the parser
+    with no ``## `` section at all, so the source parses to zero chunks.
+    """
+    return "\n".join(
+        "#" + line if line.startswith("## ") else line
+        for line in LocalFetcher().fetch(source).splitlines()
+    )
+
+
+async def _generation(session: AsyncSession) -> tuple[set[object], int]:
+    """``(chunk ids, exact-term count)`` currently in the database."""
+    chunk_ids = {c.chunk_id for c in (await session.execute(select(Chunk))).scalars().all()}
+    terms = (await session.execute(select(ExactTerm))).scalars().all()
+    return chunk_ids, len(terms)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("# Codex\nprose only\n", id="h1-and-prose-only"),
+        pytest.param(_relevelled(get_source("codex")), id="headings-relevelled-to-h3"),
+    ],
+)
+async def test_reingest_that_parses_to_zero_sections_fails_and_keeps_the_previous_generation(
+    session: AsyncSession, runner: IngestionRunner, raw: str
+) -> None:
+    """A source with no ``## `` section must FAIL the job, not replace its chunks with none.
+
+    Before #461 the runner deleted the old chunks and then persisted the empty
+    draft list: status ``completed``, ``chunk_count`` 0, the document still
+    ``active`` — every question about that product refused, with nothing red.
+
+    Turns red when the zero-draft check in ``IngestionRunner.run`` is removed.
+    """
+    source = get_source("codex")
+    first = await _run(runner, session, source=source)
+    assert first.status is JobStatus.completed
+    before_ids, before_terms = await _generation(session)
+    # Partner: there IS a generation to lose, so "unchanged" below means something.
+    assert len(before_ids) == first.chunk_count > 0
+    assert before_terms == first.term_count > 0
+
+    edited = IngestionRunner(
+        fetcher=_FixedTextFetcher(raw),
+        embedder=StubEmbedder(dim=32),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-test",
+    )
+    second = await _run(edited, session, source=source)
+
+    assert second.status is JobStatus.failed
+    assert second.error_type == "ParseError"
+    assert "codex" in (second.error_message or "")
+    assert second.chunk_count == 0
+    assert await _generation(session) == (before_ids, before_terms)
+
+    job = await session.get(IngestionJob, second.job_id)
+    assert job is not None
+    assert job.status is JobStatus.failed
+    assert job.error_type == "ParseError"
+    document = (await session.execute(select(Document))).scalars().one()
+    assert document.status is DocumentStatus.active
+
+
+@pytest.mark.asyncio
+async def test_first_ingest_that_parses_to_zero_sections_creates_no_document(
+    session: AsyncSession,
+) -> None:
+    """Edge case: with nothing to keep, a zero-section source still fails.
+
+    Without the check a first ingest would leave an ``active`` document with no
+    chunks — a source that looks ingested and can never be cited.
+
+    Turns red when the zero-draft check in ``IngestionRunner.run`` is removed.
+    """
+    runner = IngestionRunner(
+        fetcher=_FixedTextFetcher("# Codex\nprose only\n"),
+        embedder=StubEmbedder(dim=8),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-test",
+    )
+    result = await _run(runner, session, source=get_source("codex"))
+    assert result.status is JobStatus.failed
+    assert result.error_type == "ParseError"
+    assert (await session.execute(select(Document))).scalars().all() == []
+    assert (await session.execute(select(Chunk))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_failed_reingest_keeps_the_previous_generation(
+    session: AsyncSession, runner: IngestionRunner
+) -> None:
+    """A re-ingest that fails AFTER the old chunks were deleted must roll the delete back.
+
+    ``_materialize_chunks`` deletes the previous generation before it embeds, so
+    an embedder that raises lands in the failure path with the delete already
+    flushed. Only the rollback in ``IngestionRunner.run`` stands between that and
+    a committed wipe — this test is what pins it.
+
+    Turns red when ``await session.rollback()`` is deleted from the failure path
+    of ``IngestionRunner.run``.
+    """
+    source = get_source("codex")
+    first = await _run(runner, session, source=source)
+    assert first.status is JobStatus.completed
+    before_ids, before_terms = await _generation(session)
+    assert len(before_ids) == first.chunk_count > 0
+    assert before_terms == first.term_count > 0
+
+    failing = IngestionRunner(
+        fetcher=LocalFetcher(),
+        embedder=_ExplodingEmbedder(dim=32),
+        source_version_hash="sha256:test-snapshot",
+        index_version="v-test",
+    )
+    second = await _run(failing, session, source=source)
+    assert second.status is JobStatus.failed
+    assert second.error_type == "RuntimeError"
+
+    assert await _generation(session) == (before_ids, before_terms)

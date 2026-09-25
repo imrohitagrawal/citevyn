@@ -1,5 +1,7 @@
 # AI Concepts and Glossary
 
+## About this glossary
+
 This page is an original, plain-language explainer of the everyday AI terms that come up
 when using the tools CiteVyn covers (Claude, Claude Code, Codex, and Gemini). It is written
 for a general audience — a product manager or a first-time user, not only engineers — so the

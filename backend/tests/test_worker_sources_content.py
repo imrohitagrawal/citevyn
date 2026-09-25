@@ -21,8 +21,10 @@ import re
 
 import pytest
 
-from app.worker.allowlist import get_source
+from app.worker.allowlist import MVP_SOURCES, SourceSpec, get_source
+from app.worker.chunker import chunk_document
 from app.worker.fetchers import LocalFetcher
+from app.worker.parser import parse_markdown
 
 # Surfaces each product genuinely ships, beyond the terminal. A definition that
 # mentions none of these has narrowed back to "it's a CLI".
@@ -149,4 +151,66 @@ def test_codex_cli_only_sections_are_scoped_in_their_own_heading() -> None:
         f"codex.md sections {unscoped} describe CLI-only behaviour but carry no "
         f"'CLI' marker in the heading. Since the doc title no longer says CLI, "
         f"these chunks reach the generator with nothing scoping them to the CLI."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Nothing in a shipped source is silently left out of the index (#461)
+# ---------------------------------------------------------------------------
+
+
+def _lines_missing_from_chunks(raw: str, spec: SourceSpec) -> list[str]:
+    """Every non-blank line of ``raw`` that reaches NO chunk, the ``# `` title excepted.
+
+    The parser keeps only text under a ``## `` heading, so anything above the
+    first one is dropped without a word — which is how ``concepts.md`` lost its
+    four-line introduction. A ``## `` line counts as present when its heading
+    text reaches a chunk; every other line must appear verbatim, because the
+    parser joins body lines unchanged.
+    """
+    chunks = " ".join(draft.text for draft in chunk_document(parse_markdown(raw), source=spec))
+    missing: list[str] = []
+    title_seen = False
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("# ") and not title_seen:
+            title_seen = True
+            continue
+        if text.startswith("## "):
+            text = text[3:].strip()
+        if text not in chunks:
+            missing.append(line)
+    return missing
+
+
+def test_the_line_check_reports_pre_heading_text() -> None:
+    """Partner: the check can see a dropped line, so an empty result means something.
+
+    Turns red when ``_lines_missing_from_chunks`` stops reporting a line the
+    parser discarded.
+    """
+    spec = get_source("concepts")
+    raw = "# T\n\nAn introduction.\n\n## H\n\nbody line\n"
+    assert _lines_missing_from_chunks(raw, spec) == ["An introduction."]
+    assert _lines_missing_from_chunks("# T\n## H\nbody line\n", spec) == []
+
+
+@pytest.mark.parametrize("spec", MVP_SOURCES, ids=lambda s: s.name)
+def test_every_line_of_a_shipped_source_reaches_a_chunk(spec: SourceSpec) -> None:
+    """Every non-blank line except the ``# `` title must be in some chunk.
+
+    Text above the first ``## `` heading never reaches retrieval, and nothing
+    else notices: the file reads fine, the ``/about`` page even renders it.
+
+    Turns red when a shipped source gains text above its first ``## `` heading
+    (``concepts.md`` had four such lines before #461).
+    """
+    raw = LocalFetcher().fetch(spec)
+    assert raw.strip(), f"{spec.name}: the shipped file is empty — nothing was checked"
+    missing = _lines_missing_from_chunks(raw, spec)
+    assert missing == [], (
+        f"{spec.name}.md has {len(missing)} line(s) the parser drops, so they are "
+        f"never indexed: {missing}. Put them under a '## ' heading."
     )

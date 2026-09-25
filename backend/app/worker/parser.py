@@ -46,9 +46,11 @@ class ParsedDocument:
 
 
 class ParseError(Exception):
-    """Raised when the raw text cannot be parsed.
+    """Raised when the raw text cannot be parsed into anything indexable.
 
-    The runner catches this and writes ``"ParseError"`` to
+    :func:`parse_markdown` itself never raises it: empty input is a valid
+    empty :class:`ParsedDocument`. The runner raises it when a source yields
+    zero sections (#461), catches it, and writes ``"ParseError"`` to
     the :class:`IngestionJob.error_type` column. The message
     is preserved in ``error_message`` for the SRE to inspect.
     """
@@ -111,9 +113,11 @@ def _parse(lines: Iterator[str]) -> tuple[str, list[Block]]:
             current_text = []
             continue
         if current_heading is None:
-            # Pre-heading body lines are discarded (e.g.
-            # blank intro). The runner falls back to
-            # ``SourceSpec.title`` if ``title`` is empty.
+            # Pre-heading body lines are discarded and never
+            # indexed; test_worker_sources_content.py keeps the
+            # shipped corpus free of them (#461). The runner
+            # falls back to ``SourceSpec.title`` if ``title``
+            # is empty.
             continue
         current_text.append(line)
     _flush()
