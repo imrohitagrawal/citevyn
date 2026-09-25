@@ -85,6 +85,28 @@ describe("LazyChunkBoundary", () => {
     expect(String(ours[0][1])).toContain("Failed to fetch dynamically imported module");
   });
 
+  it("calls onError once when it catches, and never when nothing fails (#447)", () => {
+    // RED if componentDidCatch stops calling onError: the five click-opened
+    // dialogs rely on it to close themselves and tell the reader. The healthy
+    // render is the partner that proves the callback is not simply always fired.
+    const onError = vi.fn();
+    const { unmount } = render(
+      <LazyChunkBoundary label="auth-modal" onError={onError}>
+        <p>fine</p>
+      </LazyChunkBoundary>,
+    );
+    expect(screen.getByText("fine")).toBeInTheDocument();
+    expect(onError).not.toHaveBeenCalled();
+    unmount();
+
+    render(
+      <LazyChunkBoundary label="auth-modal" onError={onError}>
+        <Boom />
+      </LazyChunkBoundary>,
+    );
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
   it("catches a REJECTED lazy import, which Suspense does not", async () => {
     const Never = lazy(() => Promise.reject(new Error("chunk 404")));
 

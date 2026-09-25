@@ -15,7 +15,7 @@ import { Header } from "./Header";
 import { Hero } from "./Hero";
 import { QuestionTicker, SourcesStrip, InteractiveDemo } from "./landing-sections";
 import { ChatView } from "./ChatView";
-import { LazyChunkBoundary } from "./LazyChunkBoundary";
+import { CHUNK_FAILED_MESSAGE, LazyChunkBoundary } from "./LazyChunkBoundary";
 import { ToastHost } from "./ToastHost";
 
 // ADR-0004 PR 14: mounted only on the ?auth=ok return trip, and lazy, so the
@@ -214,6 +214,13 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     );
   };
 
+  // #447: a dialog's code could not be fetched (usually a deploy replaced it
+  // under an open tab). The dialog has already closed itself; say so, plainly,
+  // rather than leave a click that seems to do nothing.
+  const handleOpenFailed = () => {
+    addToast({ kind: "error", title: "Couldn't open that", message: CHUNK_FAILED_MESSAGE });
+  };
+
   return (
     <>
       {screen === "landing" && (
@@ -227,6 +234,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}
+            onOpenFailed={handleOpenFailed}
           />
 
           {/* Landing View */}
@@ -325,6 +333,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             hasChatHistory={state.messages.length > 0}
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}
+            onOpenFailed={handleOpenFailed}
           />
           <ChatView
             messages={chatView}
@@ -348,9 +357,15 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
 
       <ToastHost toasts={toasts} onDismiss={removeToast} />
       {passwordlessReturn && (
-        <Suspense fallback={null}>
-          <PasswordNudge />
-        </Suspense>
+        // #447: the nudge mounts on its own after an email-link or OAuth
+        // sign-in, so like the strip it fails quietly: the reader loses an
+        // optional prompt, not the page. "Sign-in methods" is the other way
+        // to set a password.
+        <LazyChunkBoundary label="password-nudge">
+          <Suspense fallback={null}>
+            <PasswordNudge onOpenFailed={handleOpenFailed} />
+          </Suspense>
+        </LazyChunkBoundary>
       )}
     </>
   );

@@ -36,6 +36,7 @@
 import { lazy, Suspense, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAuth } from "../hooks/useAuth";
+import { LazyChunkBoundary } from "./LazyChunkBoundary";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 
@@ -49,7 +50,15 @@ function readDismissed(): boolean {
   }
 }
 
-export function PasswordNudge() {
+interface PasswordNudgeProps {
+  /**
+   * #447: the password dialog's code could not be fetched. The dialog has
+   * already been closed; the caller tells the reader, since it owns the toasts.
+   */
+  onOpenFailed?: () => void;
+}
+
+export function PasswordNudge({ onOpenFailed }: PasswordNudgeProps = {}) {
   const { status, user } = useAuth();
   const [dismissed, setDismissed] = useState(readDismissed);
   const [hiddenThisLoad, setHiddenThisLoad] = useState(false);
@@ -117,9 +126,18 @@ export function PasswordNudge() {
         </button>
       </div>
       {modalOpen && (
-        <Suspense fallback={null}>
-          <AuthModal triggerRef={setButtonRef} onClose={() => setModalOpen(false)} initialMode="set-password" />
-        </Suspense>
+        // #447: closing on failure unmounts the boundary, so "Set one" works again.
+        <LazyChunkBoundary
+          label="auth-modal"
+          onError={() => {
+            setModalOpen(false);
+            onOpenFailed?.();
+          }}
+        >
+          <Suspense fallback={null}>
+            <AuthModal triggerRef={setButtonRef} onClose={() => setModalOpen(false)} initialMode="set-password" />
+          </Suspense>
+        </LazyChunkBoundary>
       )}
     </div>,
     document.body,

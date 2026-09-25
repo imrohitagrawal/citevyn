@@ -36,7 +36,11 @@ export function ToastHost({ toasts, onDismiss }: ToastHostProps) {
         display: "flex",
         flexDirection: "column",
         gap: "10px",
-        zIndex: 1000,
+        // One above the password nudge (1000), which is portaled after #root
+        // and fixed to the same bottom edge: at phone width the two overlap
+        // completely, and a tie hid the toast under the card (#447). Still
+        // below the account menu (1050) and the drawers (1100).
+        zIndex: 1001,
         maxWidth: "min(360px, calc(100vw - 40px))",
       }}
     >

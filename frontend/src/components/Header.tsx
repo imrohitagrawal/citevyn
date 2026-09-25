@@ -16,6 +16,8 @@ interface HeaderProps {
   onAuthenticated?: (hadChatHistory: boolean) => void;
   /** ADR-0004 PR 10: the caller picked a past session from the history drawer. */
   onResumeSession?: (sessionId: string) => void;
+  /** #447: a dialog opened from the account menu could not be loaded. */
+  onOpenFailed?: () => void;
 }
 
 export function Header({
@@ -27,6 +29,7 @@ export function Header({
   hasChatHistory,
   onAuthenticated,
   onResumeSession,
+  onOpenFailed,
 }: HeaderProps) {
   return (
     <header className="header">
@@ -64,6 +67,7 @@ export function Header({
             hasChatHistory={hasChatHistory}
             onAuthenticated={onAuthenticated}
             onResumeSession={onResumeSession}
+            onOpenFailed={onOpenFailed}
           />
           <button onClick={onAskClick} className="cta-button">
             Try the demo

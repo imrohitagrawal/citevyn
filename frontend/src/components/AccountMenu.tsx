@@ -9,6 +9,7 @@
  */
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth";
+import { LazyChunkBoundary } from "./LazyChunkBoundary";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 const HistoryDrawer = lazy(() => import("./HistoryDrawer"));
@@ -27,6 +28,12 @@ interface AccountMenuProps {
   onAuthenticated?: (hadChatHistory: boolean) => void;
   /** ADR-0004 PR 10: the caller picked a past session from the drawer. */
   onResumeSession?: (sessionId: string) => void;
+  /**
+   * #447: a dialog's code could not be fetched (usually a deploy replaced it
+   * under an open tab). The dialog has already been closed; the caller tells
+   * the reader, since only it owns the toasts.
+   */
+  onOpenFailed?: () => void;
 }
 
 /** Label for the account trigger, which must never be empty.
@@ -51,6 +58,7 @@ export function AccountMenu({
   hasChatHistory = false,
   onAuthenticated,
   onResumeSession,
+  onOpenFailed,
 }: AccountMenuProps) {
   const { status, user, signOut } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
@@ -59,6 +67,18 @@ export function AccountMenu({
   const [connectedOpen, setConnectedOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // #447: a dialog whose chunk failed is closed, which also unmounts its
+  // boundary, so the trigger works again. One handler for all three: only one
+  // of them can be open at a time. Focus goes back to the trigger because the
+  // History / Sign-in methods menuitem that was clicked is gone with the menu.
+  const openFailed = () => {
+    setModalOpen(false);
+    setHistoryOpen(false);
+    setConnectedOpen(false);
+    triggerRef.current?.focus();
+    onOpenFailed?.();
+  };
 
   // Close on an outside click — the only close path before this was the
   // "Sign out" action itself, so opening the menu and clicking anywhere
@@ -153,25 +173,29 @@ export function AccountMenu({
           </div>
         )}
         {historyOpen && (
-          <Suspense fallback={null}>
-            <HistoryDrawer
-              triggerRef={triggerRef}
-              onClose={() => setHistoryOpen(false)}
-              onResume={(sessionId) => {
-                setHistoryOpen(false);
-                onResumeSession?.(sessionId);
-              }}
-            />
-          </Suspense>
+          <LazyChunkBoundary label="history-drawer" onError={openFailed}>
+            <Suspense fallback={null}>
+              <HistoryDrawer
+                triggerRef={triggerRef}
+                onClose={() => setHistoryOpen(false)}
+                onResume={(sessionId) => {
+                  setHistoryOpen(false);
+                  onResumeSession?.(sessionId);
+                }}
+              />
+            </Suspense>
+          </LazyChunkBoundary>
         )}
         {connectedOpen && (
-          <Suspense fallback={null}>
-            <ConnectedAccountsDrawer
-              triggerRef={triggerRef}
-              onClose={() => setConnectedOpen(false)}
-              user={user}
-            />
-          </Suspense>
+          <LazyChunkBoundary label="connected-accounts" onError={openFailed}>
+            <Suspense fallback={null}>
+              <ConnectedAccountsDrawer
+                triggerRef={triggerRef}
+                onClose={() => setConnectedOpen(false)}
+                user={user}
+              />
+            </Suspense>
+          </LazyChunkBoundary>
         )}
       </div>
     );
@@ -188,13 +212,15 @@ export function AccountMenu({
         Sign in
       </button>
       {modalOpen && (
-        <Suspense fallback={null}>
-          <AuthModal
-            triggerRef={triggerRef}
-            onClose={() => setModalOpen(false)}
-            onAuthenticated={() => onAuthenticated?.(hasChatHistory)}
-          />
-        </Suspense>
+        <LazyChunkBoundary label="auth-modal" onError={openFailed}>
+          <Suspense fallback={null}>
+            <AuthModal
+              triggerRef={triggerRef}
+              onClose={() => setModalOpen(false)}
+              onAuthenticated={() => onAuthenticated?.(hasChatHistory)}
+            />
+          </Suspense>
+        </LazyChunkBoundary>
       )}
     </>
   );

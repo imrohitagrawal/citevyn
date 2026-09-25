@@ -36,12 +36,24 @@
  * containment is still what you want there — the rest of the page survives —
  * but read the logged error, not the label, when diagnosing.
  *
- * SCOPE. Applied to the #358 strip only. The four older lazy surfaces
- * (AuthModal, HistoryDrawer, ConnectedAccountsDrawer, Nudge) have the same
- * unguarded shape; that is pre-existing and is tracked separately rather than
- * being rewritten here.
+ * SCOPE (#447). Every lazy surface in the app now sits behind one of these.
+ * The strip (above) and the password nudge's mount in LandingPage are
+ * automatic, so they fail quietly like the strip. The five that open on a
+ * click — AuthModal, HistoryDrawer and ConnectedAccountsDrawer from
+ * AccountMenu, and AuthModal again from the nudge and from the Sign-in methods
+ * drawer — pass `onError`, which closes the dialog and tells the reader in
+ * plain words (CHUNK_FAILED_MESSAGE). A click that silently does nothing is a
+ * failure too. Closing the dialog also unmounts this boundary, so the next
+ * click starts from a fresh one and the button is never left dead.
+ *
+ * NOT a retry. React caches a rejected `lazy()` for the life of the page, so
+ * re-keying the boundary would just fail again; each later click is contained
+ * the same way, and the message says to reload, which is the real recovery.
  */
 import { Component, type ErrorInfo, type ReactNode } from "react";
+
+/** What a reader is told when a dialog's code could not be fetched. */
+export const CHUNK_FAILED_MESSAGE = "Part of the page didn't load. Reload the page and try again.";
 
 interface Props {
   children: ReactNode;
@@ -49,6 +61,8 @@ interface Props {
   fallback?: ReactNode;
   /** Named in the log line so a report says WHICH chunk failed. */
   label: string;
+  /** Called once the failure is caught, e.g. to close the dialog that failed. */
+  onError?: () => void;
 }
 
 interface State {
@@ -66,6 +80,7 @@ export class LazyChunkBoundary extends Component<Props, State> {
     // Not swallowed. A chunk that never arrives is invisible in the DOM, so
     // without this the only symptom is "the page is short".
     console.error(`[${this.props.label}] lazy chunk failed to render`, error, info.componentStack);
+    this.props.onError?.();
   }
 
   render() {

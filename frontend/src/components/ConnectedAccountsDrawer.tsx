@@ -28,6 +28,7 @@ import { API_BASE_URL } from "../lib/api";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { AuthUserResponse } from "../lib/types";
 import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
+import { CHUNK_FAILED_MESSAGE, LazyChunkBoundary } from "./LazyChunkBoundary";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 
@@ -53,6 +54,13 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
   const dialogRef = useRef<HTMLDivElement>(null);
   const passwordButtonRef = useRef<HTMLButtonElement>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
+  // #447: the password dialog's code could not be fetched. Said HERE, inside
+  // the drawer, rather than as a toast: the toast stack sits at z-index 1001,
+  // under this drawer's 1100 backdrop and behind its panel, so a toast would
+  // be covered by the very drawer the reader is looking at.
+  // A count, not a flag: it keys the alert below, so each failure mounts a NEW
+  // role="alert" node and a screen reader announces the second one too.
+  const [passwordFailures, setPasswordFailures] = useState(0);
 
   // Move focus INTO the dialog on open (the menuitem that opened it has just
   // been unmounted with the menu, so focus would otherwise fall to <body> and
@@ -184,10 +192,25 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
           while, sign out and back in first.
         </p>
 
+        {passwordFailures > 0 && (
+          <p key={passwordFailures} role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", marginTop: "12px" }}>
+            {CHUNK_FAILED_MESSAGE}
+          </p>
+        )}
+
         {passwordOpen && (
-          <Suspense fallback={null}>
-            <AuthModal triggerRef={passwordButtonRef} onClose={() => setPasswordOpen(false)} initialMode="set-password" />
-          </Suspense>
+          // Closing on failure unmounts the boundary, so the button works again.
+          <LazyChunkBoundary
+            label="auth-modal"
+            onError={() => {
+              setPasswordOpen(false);
+              setPasswordFailures((n) => n + 1);
+            }}
+          >
+            <Suspense fallback={null}>
+              <AuthModal triggerRef={passwordButtonRef} onClose={() => setPasswordOpen(false)} initialMode="set-password" />
+            </Suspense>
+          </LazyChunkBoundary>
         )}
       </div>
     </div>,
