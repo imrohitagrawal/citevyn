@@ -121,7 +121,10 @@ def _markdown(sessions: list[dict[str, Any]], truncated: bool) -> str:
         lines += [f"## Conversation of {convo['created_at'] or 'unknown date'}", ""]
         for m in convo["messages"]:
             who = "You" if m["role"] == "user" else "CiteVyn"
-            lines += [f"**{who}:** {m['content']}", ""]
+            # Quoted line by line, so a message containing "## ..." or a fake
+            # "**CiteVyn:**" line cannot forge structure in the document.
+            quoted = "\n".join(f"> {ln}" for ln in str(m["content"]).split("\n"))
+            lines += [f"**{who}:**", "", quoted, ""]
             if m["citations"]:
                 lines.append("Sources:")
                 for c in m["citations"]:
@@ -153,7 +156,7 @@ async def export_my_history(
             await db.execute(
                 select(Session)
                 .where(Session.user_id == principal_id, Session.expires_at > now)
-                .order_by(Session.created_at.desc())
+                .order_by(Session.created_at.desc(), Session.session_id.desc())
                 .limit(_MAX_EXPORT_SESSIONS + 1)
             )
         )
@@ -194,7 +197,10 @@ async def export_my_history(
         return Response(
             content=_markdown(sessions, truncated),
             media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.md"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.md"',
+                "Cache-Control": "no-store",  # personal data
+            },
         )
     return Response(
         content=json.dumps(
@@ -203,5 +209,8 @@ async def export_my_history(
             indent=2,
         ),
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.json"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="citevyn-history-{stamp}.json"',
+            "Cache-Control": "no-store",  # personal data
+        },
     )

@@ -50,8 +50,12 @@ export function HistoryDrawer({ triggerRef, onClose, onResume }: HistoryDrawerPr
       const a = document.createElement("a");
       a.href = url;
       a.download = `citevyn-history-${new Date().toISOString().slice(0, 10)}.${format === "json" ? "json" : "md"}`;
+      // Attached while clicked (older Firefox ignores a detached link), and the
+      // URL revoked later, not at once (some Safari versions drop the download).
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
       setExportStatus("Download started.");
     } catch {
       setExportStatus("Could not download your history. Please try again.");

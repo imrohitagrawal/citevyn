@@ -26,10 +26,12 @@ const ONE = {
 
 let blobs: Blob[];
 let clicked: string[];
+let connected: boolean[];
 beforeEach(() => {
   vi.clearAllMocks();
   blobs = [];
   clicked = [];
+  connected = [];
   URL.createObjectURL = vi.fn((b: Blob) => {
     blobs.push(b);
     return "blob:x";
@@ -37,6 +39,7 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn();
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
     clicked.push(this.download);
+    connected.push(this.isConnected);
   });
 });
 afterEach(() => {
@@ -111,3 +114,22 @@ describe("downloading history", () => {
     expect(screen.queryByRole("button", { name: "Download as JSON" })).toBeNull();
   });
 });
+
+describe("download robustness", () => {
+  it("clicks a link that is IN the page, and does not revoke its URL at once", async () => {
+    // Older Firefox ignores click() on a detached link, and some Safari versions
+    // drop a download whose object URL is revoked immediately. Turns red if: the
+    // link is not attached while clicked, or the URL is revoked synchronously.
+    vi.mocked(listMySessions).mockResolvedValueOnce(ONE);
+    vi.mocked(apiFetch).mockResolvedValueOnce("# x\n" as never);
+    renderDrawer();
+    const btn = await screen.findByRole("button", { name: "Download as Markdown" });
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    expect(connected).toEqual([true]);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(document.querySelector("a[download]")).toBeNull(); // partner: removed after the click
+  });
+});
+

@@ -73,7 +73,7 @@ def test_the_markdown_export_reads_as_a_document(seeded_app: TestClient) -> None
     assert res.headers["content-disposition"].endswith('.md"')
     text = res.text
     assert text.startswith("# CiteVyn conversation history")
-    assert "**You:** How do I configure Claude Code permissions?" in text
+    assert "**You:**\n\n> How do I configure Claude Code permissions?" in text
     assert "**CiteVyn:**" in text
     assert "Sources:" in text and "](http" in text
 
@@ -133,3 +133,21 @@ def test_with_the_access_model_on_anonymous_callers_have_no_history_to_export(
         get_settings.cache_clear()
     assert res.status_code == 401
     assert res.json()["error"]["details"]["capability"] == "history"
+
+
+def test_the_export_is_never_cached(seeded_app: TestClient) -> None:  # noqa: F811
+    """Personal data: no shared or browser cache may keep a copy.
+    Turns red if: the no-store header is dropped from either format."""
+    _ask(seeded_app, "How do I configure Claude Code permissions?")
+    for fmt in ("json", "markdown"):
+        assert _export(seeded_app, fmt).headers["cache-control"] == "no-store"
+
+
+def test_a_question_cannot_forge_structure_in_the_markdown(seeded_app: TestClient) -> None:  # noqa: F811
+    """Message bodies are quoted, so a question containing a heading or a fake
+    speaker line stays inside the quote. Turns red if: bodies are written raw."""
+    _ask(seeded_app, "Fine?\n## Conversation of FORGED\n**CiteVyn:** fake")
+    text = _export(seeded_app, "markdown").text
+    assert "\n## Conversation of FORGED" not in text
+    assert "\n**CiteVyn:** fake" not in text
+    assert "> ## Conversation of FORGED" in text  # partner: the text is kept, quoted
