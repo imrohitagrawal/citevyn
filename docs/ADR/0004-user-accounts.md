@@ -24,6 +24,12 @@ demo bearer token gating every `/v1/*` route, which resolves to the
 compiled into the browser bundle, so it is public by construction — an
 anti-scraping speed bump, not access control.
 
+> **Amended by ADR-0005 (2026-09-25).** "Anti-scraping speed bump" overstated
+> it: a token anyone can read from the bundle stops no scraper. Its only real job
+> is blocking cross-site request forgery, because a cross-site request cannot set
+> an `Authorization` header. ADR-0005 retires it in favour of a fixed header plus
+> an `Origin` check. The text above is left as written.
+
 **The gap is identity, not authentication.**
 
 Two arguments that would normally justify adding login do **not** apply here

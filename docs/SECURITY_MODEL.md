@@ -69,15 +69,20 @@ MVP supports:
    (`CITEVYN_RATE_LIMIT_PASSWORD_CHANGE_PER_HOUR`). Sessions and
    messages are owned by principal id, enforced at the two loaders every
    affected route already shares; a mismatch returns 404, never 403.
-2. The build-time demo bearer token is retained alongside the session
-   cookie as a CSRF guard (a cross-site request cannot set an `Authorization`
-   header) — it is not, on its own, an identity control.
+2. The build-time public client token (the "demo bearer") is retained alongside
+   the session cookie for one reason: a cross-site request cannot set an
+   `Authorization` header, so requiring it blocks cross-site request forgery. It
+   is public (it is in the browser bundle), so it is neither an identity control
+   nor an anti-scraping control. **ADR-0005 retires it** in favour of a fixed
+   custom header plus an `Origin` check, in two deploy steps (§3 of ADR-0005).
 3. Admin API key for ingestion, evaluation, and index promotion — unrelated
    to the login system above; the admin key has no implicit access to any
    individual account's data.
-4. Anonymous access stays enabled by design (item 1) — this supersedes the
-   prior "anonymous access disabled" line, which described a demo-bearer-only
-   world with a single shared principal, not the current model.
+4. **Anonymous access is enabled today** (item 1). ADR-0005 decides the future
+   shape: when `CITEVYN_ACCESS_MODEL_ENABLED` is on, anonymous visitors get the
+   canned sample only and no live questions; live questions need a verified
+   account (25 answered questions, once) or Pro. The setting defaults to off, so
+   until the owner turns it on, anonymous chat keeps working as described here.
 
 ## 5. MVP Authorization
 
@@ -93,9 +98,12 @@ Roles:
 Recommended defaults:
 
 ```text
-demo_user: 30 queries/hour
+demo_user: 30 queries/hour — applies to every chat caller today, anonymous
+  (anon_<uuid4hex>) and signed-in alike; the bucket is keyed per visitor, not
+  per role (#203). There is no separate "anonymous" row: anonymous chat is
+  enabled (§4 item 4). ADR-0005 adds per-plan allowances on top of this limit,
+  behind CITEVYN_ACCESS_MODEL_ENABLED.
 admin: 100 queries/hour
-anonymous: disabled
 auth_login: 10 attempts/hour, keyed per TARGET EMAIL (not per client) —
   ADR-0004 PR 6, POST /v1/auth/{register,login} — a credential-stuffing
   guard: an attacker spreading guesses across many source IPs against one
