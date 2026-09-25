@@ -1,8 +1,10 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.db import ping_database
 from app.core.logging import build_log_event
 
@@ -15,7 +17,7 @@ def _request_id(request: Request) -> str:
     return str(request.state.request_id)
 
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(requires(Capability.public))])
 def health(request: Request) -> dict[str, Any]:
     return {
         "request_id": _request_id(request),
@@ -24,7 +26,7 @@ def health(request: Request) -> dict[str, Any]:
     }
 
 
-@router.get("/health/dependencies")
+@router.get("/health/dependencies", dependencies=[Depends(requires(Capability.public))])
 async def health_dependencies(request: Request, response: Response) -> dict[str, Any]:
     """Probe every external dependency and return their health.
 

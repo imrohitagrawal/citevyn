@@ -33,6 +33,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
@@ -201,6 +203,7 @@ def _http_409_promotion_blocked(
 
 @router.get(
     "/index_versions",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=IndexVersionListResponse,
 )
 async def list_index_versions(
@@ -221,6 +224,7 @@ async def list_index_versions(
 
 @router.get(
     "/index_versions/{index_version}",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=IndexVersionDetailResponse,
 )
 async def get_index_version(
@@ -246,6 +250,7 @@ async def get_index_version(
 
 @router.post(
     "/index_versions/{index_version}/promote",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=PromoteIndexResponse,
 )
 async def promote_index_version(
@@ -336,6 +341,7 @@ async def promote_index_version(
 
 @router.get(
     "/evaluations",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=EvaluationRunListResponse,
 )
 async def list_evaluations(
@@ -359,6 +365,7 @@ async def list_evaluations(
 
 @router.get(
     "/evaluations/{run_id}",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=EvaluationRunDetailResponse,
 )
 async def get_evaluation(
@@ -385,6 +392,7 @@ async def get_evaluation(
 
 @router.get(
     "/ingestion_jobs",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=IngestionJobListResponse,
 )
 async def list_ingestion_jobs(
@@ -412,6 +420,7 @@ async def list_ingestion_jobs(
 
 @router.get(
     "/ingestion_jobs/{job_id}",
+    dependencies=[Depends(requires(Capability.operate))],
     response_model=IngestionJobDetailResponse,
 )
 async def get_ingestion_job(
@@ -431,7 +440,7 @@ async def get_ingestion_job(
     )
 
 
-@router.get("/budget")
+@router.get("/budget", dependencies=[Depends(requires(Capability.operate))])
 async def get_budget(
     request: Request,
     _: Annotated[str, Depends(rate_limited_admin)],

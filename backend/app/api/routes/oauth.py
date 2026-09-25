@@ -145,6 +145,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.auth_sessions import (
     REGISTERED_USER_PREFIX,
     claim_and_login,
@@ -441,6 +443,7 @@ async def _start_oauth_flow(
 
 @router.get(
     "/oauth/{provider}/start",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Begin an OAuth login (GitHub or Google).",
     description="Redirects to the provider's consent screen. Not an API call — a real navigation.",
 )
@@ -490,6 +493,7 @@ def _session_is_fresh(session: AuthSession, settings: Settings) -> bool:
 
 @router.get(
     "/oauth/{provider}/connect/start",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Connect a GitHub or Google identity to the signed-in account (ADR-0004 PR 13).",
     description=(
         "Redirects to the provider's consent screen. Requires a signed-in, "
@@ -839,6 +843,7 @@ async def _claim_nonce(
 
 @router.get(
     "/oauth/{provider}/callback",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Complete an OAuth login or account link (GitHub or Google).",
     description=(
         "Always redirects, never a JSON response: /?auth=ok|error for a login "

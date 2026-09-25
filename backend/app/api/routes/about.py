@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.logging import build_log_event
 from app.services.about_page import render_about_page
 from app.worker.allowlist import MVP_SOURCES, SourceSpec
@@ -101,6 +103,7 @@ def _load_documents() -> list[tuple[str, str]]:
 
 @router.get(
     ABOUT_PATH,
+    dependencies=[Depends(requires(Capability.public))],
     response_class=HTMLResponse,
     summary="The About-CiteVyn page that self-referential citations link to.",
     description=(

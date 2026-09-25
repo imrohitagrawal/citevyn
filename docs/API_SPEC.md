@@ -975,3 +975,4 @@ Notes:
 | cost_limit_reached | Demo daily cost cap reached |
 | rate_limiter_unavailable | Rate limiter backend (Redis) unreachable — request rejected fail-closed |
 | promotion_blocked | Index promotion refused: the candidate has no completed evaluation run, or measured a pass rate below `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` |
+| plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. |

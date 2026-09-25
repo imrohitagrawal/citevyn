@@ -22,6 +22,8 @@ from fastapi import APIRouter, Body, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.rate_limit import rate_limited_demo
@@ -91,7 +93,11 @@ class ExactSearchResponse(BaseModel):
     hits: list[ExactSearchHit]
 
 
-@router.post("/v1/search/exact", response_model=ExactSearchResponse)
+@router.post(
+    "/v1/search/exact",
+    dependencies=[Depends(requires(Capability.exact_search))],
+    response_model=ExactSearchResponse,
+)
 async def search_exact(
     request: Request,
     body: Annotated[ExactSearchRequest, Body()],
@@ -146,7 +152,7 @@ async def search_exact(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health/index")
+@router.get("/health/index", dependencies=[Depends(requires(Capability.public))])
 async def health_index(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_session)],

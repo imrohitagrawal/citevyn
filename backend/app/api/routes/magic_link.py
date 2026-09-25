@@ -91,6 +91,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
+from app.access.deps import requires
+from app.access.policy import Capability
 from app.api.routes.auth import normalize_email
 from app.core.auth_sessions import claim_and_login
 from app.core.config import Settings, get_settings
@@ -156,6 +158,7 @@ class MagicLinkRequest(BaseModel):
 
 @router.post(
     "/request",
+    dependencies=[Depends(requires(Capability.sign_in))],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Email the caller a one-time sign-in link.",
     description=(
@@ -316,6 +319,7 @@ def _render_interstitial(token: str | None, *, ttl_seconds: int) -> str:
 
 @router.get(
     "/confirm",
+    dependencies=[Depends(requires(Capability.sign_in))],
     response_class=HTMLResponse,
     summary="Render the sign-in confirmation page for an emailed link.",
     description=(
@@ -423,6 +427,7 @@ async def _claim_token(db: AsyncSession, token_id: uuid.UUID, secret: str) -> Ma
 
 @router.post(
     "/confirm",
+    dependencies=[Depends(requires(Capability.sign_in))],
     summary="Redeem an emailed sign-in link (form POST from the confirm page).",
     description=(
         "Redirects: /?auth=ok on success, /?auth=error otherwise (the only "

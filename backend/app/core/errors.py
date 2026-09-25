@@ -59,6 +59,12 @@ class APIErrorCode(StrEnum):
     # (audited) is the documented way through. Operators branch on this
     # code in the deploy runbook, so it is part of the published contract.
     promotion_blocked = "promotion_blocked"
+    # Spec-side (ADR-0005): a signed-in caller whose plan lacks the capability a
+    # route needs. 403, not 401: the caller IS identified; signing in again would
+    # not help, upgrading would. An anonymous caller lacking a capability gets
+    # ``auth_required`` instead, because signing in is what helps them. Emitted
+    # only when CITEVYN_ACCESS_MODEL_ENABLED is on.
+    plan_required = "plan_required"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -82,6 +88,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.cost_limit_reached: 503,
     APIErrorCode.rate_limiter_unavailable: 503,
     APIErrorCode.promotion_blocked: 409,
+    APIErrorCode.plan_required: 403,
     APIErrorCode.internal_error: 500,
 }
 
