@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -300,11 +300,15 @@ class Settings(BaseSettings):
     # so the free-primary / paid-fallback ordering is the cheaper arrangement.
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com"
-    # ``gemini-flash-latest`` auto-tracks the current Flash GA model. The previous
-    # pin ``gemini-2.5-flash`` was retired for new API projects (404 "no longer
-    # available to new users", #99); ``gemini-2.0-flash`` is being shut down. The
-    # alias avoids re-pinning a soon-to-retire snapshot.
-    gemini_model: str = "gemini-flash-latest"
+    # PINNED to an explicit version (#492). The alias ``gemini-flash-latest`` moved
+    # from 2.5 Flash to 3.5 Flash on 2026-05-19 with no change here, so the price
+    # book kept billing it at the 2.5 rate (~4x under). An alias can move to a model
+    # with a different price and a different thinking API; a pinned id cannot.
+    # 3.6 Flash: GA, no shutdown date announced, and the newest Flash whose
+    # thinking can go down to "minimal" (3.7 and 3.8 stop at "low"). Source:
+    # ai.google.dev/gemini-api/docs/{pricing,deprecations,thinking}, read 2026-09-25.
+    # ``gemini-2.5-flash`` is not an option for new projects (404, #99).
+    gemini_model: str = "gemini-3.6-flash"
     # 15s (not 30) so the sequential Gemini→OpenRouter fallback has a ~30s
     # worst-case ceiling rather than 60s. Flash answers return in a few seconds.
     gemini_timeout_seconds: float = Field(default=15.0, gt=0.0)
@@ -313,6 +317,13 @@ class Settings(BaseSettings):
     # or a positive value for a model that requires thinking (e.g. a Pro tier, or
     # a future Flash that mandates it) if you switch gemini_model.
     gemini_thinking_budget: int = Field(default=0, ge=-1)
+    # Gemini 3.x controls thinking with a LEVEL, not a budget, and cannot turn it
+    # off. A level sends ``thinkingLevel`` and ignores ``gemini_thinking_budget``;
+    # "use_budget" is for a 2.x model, which takes ``thinkingBudget`` instead (a
+    # named value, not an empty string, because an empty env var does not parse to
+    # None here). "minimal" is the lowest level 3.6 Flash accepts. Thought tokens
+    # are billed as output, so the meter adds them (see app.llm.gemini).
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high", "use_budget"] = "minimal"
     openrouter_api_key: str | None = None
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     # Paid fallback (priority-2). GPT-4o-mini is the resilience backstop when the

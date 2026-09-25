@@ -24,7 +24,7 @@ from app.core.config import Settings
 from app.cost.call_site import CallSite, call_site, get_call_site
 from app.cost.meter import build_call
 from app.cost.metered import MeteredLLMClient
-from app.cost.pricing import known_models, price_for
+from app.cost.pricing import TokenPrice, known_models, price_for
 from app.llm.factory import build_llm_client, get_llm_client, reset_llm_client
 from app.llm.stub import StubLLMClient
 from app.llm.types import LLMResult
@@ -119,6 +119,63 @@ def test_every_configured_default_model_is_priced() -> None:
     assert price_for(provider="gemini", model=s.gemini_model) is not None, (
         f"default gemini_model {s.gemini_model!r} is not in the price book"
     )
+
+
+def test_every_configured_default_model_has_an_EXACT_price_entry() -> None:
+    """#492: a default must hit the book by its exact key, and must not be an alias.
+
+    ``price_for`` also resolves variants (dated snapshots, routing suffixes), so
+    "is priced" alone would pass for a model the book only matches by accident.
+    An alias such as ``gemini-flash-latest`` can move to a different model at a
+    different price with no change here — the 2.5 rate stayed on it after Google
+    moved it to 3.5 Flash, at about 4x the price. So the default is pinned and
+    must be a literal key.
+
+    Turns red if: the gemini_model default goes back to an alias, or its exact
+    entry is removed from ``_PRICE_BOOK``.
+    """
+    from app.core.config import Settings
+
+    exact_keys = set(known_models())
+    defaults = {
+        ("gemini", Settings.model_fields["gemini_model"].default),
+        ("router", Settings.model_fields["openrouter_model"].default),
+    }
+    for provider, model in defaults:
+        assert (provider, model) in exact_keys, (
+            f"default {provider}/{model!r} has no EXACT price entry"
+        )
+        assert not model.endswith("-latest"), (
+            f"default {model!r} is a moving alias; pin an explicit version"
+        )
+
+
+def test_no_moving_alias_is_priced() -> None:
+    """#492: an alias in the book prices whatever it points at today at a stale rate.
+
+    Unpriced is the honest outcome for an alias: the call lands in
+    ``unpriced_calls``, which is the operator's alarm.
+
+    Turns red if: an entry ending in ``-latest`` is added back to ``_PRICE_BOOK``.
+    """
+    aliases = [(p, m) for p, m in known_models() if m.endswith("-latest")]
+    assert aliases == []
+    # Partner: the check above would pass on an empty book, so prove the book
+    # still prices the model we pinned.
+    assert ("gemini", "gemini-3.6-flash") in known_models()
+
+
+def test_pinned_gemini_flash_is_priced_at_its_2027_list_rate() -> None:
+    """#492: gemini-3.6-flash lists $0.75/$3.75 per 1M until 2026-12-31 and
+    $1.50/$7.50 from 2027-01-01 (ai.google.dev/gemini-api/docs/pricing, read
+    2026-09-25). Priced at the HIGHER rate: over-counting until the year ends
+    makes the daily cap trip early, which is safe; under-counting from January
+    would let real spend pass the cap, which is the failure this book prevents.
+
+    Turns red if: the entry is priced at the 2026 promotional rate or the 2.5 rate.
+    """
+    price = price_for(provider="gemini", model="gemini-3.6-flash")
+    assert price == TokenPrice(Decimal("1.50"), Decimal("7.50"))
 
 
 def test_known_models_is_non_empty_and_sorted() -> None:

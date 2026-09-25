@@ -111,6 +111,107 @@ async def test_gemini_disables_thinking_in_payload() -> None:
     assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 0}
 
 
+def _gemini_payload_for(**client_kwargs: object) -> dict[str, object]:
+    import asyncio
+    import json as _json
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(_json.loads(request.content))
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})
+
+    client = GeminiLLMClient(
+        model="gemini-3.6-flash",
+        api_key="gm-test",
+        api_base="https://generativelanguage.googleapis.com",
+        timeout_seconds=5.0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        **client_kwargs,  # type: ignore[arg-type]
+    )
+
+    async def run() -> None:
+        try:
+            await client.complete(system="s", user="q", max_tokens=64, temperature=0.0)
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+    gen_cfg = seen["generationConfig"]
+    assert isinstance(gen_cfg, dict)
+    return gen_cfg  # type: ignore[return-value]
+
+
+def test_gemini_sends_thinking_LEVEL_when_one_is_configured() -> None:
+    """#492: Gemini 3.x takes ``thinkingLevel``; 3.6 Flash's lowest is "minimal".
+
+    Sending a level AND a budget together is ambiguous, so exactly one is sent.
+    Turns red if: the client ignores ``thinking_level`` or sends both keys.
+    """
+    gen_cfg = _gemini_payload_for(thinking_level="minimal")
+    assert gen_cfg["thinkingConfig"] == {"thinkingLevel": "minimal"}
+
+
+def test_the_factory_passes_the_configured_thinking_level_through() -> None:
+    """Turns red if: build wiring drops ``gemini_thinking_level`` (the default model
+    would then get the 2.5-era ``thinkingBudget: 0``)."""
+    from app.llm.factory import _build_gemini_with_fallback
+
+    s = _settings(gemini_api_key="gm-test", openrouter_api_key=None, gemini_thinking_level="low")
+    client = _build_gemini_with_fallback(s)
+    assert isinstance(client, GeminiLLMClient)
+    assert client._thinking_level == "low"
+
+
+def test_use_budget_sends_the_2x_thinking_budget_instead() -> None:
+    """Turns red if: "use_budget" is passed through as a level instead of falling
+    back to ``thinkingBudget``."""
+    from app.llm.factory import _build_gemini_with_fallback
+
+    s = _settings(
+        gemini_api_key="gm-test", openrouter_api_key=None, gemini_thinking_level="use_budget"
+    )
+    client = _build_gemini_with_fallback(s)
+    assert isinstance(client, GeminiLLMClient)
+    assert client._thinking_level is None
+    assert _gemini_payload_for()["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+def test_the_default_thinking_level_is_minimal() -> None:
+    """Turns red if: the default level changes, or reverts to None (budget mode),
+    which is the 2.5-era request shape for a 3.x default model."""
+    assert Settings.model_fields["gemini_thinking_level"].default == "minimal"
+
+
+async def test_gemini_bills_thinking_tokens_as_output() -> None:
+    """#492: Google bills thought tokens at the OUTPUT rate. Counting only
+    ``candidatesTokenCount`` under-reports every call with thinking on.
+
+    Turns red if: ``thoughtsTokenCount`` is dropped from ``output_tokens``.
+    """
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"parts": [{"text": "a [1]"}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 40,
+                    "candidatesTokenCount": 7,
+                    "thoughtsTokenCount": 30,
+                },
+            },
+        )
+
+    client = _gemini_client(handler)
+    try:
+        result = await client.complete(system="s", user="q", max_tokens=128, temperature=0.0)
+    finally:
+        await client.aclose()
+    assert result.input_tokens == 40
+    assert result.output_tokens == 37
+
+
 async def test_gemini_empty_candidate_raises_unavailable() -> None:
     # 200 OK but the candidate has no text part (e.g. finishReason SAFETY, or
     # MAX_TOKENS with the budget consumed). Must raise so the fallback fires
@@ -338,7 +439,7 @@ def test_default_llm_models_encode_cost_priority() -> None:
     # CITEVYN_GEMINI_MODEL / .env override and could mask a reverted default).
     gemini_default = Settings.model_fields["gemini_model"].default
     openrouter_default = Settings.model_fields["openrouter_model"].default
-    assert gemini_default == "gemini-flash-latest"
+    assert gemini_default == "gemini-3.6-flash"
     assert openrouter_default == "openai/gpt-4o-mini"
     assert not openrouter_default.startswith("google/"), (
         "fallback must be a different provider family than the Gemini primary"

@@ -5,11 +5,14 @@ API key in the ``x-goog-api-key`` header. The transport is :mod:`httpx`;
 callers may inject a pre-built ``AsyncClient`` for testing (e.g. via
 :class:`httpx.MockTransport`).
 
-Thinking is disabled (``thinkingConfig.thinkingBudget = 0``) so a
-``gemini-flash-latest`` call spends its ``maxOutputTokens`` budget on the visible
-answer rather than internal reasoning — CiteVyn answers are short, extractive,
-and grounded in the evidence block, so chain-of-thought adds latency and can
-starve the answer of tokens.
+Thinking is kept as low as the model allows, so a call spends its
+``maxOutputTokens`` budget on the visible answer rather than internal reasoning —
+CiteVyn answers are short, extractive, and grounded in the evidence block, so
+chain-of-thought adds latency and can starve the answer of tokens. Gemini 3.x
+takes ``thinkingConfig.thinkingLevel`` (lowest "minimal" on 3.6 Flash) and cannot
+turn thinking off; 2.x takes ``thinkingConfig.thinkingBudget`` (0 = off). Exactly
+one of the two is sent. Thought tokens are billed at the output rate, so they are
+added to ``output_tokens`` (#492).
 
 Errors
 ------
@@ -70,6 +73,7 @@ class GeminiLLMClient:
         api_base: str,
         timeout_seconds: float,
         thinking_budget: int = 0,
+        thinking_level: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key:
@@ -81,6 +85,7 @@ class GeminiLLMClient:
         self._api_base = api_base.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._thinking_budget = thinking_budget
+        self._thinking_level = thinking_level
         self._owns_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -98,14 +103,19 @@ class GeminiLLMClient:
         temperature: float,
     ) -> LLMResult:
         url = f"{self._api_base}/v1beta/models/{self._model}:generateContent"
+        thinking: dict[str, Any] = (
+            {"thinkingLevel": self._thinking_level}
+            if self._thinking_level is not None
+            else {"thinkingBudget": self._thinking_budget}
+        )
         payload: dict[str, Any] = {
             "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {
                 "maxOutputTokens": max_tokens,
                 "temperature": temperature,
-                # Disable "thinking" so the token budget funds the answer.
-                "thinkingConfig": {"thinkingBudget": self._thinking_budget},
+                # Keep "thinking" minimal so the token budget funds the answer.
+                "thinkingConfig": thinking,
             },
         }
         headers = {
@@ -139,7 +149,11 @@ class GeminiLLMClient:
         usage_raw: Any = data.get("usageMetadata") or {}
         usage = cast(dict[str, Any], usage_raw)
         input_tokens = int(cast(int, usage.get("promptTokenCount", 0)))
-        output_tokens = int(cast(int, usage.get("candidatesTokenCount", 0)))
+        # Thought tokens are billed at the output rate; leaving them out would
+        # under-report every call made with thinking on (#492).
+        output_tokens = int(cast(int, usage.get("candidatesTokenCount", 0))) + int(
+            cast(int, usage.get("thoughtsTokenCount", 0))
+        )
 
         return LLMResult(
             text=text,
