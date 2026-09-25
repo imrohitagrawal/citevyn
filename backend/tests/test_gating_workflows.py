@@ -1940,6 +1940,8 @@ _SPEC_FILES: frozenset[str] = frozenset(
         "fonts-offline.spec.ts",
         "harness.spec.ts",
         "landing.spec.ts",
+        # #447: a dialog chunk answered with a 404 must not blank the page.
+        "lazy-dialogs.spec.ts",
         "lazy-strip.spec.ts",
         "visual.spec.ts",
     }
