@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "Hooks this repository wants on every machine, in a form that survives a",
+    "fresh clone. `.claude/settings.json` is gitignored on purpose \u2014 it holds",
+    "machine-local permissions \u2014 so the hooks inside it were not reproducible",
+    "and scripts/setup-claude.sh could only report them missing.",
+    "",
+    "`scripts/setup-claude.sh` merges the entries below into that file by",
+    "`command`, adding what is absent and touching nothing else. Run it after a",
+    "clone, or any time you restore settings from a backup.",
+    "",
+    "Why the discard guard is here rather than in a document: it exists because",
+    "a written rule failed twice in one session. Leaving its wiring in an",
+    "unreproducible file would be the same mistake one level up.",
+    "",
+    "The PostToolUse checkpoint answers what the discard guard alone cannot: the",
+    "guard saves your tree at the moment you try to throw it away, which means it",
+    "saves the good work WITH the line you deliberately broke. A checkpoint after",
+    "every edit means the one taken just before the break holds the work without",
+    "it \u2014 and you never had to decide, in advance, that the moment mattered.",
+    "",
+    "Each command tests for its script before running it. That is not defensive",
+    "padding: the scripts live in the repo, so on any branch or worktree that",
+    "predates them the hook would otherwise fail and BLOCK every Bash call. It",
+    "happened while this was being written \u2014 switching back to main made the",
+    "guard unrunnable and locked the session out of its own fix."
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "statusMessage": "Checking for a discard of uncommitted work",
+          "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\""
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "Edit|Write|NotebookEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "statusMessage": "Checkpointing the tree",
+          "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\""
+        }
+      ]
+    }
+  ]
+}
