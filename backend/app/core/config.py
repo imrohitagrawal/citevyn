@@ -324,6 +324,12 @@ class Settings(BaseSettings):
     # None here). "minimal" is the lowest level 3.6 Flash accepts. Thought tokens
     # are billed as output, so the meter adds them (see app.llm.gemini).
     gemini_thinking_level: Literal["minimal", "low", "medium", "high", "use_budget"] = "minimal"
+    # Gemini counts thought tokens against ``maxOutputTokens``, and 3.x cannot turn
+    # thinking off, so a 4-token call (the alias-intent check) could spend its whole
+    # budget thinking and return no text -> LLMUnavailable -> fallback. In level mode
+    # the client asks for ``max_tokens`` + this headroom. Billing is by tokens used,
+    # not by the cap, so headroom costs nothing unless the model actually thinks.
+    gemini_thinking_headroom_tokens: int = Field(default=256, ge=0)
     openrouter_api_key: str | None = None
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     # Paid fallback (priority-2). GPT-4o-mini is the resilience backstop when the
@@ -642,6 +648,41 @@ class Settings(BaseSettings):
                 "CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small (or another "
                 "OpenAI-compatible embedding model served by OpenRouter)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_unpriced_models_in_production(self) -> "Settings":
+        # The daily spend cap sums RECORDED cost, and an unpriced call is recorded
+        # at $0 (app.cost.pricing). So an unpriced model in production is not a
+        # weakly capped model, it is an uncapped one. #492 removed the alias
+        # ``gemini-flash-latest`` from the price book; without this check, setting
+        # it back as an override would switch the cap off silently. Fail at startup.
+        if self.environment != "production":  # local work may use any model
+            return self
+        from app.cost.pricing import canonical_provider, price_for
+
+        in_use: list[tuple[str, str, str]] = []
+        if self.llm_provider == "gemini":
+            in_use.append(("CITEVYN_GEMINI_MODEL", "gemini", self.gemini_model))
+        if self.llm_provider in ("gemini", "router"):
+            in_use.append(("CITEVYN_OPENROUTER_MODEL", "router", self.openrouter_model))
+        if self.llm_provider == "anthropic":
+            in_use.append(("CITEVYN_LLM_MODEL", "anthropic", self.llm_model))
+        if self.embedding_provider != "stub":
+            in_use.append(
+                (
+                    "CITEVYN_EMBEDDING_MODEL",
+                    canonical_provider(self.embedding_provider),
+                    self.embedding_model,
+                )
+            )
+        for env_name, provider, model in in_use:
+            if price_for(provider=provider, model=model) is None:
+                raise ValueError(
+                    f"{env_name}={model!r} has no price in app/cost/pricing.py, so its "
+                    "calls would count $0 against the daily spend cap. Add an exact "
+                    "price entry, or choose a priced model."
+                )
         return self
 
     @model_validator(mode="after")

@@ -178,6 +178,54 @@ def test_pinned_gemini_flash_is_priced_at_its_2027_list_rate() -> None:
     assert price == TokenPrice(Decimal("1.50"), Decimal("7.50"))
 
 
+# Production kwargs that satisfy the OTHER production guards, so only the pricing
+# check is exercised (mirrors test_settings_slice8._prod_kwargs).
+_PROD_LLM: dict[str, object] = {
+    "environment": "production",
+    "llm_provider": "gemini",
+    "embedding_provider": "gemini",
+    "gemini_api_key": "gk-test",
+    "admin_api_key": "a-strong-admin-secret",
+    "public_client_token": "a-strong-demo-secret",
+    "_env_file": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("gemini_model", "gemini-flash-latest"),
+        ("openrouter_model", "openai/not-a-priced-model"),
+        ("embedding_model", "gemini-embedding-999"),
+    ],
+)
+def test_production_refuses_to_start_with_an_unpriced_model(field: str, value: str) -> None:
+    """#492 review: the daily cap sums recorded cost, and an unpriced call records
+    $0. So an unpriced model in production has NO spend cap at all, not a weak one.
+    Fail closed at startup instead.
+
+    Turns red if: the production pricing check is removed or stops covering a field.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="no price"):
+        Settings(**{**_PROD_LLM, field: value})  # type: ignore[arg-type]
+
+
+def test_production_starts_with_the_priced_defaults() -> None:
+    """Partner to the refusal test: without it, a check that rejects EVERY
+    production config would pass. Turns red if: the check rejects a priced model."""
+    s = Settings(**_PROD_LLM)  # type: ignore[arg-type]
+    assert s.gemini_model == "gemini-3.6-flash"
+
+
+def test_an_unpriced_model_is_still_allowed_outside_production() -> None:
+    """Local work may point at any model; only production must be capped.
+    Turns red if: the check fires in every environment."""
+    s = Settings(llm_provider="gemini", environment="local", gemini_model="gemini-flash-latest")
+    assert s.gemini_model == "gemini-flash-latest"
+
+
 def test_known_models_is_non_empty_and_sorted() -> None:
     models = known_models()
     assert models

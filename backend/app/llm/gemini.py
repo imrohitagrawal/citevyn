@@ -74,6 +74,7 @@ class GeminiLLMClient:
         timeout_seconds: float,
         thinking_budget: int = 0,
         thinking_level: str | None = None,
+        thinking_headroom_tokens: int = 0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key:
@@ -86,6 +87,7 @@ class GeminiLLMClient:
         self._timeout_seconds = timeout_seconds
         self._thinking_budget = thinking_budget
         self._thinking_level = thinking_level
+        self._thinking_headroom_tokens = thinking_headroom_tokens
         self._owns_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -103,6 +105,14 @@ class GeminiLLMClient:
         temperature: float,
     ) -> LLMResult:
         url = f"{self._api_base}/v1beta/models/{self._model}:generateContent"
+        # Thought tokens count against maxOutputTokens, and a level cannot turn
+        # thinking off, so level mode asks for headroom on top of the answer budget.
+        # Without it a 4-token call can think its whole budget away and return no text.
+        max_output_tokens = (
+            max_tokens + self._thinking_headroom_tokens
+            if self._thinking_level is not None
+            else max_tokens
+        )
         thinking: dict[str, Any] = (
             {"thinkingLevel": self._thinking_level}
             if self._thinking_level is not None
@@ -112,7 +122,7 @@ class GeminiLLMClient:
             "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {
-                "maxOutputTokens": max_tokens,
+                "maxOutputTokens": max_output_tokens,
                 "temperature": temperature,
                 # Keep "thinking" minimal so the token budget funds the answer.
                 "thinkingConfig": thinking,

@@ -90,7 +90,7 @@ async def test_gemini_happy_path_extracts_text_and_tokens() -> None:
     assert result.provider == "gemini"
 
 
-async def test_gemini_disables_thinking_in_payload() -> None:
+async def test_a_client_built_without_a_level_sends_the_2x_thinking_budget() -> None:
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -173,8 +173,59 @@ def test_use_budget_sends_the_2x_thinking_budget_instead() -> None:
     )
     client = _build_gemini_with_fallback(s)
     assert isinstance(client, GeminiLLMClient)
-    assert client._thinking_level is None
-    assert _gemini_payload_for()["thinkingConfig"] == {"thinkingBudget": 0}
+    gen_cfg = _payload_sent_by(client)
+    assert gen_cfg["thinkingConfig"] == {"thinkingBudget": 0}
+    assert gen_cfg["maxOutputTokens"] == 64, "budget mode adds no thinking headroom"
+
+
+def _payload_sent_by(client: GeminiLLMClient, max_tokens: int = 64) -> dict[str, object]:
+    """Send one call through ``client`` as BUILT, capturing the generationConfig."""
+    import asyncio
+    import json as _json
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(_json.loads(request.content))
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})
+
+    client._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def run() -> None:
+        try:
+            await client.complete(system="s", user="q", max_tokens=max_tokens, temperature=0.0)
+        finally:
+            await client._http_client.aclose()
+
+    asyncio.run(run())
+    gen_cfg = seen["generationConfig"]
+    assert isinstance(gen_cfg, dict)
+    return gen_cfg  # type: ignore[return-value]
+
+
+def test_a_thinking_level_adds_headroom_so_thought_tokens_cannot_eat_a_tiny_budget() -> None:
+    """#492 review: Gemini 3.x counts thought tokens against ``maxOutputTokens`` and
+    cannot turn thinking off. The alias-intent check asks for 4 tokens; a few thought
+    tokens would leave no text, the client raises, and the call falls back to
+    OpenRouter. So a level-mode call asks for ``max_tokens`` + headroom.
+
+    Turns red if: the headroom is not added, or the factory does not pass it.
+    """
+    from app.llm.factory import _build_gemini_with_fallback
+
+    s = _settings(
+        gemini_api_key="gm-test", openrouter_api_key=None, gemini_thinking_headroom_tokens=300
+    )
+    client = _build_gemini_with_fallback(s)
+    assert isinstance(client, GeminiLLMClient)
+    gen_cfg = _payload_sent_by(client, max_tokens=4)
+    assert gen_cfg["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert gen_cfg["maxOutputTokens"] == 304
+
+
+def test_the_default_thinking_headroom_is_256() -> None:
+    """Turns red if: the default headroom changes or drops to 0."""
+    assert Settings.model_fields["gemini_thinking_headroom_tokens"].default == 256
 
 
 def test_the_default_thinking_level_is_minimal() -> None:
