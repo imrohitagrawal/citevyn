@@ -78,14 +78,25 @@ def main() -> int:
     if code != 0 or not sha:
         return 0
 
-    # Skip if the newest checkpoint is already this exact tree state, so a burst
+    # Skip if the newest checkpoint already holds this exact CONTENT, so a burst
     # of edits that cancel out does not fill the list with duplicates.
-    newest = _git(
+    #
+    # Compare TREES, not commit ids. `git stash create` stamps each snapshot
+    # with the current time, so identical content produces a DIFFERENT commit a
+    # second later. Comparing commits therefore deduped only when both calls
+    # landed inside the same second — it passed on my machine and failed on the
+    # macOS runner, and it is the explanation for a local flake I had recorded
+    # as unexplained. Measured: same content one second apart gives different
+    # commit ids and the same tree id.
+    newest_commit = _git(
         ["for-each-ref", "--sort=-refname", "--count=1", "--format=%(objectname)", _PREFIX],
         cwd,
     )[1]
-    if newest == sha:
-        return 0
+    if newest_commit:
+        new_tree = _git(["rev-parse", f"{sha}^{{tree}}"], cwd)[1]
+        old_tree = _git(["rev-parse", f"{newest_commit}^{{tree}}"], cwd)[1]
+        if new_tree and new_tree == old_tree:
+            return 0
 
     # The ref name has to do two jobs, and BOTH were got wrong on the first
     # attempt, each found by replaying the real scenario rather than by

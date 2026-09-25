@@ -54,10 +54,16 @@ _check "one checkpoint after one edit" "1" "$(_count "$REPO")"
 rm -rf "$REPO"
 
 echo "checkpoint: re-running on unchanged content does not pile up duplicates"
+# REGRESSION, and it only showed up on a slower machine. `git stash create`
+# stamps each snapshot with the current time, so identical content yields a
+# DIFFERENT commit id a second later. The first dedupe compared commit ids, so
+# it worked only when both calls landed inside one second: green locally, red on
+# the macOS runner with "expected 1, got 2". The sleeps below force the calls
+# into different seconds so this cannot pass by being fast.
 REPO="$(_new_repo)"
 printf 'line1\nline2\nassert x == 1\nNEW\n' > "$REPO/work.py"
-_edit "$REPO"; _edit "$REPO"; _edit "$REPO"
-_check "still one checkpoint for one state" "1" "$(_count "$REPO")"
+_edit "$REPO"; sleep 1.1; _edit "$REPO"; sleep 1.1; _edit "$REPO"
+_check "still one checkpoint for one state, across seconds" "1" "$(_count "$REPO")"
 rm -rf "$REPO"
 
 echo "checkpoint: two edits in the SAME SECOND both survive"
