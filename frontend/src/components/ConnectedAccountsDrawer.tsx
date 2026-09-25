@@ -55,7 +55,7 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
   const passwordButtonRef = useRef<HTMLButtonElement>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   // #447: the password dialog's code could not be fetched. Said HERE, inside
-  // the drawer, rather than as a toast: the toast stack sits at z-index 1000,
+  // the drawer, rather than as a toast: the toast stack sits at z-index 1001,
   // under this drawer's 1100 backdrop and behind its panel, so a toast would
   // be covered by the very drawer the reader is looking at.
   // A count, not a flag: it keys the alert below, so each failure mounts a NEW
