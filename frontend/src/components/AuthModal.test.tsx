@@ -661,3 +661,82 @@ describe("AuthModal magic-link send cooldown (#301)", () => {
     clearSpy.mockRestore();
   });
 });
+
+describe("AuthModal duplicate-email sign-up (#483)", () => {
+  // The EXACT text the API sends for a duplicate registration
+  // (backend/app/api/routes/auth.py DUPLICATE_EMAIL_MESSAGE). Copied here as a
+  // literal on purpose: backend/tests/test_duplicate_email_message_matches_ui.py
+  // ties the component's constant to the route's, and this fixture ties the
+  // component's BEHAVIOUR to that same text.
+  const DUPLICATE = "This email is already registered. Please sign in to continue.";
+
+  async function registerAndFail(message: string, status = 422) {
+    const { register } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(register).mockRejectedValueOnce(new ApiClientError(message, status, message));
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    return { user, dialog };
+  }
+
+  it("shows the server's message and a 'Sign in instead' button", async () => {
+    // RED WHEN: the duplicate-email match in handleSubmit's catch is removed or
+    // no longer matches the server's exact text.
+    const { dialog } = await registerAndFail(DUPLICATE);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(DUPLICATE);
+    const button = within(dialog).getByRole("button", { name: "Sign in instead" });
+    expect(button).toHaveAttribute("type", "button");
+  });
+
+  it("'Sign in instead' switches to sign-in, keeps the email, clears the error and focuses the password", async () => {
+    // RED WHEN: the button does not switch to login mode, the email is reset, the
+    // error survives the switch, or focus lands on the (already filled) email field.
+    const { user, dialog } = await registerAndFail(DUPLICATE);
+    await user.click(await within(dialog).findByRole("button", { name: "Sign in instead" }));
+
+    expect(within(dialog).getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Email")).toHaveValue("carol@example.com");
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+    const password = within(dialog).getByLabelText("Password");
+    expect(password).toHaveValue("");
+    expect(password).toHaveFocus();
+  });
+
+  it("does not offer sign-in for a different 422 (password too short)", async () => {
+    // RED WHEN: the match keys on status 422 alone rather than on the message.
+    const tooShort = "Password must be at least 8 characters.";
+    const { dialog } = await registerAndFail(tooShort);
+    // Partner: the error really rendered, so the absence below is not vacuous.
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(tooShort);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
+  it("does not offer sign-in for the duplicate text under a non-422 status", async () => {
+    // RED WHEN: the match drops its status check.
+    const { dialog } = await registerAndFail(DUPLICATE, 500);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(DUPLICATE);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
+  it("does not offer sign-in from the sign-in form itself", async () => {
+    // RED WHEN: the button is offered outside register mode.
+    const { login } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(login).mockRejectedValueOnce(new ApiClientError(DUPLICATE, 422, DUPLICATE));
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
+    // Partner: the same message rendered, so only the mode decides the button.
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(DUPLICATE);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+});

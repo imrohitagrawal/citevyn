@@ -98,6 +98,14 @@ export type AuthModalMode = "login" | "register" | "magic-link" | "set-password"
 // becomes an account-existence oracle.
 const MAGIC_LINK_COOLDOWN_SECONDS = 60;
 
+// #483. The EXACT text the API sends when a register attempt uses an email that
+// already has an account (`DUPLICATE_EMAIL_MESSAGE` in backend/app/api/routes/auth.py).
+// Matched whole, like the current-password reveal below, because a 422 alone also
+// means "password too short", which must not offer sign-in.
+// `backend/tests/test_duplicate_email_message_matches_ui.py` fails if this and the
+// server's text differ, so a reword cannot silently remove the button.
+const DUPLICATE_EMAIL_MESSAGE = "This email is already registered. Please sign in to continue.";
+
 interface AuthModalProps {
   /** Element to restore focus to on close — the button that opened the modal. */
   triggerRef: React.RefObject<HTMLElement | null>;
@@ -150,6 +158,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
   const doneButtonRef = useRef<HTMLButtonElement>(null);
   const titleId = "auth-modal-title";
 
@@ -165,6 +174,12 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // on any 422 -- a too-short password must not reveal the field) so the
   // field appears instead of a dead end.
   const [needCurrent, setNeedCurrent] = useState(false);
+  // #483: the register attempt failed because the email already has an account,
+  // so the form offers "Sign in instead" under the message.
+  const [offerSignIn, setOfferSignIn] = useState(false);
+  // Set by "Sign in instead" so the next mode switch focuses the password: the
+  // email is already filled in, so the email field would be the wrong stop.
+  const focusPasswordNext = useRef(false);
   const stepUp = user?.password_step_up === true && !needCurrent;
 
   // Restore focus to the trigger on close. The cleanup function runs on
@@ -183,6 +198,11 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
   // it belonged to, and focus would otherwise fall to <body> -- from where
   // the next Tab lands on the page behind the backdrop, outside the trap.
   useEffect(() => {
+    if (focusPasswordNext.current) {
+      focusPasswordNext.current = false;
+      passwordRef.current?.focus();
+      return;
+    }
     firstFieldRef.current?.focus();
   }, [mode, needCurrent]);
 
@@ -227,12 +247,23 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     setMode(next);
     setError(null);
     setNotice(null);
+    setOfferSignIn(false);
+  };
+
+  // #483. Keeps the typed email (switchMode never touches it) and clears the
+  // password: it was typed as a NEW password, and sending it to sign-in unasked
+  // would be a guess about which password the person meant.
+  const signInInstead = () => {
+    focusPasswordNext.current = true;
+    setPassword_("");
+    switchMode("login");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setNotice(null);
+    setOfferSignIn(false);
     setSubmitting(true);
     try {
       if (mode === "login") {
@@ -268,6 +299,14 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         // The step-up window closed between /me and this submit: reveal the
         // current-password field rather than showing an error with no way out.
         setNeedCurrent(true);
+      }
+      if (
+        err instanceof ApiClientError &&
+        mode === "register" &&
+        err.status === 422 &&
+        err.message === DUPLICATE_EMAIL_MESSAGE
+      ) {
+        setOfferSignIn(true);
       }
       setError(
         err instanceof ApiClientError
@@ -505,7 +544,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
               <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "13px" }}>
                 {mode === "set-password" ? "New password" : "Password"}
                 <input
-                  ref={mode === "set-password" && !showsCurrentPassword ? firstFieldRef : undefined}
+                  ref={mode === "set-password" && !showsCurrentPassword ? firstFieldRef : passwordRef}
                   type="password"
                   required
                   minLength={mode === "login" ? undefined : PASSWORD_MIN_LENGTH}
@@ -522,6 +561,11 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
               <p role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", margin: 0 }}>
                 {error}
               </p>
+            )}
+            {offerSignIn && mode === "register" && (
+              <button type="button" onClick={signInInstead} style={oauthButtonStyle}>
+                Sign in instead
+              </button>
             )}
             {notice && (
               <p role="status" style={{ fontSize: "13px", margin: 0 }}>

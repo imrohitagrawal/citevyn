@@ -82,6 +82,11 @@ POST /v1/auth/register
 rotated `Set-Cookie`. 422 `validation_error` if the email is already
 registered — a deliberate email-existence leak, recorded in the ADR (the
 always-202 alternative needs an email provider this project does not have).
+Its message is exactly "This email is already registered. Please sign in to
+continue." for both the sequential case and a lost concurrent race (#483). The
+sign-in form matches that exact text to offer a "Sign in instead" button, so
+rewording it means editing two files; `backend/tests/test_duplicate_email_message_matches_ui.py`
+fails if they differ.
 
 Registering (and logging in, below) **claims** any `sessions` rows owned by
 the caller's prior anonymous principal — chat history started before

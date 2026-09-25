@@ -62,6 +62,14 @@ router = APIRouter(prefix="/v1/auth", tags=["auth"])
 _PASSWORD_MIN_LENGTH = 8
 _PASSWORD_MAX_LENGTH = 128
 
+# #483. The one text both duplicate-email paths in ``register`` return, so the
+# existence pre-check and the IntegrityError race branch cannot drift apart. It
+# says "sign in" because that is the label on the button the register form shows
+# under it, and the form finds this error by matching this EXACT string
+# (``DUPLICATE_EMAIL_MESSAGE`` in ``frontend/src/components/AuthModal.tsx``;
+# ``tests/test_duplicate_email_message_matches_ui.py`` fails if they differ).
+DUPLICATE_EMAIL_MESSAGE = "This email is already registered. Please sign in to continue."
+
 
 def _request_id(request: Request) -> str:
     return str(request.state.request_id)
@@ -232,7 +240,7 @@ async def register(
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.validation_error,
-            message="This email is already registered.",
+            message=DUPLICATE_EMAIL_MESSAGE,
         )
 
     password_hash = await hash_password(body.password)
@@ -256,7 +264,7 @@ async def register(
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.validation_error,
-            message="This email is already registered.",
+            message=DUPLICATE_EMAIL_MESSAGE,
         ) from exc
 
     await claim_and_login(request, response, db, settings, user_id=new_user.user_id)
