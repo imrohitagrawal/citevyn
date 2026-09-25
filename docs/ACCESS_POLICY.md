@@ -93,6 +93,22 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `GET` | `/v1/admin/ingestion_jobs` | `operate` |
 | `GET` | `/v1/admin/ingestion_jobs/{job_id}` | `operate` |
 
+## Known limits (recorded, not fixed)
+
+- **The check runs before the bearer check and the rate limiter.** Route-level
+  dependencies run first in FastAPI. With the setting on, a request that carries a
+  session cookie costs one primary-key read before the rate limiter sees it, and a refused
+  request is not counted against the hourly limit. With the setting off it costs nothing.
+  Also, with the setting on, a caller with no bearer token gets the capability's 401
+  rather than the bearer 401. Revisit when Phase 2 replaces the bearer token.
+- **A signed-in caller's cookie is looked up twice** with the setting on: once for the
+  tier, once by the route itself. Same row, performance only.
+- **Turning the setting on hides pre-launch anonymous history.** A visitor's `anon_`
+  conversations become unreadable (`history` needs an account). Intended; tested.
+- **A 401 from `POST /v1/sessions` signs the frontend out** (`frontend/src/lib/api.ts`), and
+  the frontend does not handle `plan_required` yet. The sample-only and upgrade screens are
+  Phase 5.
+
 ## Adding a route
 
 1. Give it `dependencies=[Depends(requires(Capability.X))]`.

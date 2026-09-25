@@ -228,8 +228,13 @@ def _capabilities_of(dependant: Dependant) -> list[Capability]:
     """Every capability label anywhere in ``dependant``'s tree, in walk order.
 
     Recursive for the same reason the credential walk is: a label hidden one
-    level down must still be seen, and TWO labels on one route (a router-level
-    one plus a route-level one) must be caught, not resolved by picking one.
+    level down must still be seen, and two route-level labels must be caught,
+    not resolved by picking one.
+
+    Not seen: a label passed to ``include_router(dependencies=...)``. FastAPI
+    (0.141) enforces it but does not put it in ``route.dependant``, so such a
+    route looks unlabelled here and fails CI. That errs strict, never loose;
+    label routes individually.
     """
     found: list[Capability] = []
     for sub in dependant.dependencies:

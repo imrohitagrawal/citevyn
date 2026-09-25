@@ -131,14 +131,20 @@ def _cells(line: str) -> list[str]:
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+_CELL = {"yes": True, "—": False}
+
+
 def _documented_capability_table() -> dict[str, dict[str, bool]]:
     rows: dict[str, dict[str, bool]] = {}
     for line in _doc_section("Capabilities by tier"):
         cells = _cells(line)
         name = cells[0].strip("`")
-        rows[name] = {
-            tier.value: cells[i + 1].lower() == "yes" for i, tier in enumerate(TIER_ORDER)
-        }
+        # A repeated row would let a wrong row be silently overwritten by a
+        # right one; an unknown cell ("maybe") would silently read as "no".
+        assert name not in rows, f"capability {name!r} appears twice in the document"
+        tier_cells = cells[1 : 1 + len(TIER_ORDER)]
+        assert all(c in _CELL for c in tier_cells), f"{name}: cells must be yes or —: {tier_cells}"
+        rows[name] = {tier.value: _CELL[c] for tier, c in zip(TIER_ORDER, tier_cells, strict=True)}
     return rows
 
 
@@ -158,8 +164,35 @@ def _documented_routes() -> dict[tuple[str, str], str]:
     routes: dict[tuple[str, str], str] = {}
     for line in _doc_section("Routes"):
         method, path, capability = (c.strip("`") for c in _cells(line)[:3])
+        assert (method, path) not in routes, f"{method} {path} appears twice in the document"
         routes[(method, path)] = capability
     return routes
+
+
+def test_the_doc_parser_rejects_duplicate_and_unknown_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Turns red if: the parser accepts a duplicate row (a wrong row placed above a
+    right one would then pass) or reads an unknown cell as "no"."""
+    import tests.test_access_policy as me
+
+    text = DOC.read_text(encoding="utf-8")
+    good = "| `chat` | — | yes | yes | Ask a live question |"
+    assert good in text  # partner: the row being tampered with exists
+    for bad in (
+        good.replace("| — |", "| maybe |", 1),
+        "| `chat` | yes | yes | yes | wrong |\n" + good,
+    ):
+        copy = tmp_path / "ACCESS_POLICY.md"
+        copy.write_text(text.replace(good, bad), encoding="utf-8")
+        monkeypatch.setattr(me, "DOC", copy)
+        with pytest.raises(AssertionError):
+            _documented_capability_table()
+    route = "| `POST` | `/v1/sessions` | `chat` |"
+    assert route in text
+    copy.write_text(text.replace(route, "| `POST` | `/v1/sessions` | `public` |\n" + route))
+    with pytest.raises(AssertionError):
+        _documented_routes()
 
 
 def test_the_documented_route_table_equals_the_code() -> None:
@@ -265,9 +298,18 @@ def test_with_the_setting_off_the_check_never_resolves_a_tier(
         return Tier.free
 
     monkeypatch.setattr(access_deps, "resolve_tier", spy)
+
+    def no_db() -> Any:
+        calls.append("sessionmaker")
+        raise AssertionError("the capability check opened a database session")
+
+    # Also the session factory, so a change that reads the database directly
+    # (not through resolve_tier) before checking the setting is caught too.
+    monkeypatch.setattr(access_deps, "get_sessionmaker", no_db)
     with TestClient(create_app()) as client:
-        _public_flows(client)
+        flows = _public_flows(client)
     assert calls == []
+    assert flows["ask"] == 200  # partner: the flows really ran
 
 
 def test_with_the_setting_on_the_same_flows_close_to_anonymous(
@@ -358,6 +400,33 @@ def test_with_the_setting_on_a_free_account_is_refused_a_pro_capability(
     error = res.json()["detail"]["error"]
     assert error["code"] == APIErrorCode.plan_required.value
     assert error["details"] == {"capability": "mcp_ask", "required_tier": "pro"}
+
+
+def test_plan_required_reaches_the_client_flattened_through_the_real_app(
+    app_db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real app flattens the error envelope; the bare probe above does not.
+    Turns red if: the 403 body or its ``details`` do not survive app.main's handler."""
+    _enable(monkeypatch)
+
+    async def free(*_a: Any, **_k: Any) -> Tier:
+        return Tier.free
+
+    monkeypatch.setattr(access_deps, "resolve_tier", free)
+    app = create_app()
+
+    @app.get("/v1/_probe_pro", dependencies=[Depends(requires(Capability.mcp_ask))])
+    async def _probe() -> dict[str, str]:
+        return {"ok": "yes"}
+
+    with TestClient(app) as client:
+        res = client.get("/v1/_probe_pro")
+    assert res.status_code == 403
+    assert res.json()["error"] == {
+        "code": "plan_required",
+        "message": "Your plan does not include this.",
+        "details": {"capability": "mcp_ask", "required_tier": "pro"},
+    }
 
 
 def test_with_the_setting_on_a_pro_account_passes_a_pro_capability(
