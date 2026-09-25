@@ -120,13 +120,16 @@ function themeTokens(): Record<string, Record<string, string>> {
   const norm = (s: string) => s.replace(/\s+/g, " ").trim();
   root.walkRules((rule: Rule) => {
     const sel = norm(rule.selector);
+    // The light block is a selector LIST (`:root, [data-theme="light"]`), so
+    // match `:root` as one member of it, not as the whole selector.
+    const members = sel.split(",").map((m) => m.trim());
     const parent = rule.parent;
     const inDarkMedia =
       parent?.type === "atrule" &&
       (parent as AtRule).name === "media" &&
       /prefers-color-scheme\s*:\s*dark/.test((parent as AtRule).params);
     const target =
-      !inDarkMedia && sel === ":root"
+      !inDarkMedia && members.includes(":root")
         ? light
         : !inDarkMedia && sel === '[data-theme="dark"]'
           ? toggle
@@ -198,6 +201,10 @@ describe("ConnectedAccountsDrawer: the chunk-failure message is readable in both
     const bg = inlineDecl(panel, "background");
 
     const themes = themeTokens();
+    // Partner: the light tokens came from tokens.css itself, not from the
+    // component's fallback literals, or "passes in light" measures only those.
+    expect(themes.light["--surface"]).toBeDefined();
+    expect(themes.light["--color-error"]).toBeDefined();
     // Partner: both dark blocks were found and really change the surface, or
     // "passes in dark" would be the light check run three times.
     expect(themes["dark (toggle)"]["--surface"]).not.toBe(themes.light["--surface"]);
