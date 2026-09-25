@@ -738,6 +738,70 @@ describe("AuthModal duplicate-email sign-up (#483)", () => {
     expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
   });
 
+  it("does not offer sign-in when the user switched to sign-in while the register request was in flight", async () => {
+    // RED WHEN: the button renders on offerSignIn alone, without checking the CURRENT
+    // mode. The catch decides with the mode captured at submit time, and the
+    // "Have an account? Sign in" link stays enabled while the request runs.
+    const { register } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    let reject: (e: unknown) => void = () => {};
+    vi.mocked(register).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, rej) => {
+          reject = rej;
+        }),
+    );
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    await user.click(within(dialog).getByText("Have an account? Sign in"));
+    await act(async () => {
+      reject(new ApiClientError(DUPLICATE, 422, DUPLICATE));
+    });
+    // Partner: the late failure really landed in sign-in mode, so the absence
+    // below is about the mode, not about a request that never failed.
+    expect(within(dialog).getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(DUPLICATE);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
+  it("withdraws the offer when the user leaves the register form and comes back", async () => {
+    // RED WHEN: switchMode stops clearing the offer, so it reappears on the register
+    // form with its error gone.
+    const { user, dialog } = await registerAndFail(DUPLICATE);
+    await within(dialog).findByRole("button", { name: "Sign in instead" });
+    await user.click(within(dialog).getByText("Have an account? Sign in"));
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    // Partner: back on the register form, where the button can render.
+    expect(within(dialog).getByRole("heading", { name: "Create an account" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
+  it("focuses the password only once: a later switch focuses the first field again", async () => {
+    // RED WHEN: the one-shot reset of focusPasswordNext is removed, so every later
+    // mode switch sends focus to the password instead of the first field.
+    const { user, dialog } = await registerAndFail(DUPLICATE);
+    await user.click(await within(dialog).findByRole("button", { name: "Sign in instead" }));
+    // Partner: the flag really was used once.
+    expect(within(dialog).getByLabelText("Password")).toHaveFocus();
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    expect(within(dialog).getByRole("heading", { name: "Create an account" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Email")).toHaveFocus();
+  });
+
+  it("does not offer sign-in for a 422 that only contains part of the duplicate text", async () => {
+    // RED WHEN: the match is loosened from the exact text to a substring. The
+    // message here is the server's OLD duplicate text, a prefix of the new one.
+    const partial = "This email is already registered.";
+    const { dialog } = await registerAndFail(partial);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(partial);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
   it("does not offer sign-in from the sign-in form itself", async () => {
     // RED WHEN: the button is offered outside register mode.
     const { login } = await import("../lib/api");

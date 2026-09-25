@@ -2,8 +2,8 @@
 
 ``AuthModal.tsx`` shows a "Sign in instead" button only when a register attempt
 fails with a 422 whose message is the duplicate-email message. It matches the
-WHOLE string, the same way it keys the current-password reveal on its message,
-because a 422 alone also means "password too short" and must not offer sign-in.
+WHOLE string with ``===`` (not a substring), because a 422 alone also means
+"password too short" and must not offer sign-in.
 
 That makes the message a contract between two files in two languages. Before this
 guard, rewording it in ``backend/app/api/routes/auth.py`` would have left the

@@ -100,8 +100,9 @@ const MAGIC_LINK_COOLDOWN_SECONDS = 60;
 
 // #483. The EXACT text the API sends when a register attempt uses an email that
 // already has an account (`DUPLICATE_EMAIL_MESSAGE` in backend/app/api/routes/auth.py).
-// Matched whole, like the current-password reveal below, because a 422 alone also
-// means "password too short", which must not offer sign-in.
+// Matched on the whole string, not a substring (the current-password reveal below
+// uses a substring match; this does not), because a 422 alone also means "password
+// too short", which must not offer sign-in.
 // `backend/tests/test_duplicate_email_message_matches_ui.py` fails if this and the
 // server's text differ, so a reword cannot silently remove the button.
 const DUPLICATE_EMAIL_MESSAGE = "This email is already registered. Please sign in to continue.";
@@ -247,7 +248,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     setMode(next);
     setError(null);
     setNotice(null);
-    setOfferSignIn(false); // only register mode ever sets it, so every switch drops it
+    setOfferSignIn(false); // an offer never outlives the form it was made on
   };
 
   // #483. Keeps the typed email (switchMode never touches it) and clears the
@@ -300,11 +301,13 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         // current-password field rather than showing an error with no way out.
         setNeedCurrent(true);
       }
-      // #483: offered from the register form only, and only for the duplicate-email
-      // 422 -- matched on the exact text, never on the status alone.
+      // #483: only for the duplicate-email 422 -- matched on the exact text, never on
+      // the status alone. "Register form only" is decided where the button renders,
+      // against the CURRENT mode: this `mode` is the one captured when the submit
+      // started, and the user can switch to sign-in while the request is in flight.
       const isDuplicateEmail =
         err instanceof ApiClientError && err.status === 422 && err.message === DUPLICATE_EMAIL_MESSAGE;
-      if (mode === "register" && isDuplicateEmail) setOfferSignIn(true);
+      if (isDuplicateEmail) setOfferSignIn(true);
       setError(
         err instanceof ApiClientError
           ? err.status === 404 && mode === "magic-link"
@@ -559,7 +562,8 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
                 {error}
               </p>
             )}
-            {offerSignIn && (
+            {/* The one place "register form only" is decided (see the catch in handleSubmit). */}
+            {mode === "register" && offerSignIn && (
               <button type="button" onClick={signInInstead} style={oauthButtonStyle}>
                 Sign in instead
               </button>
