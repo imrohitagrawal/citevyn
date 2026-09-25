@@ -131,7 +131,6 @@ export function PasswordNudge({ onOpenFailed }: PasswordNudgeProps = {}) {
           label="auth-modal"
           onError={() => {
             setModalOpen(false);
-            setButtonRef.current?.focus();
             onOpenFailed?.();
           }}
         >

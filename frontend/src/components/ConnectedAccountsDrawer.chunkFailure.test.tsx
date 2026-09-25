@@ -76,7 +76,8 @@ describe("ConnectedAccountsDrawer: the password dialog's chunk fails to load (#4
     expect(
       errorSpy.mock.calls.some((c: unknown[]) => String(c[0]).includes("[auth-modal]")),
     ).toBe(true);
-    // Focus goes back to the button that was clicked, inside the drawer.
+    // Focus stays on the button that was clicked, inside the drawer: nothing
+    // mounted, so nothing moved it.
     expect(screen.getByRole("button", { name: "Set a password" })).toHaveFocus();
 
     await user.click(screen.getByRole("button", { name: "Set a password" }));

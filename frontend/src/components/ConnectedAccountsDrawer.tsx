@@ -203,7 +203,6 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
             onError={() => {
               setPasswordOpen(false);
               setPasswordFailed(true);
-              passwordButtonRef.current?.focus();
             }}
           >
             <Suspense fallback={null}>
