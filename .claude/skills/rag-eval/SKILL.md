@@ -56,5 +56,5 @@ in `backend/tests/eval/thresholds.py`.
 
 ## Provider / cost
 
-Gemini free tier for dev/eval — primary `gemini-flash-latest`; OpenRouter `openai/gpt-4o-mini`
+Gemini free tier for dev/eval — primary `gemini-3.6-flash` (pinned, #492); OpenRouter `openai/gpt-4o-mini`
 is the paid fallback (#99). Keep judge runs bounded (one call per case; ~20 cases).

@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -300,11 +300,15 @@ class Settings(BaseSettings):
     # so the free-primary / paid-fallback ordering is the cheaper arrangement.
     gemini_api_key: str | None = None
     gemini_api_base: str = "https://generativelanguage.googleapis.com"
-    # ``gemini-flash-latest`` auto-tracks the current Flash GA model. The previous
-    # pin ``gemini-2.5-flash`` was retired for new API projects (404 "no longer
-    # available to new users", #99); ``gemini-2.0-flash`` is being shut down. The
-    # alias avoids re-pinning a soon-to-retire snapshot.
-    gemini_model: str = "gemini-flash-latest"
+    # PINNED to an explicit version (#492). The alias ``gemini-flash-latest`` moved
+    # from 2.5 Flash to 3.5 Flash on 2026-05-19 with no change here, so the price
+    # book kept billing it at the 2.5 rate (~4x under). An alias can move to a model
+    # with a different price and a different thinking API; a pinned id cannot.
+    # 3.6 Flash: GA, no shutdown date announced, and the newest Flash whose
+    # thinking can go down to "minimal" (3.7 and 3.8 stop at "low"). Source:
+    # ai.google.dev/gemini-api/docs/{pricing,deprecations,thinking}, read 2026-09-25.
+    # ``gemini-2.5-flash`` is not an option for new projects (404, #99).
+    gemini_model: str = "gemini-3.6-flash"
     # 15s (not 30) so the sequential Gemini→OpenRouter fallback has a ~30s
     # worst-case ceiling rather than 60s. Flash answers return in a few seconds.
     gemini_timeout_seconds: float = Field(default=15.0, gt=0.0)
@@ -313,6 +317,19 @@ class Settings(BaseSettings):
     # or a positive value for a model that requires thinking (e.g. a Pro tier, or
     # a future Flash that mandates it) if you switch gemini_model.
     gemini_thinking_budget: int = Field(default=0, ge=-1)
+    # Gemini 3.x controls thinking with a LEVEL, not a budget, and cannot turn it
+    # off. A level sends ``thinkingLevel`` and ignores ``gemini_thinking_budget``;
+    # "use_budget" is for a 2.x model, which takes ``thinkingBudget`` instead (a
+    # named value, not an empty string, because an empty env var does not parse to
+    # None here). "minimal" is the lowest level 3.6 Flash accepts. Thought tokens
+    # are billed as output, so the meter adds them (see app.llm.gemini).
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high", "use_budget"] = "minimal"
+    # Gemini counts thought tokens against ``maxOutputTokens``, and 3.x cannot turn
+    # thinking off, so a 4-token call (the alias-intent check) could spend its whole
+    # budget thinking and return no text -> LLMUnavailable -> fallback. In level mode
+    # the client asks for ``max_tokens`` + this headroom. Billing is by tokens used,
+    # not by the cap, so headroom costs nothing unless the model actually thinks.
+    gemini_thinking_headroom_tokens: int = Field(default=256, ge=0)
     openrouter_api_key: str | None = None
     openrouter_api_base: str = "https://openrouter.ai/api/v1"
     # Paid fallback (priority-2). GPT-4o-mini is the resilience backstop when the
@@ -555,16 +572,18 @@ class Settings(BaseSettings):
         # ``stub`` is the dev-only deterministic LLM. ``""`` is the
         # reserved router placeholder for Slice 9b. Both must never
         # reach production — the demo build would otherwise silently
-        # serve the stub answer. ``anthropic`` and ``gemini`` are
-        # the only production-allowed providers.
+        # serve the stub answer. So does ANY name the factory does not know:
+        # it falls through to the stub, so "openrouter" (the spelling
+        # prod.env.example once gave) or "Anthropic" served stub answers in
+        # production. An allowlist of the names the factory builds (#492 review).
         if self.environment != "production":
             return self
-        if self.llm_provider in ("stub", ""):
+        if self.llm_provider not in ("anthropic", "gemini", "router"):
             raise ValueError(
                 f"CITEVYN_LLM_PROVIDER={self.llm_provider!r} is not allowed "
                 "when CITEVYN_ENVIRONMENT='production'. Set "
-                "CITEVYN_LLM_PROVIDER to 'anthropic' or 'gemini' and "
-                "provide the matching API key."
+                "CITEVYN_LLM_PROVIDER to 'gemini', 'anthropic' or 'router' "
+                "(lowercase) and provide the matching API key."
             )
         return self
 
@@ -631,6 +650,45 @@ class Settings(BaseSettings):
                 "CITEVYN_EMBEDDING_MODEL=openai/text-embedding-3-small (or another "
                 "OpenAI-compatible embedding model served by OpenRouter)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_unpriced_models_in_production(self) -> "Settings":
+        # The daily spend cap sums RECORDED cost, and an unpriced call is recorded
+        # at $0 (app.cost.pricing). So an unpriced model in production is not a
+        # weakly capped model, it is an uncapped one. #492 removed the alias
+        # ``gemini-flash-latest`` from the price book; without this check, setting
+        # it back as an override would switch the cap off silently. Fail at startup.
+        if self.environment != "production":  # local work may use any model
+            return self
+        from app.cost.pricing import canonical_provider, price_for
+
+        in_use: list[tuple[str, str, str]] = []
+        if self.llm_provider == "gemini":
+            in_use.append(("CITEVYN_GEMINI_MODEL", "gemini", self.gemini_model))
+        # OpenRouter is in use as the primary (router) or as Gemini's fallback,
+        # and the factory builds that fallback only when its key is set.
+        if self.llm_provider == "router" or (
+            self.llm_provider == "gemini" and self.openrouter_api_key
+        ):
+            in_use.append(("CITEVYN_OPENROUTER_MODEL", "router", self.openrouter_model))
+        if self.llm_provider == "anthropic":
+            in_use.append(("CITEVYN_LLM_MODEL", "anthropic", self.llm_model))
+        if self.embedding_provider != "stub":
+            in_use.append(
+                (
+                    "CITEVYN_EMBEDDING_MODEL",
+                    canonical_provider(self.embedding_provider),
+                    self.embedding_model,
+                )
+            )
+        for env_name, provider, model in in_use:
+            if price_for(provider=provider, model=model) is None:
+                raise ValueError(
+                    f"{env_name}={model!r} has no price in app/cost/pricing.py, so its "
+                    "calls would count $0 against the daily spend cap. Add an exact "
+                    "price entry, or choose a priced model."
+                )
         return self
 
     @model_validator(mode="after")
