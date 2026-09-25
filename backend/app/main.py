@@ -32,6 +32,7 @@ from app.answer.orchestrator import OrchestratorError
 from app.api.routes.about import router as about_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.billing import router as billing_router
 from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
 from app.api.routes.magic_link import router as magic_link_router
@@ -135,6 +136,7 @@ def create_app() -> FastAPI:
     app.include_router(search_router)
     app.include_router(admin_router)
     app.include_router(feedback_router)
+    app.include_router(billing_router)
     # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.

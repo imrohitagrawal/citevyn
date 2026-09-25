@@ -284,6 +284,10 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `PUT  /v1/sessions/{session_id}/messages/{message_id}/feedback` | demo | Rate an answer, or report it as wrong |
 | `POST /v1/source-requests`  | demo   | Request a source the answer could not cite (the gap log) |
 | `GET  /v1/admin/feedback`   | admin  | Answer ratings and "wrong answer" reports     |
+| `POST /v1/billing/checkout` | demo   | Start a Pro checkout (Stripe; 404 unless the access model is on) |
+| `POST /v1/billing/portal`   | demo   | Open the Stripe billing portal (404 unless the access model is on) |
+| `GET  /v1/billing/membership` | demo | The caller's tier and plan (404 unless the access model is on) |
+| `POST /v1/billing/webhook`  | none   | Stripe webhook; the signature is the credential (404 unless the access model is on) |
 | `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |
 | `GET  /v1/admin/budget`     | admin  | Spend against the daily budget ([`docs/COST_CONTROLS.md`](docs/COST_CONTROLS.md)) |
 | `GET  /v1/admin/evaluations[/{run_id}]` | admin | List / fetch `evaluation_runs`     |

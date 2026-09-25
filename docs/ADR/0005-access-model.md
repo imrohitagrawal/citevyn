@@ -149,7 +149,16 @@ for.
 - **Cancel** takes effect at the end of the paid period.
 - A **failed payment** gets a **7-day grace period**, then the account returns
   to the free-account tier. It keeps its history; it loses Pro capabilities.
-- Every membership change writes an audit event.
+- Every membership change writes an audit event. **As built (Phase 4A):** the
+  `stripe_events` table is that audit log: every webhook event id, once, with its
+  type, account and outcome (`applied`, `stale`, `unmatched`, `ignored`). Adding
+  `AuditAction` members would need `ALTER TYPE` on a native enum, which AGENTS.md
+  steers away from.
+- **As built (Phase 4A):** Stripe is called over HTTPS with `httpx` (already a
+  dependency), not the Stripe SDK: two form-encoded POSTs and a documented HMAC do
+  not justify a new dependency, and `httpx.MockTransport` keeps every test offline.
+  Each membership keeps the newest event time it has applied, so an event delivered
+  late is logged as `stale`, not applied.
 
 #### Quota: count answers, record who paid
 

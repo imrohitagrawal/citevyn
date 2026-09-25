@@ -65,6 +65,13 @@ class APIErrorCode(StrEnum):
     # ``auth_required`` instead, because signing in is what helps them. Emitted
     # only when CITEVYN_ACCESS_MODEL_ENABLED is on.
     plan_required = "plan_required"
+    # Spec-side (ADR-0005 Phase 4). 503: Stripe could not be reached or refused
+    # the call. The message is fixed: Stripe's own error body can echo request
+    # fields, so it never reaches the client.
+    billing_unavailable = "billing_unavailable"
+    # Spec-side (ADR-0005 Phase 4). 409: the account already has Pro, so a second
+    # checkout would bill it twice. The client should open the billing portal.
+    already_subscribed = "already_subscribed"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -89,6 +96,8 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.rate_limiter_unavailable: 503,
     APIErrorCode.promotion_blocked: 409,
     APIErrorCode.plan_required: 403,
+    APIErrorCode.billing_unavailable: 503,
+    APIErrorCode.already_subscribed: 409,
     APIErrorCode.internal_error: 500,
 }
 

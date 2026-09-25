@@ -19,8 +19,9 @@ either direction. The decisions behind it are in [ADR-0005](ADR/0005-access-mode
   - a signed-in caller gets **403 `plan_required`**, because upgrading is what helps.
   - Both carry `details: {capability, required_tier}`.
 - The tier is read from our own tables on the server, never from the browser and never
-  from Stripe. Today a registered account is `free`; `pro` arrives with memberships
-  (ADR-0005 Phase 4).
+  from Stripe: a registered account is `pro` when its `memberships` row says it has paid
+  (active, trialing, or past due inside the 7-day grace), else `free`. Stripe's signed
+  webhooks keep that row current.
 - `operate` belongs to no tier. It is granted only by the admin API key, which each
   operator route already checks.
 
@@ -50,6 +51,7 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `history` | — | yes | yes | Read or delete one's own conversations |
 | `exact_search` | — | yes | yes | Exact flag and command lookup |
 | `feedback` | — | yes | yes | Rate an answer, report it as wrong, request a missing source |
+| `billing` | — | yes | yes | Start, view or manage one's own paid plan |
 | `operate` | — | — | — | Operator routes (admin API key) |
 | `weekly_digest` | — | yes | yes | The weekly "what changed" email (no route yet) |
 | `mcp_ask` | — | — | yes | Cited answers through the MCP server (no route yet) |
@@ -89,6 +91,10 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `PUT` | `/v1/sessions/{session_id}/messages/{message_id}/feedback` | `feedback` |
 | `POST` | `/v1/source-requests` | `feedback` |
 | `GET` | `/v1/admin/feedback` | `operate` |
+| `POST` | `/v1/billing/checkout` | `billing` |
+| `POST` | `/v1/billing/portal` | `billing` |
+| `GET` | `/v1/billing/membership` | `billing` |
+| `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |
 | `GET` | `/v1/admin/budget` | `operate` |
 | `GET` | `/v1/admin/evaluations` | `operate` |
