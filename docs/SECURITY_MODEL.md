@@ -76,7 +76,10 @@ MVP supports:
    nor an anti-scraping control. It is also the rate limiter's fallback hashing
    salt when `CITEVYN_RATE_LIMIT_KEY_SALT` is empty. **ADR-0005 retires it** in
    favour of a fixed custom header plus an `Origin` check, in two deploy steps
-   (§3 of ADR-0005), after a real salt is set.
+   (§3 of ADR-0005), after a real salt is set. **Step 1 is built:** the server
+   accepts either the token or `X-CiteVyn-Client: web` with a same-site
+   `Origin`/`Sec-Fetch-Site` (`app/core/request_origin.py`), and the frontend
+   sends both. Step 2 (remove the token) waits for step 1 to be deployed.
 3. Admin API key for ingestion, evaluation, and index promotion — unrelated
    to the login system above; the admin key has no implicit access to any
    individual account's data.

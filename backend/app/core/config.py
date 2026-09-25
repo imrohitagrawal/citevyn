@@ -568,6 +568,22 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Production guards
     # ------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def _reject_wildcard_cors_in_production(self) -> "Settings":
+        # app/core/cors.py has always said wildcards are forbidden; nothing
+        # enforced it. A "*" grants every site the CORS preflight, and with the
+        # public token baked into the bundle that would let any page call the
+        # API as our frontend (ADR-0005 §3; found reviewing Phase 2).
+        if self.environment == "production" and any(
+            o.strip() == "*" for o in self.cors_allowed_origins
+        ):
+            raise ValueError(
+                "CITEVYN_CORS_ALLOWED_ORIGINS must not contain a wildcard '*' in "
+                "production. List the site's exact origins."
+            )
+        return self
+
     #
     # These validators are the canonical "fail at parse time" check for
     # env combinations that should never reach production. They run on

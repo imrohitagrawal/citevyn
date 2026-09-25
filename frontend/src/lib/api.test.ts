@@ -75,6 +75,22 @@ describe("session + auth headers", () => {
     expect(body()).toMatchObject({ user_id: "demo_user", channel: "chat" });
   });
 
+  // ADR-0005 step 1: every call also carries the fixed client header, so the
+  // backend can accept it once the token is retired (step 2). The bearer stays
+  // until then, so this bundle keeps working on both sides of that deploy.
+  // Turns red if: the header is dropped or its value changes.
+  it("attaches the fixed X-CiteVyn-Client header alongside the bearer", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ request_id: "r", session_id: "s1", expires_at: "2026-07-11T00:00:00Z" }),
+    );
+
+    await createSession();
+
+    const headers = new Headers(lastCall().init.headers);
+    expect(headers.get("X-CiteVyn-Client")).toBe("web");
+    expect(headers.get("Authorization")).toBe("Bearer local-demo-key");
+  });
+
   it("posts the message + answer_style to the nested messages route", async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       jsonResponse({ request_id: "r", message_id: "m1", answer: "hi", citations: [] }),

@@ -27,11 +27,30 @@ The API supports:
 
 ### MVP
 
-Use demo auth:
+Every route that "requires the demo bearer" below accepts EITHER of these
+(ADR-0005 §3, step 1 of retiring the public token):
+
+```http
+X-CiteVyn-Client: web
+```
+
+— the fixed client header, checked against where the browser says the request
+came from (`app/core/request_origin.py`):
+
+- an `Origin` other than `null` must be the site origin or on the CORS
+  allowlist (it decides on its own, whatever `Sec-Fetch-Site` says);
+- `Origin: null` passes only with `Sec-Fetch-Site: same-origin` or `none`;
+- no `Origin` passes unless `Sec-Fetch-Site` says `same-site` or `cross-site`.
+
+A refusal is 401 `auth_required`, "Cross-site request refused." Or, unchanged
+until step 2:
 
 ```http
 Authorization: Bearer <demo-token>
 ```
+
+A bearer that is present but wrong is refused even when the header is also sent.
+Step 2 (after step 1 is deployed) removes the bearer.
 
 Admin endpoints require:
 

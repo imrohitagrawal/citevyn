@@ -204,6 +204,16 @@ backend deploy together but browsers cache old bundles:
    `check_bundle_key.sh`. #489 closes here. (Changing the salt resets every rate
    bucket once, which is harmless.)
 
+   **Step 2 checklist**, found while reviewing step 1 (Phase 2, 2026-09-26):
+   - `citevyn.fly.dev` also serves the site (checked: `/health` answers 200), but
+     it is not an allowed origin. Once the token is gone, a visitor on that
+     hostname gets 401. Redirect it to `citevyn.stackclimb.com`, or add it to
+     `CITEVYN_CORS_ALLOWED_ORIGINS`.
+   - `infra/docker/scripts/deploy_verify.sh` (`curl_demo`) sends the bearer; move
+     it to the header.
+   - The backend tests that send the bearer move to the header, and
+     `require_public_client_token` is renamed with its messages.
+
 This amends ADR-0004's "anti-scraping speed bump" line. ADR-0004 is not rewritten;
 it carries a note pointing here.
 

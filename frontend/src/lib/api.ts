@@ -158,6 +158,12 @@ export async function apiFetch<T>(
   // ``docs/SECURITY_MODEL.md`` and configured via
   // ``CITEVYN_PUBLIC_CLIENT_TOKEN`` on the server.
   headers.set("Authorization", `Bearer ${PUBLIC_CLIENT_TOKEN}`);
+  // ADR-0005 §3, step 1: the fixed header that replaces the token. It is not a
+  // secret -- a cross-site page cannot set a custom header without a CORS
+  // preflight, and the server allows that only for our own origins. Sent WITH
+  // the bearer until step 2 removes the token, so this bundle keeps working on
+  // both sides of that deploy.
+  headers.set("X-CiteVyn-Client", "web");
 
   let response: Response;
   let text: string;

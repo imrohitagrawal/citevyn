@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import secrets
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -18,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.config import Settings, get_settings
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
+from app.core.request_origin import is_same_site_request
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -28,18 +30,48 @@ bearer_scheme = HTTPBearer(auto_error=False)
 ADMIN_USER_ID: str = "admin"
 DEMO_USER_ID: str = "demo_user"
 
+# The fixed header that replaces the public token (ADR-0005 §3). It is not a
+# secret and does not need to be: a cross-site page cannot set a custom header
+# without a CORS preflight, and CORS grants that only to our own origins.
+CLIENT_HEADER = "X-CiteVyn-Client"
+CLIENT_HEADER_VALUE = "web"
+
+
+def _allowed_origins(settings: Settings) -> set[str]:
+    """Our own site plus the CORS allowlist."""
+    allowed = set(settings.cors_allowed_origins)
+    if settings.magic_link_base_url:
+        # Scheme, host and port ONLY: userinfo or a path would never match a
+        # browser's Origin, and a scheme-less value is not a URL at all.
+        parts = urlsplit(settings.magic_link_base_url)
+        if parts.scheme and parts.hostname:
+            port = f":{parts.port}" if parts.port else ""
+            allowed.add(f"{parts.scheme.lower()}://{parts.hostname}{port}")
+    return allowed
+
 
 def require_public_client_token(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> str:
-    """Validate the public client token and return the demo user id.
+    """Check the request came from our own web client; return the demo user id.
 
-    The token is PUBLIC (baked into the browser bundle). What this buys is a
-    CSRF guard -- a cross-site request cannot set an ``Authorization`` header --
-    and a turnstile for the rate limiter; it is not an identity control. See
-    ``docs/SECURITY_MODEL.md`` and #430.
+    TWO ACCEPTED PATHS during the token's retirement (ADR-0005 §3, step 1):
+
+    1. **The fixed header** ``X-CiteVyn-Client: web``, plus the browser's own
+       ``Origin`` / ``Sec-Fetch-Site`` saying the request is from our site
+       (:func:`app.core.request_origin.is_same_site_request`). The header is not
+       a secret: a cross-site page cannot set a custom header without a CORS
+       preflight, and CORS grants that only to our origins.
+    2. **The old public token** as ``Authorization: Bearer``, unchanged, so a
+       bundle already open in someone's browser keeps working. It is PUBLIC
+       (baked into the bundle): a CSRF guard and a rate-limit turnstile, not an
+       identity control (#430). Step 2 removes it, owner-deployed, after step 1
+       is live; this function is renamed then.
+
+    A bearer that is present but WRONG is refused even when the header is also
+    present: the new path never papers over a bad credential on the old one.
 
     Auth failures raise the standard envelope via
     :func:`app.core.errors.error_response` so the client can parse
@@ -48,11 +80,23 @@ def require_public_client_token(
     """
     request_id = str(getattr(request.state, "request_id", "") or get_current_request_id())
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise error_response(
-            request_id=request_id,
-            code=APIErrorCode.auth_required,
-            message="Missing bearer token.",
-        )
+        if request.headers.get(CLIENT_HEADER) != CLIENT_HEADER_VALUE:
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.auth_required,
+                message="Missing bearer token.",
+            )
+        if not is_same_site_request(
+            fetch_site=request.headers.get("sec-fetch-site"),
+            origin=request.headers.get("origin"),
+            allowed=_allowed_origins(settings),
+        ):
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.auth_required,
+                message="Cross-site request refused.",
+            )
+        return DEMO_USER_ID
 
     # ``secrets.compare_digest`` to avoid a timing oracle, matching
     # ``require_admin_api_key`` below — a naive ``==``/``!=`` would let an
