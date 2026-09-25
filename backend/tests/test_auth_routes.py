@@ -315,6 +315,13 @@ def test_register_duplicate_email_is_rejected(in_memory_app: None) -> None:
     _register(_client(), "carol@example.com", "correct horse battery")
     second = _register(_client(), "carol@example.com", "a totally different password")
     assert second.status_code == 422
+    # #483: the words the person sees, not just the status. The register form keys
+    # its "Sign in instead" button on this exact text, and "sign in" matches that
+    # button's label. RED WHEN: the pre-check's message in ``register`` changes.
+    assert second.json()["error"]["code"] == "validation_error"
+    assert second.json()["error"]["message"] == (
+        "This email is already registered. Please sign in to continue."
+    )
 
 
 def test_register_losing_a_concurrent_race_is_422_not_500(
@@ -363,7 +370,11 @@ def test_register_losing_a_concurrent_race_is_422_not_500(
     # The race really happened: the competitor committed after the check.
     assert competitor_inserts == [email]
     assert response.status_code == 422, response.text
-    assert response.json()["error"]["message"] == "This email is already registered."
+    # #483: the race loser must see the SAME words as the sequential case --
+    # RED WHEN this branch's message drifts from the pre-check's.
+    assert response.json()["error"]["message"] == (
+        "This email is already registered. Please sign in to continue."
+    )
     assert "citevyn_session" not in client.cookies
     with closing(sqlite3.connect(db_file)) as check:
         rows = check.execute("SELECT user_id FROM users WHERE email = ?", (email,)).fetchall()
