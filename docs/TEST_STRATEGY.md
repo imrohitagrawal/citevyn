@@ -69,7 +69,7 @@ Evaluate:
 
 Cover:
 
-1. Anonymous access blocked.
+1. Anonymous access: allowed today; blocked from live questions when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005).
 2. Admin endpoints protected.
 3. Rate limiting.
 4. Prompt injection attempts.

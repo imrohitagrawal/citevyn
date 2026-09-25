@@ -9,7 +9,9 @@ token" below). It does not rewrite ADR-0004.
 
 Everything commercial ships **dark**, behind one setting,
 `CITEVYN_ACCESS_MODEL_ENABLED`, which defaults to `false`. With it false,
-production behaves exactly as it did before this ADR. Only the owner turns it on.
+production behaves exactly as it did before this ADR, including anonymous chat. A
+test runs today's public flows with the setting false to prove it. Only the owner
+turns it on.
 
 ## Date
 
@@ -46,7 +48,8 @@ All four CiteVyn sources already publish FREE official documentation MCP servers
 | Gemini API | `gemini-api-docs-mcp.dev` |
 
 Context7 also gives 1,000 free calls a month. So nobody will pay CiteVyn for
-*access* to these docs. What they cannot get elsewhere is the trust layer:
+*access* to these docs. What they cannot get elsewhere is a set of features that make an answer
+trustworthy:
 
 - cited answers that span vendors;
 - a refusal when the docs do not support an answer;
@@ -61,7 +64,8 @@ Developers' top frustration with AI answers is that they are "almost right"
 
 - **Cost per answer.** Measured at $0.00034 on average in production (48
   requests). At current Gemini Flash list prices it is probably $0.001–0.0022
-  (see #492: the meter priced the old alias about 4x low). So 1,000 answers cost
+  (see #492: the meter priced the alias at the 2.5 Flash rate, likely about 4x
+  low; the alias's exact target was never verified). So 1,000 answers cost
   about $1–2.20.
 - **Stripe's cut of $9** is about $0.56–0.84 (a US card vs a foreign card,
   including Billing and Tax).
@@ -83,7 +87,7 @@ Developers' top frustration with AI answers is that they are "almost right"
 | | Anonymous visitor | Free account | Pro |
 |---|---|---|---|
 | Price | — | $0 | **$9/month or $91/year** |
-| Live questions | **None.** They see the existing canned sample. | **25 answered questions, once**, per verified account | **1,000 answered questions a month**, plus the existing per-hour limit |
+| Live questions | **None** when the setting is on. They see the existing canned sample. | **25 answered questions, once**, per verified account | **1,000 answered questions a month**, plus the existing per-hour limit |
 | What counts | — | Only answered questions. Refusals and errors never count. | Same |
 | MCP answers | — | Share the 25 | Share the 1,000 |
 | "What changed" alerts | — | Weekly digest | Real-time watch alerts (a flag, model, command or page) |
@@ -95,7 +99,8 @@ Developers' top frustration with AI answers is that they are "almost right"
   live keys.
 - The **global daily spend cap stays** (`docs/COST_CONTROLS.md` Layer 3). A plan
   allowance never lifts it.
-- **"Verified account"** means the account has proved it controls its email
+- **"Verified account"** (a design choice made in this ADR, not by the owner)
+  means the account has proved it controls its email
   address: it redeemed a magic link, or it signed in with an OAuth provider that
   reported a verified email. Password sign-up does not verify an address today
   (`SECURITY_MODEL.md` §6, `email_notice`), so the `users` table gets an
@@ -111,17 +116,19 @@ two of them into one check is how the previous contradictions happened.
 |---|---|---|
 | **Authentication** | Who is this? | The session cookie (ADR-0004). |
 | **Entitlement** | What have they paid for? | Our `memberships` table, written only by signed Stripe webhooks. |
-| **Authorisation** | May this caller use this route? | A capability declared on every route, plus ONE tier→capability policy table. |
+| **Authorisation** | May this caller use this route? | A capability declared on every route, plus ONE policy table saying which tier has which capability. |
 | **Quota** | How much may they still use? | Per-user and per-plan metering on `provider_calls`, which records who paid. |
 | **CSRF** (cross-site request forgery: another site making the browser send a request) | Did this request come from our own page? | `SameSite` cookie + an `Origin` check + a fixed request header. |
-| **Abuse** | Is this a flood or a bot? | Per-IP limits on the public doors, email verification, and a bot check at sign-up. |
+| **Abuse** | Is this a flood or a bot? | Per-IP limits on the routes anyone can call without signing in (sign-up, sign-in, the sample), email verification, and a bot check at sign-up. |
 
 #### Authorisation: capabilities and one policy table
 
-Every route declares the capability it needs, for example `ask`, `mcp_ask`,
+A capability is one named thing a caller may do. Every route declares the
+capability it needs. The names below are this ADR's proposal and may be refined in
+Phase 1, for example `ask`, `mcp_ask`,
 `api_keys`, `share_answer`, `usage_insights`, `watch_alerts`, `byok`, `admin`, or
 `public` for a route that needs nothing. One table maps each tier (anonymous,
-free, pro, and later team) to the capabilities it has and the quota for each.
+free, pro, and later team; a tier is the kind of account a caller has) to the capabilities it has and the quota for each.
 A route with no declared capability fails CI. The table in the documentation is
 checked against the table in the code by a test, so the two cannot drift.
 
@@ -146,7 +153,10 @@ for.
 
 #### Quota: count answers, record who paid
 
-`provider_calls` gains a "who paid" field: the platform, or the user (BYOK). The
+`provider_calls` records model calls, not answers, and has no user column today.
+So metering needs three additions: a user id on each call, a "who paid" field
+(the platform, or the user through BYOK), and the outcome of each question
+(answered, refused or failed), which comes from the message it belongs to. The
 quota counts **answered** questions per user per period. A refusal or an error
 never uses allowance. BYOK answers are recorded as user-paid, so they do not
 consume the platform allowance. MCP answers count against the same allowance as
@@ -157,29 +167,42 @@ chat answers.
 Browser requests are protected by three things together: the session cookie is
 `SameSite=Lax`, the server checks the `Origin` header against the site's own
 origin, and state-changing requests must carry a fixed custom header. A cross-site
-page cannot set a custom header without a CORS preflight, and our CORS policy does
-not allow one from another origin.
+page cannot set a custom header without first asking the server's permission (a
+"CORS preflight"), and our CORS policy gives that permission only to our own
+origin.
 
 ### 3. The public token is retired
 
-The build-time public client token was described two ways. Both descriptions were
-partly true, and neither is a reason to keep it:
+The build-time public client token does three jobs today, and was described two
+ways. None of them is a reason to keep it:
 
 - As a **CSRF guard**, it works only because a cross-site request cannot set an
   `Authorization` header. A fixed custom header does the same job without
   pretending to be a secret.
 - As an **anti-scraping speed bump**, it stops nothing: it is compiled into the
   public JavaScript bundle, so anyone can read it.
+- As a **rate-limit turnstile**: every chat request passes through the token
+  check and the rate limiter together. The limiter does not need the token to
+  run; it moves onto the new check unchanged.
+- As a **hashing salt**: when `CITEVYN_RATE_LIMIT_KEY_SALT` is empty, the rate
+  limiter hashes client IPs and email addresses with the token as the salt
+  (`app/core/rate_limit.py`). Removing the token without setting a real salt
+  would leave those hashes unsalted, and an unsalted hash of an IPv4 address can
+  be reversed by trying all 2^32 addresses.
 
 It also costs something. It has to be passed as a build argument, it has leaked
-into deploy logs (#489, #416), and it needs its own bundle check
+into a deploy log (#489; #416 showed the same mechanism with a test value), and it
+needs its own bundle check
 (`check_bundle_key.sh`). It is retired in two steps, because the frontend and the
 backend deploy together but browsers cache old bundles:
 
 1. **Step 1:** the backend accepts EITHER the old token OR the new fixed header
    plus a valid `Origin`. The frontend sends the new header. Deploy.
-2. **Step 2** (only after step 1 is live): remove the token, its Fly secret, the
-   build argument and `check_bundle_key.sh`. #489 closes here.
+2. **Step 2** (only after step 1 is live): the owner first sets
+   `CITEVYN_RATE_LIMIT_KEY_SALT` to a new strong secret, and production refuses to
+   start without it. Then remove the token, its Fly secret, the build argument and
+   `check_bundle_key.sh`. #489 closes here. (Changing the salt resets every rate
+   bucket once, which is harmless.)
 
 This amends ADR-0004's "anti-scraping speed bump" line. ADR-0004 is not rewritten;
 it carries a note pointing here.
@@ -197,9 +220,15 @@ it carries a note pointing here.
 - **Usage insights**: a page showing the user's own use against their allowance.
 - **Install snippets** for Claude Code and Codex.
 
-### 5. "What changed" alerts
+### 5. Differentiators: "what changed" alerts and cross-vendor comparisons
 
-A scheduled job snapshots the four doc sets and compares them with the last
+**Cross-vendor comparison answers.** A question such as "how do Claude and Gemini
+each set a system prompt?" gets one answer that cites both vendors' docs side by
+side. Retrieval already spans all four sources; this makes comparison a supported
+answer shape, with citations from each vendor it names. It is built with the Pro
+features (Phase 6).
+
+**"What changed" alerts.** A scheduled job snapshots the four doc sets and compares them with the last
 snapshot. Free accounts get a weekly digest by email; Pro accounts can watch a
 specific flag, model, command or page and get an alert when it changes. Email goes
 through Resend. Every email has a working unsubscribe link, and sends are
@@ -213,14 +242,16 @@ setting:
 - a freshness stamp on every answer and citation ("docs as of <date>");
 - thumbs up/down and "report wrong answer" with a reason;
 - copy code, and copy the answer as Markdown;
-- "request this source" on a refusal, feeding a gap log;
+- "request this source" on a refusal, feeding a log of missing sources;
 - history export;
 - a published "your data is not used for training" policy.
 
 ### 7. BYOK (bring your own key)
 
 - A Pro feature at the **same price**. There is no cheaper BYOK plan.
-- **OpenRouter only**, connected through **OpenRouter's OAuth PKCE flow**: the user
+- **OpenRouter only**, connected through **OpenRouter's OAuth PKCE flow** (a
+  standard sign-in handshake that lets an app get a key without ever seeing the
+  user's password): the user
   approves CiteVyn in OpenRouter and OpenRouter hands us a key. Users never paste
   a key.
 - Used for **answer generation only**. Embeddings (the vectors used for search)
@@ -263,6 +294,8 @@ These also live in `docs/DELIBERATE_DECISIONS.md`, so they are seen outside this
 
 ### Rejected, with reasons
 
+The owner rejected these designs. The reasons are this ADR's summary of why.
+
 | Rejected | Why |
 |---|---|
 | A secret token in the bundle | Anything in the bundle is public. It protects nothing and leaks into logs. |
@@ -278,14 +311,15 @@ These also live in `docs/DELIBERATE_DECISIONS.md`, so they are seen outside this
 - Every route gets a capability label, and CI fails on a route without one.
 - New tables: `memberships`, Stripe webhook events (for idempotency), API keys,
   shared answers, feedback, gap requests, doc snapshots and watches, and BYOK
-  credentials. New columns: `users.email_verified_at` and `provider_calls` "who
-  paid". Each arrives with the phase that needs it.
+  credentials. New columns: `users.email_verified_at`, and a user id and "who paid"
+  on `provider_calls`. Each arrives with the phase that needs it.
 - New dependencies, each justified in its own PR: the Stripe SDK (Phase 4) and a
   bot-check provider (Phase 5). An MCP library may be needed in Phase 6.
 - **Owner-only steps**, which no session does on its own: every production deploy
   (including token step 2 after step 1 is live); Stripe account, live products and
   secrets; the BYOK master key; approval of the Terms, Privacy and Refund pages;
-  #492's live Gemini check; and turning `CITEVYN_ACCESS_MODEL_ENABLED` on.
+  #492's live Gemini check; topping up OpenRouter or confirming it is only a
+  fallback; setting `CITEVYN_RATE_LIMIT_KEY_SALT` before token step 2; and turning `CITEVYN_ACCESS_MODEL_ENABLED` on.
 
 ## Build order
 
@@ -294,11 +328,11 @@ Each phase is its own PR or PRs, merged and verified before the next starts.
 | # | Ships |
 |---|---|
 | 0 | This ADR and the document fixes; #492 (pin and price the Gemini model) |
-| 1 | Rails: a capability on every route, the policy table, the setting, and a CI guard |
+| 1 | Groundwork, no behaviour change: a capability on every route, the policy table, the setting, and a CI guard |
 | 2 | Retire the public token, step 1 only |
 | 3 | Trust must-haves (not behind the setting) |
 | 4 | Memberships: Stripe test mode, signed idempotent webhooks, grace, cancel, quotas, "who paid" |
 | 5 | Trial and pricing (dark): the 25-answer trial, the usage meter, the upgrade screen, the pricing section, the sign-up bot check, draft legal pages |
-| 6 | Pro features: MCP server, API keys, shareable answers, usage insights |
+| 6 | Pro features: MCP server, API keys, shareable answers, usage insights, cross-vendor comparison answers |
 | 7 | "What changed" alerts |
 | 8 | BYOK (dark) |

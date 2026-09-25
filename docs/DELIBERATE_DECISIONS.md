@@ -82,7 +82,8 @@ They are decided. Disagree with the reason given in
 ### 15. No secret in the browser, ever
 
 Real secrets live only on the server. Anything compiled into the bundle is public, however
-it is named. The public client token was the last exception, and ADR-0005 retires it.
+it is named. The public client token was the last exception (it is also the fallback
+rate-limit salt), and ADR-0005 retires it once `CITEVYN_RATE_LIMIT_KEY_SALT` is set.
 
 ### 16. Entitlement is checked on the server, from our table, on every protected request
 
@@ -93,10 +94,12 @@ Stripe webhooks write our `memberships` table, and requests read that table.
 
 - **Authentication:** the session cookie.
 - **Entitlement:** the `memberships` table, fed by signed Stripe webhooks.
-- **Authorisation:** a capability on every route, plus ONE tier→capability policy table.
+- **Authorisation:** a capability on every route, plus ONE policy table saying which tier
+  (kind of account) has which capability.
 - **Quota:** per-user and per-plan metering on `provider_calls`, which records who paid.
 - **CSRF:** a `SameSite` cookie + an `Origin` check + a fixed request header.
-- **Abuse:** per-IP limits on the public doors, email verification, a bot check at sign-up.
+- **Abuse:** per-IP limits on the routes anyone can call without signing in, email
+  verification, a bot check at sign-up.
 
 A new feature reuses these. It does not add a second mechanism for any of them.
 

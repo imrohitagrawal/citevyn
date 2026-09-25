@@ -187,7 +187,7 @@ MVP uses simple demo auth:
 
 - Demo user login or demo API key.
 - Admin API key for ingestion and evaluation.
-- Anonymous access disabled.
+- Anonymous access enabled (`SECURITY_MODEL.md` §4 item 4); ADR-0005 limits it to the canned sample when `CITEVYN_ACCESS_MODEL_ENABLED` is on.
 
 ### 6.2 MVP Authorization
 

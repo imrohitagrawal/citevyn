@@ -73,8 +73,10 @@ MVP supports:
    the session cookie for one reason: a cross-site request cannot set an
    `Authorization` header, so requiring it blocks cross-site request forgery. It
    is public (it is in the browser bundle), so it is neither an identity control
-   nor an anti-scraping control. **ADR-0005 retires it** in favour of a fixed
-   custom header plus an `Origin` check, in two deploy steps (§3 of ADR-0005).
+   nor an anti-scraping control. It is also the rate limiter's fallback hashing
+   salt when `CITEVYN_RATE_LIMIT_KEY_SALT` is empty. **ADR-0005 retires it** in
+   favour of a fixed custom header plus an `Origin` check, in two deploy steps
+   (§3 of ADR-0005), after a real salt is set.
 3. Admin API key for ingestion, evaluation, and index promotion — unrelated
    to the login system above; the admin key has no implicit access to any
    individual account's data.
@@ -98,11 +100,14 @@ Roles:
 Recommended defaults:
 
 ```text
-demo_user: 30 queries/hour — applies to every chat caller today, anonymous
-  (anon_<uuid4hex>) and signed-in alike; the bucket is keyed per visitor, not
-  per role (#203). There is no separate "anonymous" row: anonymous chat is
-  enabled (§4 item 4). ADR-0005 adds per-plan allowances on top of this limit,
-  behind CITEVYN_ACCESS_MODEL_ENABLED.
+demo_user: 30 queries/hour for an anonymous caller. The bucket is keyed on a
+  salted hash of the client IP (#203), not on the anon_ principal. Anonymous
+  chat is enabled (§4 item 4), so there is no separate "anonymous" row.
+demo_user_registered: 100 queries/hour for a signed-in caller, keyed on the
+  user id (ADR-0004 PR 11).
+Both sit under a global per-hour backstop across all visitors. ADR-0005 adds
+  per-plan allowances on top of these limits, behind
+  CITEVYN_ACCESS_MODEL_ENABLED.
 admin: 100 queries/hour
 auth_login: 10 attempts/hour, keyed per TARGET EMAIL (not per client) —
   ADR-0004 PR 6, POST /v1/auth/{register,login} — a credential-stuffing
