@@ -41,8 +41,12 @@ def _allowed_origins(settings: Settings) -> set[str]:
     """Our own site plus the CORS allowlist."""
     allowed = set(settings.cors_allowed_origins)
     if settings.magic_link_base_url:
+        # Scheme, host and port ONLY: userinfo or a path would never match a
+        # browser's Origin, and a scheme-less value is not a URL at all.
         parts = urlsplit(settings.magic_link_base_url)
-        allowed.add(f"{parts.scheme}://{parts.netloc}")
+        if parts.scheme and parts.hostname:
+            port = f":{parts.port}" if parts.port else ""
+            allowed.add(f"{parts.scheme.lower()}://{parts.hostname}{port}")
     return allowed
 
 

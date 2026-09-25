@@ -34,10 +34,16 @@ Every route that "requires the demo bearer" below accepts EITHER of these
 X-CiteVyn-Client: web
 ```
 
-— the fixed client header. When the browser sends `Origin` or `Sec-Fetch-Site`,
-they must say the request came from our own site (the site origin or the CORS
-allowlist); otherwise the answer is 401 `auth_required`, "Cross-site request
-refused." Or, unchanged until step 2:
+— the fixed client header, checked against where the browser says the request
+came from (`app/core/request_origin.py`):
+
+- an `Origin` other than `null` must be the site origin or on the CORS
+  allowlist (it decides on its own, whatever `Sec-Fetch-Site` says);
+- `Origin: null` passes only with `Sec-Fetch-Site: same-origin` or `none`;
+- no `Origin` passes unless `Sec-Fetch-Site` says `same-site` or `cross-site`.
+
+A refusal is 401 `auth_required`, "Cross-site request refused." Or, unchanged
+until step 2:
 
 ```http
 Authorization: Bearer <demo-token>

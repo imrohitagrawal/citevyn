@@ -203,6 +203,30 @@ def test_the_real_app_creates_a_session_with_the_header_only(app_db: None) -> No
     assert forged.json()["error"]["code"] == "auth_required"
 
 
+def test_production_refuses_a_wildcard_cors_origin() -> None:
+    """A ``*`` would grant every site the preflight, and with the token public
+    that opens the bearer path to any page. cors.py always said wildcards are
+    forbidden; nothing enforced it. Turns red if: production accepts ``*``."""
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    prod = {
+        "environment": "production",
+        "llm_provider": "gemini",
+        "embedding_provider": "gemini",
+        "gemini_api_key": "gk",
+        "admin_api_key": "a-strong-admin-secret",
+        "public_client_token": "a-strong-demo-secret",
+        "_env_file": None,
+    }
+    with pytest.raises(ValidationError, match="wildcard"):
+        Settings(**prod, cors_allowed_origins=["https://citevyn.example.com", "*"])  # type: ignore[arg-type]
+    # Partner: a real origin list starts.
+    ok = Settings(**prod, cors_allowed_origins=["https://citevyn.example.com"])  # type: ignore[arg-type]
+    assert ok.cors_allowed_origins == ["https://citevyn.example.com"]
+
+
 def test_cors_lets_our_origin_send_the_header_and_nobody_else() -> None:
     """The preflight is what stops a foreign page from setting the header at all.
     Turns red if: the header is missing from CORS allow_headers (our own
@@ -241,8 +265,40 @@ def test_our_own_site_origin_is_trusted_without_being_in_the_cors_list(
     monkeypatch.setenv("CITEVYN_MAGIC_LINK_BASE_URL", "https://citevyn.example.com/")
     monkeypatch.setenv("CITEVYN_CORS_ALLOWED_ORIGINS", "http://localhost:3000")
     get_settings.cache_clear()
-    res = TestClient(_protected_app()).post(
-        "/protected", headers={**WEB, "Origin": "https://citevyn.example.com"}
-    )
-    get_settings.cache_clear()
+    try:
+        res = TestClient(_protected_app()).post(
+            "/protected", headers={**WEB, "Origin": "https://citevyn.example.com"}
+        )
+    finally:
+        get_settings.cache_clear()
     assert res.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://citevyn.example.com/some/path", {"https://citevyn.example.com"}),
+        ("https://user@citevyn.example.com", {"https://citevyn.example.com"}),
+        ("https://CITEVYN.example.com:8443/", {"https://citevyn.example.com:8443"}),
+        # No scheme: not a URL we can derive an origin from. Nothing is added,
+        # rather than the meaningless "://" the first version produced.
+        ("citevyn.example.com", set()),
+    ],
+)
+def test_the_site_origin_is_scheme_host_and_port_only(base_url: str, expected: set[str]) -> None:
+    """Turns red if: userinfo or a path leaks into the origin, or a scheme-less
+    URL adds a junk entry."""
+    from app.core.config import Settings
+    from app.core.security import _allowed_origins
+
+    s = Settings(magic_link_base_url=base_url, cors_allowed_origins=[], _env_file=None)  # type: ignore[call-arg]
+    assert _allowed_origins(s) == expected
+
+
+def test_a_wildcard_cors_origin_is_still_allowed_outside_production() -> None:
+    """Local tooling may use ``*``; only production is refused.
+    Turns red if: the wildcard guard fires in every environment."""
+    from app.core.config import Settings
+
+    s = Settings(environment="local", cors_allowed_origins=["*"], _env_file=None)  # type: ignore[call-arg]
+    assert s.cors_allowed_origins == ["*"]
