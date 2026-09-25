@@ -80,6 +80,14 @@ interface ChatMessage {
    *  is unavailable, and the rejection is permanent for that exact text, so the
    *  implied "try again shortly" sends the user into an identical failure. */
   errorKind?: "rate_limit" | "error" | "rejected";
+  /** A live answer's backend ids and the question it answers, for feedback
+   *  (ADR-0005 §6). Absent on canned demo answers and errors. */
+  messageId?: string;
+  sessionId?: string;
+  question?: string;
+  /** The question was outside CiteVyn's scope (`unsupported`), as opposed to in
+   *  scope with no source. Only the latter invites "Request this source". */
+  outOfScope?: boolean;
 }
 
 interface AppState {
@@ -907,6 +915,10 @@ export function useLandingState() {
           // Graceful fallback (Phase 4a): surface nearest-doc suggestions the backend
           // offers on a no_answer/unsupported so the refusal isn't a dead end.
           finalSuggestions: resp.suggestions ?? [],
+          messageId: resp.message_id,
+          sessionId,
+          question: text,
+          outOfScope: resp.unsupported,
         });
       } catch (err) {
         // A 404 means the backend session expired or was evicted; drop the
@@ -1101,6 +1113,10 @@ export function useLandingState() {
         finalSources: Source[];
         finalSuggestions?: Suggestion[];
         errorKind?: "rate_limit" | "error" | "rejected";
+        messageId?: string;
+        sessionId?: string;
+        question?: string;
+        outOfScope?: boolean;
       },
     ) => {
       // This answer's bubble gets its own stable id, and the stream targets that
@@ -1296,11 +1312,21 @@ export function useLandingState() {
         const resp = await getSession(sessionId);
         if (epoch !== resumeEpochRef.current) return; // superseded by a newer resume
         sessionIdRef.current = resp.session_id;
-        const messages = resp.messages.map((m: StoredMessage) => ({
+        const messages = resp.messages.map((m: StoredMessage, i: number) => ({
           id: nextMessageId(),
           role: m.role === "user" ? ("user" as const) : ("bot" as const),
           text: m.content,
           sources: citationsToSources(m.citations),
+          // A resumed answer can be rated too (ADR-0005 §6). Its question is the
+          // user message before it. Refusal state is not stored, so a resumed
+          // answer never offers "Request this source".
+          ...(m.role === "assistant"
+            ? {
+                messageId: m.message_id,
+                sessionId: resp.session_id,
+                question: resp.messages[i - 1]?.role === "user" ? resp.messages[i - 1].content : "",
+              }
+            : {}),
         }));
         stopFlash();
         dispatch({ type: "RESUME_SESSION", messages });
@@ -1640,6 +1666,19 @@ export function useLandingState() {
         // Nearest-doc suggestions on a graceful fallback (Phase 4a). Only shown once the
         // bubble has finished streaming and only when the backend offered any.
         docSuggestions: !m.streaming ? m.suggestions || [] : [],
+        // Only once finished: a vote on half-streamed text rates what the reader
+        // has not seen (ADR-0005 §6 feedback).
+        answerRef:
+          !m.streaming && m.messageId && m.sessionId
+            ? {
+                messageId: m.messageId,
+                sessionId: m.sessionId,
+                question: m.question ?? "",
+                // In scope but refused for want of a source: the gap log's case.
+                // An out-of-scope refusal ("best laptop") would only add noise.
+                offerSourceRequest: !!m.refusal && !m.outOfScope,
+              }
+            : undefined,
       })),
     [state.messages, state.highlight],
   );

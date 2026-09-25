@@ -31,6 +31,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.deps import requires
@@ -42,6 +43,7 @@ from app.core.middleware import get_current_request_id
 from app.core.rate_limit import rate_limited_admin
 from app.core.security import ADMIN_USER_ID
 from app.cost.budget import classify, spend_since, utc_day_start
+from app.models import AnswerFeedback, Message, SourceRequest
 from app.models.enums import IndexStatus, JobStatus
 from app.services import evaluations as evaluation_service
 from app.services import index_versions as index_version_service
@@ -476,4 +478,79 @@ async def get_budget(
         "warn_85pct": fraction >= 0.85,
         "budget_enabled": settings.cost_budget_enabled,
         "fail_closed": settings.cost_budget_fail_closed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /v1/admin/feedback and /v1/admin/source_requests (ADR-0005 §6)
+# ---------------------------------------------------------------------------
+
+# How much of the answer to show beside a vote: enough to judge it, not a copy
+# of every conversation in one response.
+_ANSWER_EXCERPT_CHARS = 280
+
+
+@router.get("/feedback", dependencies=[Depends(requires(Capability.operate))])
+async def list_feedback(
+    request: Request,
+    _: Annotated[str, Depends(rate_limited_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    rating: str | None = Query(default=None, pattern="^(up|down)$"),  # noqa: B008
+    limit: int = Query(default=50, ge=1, le=200),  # noqa: B008
+) -> dict[str, Any]:
+    """Votes and "wrong answer" reports, newest first, with the answer they rate."""
+    stmt = (
+        select(AnswerFeedback, Message.content)
+        .join(Message, Message.message_id == AnswerFeedback.message_id)
+        .order_by(AnswerFeedback.updated_at.desc())
+        .limit(limit)
+    )
+    if rating is not None:
+        stmt = stmt.where(AnswerFeedback.rating == rating)
+    rows = (await db.execute(stmt)).all()
+    return {
+        "request_id": _request_id(request),
+        # The number of rows in THIS page (capped by ``limit``), not a grand total.
+        "count": len(rows),
+        "feedback": [
+            {
+                "feedback_id": str(fb.feedback_id),
+                "message_id": str(fb.message_id),
+                "rating": fb.rating,
+                "reason": fb.reason,
+                "comment": fb.comment,
+                "updated_at": fb.updated_at.isoformat(),
+                "answer_excerpt": content[:_ANSWER_EXCERPT_CHARS],
+            }
+            for fb, content in rows
+        ],
+    }
+
+
+@router.get("/source_requests", dependencies=[Depends(requires(Capability.operate))])
+async def list_source_requests(
+    request: Request,
+    _: Annotated[str, Depends(rate_limited_admin)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    limit: int = Query(default=50, ge=1, le=200),  # noqa: B008
+) -> dict[str, Any]:
+    """The gap log: what users asked for that the corpus could not cite, newest first."""
+    stmt = select(SourceRequest).order_by(SourceRequest.created_at.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "request_id": _request_id(request),
+        # The number of rows in THIS page (capped by ``limit``), not a grand total.
+        "count": len(rows),
+        "source_requests": [
+            {
+                "source_request_id": str(r.request_id),
+                "message_id": str(r.message_id) if r.message_id else None,
+                "question": r.question,
+                "requested_url": r.requested_url,
+                "note": r.note,
+                "status": r.status,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
     }

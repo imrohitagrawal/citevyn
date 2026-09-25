@@ -74,7 +74,7 @@ _ALLOWED_ANSWER_STYLES: frozenset[str] = frozenset({"short", "step_by_step"})
 # ---------------------------------------------------------------------------
 
 
-async def _require_session(
+async def require_session(
     db: AsyncSession, *, request_id: str, session_id: uuid.UUID, user_id: str
 ) -> Session:
     """Load a session row owned by ``user_id`` or raise the standard 404 envelope.
@@ -102,7 +102,7 @@ async def _require_session(
     return row
 
 
-async def _require_message(
+async def require_message(
     db: AsyncSession,
     *,
     request_id: str,
@@ -185,7 +185,7 @@ async def post_message(
             ),
         )
 
-    await _require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
+    await require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
     orchestrator = Orchestrator(settings, db)
     response = await orchestrator.ask(
         question=body.message,
@@ -224,8 +224,8 @@ async def get_message(
 ) -> dict[str, Any]:
     """Return a message and its retrieval trace."""
     request_id = _request_id(request)
-    await _require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
-    message = await _require_message(
+    await require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
+    message = await require_message(
         db,
         request_id=request_id,
         session_id=session_id,
@@ -261,7 +261,7 @@ async def get_message(
     }
 
 
-__all__ = ["router"]
+__all__ = ["require_message", "require_session", "router"]
 
 
 # Touch _utcnow so static analyzers see it as used; the helper is kept

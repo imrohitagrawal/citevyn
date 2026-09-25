@@ -280,6 +280,10 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/sessions/{session_id}/messages` | demo | **Ask a question** — citation-backed Q&A |
 | `GET  /v1/sessions/{session_id}/messages/{message_id}` | demo | Fetch one answer + its citations |
 | `POST /v1/search/exact`     | demo   | Exact-term lookup                             |
+| `PUT  /v1/sessions/{session_id}/messages/{message_id}/feedback` | demo | Rate an answer, or report it as wrong |
+| `POST /v1/source-requests`  | demo   | Request a source the answer could not cite (the gap log) |
+| `GET  /v1/admin/feedback`   | admin  | Answer ratings and "wrong answer" reports     |
+| `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |
 | `GET  /v1/admin/budget`     | admin  | Spend against the daily budget ([`docs/COST_CONTROLS.md`](docs/COST_CONTROLS.md)) |
 | `GET  /v1/admin/evaluations[/{run_id}]` | admin | List / fetch `evaluation_runs`     |
 | `GET  /v1/admin/index_versions[/{index_version}]` | admin | List / fetch `index_versions` |

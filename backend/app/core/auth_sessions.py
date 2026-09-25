@@ -3,7 +3,7 @@
 Every request that reaches a session/message route resolves to exactly one
 **principal id** — the id used for ownership checks
 (``app.api.routes.sessions._get_session_or_404``,
-``app.api.routes.messages._require_session``, ADR-0004 PR 1). Before this
+``app.api.routes.messages.require_session``, ADR-0004 PR 1). Before this
 module existed, every caller resolved to the constant ``demo_user``, so
 ownership was a no-op. This is deliberately separate from the **audit**
 identity (``require_public_client_token`` -> the constant ``DEMO_USER_ID``, which

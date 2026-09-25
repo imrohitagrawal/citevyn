@@ -159,7 +159,7 @@ async def _get_session_or_404(
     ``tests/test_session_ownership.py`` goes red on exactly that deletion
     (measured: 6 passed -> 2 failed, both asserting ``200 == 404`` /
     ``204 == 404``). TWO other routes carry the same predicate and must change
-    with it -- ``messages.py:87`` in ``_require_session`` and ``me.py:62`` in
+    with it -- ``messages.py:87`` in ``require_session`` and ``me.py:62`` in
     ``GET /v1/me/sessions`` (``Session.user_id == principal_id``); a
     ``grep -rn 'Session.user_id' backend/app/api/routes/`` finds all three and
     nothing else.

@@ -274,6 +274,38 @@ def test_migration_0008_users_identity_columns_round_trips(
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
 
 
+def test_migration_0015_user_signal_tables_round_trip(alembic_config: AlembicConfig) -> None:
+    """0015 (``answer_feedback``, ``source_requests``; ADR-0005 §6) creates both
+    tables and the downgrade drops them. RED if a table is missing at head, the
+    one-vote-per-(answer, user) unique constraint is missing, or a table survives
+    the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        tables = {
+            r[0]
+            for r in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).all()
+        }
+        indexes = connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE tbl_name='answer_feedback'"
+        ).all()
+    assert {"answer_feedback", "source_requests"} <= tables
+    assert any("uq_answer_feedback_message_user" in (r[0] or "") for r in indexes)
+
+    alembic_downgrade(alembic_config, "0014")
+    with engine.connect() as connection:
+        tables = {
+            r[0]
+            for r in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).all()
+        }
+    assert not ({"answer_feedback", "source_requests"} & tables)
+    assert "documents" in tables  # partner: the downgrade dropped only these two
+
+
 def test_migration_0014_documents_content_as_of_round_trips(alembic_config: AlembicConfig) -> None:
     """0014 (``documents.content_as_of``, ADR-0005 §6 freshness stamp) adds one
     nullable DATE column and the downgrade removes it. RED if the column is

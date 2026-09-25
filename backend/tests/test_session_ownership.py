@@ -183,9 +183,9 @@ def test_message_read_is_scoped_to_the_session_in_the_path(
     in_memory_client: TestClient, other_users_session: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
     """One session, another session's message id — the *second* half of the
-    predicate in ``messages.py::_require_message`` (#452).
+    predicate in ``messages.py::require_message`` (#452).
 
-    ``_require_session`` above it proves the caller owns the session in the
+    ``require_session`` above it proves the caller owns the session in the
     path. ``Message.session_id == session_id`` is then the only thing tying
     the requested message to that session, and before this test it could be
     deleted with the whole suite green:
