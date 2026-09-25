@@ -263,7 +263,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     e.preventDefault();
     setError(null);
     setNotice(null);
-    setOfferSignIn(false);
+    setOfferSignIn(false); // a new attempt withdraws the last attempt's offer
     setSubmitting(true);
     try {
       if (mode === "login") {
@@ -300,14 +300,11 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         // current-password field rather than showing an error with no way out.
         setNeedCurrent(true);
       }
-      if (
-        err instanceof ApiClientError &&
-        mode === "register" &&
-        err.status === 422 &&
-        err.message === DUPLICATE_EMAIL_MESSAGE
-      ) {
-        setOfferSignIn(true);
-      }
+      // #483: offered from the register form only, and only for the duplicate-email
+      // 422 -- matched on the exact text, never on the status alone.
+      const isDuplicateEmail =
+        err instanceof ApiClientError && err.status === 422 && err.message === DUPLICATE_EMAIL_MESSAGE;
+      if (mode === "register" && isDuplicateEmail) setOfferSignIn(true);
       setError(
         err instanceof ApiClientError
           ? err.status === 404 && mode === "magic-link"
