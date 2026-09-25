@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -61,6 +62,11 @@ class RetrievedChunk(BaseModel):
     # ``Orchestrator._persist_messages`` all name their fields explicitly, so this
     # reaches no response body, no prompt and no table.
     index_version: str | None = None
+    # When the worker last fetched the owning document (``documents.last_fetched_at``),
+    # for the "docs as of" stamp (ADR-0005 §6). Optional for the same measured
+    # reason as ``index_version`` above; ``None`` means "this construction site did
+    # not know", and the citation then says ``null`` rather than inventing a date.
+    fetched_at: datetime | None = None
 
 
 class EvidenceHit(RetrievedChunk):
@@ -139,4 +145,8 @@ def chunk_to_citation(chunk: RetrievedChunk) -> dict[str, Any]:
         "title": chunk.document_title,
         "url": chunk.source_url,
         "chunk_id": str(chunk.chunk_id),
+        # "Docs as of": the owning document's fetch date, UTC, day precision.
+        "docs_as_of": chunk.fetched_at.astimezone(UTC).date().isoformat()
+        if chunk.fetched_at is not None
+        else None,
     }

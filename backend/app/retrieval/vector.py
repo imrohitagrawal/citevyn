@@ -114,6 +114,7 @@ class VectorRetriever:
                     # selected, so this is free; it lets the hybrid layer see
                     # whether the merged evidence spans more than one active index.
                     index_version=doc.index_version,
+                    fetched_at=doc.last_fetched_at,
                 )
             )
         return results

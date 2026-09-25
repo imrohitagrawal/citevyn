@@ -25,6 +25,7 @@ import enum
 import logging
 import re
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -197,6 +198,18 @@ class RetrievalStrategy(enum.StrEnum):
 # ``dict[str, object]`` matching ``docs/API_SPEC.md`` §5. The alias
 # is purely documentary — it gives readers a single name to grep for.
 AnswerResponse = dict[str, object]
+
+
+def docs_as_of(citations: Sequence[Mapping[str, object]]) -> str | None:
+    """The answer's "docs as of" date: the OLDEST date among its citations.
+
+    The oldest is the one bound that holds for every source the answer used.
+    Citations with no date (rows cached before the stamp existed) are skipped
+    rather than read as a date; no dated citation at all means ``None``.
+    ISO ``YYYY-MM-DD`` strings sort chronologically, so ``min`` is the oldest.
+    """
+    dates = [d for c in citations if isinstance(d := c.get("docs_as_of"), str)]
+    return min(dates) if dates else None
 
 
 _FLAG_TOKEN_RE = re.compile(r"(?<!\S)--?[A-Za-z][\w-]*")
@@ -1091,6 +1104,7 @@ class Orchestrator:
             message_id=str(message_id),
             answer=GREETING_RESPONSE,
             citations=[],
+            docs_as_of=None,
             domain=response_domain.value,
             intent=Intent.greeting.value,
             confidence=Confidence.none.value,
@@ -1144,6 +1158,7 @@ class Orchestrator:
             message_id=str(message_id),
             answer=cached.answer,
             citations=[Citation(c) for c in cached.citations],
+            docs_as_of=docs_as_of(cached.citations),
             domain=domain.value,
             intent=intent.value,
             confidence=cached.confidence.value,
@@ -1377,6 +1392,7 @@ class Orchestrator:
             message_id=str(message_id),
             answer=answer,
             citations=list(citations),
+            docs_as_of=docs_as_of(citations),
             domain=domain.value,
             intent=intent.value,
             confidence=confidence.value,

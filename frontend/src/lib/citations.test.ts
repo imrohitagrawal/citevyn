@@ -74,3 +74,16 @@ describe("citationsToSources", () => {
     expect(source.url).toBe("");
   });
 });
+
+describe("citationsToSources — docs as of (ADR-0005 §6)", () => {
+  // Turns red if: the per-citation fetch date is dropped on the way to the card.
+  it("carries each citation's docs_as_of onto its source", () => {
+    const [a, b] = citationsToSources([
+      { source_name: "s", title: "A", url: "/a", chunk_id: "c1", marker: 1, docs_as_of: "2026-09-01" },
+      { source_name: "s", title: "B", url: "/b", chunk_id: "c2", marker: 2, docs_as_of: null },
+    ]);
+    expect(a.asOf).toBe("2026-09-01");
+    expect(b.asOf).toBeUndefined();
+  });
+});
+

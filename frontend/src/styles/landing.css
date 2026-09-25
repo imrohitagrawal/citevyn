@@ -2611,3 +2611,54 @@ a.citation-chip:focus-visible {
   color: var(--bg);
   --hl-band: 60%;
 }
+
+/* --- Trust must-haves on an answer (ADR-0005 §6) ------------------------- */
+
+/* A code span is a click-to-copy button. Reset the button so the chip inside
+   looks exactly as before; the focus ring comes from the global rule. */
+.answer-code-copy {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: copy;
+  text-align: inherit;
+}
+
+.source-asof {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* The answer's date and its copy control, under the sources. */
+.answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 8px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.answer-copy {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  /* WCAG 2.5.8: a 24px minimum target. */
+  min-height: 24px;
+}
+
+.answer-copy:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}

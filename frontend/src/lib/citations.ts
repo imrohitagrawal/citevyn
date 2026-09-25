@@ -40,6 +40,8 @@ export function citationsToSources(citations: Citation[]): Source[] {
       n,
       title: citation.title || citation.source_name || `Source ${n}`,
       url: citation.url || "",
+      // Only a real date string; null/absent stays undefined so no stamp is invented.
+      ...(typeof citation.docs_as_of === "string" ? { asOf: citation.docs_as_of } : {}),
     };
   });
 }

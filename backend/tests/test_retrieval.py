@@ -37,6 +37,15 @@ async def test_exact_retriever_finds_env_var(seeded_session) -> None:
     assert hits[0].score == 1.0
 
 
+async def test_exact_retriever_carries_the_documents_fetch_date(seeded_session) -> None:
+    """ADR-0005 §6 freshness stamp, exact arm. RED if ``ExactRetriever`` stops
+    setting ``fetched_at`` from the owning document."""
+    r = ExactRetriever(seeded_session, active_index_version="v1")
+    hits = await r.retrieve("CLAUDE_API_RATE_LIMIT", product_area="claude_api", limit=5)
+    assert hits, "precondition: the exact term is in the seeded catalog"
+    assert all(h.fetched_at is not None for h in hits)
+
+
 async def test_exact_retriever_filters_deprecated_docs(session) -> None:
     """Inactive documents must not surface in retrieval."""
     from tests.conftest import seed_catalog
