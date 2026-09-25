@@ -538,25 +538,17 @@ def test_documents_identity_checksum_rename_round_trips(
 
 DiffKey = tuple[object, ...]
 
-# PERMISSIVE DIVERGENCE: the hermetic schema is LOOSER than production. See the
-# comment on the entry below.
-USERS_EMAIL_UNIQUE_INDEX: DiffKey = ("remove_index", "users", "ix_users_email", ("email",), True)
-
 # Every item compare_metadata reports at head, and why it is tolerated.
 # "remove_index" = the migration creates the index, the model does not declare
 # it. "add_fk" = the model declares the FK, the migration never created it.
 # "modify_default" = the migration sets a server default the model lacks.
+#
+# No entry makes the hermetic schema LOOSER than production. The one that did,
+# ``users.ix_users_email`` UNIQUE (#455), was closed by declaring the same index
+# on ``User.email``; removing that declaration turns the parity test red with
+# ``("remove_index", "users", "ix_users_email", ("email",), True)``. Never
+# allowlist a looser-than-production item without an owner decision.
 KNOWN_DRIFT: dict[DiffKey, str] = {
-    # PERMISSIVE DIVERGENCE (#455) -- the one that ships bugs. Migration 0008
-    # creates ``ix_users_email`` UNIQUE, but ``User.email`` has no ``unique=``
-    # and no ``__table_args__``. So every hermetic test runs on a schema that
-    # ACCEPTS two users with the same email, where production REJECTS the second.
-    # A code path that relies on the database to refuse a duplicate email is
-    # therefore untested. CLOSED BY: an owner-approved model change declaring the
-    # unique index on ``User.email`` (a schema-definition change, which is why it
-    # is not made here). When that lands, this entry goes stale, the stale-entry
-    # test below fails, and this entry must be deleted.
-    USERS_EMAIL_UNIQUE_INDEX: "PERMISSIVE DIVERGENCE: users.email unique only in production",
     # STRICTER IN THE HERMETIC SCHEMA (latent). The model declares this FK and
     # ``app.core.db`` turns SQLite FK enforcement on, but migration 0001 created
     # ``evaluation_runs`` without it, so production accepts a run pointing at a
@@ -760,7 +752,7 @@ def test_every_known_drift_entry_is_still_real(migrated_schema_diff: list[DiffKe
 
     Without this, an entry outlives its fix and later excuses the same drift
     returning. RED WHEN: a migration or model change closes one of the listed
-    divergences (for example the owner adds the unique index to ``User.email``)
+    divergences (as declaring the unique index on ``User.email`` did for #455)
     and the entry is left behind.
     """
     _, stale = _unexpected_and_stale(migrated_schema_diff, KNOWN_DRIFT)
@@ -826,19 +818,19 @@ def _insert_two_users_with_one_email(engine: Engine) -> int:
         ).scalar_one()
 
 
-def test_users_email_uniqueness_matches_the_known_drift_entry(
+def test_users_email_uniqueness_is_enforced_by_both_schemas(
     alembic_config: AlembicConfig, tmp_path: Path
 ) -> None:
-    """The PERMISSIVE DIVERGENCE on ``users.email``, measured by behaviour.
+    """The closed #455 divergence on ``users.email``, measured by behaviour.
 
-    The migrated schema (production) must refuse a duplicate email. The
-    hermetic ``create_all`` schema must do whatever ``KNOWN_DRIFT`` says it
-    does: accept the duplicate while the entry is there, refuse it once the
-    owner closes the divergence and the entry is deleted. So this pins the
-    allowlist to reality in both states and never locks the defect in.
+    Both the migrated schema (production) and the hermetic ``create_all``
+    schema every other test runs on must refuse a second user with the same
+    email. Until #455 was closed the hermetic schema accepted it, so any code
+    path relying on the database to refuse a duplicate was untested.
 
     RED WHEN: migration 0008's unique index is dropped (production would accept
-    the duplicate), or ``User.email`` gains uniqueness while the entry remains.
+    the duplicate), or ``User.email`` loses its ``ix_users_email`` declaration
+    (the hermetic schema would accept it again).
     """
     alembic_upgrade(alembic_config, "head")
     migrated = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
@@ -849,14 +841,8 @@ def test_users_email_uniqueness_matches_the_known_drift_entry(
 
     hermetic = create_engine(f"sqlite:///{tmp_path / 'create_all.db'}")
     _full_orm_metadata().create_all(hermetic)
-    if USERS_EMAIL_UNIQUE_INDEX in KNOWN_DRIFT:
-        assert _insert_two_users_with_one_email(hermetic) == 2, (
-            "create_all now refuses a duplicate email, so the users.email divergence "
-            "is closed: delete its KNOWN_DRIFT entry"
-        )
-    else:
-        with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
-            _insert_two_users_with_one_email(hermetic)
+    with pytest.raises(IntegrityError, match=r"UNIQUE constraint failed: users\.email"):
+        _insert_two_users_with_one_email(hermetic)
 
 
 def _unique_column_sets(
@@ -867,12 +853,11 @@ def _unique_column_sets(
     return {(table, tuple(sorted(columns))) for table, sets in tables.items() for columns in sets}
 
 
-# The uniqueness only the migrated schema has, and why it is tolerated. Tied to
-# the KNOWN_DRIFT entry above: the same PERMISSIVE DIVERGENCE, seen by the
-# uniqueness comparison rather than by compare_metadata.
-KNOWN_UNIQUENESS_DRIFT: set[tuple[str, tuple[str, ...]]] = (
-    {("users", ("email",))} if USERS_EMAIL_UNIQUE_INDEX in KNOWN_DRIFT else set()
-)
+# The uniqueness only the migrated schema has, and why it is tolerated. Empty:
+# the one entry it had, ``("users", ("email",))``, was the #455 PERMISSIVE
+# DIVERGENCE, closed by declaring ``ix_users_email`` on ``User.email``. Anything
+# listed here would mean hermetic tests accept duplicates production refuses.
+KNOWN_UNIQUENESS_DRIFT: set[tuple[str, tuple[str, ...]]] = set()
 
 
 def test_migrated_uniqueness_matches_the_orm_models(alembic_config: AlembicConfig) -> None:
@@ -886,8 +871,8 @@ def test_migrated_uniqueness_matches_the_orm_models(alembic_config: AlembicConfi
     ``unique=True`` columns in the models. Primary keys are not included.
 
     RED WHEN: a migration makes a column set unique that no model declares
-    unique (or the reverse), or when the ``users.email`` divergence is closed and
-    its KNOWN_DRIFT entry is left behind.
+    unique (or the reverse), for example ``User.email`` losing its
+    ``ix_users_email`` declaration.
     """
     alembic_upgrade(alembic_config, "head")
     inspector = inspect(create_engine(alembic_config.get_main_option("sqlalchemy.url")))
@@ -917,6 +902,9 @@ def test_migrated_uniqueness_matches_the_orm_models(alembic_config: AlembicConfi
     # composite constraint that both declare.
     assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(migrated)
     assert ("user_identities", ("provider", "provider_account_id")) in _unique_column_sets(modelled)
+    # And the single-column unique INDEX both declare, the one #455 closed.
+    assert ("users", ("email",)) in _unique_column_sets(migrated)
+    assert ("users", ("email",)) in _unique_column_sets(modelled)
     assert only_migrated == KNOWN_UNIQUENESS_DRIFT, (
         f"UNIQUE only in production (hermetic tests accept duplicates it refuses): "
         f"{sorted(only_migrated - KNOWN_UNIQUENESS_DRIFT)}; listed but no longer "
