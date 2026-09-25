@@ -191,7 +191,7 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
         </p>
 
         {passwordFailed && (
-          <p role="alert" style={{ color: "#dc2626", fontSize: "13px", marginTop: "12px" }}>
+          <p role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", marginTop: "12px" }}>
             {CHUNK_FAILED_MESSAGE}
           </p>
         )}
