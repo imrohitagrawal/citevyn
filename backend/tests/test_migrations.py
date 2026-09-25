@@ -27,7 +27,6 @@ from sqlalchemy.exc import IntegrityError, SAWarning
 
 import app.models as app_models
 from app.models import Base
-from app.models.documents import Document
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "db" / "alembic.ini"
@@ -499,27 +498,6 @@ def test_documents_identity_checksum_rename_round_trips(
     assert value == "sha256:keepme"
 
 
-def test_migrated_documents_table_matches_the_orm_model(
-    alembic_config: AlembicConfig,
-) -> None:
-    """Guard against model/migration drift on ``documents``.
-
-    The hermetic suite builds its schema with ``Base.metadata.create_all``, NOT
-    alembic — so a column renamed in the model but not in a migration passes
-    every other test in this repo and only explodes on a real Postgres deploy.
-    This test is the one place the two are compared.
-    """
-    alembic_upgrade(alembic_config, "head")
-
-    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
-    with engine.connect() as connection:
-        rows = connection.exec_driver_sql("PRAGMA table_info(documents)").all()
-    migrated = {row[1] for row in rows}
-
-    model = {column.name for column in Document.__table__.columns}
-    assert migrated == model, f"documents drift: migration={migrated} model={model}"
-
-
 # ── #455: the migrated schema must match the ORM models ─────────────────────
 #
 # The hermetic suite builds its schema with ``Base.metadata.create_all``, NOT
@@ -527,6 +505,11 @@ def test_migrated_documents_table_matches_the_orm_model(
 # RUN -- it never looks at the models. So a model column, index or constraint
 # with no migration passed the whole suite and the CI upgrade step, and the
 # first place it would fail is a real deploy. These tests are the comparison.
+# They replace ``test_migrated_documents_table_matches_the_orm_model``, which
+# compared only the column NAMES of one table. Every drift it could see shows
+# up here as an add_column / remove_column item (checked by deleting
+# ``Document.title``: both went red); this also sees the other tables, types,
+# nullability, indexes, FKs and server defaults.
 #
 # The diff is not empty today, and the items that are left are listed below,
 # each one keyed exactly (op + table + name/columns + unique flag), never by a
@@ -535,13 +518,16 @@ def test_migrated_documents_table_matches_the_orm_model(
 # WHAT THE COMPARISON CANNOT SEE (it runs on SQLite, the only engine the
 # hermetic suite has):
 #   - anything a migration does only on Postgres: 0002's native ENUM types and
-#     0004's pgvector column/HNSW index. On SQLite those branches do not run, and
-#     the ORM's own types are dialect-agnostic TypeDecorators.
-#   - CHECK constraints: alembic's autogenerate does not compare them at all.
-#   - server defaults are compared, but only as "present vs absent" is reliable;
-#     two different non-empty defaults are compared as rendered SQL text.
-# Types (compare_type) and nullability ARE compared: on SQLite they produce no
-# noise at all (measured: zero modify_type / modify_nullable items at 57d8d4f).
+#     0004's pgvector column and HNSW index sit behind a dialect check, so on
+#     SQLite they never run. A Postgres variant of this test does not exist.
+#   - CHECK constraints: alembic's autogenerate does not compare them. None
+#     exist in the models or migrations today.
+#   - server defaults: compared, but the only shape measured is "the migration
+#     has one, the model has none". How alembic compares two different
+#     non-empty defaults on SQLite was not measured.
+# Types (compare_type) and nullability ARE compared, and on SQLite they add no
+# noise: zero modify_type / modify_nullable items at 57d8d4f. Changing
+# ``User.email`` to String(256), or to nullable=False, turns the test red.
 
 DiffKey = tuple[object, ...]
 
