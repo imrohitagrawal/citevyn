@@ -71,6 +71,26 @@ def test_hash_changes_when_a_source_edit_changes() -> None:
     assert before != after
 
 
+def test_hash_changes_when_a_sources_content_date_changes() -> None:
+    """ADR-0005 §6: answers carry a "docs as of" date taken from
+    ``SourceSpec.content_as_of``. The date is part of what an answer SHOWS, so a
+    new date must invalidate cached answers just as a text edit does: otherwise
+    an answer cached with no date (or an old one) is served for the cache's
+    whole TTL after the re-ingest that dated it. Turns red if: the date is left
+    out of the fingerprint."""
+    import dataclasses
+    from datetime import date
+
+    spec = MVP_SOURCES[0]
+    text = lambda s: "same text"  # noqa: E731
+    before = content_version_hash([spec], fetch=text)
+    moved = dataclasses.replace(spec, content_as_of=date(2026, 12, 31))
+    undated = dataclasses.replace(spec, content_as_of=None)
+    assert content_version_hash([moved], fetch=text) != before
+    assert content_version_hash([undated], fetch=text) != before
+    assert content_version_hash([spec], fetch=text) == before  # partner: deterministic
+
+
 def test_hash_reflects_the_source_set() -> None:
     """Adding/removing a source changes the corpus fingerprint too."""
     assert content_version_hash(MVP_SOURCES) != content_version_hash(MVP_SOURCES[:2])

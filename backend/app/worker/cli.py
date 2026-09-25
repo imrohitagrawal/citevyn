@@ -369,6 +369,10 @@ def content_version_hash(
             text = _UNFETCHABLE_SENTINEL
         digest.update(spec.name.encode("utf-8"))
         digest.update(b"\x1f")
+        # The "docs as of" date is part of what an answer shows (ADR-0005 §6), so
+        # a new date invalidates cached answers exactly as a text edit does.
+        digest.update((spec.content_as_of.isoformat() if spec.content_as_of else "").encode())
+        digest.update(b"\x1f")
         digest.update(text.encode("utf-8"))
         digest.update(b"\x1e")
     return f"sha256:{digest.hexdigest()}"

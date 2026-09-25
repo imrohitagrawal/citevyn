@@ -9,7 +9,7 @@ export interface DatedSourceGroup {
   title: string;
   url: string;
   markers: string[];
-  /** The document's fetch date, ISO `YYYY-MM-DD`, when the backend knew it. */
+  /** When our copy of the source was last updated, ISO `YYYY-MM-DD`, if known. */
   asOf?: string;
 }
 

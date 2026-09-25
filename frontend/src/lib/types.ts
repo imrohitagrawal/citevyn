@@ -79,8 +79,8 @@ export interface Citation {
    */
   marker: number;
   /**
-   * When the backend last fetched this citation's document, ISO `YYYY-MM-DD`
-   * (ADR-0005 §6). `null` when unknown; absent on answers cached before it existed.
+   * The day CiteVyn's copy of this citation's source was last updated, ISO
+   * `YYYY-MM-DD` (ADR-0005 §6; `documents.content_as_of`). `null` when unknown; absent on answers cached before it existed.
    */
   docs_as_of?: string | null;
 }

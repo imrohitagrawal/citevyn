@@ -366,7 +366,9 @@ gate. Re-promoting the already-active index is a no-op and is never blocked.
 **What happens automatically (no manual cache flush needed):**
 
 - `IndexVersion.source_version_hash` is derived from the **bytes of the source
-  docs** (`app.worker.cli.content_version_hash`), so any edit changes it. The
+  docs** and each source's **"docs as of" date** (`SourceSpec.content_as_of`,
+  ADR-0005 §6) (`app.worker.cli.content_version_hash`), so any edit or new date
+  changes it. The
   answer-cache key includes that hash, so cached answers built from the old text
   stop being reachable. There is no constant to bump.
 - A re-ingest **replaces** the source's chunks and exact terms rather than
