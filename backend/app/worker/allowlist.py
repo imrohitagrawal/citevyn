@@ -34,6 +34,7 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,15 @@ class SourceSpec:
     # ingest them (#92). Defaults to "" so ad-hoc ``SourceSpec`` constructions
     # (tests) need not supply it.
     source_url: str = ""
+    # "Docs as of" (ADR-0005 §6): the day this repo's copy of the source was last
+    # updated, and the SHA-256 of that exact text. The sources are hand-written
+    # summaries shipped in the repo, not fetched live, so the ingest run's clock
+    # would say "today" about months-old content; this date is the honest one.
+    # tests/test_source_content_dates.py fails when the file changes and these two
+    # are not updated with it. None for ad-hoc specs (tests), which then carry no
+    # date rather than an invented one.
+    content_as_of: date | None = None
+    content_sha256: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="app/worker/sources/claude_api.md",
         source_url="https://docs.anthropic.com/en/api/overview",
+        content_as_of=date(2026, 7, 18),
+        content_sha256="4480285f11b4ad1694dd2ca3623b51075b8a410d777d7c0773d4dee9500e33cf",
     ),
     SourceSpec(
         name="claude_code",
@@ -106,6 +118,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="app/worker/sources/claude_code.md",
         source_url="https://docs.anthropic.com/en/docs/claude-code/overview",
+        content_as_of=date(2026, 7, 19),
+        content_sha256="5ad05394cad5122cdada82bbb3a900908f510ec228ebe43cb4d0187ccd4ab11c",
     ),
     SourceSpec(
         name="codex",
@@ -114,6 +128,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="app/worker/sources/codex.md",
         source_url="https://developers.openai.com/codex/",
+        content_as_of=date(2026, 7, 19),
+        content_sha256="e7daf653f771c8687d68c8f39c6291302c1a94598811741afaa0b0b36b4c9b5b",
     ),
     SourceSpec(
         name="gemini_api",
@@ -122,6 +138,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="app/worker/sources/gemini_api.md",
         source_url="https://ai.google.dev/gemini-api/docs",
+        content_as_of=date(2026, 7, 18),
+        content_sha256="be6a4b89de4d23fc99c1a846cc649c5fad565092c4f2db51a5bc97ab9a03e663",
     ),
     SourceSpec(
         name="citevyn",
@@ -135,6 +153,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         # citevyn.com/app could later be squatted). TODO(deploy): confirm the
         # final /about route once CiteVyn is hosted.
         source_url="/about",
+        content_as_of=date(2026, 9, 1),
+        content_sha256="9252d5784d81d2ab21a066d27f0d5565b7d00911b8440880987676544acdcbef",
     ),
     SourceSpec(
         # Cross-cutting AI concepts/glossary (#112 follow-up): lets CiteVyn answer
@@ -148,6 +168,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         fetcher="local",
         location="app/worker/sources/concepts.md",
         source_url="/about",
+        content_as_of=date(2026, 9, 25),
+        content_sha256="9c60b7d3bda7c1f62e831489277adb36f528a53d1a89a522ad8ed9475dfd98ac",
     ),
 )
 

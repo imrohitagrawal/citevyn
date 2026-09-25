@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 import { parseAnswer, type Span } from "../lib/answerFormat";
+import { answerMarkdown, formatDocsDate, oldestDate } from "../lib/answerMarkdown";
 import type { Source } from "../data/knowledgeBase";
 import { isSafeHref } from "../lib/safeHref";
 
@@ -22,6 +23,8 @@ export interface SourceGroup {
   url: string;
   /** Every marker this document backs, in numeric order. */
   markers: string[];
+  /** The document's fetch date (the oldest, if its citations disagree). */
+  asOf?: string;
 }
 
 /**
@@ -39,8 +42,9 @@ export function groupSources(sources: Source[]): SourceGroup[] {
     const existing = byKey.get(key);
     if (existing) {
       if (!existing.markers.includes(src.n)) existing.markers.push(src.n);
+      existing.asOf = oldestDate([existing.asOf, src.asOf]);
     } else {
-      byKey.set(key, { key, title: src.title, url: src.url, markers: [src.n] });
+      byKey.set(key, { key, title: src.title, url: src.url, markers: [src.n], asOf: src.asOf });
     }
   }
   const groups = [...byKey.values()];
@@ -54,6 +58,7 @@ function renderSpans(
   activeKey: string | null,
   onChipFocus: (key: string | null) => void,
   keyPrefix: string,
+  copy: (text: string) => void,
 ) {
   return spans.map((span, i) => {
     const k = `${keyPrefix}-${i}`;
@@ -61,11 +66,23 @@ function renderSpans(
       // Recurse: markers and code inside bold keep working.
       return (
         <strong key={k}>
-          {renderSpans(span.spans, groupFor, activeKey, onChipFocus, `${k}b`)}
+          {renderSpans(span.spans, groupFor, activeKey, onChipFocus, `${k}b`, copy)}
         </strong>
       );
     }
-    if (span.kind === "code") return <code key={k} className="answer-code">{span.value}</code>;
+    if (span.kind === "code") {
+      // Click to copy (ADR-0005 §6). A button, so it is reachable and operable by
+      // keyboard; the <code> inside keeps the text semantics and the styling.
+      return (
+        // No aria-label: it would REPLACE the code in the sentence a screen reader
+        // reads ("Run, Copy code: x, now"). The name is the code itself plus a
+        // hidden "(copy)".
+        <button key={k} type="button" className="answer-code-copy" onClick={() => copy(span.value)}>
+          <code className="answer-code">{span.value}</code>
+          <span className="sr-only"> (copy)</span>
+        </button>
+      );
+    }
     if (span.kind === "marker") {
       const group = groupFor(span.value);
       // A marker with no matching card: validation can drop a citation, and
@@ -160,6 +177,21 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   const activeKey = focusedKey ?? hoveredKey;
+  // Announced through the aria-live region below, so a screen reader hears
+  // the result of a copy; visible text alone would only reach sighted users.
+  const [copyStatus, setCopyStatus] = useState("");
+  const copy = (value: string) => {
+    // Cleared first so a repeat copy re-announces ("Copied" -> "Copied" is no
+    // change to a live region). Wrapped so a MISSING clipboard (plain http, some
+    // iframes) lands in the failure branch instead of throwing.
+    setCopyStatus("");
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(value))
+      .then(
+        () => setCopyStatus("Copied"),
+        () => setCopyStatus("Copy failed"),
+      );
+  };
 
   const groups = groupSources(sources);
   const byMarker = new Map<string, SourceGroup>();
@@ -167,6 +199,7 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
   const groupFor = (marker: string) => byMarker.get(marker);
 
   const blocks = parseAnswer(text);
+  const docsAsOf = oldestDate(groups.map((g) => g.asOf));
 
   return (
     <>
@@ -176,13 +209,13 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
             <ul key={bi} className="answer-list">
               {block.items.map((item, ii) => (
                 <li key={ii}>
-                  {renderSpans(item, groupFor, activeKey, setFocusedKey, `${bi}-${ii}`)}
+                  {renderSpans(item, groupFor, activeKey, setFocusedKey, `${bi}-${ii}`, copy)}
                 </li>
               ))}
             </ul>
           ) : (
             <span key={bi} className="answer-para">
-              {renderSpans(block.spans, groupFor, activeKey, setFocusedKey, `${bi}`)}
+              {renderSpans(block.spans, groupFor, activeKey, setFocusedKey, `${bi}`, copy)}
             </span>
           ),
         )}
@@ -206,9 +239,28 @@ export function AnswerBody({ text, streaming, sources, showLegend = false }: Ans
               <div className="source-info">
                 <div className="source-title">{g.title}</div>
                 <div className="source-url">{g.url}</div>
+                {g.asOf && <div className="source-asof">Source as of {formatDocsDate(g.asOf)}</div>}
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {!streaming && (
+        <div className="answer-meta">
+          {docsAsOf && <span className="docs-asof">Docs as of {formatDocsDate(docsAsOf)}</span>}
+          <button
+            type="button"
+            className="answer-copy"
+            onClick={() => copy(answerMarkdown(text, groups))}
+          >
+            Copy as Markdown
+          </button>
+          {/* aria-live, not role="status": the chat already owns the page's one
+              status region (#356), and a second role would make it ambiguous. */}
+          <span aria-live="polite" className="sr-only" data-testid="copy-status">
+            {copyStatus}
+          </span>
         </div>
       )}
     </>

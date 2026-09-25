@@ -92,4 +92,5 @@ def _to_chunk(term: ExactTerm, chunk: Chunk, doc: Document) -> RetrievedChunk:
         # ``Document.index_version ==`` predicate in ``retrieve`` above is skipped
         # entirely.
         index_version=doc.index_version,
+        content_as_of=doc.content_as_of,
     )

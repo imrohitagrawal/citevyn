@@ -687,6 +687,7 @@ def _to_evidence(
         # (#352). This projection names every field explicitly, so a new field
         # that is not listed here silently becomes ``None`` downstream.
         index_version=chunk.index_version,
+        content_as_of=chunk.content_as_of,
         retrieval_type=retrieval_type,
         rank=rank,
     )

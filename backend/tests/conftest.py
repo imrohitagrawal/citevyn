@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Generator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -338,6 +338,8 @@ async def seed_catalog(
             identity_checksum=f"sha256:{spec['product_area']}",
             last_fetched_at=now,
             last_indexed_at=now,
+            # As a real ingest stamps it from SourceSpec.content_as_of (ADR-0005 §6).
+            content_as_of=date(2026, 7, 18),
             status=DocumentStatus.active,
         )
         session.add(doc)
@@ -593,6 +595,7 @@ async def seed_evidence_chunks(
                     identity_checksum=f"sha256:{hit.document_id}",
                     last_fetched_at=now,
                     last_indexed_at=now,
+                    content_as_of=hit.content_as_of,
                     status=DocumentStatus.active,
                 )
             )

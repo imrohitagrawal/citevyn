@@ -274,6 +274,30 @@ def test_migration_0008_users_identity_columns_round_trips(
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
 
 
+def test_migration_0014_documents_content_as_of_round_trips(alembic_config: AlembicConfig) -> None:
+    """0014 (``documents.content_as_of``, ADR-0005 §6 freshness stamp) adds one
+    nullable DATE column and the downgrade removes it. RED if the column is
+    missing at head, non-nullable (rows ingested before 0014 have no date), or
+    survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.connect() as connection:
+        columns = {
+            row[1]: row for row in connection.exec_driver_sql("PRAGMA table_info(documents)").all()
+        }
+    assert "content_as_of" in columns
+    assert columns["content_as_of"][3] == 0, "must be nullable"
+    assert columns["content_as_of"][2].upper() == "DATE"
+
+    alembic_downgrade(alembic_config, "0013")
+    with engine.connect() as connection:
+        columns = {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(documents)").all()
+        }
+    assert "content_as_of" not in columns
+    assert "last_fetched_at" in columns  # partner: the table itself survived
+
+
 def test_migration_0013_magic_link_verified_at_round_trips(alembic_config: AlembicConfig) -> None:
     """0013 (``auth_sessions.magic_link_verified_at``, ADR-0004 PR 15 / #293)
     adds one nullable column and the downgrade removes it -- in batch mode,

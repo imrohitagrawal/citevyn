@@ -59,7 +59,9 @@ describe("AnswerBody — hostile input is never markup", () => {
   it.each(hostile)("renders %s as visible text and creates no element", (_l, payload) => {
     const { container } = render(<AnswerBody text={payload} sources={[]} />);
     expect(container.querySelectorAll("script, img, iframe, svg")).toHaveLength(0);
-    expect(container.textContent).toBe(payload);
+    // The answer body, not the whole container: the container also holds the
+    // "Copy as Markdown" control (ADR-0005 §6), whose label is not answer text.
+    expect(container.querySelector(".message-body")?.textContent).toBe(payload);
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
   });
 

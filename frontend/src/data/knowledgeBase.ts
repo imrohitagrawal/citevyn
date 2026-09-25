@@ -17,6 +17,8 @@ export interface Source {
   n: string;
   title: string;
   url: string;
+  /** The document's fetch date, ISO `YYYY-MM-DD`, when known (ADR-0005 §6). */
+  asOf?: string;
 }
 
 export interface KBEntry {

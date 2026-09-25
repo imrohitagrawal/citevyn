@@ -12,6 +12,7 @@ rows so the gate glue runs without pgvector.
 
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -50,11 +51,13 @@ def _chunk(area: str):
 def _doc(area: str):
     # ``index_version`` is read by ``VectorRetriever`` onto every ``RetrievedChunk``
     # (#352), so the double has to carry it like the real ``documents`` row does.
+    # Same for ``content_as_of``, read for the "docs as of" stamp (ADR-0005 §6).
     return SimpleNamespace(
         source_name=area,
         title=f"{area} doc",
         source_url=f"https://x/{area}",
         index_version="v1",
+        content_as_of=date(2026, 9, 1),
     )
 
 
@@ -169,3 +172,16 @@ async def test_the_vector_arm_carries_the_index_version_it_retrieved_from() -> N
 
     assert hits, "precondition: the mocked dialect let the arm actually build hits"
     assert {h.index_version for h in hits} == {"v1"}, [h.index_version for h in hits]
+
+
+async def test_the_vector_arm_carries_each_documents_content_date() -> None:
+    """ADR-0005 §6 freshness stamp, vector arm. Same reason as the index_version
+    test above: this module's mocked dialect is the only hermetic place the arm
+    builds hits. RED if ``VectorRetriever`` stops setting ``content_as_of``."""
+    rows = _rows([("codex", 0.60), ("claude_api", 0.30)])
+    vr = VectorRetriever(_mock_session(rows), embedder=_FakeEmbedder(), global_confidence=None)
+
+    hits = await vr.retrieve("q", product_area=None, limit=10)
+
+    assert hits, "precondition: the mocked dialect let the arm actually build hits"
+    assert {h.content_as_of for h in hits} == {date(2026, 9, 1)}

@@ -78,6 +78,11 @@ export interface Citation {
    * marker pointing at a card that does not exist.
    */
   marker: number;
+  /**
+   * The day CiteVyn's copy of this citation's source was last updated, ISO
+   * `YYYY-MM-DD` (ADR-0005 §6; `documents.content_as_of`). `null` when unknown; absent on answers cached before it existed.
+   */
+  docs_as_of?: string | null;
 }
 
 /**

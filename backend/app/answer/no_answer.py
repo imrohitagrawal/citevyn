@@ -125,6 +125,8 @@ def build_no_answer_response(
         "message_id": message_id,
         "answer": copy,
         "citations": [],
+        # No source, so no date to claim (ADR-0005 §6 freshness stamp).
+        "docs_as_of": None,
         "domain": domain_value,
         "intent": intent.value,
         "confidence": "none",
