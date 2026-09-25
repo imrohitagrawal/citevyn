@@ -17,7 +17,13 @@
     "guard saves your tree at the moment you try to throw it away, which means it",
     "saves the good work WITH the line you deliberately broke. A checkpoint after",
     "every edit means the one taken just before the break holds the work without",
-    "it \u2014 and you never had to decide, in advance, that the moment mattered."
+    "it \u2014 and you never had to decide, in advance, that the moment mattered.",
+    "",
+    "Each command tests for its script before running it. That is not defensive",
+    "padding: the scripts live in the repo, so on any branch or worktree that",
+    "predates them the hook would otherwise fail and BLOCK every Bash call. It",
+    "happened while this was being written \u2014 switching back to main made the",
+    "guard unrunnable and locked the session out of its own fix."
   ],
   "PreToolUse": [
     {
@@ -26,7 +32,7 @@
         {
           "type": "command",
           "statusMessage": "Checking for a discard of uncommitted work",
-          "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\""
+          "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\""
         }
       ]
     }
@@ -38,7 +44,7 @@
         {
           "type": "command",
           "statusMessage": "Checkpointing the tree",
-          "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\""
+          "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\""
         }
       ]
     }
