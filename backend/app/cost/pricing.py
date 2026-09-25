@@ -39,7 +39,7 @@ from decimal import Decimal
 
 # Verified against provider pricing pages on 2026-07-20. Re-check when adding a
 # model; a stale rate here quietly skews every budget decision downstream.
-_PRICES_VERIFIED_ON = "2026-07-20"
+_PRICES_VERIFIED_ON = "2026-09-25"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,10 +69,15 @@ _PRICE_BOOK: dict[tuple[str, str], TokenPrice] = {
     ("router", "openai/gpt-4o-mini"): TokenPrice(Decimal("0.15"), Decimal("0.60")),
     ("router", "openai/gpt-4o"): TokenPrice(Decimal("2.50"), Decimal("10.00")),
     ("router", "google/gemini-2.5-flash"): TokenPrice(Decimal("0.30"), Decimal("2.50")),
-    # Gemini direct. ``gemini-flash-latest`` is an ALIAS that tracks the current
-    # Flash GA model, so its price can change under us without the model string
-    # changing — priced at the current Flash rate and re-checked on the date above.
-    ("gemini", "gemini-flash-latest"): TokenPrice(Decimal("0.30"), Decimal("2.50")),
+    # Gemini direct. The configured default (Settings.gemini_model), pinned (#492).
+    # Google lists 3.6 Flash at $0.75/$3.75 until 2026-12-31 and $1.50/$7.50 from
+    # 2027-01-01. Priced at the 2027 rate on purpose: over-counting until then only
+    # trips the daily cap early; the promotional rate would under-count from January.
+    #
+    # NO ALIAS is priced. ``gemini-flash-latest`` was, at the 2.5 rate, and stayed
+    # there after Google moved it to 3.5 Flash (~4x the price). An alias left out of
+    # the book lands in ``unpriced_calls``, which is the honest alarm.
+    ("gemini", "gemini-3.6-flash"): TokenPrice(Decimal("1.50"), Decimal("7.50")),
     ("gemini", "gemini-2.5-flash"): TokenPrice(Decimal("0.30"), Decimal("2.50")),
     # Anthropic direct. Wired in the factory but not the configured provider today.
     ("anthropic", "claude-opus-4-8"): TokenPrice(Decimal("5.00"), Decimal("25.00")),

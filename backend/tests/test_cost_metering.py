@@ -24,7 +24,7 @@ from app.core.config import Settings
 from app.cost.call_site import CallSite, call_site, get_call_site
 from app.cost.meter import build_call
 from app.cost.metered import MeteredLLMClient
-from app.cost.pricing import known_models, price_for
+from app.cost.pricing import TokenPrice, known_models, price_for
 from app.llm.factory import build_llm_client, get_llm_client, reset_llm_client
 from app.llm.stub import StubLLMClient
 from app.llm.types import LLMResult
@@ -119,6 +119,148 @@ def test_every_configured_default_model_is_priced() -> None:
     assert price_for(provider="gemini", model=s.gemini_model) is not None, (
         f"default gemini_model {s.gemini_model!r} is not in the price book"
     )
+
+
+def test_every_configured_default_model_has_an_EXACT_price_entry() -> None:
+    """#492: a default must hit the book by its exact key, and must not be an alias.
+
+    ``price_for`` also resolves variants (dated snapshots, routing suffixes), so
+    "is priced" alone would pass for a model the book only matches by accident.
+    An alias such as ``gemini-flash-latest`` can move to a different model at a
+    different price with no change here — the 2.5 rate stayed on it after Google
+    moved it to 3.5 Flash, at about 4x the price. So the default is pinned and
+    must be a literal key.
+
+    Turns red if: the gemini_model default goes back to an alias, or its exact
+    entry is removed from ``_PRICE_BOOK``.
+    """
+    from app.core.config import Settings
+
+    exact_keys = set(known_models())
+    defaults = {
+        ("gemini", Settings.model_fields["gemini_model"].default),
+        ("router", Settings.model_fields["openrouter_model"].default),
+    }
+    for provider, model in defaults:
+        assert (provider, model) in exact_keys, (
+            f"default {provider}/{model!r} has no EXACT price entry"
+        )
+        assert not model.endswith("-latest"), (
+            f"default {model!r} is a moving alias; pin an explicit version"
+        )
+
+
+def test_no_moving_alias_is_priced() -> None:
+    """#492: an alias in the book prices whatever it points at today at a stale rate.
+
+    Unpriced is the honest outcome for an alias: the call lands in
+    ``unpriced_calls``, which is the operator's alarm.
+
+    Turns red if: an entry ending in ``-latest`` is added back to ``_PRICE_BOOK``.
+    """
+    aliases = [(p, m) for p, m in known_models() if m.endswith("-latest")]
+    assert aliases == []
+    # Partner: the check above would pass on an empty book, so prove the book
+    # still prices the model we pinned.
+    assert ("gemini", "gemini-3.6-flash") in known_models()
+
+
+def test_pinned_gemini_flash_is_priced_at_its_2027_list_rate() -> None:
+    """#492: gemini-3.6-flash lists $0.75/$3.75 per 1M until 2026-12-31 and
+    $1.50/$7.50 from 2027-01-01 (ai.google.dev/gemini-api/docs/pricing, read
+    2026-09-25). Priced at the HIGHER rate: over-counting until the year ends
+    makes the daily cap trip early, which is safe; under-counting from January
+    would let real spend pass the cap, which is the failure this book prevents.
+
+    Turns red if: the entry is priced at the 2026 promotional rate or the 2.5 rate.
+    """
+    price = price_for(provider="gemini", model="gemini-3.6-flash")
+    assert price == TokenPrice(Decimal("1.50"), Decimal("7.50"))
+
+
+# Production kwargs that satisfy the OTHER production guards, so only the pricing
+# check is exercised (mirrors test_settings_slice8._prod_kwargs).
+_PROD_LLM: dict[str, object] = {
+    "environment": "production",
+    "llm_provider": "gemini",
+    "embedding_provider": "gemini",
+    "gemini_api_key": "gk-test",
+    "openrouter_api_key": "or-test",
+    "admin_api_key": "a-strong-admin-secret",
+    "public_client_token": "a-strong-demo-secret",
+    "_env_file": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("gemini_model", "gemini-flash-latest"),
+        ("openrouter_model", "openai/not-a-priced-model"),
+        ("embedding_model", "gemini-embedding-999"),
+    ],
+)
+def test_production_refuses_to_start_with_an_unpriced_model(field: str, value: str) -> None:
+    """#492 review: the daily cap sums recorded cost, and an unpriced call records
+    $0. So an unpriced model in production has NO spend cap at all, not a weak one.
+    Fail closed at startup instead.
+
+    Turns red if: the production pricing check is removed or stops covering a field.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="no price"):
+        Settings(**{**_PROD_LLM, field: value})  # type: ignore[arg-type]
+
+
+def test_production_starts_with_the_priced_defaults() -> None:
+    """Partner to the refusal test: without it, a check that rejects EVERY
+    production config would pass. Turns red if: the check rejects a priced model."""
+    s = Settings(**_PROD_LLM)  # type: ignore[arg-type]
+    assert s.gemini_model == "gemini-3.6-flash"
+
+
+def test_an_unpriced_model_is_still_allowed_outside_production() -> None:
+    """Local work may point at any model; only production must be capped.
+    Turns red if: the check fires in every environment."""
+    s = Settings(llm_provider="gemini", environment="local", gemini_model="gemini-flash-latest")
+    assert s.gemini_model == "gemini-flash-latest"
+
+
+def test_an_unused_openrouter_model_does_not_block_production() -> None:
+    """With no OpenRouter key the factory builds no fallback, so its model is never
+    called and cannot spend. Turns red if: the check ignores whether the key is set."""
+    s = Settings(
+        **{**_PROD_LLM, "openrouter_api_key": None, "openrouter_model": "x/unpriced"}  # type: ignore[arg-type]
+    )
+    assert s.openrouter_model == "x/unpriced"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "Anthropic", "GEMINI", "claude"])
+def test_production_refuses_an_unknown_llm_provider(provider: str) -> None:
+    """#492 review: the factory falls through to the STUB for any provider name it
+    does not know, so ``openrouter`` (the spelling prod.env.example used to give)
+    or ``Anthropic`` served stub answers in production with nothing to catch it.
+
+    Turns red if: production accepts a provider name the factory does not build.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="is not allowed"):
+        Settings(**{**_PROD_LLM, "llm_provider": provider})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("provider", ["gemini", "router"])
+def test_production_accepts_every_provider_the_factory_builds(provider: str) -> None:
+    """Partner: the allowlist must not refuse a real provider.
+    Turns red if: a provider the factory builds is dropped from the allowlist."""
+    assert Settings(**{**_PROD_LLM, "llm_provider": provider}).llm_provider == provider  # type: ignore[arg-type]
+
+
+def test_production_accepts_anthropic_with_its_key() -> None:
+    """Partner for the third real provider. Turns red if: anthropic is refused."""
+    s = Settings(**{**_PROD_LLM, "llm_provider": "anthropic", "anthropic_api_key": "ak"})  # type: ignore[arg-type]
+    assert s.llm_provider == "anthropic"
 
 
 def test_known_models_is_non_empty_and_sorted() -> None:

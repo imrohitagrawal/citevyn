@@ -162,6 +162,12 @@ def _build_gemini_with_fallback(settings: Settings) -> LLMClient:
         api_base=settings.gemini_api_base,
         timeout_seconds=settings.gemini_timeout_seconds,
         thinking_budget=settings.gemini_thinking_budget,
+        thinking_level=(
+            None
+            if settings.gemini_thinking_level == "use_budget"
+            else settings.gemini_thinking_level
+        ),
+        thinking_headroom_tokens=settings.gemini_thinking_headroom_tokens,
     )
     if not has_router:
         return gemini
