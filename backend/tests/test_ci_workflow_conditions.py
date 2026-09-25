@@ -20,6 +20,12 @@ from typing import Any
 import pytest
 import yaml
 
+# One source of truth for "is this `continue-on-error:` value anything but a
+# literal false?". GitHub accepts a boolean, the STRING "true"/"false", or an
+# expression, so `value is True` misses two of the three forms — reimplementing
+# that here would be a second, weaker copy.
+from tests.test_gating_workflows import _disables_the_gate
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
@@ -145,6 +151,154 @@ def test_postgres_migrations_runs_on_push_and_still_guards_forks() -> None:
     assert fork_guard in condition, (
         "the fork guard must be kept — fork PRs must not get the Postgres service"
     )
+
+
+def test_the_postgres_job_hands_pytest_a_real_database() -> None:
+    """#449: one deleted env key turns the whole ``postgres`` suite into skips.
+
+    ``jobs.postgres-migrations`` ends with ``uv run pytest -m postgres -v``, and
+    every test that selects reads ``CITEVYN_PG_TEST_URL`` through a module-level
+    ``skipif``. Drop the key and the job reports green on ``15 skipped`` —
+    measured at ``d4763d6``, exit 0.
+
+    This is a YAML PIN, not a bite proof: it reads the workflow file, so it
+    cannot see the job's real environment. What it buys is WHERE the edit fails —
+    inside the fast, required ``pytest + lint`` job on the PR that makes it,
+    rather than in the Postgres job whose only symptom is a green run. The
+    assertion the job itself carries is
+    ``tests/test_postgres_suite_is_not_vacuous.py``.
+
+    Turns red if: ``CITEVYN_PG_TEST_URL`` or ``CITEVYN_DATABASE_URL`` is removed or
+    renamed on the job's ``env:``, or either stops being a ``postgresql`` URL; the
+    job sets ``CI`` at all (that is the input the vacuity guard keys on, and GitHub
+    only sets it as a default); a STEP declares an ``env:`` overriding any of those
+    three (a step-level value beats the job map, so it can empty the URL for the one
+    step that runs the tests while the job map still looks correct); the pytest step
+    stops selecting ``-m postgres``, or gains ``|| true`` / ``--ignore`` /
+    ``--deselect`` / ``-k`` / ``continue-on-error``; or a SECOND pytest step appears
+    — including the ``--junit-xml`` outcome check this file's sibling recommends,
+    which reddens deliberately so the rules here are not left reading one of two.
+    """
+    job = _load(WORKFLOW_DIR / "ci.yml")["jobs"]["postgres-migrations"]
+    env = job.get("env") or {}
+
+    # ``CITEVYN_PG_TEST_URL`` is what the pytest ``postgres`` marker gates on;
+    # ``CITEVYN_DATABASE_URL`` is what ``db/env.py`` reads for alembic. They are
+    # separate keys pointed at the same service, so losing only the first leaves
+    # the migrations running for real while every integration test skips — the
+    # failure mode that looks most like health.
+    for key in ("CITEVYN_PG_TEST_URL", "CITEVYN_DATABASE_URL"):
+        assert key in env, (
+            f"ci.yml:postgres-migrations no longer sets {key} on its `env:`. "
+            "Without CITEVYN_PG_TEST_URL every `postgres`-marked test skips and "
+            "the required `alembic + postgres integration tests` context reports "
+            "green having run nothing; without CITEVYN_DATABASE_URL alembic has "
+            f"no target. Got: {sorted(env)}"
+        )
+        assert str(env[key]).startswith("postgresql"), (
+            f"ci.yml:postgres-migrations sets {key} to {env[key]!r}, which is not a postgresql URL"
+        )
+
+    # `CI` is what tests/test_postgres_suite_is_not_vacuous.py keys its whole
+    # decision on, and GitHub only sets it as a DEFAULT. `CI: "false"` here — or on
+    # the pytest step — turns that guard into a permanent no-op with both URLs
+    # present and this rule otherwise green. Traced by an adversarial review of
+    # #449. There is no legitimate reason for this job to set `CI` at all.
+    assert "CI" not in env, (
+        f"ci.yml:postgres-migrations sets `CI: {env.get('CI')!r}` on its `env:`. "
+        "That overrides the runner default the vacuity guard in "
+        "tests/test_postgres_suite_is_not_vacuous.py reads, so the guard would pass "
+        "with no database. Remove it."
+    )
+
+    steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    # Same three keys, one level down. A step-level `env:` beats the job-level map,
+    # and `CITEVYN_PG_TEST_URL:` with an empty/null value would satisfy every
+    # assertion above while the step itself runs without a usable database.
+    for step in steps:
+        step_env = step.get("env") or {}
+        overrides = sorted(set(step_env) & {"CI", "CITEVYN_PG_TEST_URL", "CITEVYN_DATABASE_URL"})
+        assert not overrides, (
+            f"step {str(step.get('name') or step.get('uses'))!r} in "
+            f"ci.yml:postgres-migrations declares a step-level `env:` overriding "
+            f"{overrides}. A step-level value beats the job-level map, so this can "
+            "empty or unset the database URL — or flip `CI` — for the step that "
+            "actually runs the tests, with the job-level `env:` still looking correct."
+        )
+    pytest_steps = [s for s in steps if "pytest" in str(s.get("run") or "")]
+    assert len(pytest_steps) == 1, (
+        f"expected exactly one pytest step in ci.yml:postgres-migrations, found "
+        f"{len(pytest_steps)}; this rule would otherwise be reading the wrong one. "
+        "Adding a second pytest step — a `--junit-xml` outcome check, say — reddens "
+        "this deliberately: the rules below would otherwise silently read only one "
+        "of them."
+    )
+    step = pytest_steps[0]
+    command = str(step["run"])
+    assert "-m postgres" in command, (
+        f"ci.yml:postgres-migrations's pytest step runs {command!r}, which no "
+        "longer selects `-m postgres`. The marker is opt-in, so nothing in "
+        "test_pg_integration.py would run."
+    )
+    # Providing the database is not enough if the command throws the result away.
+    # `|| true` makes the step exit 0 whatever pytest returns, and `--ignore=` /
+    # `--deselect` / `-k` narrow the selection to nothing while `-m postgres` is
+    # still literally present. Found by an adversarial review of #449: the earlier
+    # version of this rule asserted only that `-m postgres` appeared.
+    for idiom in ("|| true", "|| :", "; true", "--ignore", "--deselect", "-k "):
+        assert idiom not in command, (
+            f"ci.yml:postgres-migrations's pytest step runs {command!r}, which "
+            f"contains {idiom!r}. That either swallows pytest's exit code or "
+            "narrows the selection, so the required `alembic + postgres integration "
+            "tests` context goes green over nothing."
+        )
+    assert not _disables_the_gate(step.get("continue-on-error", False)), (
+        "ci.yml:postgres-migrations's pytest step sets `continue-on-error: "
+        f"{step.get('continue-on-error')!r}`. The job as a whole is exempt from "
+        "test_gating_workflows.py's defusing rule (for its deliberate job-level "
+        "`if:`), so nothing else catches this."
+    )
+
+
+def test_the_judged_eval_still_drives_the_whole_golden_set() -> None:
+    """#450's gate only bites if the release command still runs every case, loudly.
+
+    `answer-quality-eval` is the ONLY job that judges, so it is the only place the
+    prompt-injection oracle executes — and it is NOT a required status context
+    (checked against the live protection list on 2026-09-24), so it gates the
+    release TAG, not a merge. Two flags would disarm it silently:
+
+    * ``--ids`` is applied by ``run_eval_async`` BEFORE ``judgeable`` is computed,
+      so an id list excluding ``adv_injection_*`` drives ``injection.declared`` to
+      0 and the new gate clause never fires;
+    * ``--quiet`` suppresses the whole summary block, including the injection line
+      whose entire purpose is to be visible in the CI log.
+
+    Turns red if: ``--postgres`` leaves the release command (the injection cases
+    are ``postgres_only``, so a hermetic judged run drives none of them), or
+    ``--ids`` / ``--quiet`` is added to it.
+    """
+    job = _load(WORKFLOW_DIR / "ci.yml")["jobs"]["answer-quality-eval"]
+    steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)]
+    runner_steps = [s for s in steps if "tests.eval.runner" in str(s.get("run") or "")]
+    assert len(runner_steps) == 1, (
+        f"expected exactly one eval-runner step in ci.yml:answer-quality-eval, found "
+        f"{len(runner_steps)}"
+    )
+    command = " ".join(str(runner_steps[0]["run"]).split())
+    assert "--postgres" in command, (
+        f"the judged eval runs {command!r} without `--postgres`. Both injection "
+        "cases are `postgres_only`, so a hermetic judged run drives neither and the "
+        "oracle is switched off with the gate silent."
+    )
+    for flag in ("--ids", "--quiet"):
+        assert flag not in command, (
+            f"the judged eval runs {command!r}, which contains {flag!r}. `--ids` "
+            "narrows the case list before `judgeable` is computed, so it can drop "
+            "the injection cases with `declared` going to 0 and the gate staying "
+            "silent; `--quiet` suppresses the summary block the injection line "
+            "lives in."
+        )
 
 
 def test_judged_eval_remains_the_release_gate() -> None:
