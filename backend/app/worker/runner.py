@@ -209,6 +209,15 @@ class IngestionRunner:
 
             self._set_stage(session, job, JobStage.chunking)
             drafts = chunk_document(parsed, source=source)
+            if not drafts:
+                # Checked HERE, before ``_materialize_chunks`` deletes the
+                # previous generation, so a source that lost its ``## ``
+                # sections (e.g. re-levelled to ``###``) fails the job and
+                # keeps its old chunks instead of completing with none (#461).
+                raise ParseError(
+                    f"source {source.name!r} parsed to zero '## ' sections; "
+                    f"refusing to replace its existing chunks with none"
+                )
             await session.flush()
 
             self._set_stage(session, job, JobStage.embedding)

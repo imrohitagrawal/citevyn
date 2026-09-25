@@ -5,7 +5,7 @@
     "claude_api": "sha256:b8006b1fce684079397a1984d73cc0e131db4938698c3116f4671a4db3fba8ef",
     "claude_code": "sha256:b8175725013bf6826bbf68cfb038dbb60c39f95aec4b8f36083a62294ef7e70a",
     "codex": "sha256:eb5b38338d979170002fd829b129ca46d0f338c235b5e25baff3753698a5fd6a",
-    "concepts": "sha256:18fa2fe25cab22c8a0ccc7419b6fff0b8bce81b6940bbe32e0f2d40b3bb51378",
+    "concepts": "sha256:5b0e917057e36ab90baa1adb83c41496c5c3621abb308bebd23601e701853c50",
     "gemini_api": "sha256:85f3a60753bc5fb0cf1fc08a04ad6f9f64ed1ca9153f6bd86fa2ce1450f94529"
   }
 }

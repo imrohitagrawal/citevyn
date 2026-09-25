@@ -358,3 +358,56 @@ async def testdrive_does_not_advance_the_hash_on_a_source_subset(
     subset = [get_source("codex")]
     assert await drive(_runner("sha256:after"), sessionmaker_factory, subset, "v-local") == 0
     assert await _stamped_hash(sessionmaker_factory) == "sha256:before"
+
+
+@pytest.mark.asyncio
+async def testdrive_does_not_advance_the_hash_when_a_source_parses_to_zero_sections(
+    sessionmaker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#461 end to end: a zero-section source fails the run and publishes nothing.
+
+    Before the fix the runner reported that source ``completed`` with zero
+    chunks, so ``failed == 0`` held and ``drive`` advanced the fingerprint over a
+    corpus that had just lost a whole product.
+
+    Turns red when the zero-draft check in ``IngestionRunner.run`` is removed.
+    """
+    sources = list(MVP_SOURCES)
+    assert await drive(_runner("sha256:before"), sessionmaker_factory, sources, "v-local") == 0
+    async with sessionmaker_factory() as session:
+        codex_before = {
+            c.chunk_id
+            for c in (await session.execute(select(Chunk))).scalars().all()
+            if c.product_area == "codex"
+        }
+    assert codex_before, "codex produced no chunks on the clean run — nothing to protect"
+
+    class _RelevellingFetcher:
+        """Demotes codex's ``## `` sections to ``### `` — the #461 corpus edit."""
+
+        def __init__(self) -> None:
+            self._real = LocalFetcher()
+
+        def fetch(self, source: SourceSpec) -> str:
+            raw = self._real.fetch(source)
+            if source.name != "codex":
+                return raw
+            return "\n".join(
+                "#" + line if line.startswith("## ") else line for line in raw.splitlines()
+            )
+
+    exit_code = await drive(
+        _runner("sha256:after", fetcher=_RelevellingFetcher()),
+        sessionmaker_factory,
+        sources,
+        "v-local",
+    )
+    assert exit_code == 2
+    assert await _stamped_hash(sessionmaker_factory) == "sha256:before"
+    async with sessionmaker_factory() as session:
+        codex_after = {
+            c.chunk_id
+            for c in (await session.execute(select(Chunk))).scalars().all()
+            if c.product_area == "codex"
+        }
+    assert codex_after == codex_before
