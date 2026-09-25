@@ -71,3 +71,45 @@ The gap is real (useFocusTrap.ts:124-130 claims no interior Tab, so native order
 ### 14. Writing the SQL statement-count budget as first specified
 
 Three corrections are mandatory or it passes vacuously: retrieval_top_k defaults to 6 so evidence is capped regardless of corpus size (assert the two runs wrote DIFFERENT numbers of retrieved_evidence rows first); seed_catalog has no chunks-per-source parameter, so the doubled seed must be hand-built; and the cache-hit leg needs a fresh session_id plus an explicit `cache_hit is True` assertion, because the key is built from the memory-condensed retrieval_query and a same-session repeat can miss.
+
+## Access model: permanent rules (ADR-0005, owner, 2026-09-25)
+
+The entries above record what the 2026-09-16 audit chose not to test. This section is
+different: it records rules about access and payment that hold for every future change.
+They are decided. Disagree with the reason given in
+[ADR-0005](ADR/0005-access-model.md); do not route around it.
+
+### 15. No secret in the browser, ever
+
+Real secrets live only on the server. Anything compiled into the bundle is public, however
+it is named. The public client token was the last exception (it is also the fallback
+rate-limit salt), and ADR-0005 retires it once `CITEVYN_RATE_LIMIT_KEY_SALT` is set.
+
+### 16. Entitlement is checked on the server, from our table, on every protected request
+
+The frontend may show a tier; it never enforces one. A request never waits on Stripe:
+Stripe webhooks write our `memberships` table, and requests read that table.
+
+### 17. Six concerns, one mechanism each
+
+- **Authentication:** the session cookie.
+- **Entitlement:** the `memberships` table, fed by signed Stripe webhooks.
+- **Authorisation:** a capability on every route, plus ONE policy table saying which tier
+  (kind of account) has which capability.
+- **Quota:** per-user and per-plan metering on `provider_calls`, which records who paid.
+- **CSRF:** a `SameSite` cookie + an `Origin` check + a fixed request header.
+- **Abuse:** per-IP limits on the routes anyone can call without signing in, email
+  verification, a bot check at sign-up.
+
+A new feature reuses these. It does not add a second mechanism for any of them.
+
+### 18. Rejected designs
+
+- A secret token in the bundle: the bundle is public.
+- Entitlement checks in the frontend: the user controls the frontend.
+- Calling Stripe mid-request: it couples our uptime and latency to Stripe's.
+- An anonymous cookie or IP quota as the gate: neither identifies a person.
+- A silent BYOK→platform key fallback: it bills our key without the user knowing and hides
+  a broken key.
+- A cheaper BYOK plan: generation is not our only cost.
+- Pasted BYOK keys: OpenRouter's OAuth PKCE flow gives a key the user approved and can revoke.
