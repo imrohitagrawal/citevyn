@@ -277,8 +277,8 @@ def test_migration_0008_users_identity_columns_round_trips(
 def test_migration_0016_membership_tables_round_trip(alembic_config: AlembicConfig) -> None:
     """0016 (``memberships``, ``stripe_events``; ADR-0005 Phase 4) creates both
     tables and the downgrade drops them. RED if a table is missing at head, the
-    one-membership-per-account or one-row-per-subscription uniqueness is lost,
-    or a table survives the downgrade."""
+    one-row-per-subscription uniqueness is lost, account_id becomes unique (an
+    account may hold two subscriptions), or a table survives the downgrade."""
     alembic_upgrade(alembic_config, "head")
     engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
 
@@ -298,8 +298,8 @@ def test_migration_0016_membership_tables_round_trip(alembic_config: AlembicConf
             for ix in connection.exec_driver_sql("PRAGMA index_list('memberships')").all()
             if ix[2] == 1
         }
-    assert ("account_id",) in uniques
     assert ("stripe_subscription_id",) in uniques
+    assert ("account_id",) not in uniques
 
     alembic_downgrade(alembic_config, "0015")
     assert not ({"memberships", "stripe_events"} & tables())

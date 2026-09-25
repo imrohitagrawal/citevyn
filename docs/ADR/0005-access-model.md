@@ -167,8 +167,13 @@ for.
   above. A Stripe outage makes the webhook answer 503, nothing is logged, and
   Stripe's retry applies the event later.
 - The grace starts the first time the subscription is seen `past_due` and clears
-  whenever it is not. An account with two subscriptions keeps its paid one: an
-  unpaid second subscription never replaces it.
+  whenever it is not.
+- **One row per subscription** (a second review round): an account can hold two
+  subscriptions (two checkout tabs); one row per ACCOUNT let the wrong one decide
+  and left a paying customer on Free. Each subscription has its own row and grace;
+  the account is Pro if any is paid; the membership view lists them all, so paying
+  twice is visible. Handlers for one account are serialised by a row lock on the
+  user, and the subscription is read again inside the lock.
 
 **Owner checklist for Stripe (test mode first), before turning the model on:**
 1. Create the product "Pro" with a monthly ($9) and a yearly ($91) recurring price;
@@ -184,7 +189,10 @@ for.
 4. Failed payments: set the retry schedule and what happens after the last retry
    (`canceled` or `unpaid`); the 7-day grace runs from the first failure.
 5. Set `CITEVYN_STRIPE_SECRET_KEY` (a server-side secret; never in the browser).
-   Production refuses to start with the model on and any of these unset.
+   A restricted key needs **Subscriptions: read**, **Checkout Sessions: write** and
+   **Customer portal: write**. Production refuses to start with the model on and
+   any of these unset. A webhook that cannot read a subscription answers 503 and
+   logs `billing_webhook_stripe_read_failed`; watch for it.
 
 #### Quota: count answers, record who paid
 

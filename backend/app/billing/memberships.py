@@ -28,10 +28,16 @@ How events are applied (rewritten after review):
 * **Idempotent.** Each event id is applied once (``stripe_events``, which is also
   the audit log). A failed live fetch raises and logs nothing, so Stripe's retry
   is applied rather than dismissed as a duplicate.
-* **One paid subscription per account wins.** An account can end up with two
-  subscriptions (two checkout tabs). An event for a subscription that is not the
-  account's current one never replaces a paid current one (``superseded``); a
-  newly paid one does replace a lapsed one.
+* **One row per subscription; Pro if any is paid.** An account can hold two
+  subscriptions (two checkout tabs). The first design kept one row per account
+  and review showed, twice, that the wrong subscription could own it and leave a
+  paying customer on Free. Each subscription now has its own row and its own
+  grace; the account is Pro if any row is (``account_is_pro``). Double billing
+  stays visible in the rows.
+* **No lost update.** Two handlers for one account are serialised by a lock on
+  the account's user row (``SELECT ... FOR UPDATE`` on Postgres), and the
+  subscription is read from Stripe again INSIDE the lock, so a slower handler
+  holding an older read cannot overwrite a newer state.
 * **Only our own accounts.** The account id comes from subscription metadata WE
   set at checkout; a subscription naming no account we have grants nothing
   (``unmatched``).
@@ -39,7 +45,7 @@ How events are applied (rewritten after review):
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -74,6 +80,11 @@ def is_pro(membership: Membership | None, now: datetime) -> bool:
     if membership.status == "past_due" and grace is not None:
         return _aware(grace) > now
     return False
+
+
+def account_is_pro(memberships: Sequence[Membership], now: datetime) -> bool:
+    """An account is Pro if ANY of its subscriptions is (one row each)."""
+    return any(is_pro(m, now) for m in memberships)
 
 
 def _aware(value: datetime) -> datetime:
@@ -128,9 +139,7 @@ def _subscription_id(kind: str, obj: dict[str, Any]) -> str | None:
 def _store(m: Membership, sub: dict[str, Any], now: datetime, grace_days: int) -> None:
     m.status = str(sub.get("status") or "incomplete")
     m.billing_interval = _interval(sub)
-    sub_id: object = sub.get("id")
     customer: object = sub.get("customer")
-    m.stripe_subscription_id = sub_id if isinstance(sub_id, str) else None
     m.stripe_customer_id = customer if isinstance(customer, str) else None
     m.current_period_end = _period_end(sub)
     m.cancel_at_period_end = (
@@ -151,23 +160,31 @@ async def _sync(
     now: datetime,
     grace_days: int,
 ) -> tuple[str, str | None]:
-    sub = await fetch_subscription(sub_id)  # StripeError propagates: nothing logged
-    account: object = _as_dict(sub.get("metadata")).get("account_id")
+    # StripeError propagates from either read: nothing is logged, Stripe retries.
+    first = await fetch_subscription(sub_id)
+    account: object = _as_dict(first.get("metadata")).get("account_id")
     if not isinstance(account, str):
         return "unmatched", None
-    if await db.get(User, account) is None:
+    # Serialise handlers for one account (a row lock on Postgres; SQLite, the test
+    # engine, serialises writes anyway), then read again INSIDE the lock.
+    locked = (
+        await db.execute(select(User).where(User.user_id == account).with_for_update())
+    ).scalar_one_or_none()
+    if locked is None:
         return "unmatched", account
-    m = await membership_for(db, account)
+    sub = await fetch_subscription(sub_id)
+    m = (
+        await db.execute(select(Membership).where(Membership.stripe_subscription_id == sub_id))
+    ).scalar_one_or_none()
     if m is None:
-        m = Membership(account_id=account, plan="pro", created_at=now, grace_until=None)
+        m = Membership(
+            account_id=account,
+            stripe_subscription_id=sub_id,
+            plan="pro",
+            created_at=now,
+            grace_until=None,
+        )
         db.add(m)
-    elif (
-        m.stripe_subscription_id not in (None, sub.get("id"))
-        and is_pro(m, now)
-        and sub.get("status") not in _PAID
-    ):
-        # A second subscription that is not paid must not replace the paid one.
-        return "superseded", account
     _store(m, sub, now, grace_days)
     return "applied", account
 
@@ -182,10 +199,9 @@ async def apply_event(
 ) -> str:
     """Apply one signature-verified event; return its outcome.
 
-    ``duplicate`` (already seen, nothing done), ``applied``, ``superseded`` (a
-    second subscription's event that must not replace the paid one), ``unmatched``
-    (names no subscription, or an account we do not have) or ``ignored`` (a type
-    we do not act on). A failed live fetch raises and logs NOTHING, so Stripe's
+    ``duplicate`` (already seen, nothing done), ``applied``, ``unmatched`` (names
+    no subscription, or an account we do not have) or ``ignored`` (a type we do
+    not act on). A failed live fetch raises and logs NOTHING, so Stripe's
     retry is not mistaken for a duplicate. Flushes; the caller commits.
     """
     event_id = str(event.get("id") or "")
@@ -219,10 +235,28 @@ async def apply_event(
     return outcome
 
 
-async def membership_for(db: AsyncSession, account_id: str) -> Membership | None:
-    return (
-        await db.execute(select(Membership).where(Membership.account_id == account_id))
-    ).scalar_one_or_none()
+async def memberships_for(db: AsyncSession, account_id: str) -> list[Membership]:
+    """Every subscription row of an account, most recently changed first."""
+    rows = (
+        await db.execute(
+            select(Membership)
+            .where(Membership.account_id == account_id)
+            .order_by(Membership.updated_at.desc())
+        )
+    ).scalars()
+    return list(rows)
 
 
-__all__ = ["FetchSubscription", "apply_event", "is_pro", "membership_for"]
+def primary(memberships: Sequence[Membership], now: datetime) -> Membership | None:
+    """The row to describe to the user: a Pro one if any, else the latest."""
+    return next((m for m in memberships if is_pro(m, now)), None) or next(iter(memberships), None)
+
+
+__all__ = [
+    "FetchSubscription",
+    "account_is_pro",
+    "apply_event",
+    "is_pro",
+    "memberships_for",
+    "primary",
+]

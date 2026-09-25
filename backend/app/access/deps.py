@@ -43,7 +43,7 @@ from app.access.policy import (
     has_capability,
     lowest_tier_with,
 )
-from app.billing.memberships import is_pro, membership_for
+from app.billing.memberships import account_is_pro, memberships_for
 from app.core.auth_sessions import is_registered_principal, try_resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
@@ -66,8 +66,8 @@ async def resolve_tier(request: Request, settings: Settings) -> Tier:
         principal = await try_resolve_principal(request, db, settings)
         if principal is None or not is_registered_principal(principal):
             return Tier.anonymous
-        membership = await membership_for(db, principal)
-    return Tier.pro if is_pro(membership, datetime.now(UTC)) else Tier.free
+        memberships = await memberships_for(db, principal)
+    return Tier.pro if account_is_pro(memberships, datetime.now(UTC)) else Tier.free
 
 
 def requires(capability: Capability) -> Callable[..., Awaitable[None]]:

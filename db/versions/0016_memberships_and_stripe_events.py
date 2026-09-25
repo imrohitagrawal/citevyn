@@ -6,10 +6,10 @@ Create Date: 2026-09-26 00:00:00
 
 Additive only
 -------------
-* ``memberships``: what an account has paid for, one row per account, written
-  only by verified Stripe webhooks and read on every protected request.
-  ``stripe_subscription_id`` is unique (a subscription belongs to one account);
-  ``stripe_customer_id`` is indexed for the invoice events that name only it.
+* ``memberships``: one row per Stripe subscription; an account is Pro if any of
+  its rows is paid. Written only by verified Stripe webhooks, read on every
+  protected request. ``stripe_subscription_id`` is unique and required;
+  ``account_id`` and ``stripe_customer_id`` are indexed.
 * ``stripe_events``: every webhook event id once: idempotency, and the audit log
   of membership changes.
 
@@ -46,19 +46,19 @@ def upgrade() -> None:
             sa.String(128),
             sa.ForeignKey("users.user_id", ondelete="CASCADE"),
             nullable=False,
-            unique=True,
         ),
         sa.Column("plan", sa.String(16), nullable=False),
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("billing_interval", sa.String(8), nullable=True),
         sa.Column("stripe_customer_id", sa.String(64), nullable=True),
-        sa.Column("stripe_subscription_id", sa.String(64), nullable=True, unique=True),
+        sa.Column("stripe_subscription_id", sa.String(64), nullable=False, unique=True),
         sa.Column("current_period_end", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cancel_at_period_end", sa.Boolean(), nullable=False),
         sa.Column("grace_until", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
+    op.create_index("ix_memberships_account_id", "memberships", ["account_id"])
     op.create_index("ix_memberships_stripe_customer_id", "memberships", ["stripe_customer_id"])
     op.create_table(
         "stripe_events",

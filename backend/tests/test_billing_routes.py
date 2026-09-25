@@ -502,7 +502,8 @@ def test_the_webhook_stores_the_live_subscription_not_the_payload(env: pytest.Mo
         tier = client.get("/v1/billing/membership", headers=DEMO).json()["tier"]
     assert res.json()["outcome"] == "applied"
     assert tier == "pro"
-    assert [c.url.path for c in calls if c.method == "GET"] == ["/v1/subscriptions/sub_1"]
+    # Read twice: once to learn the account, again inside the per-account lock.
+    assert [c.url.path for c in calls if c.method == "GET"] == ["/v1/subscriptions/sub_1"] * 2
 
 
 def test_stripe_unreachable_during_a_webhook_is_a_503_and_logs_nothing(
@@ -532,3 +533,38 @@ def test_a_webhook_without_the_secret_key_configured_is_a_503(env: pytest.Monkey
         res = _post_event(client, _sub_event("evt_1", account))
     assert res.status_code == 503
     assert _rows(StripeEvent) == []
+
+
+def test_a_failed_stripe_read_is_logged_without_the_key(
+    env: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A permanent failure (revoked key, missing permission) would otherwise fail
+    every event silently. Turns red if: nothing is logged, or the key is."""
+    import logging
+
+    _on(env)
+    with TestClient(_app()) as client:
+        account = _register(client)
+        event = _sub_event("evt_1", account)
+        LIVE.clear()
+        with caplog.at_level(logging.WARNING, logger="citevyn.billing"):
+            _post_event(client, event)
+    records = [r for r in caplog.records if r.getMessage() == "billing_webhook_stripe_read_failed"]
+    assert len(records) == 1
+    assert "sk_test" not in caplog.text
+
+
+def test_the_membership_view_lists_every_subscription(env: pytest.MonkeyPatch) -> None:
+    """Paying twice (two checkout tabs) must be visible to the user.
+    Turns red if: only one subscription is reported."""
+    _on(env)
+    with TestClient(_app()) as client:
+        account = _register(client)
+        _post_event(client, _sub_event("evt_1", account))
+        second = _sub_event("evt_2", account)
+        second["data"]["object"]["id"] = "sub_2"
+        LIVE["sub_2"] = dict(second["data"]["object"])
+        _post_event(client, second)
+        view = client.get("/v1/billing/membership", headers=DEMO).json()
+    assert view["tier"] == "pro"
+    assert len(view["subscriptions"]) == 2

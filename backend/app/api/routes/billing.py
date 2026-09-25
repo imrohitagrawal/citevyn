@@ -21,6 +21,7 @@ Entitlement is never decided here or by the browser: ``resolve_tier`` reads the
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -33,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.deps import requires
 from app.access.policy import Capability
-from app.billing.memberships import apply_event, is_pro, membership_for
+from app.billing.memberships import account_is_pro, apply_event, memberships_for, primary
 from app.billing.stripe_client import (
     StripeError,
     create_checkout_session,
@@ -49,6 +50,7 @@ from app.models import User
 from app.services.notifications import site_base_url
 
 router = APIRouter(prefix="/v1/billing", tags=["billing"])
+_logger = logging.getLogger("citevyn.billing")
 
 # Stripe event payloads are a few KB; anything far larger is not one.
 _MAX_WEBHOOK_BYTES = 1_000_000
@@ -137,7 +139,17 @@ async def stripe_webhook(
             now=datetime.now(UTC),
         )
     except StripeError as exc:
-        # 5xx: Stripe retries, and nothing was logged, so the retry applies.
+        # 5xx: Stripe retries, and nothing was logged, so the retry applies. Logged
+        # here, because a PERMANENT failure (a revoked key, a key without
+        # Subscriptions: read, a test/live mismatch) would otherwise fail every
+        # event silently until Stripe gives up, leaving cancellations unapplied.
+        _logger.warning(
+            "billing_webhook_stripe_read_failed",
+            extra={
+                "event_type": str(cast(dict[str, Any], event).get("type"))[:64],
+                "error": str(exc)[:120],
+            },
+        )
         raise _stripe_unavailable(request) from exc
     await db.commit()
     return {"received": True, "outcome": outcome}
@@ -156,7 +168,7 @@ async def start_checkout(
     http: Annotated[httpx.AsyncClient, Depends(get_stripe_http)],
 ) -> dict[str, Any]:
     request_id = _request_id(request)
-    if is_pro(await membership_for(db, principal_id), datetime.now(UTC)):
+    if account_is_pro(await memberships_for(db, principal_id), datetime.now(UTC)):
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.already_subscribed,
@@ -200,8 +212,15 @@ async def open_portal(
     http: Annotated[httpx.AsyncClient, Depends(get_stripe_http)],
 ) -> dict[str, Any]:
     request_id = _request_id(request)
-    membership = await membership_for(db, principal_id)
-    if membership is None or not membership.stripe_customer_id:
+    customer_id = next(
+        (
+            m.stripe_customer_id
+            for m in await memberships_for(db, principal_id)
+            if m.stripe_customer_id
+        ),
+        None,
+    )
+    if customer_id is None:
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.not_found,
@@ -209,7 +228,6 @@ async def open_portal(
         )
     if not settings.stripe_secret_key:
         raise _stripe_unavailable(request)
-    customer_id = membership.stripe_customer_id
     await db.close()  # not held across the Stripe call
     try:
         url = await create_portal_session(
@@ -231,19 +249,31 @@ async def get_membership(
     settings: Annotated[Settings, Depends(billing_enabled)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
-    m = await membership_for(db, principal_id)
+    now = datetime.now(UTC)
+    rows = await memberships_for(db, principal_id)
+    m = primary(rows, now)
 
     def iso(value: datetime | None) -> str | None:
         return value.isoformat() if value is not None else None
 
     return {
         "request_id": _request_id(request),
-        "tier": "pro" if is_pro(m, datetime.now(UTC)) else "free",
+        "tier": "pro" if account_is_pro(rows, now) else "free",
+        # The subscription that decides the tier (or the latest one).
         "status": m.status if m else None,
         "interval": m.billing_interval if m else None,
         "current_period_end": iso(m.current_period_end) if m else None,
         "cancel_at_period_end": m.cancel_at_period_end if m else False,
         "grace_until": iso(m.grace_until) if m else None,
+        # Every subscription, so paying twice (two checkout tabs) is visible.
+        "subscriptions": [
+            {
+                "status": r.status,
+                "interval": r.billing_interval,
+                "current_period_end": iso(r.current_period_end),
+            }
+            for r in rows
+        ],
         "allowance": {
             "free_trial_answers": settings.access_free_trial_answers,
             "pro_monthly_answers": settings.access_pro_monthly_answers,

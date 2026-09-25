@@ -25,7 +25,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
-from app.billing.memberships import apply_event, is_pro
+from app.billing.memberships import account_is_pro, apply_event, is_pro
 from app.billing.stripe_client import StripeError
 from app.models import Membership, StripeEvent, User
 from app.models.enums import UserRole
@@ -108,10 +108,21 @@ async def _user(session: Any, user_id: str = ACCOUNT) -> None:
     await session.flush()
 
 
-async def _membership(session: Any) -> Membership | None:
+async def _membership(session: Any, sub_id: str = "sub_1") -> Membership | None:
+    """The row for ONE subscription (one row per Stripe subscription)."""
     return (
-        await session.execute(select(Membership).where(Membership.account_id == ACCOUNT))
+        await session.execute(select(Membership).where(Membership.stripe_subscription_id == sub_id))
     ).scalar_one_or_none()
+
+
+async def _pro(session: Any, now: datetime = NOW) -> bool:
+    """The account-level answer resolve_tier gives: Pro if ANY subscription is."""
+    rows = (
+        (await session.execute(select(Membership).where(Membership.account_id == ACCOUNT)))
+        .scalars()
+        .all()
+    )
+    return account_is_pro(list(rows), now)
 
 
 async def _apply(session: Any, event: dict[str, Any], now: datetime = NOW) -> str:
@@ -299,36 +310,90 @@ async def test_recovery_clears_grace_so_a_later_failure_gets_a_fresh_seven_days(
 
 
 # ---------------------------------------------------------------------------
-# Two subscriptions on one account
+# Two subscriptions on one account (one row per subscription)
 # ---------------------------------------------------------------------------
+#
+# Review found the one-row-per-account design unsafe twice (cases D and E):
+# whichever subscription had the latest event owned the row, so cancelling the
+# OTHER one could leave a paying customer on Free. One row per subscription, and
+# "Pro if any row is paid", removes the question entirely.
 
 
-async def test_a_dead_subscription_never_overrides_the_paid_one(session: Any) -> None:
-    """The review's case D (rated a blocker): an account pays a second checkout
-    (two tabs), then the FIRST one's deletion arrives. Turns red if: it replaces
-    the paid subscription, leaving a paying customer on Free."""
+async def test_d_a_dead_first_subscription_does_not_hide_a_paid_second(session: Any) -> None:
+    """Case D. Turns red if: the first subscription's deletion affects the second."""
     await _user(session)
     _live("sub_1", status="past_due")
     await _apply(session, _sub_event("evt_1", "sub_1"))
     _live("sub_2", status="active")
     await _apply(session, _sub_event("evt_2", "sub_2", kind="customer.subscription.created"))
     _live("sub_1", status="canceled")
-    deleted = _sub_event("evt_3", "sub_1", kind="customer.subscription.deleted")
-    assert await _apply(session, deleted) == "superseded"
-    m = await _membership(session)
-    assert m is not None and m.stripe_subscription_id == "sub_2" and is_pro(m, NOW)
+    await _apply(session, _sub_event("evt_3", "sub_1", kind="customer.subscription.deleted"))
+    assert await _pro(session)
 
 
-async def test_a_newly_paid_subscription_replaces_a_dead_one(session: Any) -> None:
-    """Partner: after a lapse, subscribing again must take over.
-    Turns red if: the account stays tied to its old, dead subscription."""
+async def test_e_cancelling_one_of_two_paid_subscriptions_keeps_pro(session: Any) -> None:
+    """Case E (the verifier's blocker): two tabs, both paid; the customer cancels
+    the one whose event came last. Turns red if: the account is not Pro while it
+    still pays for the other."""
     await _user(session)
-    _live("sub_1", status="canceled")
-    await _apply(session, _sub_event("evt_1", "sub_1"))
+    _live("sub_1", status="active")
     _live("sub_2", status="active")
-    await _apply(session, _sub_event("evt_2", "sub_2", kind="customer.subscription.created"))
+    await _apply(session, _sub_event("evt_1", "sub_2", kind="customer.subscription.created"))
+    await _apply(session, _invoice_event("evt_2", "invoice.paid", "sub_1"))
+    _live("sub_1", status="canceled")
+    await _apply(session, _sub_event("evt_3", "sub_1", kind="customer.subscription.deleted"))
+    assert await _pro(session)
+    rows = (await session.execute(select(Membership))).scalars().all()
+    assert sorted((r.stripe_subscription_id, r.status) for r in rows) == [
+        ("sub_1", "canceled"),
+        ("sub_2", "active"),
+    ]  # partner: both are recorded, so double billing is visible
+
+
+async def test_f_grace_belongs_to_its_subscription(session: Any) -> None:
+    """Case F: an unrelated second subscription must not reset the first one's
+    grace. Turns red if: grace is shared across subscriptions."""
+    await _user(session)
+    _live("sub_1", status="past_due")
+    await _apply(session, _sub_event("evt_1", "sub_1"))
+    day8 = NOW + timedelta(days=8)
+    assert not await _pro(session, day8)
+    _live("sub_2", status="incomplete")
+    await _apply(
+        session, _sub_event("evt_2", "sub_2", kind="customer.subscription.created"), now=day8
+    )
+    await _apply(session, _invoice_event("evt_3", "invoice.payment_failed", "sub_1"), now=day8)
+    m1 = await _membership(session, "sub_1")
+    assert m1 is not None and _utc(m1.grace_until) == NOW + timedelta(days=7)
+    assert not await _pro(session, day8)
+
+
+async def test_the_account_is_pro_when_any_subscription_is(session: Any) -> None:
+    """Turns red if: account_is_pro requires ALL rows, or only looks at one."""
+    assert account_is_pro([_m(status="canceled"), _m(status="active")], NOW)
+    assert not account_is_pro([_m(status="canceled"), _m(status="incomplete")], NOW)
+    assert not account_is_pro([], NOW)
+
+
+async def test_the_subscription_is_read_again_after_taking_the_account_lock(session: Any) -> None:
+    """Lost update: two handlers for one account must not let a slower, staler
+    read win. The state stored is the one read AFTER the per-account lock (on
+    Postgres, SELECT ... FOR UPDATE on the user row). Turns red if: the first,
+    unlocked read is what gets stored."""
+    await _user(session)
+    reads: list[str] = []
+
+    async def changing(sub_id: str) -> dict[str, Any]:
+        reads.append(sub_id)
+        _live(sub_id, status="past_due" if len(reads) == 1 else "active")
+        return LIVE[sub_id]
+
+    await apply_event(
+        session, _sub_event("evt_1"), fetch_subscription=changing, grace_days=7, now=NOW
+    )
     m = await _membership(session)
-    assert m is not None and m.stripe_subscription_id == "sub_2" and is_pro(m, NOW)
+    assert reads == ["sub_1", "sub_1"]
+    assert m is not None and m.status == "active" and m.grace_until is None
 
 
 # ---------------------------------------------------------------------------
@@ -416,15 +481,15 @@ async def test_stripe_unreachable_records_nothing_so_the_retry_can_apply(session
     assert (await session.execute(select(StripeEvent))).scalars().all() == []
 
 
-async def test_a_past_due_second_subscription_takes_over_from_a_lapsed_one(session: Any) -> None:
-    """Only a PAID current subscription is protected. If the current one has
-    lapsed, a different subscription going past due must be tracked, so its 7-day
-    grace applies. Turns red if: every different, unpaid subscription is
-    'superseded' regardless of whether the current one is still paid."""
+async def test_a_past_due_second_subscription_keeps_pro_during_its_grace(session: Any) -> None:
+    """A lapsed first subscription and a second one past due: the second's own
+    7-day grace keeps the account Pro. Turns red if: a lapsed row hides a row in
+    grace."""
     await _user(session)
     _live("sub_1", status="canceled")
     await _apply(session, _sub_event("evt_1", "sub_1"))
     _live("sub_2", status="past_due")
     assert await _apply(session, _sub_event("evt_2", "sub_2")) == "applied"
-    m = await _membership(session)
-    assert m is not None and m.stripe_subscription_id == "sub_2" and is_pro(m, NOW)
+    m2 = await _membership(session, "sub_2")
+    assert m2 is not None and _utc(m2.grace_until) == NOW + timedelta(days=7)
+    assert await _pro(session)
