@@ -58,7 +58,9 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
   // the drawer, rather than as a toast: the toast stack sits at z-index 1000,
   // under this drawer's 1100 backdrop and behind its panel, so a toast would
   // be covered by the very drawer the reader is looking at.
-  const [passwordFailed, setPasswordFailed] = useState(false);
+  // A count, not a flag: it keys the alert below, so each failure mounts a NEW
+  // role="alert" node and a screen reader announces the second one too.
+  const [passwordFailures, setPasswordFailures] = useState(0);
 
   // Move focus INTO the dialog on open (the menuitem that opened it has just
   // been unmounted with the menu, so focus would otherwise fall to <body> and
@@ -190,8 +192,8 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
           while, sign out and back in first.
         </p>
 
-        {passwordFailed && (
-          <p role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", marginTop: "12px" }}>
+        {passwordFailures > 0 && (
+          <p key={passwordFailures} role="alert" style={{ color: "var(--color-error, #a84437)", fontSize: "13px", marginTop: "12px" }}>
             {CHUNK_FAILED_MESSAGE}
           </p>
         )}
@@ -202,7 +204,7 @@ export function ConnectedAccountsDrawer({ triggerRef, onClose, user }: Connected
             label="auth-modal"
             onError={() => {
               setPasswordOpen(false);
-              setPasswordFailed(true);
+              setPasswordFailures((n) => n + 1);
             }}
           >
             <Suspense fallback={null}>

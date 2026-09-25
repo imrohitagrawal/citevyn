@@ -72,7 +72,8 @@ describe("ConnectedAccountsDrawer: the password dialog's chunk fails to load (#4
     await waitFor(() => expect(errorSpy).toHaveBeenCalled());
     expect(screen.getByText("the transcript so far")).toBeInTheDocument();
     // The partner to "no dialog": the reader is told, in the drawer.
-    expect(await screen.findByRole("alert")).toHaveTextContent(CHUNK_FAILED_MESSAGE);
+    const firstAlert = await screen.findByRole("alert");
+    expect(firstAlert).toHaveTextContent(CHUNK_FAILED_MESSAGE);
     expect(screen.queryByLabelText("New password")).not.toBeInTheDocument();
     // The drawer itself is untouched: only the dialog it tried to open is lost.
     expect(screen.getByRole("dialog", { name: "Sign-in methods" })).toBeInTheDocument();
@@ -91,6 +92,12 @@ describe("ConnectedAccountsDrawer: the password dialog's chunk fails to load (#4
         errorSpy.mock.calls.filter((c: unknown[]) => String(c[0]).includes("[auth-modal]")).length,
       ).toBeGreaterThanOrEqual(2),
     );
+    // A NEW alert node, not the same one left in place: a screen reader
+    // announces role="alert" when it is inserted, so an unchanged node would
+    // leave the second failure silent. RED if the alert stops being keyed on
+    // the failure count.
+    await waitFor(() => expect(screen.getByRole("alert")).not.toBe(firstAlert));
+    expect(firstAlert).not.toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(CHUNK_FAILED_MESSAGE);
     expect(screen.getByText("the transcript so far")).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Sign-in methods" })).toBeInTheDocument();
