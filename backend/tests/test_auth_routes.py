@@ -367,7 +367,10 @@ def test_register_losing_a_concurrent_race_is_422_not_500(
     assert "citevyn_session" not in client.cookies
     with closing(sqlite3.connect(db_file)) as check:
         rows = check.execute("SELECT user_id FROM users WHERE email = ?", (email,)).fetchall()
-    # Exactly the competitor's row: the loser's insert was rolled back.
+    # Exactly the competitor's row: the loser's insert was refused by the
+    # unique index and nothing of it was stored. This does NOT prove the
+    # route's own ``await db.rollback()`` runs: get_session also rolls back on
+    # the raised error, so deleting that line leaves this test green.
     assert rows == [("usr_competitor",)]
 
 
