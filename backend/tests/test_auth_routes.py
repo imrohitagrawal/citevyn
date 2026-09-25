@@ -317,6 +317,63 @@ def test_register_duplicate_email_is_rejected(in_memory_app: None) -> None:
     assert second.status_code == 422
 
 
+def test_register_losing_a_concurrent_race_is_422_not_500(
+    in_memory_app: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two registrations for one email both pass the existence check; the loser
+    must get the same 422 as the sequential case, not a 500 (#455).
+
+    The competing row is committed by a separate connection while this request
+    is between its existence check and its flush -- inside ``hash_password``,
+    which is exactly where a real concurrent request would win the race. The
+    flush then hits ``ix_users_email``. That only happens because ``User.email``
+    now declares the unique index; before #455 the hermetic schema accepted the
+    duplicate and this branch could not be reached in any test.
+
+    RED WHEN: the ``except IntegrityError`` branch after ``db.flush()`` in
+    ``register`` is removed (500), or ``User.email`` loses its unique index
+    (201 and two rows with the same email).
+    """
+    import sqlite3
+    from contextlib import closing
+
+    import app.api.routes.auth as auth_routes
+
+    email = "racer@example.com"
+    db_file = db_module.get_engine().url.database
+    assert db_file
+    real_hash_password = auth_routes.hash_password
+    competitor_inserts: list[str] = []
+
+    async def _hash_while_a_competitor_commits(password: str) -> str:
+        with closing(sqlite3.connect(db_file)) as competitor, competitor:
+            competitor.execute(
+                "INSERT INTO users (user_id, role, created_at, email) VALUES "
+                "('usr_competitor', 'demo_user', CURRENT_TIMESTAMP, ?)",
+                (email,),
+            )
+        competitor_inserts.append(email)
+        return await real_hash_password(password)
+
+    monkeypatch.setattr(auth_routes, "hash_password", _hash_while_a_competitor_commits)
+
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    response = _register(client, email)
+
+    # The race really happened: the competitor committed after the check.
+    assert competitor_inserts == [email]
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"] == "This email is already registered."
+    assert "citevyn_session" not in client.cookies
+    with closing(sqlite3.connect(db_file)) as check:
+        rows = check.execute("SELECT user_id FROM users WHERE email = ?", (email,)).fetchall()
+    # Exactly the competitor's row: the loser's insert was refused by the
+    # unique index and nothing of it was stored. This does NOT prove the
+    # route's own ``await db.rollback()`` runs: get_session also rolls back on
+    # the raised error, so deleting that line leaves this test green.
+    assert rows == [("usr_competitor",)]
+
+
 # ---------------------------------------------------------------------------
 # login
 # ---------------------------------------------------------------------------

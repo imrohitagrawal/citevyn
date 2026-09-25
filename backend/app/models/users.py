@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, StrEnumType
@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 
 class User(Base):
     __tablename__ = "users"
+    # Same name and shape as migration 0008's ``op.create_index("ix_users_email",
+    # "users", ["email"], unique=True)``, so the hermetic ``create_all`` schema
+    # refuses a duplicate email exactly as production does (#455). A bare
+    # ``unique=True`` on the column would create an UNNAMED constraint instead,
+    # which the ORM-to-migration parity guard reports as drift.
+    __table_args__ = (Index("ix_users_email", "email", unique=True),)
 
     user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     role: Mapped[UserRole] = mapped_column(
@@ -40,7 +46,7 @@ class User(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Unique (see migration 0008's ``ix_users_email``); NULL for anonymous
+    # Unique via ``ix_users_email`` in ``__table_args__``; NULL for anonymous
     # principals, which is not compared as equal to itself under SQL
     # uniqueness, so any number of anonymous rows may coexist.
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
