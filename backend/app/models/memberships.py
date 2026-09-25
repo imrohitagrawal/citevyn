@@ -42,11 +42,8 @@ class Membership(Base):
         DateTime(timezone=True), nullable=True
     )
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Set on the first failed payment; the account stays Pro until it passes.
+    # Set when the subscription is first seen past due; cleared when it is not.
     grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    # Stripe's ``created`` (unix seconds) of the newest subscription event applied.
-    # An older event arriving late is ignored rather than overwriting newer state.
-    last_event_created: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

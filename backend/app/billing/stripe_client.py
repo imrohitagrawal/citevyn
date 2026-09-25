@@ -13,6 +13,7 @@ webhooks keep current.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -34,13 +35,47 @@ async def _post(
         )
     except httpx.HTTPError as exc:
         raise StripeError(f"Stripe unreachable: {type(exc).__name__}") from exc
+    return _body(res)
+
+
+def _body(res: httpx.Response) -> dict[str, Any]:
     if res.status_code >= 400:
         # The status only: Stripe's error body can echo request fields.
         raise StripeError(f"Stripe returned {res.status_code}")
-    body: Any = res.json()
+    try:
+        body: Any = res.json()
+    except ValueError as exc:
+        raise StripeError("Stripe returned a body that is not JSON") from exc
     if not isinstance(body, dict):
         raise StripeError("Stripe returned a non-object body")
     return body  # type: ignore[return-value]
+
+
+# A subscription id goes into a URL path, so only the shape Stripe issues.
+_SUBSCRIPTION_ID = re.compile(r"sub_[A-Za-z0-9]{1,255}")
+
+
+async def retrieve_subscription(
+    client: httpx.AsyncClient, *, api_base: str, secret_key: str, subscription_id: str
+) -> dict[str, Any]:
+    """The live Subscription object.
+
+    Webhooks tell us THAT something changed; this tells us what is true now.
+    Stripe's docs: "Don't use ``created`` to determine event order ... use the API
+    to retrieve any missing objects." Called only on the webhook path; no user
+    request ever waits on it.
+    """
+    if not _SUBSCRIPTION_ID.fullmatch(subscription_id):
+        raise StripeError("not a subscription id")
+    try:
+        res = await client.get(
+            f"{api_base.rstrip('/')}/v1/subscriptions/{subscription_id}",
+            headers={"Authorization": f"Bearer {secret_key}"},
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise StripeError(f"Stripe unreachable: {type(exc).__name__}") from exc
+    return _body(res)
 
 
 async def create_checkout_session(
@@ -102,4 +137,9 @@ async def create_portal_session(
     return url
 
 
-__all__ = ["StripeError", "create_checkout_session", "create_portal_session"]
+__all__ = [
+    "StripeError",
+    "create_checkout_session",
+    "create_portal_session",
+    "retrieve_subscription",
+]

@@ -34,7 +34,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.deps import requires
 from app.access.policy import Capability
 from app.billing.memberships import apply_event, is_pro, membership_for
-from app.billing.stripe_client import StripeError, create_checkout_session, create_portal_session
+from app.billing.stripe_client import (
+    StripeError,
+    create_checkout_session,
+    create_portal_session,
+    retrieve_subscription,
+)
 from app.billing.stripe_signature import SignatureError, verify_signature
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
@@ -88,6 +93,7 @@ async def stripe_webhook(
     request: Request,
     settings: Annotated[Settings, Depends(billing_enabled)],
     db: Annotated[AsyncSession, Depends(get_session)],
+    http: Annotated[httpx.AsyncClient, Depends(get_stripe_http)],
 ) -> dict[str, Any]:
     request_id = _request_id(request)
     payload = await request.body()
@@ -109,12 +115,30 @@ async def stripe_webhook(
         raise bad from exc
     if not isinstance(event, dict):
         raise bad
-    outcome = await apply_event(
-        db,
-        cast(dict[str, Any], event),
-        grace_days=settings.membership_grace_days,
-        now=datetime.now(UTC),
-    )
+    secret_key = settings.stripe_secret_key
+    if not secret_key:
+        raise _stripe_unavailable(request)
+
+    async def fetch(subscription_id: str) -> dict[str, Any]:
+        # The event is a signal; the live subscription is what gets stored.
+        return await retrieve_subscription(
+            http,
+            api_base=settings.stripe_api_base,
+            secret_key=secret_key,
+            subscription_id=subscription_id,
+        )
+
+    try:
+        outcome = await apply_event(
+            db,
+            cast(dict[str, Any], event),
+            fetch_subscription=fetch,
+            grace_days=settings.membership_grace_days,
+            now=datetime.now(UTC),
+        )
+    except StripeError as exc:
+        # 5xx: Stripe retries, and nothing was logged, so the retry applies.
+        raise _stripe_unavailable(request) from exc
     await db.commit()
     return {"received": True, "outcome": outcome}
 
@@ -146,6 +170,10 @@ async def start_checkout(
     user = await db.get(User, principal_id)
     if not settings.stripe_secret_key or not price or user is None:
         raise _stripe_unavailable(request)
+    email = user.email
+    # Release the database connection before the Stripe call (up to 15 s): a slow
+    # Stripe must not hold pooled connections.
+    await db.close()
     site = site_base_url(settings)
     try:
         url = await create_checkout_session(
@@ -154,7 +182,7 @@ async def start_checkout(
             secret_key=settings.stripe_secret_key,
             price_id=price,
             account_id=principal_id,
-            customer_email=user.email,
+            customer_email=email,
             success_url=f"{site}/?billing=success",
             cancel_url=f"{site}/?billing=cancel",
         )
@@ -181,12 +209,14 @@ async def open_portal(
         )
     if not settings.stripe_secret_key:
         raise _stripe_unavailable(request)
+    customer_id = membership.stripe_customer_id
+    await db.close()  # not held across the Stripe call
     try:
         url = await create_portal_session(
             http,
             api_base=settings.stripe_api_base,
             secret_key=settings.stripe_secret_key,
-            customer_id=membership.stripe_customer_id,
+            customer_id=customer_id,
             return_url=f"{site_base_url(settings)}/",
         )
     except StripeError as exc:

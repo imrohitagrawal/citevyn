@@ -16,6 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+
+# Stripe's v1 is lowercase hex. Anything else is refused BEFORE the constant-time
+# compare, which raises TypeError on non-ASCII text (a 500 anyone could trigger).
+_HEX = re.compile(r"[0-9a-f]+")
 
 
 class SignatureError(Exception):
@@ -38,6 +43,8 @@ def verify_signature(
             except ValueError as exc:
                 raise SignatureError("timestamp is not a number") from exc
         elif key == "v1" and value:
+            if not _HEX.fullmatch(value):
+                raise SignatureError("v1 signature is not hex")
             candidates.append(value)
     if timestamp is None or not candidates:
         raise SignatureError("missing timestamp or v1 signature")

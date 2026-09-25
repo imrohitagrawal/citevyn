@@ -105,3 +105,11 @@ def test_the_module_imports_nothing_from_the_app() -> None:
     import app.billing.stripe_signature as mod
 
     assert "from app." not in inspect.getsource(mod)
+
+
+@pytest.mark.parametrize("value", ["é" * 64, "ＡＢ" * 32, "g" * 64])
+def test_a_non_hex_signature_is_refused_not_crashed(value: str) -> None:
+    """``hmac.compare_digest`` raises TypeError on non-ASCII str, which became a
+    500 any stranger could trigger. Turns red if: non-hex values reach the compare."""
+    with pytest.raises(SignatureError):
+        verify_signature(BODY, _header(NOW, value), SECRET, tolerance_s=300, now=NOW)

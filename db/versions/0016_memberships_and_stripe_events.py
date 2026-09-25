@@ -56,7 +56,6 @@ def upgrade() -> None:
         sa.Column("current_period_end", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cancel_at_period_end", sa.Boolean(), nullable=False),
         sa.Column("grace_until", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_event_created", sa.BigInteger(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )

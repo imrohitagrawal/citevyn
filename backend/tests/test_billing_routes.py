@@ -98,6 +98,7 @@ def _register(client: TestClient, email: str = "a@example.com") -> str:
 
 
 def _sub_event(event_id: str, account: str, status: str = "active", **extra: Any) -> dict[str, Any]:
+    """A subscription event, and the matching LIVE subscription in the fake Stripe."""
     obj = {
         "id": "sub_1",
         "customer": "cus_1",
@@ -108,6 +109,7 @@ def _sub_event(event_id: str, account: str, status: str = "active", **extra: Any
         "items": {"data": [{"price": {"recurring": {"interval": "month"}}}]},
     }
     obj.update(extra)
+    LIVE[str(obj["id"])] = dict(obj)
     return {
         "id": event_id,
         "type": "customer.subscription.updated",
@@ -124,12 +126,36 @@ def _rows(model: Any) -> list[Any]:
     return asyncio.run(_run())
 
 
+# A fake Stripe: the live state of each subscription (what GET /v1/subscriptions
+# returns), and every request made. The webhook stores what THIS says, not what
+# the event payload says.
+LIVE: dict[str, dict[str, Any]] = {}
+
+
+@pytest.fixture(autouse=True)
+def _clear_live() -> None:
+    LIVE.clear()
+
+
 def _stripe_mock(calls: list[httpx.Request], url: str = "https://checkout.stripe.com/c/pay/cs_1"):
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        path = request.url.path
+        if request.method == "GET" and path.startswith("/v1/subscriptions/"):
+            sub = LIVE.get(path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=sub) if sub else httpx.Response(404, json={})
         return httpx.Response(200, json={"id": "x", "url": url})
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _app(calls: list[httpx.Request] | None = None, **mock_kw: Any) -> Any:
+    """The real app, with Stripe replaced by the fake."""
+    app = create_app()
+    app.dependency_overrides[billing.get_stripe_http] = lambda: _stripe_mock(
+        calls if calls is not None else [], **mock_kw
+    )
+    return app
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +176,7 @@ def test_with_the_setting_off_every_billing_route_is_a_404(
     env: pytest.MonkeyPatch, method: str, path: str
 ) -> None:
     """Turns red if: any billing route acts while the access model is off."""
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         res = client.request(method, path, headers=DEMO, json={"interval": "month"})
     assert res.status_code == 404
     assert res.json()["error"]["code"] == "not_found"
@@ -165,7 +191,7 @@ def test_a_signed_subscription_event_makes_the_account_pro(env: pytest.MonkeyPat
     """The whole entitlement path: webhook -> table -> tier. Turns red if: the
     event is not applied, or the tier is not read from the table."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         account = _register(client)
         before = client.get("/v1/billing/membership", headers=DEMO).json()
         res = _post_event(client, _sub_event("evt_1", account))
@@ -185,7 +211,7 @@ def test_pro_unlocks_a_pro_capability_through_the_real_check(env: pytest.MonkeyP
     from app.access.policy import Capability
 
     _on(env)
-    app = create_app()
+    app = _app()
 
     @app.get("/v1/_probe_pro", dependencies=[Depends(requires(Capability.mcp_ask))])
     async def _probe() -> dict[str, str]:
@@ -209,7 +235,7 @@ def test_a_forged_or_replayed_delivery_is_refused_and_changes_nothing(
 ) -> None:
     """Turns red if: the route applies an event without a valid, fresh signature."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         account = _register(client)
         event = _sub_event("evt_1", account)
         if tamper == "wrong_secret":
@@ -237,7 +263,7 @@ def test_a_redelivered_event_is_acknowledged_but_not_reapplied(env: pytest.Monke
     nothing. Turns red if: the duplicate is refused (Stripe would keep retrying)
     or re-applied."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         account = _register(client)
         first = _post_event(client, _sub_event("evt_1", account))
         again = _post_event(client, _sub_event("evt_1", account, status="canceled"))
@@ -251,7 +277,7 @@ def test_the_webhook_needs_no_bearer_or_cookie(env: pytest.MonkeyPatch) -> None:
     """Stripe calls it directly. Turns red if: the route demands the web client's
     credentials (every real delivery would fail)."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         body, header = _signed(
             {"id": "evt_z", "type": "customer.created", "created": 1, "data": {"object": {}}}
         )
@@ -295,7 +321,7 @@ def test_checkout_is_for_accounts_only(env: pytest.MonkeyPatch) -> None:
     """Turns red if: an anonymous visitor can start a subscription with no
     account to attach it to."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         client.post("/v1/sessions", json={"channel": "chat"}, headers=DEMO)
         res = client.post("/v1/billing/checkout", json={"interval": "month"}, headers=DEMO)
     assert res.status_code == 401
@@ -314,7 +340,7 @@ def test_an_existing_pro_account_is_sent_to_the_portal_not_a_second_checkout(
         _post_event(client, _sub_event("evt_1", account))
         res = client.post("/v1/billing/checkout", json={"interval": "month"}, headers=DEMO)
     assert res.status_code == 409
-    assert calls == []
+    assert [c for c in calls if c.method == "POST"] == []  # no checkout session made
 
 
 def test_the_portal_opens_for_a_customer_and_is_a_404_before_there_is_one(
@@ -335,7 +361,8 @@ def test_the_portal_opens_for_a_customer_and_is_a_404_before_there_is_one(
         res = client.post("/v1/billing/portal", headers=DEMO)
     assert before.status_code == 404
     assert res.status_code == 200 and res.json()["url"].startswith("https://billing.stripe.com/")
-    form = {k: v[0] for k, v in parse_qs(calls[0].content.decode()).items()}
+    [portal] = [c for c in calls if c.method == "POST"]
+    form = {k: v[0] for k, v in parse_qs(portal.content.decode()).items()}
     assert form["customer"] == "cus_1"
 
 
@@ -359,7 +386,7 @@ def test_a_stripe_failure_is_a_503_and_never_leaks_the_key(env: pytest.MonkeyPat
 
 def test_an_unknown_interval_is_refused(env: pytest.MonkeyPatch) -> None:
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         _register(client)
         res = client.post("/v1/billing/checkout", json={"interval": "week"}, headers=DEMO)
     assert res.status_code == 422
@@ -401,7 +428,7 @@ def test_an_oversize_or_non_object_webhook_body_is_refused(env: pytest.MonkeyPat
     """Turns red if: a body over the size cap, or a signed JSON value that is not
     an object, is processed."""
     _on(env)
-    with TestClient(create_app()) as client:
+    with TestClient(_app()) as client:
         big = b"{" + b" " * 1_000_001 + b"}"
         t = int(time.time())
         sig = hmac.new(SECRET.encode(), f"{t}.".encode() + big, hashlib.sha256).hexdigest()
@@ -440,6 +467,9 @@ def test_the_portal_fails_closed(env: pytest.MonkeyPatch, failure: str) -> None:
     calls: list[httpx.Request] = []
 
     def boom(r: httpx.Request) -> httpx.Response:
+        # Stripe answers the webhook's subscription read, then fails the portal call.
+        if r.method == "GET":
+            return httpx.Response(200, json=LIVE[r.url.path.rsplit("/", 1)[1]])
         calls.append(r)
         return httpx.Response(500)
 
@@ -456,3 +486,49 @@ def test_the_portal_fails_closed(env: pytest.MonkeyPatch, failure: str) -> None:
         res = client.post("/v1/billing/portal", headers=DEMO)
     assert res.status_code == 503
     assert (calls == []) is (failure == "no_key")
+
+
+def test_the_webhook_stores_the_live_subscription_not_the_payload(env: pytest.MonkeyPatch) -> None:
+    """Stripe: 'Don't use created to determine event order ... use the API to
+    retrieve any missing objects.' Turns red if: the route applies the payload
+    instead of reading the subscription."""
+    _on(env)
+    calls: list[httpx.Request] = []
+    with TestClient(_app(calls)) as client:
+        account = _register(client)
+        event = _sub_event("evt_1", account, status="incomplete")
+        LIVE["sub_1"]["status"] = "active"  # what is true now
+        res = _post_event(client, event)
+        tier = client.get("/v1/billing/membership", headers=DEMO).json()["tier"]
+    assert res.json()["outcome"] == "applied"
+    assert tier == "pro"
+    assert [c.url.path for c in calls if c.method == "GET"] == ["/v1/subscriptions/sub_1"]
+
+
+def test_stripe_unreachable_during_a_webhook_is_a_503_and_logs_nothing(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """A 5xx makes Stripe retry; logging the event anyway would turn that retry
+    into an ignored duplicate. Turns red if: a failed read returns 2xx, or logs."""
+    _on(env)
+    with TestClient(_app()) as client:
+        account = _register(client)
+        event = _sub_event("evt_1", account)
+        LIVE.clear()  # Stripe has no answer (404) for this read
+        res = _post_event(client, event)
+    assert res.status_code == 503
+    assert _rows(StripeEvent) == [] and _rows(Membership) == []
+
+
+def test_a_webhook_without_the_secret_key_configured_is_a_503(env: pytest.MonkeyPatch) -> None:
+    """The live read needs the key. Outside production the model can be on
+    without it (production refuses to start). Turns red if: the route proceeds
+    without a key, or returns 2xx (Stripe would stop retrying)."""
+    _on(env)
+    env.delenv("CITEVYN_STRIPE_SECRET_KEY")
+    get_settings.cache_clear()
+    with TestClient(_app()) as client:
+        account = _register(client)
+        res = _post_event(client, _sub_event("evt_1", account))
+    assert res.status_code == 503
+    assert _rows(StripeEvent) == []

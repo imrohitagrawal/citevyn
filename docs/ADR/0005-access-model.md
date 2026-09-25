@@ -151,14 +151,40 @@ for.
   to the free-account tier. It keeps its history; it loses Pro capabilities.
 - Every membership change writes an audit event. **As built (Phase 4A):** the
   `stripe_events` table is that audit log: every webhook event id, once, with its
-  type, account and outcome (`applied`, `stale`, `unmatched`, `ignored`). Adding
+  type, account and outcome (`applied`, `superseded`, `unmatched`, `ignored`). Adding
   `AuditAction` members would need `ALTER TYPE` on a native enum, which AGENTS.md
   steers away from.
 - **As built (Phase 4A):** Stripe is called over HTTPS with `httpx` (already a
-  dependency), not the Stripe SDK: two form-encoded POSTs and a documented HMAC do
-  not justify a new dependency, and `httpx.MockTransport` keeps every test offline.
-  Each membership keeps the newest event time it has applied, so an event delivered
-  late is logged as `stale`, not applied.
+  dependency), not the Stripe SDK: three small calls and a documented HMAC do not
+  justify a new dependency, and `httpx.MockTransport` keeps every test offline.
+- **As built, after review: a webhook event is a signal, not the truth.** Stripe's
+  docs say not to use an event's `created` time to order events, and to "use the
+  API to retrieve any missing objects". The first build did order by `created`;
+  review reproduced a paying user dropping to Free on a same-second reorder, and a
+  stale grace leaving a later failure with 0 days. So each subscription or invoice
+  event re-reads the subscription from Stripe and stores what it says. This call
+  is on the webhook path only: no user request waits on Stripe, which is the rule
+  above. A Stripe outage makes the webhook answer 503, nothing is logged, and
+  Stripe's retry applies the event later.
+- The grace starts the first time the subscription is seen `past_due` and clears
+  whenever it is not. An account with two subscriptions keeps its paid one: an
+  unpaid second subscription never replaces it.
+
+**Owner checklist for Stripe (test mode first), before turning the model on:**
+1. Create the product "Pro" with a monthly ($9) and a yearly ($91) recurring price;
+   set `CITEVYN_STRIPE_PRICE_PRO_MONTHLY` and `CITEVYN_STRIPE_PRICE_PRO_YEARLY`.
+2. Create a webhook endpoint at `https://<site>/v1/billing/webhook` for
+   `customer.subscription.created`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, `invoice.paid` and `invoice.payment_failed`;
+   set `CITEVYN_STRIPE_WEBHOOK_SECRET` to its signing secret. Register it only once
+   the model is on: while it is off the route answers 404, and Stripe gives up on
+   an event after about three days of retries.
+3. Customer portal: allow cancelling at the end of the billing period, updating the
+   payment method and viewing invoices; set a business name; save.
+4. Failed payments: set the retry schedule and what happens after the last retry
+   (`canceled` or `unpaid`); the 7-day grace runs from the first failure.
+5. Set `CITEVYN_STRIPE_SECRET_KEY` (a server-side secret; never in the browser).
+   Production refuses to start with the model on and any of these unset.
 
 #### Quota: count answers, record who paid
 
