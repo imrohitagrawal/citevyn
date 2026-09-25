@@ -247,7 +247,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
     setMode(next);
     setError(null);
     setNotice(null);
-    setOfferSignIn(false);
+    setOfferSignIn(false); // only register mode ever sets it, so every switch drops it
   };
 
   // #483. Keeps the typed email (switchMode never touches it) and clears the
@@ -562,7 +562,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
                 {error}
               </p>
             )}
-            {offerSignIn && mode === "register" && (
+            {offerSignIn && (
               <button type="button" onClick={signInInstead} style={oauthButtonStyle}>
                 Sign in instead
               </button>

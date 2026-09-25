@@ -240,7 +240,7 @@ async def register(
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.validation_error,
-            message=DUPLICATE_EMAIL_MESSAGE,
+            message=DUPLICATE_EMAIL_MESSAGE,  # the sequential case
         )
 
     password_hash = await hash_password(body.password)
@@ -264,7 +264,7 @@ async def register(
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.validation_error,
-            message=DUPLICATE_EMAIL_MESSAGE,
+            message=DUPLICATE_EMAIL_MESSAGE,  # the race loser
         ) from exc
 
     await claim_and_login(request, response, db, settings, user_id=new_user.user_id)

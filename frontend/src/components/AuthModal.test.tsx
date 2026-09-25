@@ -717,6 +717,20 @@ describe("AuthModal duplicate-email sign-up (#483)", () => {
     expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
   });
 
+  it("withdraws the offer when a retry fails for a different reason", async () => {
+    // RED WHEN: handleSubmit stops clearing the offer at the start of a submit, so a
+    // stale "Sign in instead" sits under an unrelated error.
+    const { register } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    const { user, dialog } = await registerAndFail(DUPLICATE);
+    await within(dialog).findByRole("button", { name: "Sign in instead" });
+    const tooShort = "Password must be at least 8 characters.";
+    vi.mocked(register).mockRejectedValueOnce(new ApiClientError(tooShort, 422, tooShort));
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(tooShort);
+    expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+
   it("does not offer sign-in for the duplicate text under a non-422 status", async () => {
     // RED WHEN: the match drops its status check.
     const { dialog } = await registerAndFail(DUPLICATE, 500);
