@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import { AuthModal } from "./AuthModal";
@@ -23,6 +23,9 @@ vi.mock("../lib/authActions", () => ({
   requestMagicLink: vi.fn(),
   updatePassword: vi.fn(),
 }));
+
+// ADR-0005 Phase 5: the sign-up bot check. Off (no header) unless a test says so.
+vi.mock("../lib/botCheck", () => ({ botCheckHeaders: vi.fn(() => Promise.resolve({})) }));
 
 beforeEach(() => {
   __testOnly.setState(__testOnly.initialState);
@@ -816,5 +819,63 @@ describe("AuthModal duplicate-email sign-up (#483)", () => {
     // Partner: the same message rendered, so only the mode decides the button.
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(DUPLICATE);
     expect(within(dialog).queryByRole("button", { name: "Sign in instead" })).toBeNull();
+  });
+});
+
+
+describe("the sign-up bot check (ADR-0005 Phase 5)", () => {
+  it("sends the solved check with the registration", async () => {
+    // Turns red if: the modal registers without asking for the bot-check header.
+    const { register } = await import("../lib/api");
+    const { botCheckHeaders } = await import("../lib/botCheck");
+    vi.mocked(botCheckHeaders).mockResolvedValueOnce({ "X-CiteVyn-Bot-Check": "proof" });
+    vi.mocked(register).mockResolvedValueOnce({
+      request_id: "r",
+      user_id: "usr_a",
+      email: "carol@example.com",
+      anonymous: false,
+      providers: [],
+      has_password: true,
+      password_step_up: false,
+    });
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    await waitFor(() =>
+      expect(register).toHaveBeenCalledWith(
+        { email: "carol@example.com", password: "correct horse battery" },
+        { "X-CiteVyn-Bot-Check": "proof" },
+      ),
+    );
+  });
+});
+
+
+describe("a refused bot check (ADR-0005 Phase 5)", () => {
+  it("says to reload, not to complete a check the user cannot see", async () => {
+    // Turns red if: the server's "complete the check and try again" is shown
+    // verbatim (there is no visible check, and retrying the same page fails).
+    const { register } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(register).mockRejectedValueOnce(
+      new ApiClientError("Please complete the check and try again.", 403, {
+        request_id: "r",
+        status: "error",
+        error: { code: "bot_check_failed", message: "Please complete the check and try again." },
+      }),
+    );
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    expect(await within(dialog).findByText(/reload the page/i)).toBeTruthy();
+    expect(within(dialog).queryByText(/complete the check/i)).toBeNull();
   });
 });

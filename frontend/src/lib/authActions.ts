@@ -12,6 +12,7 @@
  */
 import { apiFetch } from "./api";
 import { applyIdentityFrom } from "./authStore";
+import { botCheckHeaders } from "./botCheck";
 import type { AuthUserResponse, PasswordUpdateRequest } from "./types";
 
 /**
@@ -19,9 +20,12 @@ import type { AuthUserResponse, PasswordUpdateRequest } from "./types";
  * reveals which), so the caller's only signal is "sent".
  */
 export async function requestMagicLink(email: string): Promise<void> {
+  // ADR-0005 Phase 5: the sign-up bot check, only when the server asks for it.
+  const headers = await botCheckHeaders();
   await apiFetch<unknown>("/v1/auth/magic-link/request", {
     method: "POST",
     body: JSON.stringify({ email }),
+    ...(Object.keys(headers).length ? { headers } : {}),
   });
 }
 

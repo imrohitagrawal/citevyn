@@ -317,10 +317,15 @@ export async function getHealth(): Promise<HealthResponse> {
 // Auth (ADR-0004 PR 8)
 // ---------------------------------------------------------------------------
 
-export async function register(credentials: AuthCredentials): Promise<AuthUserResponse> {
+/** ``headers`` carries the sign-up bot check when the server asks for one. */
+export async function register(
+  credentials: AuthCredentials,
+  headers?: Record<string, string>,
+): Promise<AuthUserResponse> {
   return apiFetch<AuthUserResponse>("/v1/auth/register", {
     method: "POST",
     body: JSON.stringify(credentials),
+    headers,
   });
 }
 

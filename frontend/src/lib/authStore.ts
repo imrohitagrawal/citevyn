@@ -113,8 +113,8 @@ export function login(email: string, password: string): Promise<void> {
   return applyIdentityFrom(apiLogin({ email, password }));
 }
 
-export function register(email: string, password: string): Promise<void> {
-  return applyIdentityFrom(apiRegister({ email, password }));
+export function register(email: string, password: string, headers?: Record<string, string>): Promise<void> {
+  return applyIdentityFrom(apiRegister({ email, password }, headers));
 }
 
 export async function logout(): Promise<void> {

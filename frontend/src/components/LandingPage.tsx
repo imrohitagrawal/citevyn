@@ -7,6 +7,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useLandingState } from "../hooks/useLandingState";
+import { loadClientConfig } from "../lib/clientConfig";
 import { useDeferredReveal } from "../lib/useDeferredReveal";
 import { scrollToSection } from "../lib/scrollToSection";
 import { DEFERRED_SECTION_IDS } from "../data/navSections";
@@ -124,6 +125,10 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     [goSection, revealStrip],
   );
 
+  // ADR-0005 Phase 5: learn whether the access model is on (live mode only).
+  useEffect(() => {
+    void loadClientConfig();
+  }, []);
   // A deep link (`/#pricing`) lands on a section that is not in the DOM yet, so
   // the browser's own anchor scroll finds nothing. Reveal, then scroll once.
   useEffect(() => {
