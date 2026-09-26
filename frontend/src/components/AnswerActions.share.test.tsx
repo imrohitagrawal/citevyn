@@ -42,7 +42,7 @@ function setup() {
   return user;
 }
 
-const status = () => screen.getByTestId("answer-actions-status").textContent;
+const statusText = () => screen.getByTestId("answer-actions-status").textContent;
 
 describe("sharing an answer", () => {
   it("shares THIS answer, copies its link and says who can see it", async () => {
@@ -58,7 +58,7 @@ describe("sharing an answer", () => {
     const note = screen.getByTestId("share-link").textContent ?? "";
     expect(note).toMatch(/anyone with this link can see/i);
     expect(note).toMatch(/deleting this chat does not remove it/i);
-    expect(status()).toBe("Link copied.");
+    expect(statusText()).toBe("Link copied.");
   });
 
   it("offers no Share with the access model off, or for an answer without sources", () => {
@@ -84,7 +84,7 @@ describe("sharing an answer", () => {
     );
     render(<AnswerActions {...REF} shareable />);
     await setup().click(screen.getByRole("button", { name: "Share" }));
-    expect(status()).toBe("Sharing answers is part of Pro.");
+    expect(statusText()).toBe("Sharing answers is part of Pro.");
     expect(screen.queryByTestId("share-link")).toBeNull();
   });
 
@@ -95,7 +95,7 @@ describe("sharing an answer", () => {
     await setup().click(screen.getByRole("button", { name: "Share" }));
     expect(screen.queryByTestId("share-link")).toBeNull();
     expect(writeText).not.toHaveBeenCalled();
-    expect(status()).toBe("Could not share that. Please try again.");
+    expect(statusText()).toBe("Could not share that. Please try again.");
   });
 
   it("when copying fails, the link is still shown", async () => {
@@ -105,7 +105,7 @@ describe("sharing an answer", () => {
     render(<AnswerActions {...REF} shareable />);
     await setup().click(screen.getByRole("button", { name: "Share" }));
     expect(await screen.findByTestId("share-link")).toBeInTheDocument();
-    expect(status()).toBe("Link ready. Copy it below.");
+    expect(statusText()).toBe("Link ready. Copy it below.");
   });
 
   it("two quick clicks send one request", async () => {
@@ -118,5 +118,45 @@ describe("sharing an answer", () => {
     await user.click(screen.getByRole("button", { name: "Share" }));
     expect(shareAnswer).toHaveBeenCalledTimes(1);
     finish(SHARE);
+  });
+
+  it.each([
+    [401, "auth_required", "Please sign in to share."],
+    [409, "too_many_shares", "You have shared the most answers allowed. Stop sharing one under Shared links first."],
+    [422, "validation_error", "This answer cannot be shared."],
+    [500, "internal_error", "Could not share that. Please try again."],
+  ])("a %i %s gets its own message", async (status, code, message) => {
+    // Turns red if: a failure a retry cannot fix says "try again", or the
+    // mapping for this code is dropped.
+    vi.mocked(shareAnswer).mockRejectedValue(
+      new ApiClientError("x", status, { request_id: "r", status: "error", error: { code, message: "x" } }),
+    );
+    render(<AnswerActions {...REF} shareable />);
+    await setup().click(screen.getByRole("button", { name: "Share" }));
+    expect(statusText()).toBe(message);
+  });
+
+  it("with no clipboard at all, the link is shown and not claimed copied", async () => {
+    // Turns red if: a missing clipboard (plain http) counts as a copy.
+    vi.mocked(shareAnswer).mockResolvedValue(SHARE);
+    render(<AnswerActions {...REF} shareable />);
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    await user.click(screen.getByRole("button", { name: "Share" }));
+    expect(await screen.findByTestId("share-link")).toBeInTheDocument();
+    expect(statusText()).toBe("Link ready. Copy it below.");
+  });
+
+  it("Share waits for a feedback vote still in flight", async () => {
+    // Turns red if: Share stops using the one in-flight guard it shares with feedback.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => undefined)));
+    vi.mocked(shareAnswer).mockResolvedValue(SHARE);
+    render(<AnswerActions {...REF} shareable />);
+    const user = setup();
+    await user.click(screen.getByRole("button", { name: "Helpful" }));
+    await user.click(screen.getByRole("button", { name: "Share" }));
+    expect(shareAnswer).not.toHaveBeenCalled();
+    expect(statusText()).toBe("Still sending. Please wait a moment.");
+    vi.unstubAllGlobals();
   });
 });

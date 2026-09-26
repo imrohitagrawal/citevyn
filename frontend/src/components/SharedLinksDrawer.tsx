@@ -27,12 +27,14 @@ export default function SharedLinksDrawer({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  // Announced in a polite live region: copy results, the confirm step, a stop.
+  const [note, setNote] = useState("");
 
   // A failed first load leaves `shares` null, so the drawer never claims
   // "nothing shared" when it does not know. (Unlike the API keys drawer there
   // is no "make" here: the list only reaches [] by stopping your last share.)
-  const refresh = () =>
-    listShares().then(setShares, () => setError(FAILED));
+  const refresh = (failed = FAILED) =>
+    listShares().then(setShares, () => setError(failed));
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -48,6 +50,7 @@ export default function SharedLinksDrawer({
     if (busy) return; // one revoke at a time
     if (confirming !== share.share_id) {
       setConfirming(share.share_id);
+      setNote("Press again to stop sharing.");
       return;
     }
     setBusy(true);
@@ -57,7 +60,9 @@ export default function SharedLinksDrawer({
       await revokeShare(share.share_id);
       // Gone even if the refresh below fails, so it cannot be revoked twice.
       setShares((prev) => prev?.filter((s) => s.share_id !== share.share_id) ?? prev);
-      await refresh();
+      setNote("Stopped sharing. The link no longer works.");
+      // The stop worked; a failed refresh must not say it did not.
+      await refresh("Stopped sharing, but the list could not be refreshed.");
     } catch {
       setError(FAILED);
     } finally {
@@ -66,8 +71,12 @@ export default function SharedLinksDrawer({
     }
   };
 
-  const copy = (text: string) => {
-    void navigator.clipboard?.writeText(text).catch(() => undefined);
+  const copy = async (text: string) => {
+    const copied = await navigator.clipboard?.writeText(text).then(
+      () => true,
+      () => false,
+    );
+    setNote(copied ? "Link copied." : "Could not copy the link. Use Open instead.");
   };
 
   return createPortal(
@@ -90,6 +99,9 @@ export default function SharedLinksDrawer({
           does not remove the link; stop sharing it here.
         </p>
         {error && <p role="alert">{error}</p>}
+        <p aria-live="polite" className="drawer-note" data-testid="drawer-status">
+          {note}
+        </p>
 
         {shares !== null && shares.length === 0 && (
           <p className="drawer-note">You have not shared any answers.</p>
@@ -113,7 +125,7 @@ export default function SharedLinksDrawer({
                   )}
                 </span>
                 {link && (
-                  <button type="button" onClick={() => copy(link)} aria-label={`Copy link: ${s.question}`}>
+                  <button type="button" onClick={() => void copy(link)} aria-label={`Copy link: ${s.question}`}>
                     Copy link
                   </button>
                 )}

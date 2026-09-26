@@ -69,6 +69,7 @@ describe("SharedLinksDrawer", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: `Stop sharing: ${SHARE.question}` }));
     expect(revokeShare).not.toHaveBeenCalled();
+    expect(screen.getByTestId("drawer-status").textContent).toBe("Press again to stop sharing.");
     await user.click(await screen.findByRole("button", { name: `Really stop sharing: ${SHARE.question}` }));
     expect(revokeShare).toHaveBeenCalledWith(ID);
     expect(await screen.findByText(/not shared any answers/i)).toBeTruthy();
@@ -88,7 +89,10 @@ describe("SharedLinksDrawer", () => {
     vi.mocked(listShares).mockResolvedValueOnce([SHARE]).mockRejectedValueOnce(new Error("down"));
     open();
     await stop(SHARE.question);
-    expect(await screen.findByRole("alert")).toBeTruthy();
+    // The stop worked, so the alert must not say it did not.
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Stopped sharing, but the list could not be refreshed.",
+    );
     expect(screen.queryByRole("button", { name: `Stop sharing: ${SHARE.question}` })).toBeNull();
   });
 
@@ -124,5 +128,43 @@ describe("SharedLinksDrawer", () => {
     expect(screen.queryByRole("link", { name: "Open" })).toBeNull();
     expect(screen.queryByRole("button", { name: /copy link/i })).toBeNull();
     expect(screen.getByRole("button", { name: `Stop sharing: ${SHARE.question}` })).toBeTruthy(); // partner
+  });
+});
+
+
+describe("review round", () => {
+  it("a stop the server refuses keeps the row and says so", async () => {
+    // Turns red if: the row is dropped before the server confirms (the link would
+    // look gone while still public), or the failure is silent.
+    vi.mocked(listShares).mockResolvedValue([SHARE]);
+    vi.mocked(revokeShare).mockRejectedValue(new Error("down"));
+    open();
+    await stop(SHARE.question);
+    expect((await screen.findByRole("alert")).textContent).toBe("That didn't work. Please try again later.");
+    expect(screen.getByRole("button", { name: `Stop sharing: ${SHARE.question}` })).toBeTruthy();
+    expect(listShares).toHaveBeenCalledTimes(1);
+  });
+
+  it("Copy link copies the full link and says so", async () => {
+    // Turns red if: the button is missing, copies the relative path, or is silent.
+    vi.mocked(listShares).mockResolvedValue([SHARE]);
+    open();
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await user.click(await screen.findByRole("button", { name: `Copy link: ${SHARE.question}` }));
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/s/${ID}`);
+    expect(screen.getByTestId("drawer-status").textContent).toBe("Link copied.");
+  });
+
+  it("a copy that fails says so", async () => {
+    // Turns red if: a blocked clipboard is reported as copied.
+    vi.mocked(listShares).mockResolvedValue([SHARE]);
+    open();
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.reject(new Error("blocked")));
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await user.click(await screen.findByRole("button", { name: `Copy link: ${SHARE.question}` }));
+    expect(screen.getByTestId("drawer-status").textContent).toBe("Could not copy the link. Use Open instead.");
   });
 });

@@ -152,12 +152,18 @@ export default function AnswerActions({
       setStatus(copied ? "Link copied." : "Link ready. Copy it below.");
     } catch (err) {
       const e = err instanceof ApiClientError ? err : null;
+      const code = e?.errorCode();
+      // Only a failure a retry can fix says "try again".
       setStatus(
-        e?.errorCode() === "plan_required"
+        code === "plan_required"
           ? "Sharing answers is part of Pro."
-          : e?.status === 401
-            ? "Please sign in to share."
-            : "Could not share that. Please try again.",
+          : code === "too_many_shares"
+            ? "You have shared the most answers allowed. Stop sharing one under Shared links first."
+            : e?.status === 422
+              ? "This answer cannot be shared."
+              : e?.status === 401
+                ? "Please sign in to share."
+                : "Could not share that. Please try again.",
       );
     } finally {
       busy.current = false;
