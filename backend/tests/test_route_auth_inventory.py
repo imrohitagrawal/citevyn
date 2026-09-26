@@ -324,6 +324,9 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("GET", "/s/{share_id}"): Capability.public,
     ("GET", "/v1/me/usage"): Capability.usage_insights,
     ("GET", "/v1/me/digest"): Capability.weekly_digest,
+    ("POST", "/v1/me/watches"): Capability.watch_alerts,
+    ("GET", "/v1/me/watches"): Capability.manage_account,
+    ("DELETE", "/v1/me/watches/{watch_id}"): Capability.manage_account,
     ("PUT", "/v1/me/digest"): Capability.weekly_digest,
     ("GET", "/digest/unsubscribe"): Capability.public,
     ("POST", "/digest/unsubscribe"): Capability.public,
@@ -360,7 +363,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 55
+    assert len(EXPECTED_CAPABILITY) == 58
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -415,6 +418,9 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("GET", "/v1/me/usage"),
     ("GET", "/v1/me/digest"),
     ("PUT", "/v1/me/digest"),
+    ("POST", "/v1/me/watches"),
+    ("GET", "/v1/me/watches"),
+    ("DELETE", "/v1/me/watches/{watch_id}"),
     ("POST", "/v1/auth/magic-link/request"),
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
@@ -484,6 +490,7 @@ PATH_PARAM_VALUES: dict[str, str] = {
     "slug": "terms",
     "key_id": "0" * 32,
     "share_id": "0" * 32,
+    "watch_id": "00000000-0000-4000-8000-000000000005",
 }
 
 _PARAM_RE = re.compile(r"\{([^}]+)\}")
@@ -668,6 +675,9 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("GET", "/v1/me/usage"),
         ("GET", "/v1/me/digest"),
         ("PUT", "/v1/me/digest"),
+        ("POST", "/v1/me/watches"),
+        ("GET", "/v1/me/watches"),
+        ("DELETE", "/v1/me/watches/{watch_id}"),
         ("GET", "/v1/me/export"),
         ("GET", "/v1/me/sessions"),
         ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),

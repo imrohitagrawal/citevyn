@@ -89,6 +89,9 @@ class APIErrorCode(StrEnum):
     # Spec-side (ADR-0005 Phase 6C). 409: the account already has the maximum
     # number of live shared answers; revoke one first.
     too_many_shares = "too_many_shares"
+    # Spec-side (ADR-0005 Phase 7C). 409: the account already has the maximum
+    # number of watches; remove one first.
+    too_many_watches = "too_many_watches"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -120,6 +123,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.bot_check_failed: 403,
     APIErrorCode.too_many_api_keys: 409,
     APIErrorCode.too_many_shares: 409,
+    APIErrorCode.too_many_watches: 409,
     APIErrorCode.internal_error: 500,
 }
 

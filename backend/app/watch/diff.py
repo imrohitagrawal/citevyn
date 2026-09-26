@@ -103,4 +103,44 @@ def section_changes(old: str, new: str) -> Summary:
     )
 
 
-__all__ = ["MAX_LISTED", "Summary", "normalize", "section_changes"]
+#: Bounds on the lines kept per change (for watch alerts, Phase 7C).
+MAX_LINES = 200
+MAX_LINE_CHARS = 300
+
+
+class ChangedLines(TypedDict):
+    added: list[str]
+    removed: list[str]
+
+
+def changed_lines(old: str, new: str) -> ChangedLines:
+    """The lines added and removed, in page order, as a multiset difference
+    (linear time; a moved line is neither). Blank lines are left out; each list
+    is capped at :data:`MAX_LINES` and each line at :data:`MAX_LINE_CHARS`."""
+
+    def extra(these: list[str], those: list[str]) -> list[str]:
+        left = Counter(those)
+        out: list[str] = []
+        for line in these:
+            if left[line] > 0:
+                left[line] -= 1
+            elif line.strip():
+                out.append(line[:MAX_LINE_CHARS])
+                if len(out) >= MAX_LINES:
+                    break
+        return out
+
+    a, b = normalize(old).split("\n"), normalize(new).split("\n")
+    return ChangedLines(added=extra(b, a), removed=extra(a, b))
+
+
+__all__ = [
+    "MAX_LINES",
+    "MAX_LINE_CHARS",
+    "MAX_LISTED",
+    "ChangedLines",
+    "Summary",
+    "changed_lines",
+    "normalize",
+    "section_changes",
+]

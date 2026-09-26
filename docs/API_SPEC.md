@@ -851,6 +851,25 @@ Every digest email carries `List-Unsubscribe` and
 `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. At most one email per
 account per week; a week with no changes sends none.
 
+### Watches (ADR-0005 Phase 7C)
+
+Watch a vendor page, or a term, for changes the docs watcher finds. Making a
+watch is Pro (capability `watch_alerts`); listing and removing need only an
+account (`manage_account`). 404 unless the access model is on.
+
+- `POST /v1/me/watches` `{"kind": "page"|"term", "value": ...}` → `201
+  {request_id, watch_id, kind, value, label, created_at}`.
+  - `page`: one of the watched pages, by its readable URL or its Markdown twin
+    (stored as the twin); anything else is 422.
+  - `term`: 2 to 64 characters, no control or formatting characters; matched,
+    ignoring case, in the lines a change added or removed.
+  - Watching the same thing again returns the existing watch with 200. 409
+    `too_many_watches` at 25 watches.
+- `GET /v1/me/watches` → `{request_id, watches: [...], pages: [{url, title,
+  product}]}` (the pages a page watch can point at).
+- `DELETE /v1/me/watches/{watch_id}` → 204. Someone else's watch or an unknown
+  id is 404.
+
 ### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
 
 For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's
@@ -1228,4 +1247,5 @@ Notes:
 | bot_check_failed | 403. `POST /v1/auth/register` or `POST /v1/auth/magic-link/request` came without a valid, unused proof-of-work solution in `X-CiteVyn-Bot-Check`. Get a new challenge and try again. Only with the access model on. |
 | too_many_api_keys | 409. The account already has the maximum number of live API keys (10); revoke one first. Only with the access model on. |
 | too_many_shares | 409. The account already has the maximum number of live shared answers (100); revoke one first. Only with the access model on. |
+| too_many_watches | 409. The account already has the maximum number of watches (25); remove one first. Only with the access model on. |
 | quota_exceeded | 429. A Pro account used this month's answered questions. `details` = `{used, limit, resets_at}` (the first of next month, UTC). Only with the access model on. |

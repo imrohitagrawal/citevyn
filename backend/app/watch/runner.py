@@ -25,7 +25,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.doc_watch import DocChange, DocSnapshot
-from app.watch.diff import normalize, section_changes
+from app.watch.diff import changed_lines, normalize, section_changes
 from app.watch.fetch import FetchError, RobotsCache, fetch_page
 from app.watch.pages import WatchedPage, watched_hosts
 
@@ -107,6 +107,7 @@ async def run_watch(
                     old_sha256=snap.content_sha256,
                     new_sha256=sha,
                     summary=dict(section_changes(snap.content, text)),
+                    lines=dict(changed_lines(snap.content, text)),
                 )
             )
             stats.changed += 1
