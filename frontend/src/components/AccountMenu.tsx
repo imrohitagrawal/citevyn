@@ -9,11 +9,14 @@
  */
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth";
+import { useClientConfig } from "../lib/clientConfig";
 import { LazyChunkBoundary } from "./LazyChunkBoundary";
 
 const AuthModal = lazy(() => import("./AuthModal"));
 const HistoryDrawer = lazy(() => import("./HistoryDrawer"));
 const ConnectedAccountsDrawer = lazy(() => import("./ConnectedAccountsDrawer"));
+// ADR-0005 Phase 6B-2: only with the access model on.
+const ApiKeysDrawer = lazy(() => import("./ApiKeysDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -65,6 +68,8 @@ export function AccountMenu({
   const [menuOpen, setMenuOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [connectedOpen, setConnectedOpen] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
+  const accessModel = useClientConfig().access_model;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -159,6 +164,20 @@ export function AccountMenu({
             >
               Sign-in methods
             </button>
+            {accessModel && (
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setKeysOpen(true);
+                }}
+                style={menuItemStyle}
+              >
+                API keys
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
@@ -183,6 +202,13 @@ export function AccountMenu({
                   onResumeSession?.(sessionId);
                 }}
               />
+            </Suspense>
+          </LazyChunkBoundary>
+        )}
+        {keysOpen && (
+          <LazyChunkBoundary label="api-keys" onError={openFailed}>
+            <Suspense fallback={null}>
+              <ApiKeysDrawer triggerRef={triggerRef} onClose={() => setKeysOpen(false)} />
             </Suspense>
           </LazyChunkBoundary>
         )}
