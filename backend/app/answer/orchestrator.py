@@ -32,6 +32,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.alias_intent import is_citevyn_intent_llm
+from app.answer.comparison import comparison_instruction, missing_areas, missing_note
 from app.answer.generate import AnswerGenerator
 from app.answer.memory import (
     build_contextual_query,
@@ -677,7 +678,7 @@ class Orchestrator:
             normalized_question=cache_normalized,
             product_area=cache_product_area,
             source_version_hash=source_version_hash,
-            answer_policy_version=self._settings.answer_policy_version,
+            answer_policy_version=self._policy_version,
             embedder_identity=configured_identity.cache_key_component(),
         )
         cached = await self._cache.get(cache_key=cache_key)
@@ -807,7 +808,7 @@ class Orchestrator:
             # the LLM grounding-refusal net refuses (the multi-turn refusal golden cases
             # gate this). Single-turn ``retrieval_query == question`` so this is a no-op.
             with call_site(CallSite.answer):
-                llm_result = await self._generator.generate(retrieval_query, evidence)
+                llm_result = await self._generate(retrieval_query, evidence, multi_domains)
         except LLMUnavailable as exc:
             # Slice 7 maps this to ``cost_limit_reached`` (503) when
             # the cause is 429, otherwise to ``internal_error`` (500).
@@ -908,6 +909,15 @@ class Orchestrator:
         # rejected gaps outright; now that gaps are legitimate (#215), the wire
         # has to carry the number rather than let the client guess it.
         used_indices = sorted(set(validation.cited_indices))
+        answer_text = llm_result.text
+        if multi_hop and self._settings.comparison_answers:
+            # Phase 6E: a named product the answer cites nothing for is said out
+            # loud, never left as a silently half-answered comparison.
+            note = missing_note(
+                missing_areas([d.value for d in multi_domains], evidence, used_indices)
+            )
+            if note:
+                answer_text = f"{answer_text.rstrip()}\n\n{note}"
         visible_citations = [
             Citation(chunk_to_citation(evidence[i - 1]) | {"marker": i}) for i in used_indices
         ]
@@ -920,7 +930,7 @@ class Orchestrator:
             normalized=normalized,
             domain=domain,
             intent=intent,
-            answer=llm_result.text,
+            answer=answer_text,
             citations=visible_citations,
             evidence=evidence,
             strategy=strategy,
@@ -936,6 +946,28 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @property
+    def _policy_version(self) -> str:
+        """The answer policy an answer is produced and cached under. Comparison
+        answers (Phase 6E) change what an answer says, so an answer cached with
+        the setting off is never served with it on, or the other way round."""
+        base = self._settings.answer_policy_version
+        return f"{base}+cmp" if self._settings.comparison_answers else base
+
+    async def _generate(
+        self, query: str, evidence: list[EvidenceHit], multi_domains: list[Domain]
+    ) -> LLMResult:
+        """Generate, adding the comparison instruction for a multi-product
+        question when comparison answers are on. Otherwise the call is exactly
+        the pre-6E one (same arguments, byte-identical prompt)."""
+        if self._settings.comparison_answers and len(multi_domains) >= 2:
+            return await self._generator.generate(
+                query,
+                evidence,
+                instruction=comparison_instruction([d.value for d in multi_domains]),
+            )
+        return await self._generator.generate(query, evidence)
 
     async def _retry_without_exact_lookup(
         self,
@@ -994,7 +1026,7 @@ class Orchestrator:
 
         try:
             with call_site(CallSite.answer):
-                llm_result = await self._generator.generate(retrieval_query, result.hits)
+                llm_result = await self._generate(retrieval_query, result.hits, multi_domains)
         except LLMUnavailable:
             # The first generation succeeded, so this is a mid-flight provider
             # failure on a BEST-EFFORT retry. Keep the original refusal rather
@@ -1345,7 +1377,7 @@ class Orchestrator:
                     citations=[dict(c) for c in citations],
                     confidence=confidence,
                     source_version_hash=source_version_hash,
-                    answer_policy_version=self._settings.answer_policy_version,
+                    answer_policy_version=self._policy_version,
                     created_at=_utcnow(),
                     ttl_expires_at=_utcnow_from_seconds(self._settings.cache_ttl_seconds),
                 ),
@@ -1401,7 +1433,7 @@ class Orchestrator:
             unsupported=False,
             no_answer=False,
             source_version_hash=source_version_hash,
-            answer_policy_version=self._settings.answer_policy_version,
+            answer_policy_version=self._policy_version,
         )
 
     # ------------------------------------------------------------------

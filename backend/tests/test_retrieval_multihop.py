@@ -190,3 +190,27 @@ async def test_every_degrade_reason_is_ranked_so_none_can_only_mean_clean() -> N
         _combine_degrades([VectorDegrade.unavailable, VectorDegrade.mismatch])
         is VectorDegrade.mismatch
     )
+
+
+async def test_retrieve_multi_puts_back_a_product_the_reranker_dropped() -> None:
+    """ADR-0005 Phase 6E: a reranker that ranks one product out entirely must not
+    leave a comparison with nothing to cite for it. Turns red if: retrieve_multi
+    stops applying the per-product guarantee after the rerank."""
+    a1, a2, b1 = _hit("claude_api"), _hit("claude_api"), _hit("gemini_api")
+    h, _ = _hybrid(
+        {
+            "claude_api": RetrievalResult(hits=[a1, a2], vector_degrade=VectorDegrade.none),
+            "gemini_api": RetrievalResult(hits=[b1], vector_degrade=VectorDegrade.none),
+        }
+    )
+
+    class _DropsGemini:
+        async def rerank(self, question, hits, *, top_k):  # type: ignore[no-untyped-def]
+            return [x for x in hits if x.product_area == "claude_api"][:top_k]
+
+    h._reranker = _DropsGemini()  # type: ignore[assignment]
+    result = await h.retrieve_multi(
+        "q", product_areas=["claude_api", "gemini_api"], intent=Intent.how_to, limit=20, top_k=2
+    )
+    assert [hit.chunk_id for hit in result.hits] == [a1.chunk_id, b1.chunk_id]
+    assert [hit.rank for hit in result.hits] == [1, 2]
