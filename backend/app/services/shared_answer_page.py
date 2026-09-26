@@ -108,8 +108,8 @@ def render_answer_html(text: str, *, markers: set[int]) -> str:
         if not line.strip():
             flush()
         elif bullet:
-            if para:
-                flush()
+            # An open paragraph needs no flush here: flush() always writes the
+            # paragraph before the list, and paragraph lines come first.
             items.append(bullet.group(1).strip())
         else:
             if items:

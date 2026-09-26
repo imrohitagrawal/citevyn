@@ -10,7 +10,11 @@ Each test says which change turns it red.
 
 from __future__ import annotations
 
-from app.services.shared_answer_page import render_answer_html, render_shared_answer_page
+from app.services.shared_answer_page import (
+    format_day,
+    render_answer_html,
+    render_shared_answer_page,
+)
 
 CITES = [
     {
@@ -167,3 +171,54 @@ def test_no_empty_paragraph_without_a_date() -> None:
         question="q", answer="a", citations=CITES, docs_as_of=None, shared_on="2026-09-26"
     )
     assert "<p></p>" not in page
+
+
+def test_a_date_that_is_not_a_date_is_shown_as_it_is() -> None:
+    """Turns red if: an impossible month or a non-date crashes or is reformatted."""
+    assert format_day("2026-09-01") == "1 Sep 2026"
+    assert format_day("2026-13-01") == "2026-13-01"
+    assert format_day("soon") == "soon"
+
+
+def test_a_paragraph_and_a_list_next_to_each_other_stay_apart() -> None:
+    """No blank line between them, in either order.
+    Turns red if: the switch does not close the open paragraph or list."""
+    assert render_answer_html("Intro\n- one\nOutro", markers=set()) == (
+        "<p>Intro</p><ul><li>one</li></ul><p>Outro</p>"
+    )
+
+
+def test_citation_urls_that_are_not_plain_links_are_text() -> None:
+    """A URL that cannot be parsed, and one with a user name (it reads as the
+    wrong host). Turns red if: either becomes a link, or the page crashes."""
+    page = _page(
+        citations=[
+            {"marker": 1, "title": "Broken", "url": "http://[::1", "docs_as_of": None},
+            {
+                "marker": 2,
+                "title": "Creds",
+                "url": "https://docs.example.com@evil.example/",
+                "docs_as_of": None,
+            },
+        ],
+        answer="x [1] [2]",
+    )
+    assert "Broken" in page and "Creds" in page
+    assert 'href="http://[' not in page
+    assert 'href="https://docs.example.com@' not in page
+
+
+def test_marker_values_other_than_plain_numbers() -> None:
+    """True is an int in Python but not a citation number; "2" is.
+    Turns red if: True becomes source 1, or a digit string is not read."""
+    page = _page(
+        citations=[
+            {"marker": True, "title": "Flag", "url": None, "docs_as_of": None},
+            {"marker": "2", "title": "Two", "url": None, "docs_as_of": None},
+        ],
+        answer="x [1] [2]",
+    )
+    assert 'id="source-1"' not in page
+    assert 'id="source-2"' in page
+    assert '<a class="share-marker" href="#source-2">[2]</a>' in page
+    assert "#source-1" not in page
