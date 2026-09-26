@@ -921,3 +921,14 @@ def test_a_failed_redeem_does_not_verify(magic_app: Path) -> None:
     tampered = token[:-4] + ("AAAA" if not token.endswith("AAAA") else "BBBB")
     _confirm_post(_client(), tampered)
     assert _verified_at("real@example.com") is None
+
+
+def test_a_non_ascii_address_is_verified_by_its_own_magic_link(magic_app: Path) -> None:
+    """Registration accepts non-ASCII addresses, and a redeemed link proves the
+    account's own stored address, so no look-alike folding can occur here.
+    Turns red if: the OAuth-only ASCII rule is applied to the magic-link path
+    (found in review: josé@example.com could never be verified)."""
+    _register(_client(), "josé@example.com")
+    _request_link(_client(), "josé@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).status_code == 302
+    assert _verified_at("josé@example.com") is not None

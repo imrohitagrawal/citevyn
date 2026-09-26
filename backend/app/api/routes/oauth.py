@@ -749,10 +749,17 @@ async def _resolve_connect_target(db: AsyncSession, nonce: OAuthNonce) -> str | 
 
 
 async def _mark_verified(db: AsyncSession, user_id: str, identity: _Identity) -> None:
-    """Stamp the account verified if the provider verified THIS account's address."""
-    await mark_email_verified(
-        db, user_id, identity.email if identity.email_verified else None, _now()
-    )
+    """Stamp the account verified if the provider verified THIS account's address.
+
+    ASCII only, and only here: Python lower-cases look-alikes such as the Kelvin
+    sign (U+212A) to ASCII letters, so a provider's different mailbox could match
+    a stored address. The magic-link path passes the stored address itself, so it
+    needs no such rule (a non-ASCII registration must still be verifiable).
+    """
+    proven = identity.email if identity.email_verified else None
+    if proven is not None and not proven.isascii():
+        return
+    await mark_email_verified(db, user_id, proven, _now())
 
 
 async def _handle_login_intent(
