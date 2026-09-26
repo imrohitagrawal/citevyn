@@ -57,3 +57,12 @@ describe("loadClientConfig", () => {
     expect(getClientConfig().access_model).toBe(false);
   });
 });
+
+
+it("a demo build makes no request at all", async () => {
+  // Today's demo page must make no extra request. Turns red if: the live-mode
+  // check is dropped (the result alone cannot show it: a failed fetch is OFF too).
+  vi.mocked(isLiveMode).mockReturnValue(false);
+  await loadClientConfig();
+  expect(apiFetch).not.toHaveBeenCalled();
+});
