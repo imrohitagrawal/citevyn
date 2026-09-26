@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from app.access.quota import month_start
+from app.access.quota import DayUsage, daily_usage, month_start
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import AnswerUsage, Membership
@@ -132,9 +132,16 @@ def test_days_count_exactly_what_the_allowance_counts(env: pytest.MonkeyPatch) -
         body = client.get("/v1/me/usage", headers=DEMO).json()
 
     days = body["days"]
+    # Contiguous from the 1st to the server's today (which may be one day past
+    # ours if the run crosses midnight UTC).
+    assert body["period_start"] == start.isoformat()
     assert [d["date"] for d in days] == [
-        (start + timedelta(days=i)).date().isoformat() for i in range((now - start).days + 1)
+        (start + timedelta(days=i)).date().isoformat() for i in range(len(days))
     ]
+    assert days[-1]["date"] in {
+        now.date().isoformat(),
+        (now + timedelta(days=1)).date().isoformat(),
+    }
     by_day = {d["date"]: (d["chat"], d["mcp"]) for d in days}
     today, first = now.date().isoformat(), start.date().isoformat()
     if today == first:
@@ -145,7 +152,6 @@ def test_days_count_exactly_what_the_allowance_counts(env: pytest.MonkeyPatch) -
     assert body["totals"] == {"chat": 2, "mcp": 1, "total": 3}
     assert body["usage"]["used"] == 3 == sum(d["chat"] + d["mcp"] for d in days)
     assert body["usage"]["kind"] == "monthly"
-    assert body["period_start"] == start.isoformat()
 
 
 def test_a_new_pro_account_sees_an_empty_month(env: pytest.MonkeyPatch) -> None:
@@ -158,3 +164,67 @@ def test_a_new_pro_account_sees_an_empty_month(env: pytest.MonkeyPatch) -> None:
     assert body["totals"] == {"chat": 0, "mcp": 0, "total": 0}
     assert body["days"] and all(d["chat"] == d["mcp"] == 0 for d in body["days"])
     assert body["usage"]["remaining"] == body["usage"]["limit"] > 0
+
+
+def test_an_anonymous_caller_must_sign_in(env: pytest.MonkeyPatch) -> None:
+    """Turns red if: the page answers (or 404s) for a caller with no account."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        res = client.get("/v1/me/usage", headers=DEMO)
+    assert res.status_code == 401
+    assert res.json()["error"]["code"] == "auth_required"
+
+
+# ---------------------------------------------------------------------------
+# daily_usage on a fixed clock (no dependence on today's date or the host zone)
+# ---------------------------------------------------------------------------
+
+
+def _days_at(
+    env: pytest.MonkeyPatch, now: datetime, stamps: list[tuple[datetime, str]]
+) -> list[DayUsage]:
+    _on(env)
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+    for when, channel in stamps:
+        _add(user, when, channel=channel)
+
+    async def _run() -> list[DayUsage]:
+        async with get_sessionmaker()() as s:
+            return list((await daily_usage(s, user, now))[1])
+
+    return asyncio.run(_run())
+
+
+def test_on_the_first_the_month_is_one_day(env: pytest.MonkeyPatch) -> None:
+    """Turns red if: today is left out, or chat and MCP on one day are mixed up."""
+    now = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
+    days = _days_at(env, now, [(datetime(2026, 10, 1, 0, 0, tzinfo=UTC), "mcp"), (now, "chat")])
+    assert days == [{"date": "2026-10-01", "chat": 1, "mcp": 1}]
+
+
+def test_stamps_are_read_as_utc_whatever_the_host_zone(env: pytest.MonkeyPatch) -> None:
+    """SQLite returns naive datetimes. Read as the host's local time (India,
+    UTC+5:30), 00:30 UTC on the 2nd would become 19:00 UTC on the 1st. Turns red
+    if: the naive-means-UTC step is dropped (even on a UTC CI runner: TZ is set
+    here)."""
+    import time
+
+    env.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    try:
+        now = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
+        days = _days_at(env, now, [(datetime(2026, 10, 2, 0, 30, tzinfo=UTC), "chat")])
+    finally:
+        env.delenv("TZ")
+        time.tzset()
+    assert [d for d in days if d["chat"]] == [{"date": "2026-10-02", "chat": 1, "mcp": 0}]
+
+
+def test_a_row_stamped_after_today_counts_today(env: pytest.MonkeyPatch) -> None:
+    """Another machine's clock a little ahead must not make the days add up to
+    less than the allowance's count. Turns red if: such a row is dropped."""
+    now = datetime(2026, 10, 3, 23, 59, tzinfo=UTC)
+    days = _days_at(env, now, [(datetime(2026, 10, 4, 0, 1, tzinfo=UTC), "chat")])
+    assert days[-1] == {"date": "2026-10-03", "chat": 1, "mcp": 0}
+    assert len(days) == 3

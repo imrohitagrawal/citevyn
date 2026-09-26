@@ -16,8 +16,8 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access.deps import requires, tier_for_principal
-from app.access.policy import Capability
+from app.access.deps import requires
+from app.access.policy import Capability, Tier
 from app.access.quota import daily_usage, usage_for
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
@@ -40,8 +40,9 @@ async def my_usage(
             request_id=request_id, code=APIErrorCode.not_found, message="Not found."
         )
     now = datetime.now(UTC)
-    tier = await tier_for_principal(db, principal_id, now)
-    usage = await usage_for(db, principal_id, tier, settings, now)
+    # Pro: requires(usage_insights) has just checked it. Not looked up a second
+    # time, so the allowance and the days always use the same (Pro) count.
+    usage = await usage_for(db, principal_id, Tier.pro, settings, now)
     start, days = await daily_usage(db, principal_id, now)
     chat = sum(d["chat"] for d in days)
     mcp = sum(d["mcp"] for d in days)

@@ -155,10 +155,12 @@ async def daily_usage(
         days[day.isoformat()] = {"date": day.isoformat(), "chat": 0, "mcp": 0}
         day += timedelta(days=1)
     for occurred_at, channel in rows:
+        # SQLite gives naive datetimes; they are UTC (never the host's zone).
         stamp = occurred_at if occurred_at.tzinfo else occurred_at.replace(tzinfo=UTC)
-        entry = days.get(stamp.astimezone(UTC).date().isoformat())
-        if entry is None:
-            continue
+        # A row stamped after today (another machine's clock a little ahead)
+        # counts on today, so the days always add up to the allowance's count.
+        day_of = min(stamp.astimezone(UTC).date(), today)
+        entry = days[day_of.isoformat()]
         if channel == "mcp":
             entry["mcp"] += 1
         else:
