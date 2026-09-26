@@ -19,9 +19,9 @@ either direction. The decisions behind it are in [ADR-0005](ADR/0005-access-mode
   - a signed-in caller gets **403 `plan_required`**, because upgrading is what helps.
   - Both carry `details: {capability, required_tier}`.
 - The tier is read from our own tables on the server, never from the browser and never
-  from Stripe: a registered account is `pro` when its `memberships` row says it has paid
-  (active, trialing, or past due inside the 7-day grace), else `free`. Stripe's signed
-  webhooks keep that row current.
+  from Stripe: a registered account is `pro` when any of its `memberships` rows (one per
+  subscription) says it has paid (active, trialing, or past due inside the 7-day
+  grace), else `free`. Stripe's signed webhooks keep those rows current.
 - `operate` belongs to no tier. It is granted only by the admin API key, which each
   operator route already checks.
 

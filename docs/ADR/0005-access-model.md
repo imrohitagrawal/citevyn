@@ -151,7 +151,7 @@ for.
   to the free-account tier. It keeps its history; it loses Pro capabilities.
 - Every membership change writes an audit event. **As built (Phase 4A):** the
   `stripe_events` table is that audit log: every webhook event id, once, with its
-  type, account and outcome (`applied`, `superseded`, `unmatched`, `ignored`). Adding
+  type, account and outcome (`applied`, `applied_account_mismatch`, `unmatched`, `ignored`). Adding
   `AuditAction` members would need `ALTER TYPE` on a native enum, which AGENTS.md
   steers away from.
 - **As built (Phase 4A):** Stripe is called over HTTPS with `httpx` (already a
@@ -174,6 +174,16 @@ for.
   the account is Pro if any is paid; the membership view lists them all, so paying
   twice is visible. Handlers for one account are serialised by a row lock on the
   user, and the subscription is read again inside the lock.
+- **Bound once, then the status follows Stripe** (the third review round; the
+  owner approved this design on 2026-09-26). v3 read the account from subscription
+  metadata on every event. Metadata can be edited, and review showed a cancelled
+  subscription whose metadata had been cleared staying Pro forever, and a moved
+  one leaving the payer on Free. Now a subscription is bound to an account once,
+  when its row is created, from the metadata our checkout wrote, and only if that
+  account exists. After that the row is found by subscription id and always takes
+  Stripe's status. A metadata mismatch is recorded as `applied_account_mismatch`
+  and logged; moving a subscription to another account is a manual support step.
+  The view and the portal describe the paid subscription that is not ending.
 
 **Owner checklist for Stripe (test mode first), before turning the model on:**
 1. Create the product "Pro" with a monthly ($9) and a yearly ($91) recurring price;

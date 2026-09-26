@@ -38,13 +38,20 @@ How events are applied (rewritten after review):
   the account's user row (``SELECT ... FOR UPDATE`` on Postgres), and the
   subscription is read from Stripe again INSIDE the lock, so a slower handler
   holding an older read cannot overwrite a newer state.
-* **Only our own accounts.** The account id comes from subscription metadata WE
-  set at checkout; a subscription naming no account we have grants nothing
-  (``unmatched``).
+* **Bound once; the status always follows Stripe.** A subscription is bound to
+  an account when its row is created, from the metadata OUR checkout wrote, and
+  only if that account exists; a subscription never bound grants nothing
+  (``unmatched``). After that the row is found by subscription id and always
+  takes Stripe's status, whatever the metadata now says. Metadata can be edited,
+  and v3 re-read it on every event: review showed a cancelled subscription with
+  cleared metadata staying Pro forever. A metadata mismatch is recorded
+  (``applied_account_mismatch``) and moving a subscription between accounts is a
+  manual support step.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -66,6 +73,8 @@ _SUBSCRIPTION_EVENTS = frozenset(
     }
 )
 _INVOICE_EVENTS = frozenset({"invoice.payment_failed", "invoice.paid", "invoice.payment_succeeded"})
+
+_logger = logging.getLogger("citevyn.billing")
 
 FetchSubscription = Callable[[str], Awaitable[dict[str, Any]]]
 
@@ -162,8 +171,12 @@ async def _sync(
 ) -> tuple[str, str | None]:
     # StripeError propagates from either read: nothing is logged, Stripe retries.
     first = await fetch_subscription(sub_id)
-    account: object = _as_dict(first.get("metadata")).get("account_id")
-    if not isinstance(account, str):
+    # Bound once: a subscription we already hold keeps the account it was bought
+    # for, whatever its metadata says now. Only a NEW subscription is bound, from
+    # the metadata our checkout wrote.
+    known = await _row(db, sub_id)
+    account = known.account_id if known is not None else _claimed_account(first)
+    if account is None:
         return "unmatched", None
     # Serialise handlers for one account (a row lock on Postgres; SQLite, the test
     # engine, serialises writes anyway), then read again INSIDE the lock.
@@ -171,11 +184,9 @@ async def _sync(
         await db.execute(select(User).where(User.user_id == account).with_for_update())
     ).scalar_one_or_none()
     if locked is None:
-        return "unmatched", account
+        return "unmatched", account  # a new subscription naming no account we have
     sub = await fetch_subscription(sub_id)
-    m = (
-        await db.execute(select(Membership).where(Membership.stripe_subscription_id == sub_id))
-    ).scalar_one_or_none()
+    m = await _row(db, sub_id)
     if m is None:
         m = Membership(
             account_id=account,
@@ -185,8 +196,26 @@ async def _sync(
             grace_until=None,
         )
         db.add(m)
+    # The status ALWAYS follows Stripe, even when the metadata no longer names the
+    # bound account: skipping the update would leave a cancelled row paid forever.
     _store(m, sub, now, grace_days)
-    return "applied", account
+    if _claimed_account(sub) != m.account_id:
+        # Moving a subscription between accounts is a manual support step, never
+        # a side effect of editing metadata. Recorded, not applied.
+        _logger.warning("billing_subscription_account_mismatch", extra={"subscription": sub_id})
+        return "applied_account_mismatch", m.account_id
+    return "applied", m.account_id
+
+
+async def _row(db: AsyncSession, sub_id: str) -> Membership | None:
+    return (
+        await db.execute(select(Membership).where(Membership.stripe_subscription_id == sub_id))
+    ).scalar_one_or_none()
+
+
+def _claimed_account(sub: dict[str, Any]) -> str | None:
+    value: object = _as_dict(sub.get("metadata")).get("account_id")
+    return value if isinstance(value, str) else None
 
 
 async def apply_event(
@@ -199,8 +228,10 @@ async def apply_event(
 ) -> str:
     """Apply one signature-verified event; return its outcome.
 
-    ``duplicate`` (already seen, nothing done), ``applied``, ``unmatched`` (names
-    no subscription, or an account we do not have) or ``ignored`` (a type we do
+    ``duplicate`` (already seen, nothing done), ``applied``,
+    ``applied_account_mismatch`` (applied to the bound account; the metadata now
+    names another), ``unmatched`` (names no subscription, or a new one naming no
+    account we have) or ``ignored`` (a type we do
     not act on). A failed live fetch raises and logs NOTHING, so Stripe's
     retry is not mistaken for a duplicate. Flushes; the caller commits.
     """
@@ -248,8 +279,11 @@ async def memberships_for(db: AsyncSession, account_id: str) -> list[Membership]
 
 
 def primary(memberships: Sequence[Membership], now: datetime) -> Membership | None:
-    """The row to describe to the user: a Pro one if any, else the latest."""
-    return next((m for m in memberships if is_pro(m, now)), None) or next(iter(memberships), None)
+    """The row to describe to the user, and whose customer the portal opens: a Pro
+    one that keeps billing (not ending), else any Pro one, else the latest."""
+    pro = [m for m in memberships if is_pro(m, now)]
+    continuing = next((m for m in pro if not m.cancel_at_period_end), None)
+    return continuing or next(iter(pro), None) or next(iter(memberships), None)
 
 
 __all__ = [

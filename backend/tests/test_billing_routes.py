@@ -568,3 +568,40 @@ def test_the_membership_view_lists_every_subscription(env: pytest.MonkeyPatch) -
         view = client.get("/v1/billing/membership", headers=DEMO).json()
     assert view["tier"] == "pro"
     assert len(view["subscriptions"]) == 2
+
+
+def test_the_portal_opens_the_customer_that_keeps_billing(env: pytest.MonkeyPatch) -> None:
+    """Two checkout tabs can make two Stripe customers. The portal must open the
+    one whose subscription is NOT ending, even when the ending one changed last.
+    Turns red if: the portal takes the most recently changed row's customer."""
+    _on(env)
+    calls: list[httpx.Request] = []
+    with TestClient(_app(calls, url="https://billing.stripe.com/p/session/x")) as client:
+        account = _register(client)
+        _post_event(client, _sub_event("evt_1", account))  # sub_1, cus_1, continuing
+        ending = _sub_event("evt_2", account, cancel_at_period_end=True)
+        ending["data"]["object"].update(id="sub_2", customer="cus_2")
+        LIVE["sub_2"] = dict(ending["data"]["object"])
+        _post_event(client, ending)
+        res = client.post("/v1/billing/portal", headers=DEMO)
+        view = client.get("/v1/billing/membership", headers=DEMO).json()
+    assert res.status_code == 200
+    [portal] = [c for c in calls if c.method == "POST"]
+    assert parse_qs(portal.content.decode())["customer"] == ["cus_1"]
+    assert view["cancel_at_period_end"] is False  # the view describes the same row
+
+
+def test_clearing_metadata_cannot_keep_a_cancelled_subscription_paid(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """Case H end to end: metadata cleared in the Dashboard, then the subscription
+    ends. Turns red if: the webhook skips the known row and the tier stays Pro."""
+    _on(env)
+    with TestClient(_app()) as client:
+        account = _register(client)
+        _post_event(client, _sub_event("evt_1", account))
+        cancelled = _sub_event("evt_2", account, status="canceled", metadata={})
+        res = _post_event(client, cancelled)
+        view = client.get("/v1/billing/membership", headers=DEMO).json()
+    assert res.json()["outcome"] == "applied_account_mismatch"
+    assert view["tier"] == "free" and view["status"] == "canceled"

@@ -730,16 +730,22 @@ Entitlement is never decided by these calls: every protected request reads the
   `billing` capability) → `200 {request_id, url}`: send the browser to `url`
   (Stripe Checkout). `409 already_subscribed` if the account already has Pro;
   `503 billing_unavailable` if Stripe fails or is not configured.
-- `POST /v1/billing/portal` → `200 {request_id, url}` (Stripe's customer portal);
+- `POST /v1/billing/portal` → `200 {request_id, url}` (Stripe's customer portal,
+  for the customer of the subscription that keeps billing, when there are two);
   `404` before the account has a Stripe customer.
 - `GET /v1/billing/membership` → `{tier: "free"|"pro", status, interval,
-  current_period_end, cancel_at_period_end, grace_until, allowance:
-  {free_trial_answers, pro_monthly_answers}}`.
+  current_period_end, cancel_at_period_end, grace_until, subscriptions:
+  [{status, interval, current_period_end}], allowance: {free_trial_answers,
+  pro_monthly_answers}}`. The top-level fields describe one subscription: a paid
+  one that is not ending, else any paid one, else the latest. `subscriptions`
+  lists them all, so paying twice is visible.
 - `POST /v1/billing/webhook` — Stripe only. No bearer or cookie: the
   `Stripe-Signature` header over the raw body (v1 HMAC-SHA256, 300 s window) is
   the credential. `200 {received: true, outcome}` where `outcome` is `applied`,
-  `superseded`, `unmatched`, `ignored` or `duplicate` (a redelivery: acknowledged,
-  not re-applied). `422` for a bad signature or body; `503` when the live read of
+  `applied_account_mismatch` (applied to the account the subscription was bought
+  for; its metadata now names another), `unmatched` (no subscription, or a new
+  one naming no account we have), `ignored` or `duplicate` (a redelivery:
+  acknowledged, not re-applied). `422` for a bad signature or body; `503` when the live read of
   the subscription from Stripe fails (Stripe retries).
 
 ## 8. Feedback and the gap log (ADR-0005 §6)

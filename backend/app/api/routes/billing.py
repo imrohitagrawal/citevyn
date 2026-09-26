@@ -212,13 +212,12 @@ async def open_portal(
     http: Annotated[httpx.AsyncClient, Depends(get_stripe_http)],
 ) -> dict[str, Any]:
     request_id = _request_id(request)
-    customer_id = next(
-        (
-            m.stripe_customer_id
-            for m in await memberships_for(db, principal_id)
-            if m.stripe_customer_id
-        ),
-        None,
+    rows = await memberships_for(db, principal_id)
+    # The subscription that keeps billing them first (two checkout tabs can make
+    # two Stripe customers), then any row that has a customer.
+    lead = primary(rows, datetime.now(UTC))
+    customer_id = (lead.stripe_customer_id if lead else None) or next(
+        (m.stripe_customer_id for m in rows if m.stripe_customer_id), None
     )
     if customer_id is None:
         raise error_response(

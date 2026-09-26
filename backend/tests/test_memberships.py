@@ -379,7 +379,11 @@ async def test_the_subscription_is_read_again_after_taking_the_account_lock(sess
     """Lost update: two handlers for one account must not let a slower, staler
     read win. The state stored is the one read AFTER the per-account lock (on
     Postgres, SELECT ... FOR UPDATE on the user row). Turns red if: the first,
-    unlocked read is what gets stored."""
+    unlocked read is what gets stored.
+
+    What this CANNOT see: whether FOR UPDATE is emitted. SQLite ignores it, so
+    deleting ``.with_for_update()`` leaves this green; only a Postgres run with
+    two real connections would catch that."""
     await _user(session)
     reads: list[str] = []
 
@@ -493,3 +497,88 @@ async def test_a_past_due_second_subscription_keeps_pro_during_its_grace(session
     m2 = await _membership(session, "sub_2")
     assert m2 is not None and _utc(m2.grace_until) == NOW + timedelta(days=7)
     assert await _pro(session)
+
+
+# ---------------------------------------------------------------------------
+# v4: bind once, then the status always follows Stripe (cases G, H, H2)
+# ---------------------------------------------------------------------------
+#
+# v3 re-derived the account from subscription METADATA on every event. Metadata
+# can be edited (Dashboard or API), so a subscription whose metadata stopped naming
+# one of our accounts was skipped, its row stayed 'active' forever (H: Pro without
+# payment), and a moved subscription left the paying account on Free (G). v4 binds
+# a subscription to an account ONCE, at row creation, and after that looks the row
+# up by subscription id first and always stores Stripe's status.
+
+OTHER = "usr_" + "b" * 32
+
+
+async def test_h_cleared_metadata_cannot_freeze_a_subscription_as_paid(session: Any) -> None:
+    """Case H (blocker): metadata cleared, then the subscription deleted. Turns red
+    if: the existing row is skipped as 'unmatched' and stays active."""
+    await _user(session)
+    _live(status="active")
+    await _apply(session, _sub_event("evt_1"))
+    _live(status="canceled", account=None)
+    outcome = await _apply(session, _sub_event("evt_2", kind="customer.subscription.deleted"))
+    assert outcome == "applied_account_mismatch"
+    m = await _membership(session)
+    assert m is not None and m.status == "canceled"
+    assert not await _pro(session, NOW + timedelta(days=400))
+
+
+async def test_h2_metadata_naming_an_unknown_account_cannot_freeze_it_either(session: Any) -> None:
+    """Case H2. Turns red if: an unknown account in metadata stops the update."""
+    await _user(session)
+    _live(status="active")
+    await _apply(session, _sub_event("evt_1"))
+    _live(status="canceled", account="usr_" + "f" * 32)
+    await _apply(session, _sub_event("evt_2", kind="customer.subscription.deleted"))
+    assert not await _pro(session)
+
+
+async def test_g_a_subscription_stays_bound_to_the_account_it_was_bought_for(session: Any) -> None:
+    """Case G: metadata moved to another existing account. The binding does not
+    change (a move is a manual support step), the mismatch is recorded, and the
+    status still follows Stripe. Turns red if: the row silently changes account,
+    or the event is dropped."""
+    await _user(session)
+    await _user(session, OTHER)
+    _live(status="active")
+    await _apply(session, _sub_event("evt_1"))
+    _live(status="active", account=OTHER)
+    assert await _apply(session, _sub_event("evt_2")) == "applied_account_mismatch"
+    m = await _membership(session)
+    assert m is not None and m.account_id == ACCOUNT
+    event = await session.get(StripeEvent, "evt_2")
+    assert event is not None and event.account_id == ACCOUNT  # the audit log agrees
+    _live(status="canceled", account=OTHER)
+    await _apply(session, _sub_event("evt_3", kind="customer.subscription.deleted"))
+    assert not await _pro(session)
+
+
+async def test_an_unbound_subscription_never_creates_a_row(session: Any) -> None:
+    """Partner for H: a subscription we never bound (no row) and whose metadata
+    names no account of ours grants nothing. Turns red if: a row is created."""
+    _live(status="active", account=None)
+    assert await _apply(session, _sub_event("evt_1")) == "unmatched"
+    assert (await session.execute(select(Membership))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# K: which subscription the view and the portal describe
+# ---------------------------------------------------------------------------
+
+
+def test_k_the_primary_row_is_a_paid_one_that_is_not_ending() -> None:
+    """With two paid subscriptions, one pending cancellation, the user must see the
+    one that keeps billing them. Turns red if: the latest row wins regardless."""
+    from app.billing.memberships import primary
+
+    ending = _m(status="active", cancel_at_period_end=True, stripe_subscription_id="sub_1")
+    continuing = _m(status="active", cancel_at_period_end=False, stripe_subscription_id="sub_2")
+    lapsed = _m(status="canceled", stripe_subscription_id="sub_0")
+    assert primary([lapsed, ending, continuing], NOW) is continuing
+    assert primary([lapsed, ending], NOW) is ending
+    assert primary([lapsed], NOW) is lapsed
+    assert primary([], NOW) is None
