@@ -212,6 +212,7 @@ async def _row(db: AsyncSession, sub_id: str) -> Membership | None:
     # committed. Without it SQLAlchemy returns the object loaded BEFORE the lock
     # with its old values, and only columns that differ from those are written, so
     # a newer concurrent write (a past_due and its grace) survived a recovery.
+    # It also discards unflushed edits to the row: call it with none pending.
     return (
         await db.execute(
             select(Membership)
