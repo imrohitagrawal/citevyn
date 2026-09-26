@@ -185,7 +185,8 @@ def test_the_key_authenticates_its_owner_until_revoked(env: pytest.MonkeyPatch) 
     ],
 )
 def test_a_wrong_or_malformed_key_is_refused(env: pytest.MonkeyPatch, mangle: Any) -> None:
-    """Turns red if: anything but the exact key authenticates, or a bad shape raises."""
+    """Turns red if: anything but the exact key (surrounding whitespace aside,
+    see below) authenticates, or a bad shape raises."""
     _on(env)
     with TestClient(create_app()) as client:
         user = _signed_in(client)
@@ -232,6 +233,55 @@ def test_at_most_ten_live_keys(env: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("name", ["", "   ", "x" * 65])
 def test_a_key_needs_a_short_name(env: pytest.MonkeyPatch, name: str) -> None:
     """Turns red if: an empty or over-long name is accepted."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        _make_pro(user)
+        assert client.post("/v1/me/api-keys", json={"name": name}, headers=DEMO).status_code == 422
+
+
+def test_surrounding_whitespace_from_a_paste_is_ignored(env: pytest.MonkeyPatch) -> None:
+    """Deliberate: a key pasted with a trailing newline still works; the secret
+    is unchanged, so nothing is weakened. Turns red if: the strip is dropped."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        _make_pro(user)
+        raw = client.post("/v1/me/api-keys", json={"name": "x"}, headers=DEMO).json()["key"]
+    assert _auth(f"  {raw}\n") is not None
+
+
+def test_a_lapsed_account_can_still_see_and_revoke_its_keys(env: pytest.MonkeyPatch) -> None:
+    """Found in review: after Pro lapsed, list and revoke were Pro-only (403)
+    while the keys still authenticated, so a leaked key could not be killed.
+    Turns red if: list or revoke needs Pro. Creating a key still does."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        _make_pro(user)
+        raw = client.post("/v1/me/api-keys", json={"name": "x"}, headers=DEMO).json()["key"]
+
+        async def lapse() -> None:
+            async with get_sessionmaker()() as s:
+                for m in (await s.execute(select(Membership))).scalars():
+                    m.status = "canceled"
+                await s.commit()
+
+        asyncio.run(lapse())
+        assert client.post("/v1/me/api-keys", json={"name": "y"}, headers=DEMO).status_code == 403
+        listed = client.get("/v1/me/api-keys", headers=DEMO)
+        assert listed.status_code == 200
+        key_id = listed.json()["keys"][0]["key_id"]
+        assert client.delete(f"/v1/me/api-keys/{key_id}", headers=DEMO).status_code == 204
+    assert _auth(raw) is None
+
+
+@pytest.mark.parametrize("name", ["bad\u0007bell", "flip\u202eme", "zero\u200bwidth", "tab\there"])
+def test_a_key_name_has_no_control_or_direction_characters(
+    env: pytest.MonkeyPatch, name: str
+) -> None:
+    """A right-to-left override can make a name look like another in any list
+    that shows it. Turns red if: such characters are accepted."""
     _on(env)
     with TestClient(create_app()) as client:
         user = _signed_in(client)

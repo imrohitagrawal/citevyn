@@ -771,9 +771,13 @@ Entitlement is never decided by these calls: every protected request reads the
 
 ### API keys (ADR-0005 Phase 6A)
 
-Pro only (capability `api_keys`); 404 unless the access model is on.
+Making a key is Pro (capability `api_keys`); listing and revoking need only a
+signed-in account (`manage_account`), so a lapsed Pro account can still revoke
+its keys. 404 unless the access model is on. A key is not revoked by signing out
+everywhere or by a password change. A route that accepts keys checks the owner's
+plan on every call.
 
-- `POST /v1/me/api-keys` `{"name": "laptop"}` (1 to 64 characters) → `201
+- `POST /v1/me/api-keys` `{"name": "laptop"}` (1 to 64 characters, no control or formatting characters) → `201
   {request_id, key_id, name, prefix, scope, created_at, last_used_at, key}`.
   `key` (`cvk_<32 hex>_<64 hex>`) is returned ONCE and stored only as a SHA-256
   hash. 409 `too_many_api_keys` at 10 live keys.

@@ -1,13 +1,21 @@
 """``/v1/me/api-keys`` — make, list and revoke your API keys (ADR-0005 Phase 6A).
 
-Pro only (capability ``api_keys``), and 404 unless ``CITEVYN_ACCESS_MODEL_ENABLED``
-is on. A key is shown ONCE, at creation; lists show only its first characters.
+Making a key is Pro (capability ``api_keys``); listing and revoking need only a
+signed-in account (``manage_account``), so a lapsed Pro account can still kill
+its keys. All three are 404 unless ``CITEVYN_ACCESS_MODEL_ENABLED`` is on.
+
+A key is NOT revoked by signing out everywhere or by a password change: revoke
+it here. ``authenticate_api_key`` checks only the key; a route that accepts keys
+(the MCP server) must check the owner's plan on every call.
+
+A key is shown ONCE, at creation; lists show only its first characters.
 Revoking keeps the row (with ``revoked_at``) so the audit trail survives. At most
 :data:`MAX_LIVE_KEYS` live keys per account.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -23,7 +31,7 @@ from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
-from app.models import ApiKey
+from app.models import ApiKey, User
 
 router = APIRouter(prefix="/v1/me/api-keys", tags=["api-keys"])
 
@@ -51,6 +59,10 @@ class NewKeyRequest(BaseModel):
         value = value.strip()
         if not 1 <= len(value) <= 64:
             raise ValueError("a key name is 1 to 64 characters")
+        # No control or format characters: a right-to-left override or a
+        # zero-width character can make one name look like another in a list.
+        if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
+            raise ValueError("a key name cannot contain control or formatting characters")
         return value
 
 
@@ -80,6 +92,9 @@ async def create_key(
     _on: Annotated[None, Depends(keys_enabled)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
+    # Serialise key creation per account (a row lock on Postgres), so a burst of
+    # requests cannot count 9 at once and all insert (found in review).
+    await db.execute(select(User).where(User.user_id == principal_id).with_for_update())
     live = (
         await db.execute(
             select(func.count())
@@ -100,7 +115,10 @@ async def create_key(
     return {"request_id": _request_id(request), **_view(new.row), "key": new.raw}
 
 
-@router.get("", dependencies=[Depends(requires(Capability.api_keys))])
+# List and revoke need only a signed-in account, NOT Pro: after Pro lapses the
+# keys still exist, and their owner must always be able to see and kill them
+# (found in review: "revocable" failed for lapsed accounts).
+@router.get("", dependencies=[Depends(requires(Capability.manage_account))])
 async def list_keys(
     request: Request,
     principal_id: Annotated[str, Depends(resolve_principal)],
@@ -119,7 +137,7 @@ async def list_keys(
 
 @router.delete(
     "/{key_id}",
-    dependencies=[Depends(requires(Capability.api_keys))],
+    dependencies=[Depends(requires(Capability.manage_account))],
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def revoke_key(
