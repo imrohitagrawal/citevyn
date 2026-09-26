@@ -8,11 +8,15 @@ record real changes (ADR-0005 §5, Phase 7A).
 * A fetch that fails keeps the old snapshot and records why in ``last_error``;
   a failure is never a change.
 
-Each page is committed on its own, so one bad page cannot lose the others.
+Each page is committed on its own, so one bad page cannot lose the others, and
+each page has an overall deadline (:data:`PAGE_DEADLINE_SECONDS`), so a server
+trickling bytes cannot stall the run. Run ONE watcher at a time: two
+overlapping runs can both try to create a new page's snapshot row.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +30,7 @@ from app.watch.fetch import FetchError, RobotsCache, fetch_page
 from app.watch.pages import WatchedPage, watched_hosts
 
 MAX_PAGE_BYTES = 1_000_000
+PAGE_DEADLINE_SECONDS = 60.0
 
 
 @dataclass
@@ -50,8 +55,8 @@ async def run_watch(
     now: datetime,
 ) -> RunStats:
     stats = RunStats()
-    robots = RobotsCache(client, user_agent)
     hosts = watched_hosts(pages)
+    robots = RobotsCache(client, user_agent, hosts)
     for page in pages:
         stats.checked += 1
         snap = await db.get(DocSnapshot, page.url)
@@ -64,15 +69,23 @@ async def run_watch(
         snap.title, snap.product_area = page.title, page.product_area
         try:
             text = normalize(
-                await fetch_page(
-                    client,
-                    page.url,
-                    allowed_hosts=hosts,
-                    user_agent=user_agent,
-                    max_bytes=MAX_PAGE_BYTES,
-                    robots=robots,
+                await asyncio.wait_for(
+                    fetch_page(
+                        client,
+                        page.url,
+                        allowed_hosts=hosts,
+                        user_agent=user_agent,
+                        max_bytes=MAX_PAGE_BYTES,
+                        robots=robots,
+                    ),
+                    timeout=PAGE_DEADLINE_SECONDS,
                 )
             )
+        except TimeoutError:
+            snap.last_error = f"no complete answer within {PAGE_DEADLINE_SECONDS:.0f}s"
+            stats.failed += 1
+            await db.commit()
+            continue
         except FetchError as exc:
             snap.last_error = str(exc)[:255]
             stats.failed += 1
@@ -102,4 +115,4 @@ async def run_watch(
     return stats
 
 
-__all__ = ["MAX_PAGE_BYTES", "RunStats", "run_watch"]
+__all__ = ["MAX_PAGE_BYTES", "PAGE_DEADLINE_SECONDS", "RunStats", "run_watch"]

@@ -88,7 +88,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _cmd_watch() -> int:
-    """Run the docs watcher once (ADR-0005 Phase 7A). Refuses unless enabled."""
+    """Run the docs watcher once (ADR-0005 Phase 7A). Refuses unless enabled.
+
+    Exit codes: 0 every page checked; 2 the watcher is off; 3 some pages could
+    not be fetched (their reasons are in ``doc_snapshots.last_error``); 1 an
+    unexpected error (a traceback). Schedule ONE run at a time.
+    """
     settings = get_settings()
     if not settings.docs_watch_enabled:
         print("The docs watcher is off. Set CITEVYN_DOCS_WATCH_ENABLED=true to run it.")

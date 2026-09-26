@@ -431,3 +431,260 @@ def test_the_watch_list_is_https_markdown_on_a_small_set_of_hosts() -> None:
         "codex",
         "gemini_api",
     }
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: every finding below failed (or could fail) before its fix
+# ---------------------------------------------------------------------------
+
+
+def _redirecting(location: str, *, robots: str = "User-agent: *\nAllow: /\n") -> object:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=robots)
+        if request.url.path == "/p.md":
+            return httpx.Response(302, headers={"location": location})
+        return httpx.Response(200, text="target", headers={"content-type": "text/markdown"})
+
+    return handler
+
+
+async def test_a_malformed_redirect_is_a_fetch_error_not_a_crash() -> None:
+    """httpx.InvalidURL is not an httpx.HTTPError. Turns red if: it escapes."""
+    async with _client(_redirecting("https:\\\\evil.example/x")) as c:
+        with pytest.raises(FetchError, match="malformed"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_one_malformed_redirect_does_not_stop_the_run(db: Any) -> None:
+    """Turns red if: one bad page aborts the pages after it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if str(request.url) == LIMITS:
+            return httpx.Response(302, headers={"location": "https:\\\\evil.example/x"})
+        return httpx.Response(200, text="# M\nok", headers={"content-type": "text/markdown"})
+
+    async with _client(handler) as c, db() as s:
+        stats = await run_watch(s, c, PAGES, user_agent=UA, now=T0)
+    assert (stats.failed, stats.baseline) == (1, 1)
+
+
+async def test_a_redirect_target_is_checked_against_robots_txt() -> None:
+    """Turns red if: only the first URL is checked against robots.txt."""
+    async with _client(
+        _redirecting("/private/p.md", robots="User-agent: *\nDisallow: /private/\n")
+    ) as c:
+        with pytest.raises(FetchError, match="disallowed by robots"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_a_redirect_to_another_port_is_refused() -> None:
+    """Turns red if: an allowlisted host on a non-default port is fetched."""
+    async with _client(_redirecting("https://docs.example.com:8443/x")) as c:
+        with pytest.raises(FetchError, match="port"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_redirects_are_never_followed_by_the_client() -> None:
+    """Even a client built to follow redirects must not carry the watcher off
+    the allowlist. Turns red if: the stream call leaves redirects to the client."""
+    transport = httpx.MockTransport(_redirecting("https://evil.example/x"))  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, follow_redirects=True) as c:
+        with pytest.raises(FetchError, match="host"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_uncompressed_transfer_is_requested() -> None:
+    """The size cap counts decompressed bytes, so a compressed page could hold
+    far more than the cap in memory. Turns red if: identity is not requested."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("accept-encoding", ""))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        return httpx.Response(200, text="x", headers={"content-type": "text/plain"})
+
+    async with _client(handler) as c:
+        await _fetch(c, "https://docs.example.com/p.md")
+    assert seen and all(v == "identity" for v in seen)
+
+
+async def test_robots_txt_redirects_are_followed_on_watched_hosts_only() -> None:
+    """RFC 9309: follow robots.txt redirects (at least 5). Turns red if: a
+    same-host robots redirect disables the host, or an off-host one is followed."""
+
+    def moved(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(301, headers={"location": "/robots-v2.txt"})
+        if request.url.path == "/robots-v2.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow: /private/\n")
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    async with _client(moved) as c:
+        assert await _fetch(c, "https://docs.example.com/p.md") == "ok"
+        with pytest.raises(FetchError, match="disallowed"):
+            await _fetch(c, "https://docs.example.com/private/p.md")
+
+    def off_host(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(301, headers={"location": "https://evil.example/robots.txt"})
+        return httpx.Response(200, text="ok", headers={"content-type": "text/plain"})
+
+    async with _client(off_host) as c:
+        with pytest.raises(FetchError, match="robots.txt unreadable"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+async def test_a_robots_txt_the_server_will_not_give_skips_the_host(status: int) -> None:
+    """429 is 'slow down', not 'no rules'. Turns red if: 429 counts as permission,
+    or the reason reads as a robots.txt disallow."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(status)
+        return httpx.Response(200, text="x", headers={"content-type": "text/plain"})
+
+    async with _client(handler) as c:
+        with pytest.raises(FetchError, match="robots.txt unreadable"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_an_oversized_robots_txt_skips_the_host() -> None:
+    """Turns red if: robots.txt is read without a size cap."""
+    from app.watch.fetch import MAX_ROBOTS_BYTES
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="#" * (MAX_ROBOTS_BYTES + 10))
+        return httpx.Response(200, text="x", headers={"content-type": "text/plain"})
+
+    async with _client(handler) as c:
+        with pytest.raises(FetchError, match="robots.txt unreadable"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_a_page_that_never_finishes_hits_the_deadline(
+    db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turns red if: a trickling server can stall the run (no overall deadline)."""
+    import asyncio
+
+    from app.watch import runner
+
+    monkeypatch.setattr(runner, "PAGE_DEADLINE_SECONDS", 0.05)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if str(request.url) == LIMITS:
+            await asyncio.sleep(5)
+        return httpx.Response(200, text="# M\nok", headers={"content-type": "text/markdown"})
+
+    async with _client(handler) as c, db() as s:
+        stats = await run_watch(s, c, PAGES, user_agent=UA, now=T0)
+    assert (stats.failed, stats.baseline) == (1, 1)
+    snap = next(x for x in await _rows(db, DocSnapshot) if x.url == LIMITS)
+    assert snap.last_error is not None and "within" in snap.last_error
+
+
+def test_the_diff_stays_fast_on_hostile_pages() -> None:
+    """Each shape took seconds to hours before the fix (measured by the breaker:
+    a 4 KB heading of spaces 37 s; 130 KB of repeated short lines 281 s).
+    Turns red if: the heading regex backtracks, duplicate headings are searched,
+    or line counting is quadratic."""
+    import time
+
+    shapes = [
+        ("# x" + " " * 4000 + "y\n", "# x" + " " * 4000 + "z\n"),
+        (
+            "".join(f"line {i % 7}\n" for i in range(20000)),
+            "".join(f"line {i % 5}\n" for i in range(20000)),
+        ),
+        ("# FAQ\nx\n" * 4000, "# FAQ\ny\n" * 4000),
+    ]
+    for old, new in shapes:
+        start = time.perf_counter()
+        section_changes(old, new)
+        assert time.perf_counter() - start < 2.0
+
+
+def test_line_counts_see_every_content_line() -> None:
+    """A '---' rule or a '++x' line is content, not a diff header.
+    Turns red if: such lines are left out of the counts."""
+    s = section_changes("# A\n---\ntext\n", "# A\ntext\n++x\n")
+    assert (s["lines_removed"], s["lines_added"]) == (1, 1)
+
+
+def test_a_fence_closes_only_on_a_matching_fence() -> None:
+    """A ~~~ line inside a ``` block does not close it; the heading after the
+    real close is a section. Turns red if: any fence toggles the state."""
+    old = "# A\n```\n~~~\n# not a heading\n```\n# Real\nold\n"
+    new = "# A\n```\n~~~\n# not a heading\n```\n# Real\nnew\n"
+    assert section_changes(old, new)["changed"] == ["Real"]
+
+
+def test_the_cli_runs_every_page_and_reports_failures(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any, tmp_path: Any
+) -> None:
+    """The enabled path, end to end on fakes: exit 0 when every page is fetched,
+    3 when one fails. Turns red if: the wiring (client, session, redirects off,
+    the summary line, the exit codes) breaks."""
+    import asyncio
+
+    from app.core.config import get_settings
+    from app.watch import pages as pages_module
+    from app.worker import cli
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'cli.db'}")
+
+    async def init() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(init())
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("app.core.db.get_sessionmaker", lambda: maker)
+    monkeypatch.setattr(pages_module, "WATCHED_PAGES", PAGES)
+    status = {"code": 200}
+    clients: list[httpx.AsyncClient] = []
+    real = httpx.AsyncClient
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+            if str(request.url) == LIMITS and status["code"] != 200:
+                return httpx.Response(status["code"])
+            return httpx.Response(200, text="# P\nok", headers={"content-type": "text/markdown"})
+
+        client = real(transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    monkeypatch.setenv("CITEVYN_DOCS_WATCH_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["watch"]) == 0
+        assert (
+            "checked 2: 0 changed, 0 unchanged, 2 first seen, 0 failed" in capsys.readouterr().out
+        )
+        assert clients and clients[0].follow_redirects is False
+        status["code"] = 503
+        assert cli.main(["watch"]) == 3
+        assert "1 failed" in capsys.readouterr().out
+    finally:
+        get_settings.cache_clear()
+        asyncio.run(engine.dispose())
+
+
+def test_two_sections_with_the_same_heading_stay_separate() -> None:
+    """Two '## Example' sections under one parent: a change in the FIRST must be
+    reported. Turns red if: the second overwrites the first (one shared key)."""
+    old = "# API\n## Example\nfirst old\n## Example\nsecond\n"
+    new = "# API\n## Example\nfirst new\n## Example\nsecond\n"
+    assert section_changes(old, new)["changed"] == ["API > Example"]

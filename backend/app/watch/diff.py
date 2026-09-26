@@ -9,12 +9,15 @@ is normalised away first, so it never counts as a change.
 
 from __future__ import annotations
 
-import difflib
 import re
+from collections import Counter
 from typing import TypedDict
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+# Linear-time patterns only: a lazy group followed by optional runs (the first
+# version) backtracked for tens of seconds on one heading with a long run of
+# spaces. The trailing ``#``s and spaces are stripped in code instead.
+_HEADING = re.compile(r"^(#{1,6})[ \t]+(.*)$")
+_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
 #: Most section names listed per kind; the rest is counted in ``more``.
 MAX_LISTED = 20
 
@@ -45,20 +48,26 @@ def _sections(text: str) -> dict[str, list[str]]:
     """Heading path -> body lines, in document order. Text before the first
     heading is the section ``""``. A repeated path gets a ``(2)`` suffix."""
     sections: dict[str, list[str]] = {"": []}
+    seen: Counter[str] = Counter()
     path: list[tuple[int, str]] = []
     current = ""
-    in_fence = False
+    fence: str | None = None  # the open fence marker; only a matching one closes it
     for line in normalize(text).split("\n"):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-        heading = None if in_fence else _HEADING.match(line)
+        opener = _FENCE.match(line)
+        if opener:
+            mark = opener.group(1)
+            if fence is None:
+                fence = mark
+            elif mark[0] == fence[0] and len(mark) >= len(fence) and not line.strip()[len(mark) :]:
+                fence = None
+        heading = None if fence is not None or opener else _HEADING.match(line)
         if heading:
-            level, title = len(heading.group(1)), heading.group(2)
+            level = len(heading.group(1))
+            title = heading.group(2).rstrip(" \t").rstrip("#").rstrip(" \t") or "(untitled)"
             path = [(lvl, t) for lvl, t in path if lvl < level] + [(level, title)]
             name = " > ".join(t for _, t in path)
-            key, n = name, 2
-            while key in sections:
-                key, n = f"{name} ({n})", n + 1
+            seen[name] += 1  # a repeated heading path: counted, not searched for
+            key = name if seen[name] == 1 else f"{name} ({seen[name]})"
             sections[key] = []
             current = key
         else:
@@ -77,14 +86,13 @@ def section_changes(old: str, new: str) -> Summary:
     added = [k for k in b if k not in a]
     removed = [k for k in a if k not in b]
     more = sum(max(0, len(x) - MAX_LISTED) for x in (changed, added, removed))
-    plus = minus = 0
-    for line in difflib.unified_diff(
-        normalize(old).split("\n"), normalize(new).split("\n"), lineterm="", n=0
-    ):
-        if line.startswith("+") and not line.startswith("+++"):
-            plus += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            minus += 1
+    # Lines added and removed as a multiset difference: linear time on any page
+    # (difflib took minutes on a 130 KB page of short repeated lines), and a
+    # content line such as "---" is never mistaken for a diff header. A moved
+    # line counts as neither added nor removed.
+    before, after = Counter(normalize(old).split("\n")), Counter(normalize(new).split("\n"))
+    plus = sum((after - before).values())
+    minus = sum((before - after).values())
     return Summary(
         changed=changed[:MAX_LISTED],
         added=added[:MAX_LISTED],
