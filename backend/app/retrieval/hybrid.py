@@ -48,6 +48,9 @@ _logger = logging.getLogger("citevyn.retrieval")
 # per-area searches are sequential (shared session) and each embeds the query, so
 # this bounds cost/latency; a realistic cross-product question names 2–3 products.
 _MAX_MULTIHOP_DOMAINS = 3
+#: Public name for the cap: the orchestrator's comparison instruction and note
+#: must name only the products ``retrieve_multi`` actually searches (Phase 6E).
+MAX_MULTIHOP_DOMAINS = _MAX_MULTIHOP_DOMAINS
 
 
 # Precedence for :func:`_combine_degrades`, most severe first. It is a LIST and

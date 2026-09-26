@@ -40,8 +40,7 @@ def comparison_instruction(areas: Sequence[str]) -> str:
     names = [product_name(a) for a in areas]
     return (
         f"This question is about {_join(names, 'and')}. Answer for each of them, "
-        "citing that product's own evidence. If the evidence does not cover one of "
-        "them, say so for that one."
+        "citing that product's own evidence."
     )
 
 

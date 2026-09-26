@@ -149,3 +149,19 @@ def test_every_product_domain_has_a_plain_name() -> None:
         if d.value in {"unsupported", "general", "citevyn"}:
             continue
         assert product_name(d.value) != d.value
+
+
+def test_with_no_instruction_the_prompt_is_byte_for_byte_the_old_one() -> None:
+    """Turns red if: the setting's default changes a single byte of the prompt."""
+    from app.answer.generate import build_user_prompt
+
+    ev = [_hit("claude_api", 1)]
+    expected = (
+        "Question: q?\nEVIDENCE:\n"
+        f"[1] Source: claude_api | Title: claude_api doc 1 | URL: {ev[0].source_url} | "
+        "Snippet: claude_api text 1\n"
+    )
+    assert build_user_prompt(" q? ", ev) == expected
+    assert build_user_prompt("q?", []) == "Question: q?\nEVIDENCE: NONE\n"
+    with_note = build_user_prompt("q?", ev, instruction="Compare.")
+    assert with_note == "Question: q?\nNote: Compare.\n" + expected.split("\n", 1)[1]

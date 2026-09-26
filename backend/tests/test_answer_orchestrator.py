@@ -3244,3 +3244,45 @@ async def test_an_answer_cached_with_comparisons_off_is_not_served_with_them_on(
     assert on["cache_hit"] is False and len(llm_on.users) == 1
     assert "does not cover the Gemini API" in on["answer"]
     assert first["cache_hit"] is False
+
+
+async def test_a_product_never_searched_is_never_named_or_called_uncovered(session: Any) -> None:
+    """Four products named; retrieve_multi searches the first three. Turns red if:
+    the instruction names the fourth, or the note says the docs do not cover it."""
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=3)
+    for hit, area in zip(evidence, ["claude_code", "claude_api", "gemini_api"], strict=True):
+        hit.product_area, hit.source_name = area, area
+    llm = _CitingLLM([1, 2, 3])
+    orchestrator = Orchestrator(
+        _settings(comparison_answers=True), session, llm=llm, retriever=_FakeRetriever(evidence)
+    )
+    response = await orchestrator.ask(
+        question="How do Claude Code, Codex, the Claude API and Gemini compare on rate limits?",
+        request_id="req_four",
+        session_id=uuid.uuid4(),
+    )
+    note = next(line for line in llm.users[0].splitlines() if line.startswith("Note:"))
+    assert "Codex" not in note
+    assert "Claude Code" in note  # partner: the searched products are named
+    assert "does not cover" not in response["answer"]
+
+
+async def test_a_degraded_retrieval_never_blames_the_docs(session: Any) -> None:
+    """A product missing because its search failed is an outage, not a gap in the
+    docs (#142). Turns red if: the note is added after a degraded retrieval."""
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=2)
+    evidence[0].product_area, evidence[0].source_name = "claude_api", "claude_api"
+    evidence[1].product_area, evidence[1].source_name = "gemini_api", "gemini_api"
+    orchestrator = Orchestrator(
+        _settings(comparison_answers=True),
+        session,
+        llm=_CitingLLM([1]),
+        retriever=_FakeRetriever(evidence, vector_degrade=VectorDegrade.unavailable),
+    )
+    response = await orchestrator.ask(
+        question=_COMPARE_Q, request_id="req_deg", session_id=uuid.uuid4()
+    )
+    assert response["no_answer"] is False
+    assert "does not cover" not in response["answer"]

@@ -77,7 +77,7 @@ from app.models import (
     UserRole,
 )
 from app.models.enums import RetrievalType
-from app.retrieval.hybrid import HybridRetriever
+from app.retrieval.hybrid import MAX_MULTIHOP_DOMAINS, HybridRetriever
 from app.retrieval.types import (
     EvidenceHit,
     RetrievalResult,
@@ -379,6 +379,13 @@ def _default_retriever(
             settings.retrieval_global_min_margin,
         ),
     )
+
+
+def _searched(domains: list[Domain]) -> list[str]:
+    """The product areas ``retrieve_multi`` actually searches: the first
+    ``MAX_MULTIHOP_DOMAINS`` named. A comparison may name only these (Phase 6E):
+    one never searched can never be cited, and must not be called uncovered."""
+    return [d.value for d in domains][:MAX_MULTIHOP_DOMAINS]
 
 
 class Orchestrator:
@@ -910,12 +917,13 @@ class Orchestrator:
         # has to carry the number rather than let the client guess it.
         used_indices = sorted(set(validation.cited_indices))
         answer_text = llm_result.text
-        if multi_hop and self._settings.comparison_answers:
+        if multi_hop and self._settings.comparison_answers and vector_degrade is VectorDegrade.none:
             # Phase 6E: a named product the answer cites nothing for is said out
-            # loud, never left as a silently half-answered comparison.
-            note = missing_note(
-                missing_areas([d.value for d in multi_domains], evidence, used_indices)
-            )
+            # loud, never left as a silently half-answered comparison. Only the
+            # products actually searched, and never after a degraded retrieval: a
+            # product missing because its search failed is an outage, not a gap in
+            # the docs (the #142 mistake).
+            note = missing_note(missing_areas(_searched(multi_domains), evidence, used_indices))
             if note:
                 answer_text = f"{answer_text.rstrip()}\n\n{note}"
         visible_citations = [
@@ -965,7 +973,7 @@ class Orchestrator:
             return await self._generator.generate(
                 query,
                 evidence,
-                instruction=comparison_instruction([d.value for d in multi_domains]),
+                instruction=comparison_instruction(_searched(multi_domains)),
             )
         return await self._generator.generate(query, evidence)
 
