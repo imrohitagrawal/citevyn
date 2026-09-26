@@ -160,9 +160,16 @@ def refuse_if_used_up(usage: Usage, tier: Tier, request_id: str) -> None:
 
 
 def usage_row(
-    user_id: str, tier: Tier, response: Mapping[str, object], request_id: str, now: datetime
+    user_id: str,
+    tier: Tier,
+    response: Mapping[str, object],
+    request_id: str,
+    now: datetime,
+    *,
+    channel: str = "chat",
 ) -> AnswerUsage:
-    """The row recording one answered question (platform-paid, from chat)."""
+    """The row recording one answered question (platform-paid). ``channel`` is
+    ``chat`` or ``mcp``; both share one allowance."""
     raw = response.get("message_id")
     try:
         message_id = uuid.UUID(str(raw)) if raw is not None else None
@@ -173,7 +180,7 @@ def usage_row(
         user_id=user_id,
         occurred_at=now,
         paid_by="platform",
-        channel="chat",
+        channel=channel,
         tier=tier.value,
         message_id=message_id,
         request_id=request_id,

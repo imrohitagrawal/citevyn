@@ -15,11 +15,14 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.core.db import get_session as _get_session
 from app.core.errors import APIErrorCode, error_response
 from app.core.middleware import get_current_request_id
 from app.core.request_origin import is_same_site_request
+from app.models import ApiKey
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -163,3 +166,36 @@ __all__ = [
     "require_admin_api_key",
     "require_public_client_token",
 ]
+
+
+async def require_api_key(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(_get_session)],
+) -> ApiKey:
+    """The caller's live API key (ADR-0005 Phase 6A/6B), or 401.
+
+    For routes an AI agent calls (the MCP server): the key arrives as
+    ``Authorization: Bearer cvk_...``. A browser session cookie is deliberately
+    NOT accepted here, so a page on another site cannot drive these routes with
+    the visitor's cookie. 404 while the access model is off, so "off" looks like
+    "not there". The key alone says nothing about the owner's plan: the route
+    checks that on every call.
+    """
+    from app.access.api_keys import authenticate_api_key
+
+    request_id = get_current_request_id()
+    if not settings.access_model_enabled:
+        raise error_response(
+            request_id=request_id, code=APIErrorCode.not_found, message="Not found."
+        )
+    scheme, _, raw = request.headers.get("authorization", "").partition(" ")
+    key = await authenticate_api_key(db, raw) if scheme.lower() == "bearer" and raw else None
+    if key is None:
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.auth_required,
+            message="A valid CiteVyn API key is required.",
+        )
+    await db.commit()  # records last_used_at
+    return key

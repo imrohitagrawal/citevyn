@@ -38,6 +38,11 @@ questions count; a refusal or an error never does.
 
 The per-hour rate limits and the global daily spend cap apply on top, to every tier.
 
+**The MCP server (`POST /v1/mcp`, Phase 6B)** is called with an API key, not a
+browser cookie, so `requires` (which reads the cookie) cannot see the right
+account. The route declares `mcp_ask` with `enforced_in_handler`, and the handler
+re-reads the key owner's tier, allowance and hourly limit on every call.
+
 **As built (Phase 4B-2, `app/access/quota.py`):**
 
 - An answered question is a cited answer, fresh or from the cache. A refusal, a
@@ -123,6 +128,7 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `POST` | `/v1/me/api-keys` | `api_keys` |
 | `GET` | `/v1/me/api-keys` | `manage_account` |
 | `DELETE` | `/v1/me/api-keys/{key_id}` | `manage_account` |
+| `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |
 | `GET` | `/v1/admin/budget` | `operate` |

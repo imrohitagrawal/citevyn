@@ -293,6 +293,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/me/api-keys`      | demo   | Make an API key, shown once (Pro; 404 unless the access model is on) |
 | `GET  /v1/me/api-keys`      | demo   | List your API keys (first characters only) |
 | `DELETE /v1/me/api-keys/{key_id}` | demo | Revoke an API key |
+| `POST /v1/mcp`             | api key | MCP server: `ask_docs` returns a finished, cited answer (Pro; 404 unless the access model is on) |
 | `POST /v1/billing/webhook`  | none   | Stripe webhook; the signature is the credential (404 unless the access model is on) |
 | `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |
 | `GET  /v1/admin/budget`     | admin  | Spend against the daily budget ([`docs/COST_CONTROLS.md`](docs/COST_CONTROLS.md)) |

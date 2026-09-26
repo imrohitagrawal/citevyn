@@ -80,7 +80,7 @@ from app.access.deps import capability_of
 from app.access.policy import Capability
 from app.core import db as db_module
 from app.core.config import get_settings
-from app.core.security import require_admin_api_key, require_public_client_token
+from app.core.security import require_admin_api_key, require_api_key, require_public_client_token
 from app.main import create_app
 from app.models import Base
 
@@ -93,6 +93,7 @@ ADMIN_HEADER = "X-Admin-API-Key"
 # ``EXPECTED_OPEN`` below.
 ADMIN = "admin-api-key"
 BEARER = "public-bearer"
+API_KEY = "api-key"
 OPEN = "no-credential"
 
 
@@ -177,6 +178,15 @@ def _depth_of(dependant: Dependant, target: Any, _depth: int = 1) -> int | None:
 def _classify(route: Any) -> str:
     admin = _depth_of(route.dependant, require_admin_api_key) is not None
     bearer = _depth_of(route.dependant, require_public_client_token) is not None
+    api_key = _depth_of(route.dependant, require_api_key) is not None
+    if api_key:
+        # ADR-0005 Phase 6B: an agent's per-user API key. It must never share a
+        # route with the browser credentials (a cookie-driven MCP call is CSRF).
+        if admin or bearer:
+            raise AssertionError(
+                f"{sorted(route.methods)} {route.path} mixes the API key with another credential"
+            )
+        return API_KEY
     if admin and bearer:
         # Never true today. If it becomes true, that is a real finding
         # (two credential systems on one route), not something to classify
@@ -308,6 +318,7 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("POST", "/v1/me/api-keys"): Capability.api_keys,
     ("GET", "/v1/me/api-keys"): Capability.manage_account,
     ("DELETE", "/v1/me/api-keys/{key_id}"): Capability.manage_account,
+    ("POST", "/v1/mcp"): Capability.mcp_ask,
     ("POST", "/v1/billing/webhook"): Capability.public,
     ("GET", "/v1/admin/source_requests"): Capability.operate,
     ("GET", "/v1/admin/budget"): Capability.operate,
@@ -340,7 +351,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 45
+    assert len(EXPECTED_CAPABILITY) == 46
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -525,7 +536,7 @@ def test_each_auth_class_is_non_empty() -> None:
     ``BEARER`` are both empty (see the module docstring).
     """
     assert INVENTORY, "the route walk found no routes at all"
-    for auth_class in (ADMIN, BEARER, OPEN):
+    for auth_class in (ADMIN, BEARER, OPEN, API_KEY):
         assert _class_members(auth_class), (
             f"auth class {auth_class!r} is empty — the walk is vacuous"
         )
@@ -693,7 +704,11 @@ def test_the_credential_checks_the_classifier_knows_are_the_only_ones() -> None:
         for name in dir(security_module)
         if name.startswith("require_") and callable(getattr(security_module, name))
     }
-    assert requires == {"require_public_client_token", "require_admin_api_key"}, (
+    assert requires == {
+        "require_public_client_token",
+        "require_admin_api_key",
+        "require_api_key",
+    }, (
         "app.core.security gained or lost a require_* credential dependency; "
         f"_classify() only knows two of them: {sorted(requires)}"
     )
@@ -1049,3 +1064,52 @@ def test_uuid_substitutions_are_real_uuids() -> None:
     would look like a routing miss rather than a broken fixture."""
     for name in ("session_id", "message_id", "run_id", "job_id"):
         uuid.UUID(PATH_PARAM_VALUES[name])
+
+
+# ---------------------------------------------------------------------------
+# The API-key class (ADR-0005 Phase 6B)
+# ---------------------------------------------------------------------------
+
+EXPECTED_API_KEY: set[tuple[str, str]] = {("POST", "/v1/mcp")}
+
+
+def test_the_api_key_class_is_exactly_the_expected_set() -> None:
+    """Turns red if: a route gains or loses the API-key credential unnoticed."""
+    assert set(_class_members(API_KEY)) == EXPECTED_API_KEY
+
+
+@pytest.mark.parametrize(("method", "path"), sorted(EXPECTED_API_KEY))
+def test_every_api_key_route_rejects_a_missing_or_wrong_key(
+    method: str, path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """EXECUTED, with the access model on (off, these routes are 404). Turns
+    red if: an API-key route answers without a valid key, or accepts the demo
+    bearer or a cookie in its place. A real (empty) database, so a well-formed
+    but unknown key is looked up and refused, not crashed on."""
+    import asyncio
+
+    from app.core import db as db_module
+    from app.models import Base
+
+    monkeypatch.setenv("CITEVYN_ACCESS_MODEL_ENABLED", "true")
+    monkeypatch.setenv("CITEVYN_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'inv.db'}")
+    get_settings.cache_clear()
+    db_module.reset_engine()
+
+    async def _schema() -> None:
+        async with db_module.get_engine().begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_schema())
+    try:
+        with TestClient(create_app()) as client:
+            for headers in (
+                {},
+                {"Authorization": "Bearer local-demo-key"},
+                {"Authorization": "Bearer cvk_" + "0" * 32 + "_" + "0" * 64},
+            ):
+                res = client.request(method, path, json={}, headers=headers)
+                assert res.status_code == 401, (headers, res.status_code)
+    finally:
+        get_settings.cache_clear()
+        db_module.reset_engine()

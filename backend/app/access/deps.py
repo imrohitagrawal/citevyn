@@ -119,6 +119,23 @@ def requires(capability: Capability) -> Callable[..., Awaitable[None]]:
     return check_capability
 
 
+def enforced_in_handler(capability: Capability) -> Callable[..., Awaitable[None]]:
+    """Declare ``capability`` for a route that enforces it in its handler.
+
+    For routes whose caller is NOT the cookie's principal: the MCP server is
+    called with an API key, so ``requires`` (which reads the cookie) cannot see
+    the right account. The handler checks the key owner's tier on every call
+    instead (``tests/test_mcp_route.py`` pins that). This dependency only
+    carries the label the route inventory and ACCESS_POLICY.md read.
+    """
+
+    async def declared() -> None:
+        return None
+
+    setattr(declared, _MARKER, capability)
+    return declared
+
+
 def capability_of(dependency: Any) -> Capability | None:
     """The capability a dependency built by :func:`requires` enforces, else None."""
     value = getattr(dependency, _MARKER, None)
