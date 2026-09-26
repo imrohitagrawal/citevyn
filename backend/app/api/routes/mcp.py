@@ -28,6 +28,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
@@ -42,15 +43,17 @@ from app.access.quota import is_counted_answer, refuse_if_used_up, usage_for, us
 from app.answer.orchestrator import Orchestrator
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
-from app.core.rate_limit import enforce_rate_limit
+from app.core.rate_limit import enforce_global_rate_limit, enforce_rate_limit
 from app.core.security import require_api_key
 from app.cost.call_site import billed_to
-from app.mcp.clean import clean_answer, clean_url
+from app.mcp.clean import clean_answer, clean_field, clean_url
 from app.models import ApiKey, Session
 
 router = APIRouter(tags=["mcp"])
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+# One JSON-RPC request is small; anything larger is refused before it is read.
+MAX_BODY_BYTES = 64 * 1024
 MAX_QUESTION_CHARS = 4000
 
 ASK_DOCS = {
@@ -69,6 +72,12 @@ ASK_DOCS = {
         "required": ["question"],
     },
 }
+
+
+def _reject_constant(name: str) -> object:
+    """NaN and Infinity are not JSON; echoing one back as an id crashed the
+    response writer (found in review)."""
+    raise ValueError(name)
 
 
 def _obj(value: object) -> dict[str, Any]:
@@ -95,14 +104,25 @@ async def mcp(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
 ) -> Response:
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        return _error(None, -32600, "Request too large.")  # refused unread
+    raw = await request.body()
+    if len(raw) > MAX_BODY_BYTES:
+        return _error(None, -32600, "Request too large.")
     try:
-        parsed: object = json.loads(await request.body())
-    except ValueError:
+        parsed: object = json.loads(raw, parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
         return _error(None, -32700, "Parse error.")
     message = _obj(parsed)
     method_value: object = message.get("method")
     if not isinstance(parsed, dict) or not isinstance(method_value, str):
         return _error(None, -32600, "Invalid request: send one JSON-RPC 2.0 request object.")
+    id_value: object = message.get("id")
+    if "id" in message and not (
+        id_value is None or isinstance(id_value, str) or type(id_value) is int
+    ):
+        return _error(None, -32600, "Invalid request: an id is a string, an integer or null.")
     method = method_value
     if "id" not in message:  # a notification: acknowledge, never answer
         return Response(status_code=202)
@@ -151,6 +171,8 @@ async def _ask_docs(
         await enforce_rate_limit(
             user_id=key.user_id, role="demo_user_registered", settings=settings
         )
+        # The site-wide backstop chat applies too (found in review: MCP skipped it).
+        await enforce_global_rate_limit(settings)
     except HTTPException:
         if usage.remaining == 0:
             return _tool_error(
@@ -184,12 +206,13 @@ async def _ask_docs(
         citations.append(
             {
                 "marker": c.get("marker"),
-                "title": clean_answer(str(c.get("title") or "")).split("\n\n", 1)[-1][:200],
+                "title": clean_field(str(c.get("title") or "")),
                 "url": url,
-                "source": str(c.get("source_name") or "")[:80],
+                "source": clean_field(str(c.get("source_name") or ""), 80),
             }
         )
-    text = clean_answer(str(response.get("answer") or ""))
+    # A per-request marker frames the answer; the text cannot forge it.
+    text = clean_answer(str(response.get("answer") or ""), nonce=secrets.token_hex(6))
     if citations:
         text += "\n\nSources:\n" + "\n".join(
             f"[{c['marker']}] {c['title']} — {c['url']}" for c in citations

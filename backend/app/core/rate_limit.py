@@ -800,6 +800,13 @@ async def _apply_per_visitor_rate_limit(
         await enforce_rate_limit(user_id=_GLOBAL_BUCKET_KEY, role=_GLOBAL_ROLE, settings=settings)
 
 
+async def enforce_global_rate_limit(settings: Settings) -> None:
+    """The site-wide hourly backstop, for entry points that do not go through
+    :func:`rate_limited_demo` (the MCP server, ADR-0005 Phase 6B)."""
+    if settings.rate_limit_global_per_hour > 0:
+        await enforce_rate_limit(user_id=_GLOBAL_BUCKET_KEY, role=_GLOBAL_ROLE, settings=settings)
+
+
 async def rate_limited_demo(
     request: Request,
     user_id: Annotated[str, Depends(require_public_client_token)],
