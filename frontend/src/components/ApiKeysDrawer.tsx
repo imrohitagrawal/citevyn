@@ -29,9 +29,13 @@ function snippets(key: string, origin: string): { id: string; label: string; tex
       text: `claude mcp add --transport http citevyn ${url} --header "Authorization: Bearer ${key}"`,
     },
     {
+      // Codex reads the key from an environment variable (its documented
+      // bearer_token_env_var), so the key is never written into config.toml.
       id: "codex",
-      label: "Codex (~/.codex/config.toml)",
-      text: `[mcp_servers.citevyn]\nurl = "${url}"\nhttp_headers = { Authorization = "Bearer ${key}" }`,
+      label: "Codex (shell, then ~/.codex/config.toml)",
+      text:
+        `export CITEVYN_API_KEY=${key}\n\n` +
+        `[mcp_servers.citevyn]\nurl = "${url}"\nbearer_token_env_var = "CITEVYN_API_KEY"`,
     },
   ];
 }
@@ -45,15 +49,24 @@ export default function ApiKeysDrawer({
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const [keys, setKeys] = useState<ApiKeyView[] | null>(null);
-  const [created, setCreated] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ key_id: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [listFailed, setListFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
+  // A failed list keeps what was shown and says so; it never claims "No keys yet".
   const refresh = () =>
-    listKeys().then(setKeys, (e: unknown) => {
-      setKeys([]);
-      setError(refusal(e));
-    });
+    listKeys().then(
+      (next) => {
+        setKeys(next);
+        setListFailed(false);
+      },
+      (e: unknown) => {
+        setListFailed(true);
+        setError(refusal(e));
+      },
+    );
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -65,12 +78,13 @@ export default function ApiKeysDrawer({
   useFocusTrap(dialogRef, { onEscape: onClose });
 
   const make = async () => {
-    if (busy) return;
+    if (busy) return; // one make at a time
     setBusy(true);
     setError(null);
     try {
       const name = `Key made ${new Date().toISOString().slice(0, 10)}`;
-      setCreated((await createKey(name)).key);
+      const made = await createKey(name);
+      setCreated({ key_id: made.key_id, key: made.key });
       await refresh();
     } catch (e) {
       setError(refusal(e));
@@ -79,13 +93,25 @@ export default function ApiKeysDrawer({
     }
   };
 
+  // Two clicks: "Revoke" asks, "Really revoke" does it. One request at a time.
   const revoke = async (key: ApiKeyView) => {
+    if (busy) return;
+    if (confirming !== key.key_id) {
+      setConfirming(key.key_id);
+      return;
+    }
+    setBusy(true);
+    setConfirming(null);
     setError(null);
     try {
       await revokeKey(key.key_id);
+      if (created?.key_id === key.key_id) setCreated(null);
       await refresh();
     } catch (e) {
       setError(refusal(e));
+    } finally {
+      setBusy(false);
+      dialogRef.current?.focus(); // the revoked row and its button are gone
     }
   };
 
@@ -117,12 +143,12 @@ export default function ApiKeysDrawer({
           <div className="drawer-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
             <strong>Your new key. This is the only time it is shown.</strong>
             <code data-testid="new-key" style={{ wordBreak: "break-all" }}>
-              {created}
+              {created.key}
             </code>
-            <button type="button" onClick={() => copy(created)}>
+            <button type="button" onClick={() => copy(created.key)}>
               Copy key
             </button>
-            {snippets(created, window.location.origin).map((s) => (
+            {snippets(created.key, window.location.origin).map((s) => (
               <div key={s.id}>
                 <p style={{ margin: "8px 0 4px" }}>{s.label}</p>
                 <pre data-testid={`snippet-${s.id}`} style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
@@ -141,7 +167,7 @@ export default function ApiKeysDrawer({
         </button>
         {error && <p role="alert">{error}</p>}
 
-        {keys !== null && keys.length === 0 && <p className="drawer-note">No keys yet.</p>}
+        {keys !== null && keys.length === 0 && !listFailed && <p className="drawer-note">No keys yet.</p>}
         <ul style={{ listStyle: "none", padding: 0 }}>
           {(keys ?? []).map((k) => (
             <li key={k.key_id} className="drawer-row">
@@ -151,8 +177,13 @@ export default function ApiKeysDrawer({
                 <code>{k.prefix}…</code>
                 {k.last_used_at ? ` · last used ${k.last_used_at.slice(0, 10)}` : " · never used"}
               </span>
-              <button type="button" onClick={() => void revoke(k)} aria-label={`Revoke ${k.name}`}>
-                Revoke
+              <button
+                type="button"
+                onClick={() => void revoke(k)}
+                aria-disabled={busy}
+                aria-label={confirming === k.key_id ? `Really revoke ${k.name}` : `Revoke ${k.name}`}
+              >
+                {confirming === k.key_id ? "Really revoke?" : "Revoke"}
               </button>
             </li>
           ))}

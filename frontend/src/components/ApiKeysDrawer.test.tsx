@@ -14,7 +14,7 @@ import { ApiClientError } from "../lib/types";
 vi.mock("../lib/apiKeys", () => ({
   listKeys: vi.fn(),
   createKey: vi.fn(),
-  revokeKey: vi.fn(() => Promise.resolve()),
+  revokeKey: vi.fn(),
 }));
 
 const KEY = {
@@ -36,6 +36,12 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+async function revoke(name: string) {
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: `Revoke ${name}` }));
+  await user.click(await screen.findByRole("button", { name: `Really revoke ${name}` }));
+}
+
 describe("ApiKeysDrawer", () => {
   it("lists your keys by name and first characters, never the key", async () => {
     // Turns red if: the list is missing, or shows more than the prefix.
@@ -56,13 +62,25 @@ describe("ApiKeysDrawer", () => {
     expect(shown.textContent).toContain("b".repeat(64));
     expect(screen.getByText(/only time/i)).toBeTruthy();
     expect(screen.getByTestId("snippet-claude").textContent).toContain(`Bearer cvk_${"a".repeat(32)}_`);
+    // Codex: the key goes in an environment variable, never in config.toml
+    // (Codex's documented bearer_token_env_var).
+    const codex = screen.getByTestId("snippet-codex").textContent ?? "";
+    expect(codex).toContain(`export CITEVYN_API_KEY=cvk_${"a".repeat(32)}_`);
+    expect(codex).toContain("[mcp_servers.citevyn]");
+    expect(codex).toContain('bearer_token_env_var = "CITEVYN_API_KEY"');
+    expect(codex).toMatch(/url = "https?:\/\/[^"]+\/v1\/mcp"/);
   });
 
-  it("revokes a key", async () => {
-    // Turns red if: revoke is not called, or the row stays.
+  it("revokes a key after a second, confirming click", async () => {
+    // Turns red if: revoke is sent on the first click, not sent on the second,
+    // or the row stays.
+    vi.mocked(revokeKey).mockResolvedValue();
     vi.mocked(listKeys).mockResolvedValueOnce([KEY]).mockResolvedValueOnce([]);
     open();
-    await userEvent.setup().click(await screen.findByRole("button", { name: `Revoke ${KEY.name}` }));
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: `Revoke ${KEY.name}` }));
+    expect(revokeKey).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: `Really revoke ${KEY.name}` }));
     expect(revokeKey).toHaveBeenCalledWith(KEY.key_id);
     expect(await screen.findByText(/no keys yet/i)).toBeTruthy();
   });
@@ -103,5 +121,76 @@ describe("ApiKeysDrawer", () => {
     open();
     const dialog = await screen.findByRole("dialog", { name: "API keys" });
     expect(within(dialog).getByRole("button", { name: "Close" })).toBeTruthy();
+  });
+});
+
+
+describe("review round", () => {
+  it("a failed list says so, and never claims there are no keys", async () => {
+    // Turns red if: a list failure shows "No keys yet".
+    vi.mocked(listKeys).mockRejectedValue(new Error("down"));
+    open();
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByText(/no keys yet/i)).toBeNull();
+  });
+
+  it("a list that fails after a key is made does not say there are no keys", async () => {
+    // Turns red if: the "No keys yet" line ignores a failed list.
+    vi.mocked(listKeys).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("down"));
+    vi.mocked(createKey).mockResolvedValue({ ...KEY, key: "cvk_x" });
+    open();
+    await screen.findByText(/no keys yet/i);
+    await userEvent.setup().click(screen.getByRole("button", { name: "Make a key" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByText(/no keys yet/i)).toBeNull();
+  });
+
+  it("a list that fails keeps the keys already shown", async () => {
+    // Turns red if: a failed list empties the shown keys.
+    vi.mocked(listKeys).mockResolvedValueOnce([KEY]).mockRejectedValueOnce(new Error("down"));
+    vi.mocked(createKey).mockResolvedValue({ ...KEY, key_id: "k2", key: "cvk_x" });
+    open();
+    await screen.findByRole("button", { name: `Revoke ${KEY.name}` });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Make a key" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("button", { name: `Revoke ${KEY.name}` })).toBeTruthy();
+  });
+
+  it("revoking the key just made removes it from the screen", async () => {
+    // Turns red if: the dead key and its snippets stay shown after revoke.
+    vi.mocked(revokeKey).mockResolvedValue();
+    vi.mocked(listKeys).mockResolvedValueOnce([]).mockResolvedValueOnce([KEY]).mockResolvedValueOnce([]);
+    vi.mocked(createKey).mockResolvedValue({ ...KEY, key: "cvk_" + "a".repeat(32) + "_" + "b".repeat(64) });
+    open();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Make a key" }));
+    await screen.findByTestId("new-key");
+    await revoke(KEY.name);
+    expect(await screen.findByText(/no keys yet/i)).toBeTruthy();
+    expect(screen.queryByTestId("new-key")).toBeNull();
+  });
+
+  it("making a key twice quickly sends one request", async () => {
+    // Turns red if: the busy guard is dropped.
+    vi.mocked(listKeys).mockResolvedValue([]);
+    let finish: (v: Awaited<ReturnType<typeof createKey>>) => void = () => undefined;
+    vi.mocked(createKey).mockReturnValue(new Promise((r) => (finish = r)));
+    open();
+    const user = userEvent.setup();
+    const make = await screen.findByRole("button", { name: "Make a key" });
+    await user.click(make);
+    await user.click(make);
+    expect(createKey).toHaveBeenCalledTimes(1);
+    finish({ ...KEY, key: "cvk_x" });
+  });
+
+  it("after a revoke, focus stays in the drawer", async () => {
+    // Turns red if: focus falls to the page when the revoked row disappears.
+    vi.mocked(revokeKey).mockResolvedValue();
+    vi.mocked(listKeys).mockResolvedValueOnce([KEY]).mockResolvedValueOnce([]);
+    open();
+    await revoke(KEY.name);
+    await screen.findByText(/no keys yet/i);
+    const dialog = screen.getByRole("dialog", { name: "API keys" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 });
