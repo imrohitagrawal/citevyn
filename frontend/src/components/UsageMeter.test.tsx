@@ -6,9 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import UsageMeter from "./UsageMeter";
-import { getMembership, startCheckout } from "../lib/billing";
+import { getMembership, openPortal, startCheckout } from "../lib/billing";
 
-vi.mock("../lib/billing", () => ({ getMembership: vi.fn(), startCheckout: vi.fn(() => Promise.resolve()) }));
+vi.mock("../lib/billing", () => ({
+  getMembership: vi.fn(),
+  startCheckout: vi.fn(() => Promise.resolve()),
+  openPortal: vi.fn(() => Promise.resolve()),
+}));
 
 function membership(usage: Record<string, unknown>) {
   return { tier: usage.kind === "monthly" ? "pro" : "free", usage } as unknown as Awaited<
@@ -83,5 +87,28 @@ it("a failed upgrade from the meter is said plainly", async () => {
   vi.mocked(startCheckout).mockRejectedValueOnce(new Error("down"));
   render(<UsageMeter answered={0} />);
   await userEvent.setup().click(await screen.findByRole("button", { name: "Upgrade" }));
-  expect((await screen.findByRole("alert")).textContent).toMatch(/couldn't start the upgrade/i);
+  expect((await screen.findByRole("alert")).textContent).toMatch(/couldn't open billing/i);
+});
+
+
+it("gives a Pro account a way to manage or cancel billing", async () => {
+  // Found while drafting the Refund Policy: the app had no way for a paying
+  // user to reach the billing portal to cancel. Turns red if: Pro has no
+  // Manage billing button, or it does not open the portal.
+  vi.mocked(getMembership).mockResolvedValue(
+    membership({ kind: "monthly", used: 1, limit: 1000, remaining: 999, resets_at: null, verified: true }),
+  );
+  render(<UsageMeter answered={0} />);
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Manage billing" }));
+  expect(openPortal).toHaveBeenCalled();
+});
+
+it("partner: a trial account is not offered Manage billing", async () => {
+  // Turns red if: the portal button shows for an account with no subscription.
+  vi.mocked(getMembership).mockResolvedValue(
+    membership({ kind: "trial", used: 1, limit: 25, remaining: 24, resets_at: null, verified: true }),
+  );
+  render(<UsageMeter answered={0} />);
+  await screen.findByText("24 of 25 free questions left");
+  expect(screen.queryByRole("button", { name: "Manage billing" })).toBeNull();
 });

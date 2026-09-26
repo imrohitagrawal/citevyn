@@ -36,6 +36,7 @@ from app.api.routes.billing import router as billing_router
 from app.api.routes.client_config import router as client_config_router
 from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
+from app.api.routes.legal import router as legal_router
 from app.api.routes.magic_link import router as magic_link_router
 from app.api.routes.me import router as me_router
 from app.api.routes.messages import router as messages_router
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.
     app.include_router(about_router)
+    app.include_router(legal_router)
 
     # Exception handlers are defined at module scope (below) so pyright
     # can see them as referenced symbols; the FastAPI decorator binds

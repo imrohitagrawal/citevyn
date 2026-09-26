@@ -283,7 +283,20 @@ def _table_of_contents(rendered_documents: Sequence[tuple[str, str, str]]) -> st
     return f'<nav class="about-toc" aria-label="On this page"><ul>{"".join(links)}</ul></nav>'
 
 
-def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
+_ABOUT_LEAD = (
+    "These are the pages CiteVyn cites when it answers "
+    "questions about itself. They are the source text, not a summary of it."
+)
+
+
+def render_about_page(
+    documents: Sequence[tuple[str, str]],
+    *,
+    page_title: str = PAGE_TITLE,
+    description: str = PAGE_DESCRIPTION,
+    lead: str = _ABOUT_LEAD,
+    lead_class: str = "about-lead",
+) -> str:
     """The complete ``/about`` document for ``(title, markdown)`` pairs.
 
     ``title`` comes from the source's ``SourceSpec.title`` and is used only as
@@ -317,9 +330,9 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
         "<head>\n"
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f'<meta name="description" content="{html.escape(PAGE_DESCRIPTION, quote=True)}">\n'
+        f'<meta name="description" content="{html.escape(description, quote=True)}">\n'
         '<meta name="color-scheme" content="light dark">\n'
-        f"<title>{html.escape(PAGE_TITLE)} — CiteVyn</title>\n"
+        f"<title>{html.escape(page_title)} — CiteVyn</title>\n"
         '<link rel="icon" type="image/svg+xml" href="/favicon.svg">\n'
         + "".join(
             f'<link rel="preload" as="font" type="font/woff2" href="{url}" crossorigin>\n'
@@ -337,9 +350,8 @@ def render_about_page(documents: Sequence[tuple[str, str]]) -> str:
         '<div class="about-page">\n'
         '<header class="about-header">\n'
         '<a class="about-back" href="/" aria-label="Back to CiteVyn">&#8592; CiteVyn</a>\n'
-        f"<h1>{html.escape(PAGE_TITLE)}</h1>\n"
-        '<p class="about-lead">These are the pages CiteVyn cites when it answers '
-        "questions about itself. They are the source text, not a summary of it.</p>\n"
+        f"<h1>{html.escape(page_title)}</h1>\n"
+        f'<p class="{html.escape(lead_class, quote=True)}">{html.escape(lead)}</p>\n'
         "</header>\n"
         "<main>\n"
         f"{toc}\n"

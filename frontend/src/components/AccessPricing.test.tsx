@@ -160,3 +160,17 @@ describe("after registering from a paid plan", () => {
     expect(screen.getByRole("button", { name: "Start asking" })).toBe(before);
   });
 });
+
+
+it("links the Terms, Privacy, Refund and No-training pages", () => {
+  // Turns red if: a page the owner must approve is not reachable from pricing.
+  render(<AccessPricing allowance={ALLOWANCE} onOpenChat={vi.fn()} />);
+  for (const [name, href] of [
+    ["Terms", "/legal/terms"],
+    ["Privacy", "/legal/privacy"],
+    ["Refunds", "/legal/refunds"],
+    ["No training", "/legal/no-training"],
+  ]) {
+    expect(screen.getByRole("link", { name }).getAttribute("href")).toBe(href);
+  }
+});
