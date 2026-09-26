@@ -70,6 +70,7 @@ def test_a_cited_answer_counts_fresh_or_cached() -> None:
     [
         {"no_answer": True, "citations": []},
         {"unsupported": True, "no_answer": True, "citations": []},
+        {"unsupported": True},  # alone: an off-topic reply never counts, even if cited
         {"intent": "greeting", "citations": []},
         {"citations": []},  # an answer with no citation is not an answer we count
         {"no_answer": "false"},  # only the boolean False means answered
