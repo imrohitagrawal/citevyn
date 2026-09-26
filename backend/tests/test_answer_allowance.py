@@ -33,7 +33,7 @@ from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import AnswerUsage, Base, IndexStatus, IndexVersion, Membership, User
-from tests.conftest import seed_catalog
+from tests.conftest import bot_check_headers, seed_catalog
 
 DEMO = {"Authorization": "Bearer local-demo-key"}
 ON = {"CITEVYN_ACCESS_MODEL_ENABLED": "true", "CITEVYN_ACCESS_FREE_TRIAL_ANSWERS": "3"}
@@ -237,7 +237,7 @@ def _signed_in(client: TestClient, email: str = "a@example.com", *, verified: bo
     res = client.post(
         "/v1/auth/register",
         json={"email": email, "password": "correct horse battery"},
-        headers=DEMO,
+        headers={**DEMO, **bot_check_headers(client)},
     )
     assert res.status_code == 201
     user_id = str(res.json()["user_id"])

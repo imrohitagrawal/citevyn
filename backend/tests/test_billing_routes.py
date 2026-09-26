@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import Base, Membership, StripeEvent
+from tests.conftest import bot_check_headers
 
 DEMO = {"Authorization": "Bearer local-demo-key"}
 SECRET = "whsec_test"
@@ -91,7 +92,7 @@ def _register(client: TestClient, email: str = "a@example.com") -> str:
     res = client.post(
         "/v1/auth/register",
         json={"email": email, "password": "correct horse battery"},
-        headers=DEMO,
+        headers={**DEMO, **bot_check_headers(client)},
     )
     assert res.status_code == 201
     return res.json()["user_id"]
@@ -413,6 +414,7 @@ def test_production_with_the_access_model_on_needs_every_stripe_setting(missing:
         "admin_api_key": "a-strong-admin-secret",
         "public_client_token": "a-strong-demo-secret",
         "access_model_enabled": True,
+        "bot_check_secret": "a" * 32,
         "_env_file": None,
     }
     for k in list(ON)[1:]:

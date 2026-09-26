@@ -91,6 +91,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
+from app.access.bot_check import require_bot_check
 from app.access.deps import requires
 from app.access.policy import Capability
 from app.api.routes.auth import normalize_email
@@ -159,7 +160,7 @@ class MagicLinkRequest(BaseModel):
 
 @router.post(
     "/request",
-    dependencies=[Depends(requires(Capability.sign_in))],
+    dependencies=[Depends(requires(Capability.sign_in)), Depends(require_bot_check)],
     status_code=status.HTTP_202_ACCEPTED,
     summary="Email the caller a one-time sign-in link.",
     description=(

@@ -9,6 +9,7 @@ from app.models.answer_usage import AnswerUsage
 from app.models.audit_events import AuditEvent
 from app.models.auth_sessions import AuthSession
 from app.models.base import GUID, Base, PickledEmbedding, TimestampMixin
+from app.models.bot_check import BotCheckUse
 from app.models.chunks import Chunk
 from app.models.documents import Document
 from app.models.enums import (
@@ -42,6 +43,7 @@ from app.models.users import User
 
 __all__ = [
     "AnswerUsage",
+    "BotCheckUse",
     "Membership",
     "StripeEvent",
     "AnswerFeedback",

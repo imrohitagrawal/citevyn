@@ -751,6 +751,22 @@ Entitlement is never decided by these calls: every protected request reads the
   acknowledged, not re-applied). `422` for a bad signature or body; `503` when the live read of
   the subscription from Stripe fails (Stripe retries).
 
+### Client config and the sign-up bot check (ADR-0005 Phase 5)
+
+- `GET /v1/config` (no credential) → `{request_id, access_model: bool,
+  bot_check: {kind: "pow"} | null}`. The web client reads it before sign-in to
+  decide whether to show the pricing section, the usage meter and the bot check.
+- `GET /v1/auth/challenge` (no credential; 404 unless the access model is on) →
+  `{request_id, challenge: {algorithm: "SHA-256", salt, challenge, maxnumber,
+  signature}}`. Find the integer `number` in `0..maxnumber` with
+  `SHA-256(salt + number)` (hex) equal to `challenge`.
+- With the access model on, `POST /v1/auth/register` and
+  `POST /v1/auth/magic-link/request` need the header `X-CiteVyn-Bot-Check`: the
+  challenge object plus `number`, as base64url-encoded JSON. Each solution works
+  once, and a request refused for another reason (for example a weak password)
+  does not use it up. Missing, wrong, forged, expired or reused: 403
+  `bot_check_failed`. OAuth sign-in is not checked.
+
 ### Answer allowance on `POST /v1/sessions/{id}/messages`
 
 With the access model on, each answered question (a cited answer, fresh or
@@ -1098,4 +1114,5 @@ Notes:
 | already_subscribed | 409. The account already has Pro; a second checkout would bill it twice. Open the billing portal instead. Only with the access model on. |
 | plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. Also returned by `POST /v1/sessions/{id}/messages` when a Free account has used its free trial: `details` = `{capability: "chat", required_tier: "pro", reason: "trial_used", used, limit}`. |
 | verification_required | 403. A Free account has not verified its email address, so it has no free trial yet (ADR-0005 §1). Redeem a magic link, or sign in with a provider that verifies the same address. Only with the access model on. |
+| bot_check_failed | 403. `POST /v1/auth/register` or `POST /v1/auth/magic-link/request` came without a valid, unused proof-of-work solution in `X-CiteVyn-Bot-Check`. Get a new challenge and try again. Only with the access model on. |
 | quota_exceeded | 429. A Pro account used this month's answered questions. `details` = `{used, limit, resets_at}` (the first of next month, UTC). Only with the access model on. |

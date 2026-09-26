@@ -351,6 +351,19 @@ Indexed on `(user_id, occurred_at)`. Free counts all rows ever (a one-time
 trial, whatever the tier); Pro counts `pro` rows since midnight UTC on the first
 of the month.
 
+## 15c. bot_check_uses
+
+Proof-of-work solutions already used to sign up or request a magic link (ADR-0005
+Phase 5, migration 0019), so one solution cannot be replayed. Written in the same
+transaction as the request it paid for; expired rows are deleted on the next
+check (an expired challenge is refused by its own signed expiry anyway).
+
+| Field | Type | Notes |
+|---|---|---|
+| challenge | text(64) | Primary key: the SHA-256 challenge the solution answered |
+| used_at | timestamp | |
+| expires_at | timestamp | Indexed, for the clean-up |
+
 Other ADR-0005 tables (`answer_feedback`, `source_requests`, `memberships`,
 `stripe_events`) are described in their model docstrings under
 `backend/app/models/` and in `docs/API_SPEC.md` §7c and §8.

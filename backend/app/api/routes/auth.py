@@ -29,6 +29,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access.bot_check import require_bot_check
 from app.access.deps import requires
 from app.access.policy import Capability
 from app.core.auth_sessions import (
@@ -210,7 +211,7 @@ async def _auth_user_payload(
 
 @router.post(
     "/register",
-    dependencies=[Depends(requires(Capability.sign_in))],
+    dependencies=[Depends(requires(Capability.sign_in)), Depends(require_bot_check)],
     status_code=status.HTTP_201_CREATED,
     summary="Register a new account.",
     description=(

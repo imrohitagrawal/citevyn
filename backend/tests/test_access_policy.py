@@ -44,6 +44,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import APIErrorCode
 from app.main import create_app
 from app.models import Base
+from tests.conftest import bot_check_headers
 
 DOC = Path(__file__).resolve().parents[2] / "docs" / "ACCESS_POLICY.md"
 DEMO_BEARER = {"Authorization": "Bearer local-demo-key"}
@@ -367,7 +368,7 @@ def test_with_the_setting_on_a_signed_in_account_can_chat(
         reg = client.post(
             "/v1/auth/register",
             json={"email": "a@example.com", "password": "correct horse battery"},
-            headers=DEMO_BEARER,
+            headers={**DEMO_BEARER, **bot_check_headers(client)},
         )
         assert reg.status_code == 201
         created = client.post("/v1/sessions", json={"channel": "chat"}, headers=DEMO_BEARER)
