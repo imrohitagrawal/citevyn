@@ -276,7 +276,9 @@ def test_a_lapsed_account_can_still_see_and_revoke_its_keys(env: pytest.MonkeyPa
     assert _auth(raw) is None
 
 
-@pytest.mark.parametrize("name", ["bad\u0007bell", "flip\u202eme", "zero\u200bwidth", "tab\there"])
+@pytest.mark.parametrize(
+    "name", ["bad\u0007bell", "flip\u202eme", "zero\u200bwidth", "tab\there", "line\u2028break"]
+)
 def test_a_key_name_has_no_control_or_direction_characters(
     env: pytest.MonkeyPatch, name: str
 ) -> None:
@@ -287,3 +289,18 @@ def test_a_key_name_has_no_control_or_direction_characters(
         user = _signed_in(client)
         _make_pro(user)
         assert client.post("/v1/me/api-keys", json={"name": name}, headers=DEMO).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["\U0001f469\u200d\U0001f4bb laptop", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"],
+)
+def test_joiners_that_real_names_use_are_allowed(env: pytest.MonkeyPatch, name: str) -> None:
+    """The zero-width joiner builds emoji like a person at a laptop, and the
+    non-joiner is part of Persian spelling. Turns red if: they are rejected
+    along with the other formatting characters."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        _make_pro(user)
+        assert client.post("/v1/me/api-keys", json={"name": name}, headers=DEMO).status_code == 201

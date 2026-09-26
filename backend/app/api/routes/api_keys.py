@@ -36,6 +36,8 @@ from app.models import ApiKey, User
 router = APIRouter(prefix="/v1/me/api-keys", tags=["api-keys"])
 
 MAX_LIVE_KEYS = 10
+# Zero-width non-joiner and joiner: part of real names, not a spoofing tool.
+_JOINERS = frozenset({"\u200c", "\u200d"})
 
 
 def _request_id(request: Request) -> str:
@@ -59,9 +61,13 @@ class NewKeyRequest(BaseModel):
         value = value.strip()
         if not 1 <= len(value) <= 64:
             raise ValueError("a key name is 1 to 64 characters")
-        # No control or format characters: a right-to-left override or a
-        # zero-width character can make one name look like another in a list.
-        if any(unicodedata.category(c) in ("Cc", "Cf") for c in value):
+        # No control, format or line/paragraph-separator characters: a
+        # right-to-left override or a zero-width space can make one name look
+        # like another in a list. The two joiners stay allowed: real names use
+        # them (emoji sequences, Persian spelling).
+        if any(
+            unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") and c not in _JOINERS for c in value
+        ):
             raise ValueError("a key name cannot contain control or formatting characters")
         return value
 
