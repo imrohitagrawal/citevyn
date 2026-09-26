@@ -46,6 +46,8 @@ class Capability(enum.StrEnum):
     exact_search = "exact_search"
     #: Rate an answer, report it as wrong, request a missing source (ADR-0005 §6).
     feedback = "feedback"
+    #: Start, view or manage one's own paid plan (ADR-0005 Phase 4).
+    billing = "billing"
     #: Operator routes. Granted by the admin API key, never by a tier.
     operate = "operate"
 
@@ -94,6 +96,7 @@ _ACCOUNT = frozenset(
         Capability.history,
         Capability.exact_search,
         Capability.feedback,
+        Capability.billing,
         Capability.weekly_digest,
     }
 )

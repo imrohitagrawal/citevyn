@@ -135,6 +135,18 @@ class Settings(BaseSettings):
     # Refusals and errors never count against either.
     access_free_trial_answers: int = Field(default=25, ge=0)
     access_pro_monthly_answers: int = Field(default=1000, ge=0)
+    # Stripe (ADR-0005 Phase 4). TEST MODE until the owner sets live values; none
+    # is read unless CITEVYN_ACCESS_MODEL_ENABLED is on, and production refuses to
+    # start with the model on and any of these unset.
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    stripe_price_pro_monthly: str | None = None
+    stripe_price_pro_yearly: str | None = None
+    stripe_api_base: str = "https://api.stripe.com"
+    # How far a webhook's signed timestamp may be from now (replay window).
+    stripe_webhook_tolerance_seconds: int = Field(default=300, ge=1)
+    # Locked: 7 days of Pro after a failed payment, then the free tier.
+    membership_grace_days: int = Field(default=7, ge=0)
 
     rate_limit_enabled: bool = True
     rate_limit_demo_user_per_hour: int = Field(default=30, ge=1)
@@ -568,6 +580,29 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Production guards
     # ------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def _require_stripe_when_the_access_model_is_on_in_production(self) -> "Settings":
+        # Turning the access model on without Stripe configured would fail at the
+        # first checkout or webhook, in front of a user. Fail at startup instead.
+        if self.environment != "production" or not self.access_model_enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("CITEVYN_STRIPE_SECRET_KEY", self.stripe_secret_key),
+                ("CITEVYN_STRIPE_WEBHOOK_SECRET", self.stripe_webhook_secret),
+                ("CITEVYN_STRIPE_PRICE_PRO_MONTHLY", self.stripe_price_pro_monthly),
+                ("CITEVYN_STRIPE_PRICE_PRO_YEARLY", self.stripe_price_pro_yearly),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "CITEVYN_ACCESS_MODEL_ENABLED is on in production but Stripe is not "
+                f"configured: set {', '.join(missing)}."
+            )
+        return self
 
     @model_validator(mode="after")
     def _reject_wildcard_cors_in_production(self) -> "Settings":

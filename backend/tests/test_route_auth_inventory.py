@@ -299,6 +299,10 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"): Capability.feedback,
     ("POST", "/v1/source-requests"): Capability.feedback,
     ("GET", "/v1/admin/feedback"): Capability.operate,
+    ("POST", "/v1/billing/checkout"): Capability.billing,
+    ("POST", "/v1/billing/portal"): Capability.billing,
+    ("GET", "/v1/billing/membership"): Capability.billing,
+    ("POST", "/v1/billing/webhook"): Capability.public,
     ("GET", "/v1/admin/source_requests"): Capability.operate,
     ("GET", "/v1/admin/budget"): Capability.operate,
     ("GET", "/v1/admin/evaluations"): Capability.operate,
@@ -330,7 +334,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 35
+    assert len(EXPECTED_CAPABILITY) == 39
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -373,6 +377,9 @@ EXPECTED_ADMIN: set[tuple[str, str]] = {
 EXPECTED_BEARER: set[tuple[str, str]] = {
     ("POST", "/v1/auth/login"),
     ("POST", "/v1/auth/logout"),
+    ("POST", "/v1/billing/checkout"),
+    ("GET", "/v1/billing/membership"),
+    ("POST", "/v1/billing/portal"),
     ("POST", "/v1/auth/magic-link/request"),
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
@@ -406,6 +413,10 @@ EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ("GET", "/v1/auth/oauth/{provider}/start"): "browser navigation; state/PKCE guards it",
     ("GET", "/v1/auth/oauth/{provider}/connect/start"): "same, account-linking entry point",
     ("GET", "/v1/auth/oauth/{provider}/callback"): "provider redirect; state/PKCE guards it",
+    # ADR-0005 Phase 4: Stripe calls it directly with no browser credential. The
+    # Stripe signature over the raw body, inside a replay window, is the credential;
+    # it answers 404 unless the access model is on.
+    ("POST", "/v1/billing/webhook"): "Stripe webhook; the signature is the credential",
 }
 
 # Routes the framework registers that have no ``dependant`` to inspect.
@@ -596,6 +607,9 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("POST", "/v1/search/exact"),
     }
     assert by_depth[3] == {
+        ("POST", "/v1/billing/checkout"),
+        ("GET", "/v1/billing/membership"),
+        ("POST", "/v1/billing/portal"),
         ("GET", "/v1/me/export"),
         ("GET", "/v1/me/sessions"),
         ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),

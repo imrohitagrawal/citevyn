@@ -720,6 +720,34 @@ hit) and `sessions[]` with `messages[]` (`role`, `content`, `created_at`,
 `citations[]` including `docs_as_of`). Markdown is the same content as a
 readable document and says so when truncated. Any other `format` is 422.
 
+## 7c. Billing (ADR-0005 Phase 4)
+
+**Every route here answers 404 unless `CITEVYN_ACCESS_MODEL_ENABLED` is on.**
+Entitlement is never decided by these calls: every protected request reads the
+`memberships` table, which only the webhook writes.
+
+- `POST /v1/billing/checkout` `{"interval": "month" | "year"}` (an account;
+  `billing` capability) → `200 {request_id, url}`: send the browser to `url`
+  (Stripe Checkout). `409 already_subscribed` if the account already has Pro;
+  `503 billing_unavailable` if Stripe fails or is not configured.
+- `POST /v1/billing/portal` → `200 {request_id, url}` (Stripe's customer portal,
+  for the customer of the subscription that keeps billing, when there are two);
+  `404` before the account has a Stripe customer.
+- `GET /v1/billing/membership` → `{tier: "free"|"pro", status, interval,
+  current_period_end, cancel_at_period_end, grace_until, subscriptions:
+  [{status, interval, current_period_end}], allowance: {free_trial_answers,
+  pro_monthly_answers}}`. The top-level fields describe one subscription: a paid
+  one that is not ending, else any paid one, else the latest. `subscriptions`
+  lists them all, so paying twice is visible.
+- `POST /v1/billing/webhook` — Stripe only. No bearer or cookie: the
+  `Stripe-Signature` header over the raw body (v1 HMAC-SHA256, 300 s window) is
+  the credential. `200 {received: true, outcome}` where `outcome` is `applied`,
+  `applied_account_mismatch` (applied to the account the subscription was bought
+  for; its metadata now names another), `unmatched` (no subscription, or a new
+  one naming no account we have), `ignored` or `duplicate` (a redelivery:
+  acknowledged, not re-applied). `422` for a bad signature or body; `503` when the live read of
+  the subscription from Stripe fails (Stripe retries).
+
 ## 8. Feedback and the gap log (ADR-0005 §6)
 
 Trust must-haves: live without `CITEVYN_ACCESS_MODEL_ENABLED`. With it on, both
@@ -1053,4 +1081,6 @@ Notes:
 | cost_limit_reached | Demo daily cost cap reached |
 | rate_limiter_unavailable | Rate limiter backend (Redis) unreachable — request rejected fail-closed |
 | promotion_blocked | Index promotion refused: the candidate has no completed evaluation run, or measured a pass rate below `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` |
+| billing_unavailable | 503. Stripe could not be reached or refused a checkout or portal call. Fixed message; Stripe's error body is never forwarded. Only with `CITEVYN_ACCESS_MODEL_ENABLED` on (ADR-0005 Phase 4). |
+| already_subscribed | 409. The account already has Pro; a second checkout would bill it twice. Open the billing portal instead. Only with the access model on. |
 | plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. |

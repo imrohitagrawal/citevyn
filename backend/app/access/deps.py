@@ -24,14 +24,14 @@ With the setting on:
   ``auth_required`` (401) for an anonymous caller, since signing in is what
   helps them, and ``plan_required`` (403) for a signed-in one.
 
-Tier resolution today knows two tiers: no registered session is ``anonymous``,
-a registered account is ``free``. ``pro`` arrives with the memberships table
-(ADR-0005 Phase 4); until then no caller resolves to it.
+Tier resolution: no registered session is ``anonymous``; a registered account is
+``pro`` when its membership (ADR-0005 Phase 4) says it has paid, else ``free``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import Depends, Request
@@ -43,6 +43,7 @@ from app.access.policy import (
     has_capability,
     lowest_tier_with,
 )
+from app.billing.memberships import account_is_pro, memberships_for
 from app.core.auth_sessions import is_registered_principal, try_resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
@@ -55,12 +56,18 @@ _MARKER = "__citevyn_capability__"
 
 
 async def resolve_tier(request: Request, settings: Settings) -> Tier:
-    """The caller's tier, from OUR tables. Never mints an anonymous principal."""
+    """The caller's tier, from OUR tables. Never mints an anonymous principal.
+
+    A registered account is ``pro`` when its membership row says so
+    (``app.billing.memberships.is_pro``), else ``free``. The row is kept current by
+    Stripe's signed webhooks; this never calls Stripe.
+    """
     async with get_sessionmaker()() as db:
         principal = await try_resolve_principal(request, db, settings)
-    if principal is not None and is_registered_principal(principal):
-        return Tier.free
-    return Tier.anonymous
+        if principal is None or not is_registered_principal(principal):
+            return Tier.anonymous
+        memberships = await memberships_for(db, principal)
+    return Tier.pro if account_is_pro(memberships, datetime.now(UTC)) else Tier.free
 
 
 def requires(capability: Capability) -> Callable[..., Awaitable[None]]:

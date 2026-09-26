@@ -274,6 +274,38 @@ def test_migration_0008_users_identity_columns_round_trips(
         connection.exec_driver_sql("DELETE FROM users WHERE user_id = 'usr_b'")
 
 
+def test_migration_0016_membership_tables_round_trip(alembic_config: AlembicConfig) -> None:
+    """0016 (``memberships``, ``stripe_events``; ADR-0005 Phase 4) creates both
+    tables and the downgrade drops them. RED if a table is missing at head, the
+    one-row-per-subscription uniqueness is lost, account_id becomes unique (an
+    account may hold two subscriptions), or a table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert {"memberships", "stripe_events"} <= tables()
+    with engine.connect() as connection:
+        uniques = {
+            tuple(r[2] for r in connection.exec_driver_sql(f"PRAGMA index_info('{ix[1]}')").all())
+            for ix in connection.exec_driver_sql("PRAGMA index_list('memberships')").all()
+            if ix[2] == 1
+        }
+    assert ("stripe_subscription_id",) in uniques
+    assert ("account_id",) not in uniques
+
+    alembic_downgrade(alembic_config, "0015")
+    assert not ({"memberships", "stripe_events"} & tables())
+    assert "answer_feedback" in tables()  # partner: only 0016's tables went
+
+
 def test_migration_0015_user_signal_tables_round_trip(alembic_config: AlembicConfig) -> None:
     """0015 (``answer_feedback``, ``source_requests``; ADR-0005 §6) creates both
     tables and the downgrade drops them. RED if a table is missing at head, the

@@ -29,6 +29,7 @@ from app.models.exact_terms import ExactTerm
 from app.models.index_versions import IndexVersion
 from app.models.ingestion_jobs import IngestionJob
 from app.models.magic_link_tokens import MagicLinkToken
+from app.models.memberships import Membership, StripeEvent
 from app.models.messages import Message
 from app.models.oauth_nonces import OAuthNonce
 from app.models.provider_calls import ProviderCall
@@ -39,6 +40,8 @@ from app.models.user_signals import AnswerFeedback, SourceRequest
 from app.models.users import User
 
 __all__ = [
+    "Membership",
+    "StripeEvent",
     "AnswerFeedback",
     "SourceRequest",
     "GUID",

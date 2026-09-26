@@ -149,7 +149,60 @@ for.
 - **Cancel** takes effect at the end of the paid period.
 - A **failed payment** gets a **7-day grace period**, then the account returns
   to the free-account tier. It keeps its history; it loses Pro capabilities.
-- Every membership change writes an audit event.
+- Every membership change writes an audit event. **As built (Phase 4A):** the
+  `stripe_events` table is that audit log: every webhook event id, once, with its
+  type, account and outcome (`applied`, `applied_account_mismatch`, `unmatched`, `ignored`). Adding
+  `AuditAction` members would need `ALTER TYPE` on a native enum, which AGENTS.md
+  steers away from.
+- **As built (Phase 4A):** Stripe is called over HTTPS with `httpx` (already a
+  dependency), not the Stripe SDK: three small calls and a documented HMAC do not
+  justify a new dependency, and `httpx.MockTransport` keeps every test offline.
+- **As built, after review: a webhook event is a signal, not the truth.** Stripe's
+  docs say not to use an event's `created` time to order events, and to "use the
+  API to retrieve any missing objects". The first build did order by `created`;
+  review reproduced a paying user dropping to Free on a same-second reorder, and a
+  stale grace leaving a later failure with 0 days. So each subscription or invoice
+  event re-reads the subscription from Stripe and stores what it says. This call
+  is on the webhook path only: no user request waits on Stripe, which is the rule
+  above. A Stripe outage makes the webhook answer 503, nothing is logged, and
+  Stripe's retry applies the event later.
+- The grace starts the first time the subscription is seen `past_due` and clears
+  whenever it is not.
+- **One row per subscription** (a second review round): an account can hold two
+  subscriptions (two checkout tabs); one row per ACCOUNT let the wrong one decide
+  and left a paying customer on Free. Each subscription has its own row and grace;
+  the account is Pro if any is paid; the membership view lists them all, so paying
+  twice is visible. Handlers for one account are serialised by a row lock on the
+  user, and the subscription is read again inside the lock.
+- **Bound once, then the status follows Stripe** (the third review round; the
+  owner approved this design on 2026-09-26). v3 read the account from subscription
+  metadata on every event. Metadata can be edited, and review showed a cancelled
+  subscription whose metadata had been cleared staying Pro forever, and a moved
+  one leaving the payer on Free. Now a subscription is bound to an account once,
+  when its row is created, from the metadata our checkout wrote, and only if that
+  account exists. After that the row is found by subscription id and always takes
+  Stripe's status. A metadata mismatch is recorded as `applied_account_mismatch`
+  and logged; moving a subscription to another account is a manual support step.
+  The view and the portal describe the paid subscription that is not ending.
+
+**Owner checklist for Stripe (test mode first), before turning the model on:**
+1. Create the product "Pro" with a monthly ($9) and a yearly ($91) recurring price;
+   set `CITEVYN_STRIPE_PRICE_PRO_MONTHLY` and `CITEVYN_STRIPE_PRICE_PRO_YEARLY`.
+2. Create a webhook endpoint at `https://<site>/v1/billing/webhook` for
+   `customer.subscription.created`, `customer.subscription.updated`,
+   `customer.subscription.deleted`, `invoice.paid` and `invoice.payment_failed`;
+   set `CITEVYN_STRIPE_WEBHOOK_SECRET` to its signing secret. Register it only once
+   the model is on: while it is off the route answers 404, and Stripe gives up on
+   an event after about three days of retries.
+3. Customer portal: allow cancelling at the end of the billing period, updating the
+   payment method and viewing invoices; set a business name; save.
+4. Failed payments: set the retry schedule and what happens after the last retry
+   (`canceled` or `unpaid`); the 7-day grace runs from the first failure.
+5. Set `CITEVYN_STRIPE_SECRET_KEY` (a server-side secret; never in the browser).
+   A restricted key needs **Subscriptions: read**, **Checkout Sessions: write** and
+   **Customer portal: write**. Production refuses to start with the model on and
+   any of these unset. A webhook that cannot read a subscription answers 503 and
+   logs `billing_webhook_stripe_read_failed`; watch for it.
 
 #### Quota: count answers, record who paid
 
