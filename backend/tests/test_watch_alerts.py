@@ -461,3 +461,62 @@ def test_the_command_sends_through_the_configured_client(
     assert "sent 1" in capsys.readouterr().out
     [mail] = list((tmp_path / "outbox").iterdir())
     assert "List-Unsubscribe: <https://citevyn.example/alerts/unsubscribe?t=" in mail.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "https://x.example>,<mailto:attacker@evil.example?x=",  # a second unsubscribe target
+        "javascript:alert(1)//",
+        "https://x.example\x7f",
+        "https://x.example/'q",
+        "ftp://x.example",
+        "https://",
+    ],
+)
+def test_the_site_url_must_be_a_plain_http_url(bad: str) -> None:
+    """It goes into List-Unsubscribe. Turns red if: a value that adds a target,
+    a script URL, DEL or a non-http scheme is accepted."""
+    from app.services.notifications import mail_link_base
+
+    with pytest.raises(ValueError):
+        mail_link_base(Settings(magic_link_base_url=bad))
+    assert mail_link_base(Settings(magic_link_base_url="https://citevyn.example/")) == (
+        "https://citevyn.example"
+    )  # partner
+
+
+@pytest.mark.parametrize("command", ["alerts", "digest"])
+def test_a_bad_site_url_is_a_clean_refusal_not_a_crash(
+    env: pytest.MonkeyPatch, tmp_path: Any, capsys: Any, command: str
+) -> None:
+    """Turns red if: the command exits with a traceback instead of code 2."""
+    from app.worker import cli
+
+    _alerts_env(
+        env,
+        tmp_path,
+        CITEVYN_WEEKLY_DIGEST_ENABLED="true",
+        CITEVYN_MAGIC_LINK_BASE_URL="https://x.example>,<mailto:e@x",
+    )
+    assert cli.main([command]) == 2
+    assert "not usable in mail" in capsys.readouterr().out
+
+
+def test_one_alert_lists_at_most_fifty_changes(env: pytest.MonkeyPatch) -> None:
+    """Turns red if: an alert lists every change with no limit."""
+    from app.services.alerts import MAX_LISTED
+
+    for i in range(MAX_LISTED + 5):
+        _add_change(title=f"Page {i}")
+    _add_user("a@example.com")
+    rec = _Recorder()
+    _send(rec)
+    [msg] = rec.sent
+    assert msg.text.count("\n- ") == MAX_LISTED
+    assert "...and 5 more changed pages you watch." in msg.text

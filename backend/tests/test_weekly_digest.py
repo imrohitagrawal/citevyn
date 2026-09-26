@@ -563,7 +563,7 @@ def test_a_site_url_with_a_line_break_is_refused(env: pytest.MonkeyPatch) -> Non
     _add_change()
     _add_user("a@example.com")
     rec = _Recorder()
-    with pytest.raises(ValueError, match="line break"):
+    with pytest.raises(ValueError, match="not allowed in a mail header"):
         _send(rec, magic_link_base_url="https://x.example\r\nBcc: evil@example.com")
     assert rec.sent == [] and _sends() == []
 

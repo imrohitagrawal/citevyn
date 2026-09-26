@@ -38,7 +38,7 @@ from app.core.config import Settings
 from app.core.email_client import EmailClient, EmailDeliveryError, EmailMessage
 from app.core.token_secrets import generate_token, hash_token
 from app.models import DigestSend, DocChange, User
-from app.services.notifications import site_base_url
+from app.services.notifications import mail_link_base
 from app.watch.pages import human_url
 
 WINDOW = timedelta(days=7)
@@ -155,9 +155,7 @@ async def send_weekly_digest(
     values FIRST: a rollback expires every ORM object in the session, and an
     expired row read later in an async session crashes (a re-run in the same
     week did exactly that, after committing the next account's claim)."""
-    base = site_base_url(settings)
-    if "\r" in base or "\n" in base:
-        raise ValueError("the site URL contains a line break; refusing to build mail headers")
+    base = mail_link_base(settings)
     stats = DigestStats()
     changes = [
         ChangeItem(

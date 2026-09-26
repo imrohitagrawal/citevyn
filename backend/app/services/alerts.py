@@ -37,12 +37,14 @@ from app.core.config import Settings
 from app.core.email_client import EmailClient, EmailDeliveryError, EmailMessage
 from app.core.token_secrets import generate_token, hash_token
 from app.models import AlertSend, DocChange, User, Watch
-from app.services.notifications import site_base_url
+from app.services.notifications import mail_link_base
 from app.watch.match import matches
 from app.watch.pages import human_url
 
 WINDOW = timedelta(days=7)
 UNSUBSCRIBE_PATH = "/alerts/unsubscribe"
+#: Most changes listed in one alert email; the rest are counted.
+MAX_LISTED = 50
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,8 @@ def alert_message(*, to_addr: str, hits: Sequence[_Hit], unsubscribe_url: str) -
     """The alert email. Every value is escaped in the HTML part."""
     text = ["Docs you watch changed", ""]
     items: list[str] = []
-    for hit in hits:
+    shown, more = hits[:MAX_LISTED], len(hits) - MAX_LISTED
+    for hit in shown:
         c = hit.change
         name = f"{product_name(c.product_area)}: {c.title}"
         url = human_url(c.url)
@@ -97,6 +100,9 @@ def alert_message(*, to_addr: str, hits: Sequence[_Hit], unsubscribe_url: str) -
             f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a>: '
             f"{html.escape(sections)} ({html.escape(why)}){html.escape(maybe)}</li>"
         )
+    if more > 0:
+        text.append(f"...and {more} more changed pages you watch.")
+        items.append(f"<li>...and {more} more changed pages you watch.</li>")
     text += ["", f"Stop watch alerts with one click (this removes your watches): {unsubscribe_url}"]
     body = (
         "<p>Docs you watch changed</p>"
@@ -124,9 +130,7 @@ async def send_watch_alerts(
     now: datetime,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AlertStats:
-    base = site_base_url(settings)
-    if any(ch.isspace() or ord(ch) < 32 for ch in base):
-        raise ValueError("the site URL contains whitespace or a control character")
+    base = mail_link_base(settings)
     stats = AlertStats()
     changes = [
         _Change(

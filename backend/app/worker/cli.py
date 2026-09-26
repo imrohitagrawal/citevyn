@@ -157,6 +157,13 @@ def _cmd_digest() -> int:
     if client is None:
         print("No email delivery is configured (CITEVYN_RESEND_API_KEY).")
         return 2
+    from app.services.notifications import mail_link_base
+
+    try:
+        mail_link_base(settings)
+    except ValueError as exc:
+        print(f"CITEVYN_MAGIC_LINK_BASE_URL is not usable in mail: {exc}.")
+        return 2
     return asyncio.run(_digest(settings, client))
 
 
@@ -196,6 +203,13 @@ def _cmd_alerts() -> int:
     client = build_email_client(settings)
     if client is None:
         print("No email delivery is configured (CITEVYN_RESEND_API_KEY).")
+        return 2
+    from app.services.notifications import mail_link_base
+
+    try:
+        mail_link_base(settings)
+    except ValueError as exc:
+        print(f"CITEVYN_MAGIC_LINK_BASE_URL is not usable in mail: {exc}.")
         return 2
     return asyncio.run(_alerts(settings, client))
 
