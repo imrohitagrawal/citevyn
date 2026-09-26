@@ -277,6 +277,8 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("GET", "/health"): Capability.public,
     ("GET", "/health/dependencies"): Capability.public,
     ("GET", "/health/index"): Capability.public,
+    ("GET", "/v1/config"): Capability.public,
+    ("GET", "/v1/auth/challenge"): Capability.public,
     ("POST", "/v1/auth/register"): Capability.sign_in,
     ("POST", "/v1/auth/login"): Capability.sign_in,
     ("POST", "/v1/auth/logout"): Capability.sign_in,
@@ -334,7 +336,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 39
+    assert len(EXPECTED_CAPABILITY) == 41
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -403,6 +405,10 @@ EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ("GET", "/health"): "liveness probe, called by the platform before any key exists",
     ("GET", "/health/dependencies"): "readiness probe, same reason",
     ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
+    ("GET", "/v1/config"): "UI feature switch, read by the landing page before any sign-in",
+    ("GET", "/v1/auth/challenge"): (
+        "sign-up proof-of-work challenge; worthless until solved and checked once"
+    ),
     # ADR-0004 PR 12 / the magic-link flow: these four are reached by a real
     # top-level browser navigation or by a provider's own redirect, neither of
     # which can set an ``Authorization`` header. They carry

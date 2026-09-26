@@ -1191,3 +1191,31 @@ def test_migration_0018_answer_usage_round_trip(alembic_config: AlembicConfig) -
     alembic_downgrade(alembic_config, "0017")
     assert "answer_usage" not in tables()
     assert "memberships" in tables()  # partner: only 0018's table went
+
+
+def test_migration_0019_bot_check_uses_round_trip(alembic_config: AlembicConfig) -> None:
+    """0019 (``bot_check_uses``; ADR-0005 Phase 5) creates the single-use table
+    with its challenge primary key and expiry index; the downgrade drops it. RED
+    if the table, the key or the index is missing, or the table survives."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert "bot_check_uses" in tables()
+    with engine.connect() as connection:
+        pk = [r[1] for r in connection.exec_driver_sql("PRAGMA table_info(bot_check_uses)") if r[5]]
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('bot_check_uses')")}
+    assert pk == ["challenge"]
+    assert "ix_bot_check_uses_expires_at" in indexes
+
+    alembic_downgrade(alembic_config, "0018")
+    assert "bot_check_uses" not in tables()
+    assert "answer_usage" in tables()  # partner: only 0019's table went

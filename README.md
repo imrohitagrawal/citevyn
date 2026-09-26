@@ -261,6 +261,8 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /health`              | none   | DB-free liveness probe                        |
 | `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
 | `GET  /health/index`        | none   | Active index + vector-arm health              |
+| `GET  /v1/config`           | none   | Whether the access model is on (the UI reads it before sign-in) |
+| `GET  /v1/auth/challenge`   | none   | Sign-up proof-of-work challenge (404 unless the access model is on) |
 | `GET  /about`               | none   | HTML page every CiteVyn self-citation links to |
 | `POST /v1/auth/register`    | demo   | Create an account, log in, claim prior anon history |
 | `POST /v1/auth/login`       | demo   | Log in, claim prior anon history              |

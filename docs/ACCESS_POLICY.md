@@ -92,6 +92,8 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `GET` | `/health` | `public` |
 | `GET` | `/health/dependencies` | `public` |
 | `GET` | `/health/index` | `public` |
+| `GET` | `/v1/config` | `public` |
+| `GET` | `/v1/auth/challenge` | `public` |
 | `POST` | `/v1/auth/register` | `sign_in` |
 | `POST` | `/v1/auth/login` | `sign_in` |
 | `POST` | `/v1/auth/logout` | `sign_in` |

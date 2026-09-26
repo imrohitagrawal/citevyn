@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # Stripe (ADR-0005 Phase 4). TEST MODE until the owner sets live values; none
     # is read unless CITEVYN_ACCESS_MODEL_ENABLED is on, and production refuses to
     # start with the model on and any of these unset.
+    # The sign-up bot check (ADR-0005 Phase 5, ``app.core.pow``): the HMAC key
+    # that signs proof-of-work challenges, the search space (the browser does
+    # about half this many SHA-256 hashes, around a second; a native script is
+    # much faster, so this raises cost rather than proving a human), and
+    # how long a challenge stays valid. Only used with the access model on.
+    bot_check_secret: str | None = None
+    bot_check_max_number: int = Field(default=200_000, ge=1)
+    bot_check_ttl_seconds: int = Field(default=600, ge=30)
     stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None
     stripe_price_pro_monthly: str | None = None
@@ -580,6 +588,21 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Production guards
     # ------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def _require_bot_check_secret_when_the_access_model_is_on_in_production(self) -> "Settings":
+        # Missing: every sign-up is refused (the check fails closed). Short: the
+        # HMAC key is guessable, so challenges could be forged.
+        if (
+            self.environment == "production"
+            and self.access_model_enabled
+            and len(self.bot_check_secret or "") < 32
+        ):
+            raise ValueError(
+                "CITEVYN_ACCESS_MODEL_ENABLED is on in production but "
+                "CITEVYN_BOT_CHECK_SECRET is missing or shorter than 32 characters."
+            )
+        return self
 
     @model_validator(mode="after")
     def _require_stripe_when_the_access_model_is_on_in_production(self) -> "Settings":

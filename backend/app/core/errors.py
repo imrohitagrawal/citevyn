@@ -80,6 +80,9 @@ class APIErrorCode(StrEnum):
     # (A Free account whose trial is used gets 403 ``plan_required``: upgrading
     # is what helps it, not waiting.)
     quota_exceeded = "quota_exceeded"
+    # Spec-side (ADR-0005 Phase 5). 403: sign-up or a magic-link request came
+    # without a valid, unused proof-of-work solution (``X-CiteVyn-Bot-Check``).
+    bot_check_failed = "bot_check_failed"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -108,6 +111,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.already_subscribed: 409,
     APIErrorCode.verification_required: 403,
     APIErrorCode.quota_exceeded: 429,
+    APIErrorCode.bot_check_failed: 403,
     APIErrorCode.internal_error: 500,
 }
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Generator, Sequence
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -52,6 +53,10 @@ def _default_database_url() -> Generator[None, None, None]:
     import os
 
     os.environ.setdefault("CITEVYN_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    # The sign-up bot check (ADR-0005 Phase 5) is only active with the access
+    # model on. A test-only key, and a tiny search space so solving is instant.
+    os.environ.setdefault("CITEVYN_BOT_CHECK_SECRET", "test-bot-check-secret-" + "x" * 16)
+    os.environ.setdefault("CITEVYN_BOT_CHECK_MAX_NUMBER", "20")
     yield
 
 
@@ -676,3 +681,20 @@ async def seeded_session(session: AsyncSession) -> AsyncSession:
     await seed_catalog(session)
     await session.commit()
     return session
+
+
+def bot_check_headers(client: Any) -> dict[str, str]:
+    """The ``X-CiteVyn-Bot-Check`` header a sign-up needs, when the access model
+    is on (ADR-0005 Phase 5); an empty dict when it is off. Solves the challenge
+    the way the browser does, so tests use the real check, never a bypass."""
+    import base64
+    import json
+
+    from app.core.pow import solve
+
+    config = client.get("/v1/config").json()
+    if not config.get("bot_check"):
+        return {}
+    challenge = client.get("/v1/auth/challenge").json()["challenge"]
+    payload = {**challenge, "number": solve(challenge)}
+    return {"X-CiteVyn-Bot-Check": base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()}

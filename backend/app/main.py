@@ -33,6 +33,7 @@ from app.api.routes.about import router as about_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
+from app.api.routes.client_config import router as client_config_router
 from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
 from app.api.routes.magic_link import router as magic_link_router
@@ -127,6 +128,7 @@ def create_app() -> FastAPI:
     configure_security_headers(app, settings)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(health_router)
+    app.include_router(client_config_router)
     app.include_router(auth_router)
     app.include_router(oauth_router)
     app.include_router(magic_link_router)
