@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.deps import requires
 from app.access.policy import Capability
+from app.answer.orchestrator import docs_as_of
 from app.api.routes.messages import require_message, require_session
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
@@ -69,11 +70,6 @@ def _view(row: SharedAnswer) -> dict[str, Any]:
         "question": row.question[:200],
         "created_at": row.created_at.isoformat(),
     }
-
-
-def _oldest_day(citations: list[dict[str, Any]]) -> str | None:
-    days = sorted(d for c in citations if isinstance(d := c.get("docs_as_of"), str))
-    return days[0] if days else None
 
 
 async def _question_for(db: AsyncSession, answer: Message) -> str:
@@ -146,7 +142,7 @@ async def share_answer(
         question=await _question_for(db, answer),
         answer=answer.content,
         citations=[dict(c) for c in citations],
-        docs_as_of=_oldest_day(citations),
+        docs_as_of=docs_as_of(citations),
         answered_at=answer.created_at,
         created_at=datetime.now(UTC),
     )

@@ -797,7 +797,8 @@ lapsed Pro account can still revoke its links. 404 unless the access model is on
 
 - `POST /v1/sessions/{session_id}/messages/{message_id}/share` → `201 {request_id,
   share_id, url, question, created_at}`, where `url` is `/s/<share_id>` (32 hex
-  characters, 128 random bits). Only the caller's own answer with sources: a
+  characters, 128 random bits) and `question` is cut to 200 characters (the page
+  shows it whole). Only the caller's own answer with sources: a
   question or a refusal is 422 `validation_error`; someone else's session is 404.
   The question, answer and citations are copied at this moment: deleting the
   conversation later does not change the page. Sharing an answer that already has

@@ -140,3 +140,30 @@ def test_the_title_and_description_never_carry_user_text() -> None:
     page = _page(question="FREE REFUND click here")
     head = page.split("</head>")[0]
     assert "FREE REFUND" not in head
+
+
+def test_text_around_a_marker_inside_bold_is_escaped() -> None:
+    """The inner loop escapes text between markers separately.
+    Turns red if: either inner escape is dropped."""
+    out = render_answer_html("**<b>see [1]</b> <i>**", markers={1})
+    assert "<b>" not in out and "<i>" not in out
+    assert (
+        '<strong>&lt;b&gt;see <a class="share-marker" href="#source-1">[1]</a>'
+        "&lt;/b&gt; &lt;i&gt;</strong>"
+    ) in out
+
+
+def test_an_odd_marker_value_never_breaks_the_page() -> None:
+    """ "²".isdigit() is True but int("²") raises: a 500 on a public page.
+    Turns red if: marker strings are checked with isdigit()."""
+    page = _page(citations=[{"marker": "²", "title": "T", "url": None, "docs_as_of": None}])
+    assert "T" in page
+    assert 'id="source-' not in page
+
+
+def test_no_empty_paragraph_without_a_date() -> None:
+    """Turns red if: the page prints an empty <p> when no source has a date."""
+    page = render_shared_answer_page(
+        question="q", answer="a", citations=CITES, docs_as_of=None, shared_on="2026-09-26"
+    )
+    assert "<p></p>" not in page

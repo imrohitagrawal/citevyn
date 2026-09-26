@@ -39,8 +39,8 @@ PAGE_DESCRIPTION = "An answer from CiteVyn, with its sources, shared by a CiteVy
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _BULLET = re.compile(r"^\s*[-*] (.*)$")
 # One inline token: `code`, **bold**, or a [n] marker. Tried left to right.
-_INLINE = re.compile(r"`([^`]+)`|\*\*(.+?)\*\*|\[(\d{1,3})\]")
-_MARKER = re.compile(r"\[(\d{1,3})\]")
+_INLINE = re.compile(r"`([^`]+)`|\*\*(.+?)\*\*|\[([0-9]{1,3})\]")
+_MARKER = re.compile(r"\[([0-9]{1,3})\]")
 
 
 def format_day(iso: str) -> str:
@@ -140,7 +140,8 @@ def _marker_of(citation: Mapping[str, object]) -> int | None:
         return None
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.isdigit():
+    # ASCII digits only: "²".isdigit() is True, yet int("²") raises.
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,6}", value):
         return int(value)
     return None
 
@@ -186,7 +187,7 @@ def render_shared_answer_page(
         f"{render_answer_html(answer, markers=markers)}"
         "<h2>Sources</h2>"
         f"{_sources(citations)}"
-        f"<p>{as_of.strip()}</p>"
+        f"{f'<p>{as_of.strip()}</p>' if as_of else ''}"
         "</section>\n"
     )
     lead = (
