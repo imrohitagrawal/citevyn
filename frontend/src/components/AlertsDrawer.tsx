@@ -56,18 +56,20 @@ export default function AlertsDrawer({
   const [term, setTerm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  // A failed first load stays reported; run() clears only an action's error.
+  const [loadFailed, setLoadFailed] = useState(false);
   const busy = useRef(false);
 
   useEffect(() => {
     dialogRef.current?.focus();
-    getDigest().then(setDigestState, () => setError(FAILED));
+    getDigest().then(setDigestState, () => setLoadFailed(true));
     listWatches().then(
       (res) => {
         setWatches(res.watches);
         setPages(res.pages);
         setPage(res.pages[0]?.url ?? "");
       },
-      () => setError(FAILED),
+      () => setLoadFailed(true),
     );
     const trigger = triggerRef.current;
     return () => trigger?.focus();
@@ -76,7 +78,10 @@ export default function AlertsDrawer({
 
   /** One request at a time; announce the result. */
   const run = async (work: () => Promise<void>) => {
-    if (busy.current) return;
+    if (busy.current) {
+      setNote("Still sending. Please wait a moment.");
+      return;
+    }
     busy.current = true;
     setError(null);
     setNote("");
@@ -100,6 +105,10 @@ export default function AlertsDrawer({
   const add = () =>
     run(async () => {
       const value = kind === "page" ? page : term.trim();
+      if (kind === "page" && !value) {
+        setError("No pages are available to watch right now.");
+        return;
+      }
       // Counted the server's way (code points): 40 emoji are 40 characters.
       const n = questionLength(value);
       if (kind === "term" && (n < 2 || n > 64)) {
@@ -116,7 +125,13 @@ export default function AlertsDrawer({
 
   const remove = (w: WatchView) =>
     run(async () => {
-      await removeWatch(w.watch_id);
+      try {
+        await removeWatch(w.watch_id);
+      } catch (e) {
+        // Already gone (another tab, or the alert email's unsubscribe link):
+        // that is what the user asked for, not an error.
+        if (!(e instanceof ApiClientError && e.status === 404)) throw e;
+      }
       setWatches((prev) => prev?.filter((x) => x.watch_id !== w.watch_id) ?? prev);
       setNote(`Stopped watching ${w.label}.`);
       dialogRef.current?.focus(); // the removed row and its button are gone
@@ -138,6 +153,9 @@ export default function AlertsDrawer({
           </button>
         </div>
         {error && <p role="alert">{error}</p>}
+        {loadFailed && (
+          <p role="alert">Your alert settings could not be loaded. Please try again later.</p>
+        )}
         <p aria-live="polite" className="drawer-note" data-testid="alerts-status">
           {note}
         </p>
@@ -150,12 +168,15 @@ export default function AlertsDrawer({
                 type="checkbox"
                 checked={digest.subscribed}
                 disabled={!digest.verified && !digest.subscribed}
+                aria-describedby={!digest.verified && !digest.subscribed ? "digest-verify-note" : undefined}
                 onChange={() => void toggleDigest()}
               />
               <span>Email me once a week when the Claude, Codex or Gemini docs change</span>
             </label>
             {!digest.verified && !digest.subscribed && (
-              <p className="drawer-note">Verify your email address to get the digest.</p>
+              <p id="digest-verify-note" className="drawer-note">
+                Verify your email address to get the digest.
+              </p>
             )}
           </>
         )}

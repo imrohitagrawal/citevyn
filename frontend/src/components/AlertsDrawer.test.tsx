@@ -152,4 +152,92 @@ describe("watches", () => {
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.queryByText("You are not watching anything.")).toBeNull();
   });
+
+  it("a click while a request runs is announced, not silently dropped", async () => {
+    // Turns red if: the busy branch returns without telling the user.
+    vi.mocked(addWatch).mockReturnValue(new Promise(() => undefined));
+    open();
+    const user = userEvent.setup();
+    const button = await screen.findByRole("button", { name: "Watch" });
+    await user.click(button);
+    await user.click(button);
+    expect(status()).toBe("Still sending. Please wait a moment.");
+  });
+
+  it("with no pages to pick, Watch says so instead of sending an empty page", async () => {
+    // Turns red if: an empty page is sent (a 422 would blame the user).
+    vi.mocked(getDigest).mockResolvedValue({ subscribed: false, verified: true });
+    vi.mocked(listWatches).mockResolvedValue({ watches: [], pages: [] });
+    render(<AlertsDrawer triggerRef={{ current: document.createElement("button") }} onClose={vi.fn()} />);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Watch" }));
+    expect(addWatch).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toBe("No pages are available to watch right now.");
+  });
+
+  it("a failed load stays reported after another action", async () => {
+    // Turns red if: the next action's run() clears the load failure.
+    vi.mocked(getDigest).mockResolvedValue({ subscribed: false, verified: true });
+    vi.mocked(listWatches).mockRejectedValue(new Error("down"));
+    vi.mocked(setDigest).mockResolvedValue({ subscribed: true, verified: true });
+    render(<AlertsDrawer triggerRef={{ current: document.createElement("button") }} onClose={vi.fn()} />);
+    await userEvent.setup().click(await screen.findByRole("checkbox"));
+    expect(await screen.findByText("Your alert settings could not be loaded. Please try again later.")).toBeTruthy();
+  });
+
+  it("removing a watch that is already gone counts as removed", async () => {
+    // Turns red if: a 404 (removed elsewhere) shows an error and keeps the row.
+    vi.mocked(removeWatch).mockRejectedValue(apiError(404, "not_found"));
+    open({ watches: [WATCH] });
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Stop watching --permission-mode" }));
+    expect(await screen.findByText("You are not watching anything.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("a remove that fails for another reason keeps the row and says so", async () => {
+    // Partner: only a 404 is treated as removed.
+    vi.mocked(removeWatch).mockRejectedValue(apiError(500, "internal_error"));
+    open({ watches: [WATCH] });
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Stop watching --permission-mode" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("That didn't work. Please try again later.");
+    expect(screen.getByText("--permission-mode")).toBeTruthy();
+  });
+
+  it("the disabled digest switch points at why", async () => {
+    // Turns red if: a screen reader cannot hear why the switch is off.
+    open({ verified: false });
+    const box = await screen.findByRole("checkbox");
+    expect(box.getAttribute("aria-describedby")).toBe("digest-verify-note");
+    expect(document.getElementById("digest-verify-note")?.textContent).toMatch(/verify your email/i);
+  });
+
+  it("watching something already watched does not list it twice", async () => {
+    // Turns red if: the list is not deduped by watch_id (the server returns the existing one).
+    vi.mocked(addWatch).mockResolvedValue(WATCH);
+    open({ watches: [WATCH] });
+    const user = userEvent.setup();
+    await user.selectOptions(await screen.findByRole("combobox", { name: "What to watch" }), "term");
+    await user.type(screen.getByRole("textbox", { name: "Term to watch" }), "--PERMISSION-MODE");
+    await user.click(screen.getByRole("button", { name: "Watch" }));
+    expect(within(screen.getByRole("list")).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("a later success clears an earlier error", async () => {
+    // Turns red if: an old error stays on screen after an action works.
+    vi.mocked(addWatch).mockRejectedValueOnce(apiError(500, "internal_error")).mockResolvedValueOnce(WATCH);
+    open();
+    const user = userEvent.setup();
+    const button = await screen.findByRole("button", { name: "Watch" });
+    await user.click(button);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    await user.click(button);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("a failed digest load is reported too", async () => {
+    // Turns red if: only the watches load failure is reported.
+    vi.mocked(getDigest).mockRejectedValue(new Error("down"));
+    vi.mocked(listWatches).mockResolvedValue({ watches: [], pages: PAGES });
+    render(<AlertsDrawer triggerRef={{ current: document.createElement("button") }} onClose={vi.fn()} />);
+    expect(await screen.findByText("Your alert settings could not be loaded. Please try again later.")).toBeTruthy();
+  });
 });
