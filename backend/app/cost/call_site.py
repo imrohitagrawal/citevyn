@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Generator
 from contextvars import ContextVar
+from dataclasses import dataclass
 from enum import StrEnum
 
 
@@ -64,4 +65,54 @@ def call_site(site: CallSite) -> Generator[None]:
         _current_call_site.reset(token)
 
 
-__all__ = ["CallSite", "call_site", "get_call_site"]
+class PaidBy(StrEnum):
+    """Whose key paid for a call (ADR-0005 §2, Quota). Stored as a plain string."""
+
+    platform = "platform"
+    # BYOK (Phase 8): the user's own key. Never counts against the plan allowance.
+    user = "user"
+
+
+@dataclass(frozen=True)
+class Billing:
+    """The principal a paid call was made for, and who paid. ``user_id`` is None
+    outside a user request (ingest, eval)."""
+
+    user_id: str | None = None
+    paid_by: PaidBy = PaidBy.platform
+
+
+# Frozen, so sharing one default instance across tasks is safe.
+_NOBODY = Billing()
+_current_billing: ContextVar[Billing] = ContextVar("citevyn_billing", default=_NOBODY)
+
+
+def get_billing() -> Billing:
+    """Return who the current task's paid calls are for."""
+    return _current_billing.get()
+
+
+@contextlib.contextmanager
+def billed_to(user_id: str | None, paid_by: PaidBy = PaidBy.platform) -> Generator[None]:
+    """Attribute every paid call made inside this block to ``user_id``.
+
+    A ContextVar for the same reasons as :func:`call_site`: the meter sits below
+    the call sites, and each asyncio task gets its own copy. Restored on exit,
+    including on an exception.
+    """
+    token = _current_billing.set(Billing(user_id=user_id, paid_by=paid_by))
+    try:
+        yield
+    finally:
+        _current_billing.reset(token)
+
+
+__all__ = [
+    "Billing",
+    "CallSite",
+    "PaidBy",
+    "billed_to",
+    "call_site",
+    "get_billing",
+    "get_call_site",
+]

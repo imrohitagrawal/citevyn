@@ -158,6 +158,7 @@ from app.core.auth_sessions import (
 )
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
+from app.core.email_verification import mark_email_verified
 from app.core.errors import APIErrorCode, error_response
 from app.core.oauth_http import OAuthProviderError, get_json, post_form
 from app.core.rate_limit import rate_limited_oauth_navigation
@@ -281,28 +282,33 @@ async def _fetch_identity(
         if raw_id is None:
             raise OAuthProviderError("GitHub userinfo response missing id")
         provider_account_id = str(raw_id)
-        email = user.get("email")
-        email_verified = bool(email)
-        if not email:
-            emails = await get_json(
-                client=client,
-                url="https://api.github.com/user/emails",
-                headers={**auth_header, "Accept": "application/vnd.github+json"},
-                timeout_seconds=timeout_seconds,
-                provider="GitHub",
-                error_event="github_emails_error",
-            )
-            # The endpoint returns a JSON array, not an object; get_json's
-            # dict[str, Any] contract only describes the OBJECT case, so the
-            # array is cast back here rather than widening that shared helper.
-            entries = cast("list[dict[str, Any]]", emails)
-            primary: dict[str, Any] | None = next(
-                (e for e in entries if e.get("primary") and e.get("verified")),
-                None,
-            )
-            if primary is not None:
-                email = primary.get("email")
-                email_verified = True
+        public: object = user.get("email")
+        # /user's public email carries no verified flag, so /user/emails decides
+        # (the ``user:email`` scope is requested). A public email counts only if
+        # GitHub lists it as verified; with none, the primary verified address.
+        emails = await get_json(
+            client=client,
+            url="https://api.github.com/user/emails",
+            headers={**auth_header, "Accept": "application/vnd.github+json"},
+            timeout_seconds=timeout_seconds,
+            provider="GitHub",
+            error_event="github_emails_error",
+        )
+        # The endpoint returns a JSON array, not an object; get_json's
+        # dict[str, Any] contract only describes the OBJECT case, so the
+        # array is cast back here rather than widening that shared helper.
+        entries = cast("list[dict[str, Any]]", emails)
+        chosen: dict[str, Any] | None = next(
+            (
+                e
+                for e in entries
+                if e.get("verified") is True
+                and (e.get("email") == public if public else e.get("primary"))
+            ),
+            None,
+        )
+        email: str | None = chosen.get("email") if chosen is not None else None
+        email_verified = chosen is not None
         return _Identity(
             provider_account_id=provider_account_id, email=email, email_verified=email_verified
         )
@@ -322,7 +328,8 @@ async def _fetch_identity(
     return _Identity(
         provider_account_id=str(raw_sub),
         email=userinfo.get("email"),
-        email_verified=bool(userinfo.get("email_verified")),
+        # ``is True``: the claim is a JSON boolean; bool("false") would be True.
+        email_verified=userinfo.get("email_verified") is True,
     )
 
 
@@ -731,6 +738,13 @@ async def _resolve_connect_target(db: AsyncSession, nonce: OAuthNonce) -> str | 
     return principal_id
 
 
+async def _mark_verified(db: AsyncSession, user_id: str, identity: _Identity) -> None:
+    """Stamp the account verified if the provider verified THIS account's address."""
+    await mark_email_verified(
+        db, user_id, identity.email if identity.email_verified else None, _now()
+    )
+
+
 async def _handle_login_intent(
     request: Request,
     db: AsyncSession,
@@ -747,6 +761,7 @@ async def _handle_login_intent(
     # Same placeholder-then-mutate approach as `start`: claim_and_login needs
     # a Response to set the login cookie on, and it must be the SAME object
     # ultimately returned (see _start_oauth_flow's docstring).
+    await _mark_verified(db, resolved_user_id, identity)
     redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
     await claim_and_login(request, redirect, db, settings, user_id=resolved_user_id)
     await record_audit_event(
@@ -787,6 +802,7 @@ async def _handle_connect_intent(
             location=_connect_error_location(provider, "already_linked"),
         )
 
+    await _mark_verified(db, target_user_id, identity)
     # Deliberately NOT claim_and_login: the caller is already signed in as
     # the target, their cookie must not rotate, and claim-on-login's
     # "fold in a prior anon_ principal" logic can never apply here.

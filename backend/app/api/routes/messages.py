@@ -36,6 +36,7 @@ from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.errors import APIErrorCode, error_response
+from app.cost.call_site import billed_to
 from app.models import Message, Session
 
 router = APIRouter(prefix="/v1/sessions", tags=["messages"])
@@ -187,11 +188,14 @@ async def post_message(
 
     await require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
     orchestrator = Orchestrator(settings, db)
-    response = await orchestrator.ask(
-        question=body.message,
-        request_id=request_id,
-        session_id=session_id,
-    )
+    # Every paid call made while answering (the answer, condense, alias check,
+    # query embedding) is recorded against the asker (ADR-0005 §2, Quota).
+    with billed_to(principal_id):
+        response = await orchestrator.ask(
+            question=body.message,
+            request_id=request_id,
+            session_id=session_id,
+        )
     # ``Orchestrator.ask`` mutates ``db`` (adds + flushes) but does not
     # commit; commit here so the message + audit rows survive the
     # request boundary.

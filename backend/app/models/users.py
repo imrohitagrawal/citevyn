@@ -53,3 +53,11 @@ class User(Base):
     # Argon2id PHC string (``app.core.passwords``). NULL for anonymous
     # principals and, later, OAuth-only accounts (PR 12).
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # When the account proved it controls ``email`` (ADR-0005 §1): it redeemed a
+    # magic link, or an OAuth provider reported that same address as verified.
+    # Password sign-up proves nothing, so it leaves this NULL. The free trial is
+    # granted once per verified account. Set once, never moved; ``email`` has no
+    # change path today, and one added later must clear this in the same write.
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
