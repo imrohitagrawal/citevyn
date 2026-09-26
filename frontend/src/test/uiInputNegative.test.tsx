@@ -45,6 +45,7 @@ import {
   getCurrentUser,
   apiFetch,
 } from "../lib/api";
+import AlertsDrawer from "../components/AlertsDrawer";
 import AnswerActions from "../components/AnswerActions";
 import { MAX_FEEDBACK_COMMENT, MAX_SOURCE_NOTE, MAX_SOURCE_URL } from "../lib/feedbackLimits";
 import { requestMagicLink, updatePassword } from "../lib/authActions";
@@ -130,6 +131,9 @@ afterEach(() => {
  * type checker rather than the syntax tree.
  */
 const SURFACES = [
+  // ADR-0005 Phase 7D alerts. Cells: "§8b cells — AlertsDrawer" below.
+  "components/AlertsDrawer.tsx#0 (type=checkbox)",
+  "components/AlertsDrawer.tsx#1 (type=<none>)",
   // ADR-0005 §6 feedback forms. Cells: "§8b cells — AnswerActions" below.
   "components/AnswerActions.tsx#0 (type=radio)",
   "components/AnswerActions.tsx#1 (type=<none>)",
@@ -1544,3 +1548,91 @@ describe("§8b cells — AnswerActions", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// §8b cells — AlertsDrawer (the digest switch and the watch term, Phase 7D)
+// ---------------------------------------------------------------------------
+//
+// Two surfaces: #0 the digest checkbox, #1 the watch term.
+// - #0 is not typed into: over-length, whitespace, paste and IME are NOT
+//   APPLICABLE. Its disabled rule and in-flight guard are covered in
+//   AlertsDrawer.test.tsx.
+// - #1, the term: empty and whitespace-only are REFUSED at submit (a term is
+//   required), announced, text kept. Over-length (65) refused the same way,
+//   counted as code points like the server (40 emoji are accepted). Paste-only
+//   works. No length attribute. IME: Enter while composing does not submit.
+//   Double-submit and in-flight: covered in AlertsDrawer.test.tsx.
+
+describe("§8b cells — AlertsDrawer", () => {
+  const fetchMock = () => vi.mocked(apiFetch);
+
+  beforeEach(() => {
+    fetchMock()
+      .mockReset()
+      .mockImplementation(async (path: string, init?: RequestInit) => {
+        if (path === "/v1/me/digest") return { subscribed: false, verified: true } as never;
+        if (path === "/v1/me/watches" && !init)
+          return { watches: [], pages: [{ url: "u", title: "T", product: "P" }] } as never;
+        return { watch_id: "w", kind: "term", value: "x", label: "x", created_at: "" } as never;
+      });
+  });
+
+  const openTerm = async () => {
+    render(
+      <AlertsDrawer triggerRef={{ current: document.createElement("button") }} onClose={vi.fn()} />,
+    );
+    const kind = await screen.findByRole("combobox", { name: "What to watch" });
+    await act(async () => fireEvent.change(kind, { target: { value: "term" } }));
+    return screen.getByRole("textbox", { name: "Term to watch" }) as HTMLInputElement;
+  };
+  const posts = () => fetchMock().mock.calls.filter(([, init]) => init?.method === "POST");
+  const watch = async () => act(async () => fireEvent.click(screen.getByRole("button", { name: "Watch" })));
+
+  it("no length attribute on the term", async () => {
+    // Turns red if: a maxLength attribute (silent clamping) comes back.
+    expect((await openTerm()).hasAttribute("maxlength")).toBe(false);
+  });
+
+  it.each([
+    ["", 0],
+    ["   ", 0],
+    ["y".repeat(65), 65],
+  ])("a term %j is refused at submit, announced, and kept", async (value, n) => {
+    // Turns red if: an empty, blank or over-long term is sent, or the text is cleared.
+    const input = await openTerm();
+    fireEvent.change(input, { target: { value } });
+    await watch();
+    expect(posts()).toEqual([]);
+    expect(screen.getByRole("alert").textContent).toBe(`A term is 2 to 64 characters; this one is ${n}.`);
+    expect(input.value).toBe(value);
+  });
+
+  it("40 emoji are 40 characters, not 80, and are sent", async () => {
+    // Turns red if: the check counts UTF-16 units (the server counts code points).
+    const input = await openTerm();
+    fireEvent.change(input, { target: { value: "😀".repeat(40) } });
+    await watch();
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("a pasted term (no keystrokes) is sent", async () => {
+    // Turns red if: submit depends on a key event having happened.
+    const input = await openTerm();
+    fireEvent.change(input, { target: { value: "--resume" } });
+    await watch();
+    expect(JSON.parse(String(posts()[0][1]?.body))).toEqual({ kind: "term", value: "--resume" });
+  });
+
+  it("Enter while an IME is composing does not submit", async () => {
+    // Turns red if: the composing Enter is not blocked.
+    const input = await openTerm();
+    fireEvent.change(input, { target: { value: "--resume" } });
+    const e = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(e, "isComposing", { value: true });
+    input.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(true);
+    const plain = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(false); // partner: a plain Enter still submits
+  });
+});

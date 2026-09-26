@@ -25,6 +25,7 @@ import {
   type WatchablePage,
   type WatchView,
 } from "../lib/alerts";
+import { isSubmitKey, questionLength } from "../lib/composerInput";
 import { ApiClientError } from "../lib/types";
 
 const FAILED = "That didn't work. Please try again later.";
@@ -99,8 +100,10 @@ export default function AlertsDrawer({
   const add = () =>
     run(async () => {
       const value = kind === "page" ? page : term.trim();
-      if (kind === "term" && (value.length < 2 || value.length > 64)) {
-        setError(`A term is 2 to 64 characters; this one is ${value.length}.`);
+      // Counted the server's way (code points): 40 emoji are 40 characters.
+      const n = questionLength(value);
+      if (kind === "term" && (n < 2 || n > 64)) {
+        setError(`A term is 2 to 64 characters; this one is ${n}.`);
         return;
       }
       const made = await addWatch(kind, value);
@@ -186,6 +189,11 @@ export default function AlertsDrawer({
               value={term}
               placeholder="--permission-mode"
               onChange={(e) => setTerm(e.target.value)}
+              // Enter submits the form, but not while an IME is composing: that
+              // Enter picks a candidate (TEST_STRATEGY §8b, isSubmitKey).
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !isSubmitKey(e)) e.preventDefault();
+              }}
               style={{ flex: 1, minWidth: 0 }}
             />
           )}
