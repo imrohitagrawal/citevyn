@@ -31,6 +31,10 @@ class AnswerUsage(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     paid_by: Mapped[str] = mapped_column(String(16), nullable=False, default="platform")
     channel: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
+    # The tier the answer was used on: ``free`` or ``pro``. Pro counts only its
+    # own rows, so trial answers used earlier in a month never shrink the first
+    # Pro month (found in review). Free counts every row, whatever the tier.
+    tier: Mapped[str] = mapped_column(String(16), nullable=False)
     # The answer this use paid for. No foreign key: history can be closed or
     # removed, and the count of what was used must not change with it.
     message_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), nullable=True)

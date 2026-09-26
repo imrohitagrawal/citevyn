@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.policy import (
     CREDENTIAL_ONLY,
@@ -55,6 +56,17 @@ from app.core.middleware import get_current_request_id
 _MARKER = "__citevyn_capability__"
 
 
+async def tier_for_principal(db: AsyncSession, principal_id: str, now: datetime) -> Tier:
+    """The tier of a principal the caller has ALREADY resolved, on the caller's
+    own session. Use this in a route: looking the cookie up a second time can
+    disagree with the first (a logout landing between them) and costs a second
+    pooled connection while the first is held."""
+    if not is_registered_principal(principal_id):
+        return Tier.anonymous
+    memberships = await memberships_for(db, principal_id)
+    return Tier.pro if account_is_pro(memberships, now) else Tier.free
+
+
 async def resolve_tier(request: Request, settings: Settings) -> Tier:
     """The caller's tier, from OUR tables. Never mints an anonymous principal.
 
@@ -64,10 +76,9 @@ async def resolve_tier(request: Request, settings: Settings) -> Tier:
     """
     async with get_sessionmaker()() as db:
         principal = await try_resolve_principal(request, db, settings)
-        if principal is None or not is_registered_principal(principal):
+        if principal is None:
             return Tier.anonymous
-        memberships = await memberships_for(db, principal)
-    return Tier.pro if account_is_pro(memberships, datetime.now(UTC)) else Tier.free
+        return await tier_for_principal(db, principal, datetime.now(UTC))
 
 
 def requires(capability: Capability) -> Callable[..., Awaitable[None]]:

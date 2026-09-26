@@ -343,11 +343,13 @@ no-answers, greetings and errors never get a row; a cache hit does.
 | occurred_at | timestamp | When the answer was served |
 | paid_by | text(16) | `platform`, or `user` for BYOK (Phase 8); only `platform` rows count |
 | channel | text(16) | `chat`, or `mcp` from Phase 6; one shared allowance |
+| tier | text(16) | `free` or `pro`, the tier the answer was used on. Pro counts only `pro` rows, so trial answers never shrink the first Pro month |
 | message_id | UUID, nullable | The answer; no foreign key, so closing history never changes the count |
 | request_id | text(64), nullable | Correlation id |
 
 Indexed on `(user_id, occurred_at)`. Free counts all rows ever (a one-time
-trial); Pro counts rows since midnight UTC on the first of the month.
+trial, whatever the tier); Pro counts `pro` rows since midnight UTC on the first
+of the month.
 
 Other ADR-0005 tables (`answer_feedback`, `source_requests`, `memberships`,
 `stripe_events`) are described in their model docstrings under

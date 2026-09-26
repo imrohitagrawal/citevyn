@@ -7,7 +7,8 @@ question, written by the answer route in the same transaction as the answer.
 
 * **Free:** ``access_free_trial_answers`` answered questions, ever, and only for a
   VERIFIED account (``users.email_verified_at``). An unverified account has none.
-* **Pro:** ``access_pro_monthly_answers`` per calendar month in UTC. Not the
+* **Pro:** ``access_pro_monthly_answers`` Pro answers per calendar month in UTC
+  (rows record their tier, so trial answers never count against it). Not the
   Stripe billing period: yearly plans have no monthly period, and the count must
   not depend on how fresh the last webhook was. It matches the daily spend cap's
   UTC buckets. The hourly limit still applies on top.
@@ -111,7 +112,9 @@ async def usage_for(
         AnswerUsage.user_id == user_id, AnswerUsage.paid_by == "platform"
     )
     if since is not None:
-        query = query.where(AnswerUsage.occurred_at >= since)
+        # Pro: this month's PRO answers only, so trial answers from earlier in
+        # the month do not shrink the first Pro month.
+        query = query.where(AnswerUsage.occurred_at >= since, AnswerUsage.tier == Tier.pro.value)
     used = int((await db.execute(query)).scalar_one())
     return Usage(kind=kind, used=used, limit=limit, resets_at=resets_at, verified=verified)
 
@@ -157,7 +160,7 @@ def refuse_if_used_up(usage: Usage, tier: Tier, request_id: str) -> None:
 
 
 def usage_row(
-    user_id: str, response: Mapping[str, object], request_id: str, now: datetime
+    user_id: str, tier: Tier, response: Mapping[str, object], request_id: str, now: datetime
 ) -> AnswerUsage:
     """The row recording one answered question (platform-paid, from chat)."""
     raw = response.get("message_id")
@@ -171,6 +174,7 @@ def usage_row(
         occurred_at=now,
         paid_by="platform",
         channel="chat",
+        tier=tier.value,
         message_id=message_id,
         request_id=request_id,
     )

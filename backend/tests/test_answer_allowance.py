@@ -133,6 +133,7 @@ def _seed(make: Any, rows: list[tuple[str, datetime, str]], *, verified: bool = 
                         occurred_at=when,
                         paid_by=paid_by,
                         channel="chat",
+                        tier="pro",
                     )
                 )
             await s.commit()
@@ -276,7 +277,7 @@ def _make_pro(user_id: str) -> None:
     asyncio.run(_run())
 
 
-def _add_usage(user_id: str, n: int, when: datetime | None = None) -> None:
+def _add_usage(user_id: str, n: int, when: datetime | None = None, tier: str = "free") -> None:
     async def _run() -> None:
         async with get_sessionmaker()() as s:
             for _ in range(n):
@@ -287,6 +288,7 @@ def _add_usage(user_id: str, n: int, when: datetime | None = None) -> None:
                         occurred_at=when or datetime.now(UTC),
                         paid_by="platform",
                         channel="chat",
+                        tier=tier,
                     )
                 )
             await s.commit()
@@ -396,8 +398,8 @@ def test_pro_has_its_monthly_allowance_and_last_month_does_not_count(
     with TestClient(create_app()) as client:
         user = _signed_in(client, verified=False)  # Pro does not need the trial rule
         _make_pro(user)
-        _add_usage(user, 5, when=month_start(datetime.now(UTC)) - timedelta(seconds=1))
-        _add_usage(user, 1)
+        _add_usage(user, 5, when=month_start(datetime.now(UTC)) - timedelta(seconds=1), tier="pro")
+        _add_usage(user, 1, tier="pro")
         assert _ask(client).status_code == 200
         res = _ask(client)
     assert res.status_code == 429
@@ -467,5 +469,78 @@ def test_a_usage_row_survives_a_missing_or_odd_message_id(message_id: str | None
     an odd id raises (the answer would be lost with a 500) or is stored."""
     from app.access.quota import usage_row
 
-    row = usage_row(ACCOUNT, _response(message_id=message_id), "req_1", NOW)
+    row = usage_row(ACCOUNT, Tier.free, _response(message_id=message_id), "req_1", NOW)
     assert row.message_id is None and row.user_id == ACCOUNT and row.paid_by == "platform"
+
+
+def test_a_logout_during_the_request_cannot_skip_the_allowance(
+    app_env: pytest.MonkeyPatch,
+) -> None:
+    """Found in review: the tier came from a SECOND cookie lookup, so a logout
+    landing between the two made a signed-in caller look anonymous, and the
+    answer was served unchecked and unrecorded. The tier now comes from the
+    principal the request already resolved. Turns red if: the route looks the
+    caller up again (or treats a registered principal as anonymous)."""
+    from sqlalchemy import delete
+
+    import app.api.routes.messages as m
+    from app.models import AuthSession
+
+    _on(app_env)
+    real = m.require_session
+
+    async def logout_lands_here(db: Any, **kw: Any) -> Any:
+        out = await real(db, **kw)
+        async with get_sessionmaker()() as s:  # another request logs this user out
+            await s.execute(delete(AuthSession))
+            await s.commit()
+        return out
+
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        _add_usage(user, 3)  # the trial of 3 is used
+        session = client.post("/v1/sessions", json={"channel": "chat"}, headers=DEMO).json()
+        app_env.setattr(m, "require_session", logout_lands_here)
+        res = client.post(
+            f"/v1/sessions/{session['session_id']}/messages",
+            json={"message": QUESTION},
+            headers=DEMO,
+        )
+    assert res.status_code == 403
+    assert res.json()["error"]["code"] == "plan_required"
+    assert len(_rows(user)) == 3
+
+
+def test_upgrading_mid_month_gets_the_whole_pro_allowance(app_env: pytest.MonkeyPatch) -> None:
+    """Found in review: trial answers used earlier in the month were counted
+    against the first Pro month. Each row now records the tier it was used on,
+    and Pro counts only Pro rows. Turns red if: Pro counts trial rows."""
+    _on(app_env)
+    app_env.setenv("CITEVYN_ACCESS_PRO_MONTHLY_ANSWERS", "2")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        user = _signed_in(client)
+        for _ in range(3):
+            assert _ask(client).status_code == 200
+        assert _ask(client).status_code == 403  # trial used
+        _make_pro(user)
+        codes = [_ask(client).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]
+    assert sorted(r.tier for r in _rows(user)) == ["free"] * 3 + ["pro"] * 2
+
+
+def test_an_anonymous_caller_reaching_the_route_is_refused_not_unmetered(
+    app_env: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: the ``chat`` capability refuses anonymous callers
+    first. If that ever let one through, the route must still refuse rather
+    than answer without an allowance. The capability check is switched off here
+    to reach the guard. Turns red if: the route skips metering for anonymous."""
+    import app.access.deps as deps
+
+    _on(app_env)
+    app_env.setattr(deps, "has_capability", lambda tier, capability: True)
+    with TestClient(create_app()) as client:
+        res = _ask(client)  # never signed in: an anonymous principal
+    assert res.status_code == 401
+    assert res.json()["error"]["code"] == "auth_required"

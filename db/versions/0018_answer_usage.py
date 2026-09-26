@@ -48,6 +48,7 @@ def upgrade() -> None:
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("paid_by", sa.String(16), nullable=False),
         sa.Column("channel", sa.String(16), nullable=False),
+        sa.Column("tier", sa.String(16), nullable=False),
         sa.Column("message_id", uuid_type, nullable=True),
         sa.Column("request_id", sa.String(64), nullable=True),
     )

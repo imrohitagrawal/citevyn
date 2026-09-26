@@ -48,6 +48,14 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
   - Free with the trial used: 403 `plan_required`, reason `trial_used`;
   - Pro with the month used: 429 `quota_exceeded`, with `resets_at`.
 - BYOK answers (Phase 8) are recorded as user-paid and never count.
+- Each row records the tier it was used on. Pro counts only Pro rows, so an
+  account that upgrades mid-month gets its whole Pro allowance. Free counts
+  every row ever, so a lapsed Pro account has usually used its trial.
+- The tier is worked out from the principal the request already resolved, on
+  the same database session; a caller the route sees as anonymous is refused,
+  never answered without a check.
+- Deleting an account deletes its usage rows; there is no delete route today.
+  One added later must not let the same address start a fresh trial.
 - Two questions sent at the same moment near the limit can both be answered: the
   check and the write are not one step, because locking the account for a whole
   model call would block its Stripe webhooks. The overshoot is at most the number

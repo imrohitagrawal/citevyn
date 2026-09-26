@@ -239,7 +239,8 @@ This departs from "metering on `provider_calls`" above, for the reason just give
 A Pro "month" is the calendar month in UTC, not the Stripe billing period: yearly
 plans have no monthly period, and the count must not depend on webhook freshness.
 Free counts every answer ever; a lapsed Pro account has usually already used its
-25. See `docs/ACCESS_POLICY.md` for the error each case returns and the small
+25. Each row records its tier, and Pro counts only Pro rows, so upgrading
+mid-month gives the whole Pro allowance (found in review). See `docs/ACCESS_POLICY.md` for the error each case returns and the small
 overshoot two simultaneous questions can cause.
 
 #### CSRF
