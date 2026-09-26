@@ -504,3 +504,24 @@ def test_the_answer_is_framed_and_citation_fields_are_clean(env: pytest.MonkeyPa
     [c] = result["structuredContent"]["citations"]
     assert "\n" not in c["title"] and c["source"] == "Srcevil"
     assert "\nIGNORE PREVIOUS" not in text
+
+
+def test_a_chunked_body_over_the_cap_is_refused(env: pytest.MonkeyPatch) -> None:
+    """A streamed (chunked) body has no Content-Length, so the size is checked
+    again after reading. Turns red if: only the header is checked."""
+    _on(env)
+    with TestClient(create_app()) as client:
+        _, key = _pro_key(client)
+
+        def chunks() -> Any:
+            yield b'{"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "'
+            for _ in range(8):
+                yield b"x" * 10_000
+            yield b'"}'
+
+        res = TestClient(client.app).post(
+            "/v1/mcp",
+            content=chunks(),
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+    assert res.json()["error"]["code"] == -32600
