@@ -812,6 +812,23 @@ lapsed Pro account can still revoke its links. 404 unless the access model is on
   `Cache-Control: no-store`. Every piece of text is escaped; nothing in the
   question or answer becomes a link; a citation links only to an http(s) URL.
 
+### Usage insights: `GET /v1/me/usage` (ADR-0005 Phase 6D)
+
+Your own answered questions this month against your allowance. Pro (capability
+`usage_insights`); a Free account gets 403 `plan_required`. 404 unless the
+access model is on.
+
+`200 {request_id, usage, period_start, days, totals}`:
+- `usage`: the same object as `GET /v1/billing/membership`'s `usage`
+  (`{kind, used, limit, remaining, resets_at, verified}`).
+- `period_start`: midnight UTC on the 1st of this month.
+- `days`: `[{date, chat, mcp}]`, one per UTC day from the 1st to today, days
+  with no use included as zeros. `chat` is the web client; `mcp` is the MCP server.
+- `totals`: `{chat, mcp, total}` for the month.
+
+The days count exactly what the allowance counts (platform-paid Pro answers
+this month), so `totals.total` always equals `usage.used`. Refusals never count.
+
 ### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
 
 For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's

@@ -85,7 +85,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `mcp_ask` | — | — | yes | Cited answers through the MCP server (no route yet) |
 | `api_keys` | — | — | yes | Personal API keys (no route yet) |
 | `share_answer` | — | — | yes | Shareable answers |
-| `usage_insights` | — | — | yes | The usage page (no route yet) |
+| `usage_insights` | — | — | yes | The usage page |
 | `watch_alerts` | — | — | yes | Real-time "what changed" alerts (no route yet) |
 | `byok` | — | — | yes | Bring your own OpenRouter key (no route yet) |
 
@@ -132,6 +132,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `GET` | `/v1/me/shares` | `manage_account` |
 | `DELETE` | `/v1/me/shares/{share_id}` | `manage_account` |
 | `GET` | `/s/{share_id}` | `public` |
+| `GET` | `/v1/me/usage` | `usage_insights` |
 | `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |
