@@ -2813,6 +2813,16 @@ a.citation-chip:focus-visible {
   margin-top: 8px;
 }
 
+/* Usage drawer (ADR-0005 Phase 6D-2): a bar beside each day's numbers. */
+.usage-bar {
+  display: block;
+  height: 8px;
+  min-width: 2px;
+  border-radius: 4px;
+  background: var(--ink);
+  opacity: 0.35;
+}
+
 .drawer-row {
   display: flex;
   align-items: center;

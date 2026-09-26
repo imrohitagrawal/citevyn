@@ -18,6 +18,7 @@ const ConnectedAccountsDrawer = lazy(() => import("./ConnectedAccountsDrawer"));
 // ADR-0005 Phase 6B-2: only with the access model on.
 const ApiKeysDrawer = lazy(() => import("./ApiKeysDrawer"));
 const SharedLinksDrawer = lazy(() => import("./SharedLinksDrawer"));
+const UsageDrawer = lazy(() => import("./UsageDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -71,6 +72,7 @@ export function AccountMenu({
   const [connectedOpen, setConnectedOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
   const [sharesOpen, setSharesOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const accessModel = useClientConfig().access_model;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -85,6 +87,7 @@ export function AccountMenu({
     setConnectedOpen(false);
     setKeysOpen(false);
     setSharesOpen(false);
+    setUsageOpen(false);
     triggerRef.current?.focus();
     onOpenFailed?.();
   };
@@ -196,6 +199,20 @@ export function AccountMenu({
                 Shared links
               </button>
             )}
+            {accessModel && (
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setUsageOpen(true);
+                }}
+                style={menuItemStyle}
+              >
+                Usage
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
@@ -220,6 +237,13 @@ export function AccountMenu({
                   onResumeSession?.(sessionId);
                 }}
               />
+            </Suspense>
+          </LazyChunkBoundary>
+        )}
+        {usageOpen && (
+          <LazyChunkBoundary label="usage" onError={openFailed}>
+            <Suspense fallback={null}>
+              <UsageDrawer triggerRef={triggerRef} onClose={() => setUsageOpen(false)} />
             </Suspense>
           </LazyChunkBoundary>
         )}

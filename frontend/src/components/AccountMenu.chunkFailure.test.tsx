@@ -40,6 +40,9 @@ vi.mock("./ApiKeysDrawer", () => {
 vi.mock("./SharedLinksDrawer", () => {
   throw new Error(CHUNK_404);
 });
+vi.mock("./UsageDrawer", () => {
+  throw new Error(CHUNK_404);
+});
 // The access model on, so the API keys and Shared links items exist.
 vi.mock("../lib/clientConfig", () => ({ useClientConfig: () => ({ access_model: true }) }));
 
@@ -168,6 +171,7 @@ describe("AccountMenu: a dialog chunk that fails to load (#447)", () => {
   it.each([
     ["API keys", "api-keys"],
     ["Shared links", "shared-links"],
+    ["Usage", "usage"],
   ])("%s: the page survives and the menu item works a second time", async (item, label) => {
     // Turns red if: openFailed does not reset this drawer's open state (the
     // second click then does nothing), or its boundary is removed.
