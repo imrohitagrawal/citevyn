@@ -34,6 +34,14 @@ vi.mock("./HistoryDrawer", () => {
 vi.mock("./ConnectedAccountsDrawer", () => {
   throw new Error(CHUNK_404);
 });
+vi.mock("./ApiKeysDrawer", () => {
+  throw new Error(CHUNK_404);
+});
+vi.mock("./SharedLinksDrawer", () => {
+  throw new Error(CHUNK_404);
+});
+// The access model on, so the API keys and Shared links items exist.
+vi.mock("../lib/clientConfig", () => ({ useClientConfig: () => ({ access_model: true }) }));
 
 const SIGNED_IN_USER = {
   request_id: "req_1",
@@ -155,5 +163,29 @@ describe("AccountMenu: a dialog chunk that fails to load (#447)", () => {
     await user.click(screen.getByRole("menuitem", { name: "Sign-in methods" }));
     await waitFor(() => expect(onOpenFailed).toHaveBeenCalledTimes(2));
     expect(screen.getByText("the transcript so far")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["API keys", "api-keys"],
+    ["Shared links", "shared-links"],
+  ])("%s: the page survives and the menu item works a second time", async (item, label) => {
+    // Turns red if: openFailed does not reset this drawer's open state (the
+    // second click then does nothing), or its boundary is removed.
+    currentUser = SIGNED_IN_USER;
+    __testOnly.setState({ status: "signed-in", user: SIGNED_IN_USER });
+    const onOpenFailed = vi.fn();
+    const user = userEvent.setup();
+    renderWithSibling(onOpenFailed);
+
+    await user.click(await screen.findByRole("button", { name: "a@example.com" }));
+    await user.click(screen.getByRole("menuitem", { name: item }));
+    await chunkRejected();
+    await waitFor(() => expect(onOpenFailed).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("the transcript so far")).toBeInTheDocument();
+    expect(boundaryLogs(label).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "a@example.com" }));
+    await user.click(screen.getByRole("menuitem", { name: item }));
+    await waitFor(() => expect(onOpenFailed).toHaveBeenCalledTimes(2));
   });
 });

@@ -43,6 +43,7 @@ interface ChatViewProps {
       sessionId: string;
       question: string;
       offerSourceRequest: boolean;
+      shareable?: boolean;
     };
   }>;
   chatEmpty: boolean;

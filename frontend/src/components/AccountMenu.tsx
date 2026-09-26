@@ -17,6 +17,7 @@ const HistoryDrawer = lazy(() => import("./HistoryDrawer"));
 const ConnectedAccountsDrawer = lazy(() => import("./ConnectedAccountsDrawer"));
 // ADR-0005 Phase 6B-2: only with the access model on.
 const ApiKeysDrawer = lazy(() => import("./ApiKeysDrawer"));
+const SharedLinksDrawer = lazy(() => import("./SharedLinksDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -69,18 +70,21 @@ export function AccountMenu({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [connectedOpen, setConnectedOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
+  const [sharesOpen, setSharesOpen] = useState(false);
   const accessModel = useClientConfig().access_model;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // #447: a dialog whose chunk failed is closed, which also unmounts its
-  // boundary, so the trigger works again. One handler for all three: only one
+  // boundary, so the trigger works again. One handler for every dialog: only one
   // of them can be open at a time. Focus goes back to the trigger because the
   // History / Sign-in methods menuitem that was clicked is gone with the menu.
   const openFailed = () => {
     setModalOpen(false);
     setHistoryOpen(false);
     setConnectedOpen(false);
+    setKeysOpen(false);
+    setSharesOpen(false);
     triggerRef.current?.focus();
     onOpenFailed?.();
   };
@@ -178,6 +182,20 @@ export function AccountMenu({
                 API keys
               </button>
             )}
+            {accessModel && (
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setSharesOpen(true);
+                }}
+                style={menuItemStyle}
+              >
+                Shared links
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
@@ -202,6 +220,13 @@ export function AccountMenu({
                   onResumeSession?.(sessionId);
                 }}
               />
+            </Suspense>
+          </LazyChunkBoundary>
+        )}
+        {sharesOpen && (
+          <LazyChunkBoundary label="shared-links" onError={openFailed}>
+            <Suspense fallback={null}>
+              <SharedLinksDrawer triggerRef={triggerRef} onClose={() => setSharesOpen(false)} />
             </Suspense>
           </LazyChunkBoundary>
         )}
