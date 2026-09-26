@@ -44,6 +44,7 @@ from app.models.shared_answers import SharedAnswer
 from app.models.user_identities import UserIdentity
 from app.models.user_signals import AnswerFeedback, SourceRequest
 from app.models.users import User
+from app.models.watches import Watch
 
 __all__ = [
     "DigestSend",
@@ -89,6 +90,7 @@ __all__ = [
     "TermType",
     "TimestampMixin",
     "User",
+    "Watch",
     "UserIdentity",
     "UserRole",
 ]

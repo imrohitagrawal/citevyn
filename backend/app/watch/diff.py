@@ -103,4 +103,53 @@ def section_changes(old: str, new: str) -> Summary:
     )
 
 
-__all__ = ["MAX_LISTED", "Summary", "normalize", "section_changes"]
+#: The most text kept per change, added and removed lines together (for watch
+#: alerts, Phase 7C). Whole lines are kept, never cut: vendor Markdown puts a
+#: paragraph on one line, and a term past a per-line cut would never match.
+MAX_CHANGED_CHARS = 200_000
+
+
+class ChangedLines(TypedDict):
+    added: list[str]
+    removed: list[str]
+    truncated: bool  # True when the budget ran out: later lines were not kept
+
+
+def changed_lines(old: str, new: str) -> ChangedLines:
+    """The lines added and removed, in page order, as a multiset difference
+    (linear time; a moved line is neither). Blank lines are left out. Whole
+    lines are kept until :data:`MAX_CHANGED_CHARS` (both lists together) runs
+    out; then ``truncated`` is True."""
+    budget = MAX_CHANGED_CHARS
+    truncated = False
+
+    def extra(these: list[str], those: list[str]) -> list[str]:
+        nonlocal budget, truncated
+        left = Counter(those)
+        out: list[str] = []
+        for line in these:
+            if left[line] > 0:
+                left[line] -= 1
+            elif line.strip():
+                if len(line) > budget:
+                    truncated = True
+                    break
+                budget -= len(line)
+                out.append(line)
+        return out
+
+    a, b = normalize(old).split("\n"), normalize(new).split("\n")
+    added = extra(b, a)
+    removed = extra(a, b)
+    return ChangedLines(added=added, removed=removed, truncated=truncated)
+
+
+__all__ = [
+    "MAX_CHANGED_CHARS",
+    "MAX_LISTED",
+    "ChangedLines",
+    "Summary",
+    "changed_lines",
+    "normalize",
+    "section_changes",
+]

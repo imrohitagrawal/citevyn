@@ -1355,3 +1355,34 @@ def test_migration_0023_weekly_digest_round_trip(alembic_config: AlembicConfig) 
             "SELECT name FROM sqlite_master WHERE type='table'"
         )
     }
+
+
+def test_migration_0024_watches_round_trip(alembic_config: AlembicConfig) -> None:
+    """0024 (``doc_changes.lines``, ``watches``; ADR-0005 Phase 7C). RED if the
+    column or table is missing, the one-per-(account, kind, value) rule or the
+    account cascade is lost, or anything survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def columns(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {r[1] for r in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+
+    assert "lines" in columns("doc_changes")
+    assert {"watch_id", "user_id", "kind", "value", "created_at"} <= columns("watches")
+    with engine.connect() as connection:
+        uniques = {
+            tuple(r[2] for r in connection.exec_driver_sql(f"PRAGMA index_info('{ix[1]}')").all())
+            for ix in connection.exec_driver_sql("PRAGMA index_list('watches')").all()
+            if ix[2] == 1
+        }
+        fks = {r[3]: r[6] for r in connection.exec_driver_sql("PRAGMA foreign_key_list('watches')")}
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('watches')")}
+    assert ("user_id", "kind", "value") in uniques
+    assert fks == {"user_id": "CASCADE"}
+    assert "ix_watches_user_id" in indexes
+
+    alembic_downgrade(alembic_config, "0023")
+    assert columns("watches") == set()
+    assert "lines" not in columns("doc_changes")
+    assert "digest_opt_in_at" in columns("users")  # partner: only 0024 went

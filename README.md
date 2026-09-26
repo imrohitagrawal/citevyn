@@ -302,6 +302,9 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `PUT  /v1/me/digest`        | demo   | Turn the weekly digest on (verified address only) or off |
 | `GET  /digest/unsubscribe`  | none   | The digest's unsubscribe page: one button, changes nothing by itself |
 | `POST /digest/unsubscribe`  | none   | One-click unsubscribe (the emailed token is the credential) |
+| `POST /v1/me/watches`       | demo   | Watch a vendor page or a term (a flag, model id, command) for changes (Pro; 404 unless the access model is on) |
+| `GET  /v1/me/watches`       | demo   | List your watches and the pages you can watch |
+| `DELETE /v1/me/watches/{watch_id}` | demo | Remove a watch |
 | `POST /v1/mcp`             | api key | MCP server: `ask_docs` returns a finished, cited answer (Pro; 404 unless the access model is on) |
 | `POST /v1/billing/webhook`  | none   | Stripe webhook; the signature is the credential (404 unless the access model is on) |
 | `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |

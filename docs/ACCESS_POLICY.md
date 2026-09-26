@@ -86,7 +86,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `api_keys` | — | — | yes | Personal API keys (no route yet) |
 | `share_answer` | — | — | yes | Shareable answers |
 | `usage_insights` | — | — | yes | The usage page |
-| `watch_alerts` | — | — | yes | Real-time "what changed" alerts (no route yet) |
+| `watch_alerts` | — | — | yes | "What changed" alerts for watched pages and terms |
 | `byok` | — | — | yes | Bring your own OpenRouter key (no route yet) |
 
 ## Routes
@@ -137,6 +137,9 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `PUT` | `/v1/me/digest` | `weekly_digest` |
 | `GET` | `/digest/unsubscribe` | `public` |
 | `POST` | `/digest/unsubscribe` | `public` |
+| `POST` | `/v1/me/watches` | `watch_alerts` |
+| `GET` | `/v1/me/watches` | `manage_account` |
+| `DELETE` | `/v1/me/watches/{watch_id}` | `manage_account` |
 | `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |

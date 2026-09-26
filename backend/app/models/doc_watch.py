@@ -46,3 +46,6 @@ class DocChange(Base):
     old_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     new_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # The added and removed lines (bounded), so a term watch (Phase 7C) can
+    # tell whether "--permission-mode" changed. NULL on rows from before 0024.
+    lines: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

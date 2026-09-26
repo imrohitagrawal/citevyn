@@ -356,6 +356,7 @@ async def test_a_changed_page_records_one_change_with_its_sections(db: Any) -> N
     [change] = await _rows(db, DocChange)
     assert (change.url, change.product_area, change.title) == (LIMITS, "claude_api", "Limits")
     assert change.summary["changed"] == ["L > Tier 1"]
+    assert change.lines == {"added": ["60 rpm"], "removed": ["50 rpm"], "truncated": False}
     assert change.detected_at.replace(tzinfo=UTC) == T0 + timedelta(days=1)
     snap = next(s for s in await _rows(db, DocSnapshot) if s.url == LIMITS)
     assert snap.content == "# L\n## Tier 1\n60 rpm"  # the snapshot moves on
