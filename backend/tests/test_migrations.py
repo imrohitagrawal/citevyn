@@ -1386,3 +1386,36 @@ def test_migration_0024_watches_round_trip(alembic_config: AlembicConfig) -> Non
     assert columns("watches") == set()
     assert "lines" not in columns("doc_changes")
     assert "digest_opt_in_at" in columns("users")  # partner: only 0024 went
+
+
+def test_migration_0025_alert_sends_round_trip(alembic_config: AlembicConfig) -> None:
+    """0025 (``alert_sends``; ADR-0005 Phase 7C-2). RED if the table, the
+    one-per-(account, change) rule, the email_id index or either cascade is
+    missing, or the table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def columns(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {r[1] for r in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+
+    assert {"alert_id", "email_id", "user_id", "change_id", "sent_at", "token_hash"} <= columns(
+        "alert_sends"
+    )
+    with engine.connect() as connection:
+        uniques = {
+            tuple(r[2] for r in connection.exec_driver_sql(f"PRAGMA index_info('{ix[1]}')").all())
+            for ix in connection.exec_driver_sql("PRAGMA index_list('alert_sends')").all()
+            if ix[2] == 1
+        }
+        fks = {
+            r[3]: r[6] for r in connection.exec_driver_sql("PRAGMA foreign_key_list('alert_sends')")
+        }
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('alert_sends')")}
+    assert ("user_id", "change_id") in uniques
+    assert fks == {"user_id": "CASCADE", "change_id": "CASCADE"}
+    assert "ix_alert_sends_email_id" in indexes
+
+    alembic_downgrade(alembic_config, "0024")
+    assert columns("alert_sends") == set()
+    assert "watch_id" in columns("watches")  # partner: only 0025 went

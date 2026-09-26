@@ -422,6 +422,13 @@ class Settings(BaseSettings):
     weekly_digest_enabled: bool = False
     digest_max_per_run: int = Field(default=500, ge=1)
     digest_send_interval_seconds: float = Field(default=0.6, ge=0)
+    # Watch alerts (ADR-0005 §5, Phase 7C): `python -m app.worker.cli alerts`
+    # emails current Pro accounts the changes that match their watches. Default
+    # OFF: the command refuses to run until the owner turns this on and
+    # schedules it (after the docs watcher). Same pacing knobs as the digest.
+    watch_alerts_enabled: bool = False
+    alert_max_per_run: int = Field(default=500, ge=1)
+    alert_send_interval_seconds: float = Field(default=0.6, ge=0)
     docs_watch_user_agent: str = (
         "CiteVyn-docs-watcher/0.1 (+https://github.com/imrohitagrawal/citevyn)"
     )

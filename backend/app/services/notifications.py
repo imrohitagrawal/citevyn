@@ -66,6 +66,27 @@ def site_base_url(settings: Settings) -> str:
     return (settings.magic_link_base_url or LOCAL_BASE_URL).rstrip("/")
 
 
+_URL_FORBIDDEN = set("<>,\"'\\`")
+
+
+def mail_link_base(settings: Settings) -> str:
+    """The site URL for links that go into MAIL HEADERS (List-Unsubscribe).
+
+    A plain ``http(s)`` URL with a host, and no whitespace, control characters
+    or ``<>,"'\\```: any of those can add a header or a second unsubscribe
+    target (``https://x>,<mailto:evil@x>``). Raises ValueError otherwise.
+    """
+    from urllib.parse import urlsplit
+
+    base = site_base_url(settings)
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 or ch in _URL_FORBIDDEN for ch in base):
+        raise ValueError("the site URL contains a character that is not allowed in a mail header")
+    parts = urlsplit(base)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("the site URL must be a plain http(s) URL")
+    return base
+
+
 def _when(at: datetime) -> str:
     return at.strftime("%Y-%m-%d %H:%M UTC")
 

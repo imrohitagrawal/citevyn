@@ -140,6 +140,8 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `POST` | `/v1/me/watches` | `watch_alerts` |
 | `GET` | `/v1/me/watches` | `manage_account` |
 | `DELETE` | `/v1/me/watches/{watch_id}` | `manage_account` |
+| `GET` | `/alerts/unsubscribe` | `public` |
+| `POST` | `/alerts/unsubscribe` | `public` |
 | `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |

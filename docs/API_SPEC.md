@@ -874,6 +874,22 @@ account (`manage_account`). 404 unless the access model is on.
 - `DELETE /v1/me/watches/{watch_id}` → 204. Someone else's watch or an unknown
   id is 404.
 
+### Watch alerts (ADR-0005 Phase 7C-2)
+
+`python -m app.worker.cli alerts` (off unless `CITEVYN_WATCH_ALERTS_ENABLED`)
+emails each current Pro account with a verified address the last 7 days of
+changes that match its watches, one email per run, never the same change twice
+(`alert_sends`, unique per account and change). An email for a change whose
+stored lines were truncated says a match may be missing. Every alert carries
+`List-Unsubscribe` and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`.
+404 unless the access model is on:
+
+- `GET /alerts/unsubscribe?t=<email_id>.<token>` → an HTML page with one
+  button; it changes nothing.
+- `POST /alerts/unsubscribe?t=<email_id>.<token>` → removes that account's
+  watches (no more alerts); idempotent; no cookie needed. A wrong token is a
+  404 page; a missing or over-long `t` is 422. Links do not expire.
+
 ### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
 
 For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's
