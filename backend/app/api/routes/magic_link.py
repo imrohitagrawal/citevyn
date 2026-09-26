@@ -191,9 +191,11 @@ async def magic_link_request(
     # moments ago" (true, and reassuring) rather than "too many sign-in links"
     # (also true, but it reads like an accusation for a second click).
     #
-    # Neither call touches the database, which is why the always-202 statement-count
-    # parity below is unaffected: a refusal here raises before any SQL runs, and an
-    # acceptance adds none.
+    # Neither call touches the request's database session, which is why the
+    # always-202 statement-count parity below is unaffected: a refusal here raises
+    # before any SQL runs on it, and an acceptance adds none. (With the access
+    # model on, the bot check has already committed on its OWN session, the same
+    # way on both paths.)
     await enforce_magic_link_interval(email, settings)
     await enforce_magic_link_rate_limit(email, settings)
 

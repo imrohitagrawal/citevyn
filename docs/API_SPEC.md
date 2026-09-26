@@ -762,10 +762,10 @@ Entitlement is never decided by these calls: every protected request reads the
   `SHA-256(salt + number)` (hex) equal to `challenge`.
 - With the access model on, `POST /v1/auth/register` and
   `POST /v1/auth/magic-link/request` need the header `X-CiteVyn-Bot-Check`: the
-  challenge object plus `number`, as base64url-encoded JSON. Each solution works
-  once, and a request refused for another reason (for example a weak password)
-  does not use it up. Missing, wrong, forged, expired or reused: 403
-  `bot_check_failed`. OAuth sign-in is not checked.
+  challenge object plus `number`, as base64url-encoded JSON. Each solution pays
+  for one attempt, whether the attempt succeeds or not: to retry, solve a new
+  challenge. Missing, wrong, forged, expired or reused: 403 `bot_check_failed`.
+  OAuth sign-in is not checked.
 
 ### Answer allowance on `POST /v1/sessions/{id}/messages`
 

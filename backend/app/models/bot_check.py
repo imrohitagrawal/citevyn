@@ -1,9 +1,11 @@
 """Proof-of-work solutions already used (ADR-0005 Phase 5, the sign-up bot check).
 
-Each solved challenge may sign up or request a magic link ONCE. The row is written
-in the same transaction as the request it paid for, so a request that fails for
-another reason (a weak password) leaves the solution usable. ``expires_at`` lets
-old rows be deleted: an expired challenge is refused by its own signed expiry.
+Each solved challenge pays for ONE attempt to sign up or request a magic link,
+whether or not the attempt then succeeds: the row is committed on its own before
+the request runs. (Leaving it unused after a failed attempt let one solve probe
+"is this email registered?" without limit; found in review.) ``expires_at`` lets
+old rows be deleted a minute after expiry; an expired challenge is refused by its
+own signed expiry.
 """
 
 from __future__ import annotations

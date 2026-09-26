@@ -150,10 +150,11 @@ def test_a_solved_challenge_signs_up_once_and_a_replay_is_refused(env: pytest.Mo
     assert replay.json()["error"]["code"] == "bot_check_failed"
 
 
-def test_a_failed_sign_up_does_not_burn_the_solution(env: pytest.MonkeyPatch) -> None:
-    """A registration refused for another reason (a weak password here) must
-    let the user retry with the same solution. Turns red if: the solution is
-    recorded before the rest of the request succeeds."""
+def test_one_solution_is_one_attempt_even_a_failed_one(env: pytest.MonkeyPatch) -> None:
+    """Found in review: when a refused sign-up left its solution unused, one
+    solve could probe "is this email registered?" without limit. Each solution
+    now pays for exactly one attempt; the browser solves a new one to retry.
+    Turns red if: a refused request leaves the solution usable."""
     _on(env)
     with TestClient(create_app()) as client:
         proof = _solution(client)
@@ -163,7 +164,39 @@ def test_a_failed_sign_up_does_not_burn_the_solution(env: pytest.MonkeyPatch) ->
             headers={**DEMO, "X-CiteVyn-Bot-Check": proof},
         )
         assert weak.status_code == 422
-        assert _register(client, "a@example.com", proof).status_code == 201
+        again = _register(client, "a@example.com", proof)
+        assert again.status_code == 403
+        assert _register(client, "a@example.com", _solution(client)).status_code == 201
+
+
+@pytest.mark.parametrize(("offset", "expected"), [(-0.5, 201), (0.0, 403), (0.5, 403)])
+def test_a_used_solution_cannot_be_replayed_at_its_expiry(
+    env: pytest.MonkeyPatch, offset: float, expected: int
+) -> None:
+    """Found in review: the expiry check used whole seconds and the clean-up the
+    exact time, so in the second after expiry each replay deleted the "used" row
+    and passed. Before expiry a FRESH solution still works (the partner case).
+    Turns red if: the expiry check and the clean-up disagree again."""
+    import datetime as real_datetime
+
+    import app.access.bot_check as bot_check
+
+    _on(env)
+    with TestClient(create_app()) as client:
+        proof = _solution(client)
+        payload = json.loads(base64.urlsafe_b64decode(proof))
+        expires = int(str(payload["salt"]).rpartition("?expires=")[2])
+        if expected == 403:
+            assert _register(client, "a@example.com", proof).status_code == 201
+
+        class Frozen(real_datetime.datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:  # noqa: ARG003
+                return real_datetime.datetime.fromtimestamp(expires + offset, real_datetime.UTC)
+
+        env.setattr(bot_check, "datetime", Frozen)
+        res = _register(TestClient(create_app()), "b@example.com", proof)
+    assert res.status_code == expected
 
 
 def test_a_magic_link_request_needs_a_solved_challenge_too(env: pytest.MonkeyPatch) -> None:
@@ -208,35 +241,11 @@ def test_production_with_the_access_model_on_needs_a_bot_check_secret(
     }
     with pytest.raises(ValidationError, match="CITEVYN_BOT_CHECK_SECRET"):
         Settings(**kw)
+    kw["bot_check_secret"] = "a" * 31  # a short key makes challenges guessable
+    with pytest.raises(ValidationError, match="CITEVYN_BOT_CHECK_SECRET"):
+        Settings(**kw)
     kw["bot_check_secret"] = "a" * 32
     assert Settings(**kw).bot_check_secret == "a" * 32  # partner: set, it starts
-
-
-def test_the_same_solution_at_the_same_moment_is_refused_not_a_500(
-    env: pytest.MonkeyPatch,
-) -> None:
-    """Two requests with one solution can both pass the "already used?" lookup;
-    the second then hits the primary key. Simulated by hiding the first use from
-    the lookup. Turns red if: that collision is a 500, or is let through."""
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from app.models import BotCheckUse
-
-    _on(env)
-    with TestClient(create_app()) as client:
-        proof = _solution(client)
-        assert _register(client, "a@example.com", proof).status_code == 201
-        real_get = AsyncSession.get
-
-        async def blind_get(self: AsyncSession, entity: Any, ident: Any, **kw: Any) -> Any:
-            if entity is BotCheckUse:
-                return None  # the concurrent request's row is not visible yet
-            return await real_get(self, entity, ident, **kw)
-
-        env.setattr(AsyncSession, "get", blind_get)
-        res = _register(TestClient(create_app()), "b@example.com", proof)
-    assert res.status_code == 403
-    assert res.json()["error"]["code"] == "bot_check_failed"
 
 
 def test_expired_uses_are_cleaned_up_on_the_next_check(env: pytest.MonkeyPatch) -> None:
@@ -264,3 +273,28 @@ def test_expired_uses_are_cleaned_up_on_the_next_check(env: pytest.MonkeyPatch) 
         assert _register(client, "a@example.com", _solution(client)).status_code == 201
     rows = asyncio.run(_rows())
     assert "0" * 64 not in rows and len(rows) == 1  # the old one gone, the new one kept
+
+
+def test_a_fresh_solution_is_refused_from_the_instant_it_expires(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """Expiry uses the exact time, not whole seconds. Turns red if: a solution
+    is still accepted at its expiry instant (the rounding the review found)."""
+    import datetime as real_datetime
+
+    import app.access.bot_check as bot_check
+
+    _on(env)
+    with TestClient(create_app()) as client:
+        proof = _solution(client)
+        payload = json.loads(base64.urlsafe_b64decode(proof))
+        expires = int(str(payload["salt"]).rpartition("?expires=")[2])
+
+        class AtExpiry(real_datetime.datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:  # noqa: ARG003
+                return real_datetime.datetime.fromtimestamp(expires, real_datetime.UTC)
+
+        env.setattr(bot_check, "datetime", AtExpiry)
+        res = _register(client, "a@example.com", proof)
+    assert res.status_code == 403

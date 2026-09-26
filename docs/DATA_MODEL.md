@@ -354,9 +354,9 @@ of the month.
 ## 15c. bot_check_uses
 
 Proof-of-work solutions already used to sign up or request a magic link (ADR-0005
-Phase 5, migration 0019), so one solution cannot be replayed. Written in the same
-transaction as the request it paid for; expired rows are deleted on the next
-check (an expired challenge is refused by its own signed expiry anyway).
+Phase 5, migration 0019), so one solution cannot be replayed. Committed on its own
+before the request runs, so each solution pays for one attempt. Rows are deleted
+a minute after expiry (an expired challenge is refused by its own signed expiry).
 
 | Field | Type | Notes |
 |---|---|---|

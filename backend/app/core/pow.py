@@ -61,8 +61,14 @@ def solve(challenge: dict[str, Any]) -> int:
     raise PowError("no solution in range")
 
 
-def verify_solution(secret: str, payload: dict[str, Any], *, now: int) -> str:
-    """Check a solved challenge; return its ``challenge`` (the single-use id)."""
+def verify_solution(secret: str, payload: dict[str, Any], *, now: float) -> str:
+    """Check a solved challenge; return its ``challenge`` (the single-use id).
+
+    Expired from the instant ``now`` reaches the signed expiry. Pass the exact
+    time: a caller that rounds it and cleans up its "used" records with the exact
+    time would let a used solution through in the second after expiry (found in
+    review).
+    """
     salt, number = payload.get("salt"), payload.get("number")
     challenge, signature = payload.get("challenge"), payload.get("signature")
     if not (
@@ -78,7 +84,7 @@ def verify_solution(secret: str, payload: dict[str, Any], *, now: int) -> str:
     if not hmac.compare_digest(_hash(salt, number), challenge):
         raise PowError("wrong answer")
     _, _, expires = salt.rpartition("?expires=")
-    if not expires.isdigit() or int(expires) < now:
+    if not expires.isdigit() or int(expires) <= now:
         raise PowError("expired")
     return challenge
 

@@ -17,21 +17,21 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, cast
 
 from fastapi import Depends, Request
 from sqlalchemy import delete
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.db import get_session
+from app.core.db import get_sessionmaker
 from app.core.errors import APIErrorCode, error_response
 from app.core.pow import PowError, verify_solution
 from app.models import BotCheckUse
 
 HEADER = "X-CiteVyn-Bot-Check"
+_CLEANUP_MARGIN = timedelta(minutes=1)
 
 
 def _refuse(request: Request) -> Exception:
@@ -56,7 +56,6 @@ def _decode(value: str) -> dict[str, Any]:
 async def require_bot_check(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-    db: Annotated[AsyncSession, Depends(get_session)],
 ) -> None:
     """Refuse with 403 ``bot_check_failed`` unless a fresh, unused solution came."""
     if not settings.access_model_enabled:
@@ -68,28 +67,34 @@ async def require_bot_check(
     now = datetime.now(UTC)
     try:
         payload = _decode(value)
-        challenge = verify_solution(secret, payload, now=int(now.timestamp()))
+        challenge = verify_solution(secret, payload, now=now.timestamp())
     except PowError as exc:
         raise _refuse(request) from exc
     expires = int(str(payload["salt"]).rpartition("?expires=")[2])
-    # Expired rows can never be replayed (their signed expiry refuses them).
-    await db.execute(delete(BotCheckUse).where(BotCheckUse.expires_at < now))
-    # Recorded in the request's own transaction: committed only if the request
-    # succeeds, so a sign-up refused for another reason can retry.
-    if await db.get(BotCheckUse, challenge) is not None:
+    if not await _use_once(challenge, now, datetime.fromtimestamp(expires, UTC)):
         raise _refuse(request)
-    db.add(
-        BotCheckUse(
-            challenge=challenge,
-            used_at=now,
-            expires_at=datetime.fromtimestamp(expires, UTC),
-        )
-    )
-    try:
-        await db.flush()
-    except IntegrityError as exc:  # the same solution, used at the same moment
-        await db.rollback()
-        raise _refuse(request) from exc
+
+
+async def _use_once(challenge: str, now: datetime, expires_at: datetime) -> bool:
+    """Record the solution as used; False if it already was.
+
+    Committed at once, on its own session, whatever the request then does: one
+    solution pays for ONE attempt. (Keeping it unused when the request failed
+    let one solve probe "is this email registered?" without limit; found in
+    review.) The primary key settles two requests racing with one solution.
+    """
+    async with get_sessionmaker()() as db:
+        # Delete only rows well past expiry. A row deleted AT its expiry could be
+        # replayed in the same instant; verify_solution refuses anything expired,
+        # so a margin keeps the two rules from ever overlapping.
+        await db.execute(delete(BotCheckUse).where(BotCheckUse.expires_at < now - _CLEANUP_MARGIN))
+        db.add(BotCheckUse(challenge=challenge, used_at=now, expires_at=expires_at))
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            return False
+    return True
 
 
 __all__ = ["HEADER", "require_bot_check"]

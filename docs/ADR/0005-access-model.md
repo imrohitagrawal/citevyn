@@ -249,9 +249,10 @@ vendor widget (Turnstile, hCaptcha) needs a third-party script and frame, which
 reopens the `'self'`-only Content-Security-Policy that #365 closed, and sends
 every visitor's data to the vendor. The proof-of-work is the ALTCHA scheme in
 about 60 lines of `hashlib` and `hmac` (`app/core/pow.py`): the server signs a
-challenge, the browser searches for the number behind it (about 25,000 SHA-256
+challenge, the browser searches for the number behind it (about 100,000 SHA-256
 hashes by default), and the server checks the signature, the work and the expiry,
-then records the solution so it works once. It guards registration and
+then records the solution so it pays for exactly one attempt, successful or not.
+It guards registration and
 magic-link requests (which send email); OAuth is not guarded. It raises the cost
 of scripting sign-ups; it does not prove a human. If abuse shows it is too weak,
 a vendor can replace it behind the same header without changing the routes.
