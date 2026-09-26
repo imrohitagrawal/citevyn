@@ -1,5 +1,5 @@
 /**
- * UsageMeter — "n of N left", under the chat composer (ADR-0005 Phase 5B-2).
+ * UsageMeter — "n of N left", just above the chat composer (ADR-0005 Phase 5B-2).
  * Mounted only with the access model on and the caller signed in. Re-reads the
  * membership after each answer. A failed read renders nothing: the chat must
  * never break, or show wrong numbers, because the meter could not load.
@@ -8,7 +8,7 @@
  * announcer (#356) already speaks the answer.
  */
 import { useEffect, useState } from "react";
-import { getMembership, startCheckout, type Usage } from "../lib/billing";
+import { getMembership, openPortal, startCheckout, type Usage } from "../lib/billing";
 
 export default function UsageMeter({ answered }: { answered: number }) {
   const [usage, setUsage] = useState<Usage | null>(null);
@@ -55,7 +55,24 @@ export default function UsageMeter({ answered }: { answered: number }) {
           Upgrade
         </button>
       )}
-      {error && <span role="alert">We couldn't start the upgrade. Please try again later.</span>}
+      {usage.kind === "monthly" && (
+        // Pro's way to change the card or cancel (Stripe's billing portal).
+        <button
+          type="button"
+          aria-disabled={busy}
+          onClick={() => {
+            if (busy) return;
+            setBusy(true);
+            setError(false);
+            openPortal()
+              .catch(() => setError(true))
+              .finally(() => setBusy(false));
+          }}
+        >
+          Manage billing
+        </button>
+      )}
+      {error && <span role="alert">We couldn't open billing. Please try again later.</span>}
     </div>
   );
 }

@@ -118,6 +118,11 @@ export default function AccessPricing({
           </button>
         </div>
       </div>
+      <p className="legal-links">
+        {/* Drafts until the owner approves them (ADR-0005 Phase 5C). */}
+        <a href="/legal/terms">Terms</a> · <a href="/legal/privacy">Privacy</a> ·{" "}
+        <a href="/legal/refunds">Refunds</a> · <a href="/legal/no-training">No training</a>
+      </p>
       {registering && (
         <LazyChunkBoundary label="auth-modal" onError={() => setRegistering(false)}>
           <Suspense fallback={null}>

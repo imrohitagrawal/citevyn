@@ -258,6 +258,18 @@ of scripting sign-ups; it does not prove a human. If abuse shows it is too weak,
 a vendor can replace it behind the same header without changing the routes.
 `GET /v1/config` tells the web client whether the access model is on.
 
+**As built (Phase 5C): draft legal pages.** `GET /legal/{terms,privacy,refunds,no-training}`
+serves the drafts from `backend/app/legal/*.md`, rendered like `/about`, with a
+visible "DRAFT, not in effect" notice and `X-Robots-Tag: noindex`, and a 404
+while the access model is off. They are linked only from the model-on pricing
+section. Every fact in them was checked against the code; every decision or
+fact that is the owner's to give is marked `[OWNER: ...]` (entity, contact,
+jurisdiction, refund terms, retention periods, provider data terms). The
+no-training page stays a draft until the Gemini key's tier (#492) and the
+OpenRouter data policy are confirmed. Drafting the refund page found that a
+paying user had no way to reach the billing portal to cancel, so the usage
+meter now offers Pro accounts "Manage billing".
+
 #### CSRF
 
 Browser requests are protected by three things together: the session cookie is

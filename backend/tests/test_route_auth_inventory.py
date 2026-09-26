@@ -274,6 +274,7 @@ def capability_inventory() -> dict[tuple[str, str], Capability]:
 # or changing which one it carries, turns this red naming the route.
 EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("GET", "/about"): Capability.public,
+    ("GET", "/legal/{slug}"): Capability.public,
     ("GET", "/health"): Capability.public,
     ("GET", "/health/dependencies"): Capability.public,
     ("GET", "/health/index"): Capability.public,
@@ -336,7 +337,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 41
+    assert len(EXPECTED_CAPABILITY) == 42
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -402,6 +403,7 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
 # this is the list an attacker reads first.
 EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ("GET", "/about"): "public marketing/legal copy",
+    ("GET", "/legal/{slug}"): "draft legal pages; 404 unless the access model is on",
     ("GET", "/health"): "liveness probe, called by the platform before any key exists",
     ("GET", "/health/dependencies"): "readiness probe, same reason",
     ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
@@ -441,6 +443,7 @@ PATH_PARAM_VALUES: dict[str, str] = {
     "job_id": "00000000-0000-4000-8000-000000000004",
     "index_version": "v1",
     "provider": "github",
+    "slug": "terms",
 }
 
 _PARAM_RE = re.compile(r"\{([^}]+)\}")
