@@ -139,10 +139,10 @@ def _seed(make: Any, rows: list[tuple[str, datetime, str]], *, verified: bool = 
     asyncio.run(_run())
 
 
-def _usage(make: Any, tier: Tier, settings: Settings | None = None) -> Any:
+def _usage(make: Any, tier: Tier, settings: Settings | None = None, now: datetime = NOW) -> Any:
     async def _run() -> Any:
         async with make() as s:
-            return await usage_for(s, ACCOUNT, tier, settings or Settings(), NOW)
+            return await usage_for(s, ACCOUNT, tier, settings or Settings(), now)
 
     return asyncio.run(_run())
 
@@ -443,3 +443,28 @@ def test_the_membership_view_reports_the_allowance(app_env: pytest.MonkeyPatch) 
         "resets_at": None,
         "verified": True,
     }
+
+
+def test_december_resets_on_the_first_of_january(db: Any) -> None:
+    """Turns red if: the next-month arithmetic breaks at the year's end."""
+    _seed(db, [])
+    usage = _usage(db, Tier.pro, now=datetime(2026, 12, 31, 23, 0, tzinfo=UTC))
+    assert usage.resets_at == datetime(2027, 1, 1, tzinfo=UTC)
+
+
+def test_an_anonymous_caller_has_no_allowance(db: Any) -> None:
+    """Anonymous visitors get the canned sample only (ADR-0005 §1). Turns red
+    if: the anonymous tier is given the trial."""
+    _seed(db, [(ACCOUNT, NOW, "platform")])
+    usage = _usage(db, Tier.anonymous)
+    assert (usage.kind, usage.limit, usage.remaining) == ("none", 0, 0)
+
+
+@pytest.mark.parametrize("message_id", [None, "not-a-uuid"])
+def test_a_usage_row_survives_a_missing_or_odd_message_id(message_id: str | None) -> None:
+    """The row must still be written, so the answer still counts. Turns red if:
+    an odd id raises (the answer would be lost with a 500) or is stored."""
+    from app.access.quota import usage_row
+
+    row = usage_row(ACCOUNT, _response(message_id=message_id), "req_1", NOW)
+    assert row.message_id is None and row.user_id == ACCOUNT and row.paid_by == "platform"
