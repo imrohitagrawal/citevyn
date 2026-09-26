@@ -37,6 +37,14 @@ async def client_config(
         "request_id": str(request.state.request_id),
         "access_model": on,
         "bot_check": {"kind": "pow"} if on else None,
+        # The allowance numbers are settings (ADR-0005 §1); the pricing section
+        # and the usage meter show them rather than hard-coding 25 and 1,000.
+        "allowance": {
+            "free_trial_answers": settings.access_free_trial_answers,
+            "pro_monthly_answers": settings.access_pro_monthly_answers,
+        }
+        if on
+        else None,
     }
 
 

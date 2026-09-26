@@ -18,13 +18,21 @@ describe("loadClientConfig", () => {
   it("reads 'on' and tells subscribers", async () => {
     // Turns red if: the server's answer is not stored, or subscribers are not told.
     vi.mocked(isLiveMode).mockReturnValue(true);
-    vi.mocked(apiFetch).mockResolvedValue({ access_model: true, bot_check: { kind: "pow" } });
+    vi.mocked(apiFetch).mockResolvedValue({
+      access_model: true,
+      bot_check: { kind: "pow" },
+      allowance: { free_trial_answers: 25, pro_monthly_answers: 1000 },
+    });
     const heard = vi.fn();
     const stop = subscribeClientConfig(heard);
     await loadClientConfig();
     stop();
     expect(apiFetch).toHaveBeenCalledWith("/v1/config");
-    expect(getClientConfig()).toEqual({ access_model: true, bot_check: { kind: "pow" } });
+    expect(getClientConfig()).toEqual({
+      access_model: true,
+      bot_check: { kind: "pow" },
+      allowance: { free_trial_answers: 25, pro_monthly_answers: 1000 },
+    });
     expect(heard).toHaveBeenCalledTimes(1);
   });
 
@@ -53,7 +61,11 @@ describe("loadClientConfig", () => {
     // a failure escapes (the page would crash instead of staying as it is).
     vi.mocked(isLiveMode).mockReturnValue(true);
     arrange();
-    await expect(loadClientConfig()).resolves.toEqual({ access_model: false, bot_check: null });
+    await expect(loadClientConfig()).resolves.toEqual({
+      access_model: false,
+      bot_check: null,
+      allowance: null,
+    });
     expect(getClientConfig().access_model).toBe(false);
   });
 });

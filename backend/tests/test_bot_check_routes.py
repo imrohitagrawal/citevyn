@@ -96,6 +96,7 @@ def test_config_reports_the_access_model_off_by_default(env: pytest.MonkeyPatch)
     assert res.status_code == 200
     body = res.json()
     assert body["access_model"] is False and body["bot_check"] is None
+    assert body["allowance"] is None
 
 
 def test_config_reports_the_access_model_on(env: pytest.MonkeyPatch) -> None:
@@ -105,7 +106,9 @@ def test_config_reports_the_access_model_on(env: pytest.MonkeyPatch) -> None:
         body = client.get("/v1/config", headers=DEMO).json()
     assert body["access_model"] is True
     assert body["bot_check"] == {"kind": "pow"}
-    assert set(body) == {"request_id", "access_model", "bot_check"}  # nothing else leaks
+    # The numbers are settings; the pricing section and the usage meter show them.
+    assert body["allowance"] == {"free_trial_answers": 25, "pro_monthly_answers": 1000}
+    assert set(body) == {"request_id", "access_model", "bot_check", "allowance"}
 
 
 # ---------------------------------------------------------------------------

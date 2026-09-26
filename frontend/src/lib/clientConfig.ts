@@ -9,14 +9,17 @@
  * moment a decision is made; ``subscribeClientConfig`` lets a component
  * re-render when it arrives.
  */
+import { useSyncExternalStore } from "react";
 import { apiFetch, isLiveMode } from "./api";
 
 export interface ClientConfig {
   access_model: boolean;
   bot_check: { kind: string } | null;
+  /** The allowance numbers (settings), shown by the pricing section and meter. */
+  allowance: { free_trial_answers: number; pro_monthly_answers: number } | null;
 }
 
-const OFF: ClientConfig = { access_model: false, bot_check: null };
+const OFF: ClientConfig = { access_model: false, bot_check: null, allowance: null };
 let snapshot: ClientConfig = OFF;
 let loading: Promise<ClientConfig> | null = null;
 const listeners = new Set<() => void>();
@@ -37,7 +40,9 @@ export function loadClientConfig(): Promise<ClientConfig> {
     .then(() => apiFetch<Partial<ClientConfig> | null>("/v1/config"))
     .then((c) => {
       snapshot =
-        c?.access_model === true ? { access_model: true, bot_check: c.bot_check ?? null } : OFF;
+        c?.access_model === true
+          ? { access_model: true, bot_check: c.bot_check ?? null, allowance: c.allowance ?? null }
+          : OFF;
       listeners.forEach((l) => l());
       return snapshot;
     })
@@ -46,6 +51,11 @@ export function loadClientConfig(): Promise<ClientConfig> {
       return OFF;
     });
   return loading;
+}
+
+/** The config, re-rendering the caller when it arrives. */
+export function useClientConfig(): ClientConfig {
+  return useSyncExternalStore(subscribeClientConfig, getClientConfig, getClientConfig);
 }
 
 /** Tests only: forget what was loaded. */

@@ -3,14 +3,18 @@
  * sample answers in demo mode.
  */
 
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AnswerBody, hasCitationChips } from "./AnswerBody";
 import { LazyChunkBoundary } from "./LazyChunkBoundary";
 import { isSafeHref } from "../lib/safeHref";
 import { EMPTY_SUBMIT_NUDGE_GLYPH, hasNudge } from "../lib/composerNudge";
+import { useClientConfig } from "../lib/clientConfig";
+import { getAuthSnapshot, subscribeAuth } from "../lib/authStore";
 
 // Feedback controls load on demand: the eager bundle carries none of them.
 const AnswerActions = lazy(() => import("./AnswerActions"));
+// ADR-0005 Phase 5B-2: "n of N left", only with the access model on and signed in.
+const UsageMeter = lazy(() => import("./UsageMeter"));
 
 interface ChatViewProps {
   messages: Array<{
@@ -102,6 +106,11 @@ export function ChatView({
   chatNudge = null,
   composerRef: composerRefProp,
 }: ChatViewProps) {
+  const config = useClientConfig();
+  const signedIn = useSyncExternalStore(subscribeAuth, getAuthSnapshot, getAuthSnapshot).status === "signed-in";
+  const meterOn = config.access_model && signedIn;
+  // Refreshes the meter after each answer lands (not while one streams).
+  const answered = messages.filter((m) => !m.isUser && !m.streaming).length;
   const chatListRef = useRef<HTMLDivElement>(null);
   const localComposerRef = useRef<HTMLInputElement>(null);
   const composerRef = composerRefProp ?? localComposerRef;
@@ -671,6 +680,14 @@ export function ChatView({
           </div>
         )}
       </div>
+
+      {meterOn && (
+        <LazyChunkBoundary label="usage-meter">
+          <Suspense fallback={null}>
+            <UsageMeter answered={answered} />
+          </Suspense>
+        </LazyChunkBoundary>
+      )}
 
       {/* Composer */}
       <div className="composer">

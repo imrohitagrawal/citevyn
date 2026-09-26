@@ -1644,6 +1644,26 @@ body {
   align-items: start;
 }
 
+/* ADR-0005 Phase 5B-2: the monthly / yearly choice (two buttons, no input). */
+.interval-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 16px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.interval-toggle button {
+  padding: 6px 14px;
+  border-radius: 999px;
+}
+
+.interval-toggle button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--bg);
+}
+
 .pricing-card {
   position: relative;
   overflow: hidden;
@@ -2257,6 +2277,17 @@ a.citation-chip:focus-visible {
 
 .composer {
   padding: 12px 0 20px;
+}
+
+/* ADR-0005 Phase 5B-2: "n of N left", above the composer. */
+.usage-meter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 /* One rounded surface box holds the prompt, input, and send button. */

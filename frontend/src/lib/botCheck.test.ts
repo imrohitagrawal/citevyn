@@ -42,7 +42,7 @@ describe("botCheckHeaders", () => {
   it("returns no header, and makes no request, when the check is off", async () => {
     // Turns red if: the challenge is fetched while the access model is off
     // (today's page must make no extra request).
-    vi.mocked(loadClientConfig).mockResolvedValue({ access_model: false, bot_check: null });
+    vi.mocked(loadClientConfig).mockResolvedValue({ access_model: false, bot_check: null, allowance: null });
     expect(await botCheckHeaders()).toEqual({});
     expect(apiFetch).not.toHaveBeenCalled();
   });
@@ -51,7 +51,11 @@ describe("botCheckHeaders", () => {
     // Turns red if: the header name, the encoding or the payload shape changes.
     // Found in review: reading a snapshot that had not loaded yet sent no
     // header. It must WAIT for the config. Turns red if: it reads a snapshot.
-    vi.mocked(loadClientConfig).mockResolvedValue({ access_model: true, bot_check: { kind: "pow" } });
+    vi.mocked(loadClientConfig).mockResolvedValue({
+      access_model: true,
+      bot_check: { kind: "pow" },
+      allowance: { free_trial_answers: 25, pro_monthly_answers: 1000 },
+    });
     const c = challengeFor(9);
     vi.mocked(apiFetch).mockResolvedValue({ request_id: "r", challenge: c });
     const headers = await botCheckHeaders();
