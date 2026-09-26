@@ -133,7 +133,9 @@ def _cmd_digest() -> int:
     the access model is off, the site URL is unset, or no email delivery is
     configured; 3 some sends failed (they are
     retried by the next run); 1 an unexpected error. Schedule ONE run at a time,
-    weekly; re-running in the same week mails no one twice.
+    weekly, AFTER the docs watcher has finished (never while it runs: a change
+    it commits mid-run can be missed, #524); re-running in the same week mails
+    no one twice.
     """
     settings = get_settings()
     if not settings.weekly_digest_enabled:
