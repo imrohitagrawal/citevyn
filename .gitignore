@@ -7,6 +7,9 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+# Also a SYMLINK named .venv or node_modules (a worktree sharing the main
+# checkout's environment): a trailing slash matches only directories.
+.venv
 venv/
 
 # Environment
@@ -37,6 +40,7 @@ build/
 
 # Node, if frontend is added later
 node_modules/
+node_modules
 .next/
 coverage/
 # frontend/ — node_modules and build artefacts only; source files are tracked

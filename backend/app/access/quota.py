@@ -25,10 +25,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import TypedDict, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.policy import POLICY, Allowance, Capability, Tier
@@ -108,15 +108,64 @@ async def usage_for(
         limit = settings.access_free_trial_answers if verified else 0
     else:
         return Usage(kind="none", used=0, limit=0, resets_at=None, verified=verified)
-    query = select(func.count()).where(
-        AnswerUsage.user_id == user_id, AnswerUsage.paid_by == "platform"
-    )
-    if since is not None:
-        # Pro: this month's PRO answers only, so trial answers from earlier in
-        # the month do not shrink the first Pro month.
-        query = query.where(AnswerUsage.occurred_at >= since, AnswerUsage.tier == Tier.pro.value)
+    query = select(func.count()).where(*counted_rows(user_id, since))
     used = int((await db.execute(query)).scalar_one())
     return Usage(kind=kind, used=used, limit=limit, resets_at=resets_at, verified=verified)
+
+
+def counted_rows(user_id: str, since: datetime | None) -> list[ColumnElement[bool]]:
+    """The ``answer_usage`` rows an allowance counts: this account's
+    platform-paid answers; with ``since`` (Pro), only this month's PRO answers,
+    so trial answers from earlier in the month do not shrink the first Pro
+    month. One definition, used by the allowance AND the usage page, so the two
+    can never disagree."""
+    where: list[ColumnElement[bool]] = [
+        AnswerUsage.user_id == user_id,
+        AnswerUsage.paid_by == "platform",
+    ]
+    if since is not None:
+        where += [AnswerUsage.occurred_at >= since, AnswerUsage.tier == Tier.pro.value]
+    return where
+
+
+class DayUsage(TypedDict):
+    date: str  # ISO YYYY-MM-DD, a UTC day
+    chat: int
+    mcp: int
+
+
+async def daily_usage(
+    db: AsyncSession, user_id: str, now: datetime
+) -> tuple[datetime, list[DayUsage]]:
+    """This month's counted answers per UTC day and channel, zero-filled from
+    the 1st to today. Returns ``(period_start, days)``. At most one month of
+    rows, so it is counted here rather than with a per-database date function."""
+    start = month_start(now)
+    rows = (
+        await db.execute(
+            select(AnswerUsage.occurred_at, AnswerUsage.channel).where(
+                *counted_rows(user_id, start)
+            )
+        )
+    ).all()
+    today = now.astimezone(UTC).date()
+    days: dict[str, DayUsage] = {}
+    day = start.date()
+    while day <= today:
+        days[day.isoformat()] = {"date": day.isoformat(), "chat": 0, "mcp": 0}
+        day += timedelta(days=1)
+    for occurred_at, channel in rows:
+        # SQLite gives naive datetimes; they are UTC (never the host's zone).
+        stamp = occurred_at if occurred_at.tzinfo else occurred_at.replace(tzinfo=UTC)
+        # A row stamped after today (another machine's clock a little ahead)
+        # counts on today, so the days always add up to the allowance's count.
+        day_of = min(stamp.astimezone(UTC).date(), today)
+        entry = days[day_of.isoformat()]
+        if channel == "mcp":
+            entry["mcp"] += 1
+        else:
+            entry["chat"] += 1
+    return start, list(days.values())
 
 
 def refuse_if_used_up(usage: Usage, tier: Tier, request_id: str) -> None:
