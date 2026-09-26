@@ -106,6 +106,12 @@ Developers' top frustration with AI answers is that they are "almost right"
   (`SECURITY_MODEL.md` §6, `email_notice`), so the `users` table gets an
   `email_verified_at` column (Phase 4). The trial is granted once per verified
   account; it is never reset without a new verified account.
+  **As built (Phase 4B):** the stamp goes only on the account that proved the
+  address, never on another account found by email (OAuth never links by email).
+  Google's `email_verified` must be the boolean `true`. A GitHub public email
+  counts only if GitHub's `/user/emails` lists it as verified: `/user` carries no
+  verified flag. The first stamp is kept. `email` has no change path today; one
+  added later must clear the stamp in the same write.
 
 ### 2. Six concerns, one mechanism each
 
@@ -214,6 +220,12 @@ quota counts **answered** questions per user per period. A refusal or an error
 never uses allowance. BYOK answers are recorded as user-paid, so they do not
 consume the platform allowance. MCP answers count against the same allowance as
 chat answers.
+
+**As built (Phase 4B-1):** `provider_calls` now has `user_id` and `paid_by`, set
+from a `billed_to` context the answer route opens around the whole answer, so the
+answer, condense, alias-check and query-embedding calls are all attributed. The
+allowance itself (Phase 4B-2) counts ANSWERS, not model calls: a cache hit is a
+cited answer that makes no model call, and a refusal can make several.
 
 #### CSRF
 

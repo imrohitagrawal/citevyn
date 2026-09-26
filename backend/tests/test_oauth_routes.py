@@ -1863,3 +1863,19 @@ def test_connecting_a_provider_with_a_different_address_does_not_verify(
         email="other@example.com",
     )
     assert _by_email("me@example.com").email_verified_at is None
+
+
+def test_connecting_a_provider_that_has_not_verified_the_address_does_not_verify(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Google returns the account's own address but says it is NOT verified.
+    Turns red if: the stamp uses the provider's email without its verified flag
+    (the connect path is the only one where an unverified address can match)."""
+    _register(oauth_client, "me@example.com")
+    _patch_provider(
+        monkeypatch, "google", account_id=_GOOGLE_SUB, email="me@example.com", email_verified=False
+    )
+    start = _connect_start(oauth_client, "google")
+    ok = _callback(oauth_client, "google", state=_state_from_start_response(start))
+    assert ok.headers["location"] == "/?connect=ok&provider=google"
+    assert _by_email("me@example.com").email_verified_at is None
