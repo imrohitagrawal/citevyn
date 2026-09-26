@@ -33,6 +33,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  vi.unstubAllGlobals(); // even when a test fails midway
 });
 
 /** userEvent.setup() installs its own clipboard, so ours goes in after it. */
@@ -157,6 +158,5 @@ describe("sharing an answer", () => {
     await user.click(screen.getByRole("button", { name: "Share" }));
     expect(shareAnswer).not.toHaveBeenCalled();
     expect(statusText()).toBe("Still sending. Please wait a moment.");
-    vi.unstubAllGlobals();
   });
 });

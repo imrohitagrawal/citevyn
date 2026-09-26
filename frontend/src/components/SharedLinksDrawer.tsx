@@ -56,6 +56,7 @@ export default function SharedLinksDrawer({
     setBusy(true);
     setConfirming(null);
     setError(null);
+    setNote(""); // "Press again…" is done; never leave it after a refused stop
     try {
       await revokeShare(share.share_id);
       // Gone even if the refresh below fails, so it cannot be revoked twice.

@@ -141,6 +141,7 @@ describe("review round", () => {
     open();
     await stop(SHARE.question);
     expect((await screen.findByRole("alert")).textContent).toBe("That didn't work. Please try again later.");
+    expect(screen.getByTestId("drawer-status").textContent).toBe(""); // no stale "Press again"
     expect(screen.getByRole("button", { name: `Stop sharing: ${SHARE.question}` })).toBeTruthy();
     expect(listShares).toHaveBeenCalledTimes(1);
   });
