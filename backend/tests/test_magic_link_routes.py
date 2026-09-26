@@ -881,3 +881,54 @@ def test_the_interval_bucket_does_not_drain_the_hourly_bucket(magic_app: Path) -
     assert len(limiter._buckets[key]) == 1, (  # type: ignore[attr-defined]
         "a refused interval attempt consumed an hourly send"
     )
+
+
+# ---------------------------------------------------------------------------
+# ADR-0005 Phase 4B: redeeming a link proves the address (email_verified_at)
+# ---------------------------------------------------------------------------
+
+
+def _verified_at(email: str):
+    users = [u for u in _query_all(User) if u.email == email]
+    assert len(users) == 1
+    return users[0].email_verified_at
+
+
+def test_redeeming_a_link_marks_the_email_verified_once(magic_app: Path) -> None:
+    """The free trial is granted per VERIFIED account (ADR-0005 §1). A link is
+    mailed to the account's own address, so redeeming it proves control of it;
+    password sign-up proves nothing. Turns red if: the redeem does not stamp
+    email_verified_at, or a later redeem overwrites the first stamp."""
+    _register(_client(), "real@example.com")
+    assert _verified_at("real@example.com") is None  # sign-up alone never verifies
+
+    _request_link(_client(), "real@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).status_code == 302
+    first = _verified_at("real@example.com")
+    assert first is not None
+
+    _request_link_past_cooldown(_client(), "real@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).status_code == 302
+    assert _verified_at("real@example.com") == first
+
+
+def test_a_failed_redeem_does_not_verify(magic_app: Path) -> None:
+    """Partner: a wrong secret consumes nothing and proves nothing. Turns red if:
+    the stamp is written before the token is claimed."""
+    _register(_client(), "real@example.com")
+    _request_link(_client(), "real@example.com")
+    token = _latest_token(magic_app)
+    tampered = token[:-4] + ("AAAA" if not token.endswith("AAAA") else "BBBB")
+    _confirm_post(_client(), tampered)
+    assert _verified_at("real@example.com") is None
+
+
+def test_a_non_ascii_address_is_verified_by_its_own_magic_link(magic_app: Path) -> None:
+    """Registration accepts non-ASCII addresses, and a redeemed link proves the
+    account's own stored address, so no look-alike folding can occur here.
+    Turns red if: the OAuth-only ASCII rule is applied to the magic-link path
+    (found in review: josé@example.com could never be verified)."""
+    _register(_client(), "josé@example.com")
+    _request_link(_client(), "josé@example.com")
+    assert _confirm_post(_client(), _latest_token(magic_app)).status_code == 302
+    assert _verified_at("josé@example.com") is not None

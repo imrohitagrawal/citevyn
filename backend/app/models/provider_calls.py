@@ -85,6 +85,16 @@ class ProviderCall(Base):
     # happen outside an HTTP request.
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Who the call was for, and whose key paid (ADR-0005 §2, Quota; migration
+    # 0017). ``user_id`` is the asking principal (``usr_`` or ``anon_``), NULL
+    # outside a user request (ingest, eval). It has no foreign
+    # key: a spend row records money already spent and outlives the account.
+    # ``paid_by`` is ``platform`` or ``user`` (BYOK), a plain string (AGENTS.md).
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    paid_by: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="platform", server_default="platform"
+    )
+
     __table_args__ = (
         # The budget's hot query is "sum cost_usd since midnight UTC", so the index
         # leads on occurred_at. Without it that scan grows without bound as the

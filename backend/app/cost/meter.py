@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.cost.call_site import CallSite, get_call_site
+from app.cost.call_site import CallSite, get_billing, get_call_site
 from app.cost.pricing import price_for
 from app.models.provider_calls import ProviderCall
 
@@ -60,8 +60,11 @@ def build_call(
             "provider_call_unpriced",
             extra={"provider": provider, "model": model, "kind": kind},
         )
+    billing = get_billing()
     return ProviderCall(
         occurred_at=occurred_at or datetime.now(UTC),
+        user_id=billing.user_id,
+        paid_by=str(billing.paid_by),
         kind=kind,
         call_site=str(call_site if call_site is not None else get_call_site()),
         provider=provider,

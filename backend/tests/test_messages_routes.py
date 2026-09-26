@@ -735,3 +735,41 @@ def test_the_request_log_line_redacts_a_secret_a_unicode_letter_used_to_shield(
     # this is not "the whole field was blanked".
     assert "'status_code': 404" in emitted, emitted
     assert "'method': 'GET'" in emitted, emitted
+
+
+def test_every_paid_call_while_answering_is_billed_to_the_asker(
+    seeded_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0005 Phase 4B: provider_calls records who each call was for. The
+    stub provider is never metered, so this captures what the meter WOULD read
+    during the answer. Turns red if: the route does not wrap the answer in
+    billed_to(principal)."""
+    import app.core.rate_limit as rate_limit
+    from app.answer.orchestrator import Orchestrator
+    from app.cost.call_site import get_billing
+
+    rate_limit.reset_limiter()  # earlier tests in this file used up the hour
+
+    seen: list[object] = []
+    real_ask = Orchestrator.ask
+
+    async def spy(self: Orchestrator, **kw: object) -> object:
+        seen.append(get_billing())
+        return await real_ask(self, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Orchestrator, "ask", spy)
+    create = seeded_app.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert create.status_code == 201, create.json()
+    session = create.json()
+    res = seeded_app.post(
+        f"/v1/sessions/{session['session_id']}/messages",
+        json={"message": "How do I install Claude Code?"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert res.status_code == 200
+    [billing] = seen
+    # This visitor never signed in, so its principal is an anonymous one.
+    assert str(getattr(billing, "user_id", "")).startswith("anon_")
+    assert get_billing().user_id is None  # restored after the request

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -808,3 +809,64 @@ def test_meter_wiring_does_NOT_flag_a_call_that_reported_real_usage() -> None:
 
     assert captured[0].tokens_estimated is False
     assert captured[0].input_tokens == 1000
+
+
+# ---------------------------------------------------------------------------
+# Who paid (ADR-0005 Phase 4B): the account a call was made for, and whose key
+# ---------------------------------------------------------------------------
+
+
+def _call() -> Any:
+    return build_call(
+        kind="llm", provider="router", model="openai/gpt-4o-mini", input_tokens=1, output_tokens=1
+    )
+
+
+def test_a_call_made_for_an_account_records_it_and_the_platform_as_payer() -> None:
+    """Turns red if: build_call does not read the ambient account."""
+    from app.cost.call_site import billed_to
+
+    with billed_to("usr_" + "a" * 32):
+        call = _call()
+    assert call.user_id == "usr_" + "a" * 32 and call.paid_by == "platform"
+
+
+def test_a_byok_call_is_recorded_as_user_paid() -> None:
+    """Phase 8's BYOK answers must not use the platform allowance. Turns red if:
+    paid_by is not carried through."""
+    from app.cost.call_site import PaidBy, billed_to
+
+    with billed_to("usr_" + "a" * 32, PaidBy.user):
+        call = _call()
+    assert call.paid_by == "user"
+
+
+def test_a_call_outside_any_request_is_the_platforms_and_nobodys() -> None:
+    """Ingest and eval calls. Turns red if: the default is not (None, platform)."""
+    call = _call()
+    assert call.user_id is None and call.paid_by == "platform"
+
+
+def test_the_account_is_restored_after_the_block_even_on_error() -> None:
+    """Turns red if: billed_to does not reset, so a failed request's account
+    would be charged for whatever runs next in the task."""
+    from app.cost.call_site import billed_to
+
+    with pytest.raises(RuntimeError), billed_to("usr_" + "a" * 32):
+        raise RuntimeError
+    assert _call().user_id is None
+
+
+def test_concurrent_requests_do_not_share_an_account() -> None:
+    """Turns red if: the account is a module global instead of a ContextVar."""
+    from app.cost.call_site import billed_to
+
+    async def _for(user: str, delay: float) -> str | None:
+        with billed_to(user):
+            await asyncio.sleep(delay)
+            return _call().user_id
+
+    async def _run() -> list[str | None]:
+        return list(await asyncio.gather(_for("usr_1", 0.02), _for("usr_2", 0.0)))
+
+    assert asyncio.run(_run()) == ["usr_1", "usr_2"]

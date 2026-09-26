@@ -60,7 +60,10 @@ transient 5xx, not as a content refusal — which is the right shape (see §3).
 ## 1-3. Metering, admission control, and the daily budget — LIVE
 
 **Layer 1 — metering.** `provider_calls` (migration 0005) records tokens, priced
-cost, provider, model, call site and attempts for every paid LLM call. Priced from
+cost, provider, model, call site and attempts for every paid LLM call, and (since
+migration 0017, ADR-0005 Phase 4B) the principal the call was for and who paid
+(`platform`, or `user` for BYOK), carried by the `billed_to` context the answer
+route sets. Priced from
 `app/cost/pricing.py`, keyed by **provider + model**.
 
 The **embedder is metered on the same seam** (`app/cost/metered.MeteredEmbedder`,

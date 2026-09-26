@@ -15,6 +15,7 @@ import asyncio
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -1682,3 +1683,296 @@ def test_auth_me_providers_is_a_set_even_with_two_identities_of_one_provider(
     _link_identity_to(oauth_client, monkeypatch, "github", account_id="222", email="b@example.com")
     assert len(_query_all(UserIdentity)) == 2
     assert _me(oauth_client).json()["providers"] == ["github"]
+
+
+# ---------------------------------------------------------------------------
+# ADR-0005 Phase 4B: a provider-verified email marks the account verified
+# ---------------------------------------------------------------------------
+#
+# The free trial is granted once per VERIFIED account. OAuth may stamp
+# users.email_verified_at only when the provider says the address is verified
+# AND it is the address on the account. Anything looser would let an OAuth
+# login vouch for an account whose address it never proved.
+
+
+def _registered() -> list[User]:
+    return [u for u in _query_all(User) if u.user_id.startswith("usr_")]
+
+
+def _by_email(email: str) -> User:
+    [user] = [u for u in _query_all(User) if u.email == email]
+    return user
+
+
+def _clear_verified() -> None:
+    async def _run() -> None:
+        async with get_sessionmaker()() as s:
+            for u in (await s.execute(select(User))).scalars():
+                u.email_verified_at = None
+            await s.commit()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("provider", ["github", "google"])
+def test_a_first_login_with_a_verified_email_marks_the_account_verified(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient, provider: str
+) -> None:
+    """Turns red if: account creation from a verified provider email does not
+    stamp email_verified_at."""
+    account = str(_GITHUB_ACCOUNT_ID) if provider == "github" else _GOOGLE_SUB
+    _patch_provider(monkeypatch, provider, account_id=account, email="v@example.com")
+    _callback(
+        oauth_client, provider, state=_state_from_start_response(_start(oauth_client, provider))
+    )
+    [user] = _registered()
+    assert user.email == "v@example.com" and user.email_verified_at is not None
+
+
+@pytest.mark.parametrize("provider", ["github", "google"])
+def test_an_unverified_provider_email_never_verifies(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient, provider: str
+) -> None:
+    """Partner. Turns red if: the stamp ignores the provider's verified flag."""
+    account = str(_GITHUB_ACCOUNT_ID) if provider == "github" else _GOOGLE_SUB
+    _patch_provider(
+        monkeypatch, provider, account_id=account, email="u@example.com", email_verified=False
+    )
+    _callback(
+        oauth_client, provider, state=_state_from_start_response(_start(oauth_client, provider))
+    )
+    [user] = _registered()
+    assert user.email_verified_at is None
+
+
+def test_googles_email_verified_must_be_the_boolean_true(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """``bool("false")`` is True. Turns red if: Google's flag is read with
+    bool() instead of ``is True``."""
+    _patch_provider(
+        monkeypatch,
+        "google",
+        account_id=_GOOGLE_SUB,
+        email="s@example.com",
+        email_verified=cast(Any, "false"),
+    )
+    _callback(
+        oauth_client, "google", state=_state_from_start_response(_start(oauth_client, "google"))
+    )
+    [user] = _registered()
+    assert user.email is None and user.email_verified_at is None
+
+
+def test_a_github_public_email_counts_only_if_github_lists_it_as_verified(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """GitHub's /user response carries a public email with no verified flag;
+    /user/emails says whether it is verified. Turns red if: a public email is
+    treated as verified without that check."""
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "t", "token_type": "bearer"})
+        if url.startswith("https://api.github.com/user/emails"):
+            return httpx.Response(
+                200, json=[{"email": "pub@example.com", "primary": True, "verified": False}]
+            )
+        if url.startswith("https://api.github.com/user"):
+            return httpx.Response(
+                200, json={"id": _GITHUB_ACCOUNT_ID, "login": "o", "email": "pub@example.com"}
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    [user] = _registered()
+    assert user.email_verified_at is None
+
+
+def test_an_oauth_login_never_verifies_someone_elses_account(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """A password account owns taken@example.com. An OAuth login whose provider
+    verifies that address creates a separate account (no linking by email) and
+    must not stamp the password account. Turns red if: the stamp is looked up by
+    email instead of applied to the account that logged in."""
+    _register(TestClient(create_app()), "taken@example.com")
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="taken@example.com"
+    )
+    _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    assert _by_email("taken@example.com").email_verified_at is None
+    oauth_user = [u for u in _registered() if u.email is None]
+    assert len(oauth_user) == 1 and oauth_user[0].email_verified_at is None
+
+
+def test_a_later_login_verifies_an_account_created_before_this_existed(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Accounts from before Phase 4B have no stamp; the next verified login
+    adds it. Turns red if: only account creation stamps."""
+    _patch_provider(
+        monkeypatch, "github", account_id=str(_GITHUB_ACCOUNT_ID), email="old@example.com"
+    )
+    _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    _clear_verified()
+    browser = TestClient(create_app())
+    _callback(browser, "github", state=_state_from_start_response(_start(browser, "github")))
+    assert _by_email("old@example.com").email_verified_at is not None
+
+
+def test_connecting_a_provider_that_verifies_the_accounts_address_verifies_it(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Turns red if: the connect path does not stamp."""
+    _register(oauth_client, "me@example.com")
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="me@example.com",
+    )
+    assert _by_email("me@example.com").email_verified_at is not None
+
+
+def test_connecting_a_provider_with_a_different_address_does_not_verify(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """The provider proved a DIFFERENT address, not the account's. Turns red if:
+    the stamp skips the address match."""
+    _register(oauth_client, "me@example.com")
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "github",
+        account_id=str(_GITHUB_ACCOUNT_ID),
+        email="other@example.com",
+    )
+    assert _by_email("me@example.com").email_verified_at is None
+
+
+def test_connecting_a_provider_that_has_not_verified_the_address_does_not_verify(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Google returns the account's own address but says it is NOT verified.
+    Turns red if: the stamp uses the provider's email without its verified flag
+    (the connect path is the only one where an unverified address can match)."""
+    _register(oauth_client, "me@example.com")
+    _patch_provider(
+        monkeypatch, "google", account_id=_GOOGLE_SUB, email="me@example.com", email_verified=False
+    )
+    start = _connect_start(oauth_client, "google")
+    ok = _callback(oauth_client, "google", state=_state_from_start_response(start))
+    assert ok.headers["location"] == "/?connect=ok&provider=google"
+    assert _by_email("me@example.com").email_verified_at is None
+
+
+def test_a_failing_github_email_list_still_signs_a_public_email_user_in(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Before Phase 4B a user with a public GitHub email never called
+    /user/emails; now it decides verification. If it fails, sign-in must still
+    work, with no email stored and no stamp. Turns red if: the failure aborts
+    the login, or the unconfirmed public email is treated as verified."""
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "t", "token_type": "bearer"})
+        if url.startswith("https://api.github.com/user/emails"):
+            return httpx.Response(500, json={})
+        if url.startswith("https://api.github.com/user"):
+            return httpx.Response(
+                200, json={"id": _GITHUB_ACCOUNT_ID, "login": "o", "email": "pub@example.com"}
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    res = _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    assert res.headers["location"] == "/?auth=ok"
+    [user] = _registered()
+    assert user.email is None and user.email_verified_at is None
+
+
+def test_a_look_alike_unicode_address_never_verifies(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Python lower-cases the Kelvin sign (U+212A) to ASCII 'k', so a provider
+    address "\u212aim@x.com" would match an account's "kim@x.com" although it
+    is a different mailbox. Only an ASCII provider address may verify. Turns red
+    if: non-ASCII addresses are compared after lower-casing."""
+    _register(oauth_client, "kim@x.com")
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "google",
+        account_id=_GOOGLE_SUB,
+        email="\u212aim@x.com",
+    )
+    assert _by_email("kim@x.com").email_verified_at is None
+
+
+def test_a_failing_github_email_list_without_a_public_email_is_still_an_error(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Partner of the public-email fallback: with no public email the list is
+    the only source, and a failure stays a provider error, as before Phase 4B.
+    Turns red if: the fallback is widened to every user."""
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "t", "token_type": "bearer"})
+        if url.startswith("https://api.github.com/user/emails"):
+            return httpx.Response(500, json={})
+        if url.startswith("https://api.github.com/user"):
+            return httpx.Response(200, json={"id": _GITHUB_ACCOUNT_ID, "login": "o", "email": None})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    res = _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    assert res.headers["location"] == "/?auth=error"
+    assert _registered() == []
+
+
+def test_a_look_alike_unicode_address_is_not_stored_on_a_new_account(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Lower-casing turns "\u212aim@x.com" into "kim@x.com", so storing it would
+    let a new OAuth account squat the real kim@x.com (and a magic link the real
+    owner later redeems would sign them into it). Turns red if: a non-ASCII
+    provider address is stored on account creation."""
+    _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="\u212aim@x.com")
+    _callback(
+        oauth_client, "google", state=_state_from_start_response(_start(oauth_client, "google"))
+    )
+    [user] = _registered()
+    assert user.email is None

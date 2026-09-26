@@ -97,6 +97,7 @@ from app.api.routes.auth import normalize_email
 from app.core.auth_sessions import claim_and_login
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
+from app.core.email_verification import mark_email_verified
 from app.core.errors import APIErrorCode, error_response
 from app.core.rate_limit import (
     email_notice_allowed,
@@ -483,6 +484,9 @@ async def magic_link_confirm(
     #    #293): the server-held fact that lets THIS session set a new
     #    password without the old one for a few minutes.
     now = _now()
+    # The link was mailed to this account's address; redeeming it proves the
+    # address (ADR-0005 §1: the free trial needs a verified account).
+    await mark_email_verified(db, user.user_id, user.email, now)
     redirect = RedirectResponse("about:blank", status_code=status.HTTP_302_FOUND)
     await claim_and_login(
         request, redirect, db, settings, user_id=user.user_id, magic_link_verified_at=now

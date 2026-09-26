@@ -109,6 +109,7 @@ anonymous or registered, and this is that principal's row.
 | created_at | timestamp | |
 | email | text(255), nullable | Unique when set. `NULL` for anonymous principals; SQL uniqueness does not compare `NULL` to itself, so any number of anonymous rows coexist (ADR-0004 PR 5) |
 | password_hash | text(255), nullable | Argon2id PHC string (`app.core.passwords`). `NULL` for anonymous principals and, later, OAuth-only accounts (PR 12) |
+| email_verified_at | timestamp, nullable | When the account proved it controls `email`: a magic link redeemed, or an OAuth provider reporting that same address as verified (ADR-0005 §1, migration 0017). Password sign-up leaves it `NULL`. Set once; never moved |
 
 ## 6. sessions
 
@@ -281,6 +282,8 @@ no other record.
 | priced | boolean | False means the price book had no entry |
 | tokens_estimated | boolean | True means token counts are a local estimate |
 | request_id | text | Correlation id; nullable (ingest and eval run outside a request) |
+| user_id | text(128) | The principal the call was made for (`usr_` or `anon_`); nullable (ingest, eval). No foreign key: spend outlives the account (migration 0017) |
+| paid_by | text(16) | `platform` (our key) or `user` (BYOK, ADR-0005 Phase 8); default `platform` |
 
 Design decisions:
 
