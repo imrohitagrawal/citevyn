@@ -208,15 +208,22 @@ def test_stamps_are_read_as_utc_whatever_the_host_zone(env: pytest.MonkeyPatch) 
     UTC+5:30), 00:30 UTC on the 2nd would become 19:00 UTC on the 1st. Turns red
     if: the naive-means-UTC step is dropped (even on a UTC CI runner: TZ is set
     here)."""
+    import os
     import time
 
-    env.setenv("TZ", "Asia/Kolkata")
+    # Restored by hand, exactly: monkeypatch puts the TZ variable back but never
+    # calls tzset(), which would leave later tests on India time.
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
     time.tzset()
     try:
         now = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
         days = _days_at(env, now, [(datetime(2026, 10, 2, 0, 30, tzinfo=UTC), "chat")])
     finally:
-        env.delenv("TZ")
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
         time.tzset()
     assert [d for d in days if d["chat"]] == [{"date": "2026-10-02", "chat": 1, "mcp": 0}]
 
