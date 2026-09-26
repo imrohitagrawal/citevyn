@@ -91,9 +91,17 @@ WATCHED_PAGES: tuple[WatchedPage, ...] = (
 )
 
 
+def human_url(url: str) -> str:
+    """The page a person reads: the watched Markdown twin without its suffix."""
+    for suffix in (".md.txt", ".md"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)]
+    return url
+
+
 def watched_hosts(pages: tuple[WatchedPage, ...] = WATCHED_PAGES) -> frozenset[str]:
     """The only hosts the watcher may contact (a redirect may not leave them)."""
     return frozenset(urlsplit(p.url).hostname or "" for p in pages)
 
 
-__all__ = ["WATCHED_PAGES", "WatchedPage", "watched_hosts"]
+__all__ = ["WATCHED_PAGES", "WatchedPage", "human_url", "watched_hosts"]

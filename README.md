@@ -298,6 +298,10 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /v1/me/shares`        | demo   | List your shared answers |
 | `DELETE /v1/me/shares/{share_id}` | demo | Revoke a shared answer |
 | `GET  /v1/me/usage`         | demo   | Your answers this month, per day and channel, against your allowance (Pro; 404 unless the access model is on) |
+| `GET  /v1/me/digest`        | demo   | Whether you get the weekly "what changed" digest (404 unless the access model is on) |
+| `PUT  /v1/me/digest`        | demo   | Turn the weekly digest on (verified address only) or off |
+| `GET  /digest/unsubscribe`  | none   | The digest's unsubscribe page: one button, changes nothing by itself |
+| `POST /digest/unsubscribe`  | none   | One-click unsubscribe (the emailed token is the credential) |
 | `POST /v1/mcp`             | api key | MCP server: `ask_docs` returns a finished, cited answer (Pro; 404 unless the access model is on) |
 | `POST /v1/billing/webhook`  | none   | Stripe webhook; the signature is the credential (404 unless the access model is on) |
 | `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |

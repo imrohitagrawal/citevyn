@@ -81,7 +81,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `feedback` | — | yes | yes | Rate an answer, report it as wrong, request a missing source |
 | `billing` | — | yes | yes | Start, view or manage one's own paid plan |
 | `operate` | — | — | — | Operator routes (admin API key) |
-| `weekly_digest` | — | yes | yes | The weekly "what changed" email (no route yet) |
+| `weekly_digest` | — | yes | yes | The weekly "what changed" email |
 | `mcp_ask` | — | — | yes | Cited answers through the MCP server (no route yet) |
 | `api_keys` | — | — | yes | Personal API keys (no route yet) |
 | `share_answer` | — | — | yes | Shareable answers |
@@ -133,6 +133,10 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `DELETE` | `/v1/me/shares/{share_id}` | `manage_account` |
 | `GET` | `/s/{share_id}` | `public` |
 | `GET` | `/v1/me/usage` | `usage_insights` |
+| `GET` | `/v1/me/digest` | `weekly_digest` |
+| `PUT` | `/v1/me/digest` | `weekly_digest` |
+| `GET` | `/digest/unsubscribe` | `public` |
+| `POST` | `/digest/unsubscribe` | `public` |
 | `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |

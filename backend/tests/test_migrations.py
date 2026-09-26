@@ -1316,3 +1316,42 @@ def test_migration_0022_doc_watch_round_trip(alembic_config: AlembicConfig) -> N
     alembic_downgrade(alembic_config, "0021")
     assert not ({"doc_snapshots", "doc_changes"} & tables())
     assert "shared_answers" in tables()  # partner: only 0022's tables went
+
+
+def test_migration_0023_weekly_digest_round_trip(alembic_config: AlembicConfig) -> None:
+    """0023 (``users.digest_opt_in_at``, ``digest_sends``; ADR-0005 Phase 7B).
+    RED if the column or table is missing, the one-per-week uniqueness or the
+    account cascade is lost, or anything survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def columns(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {r[1] for r in connection.exec_driver_sql(f"PRAGMA table_info({table})")}
+
+    assert "digest_opt_in_at" in columns("users")
+    assert {"send_id", "user_id", "week_start", "token_hash", "unsubscribed_at"} <= columns(
+        "digest_sends"
+    )
+    with engine.connect() as connection:
+        uniques = {
+            tuple(r[2] for r in connection.exec_driver_sql(f"PRAGMA index_info('{ix[1]}')").all())
+            for ix in connection.exec_driver_sql("PRAGMA index_list('digest_sends')").all()
+            if ix[2] == 1
+        }
+        fks = {
+            r[3]: r[6]
+            for r in connection.exec_driver_sql("PRAGMA foreign_key_list('digest_sends')")
+        }
+    assert ("user_id", "week_start") in uniques
+    assert fks == {"user_id": "CASCADE"}
+
+    alembic_downgrade(alembic_config, "0022")
+    assert "digest_opt_in_at" not in columns("users")
+    assert columns("digest_sends") == set()
+    assert "doc_changes" in {  # partner: only 0023 went
+        r[0]
+        for r in engine.connect().exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }

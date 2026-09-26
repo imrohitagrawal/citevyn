@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.db import get_sessionmaker
+from app.core.email_client import EmailClient
 from app.core.logging import configure_logging
 from app.embeddings import (
     DocumentEmbedder,
@@ -78,6 +79,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_evaluate(args)
     if args.command == "watch":
         return _cmd_watch()
+    if args.command == "digest":
+        return _cmd_digest()
     parser.print_help()
     return 1
 
@@ -119,6 +122,40 @@ async def _watch(settings: Settings) -> int:
     print(
         f"checked {stats.checked}: {stats.changed} changed, {stats.unchanged} unchanged, "
         f"{stats.baseline} first seen, {stats.failed} failed"
+    )
+    return 0 if stats.failed == 0 else 3
+
+
+def _cmd_digest() -> int:
+    """Send the weekly digest once (ADR-0005 Phase 7B). Refuses unless enabled.
+
+    Exit codes: 0 done (including "no changes, nothing sent"); 2 the digest is
+    off, or no email delivery is configured; 3 some sends failed (they are
+    retried by the next run); 1 an unexpected error. Schedule ONE run at a time,
+    weekly; re-running in the same week mails no one twice.
+    """
+    settings = get_settings()
+    if not settings.weekly_digest_enabled:
+        print("The weekly digest is off. Set CITEVYN_WEEKLY_DIGEST_ENABLED=true to send it.")
+        return 2
+    from app.services.notifications import build_email_client
+
+    client = build_email_client(settings)
+    if client is None:
+        print("No email delivery is configured (CITEVYN_RESEND_API_KEY).")
+        return 2
+    return asyncio.run(_digest(settings, client))
+
+
+async def _digest(settings: Settings, client: EmailClient) -> int:
+    from app.core.db import get_sessionmaker
+    from app.services.digest import send_weekly_digest
+
+    async with get_sessionmaker()() as db:
+        stats = await send_weekly_digest(db, client, settings, now=datetime.now(UTC))
+    print(
+        f"{stats.changes} changes: sent {stats.sent}, already sent {stats.skipped_already_sent}, "
+        f"failed {stats.failed}{', stopped at the per-run cap' if stats.capped else ''}"
     )
     return 0 if stats.failed == 0 else 3
 
@@ -275,6 +312,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "watch",
         help="Fetch the watched vendor doc pages and record what changed (needs "
         "CITEVYN_DOCS_WATCH_ENABLED=true).",
+    )
+
+    sub.add_parser(
+        "digest",
+        help="Email this week's doc changes to opted-in accounts (needs "
+        "CITEVYN_WEEKLY_DIGEST_ENABLED=true).",
     )
 
     evaluate = sub.add_parser(
