@@ -364,6 +364,22 @@ a minute after expiry (an expired challenge is refused by its own signed expiry)
 | used_at | timestamp | |
 | expires_at | timestamp | Indexed, for the clean-up |
 
+## 15d. api_keys
+
+Per-user API keys (ADR-0005 Phase 6A, migration 0020): "shown once, stored only
+as a hash, scoped, revocable". The key the user holds is `cvk_<key_id>_<secret>`.
+
+| Field | Type | Notes |
+|---|---|---|
+| key_id | text(32) | Primary key; 32 hex characters, part of the key |
+| user_id | text(128) | The owner; `ON DELETE CASCADE`; indexed |
+| name | text(64) | The user's label |
+| secret_hash | text(64) | SHA-256 of the secret; the secret itself is never stored |
+| scope | text(32) | `mcp` (plain string, AGENTS.md) |
+| created_at | timestamp | |
+| last_used_at | timestamp, nullable | Set on each successful authentication |
+| revoked_at | timestamp, nullable | Set on revoke; a revoked key never authenticates |
+
 Other ADR-0005 tables (`answer_feedback`, `source_requests`, `memberships`,
 `stripe_events`) are described in their model docstrings under
 `backend/app/models/` and in `docs/API_SPEC.md` §7c and §8.

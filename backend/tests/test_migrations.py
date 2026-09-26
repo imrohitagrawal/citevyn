@@ -1219,3 +1219,31 @@ def test_migration_0019_bot_check_uses_round_trip(alembic_config: AlembicConfig)
     alembic_downgrade(alembic_config, "0018")
     assert "bot_check_uses" not in tables()
     assert "answer_usage" in tables()  # partner: only 0019's table went
+
+
+def test_migration_0020_api_keys_round_trip(alembic_config: AlembicConfig) -> None:
+    """0020 (``api_keys``; ADR-0005 Phase 6A) creates the table with its key_id
+    primary key and user_id index; the downgrade drops it. RED if the table, the
+    key or the index is missing, or the table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert "api_keys" in tables()
+    with engine.connect() as connection:
+        pk = [r[1] for r in connection.exec_driver_sql("PRAGMA table_info(api_keys)") if r[5]]
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('api_keys')")}
+    assert pk == ["key_id"]
+    assert "ix_api_keys_user_id" in indexes
+
+    alembic_downgrade(alembic_config, "0019")
+    assert "api_keys" not in tables()
+    assert "bot_check_uses" in tables()  # partner: only 0020's table went

@@ -83,6 +83,9 @@ class APIErrorCode(StrEnum):
     # Spec-side (ADR-0005 Phase 5). 403: sign-up or a magic-link request came
     # without a valid, unused proof-of-work solution (``X-CiteVyn-Bot-Check``).
     bot_check_failed = "bot_check_failed"
+    # Spec-side (ADR-0005 Phase 6A). 409: the account already has the maximum
+    # number of live API keys; revoke one first.
+    too_many_api_keys = "too_many_api_keys"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -112,6 +115,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.verification_required: 403,
     APIErrorCode.quota_exceeded: 429,
     APIErrorCode.bot_check_failed: 403,
+    APIErrorCode.too_many_api_keys: 409,
     APIErrorCode.internal_error: 500,
 }
 

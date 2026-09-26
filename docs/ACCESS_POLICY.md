@@ -120,6 +120,9 @@ The per-hour rate limits and the global daily spend cap apply on top, to every t
 | `POST` | `/v1/billing/checkout` | `billing` |
 | `POST` | `/v1/billing/portal` | `billing` |
 | `GET` | `/v1/billing/membership` | `billing` |
+| `POST` | `/v1/me/api-keys` | `api_keys` |
+| `GET` | `/v1/me/api-keys` | `api_keys` |
+| `DELETE` | `/v1/me/api-keys/{key_id}` | `api_keys` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |
 | `GET` | `/v1/admin/budget` | `operate` |

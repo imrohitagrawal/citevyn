@@ -6,6 +6,7 @@ which Alembic consults to autogenerate migrations.
 
 from app.models.answer_cache import AnswerCache
 from app.models.answer_usage import AnswerUsage
+from app.models.api_keys import ApiKey
 from app.models.audit_events import AuditEvent
 from app.models.auth_sessions import AuthSession
 from app.models.base import GUID, Base, PickledEmbedding, TimestampMixin
@@ -43,6 +44,7 @@ from app.models.users import User
 
 __all__ = [
     "AnswerUsage",
+    "ApiKey",
     "BotCheckUse",
     "Membership",
     "StripeEvent",
