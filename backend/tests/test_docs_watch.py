@@ -688,3 +688,68 @@ def test_two_sections_with_the_same_heading_stay_separate() -> None:
     old = "# API\n## Example\nfirst old\n## Example\nsecond\n"
     new = "# API\n## Example\nfirst new\n## Example\nsecond\n"
     assert section_changes(old, new)["changed"] == ["API > Example"]
+
+
+# ---------------------------------------------------------------------------
+# Remaining branches (CI's coverage gate found them untested)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "robots_response",
+    [
+        httpx.Response(204),  # neither rules nor a 4xx "no rules"
+        httpx.Response(301, headers={"location": "/robots.txt"}),  # a redirect loop
+    ],
+)
+async def test_a_robots_txt_that_never_settles_skips_the_host(
+    robots_response: httpx.Response,
+) -> None:
+    """Turns red if: an odd status or an endless robots redirect counts as permission."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return robots_response
+        return httpx.Response(200, text="x", headers={"content-type": "text/plain"})
+
+    async with _client(handler) as c:
+        with pytest.raises(FetchError, match="robots.txt unreadable"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_a_garbage_port_is_a_fetch_error_never_a_crash() -> None:
+    """A URL whose port is not a number fails the page cleanly. In a redirect,
+    httpx itself rejects the Location first (a protocol error), which is also a
+    FetchError. Turns red if: either path crashes with a raw exception."""
+    async with _client(_site({})) as c:
+        with pytest.raises(FetchError, match="malformed"):
+            await _fetch(c, "https://docs.example.com:abc/p.md")
+    async with _client(_redirecting("https://docs.example.com:abc/x")) as c:
+        with pytest.raises(FetchError):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_a_redirect_without_a_location_is_a_fetch_error() -> None:
+    """Turns red if: a Location-less 3xx is followed, stored, or crashes."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        return httpx.Response(302)
+
+    async with _client(handler) as c:
+        with pytest.raises(FetchError, match="without a location"):
+            await _fetch(c, "https://docs.example.com/p.md")
+
+
+async def test_a_network_failure_on_a_page_is_a_fetch_error() -> None:
+    """Turns red if: a connection error escapes as an httpx exception."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        raise httpx.ConnectError("refused", request=request)
+
+    async with _client(handler) as c:
+        with pytest.raises(FetchError, match="network error: ConnectError"):
+            await _fetch(c, "https://docs.example.com/p.md")
