@@ -237,3 +237,30 @@ def test_the_same_solution_at_the_same_moment_is_refused_not_a_500(
         res = _register(TestClient(create_app()), "b@example.com", proof)
     assert res.status_code == 403
     assert res.json()["error"]["code"] == "bot_check_failed"
+
+
+def test_expired_uses_are_cleaned_up_on_the_next_check(env: pytest.MonkeyPatch) -> None:
+    """The table must not grow forever. Turns red if: expired rows are kept."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.db import get_sessionmaker
+    from app.models import BotCheckUse
+
+    async def _rows() -> list[str]:
+        async with get_sessionmaker()() as s:
+            from sqlalchemy import select
+
+            return [r.challenge for r in (await s.execute(select(BotCheckUse))).scalars()]
+
+    async def _old() -> None:
+        async with get_sessionmaker()() as s:
+            long_ago = datetime.now(UTC) - timedelta(days=1)
+            s.add(BotCheckUse(challenge="0" * 64, used_at=long_ago, expires_at=long_ago))
+            await s.commit()
+
+    _on(env)
+    asyncio.run(_old())
+    with TestClient(create_app()) as client:
+        assert _register(client, "a@example.com", _solution(client)).status_code == 201
+    rows = asyncio.run(_rows())
+    assert "0" * 64 not in rows and len(rows) == 1  # the old one gone, the new one kept
