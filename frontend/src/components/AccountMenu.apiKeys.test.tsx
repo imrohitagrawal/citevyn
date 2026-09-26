@@ -30,6 +30,7 @@ vi.mock("../lib/api", () => ({
 vi.mock("../lib/clientConfig", () => ({ useClientConfig: vi.fn() }));
 vi.mock("./ApiKeysDrawer", () => ({ default: () => <div role="dialog" aria-label="API keys" /> }));
 vi.mock("./SharedLinksDrawer", () => ({ default: () => <div role="dialog" aria-label="Shared links" /> }));
+vi.mock("./UsageDrawer", () => ({ default: () => <div role="dialog" aria-label="Usage" /> }));
 
 beforeEach(() => {
   __testOnly.setState({ status: "signed-in", user: USER });
@@ -61,6 +62,7 @@ describe("the API keys menu item", () => {
     expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "API keys" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "Shared links" })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: "Usage" })).toBeNull();
   });
 
   it("offers Shared links with the access model on (ADR-0005 Phase 6C-2)", async () => {
@@ -75,5 +77,19 @@ describe("the API keys menu item", () => {
     await user.click(await screen.findByRole("button", { name: "a@example.com" }));
     await user.click(screen.getByRole("menuitem", { name: "Shared links" }));
     expect(await screen.findByRole("dialog", { name: "Shared links" })).toBeInTheDocument();
+  });
+
+  it("offers Usage with the access model on (ADR-0005 Phase 6D-2)", async () => {
+    // Turns red if: the item is missing, or does not open its drawer.
+    vi.mocked(useClientConfig).mockReturnValue({
+      access_model: true,
+      bot_check: { kind: "pow" },
+      allowance: { free_trial_answers: 25, pro_monthly_answers: 1000 },
+    });
+    const user = userEvent.setup();
+    render(<AccountMenu />);
+    await user.click(await screen.findByRole("button", { name: "a@example.com" }));
+    await user.click(screen.getByRole("menuitem", { name: "Usage" }));
+    expect(await screen.findByRole("dialog", { name: "Usage" })).toBeInTheDocument();
   });
 });
