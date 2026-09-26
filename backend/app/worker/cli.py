@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,6 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "evaluate":
         return _cmd_evaluate(args)
+    if args.command == "watch":
+        return _cmd_watch()
     parser.print_help()
     return 1
 
@@ -82,6 +85,42 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+
+
+def _cmd_watch() -> int:
+    """Run the docs watcher once (ADR-0005 Phase 7A). Refuses unless enabled.
+
+    Exit codes: 0 every page checked; 2 the watcher is off; 3 some pages could
+    not be fetched (their reasons are in ``doc_snapshots.last_error``); 1 an
+    unexpected error (a traceback). Schedule ONE run at a time.
+    """
+    settings = get_settings()
+    if not settings.docs_watch_enabled:
+        print("The docs watcher is off. Set CITEVYN_DOCS_WATCH_ENABLED=true to run it.")
+        return 2
+    return asyncio.run(_watch(settings))
+
+
+async def _watch(settings: Settings) -> int:
+    import httpx
+
+    from app.core.db import get_sessionmaker
+    from app.watch.pages import WATCHED_PAGES
+    from app.watch.runner import run_watch
+
+    async with httpx.AsyncClient(follow_redirects=False) as client, get_sessionmaker()() as db:
+        stats = await run_watch(
+            db,
+            client,
+            WATCHED_PAGES,
+            user_agent=settings.docs_watch_user_agent,
+            now=datetime.now(UTC),
+        )
+    print(
+        f"checked {stats.checked}: {stats.changed} changed, {stats.unchanged} unchanged, "
+        f"{stats.baseline} first seen, {stats.failed} failed"
+    )
+    return 0 if stats.failed == 0 else 3
 
 
 def _cmd_list_sources() -> int:
@@ -230,6 +269,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--index-version",
         default="v-local",
         help="IndexVersion key to write to (default: v-local).",
+    )
+
+    sub.add_parser(
+        "watch",
+        help="Fetch the watched vendor doc pages and record what changed (needs "
+        "CITEVYN_DOCS_WATCH_ENABLED=true).",
     )
 
     evaluate = sub.add_parser(
