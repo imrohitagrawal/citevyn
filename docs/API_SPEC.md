@@ -843,7 +843,8 @@ watcher). Opt-in. 404 unless the access model is on.
   It changes nothing: mail scanners open links.
 - `POST /digest/unsubscribe?t=<send_id>.<token>` → unsubscribes (the button, or
   RFC 8058 one-click from the mail app; no cookie needed). Idempotent. A wrong
-  token is a 404 page and changes nothing. Each email has its own random token;
+  token is a 404 page and changes nothing; a missing or over-long `t` is 422.
+  Links do not expire. Each email has its own random token;
   only its hash is stored.
 
 Every digest email carries `List-Unsubscribe` and

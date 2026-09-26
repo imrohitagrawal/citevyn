@@ -129,14 +129,23 @@ async def _watch(settings: Settings) -> int:
 def _cmd_digest() -> int:
     """Send the weekly digest once (ADR-0005 Phase 7B). Refuses unless enabled.
 
-    Exit codes: 0 done (including "no changes, nothing sent"); 2 the digest is
-    off, or no email delivery is configured; 3 some sends failed (they are
+    Exit codes: 0 done (including "no changes, nothing sent"); 2 the digest or
+    the access model is off, the site URL is unset, or no email delivery is
+    configured; 3 some sends failed (they are
     retried by the next run); 1 an unexpected error. Schedule ONE run at a time,
     weekly; re-running in the same week mails no one twice.
     """
     settings = get_settings()
     if not settings.weekly_digest_enabled:
         print("The weekly digest is off. Set CITEVYN_WEEKLY_DIGEST_ENABLED=true to send it.")
+        return 2
+    if not settings.access_model_enabled:
+        # The unsubscribe link in every email is a route that is 404 while the
+        # access model is off: never send mail whose unsubscribe cannot work.
+        print("The access model is off, so digest unsubscribe links would not work.")
+        return 2
+    if not settings.magic_link_base_url:
+        print("CITEVYN_MAGIC_LINK_BASE_URL is not set, so unsubscribe links would be wrong.")
         return 2
     from app.services.notifications import build_email_client
 

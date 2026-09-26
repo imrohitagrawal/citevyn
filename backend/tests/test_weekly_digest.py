@@ -75,13 +75,15 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _add_user(email: str, *, verified: bool = True, opted_in: bool = True) -> str:
+def _add_user(
+    email: str, *, verified: bool = True, opted_in: bool = True, uid: str | None = None
+) -> str:
     async def go() -> str:
         async with get_sessionmaker()() as s:
-            uid = f"usr_{uuid.uuid4().hex[:12]}"
+            user_id = uid or f"usr_{uuid.uuid4().hex[:12]}"
             s.add(
                 User(
-                    user_id=uid,
+                    user_id=user_id,
                     role="demo_user",
                     created_at=NOW,
                     email=email,
@@ -90,7 +92,7 @@ def _add_user(email: str, *, verified: bool = True, opted_in: bool = True) -> st
                 )
             )
             await s.commit()
-            return uid
+            return user_id
 
     return _run(go())
 
@@ -123,7 +125,7 @@ def _add_change(
     _run(go())
 
 
-def _send(client: Any, **settings: Any) -> Any:
+def _send(client: Any, *, now: datetime = NOW, **settings: Any) -> Any:
     async def go() -> Any:
         slept: list[float] = []
 
@@ -132,7 +134,7 @@ def _send(client: Any, **settings: Any) -> Any:
 
         async with get_sessionmaker()() as s:
             stats = await send_weekly_digest(
-                s, client, Settings(**settings), now=NOW, sleep=fake_sleep
+                s, client, Settings(**settings), now=now, sleep=fake_sleep
             )
         stats.slept = slept  # type: ignore[attr-defined]
         return stats
@@ -480,5 +482,169 @@ def test_the_command_refuses_while_off(monkeypatch: pytest.MonkeyPatch, capsys: 
 
     monkeypatch.setattr(cli, "_digest", boom)
     assert cli.main(["digest"]) == 2
-    assert "off" in capsys.readouterr().out
+    assert "The weekly digest is off" in capsys.readouterr().out
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (dc03869): each test below failed or could not fail before
+# ---------------------------------------------------------------------------
+
+
+def test_a_rerun_mails_the_accounts_the_first_run_did_not(env: pytest.MonkeyPatch) -> None:
+    """The blocker: a re-run rolled back on the first account already mailed,
+    expiring the loaded changes, then crashed on the next account AFTER claiming
+    it, so that account silently missed the week. Turns red if: a re-run cannot
+    mail an account that comes after one it skips."""
+    _add_change()
+    _add_user("a@example.com", uid="usr_a")
+    first = _Recorder()
+    _send(first)
+    _add_user("b@example.com", uid="usr_b")  # opts in mid-week
+    second = _Recorder()
+    stats = _send(second)
+    assert (stats.sent, stats.skipped_already_sent) == (1, 1)
+    assert [m.to_addr for m in second.sent] == ["b@example.com"]
+    assert len(_sends()) == 2
+
+
+def test_runs_either_side_of_monday_never_repeat_a_change(env: pytest.MonkeyPatch) -> None:
+    """The week key is a calendar week but the window is 7 days: without
+    'since this account's last digest', Sunday night and Monday morning runs
+    both sent the same change. Turns red if: a change is mailed twice."""
+    sunday = datetime(2026, 9, 27, 23, 0, tzinfo=UTC)
+    monday = datetime(2026, 9, 28, 1, 0, tzinfo=UTC)
+    _add_change(at=sunday - timedelta(hours=1))
+    _add_user("a@example.com")
+    rec = _Recorder()
+    assert _send(rec, now=sunday).sent == 1
+    again = _send(rec, now=monday)
+    assert (again.sent, again.skipped_nothing_new) == (0, 1)
+    assert len(rec.sent) == 1
+    _add_change("Models", at=monday - timedelta(minutes=30))  # something new: it goes out
+    rec2 = _Recorder()
+    _send(rec2, now=monday + timedelta(minutes=1))
+    # already mailed this week (Monday's run claimed nothing, so this is its first)
+    assert [m.to_addr for m in rec2.sent] == ["a@example.com"]
+    assert "Models" in rec2.sent[0].text and "Rate limits" not in rec2.sent[0].text
+
+
+def test_failed_sends_count_toward_the_per_run_cap(env: pytest.MonkeyPatch) -> None:
+    """A provider that rejects everything must not be tried for every account.
+    Turns red if: only successes count toward the cap."""
+    _add_change()
+    for i in range(5):
+        _add_user(f"u{i}@example.com")
+    everyone = {f"u{i}@example.com" for i in range(5)}
+    stats = _send(_Recorder(fail_for=everyone), digest_max_per_run=2)
+    assert (stats.failed, stats.capped) == (2, True)
+
+
+def test_an_unexpected_error_releases_the_claim(env: pytest.MonkeyPatch) -> None:
+    """Turns red if: an error other than EmailDeliveryError leaves the account
+    claimed (it would miss the week)."""
+    _add_change()
+    _add_user("a@example.com")
+
+    class Broken:
+        async def send(self, message: EmailMessage) -> None:
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        _send(Broken())
+    assert _sends() == []
+    rec = _Recorder()
+    assert _send(rec).sent == 1
+
+
+def test_a_site_url_with_a_line_break_is_refused(env: pytest.MonkeyPatch) -> None:
+    """The site URL goes into a mail header. Turns red if: a CR/LF in it can
+    add headers (e.g. Bcc) to every digest."""
+    _add_change()
+    _add_user("a@example.com")
+    rec = _Recorder()
+    with pytest.raises(ValueError, match="line break"):
+        _send(rec, magic_link_base_url="https://x.example\r\nBcc: evil@example.com")
+    assert rec.sent == [] and _sends() == []
+
+
+def _digest_env(env: pytest.MonkeyPatch, tmp_path: Any, **extra: str) -> None:
+    values = {
+        "CITEVYN_WEEKLY_DIGEST_ENABLED": "true",
+        "CITEVYN_ACCESS_MODEL_ENABLED": "true",
+        "CITEVYN_MAGIC_LINK_BASE_URL": "https://citevyn.example",
+        "CITEVYN_EMAIL_OUTBOX_DIR": str(tmp_path / "outbox"),
+        **extra,
+    }
+    for k, v in values.items():
+        env.setenv(k, v)
+    get_settings.cache_clear()
+
+
+def test_the_command_refuses_with_the_access_model_off(
+    env: pytest.MonkeyPatch, tmp_path: Any, capsys: Any
+) -> None:
+    """Unsubscribe links are 404 while the access model is off. Turns red if:
+    the digest can be sent then."""
+    from app.worker import cli
+
+    _digest_env(env, tmp_path, CITEVYN_ACCESS_MODEL_ENABLED="false")
+    _add_change()
+    _add_user("a@example.com")
+    assert cli.main(["digest"]) == 2
+    assert "access model is off" in capsys.readouterr().out
+    assert not (tmp_path / "outbox").exists()
+
+
+def test_the_command_refuses_without_a_site_url(
+    env: pytest.MonkeyPatch, tmp_path: Any, capsys: Any
+) -> None:
+    """Turns red if: emails can carry a localhost unsubscribe link."""
+    from app.worker import cli
+
+    _digest_env(env, tmp_path)
+    env.delenv("CITEVYN_MAGIC_LINK_BASE_URL")
+    get_settings.cache_clear()
+    assert cli.main(["digest"]) == 2
+    assert "MAGIC_LINK_BASE_URL" in capsys.readouterr().out
+
+
+def test_the_command_sends_through_the_configured_client(
+    env: pytest.MonkeyPatch, tmp_path: Any, capsys: Any
+) -> None:
+    """The enabled path end to end, into the local outbox (never real mail).
+    Turns red if: the wiring (settings, client, session, summary) breaks."""
+    from app.worker import cli
+
+    _digest_env(env, tmp_path)
+    _add_change(at=datetime.now(UTC) - timedelta(hours=1))
+    _add_user("a@example.com")
+    env.setenv("CITEVYN_DIGEST_SEND_INTERVAL_SECONDS", "0")
+    get_settings.cache_clear()
+    assert cli.main(["digest"]) == 0
+    assert "sent 1" in capsys.readouterr().out
+    [mail] = list((tmp_path / "outbox").iterdir())
+    text = mail.read_text()
+    assert "To: a@example.com" in text
+    assert "List-Unsubscribe: <https://citevyn.example/digest/unsubscribe?t=" in text
+
+
+def test_the_database_refuses_a_second_claim_for_the_same_week(env: pytest.MonkeyPatch) -> None:
+    """Two OVERLAPPING runs both pass the up-front check; the unique constraint
+    is what stops the second claim. Turns red if: the constraint is dropped."""
+    from sqlalchemy.exc import IntegrityError
+
+    user = _add_user("a@example.com")
+
+    async def claim() -> None:
+        async with get_sessionmaker()() as s:
+            s.add(
+                DigestSend(
+                    user_id=user, week_start=week_start(NOW), sent_at=NOW, token_hash="h" * 64
+                )
+            )
+            await s.commit()
+
+    _run(claim())
+    with pytest.raises(IntegrityError):
+        _run(claim())
