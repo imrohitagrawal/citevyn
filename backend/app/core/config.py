@@ -407,6 +407,15 @@ class Settings(BaseSettings):
     # whether the prompt helps can only be measured by the paid judged eval, which
     # is the owner's call. The answer cache keys on it (policy version "+cmp").
     comparison_answers: bool = False
+    # The docs watcher (ADR-0005 §5, Phase 7A): `python -m app.worker.cli watch`
+    # fetches the fixed page list in app/watch/pages.py from the vendors' own
+    # sites and records what changed. Default OFF: the command refuses to run
+    # until the owner turns this on (and schedules it). It obeys robots.txt and
+    # identifies itself with this User-Agent.
+    docs_watch_enabled: bool = False
+    docs_watch_user_agent: str = (
+        "CiteVyn-docs-watcher/0.1 (+https://github.com/imrohitagrawal/citevyn)"
+    )
     # Confidence gate for the GLOBAL vector result (see app/retrieval/confidence.py).
     # An off-corpus query's nearest chunk is either barely related (below the floor)
     # or one of a muddle of ~equal weak matches (below the margin); an in-corpus

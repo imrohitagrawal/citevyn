@@ -1282,3 +1282,37 @@ def test_migration_0021_shared_answers_round_trip(alembic_config: AlembicConfig)
     alembic_downgrade(alembic_config, "0020")
     assert "shared_answers" not in tables()
     assert "api_keys" in tables()  # partner: only 0021's table went
+
+
+def test_migration_0022_doc_watch_round_trip(alembic_config: AlembicConfig) -> None:
+    """0022 (``doc_snapshots``, ``doc_changes``; ADR-0005 Phase 7A) creates both
+    tables with their keys and indexes; the downgrade drops them. RED if a table,
+    key or index is missing, or a table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert {"doc_snapshots", "doc_changes"} <= tables()
+    with engine.connect() as connection:
+        snap_pk = [
+            r[1] for r in connection.exec_driver_sql("PRAGMA table_info(doc_snapshots)") if r[5]
+        ]
+        change_pk = [
+            r[1] for r in connection.exec_driver_sql("PRAGMA table_info(doc_changes)") if r[5]
+        ]
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('doc_changes')")}
+    assert snap_pk == ["url"]
+    assert change_pk == ["change_id"]
+    assert {"ix_doc_changes_url", "ix_doc_changes_detected_at"} <= indexes
+
+    alembic_downgrade(alembic_config, "0021")
+    assert not ({"doc_snapshots", "doc_changes"} & tables())
+    assert "shared_answers" in tables()  # partner: only 0022's tables went
