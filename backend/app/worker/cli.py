@@ -81,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_watch()
     if args.command == "digest":
         return _cmd_digest()
+    if args.command == "alerts":
+        return _cmd_alerts()
     parser.print_help()
     return 1
 
@@ -167,6 +169,46 @@ async def _digest(settings: Settings, client: EmailClient) -> int:
     print(
         f"{stats.changes} changes: sent {stats.sent}, already sent {stats.skipped_already_sent}, "
         f"failed {stats.failed}{', stopped at the per-run cap' if stats.capped else ''}"
+    )
+    return 0 if stats.failed == 0 else 3
+
+
+def _cmd_alerts() -> int:
+    """Send watch alerts once (ADR-0005 Phase 7C-2). Refuses unless enabled.
+
+    Exit codes: 0 done; 2 alerts or the access model is off, the site URL is
+    unset, or no email delivery is configured; 3 some sends failed (retried by
+    the next run); 1 an unexpected error. Schedule ONE run at a time, after the
+    docs watcher (a change it commits mid-run is picked up by the next run).
+    """
+    settings = get_settings()
+    if not settings.watch_alerts_enabled:
+        print("Watch alerts are off. Set CITEVYN_WATCH_ALERTS_ENABLED=true to send them.")
+        return 2
+    if not settings.access_model_enabled:
+        print("The access model is off, so alert unsubscribe links would not work.")
+        return 2
+    if not (settings.magic_link_base_url or "").strip():
+        print("CITEVYN_MAGIC_LINK_BASE_URL is not set, so unsubscribe links would be wrong.")
+        return 2
+    from app.services.notifications import build_email_client
+
+    client = build_email_client(settings)
+    if client is None:
+        print("No email delivery is configured (CITEVYN_RESEND_API_KEY).")
+        return 2
+    return asyncio.run(_alerts(settings, client))
+
+
+async def _alerts(settings: Settings, client: EmailClient) -> int:
+    from app.core.db import get_sessionmaker
+    from app.services.alerts import send_watch_alerts
+
+    async with get_sessionmaker()() as db:
+        stats = await send_watch_alerts(db, client, settings, now=datetime.now(UTC))
+    print(
+        f"{stats.changes} changes: sent {stats.sent}, failed {stats.failed}, "
+        f"not Pro {stats.skipped_not_pro}{', stopped at the per-run cap' if stats.capped else ''}"
     )
     return 0 if stats.failed == 0 else 3
 
@@ -329,6 +371,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "digest",
         help="Email this week's doc changes to opted-in accounts (needs "
         "CITEVYN_WEEKLY_DIGEST_ENABLED=true).",
+    )
+
+    sub.add_parser(
+        "alerts",
+        help="Email Pro accounts the doc changes that match their watches (needs "
+        "CITEVYN_WATCH_ALERTS_ENABLED=true).",
     )
 
     evaluate = sub.add_parser(

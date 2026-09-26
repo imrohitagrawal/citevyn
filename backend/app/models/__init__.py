@@ -4,6 +4,7 @@ Importing this package registers every model with ``Base.metadata``,
 which Alembic consults to autogenerate migrations.
 """
 
+from app.models.alerts import AlertSend
 from app.models.answer_cache import AnswerCache
 from app.models.answer_usage import AnswerUsage
 from app.models.api_keys import ApiKey
@@ -47,6 +48,7 @@ from app.models.users import User
 from app.models.watches import Watch
 
 __all__ = [
+    "AlertSend",
     "DigestSend",
     "DocChange",
     "DocSnapshot",

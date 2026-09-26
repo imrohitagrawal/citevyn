@@ -327,6 +327,8 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("POST", "/v1/me/watches"): Capability.watch_alerts,
     ("GET", "/v1/me/watches"): Capability.manage_account,
     ("DELETE", "/v1/me/watches/{watch_id}"): Capability.manage_account,
+    ("GET", "/alerts/unsubscribe"): Capability.public,
+    ("POST", "/alerts/unsubscribe"): Capability.public,
     ("PUT", "/v1/me/digest"): Capability.weekly_digest,
     ("GET", "/digest/unsubscribe"): Capability.public,
     ("POST", "/digest/unsubscribe"): Capability.public,
@@ -363,7 +365,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 58
+    assert len(EXPECTED_CAPABILITY) == 60
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -448,6 +450,14 @@ EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ): "a shared answer, public by design; 404 unless the access model is on",
     ("GET", "/digest/unsubscribe"): "the unsubscribe page; the emailed token is the credential",
     ("POST", "/digest/unsubscribe"): "one-click unsubscribe; the emailed token is the credential",
+    (
+        "GET",
+        "/alerts/unsubscribe",
+    ): "the watch-alert unsubscribe page; the emailed token is the credential",
+    (
+        "POST",
+        "/alerts/unsubscribe",
+    ): "one-click alert unsubscribe; the emailed token is the credential",
     ("GET", "/health"): "liveness probe, called by the platform before any key exists",
     ("GET", "/health/dependencies"): "readiness probe, same reason",
     ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
