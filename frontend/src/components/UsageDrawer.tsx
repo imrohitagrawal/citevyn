@@ -85,9 +85,10 @@ export default function UsageDrawer({
                     </th>
                     <th scope="col">Chat</th>
                     <th scope="col">MCP</th>
-                    <th scope="col">
-                      <span className="sr-only">Share of the busiest day</span>
-                    </th>
+                    {/* The bar column is decoration: hidden from screen readers,
+                        header and cells alike, so no one hears a column they
+                        cannot reach. The numbers carry the meaning. */}
+                    <th aria-hidden="true" />
                   </tr>
                 </thead>
                 <tbody>

@@ -48,8 +48,20 @@ describe("UsageDrawer", () => {
     // Turns red if: empty days are listed, a day is dropped, or chat and MCP swap.
     vi.mocked(getUsage).mockResolvedValue(DATA);
     open();
-    const rows = within(await screen.findByRole("table")).getAllByRole("row").slice(1);
-    expect(rows.map((r) => r.textContent)).toEqual(["2 Sep 202631", "4 Sep 202601"]);
+    const table = await screen.findByRole("table");
+    // Headers are asserted too: swapping the Chat and MCP labels would mislabel
+    // every number. The decorative bar column exposes no header.
+    expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Day", "Chat", "MCP"]);
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(
+      rows.map((r) => [
+        within(r).getByRole("rowheader").textContent,
+        ...within(r).getAllByRole("cell").map((c) => c.textContent),
+      ]),
+    ).toEqual([
+      ["2 Sep 2026", "3", "1"],
+      ["4 Sep 2026", "0", "1"],
+    ]);
   });
 
   it("the busiest day gets the full bar and the others a share of it", async () => {
@@ -85,5 +97,14 @@ describe("UsageDrawer", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Could not load your usage. Please try again later.");
     expect(screen.queryByTestId("usage-summary")).toBeNull();
     expect(screen.queryByText(/no answered questions/i)).toBeNull();
+  });
+
+  it("without a reset date the summary simply ends", async () => {
+    // Turns red if: a null resets_at prints "resets" or crashes.
+    vi.mocked(getUsage).mockResolvedValue({ ...DATA, usage: { ...DATA.usage, resets_at: null } });
+    open();
+    expect((await screen.findByTestId("usage-summary")).textContent).toBe(
+      "1,234 of 2,000 answered questions used this month.",
+    );
   });
 });
