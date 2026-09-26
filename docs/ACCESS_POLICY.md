@@ -34,9 +34,24 @@ questions count; a refusal or an error never does.
 |---|---|---|---|
 | Anonymous | None (the canned sample only) | — | — |
 | Free | Once, per verified account | `CITEVYN_ACCESS_FREE_TRIAL_ANSWERS` | 25 |
-| Pro | Per month | `CITEVYN_ACCESS_PRO_MONTHLY_ANSWERS` | 1,000 |
+| Pro | Per calendar month (UTC) | `CITEVYN_ACCESS_PRO_MONTHLY_ANSWERS` | 1,000 |
 
 The per-hour rate limits and the global daily spend cap apply on top, to every tier.
+
+**As built (Phase 4B-2, `app/access/quota.py`):**
+
+- An answered question is a cited answer, fresh or from the cache. A refusal, a
+  no-answer, a greeting or an error never counts. Each one is a row in
+  `answer_usage`, written with the answer in one transaction.
+- The check runs before any paid call. When the allowance is used up:
+  - Free and not verified: 403 `verification_required`;
+  - Free with the trial used: 403 `plan_required`, reason `trial_used`;
+  - Pro with the month used: 429 `quota_exceeded`, with `resets_at`.
+- BYOK answers (Phase 8) are recorded as user-paid and never count.
+- Two questions sent at the same moment near the limit can both be answered: the
+  check and the write are not one step, because locking the account for a whole
+  model call would block its Stripe webhooks. The overshoot is at most the number
+  of requests that account has in flight, and the hourly limit caps it.
 
 ## Capabilities by tier
 

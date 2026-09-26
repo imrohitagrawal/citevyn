@@ -33,7 +33,8 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.deps import requires
-from app.access.policy import Capability
+from app.access.policy import Capability, Tier
+from app.access.quota import usage_for
 from app.billing.memberships import account_is_pro, apply_event, memberships_for, primary
 from app.billing.stripe_client import (
     StripeError,
@@ -251,13 +252,15 @@ async def get_membership(
     now = datetime.now(UTC)
     rows = await memberships_for(db, principal_id)
     m = primary(rows, now)
+    tier = Tier.pro if account_is_pro(rows, now) else Tier.free
+    usage = await usage_for(db, principal_id, tier, settings, now)
 
     def iso(value: datetime | None) -> str | None:
         return value.isoformat() if value is not None else None
 
     return {
         "request_id": _request_id(request),
-        "tier": "pro" if account_is_pro(rows, now) else "free",
+        "tier": tier.value,
         # The subscription that decides the tier (or the latest one).
         "status": m.status if m else None,
         "interval": m.billing_interval if m else None,
@@ -277,6 +280,8 @@ async def get_membership(
             "free_trial_answers": settings.access_free_trial_answers,
             "pro_monthly_answers": settings.access_pro_monthly_answers,
         },
+        # Where this account stands: answered questions used and left.
+        "usage": usage.as_dict(),
     }
 
 
