@@ -17,9 +17,17 @@
  * request, and LandingPage mounts them behind a single shared gate — they are
  * never half-mounted.
  *
- * Everything here is static marketing copy. Nothing in this module reads app
- * state directly; the four behavioural props are passed down from LandingPage.
+ * Everything here is static marketing copy. The one piece of app state read
+ * here is the access-model config (ADR-0005 Phase 5B-2), which picks which
+ * pricing section renders; the four behavioural props come from LandingPage.
  */
+
+import { lazy, Suspense } from "react";
+import { useClientConfig } from "../lib/clientConfig";
+import { LazyChunkBoundary } from "./LazyChunkBoundary";
+
+// ADR-0005 Phase 5B-2: the real plans, only with the access model on.
+const AccessPricing = lazy(() => import("./AccessPricing"));
 
 // ---------------------------------------------------------------------------
 // Personas
@@ -383,6 +391,18 @@ export function Pricing({
   onGetPro: () => void;
   onOpenChat: () => void;
 }) {
+  // ADR-0005 Phase 5B-2: with the access model on, the real plans (a lazy
+  // chunk of their own). With it off, this section renders exactly as before.
+  const config = useClientConfig();
+  if (config.access_model && config.allowance) {
+    return (
+      <LazyChunkBoundary label="access-pricing">
+        <Suspense fallback={null}>
+          <AccessPricing allowance={config.allowance} onOpenChat={onOpenChat} />
+        </Suspense>
+      </LazyChunkBoundary>
+    );
+  }
   const handlers: Record<Exclude<TierAction, null>, () => void> = {
     openChat: onOpenChat,
     getPro: onGetPro,

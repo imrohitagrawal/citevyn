@@ -754,8 +754,10 @@ Entitlement is never decided by these calls: every protected request reads the
 ### Client config and the sign-up bot check (ADR-0005 Phase 5)
 
 - `GET /v1/config` (no credential) → `{request_id, access_model: bool,
-  bot_check: {kind: "pow"} | null}`. The web client reads it before sign-in to
-  decide whether to show the pricing section, the usage meter and the bot check.
+  bot_check: {kind: "pow"} | null, allowance: {free_trial_answers,
+  pro_monthly_answers} | null}`. The web client reads it before sign-in to
+  decide whether to show the pricing section, the usage meter and the bot check;
+  the allowance numbers are settings, so the page never hard-codes them.
 - `GET /v1/auth/challenge` (no credential; 404 unless the access model is on) →
   `{request_id, challenge: {algorithm: "SHA-256", salt, challenge, maxnumber,
   signature}}`. Find the integer `number` in `0..maxnumber` with

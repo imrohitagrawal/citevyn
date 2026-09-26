@@ -35,8 +35,12 @@ vi.mock("../lib/clientConfig", () => ({
   getClientConfig: vi.fn(() => ({ access_model: false, bot_check: null })),
 }));
 
-const ON: ClientConfig = { access_model: true, bot_check: { kind: "pow" } };
-const OFF: ClientConfig = { access_model: false, bot_check: null };
+const ON: ClientConfig = {
+  access_model: true,
+  bot_check: { kind: "pow" },
+  allowance: { free_trial_answers: 25, pro_monthly_answers: 1000 },
+};
+const OFF: ClientConfig = { access_model: false, bot_check: null, allowance: null };
 
 /** Long enough for the fetch and the word streaming, shorter than a toast's
  * 5-second life (the same helper as useLandingState.test.tsx). */
