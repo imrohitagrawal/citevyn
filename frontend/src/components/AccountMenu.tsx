@@ -19,6 +19,7 @@ const ConnectedAccountsDrawer = lazy(() => import("./ConnectedAccountsDrawer"));
 const ApiKeysDrawer = lazy(() => import("./ApiKeysDrawer"));
 const SharedLinksDrawer = lazy(() => import("./SharedLinksDrawer"));
 const UsageDrawer = lazy(() => import("./UsageDrawer"));
+const AlertsDrawer = lazy(() => import("./AlertsDrawer"));
 
 interface AccountMenuProps {
   /**
@@ -73,6 +74,7 @@ export function AccountMenu({
   const [keysOpen, setKeysOpen] = useState(false);
   const [sharesOpen, setSharesOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [alertsOpen, setAlertsOpen] = useState(false);
   const accessModel = useClientConfig().access_model;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -88,6 +90,7 @@ export function AccountMenu({
     setKeysOpen(false);
     setSharesOpen(false);
     setUsageOpen(false);
+    setAlertsOpen(false);
     triggerRef.current?.focus();
     onOpenFailed?.();
   };
@@ -213,6 +216,20 @@ export function AccountMenu({
                 Usage
               </button>
             )}
+            {accessModel && (
+              <button
+                type="button"
+                role="menuitem"
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setAlertsOpen(true);
+                }}
+                style={menuItemStyle}
+              >
+                Alerts
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
@@ -237,6 +254,13 @@ export function AccountMenu({
                   onResumeSession?.(sessionId);
                 }}
               />
+            </Suspense>
+          </LazyChunkBoundary>
+        )}
+        {alertsOpen && (
+          <LazyChunkBoundary label="alerts" onError={openFailed}>
+            <Suspense fallback={null}>
+              <AlertsDrawer triggerRef={triggerRef} onClose={() => setAlertsOpen(false)} />
             </Suspense>
           </LazyChunkBoundary>
         )}
