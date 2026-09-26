@@ -426,9 +426,11 @@ async def test_every_event_is_logged_once_with_its_outcome(session: Any) -> None
     other = {"id": "evt_x", "type": "customer.created", "created": T0, "data": {"object": {}}}
     await _apply(session, other)
     rows = (
-        (await session.execute(select(StripeEvent).order_by(StripeEvent.event_id))).scalars().all()
+        (await session.execute(select(StripeEvent).order_by(StripeEvent.stripe_event_id)))
+        .scalars()
+        .all()
     )
-    assert [(r.event_id, r.outcome, r.account_id) for r in rows] == [
+    assert [(r.stripe_event_id, r.outcome, r.account_id) for r in rows] == [
         ("evt_1", "applied", ACCOUNT),
         ("evt_x", "ignored", None),
     ]

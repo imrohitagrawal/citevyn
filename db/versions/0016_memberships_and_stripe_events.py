@@ -62,7 +62,7 @@ def upgrade() -> None:
     op.create_index("ix_memberships_stripe_customer_id", "memberships", ["stripe_customer_id"])
     op.create_table(
         "stripe_events",
-        sa.Column("event_id", sa.String(255), primary_key=True),
+        sa.Column("stripe_event_id", sa.String(255), primary_key=True),
         sa.Column("event_type", sa.String(128), nullable=False),
         sa.Column("event_created", sa.BigInteger(), nullable=False),
         sa.Column("account_id", sa.String(128), nullable=True),

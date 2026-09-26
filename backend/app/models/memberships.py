@@ -54,7 +54,7 @@ class Membership(Base):
 class StripeEvent(Base):
     __tablename__ = "stripe_events"
 
-    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    stripe_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False)
     event_created: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # No foreign key: an event can name an account we do not (yet) know.

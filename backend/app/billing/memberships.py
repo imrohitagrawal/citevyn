@@ -263,7 +263,7 @@ async def apply_event(
         outcome = "ignored"
     db.add(
         StripeEvent(
-            event_id=event_id,
+            stripe_event_id=event_id,
             event_type=kind[:128],
             event_created=created,
             account_id=account,
