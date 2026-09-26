@@ -648,3 +648,99 @@ def test_the_database_refuses_a_second_claim_for_the_same_week(env: pytest.Monke
     _run(claim())
     with pytest.raises(IntegrityError):
         _run(claim())
+
+
+# ---------------------------------------------------------------------------
+# Remaining branches (CI's coverage gate found them untested)
+# ---------------------------------------------------------------------------
+
+
+def test_an_overlapping_run_that_claims_first_is_skipped_and_the_rest_are_mailed(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """Run A claims usr_b AFTER this run's up-front read but before its insert.
+    Turns red if: the lost insert crashes the run, or mails usr_b twice."""
+    _add_change()
+    _add_user("a@example.com", uid="usr_a")
+    _add_user("b@example.com", uid="usr_b")
+    _add_user("c@example.com", uid="usr_c")
+
+    class OtherRunClaimsB(_Recorder):
+        async def send(self, message: EmailMessage) -> None:
+            await super().send(message)
+            if message.to_addr == "a@example.com":
+                async with get_sessionmaker()() as other:
+                    other.add(
+                        DigestSend(
+                            user_id="usr_b",
+                            week_start=week_start(NOW),
+                            sent_at=NOW,
+                            token_hash="x" * 64,
+                        )
+                    )
+                    await other.commit()
+
+    rec = OtherRunClaimsB()
+    stats = _send(rec)
+    assert (stats.sent, stats.skipped_already_sent) == (2, 1)
+    assert [m.to_addr for m in rec.sent] == ["a@example.com", "c@example.com"]
+
+
+def test_opening_a_bad_unsubscribe_link_shows_a_404_page(env: pytest.MonkeyPatch) -> None:
+    """Turns red if: a bad link renders the confirm button or changes anything."""
+    _on(env)
+    user = _add_user("a@example.com")
+    _one_sent_token(env, user)
+    with TestClient(create_app()) as client:
+        page = client.get(f"/digest/unsubscribe?t={uuid.uuid4()}.nope")
+    assert page.status_code == 404
+    assert 'method="post"' not in page.text and "does not work" in page.text
+    assert _opted_in(user)
+
+
+def test_the_settings_route_is_404_for_an_account_that_no_longer_exists() -> None:
+    """Turns red if: a principal whose user row is gone gets a 500."""
+    from fastapi import HTTPException
+
+    from app.api.routes.digest import _user
+
+    class NoRows:
+        async def get(self, *_a: object) -> None:
+            return None
+
+    class Req:
+        class state:  # noqa: N801
+            request_id = "r"
+
+    with pytest.raises(HTTPException) as exc:
+        _run(_user(NoRows(), Req(), "usr_gone"))  # type: ignore[arg-type]
+    assert exc.value.status_code == 404
+
+
+def test_a_resend_transport_failure_is_an_email_delivery_error() -> None:
+    """The sender releases its claim only on EmailDeliveryError. Turns red if: a
+    network failure escapes as a raw httpx error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = ResendEmailClient(
+        api_key="k",
+        from_addr="CiteVyn <x@example.com>",
+        base_url="https://r.example",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(EmailDeliveryError, match="transport error: ConnectError"):
+        _run(client.send(EmailMessage("a@example.com", "s", "t", "h")))
+
+
+def test_the_command_refuses_without_email_delivery(
+    env: pytest.MonkeyPatch, tmp_path: Any, capsys: Any
+) -> None:
+    """Turns red if: the digest runs with nowhere to send mail."""
+    from app.worker import cli
+
+    _digest_env(env, tmp_path)
+    env.setattr("app.services.notifications.build_email_client", lambda _s: None)
+    assert cli.main(["digest"]) == 2
+    assert "No email delivery" in capsys.readouterr().out
