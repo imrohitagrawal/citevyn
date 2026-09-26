@@ -607,8 +607,13 @@ async def _resolve_or_create_identity(
     # ``normalize_email``: a provider address that fails that permissive
     # check must not abort a login, it just goes unstored like an
     # unverified one.
+    # ASCII only (ADR-0005 Phase 4B review): lower-casing folds look-alikes such
+    # as the Kelvin sign into ASCII, so a different mailbox would be stored as,
+    # and squat, a real address.
     email_for_new_user = (
-        identity.email.strip().lower() if identity.email_verified and identity.email else None
+        identity.email.strip().lower()
+        if identity.email_verified and identity.email and identity.email.isascii()
+        else None
     )
     if email_for_new_user is not None:
         email_taken = (

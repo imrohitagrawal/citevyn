@@ -1961,3 +1961,18 @@ def test_a_failing_github_email_list_without_a_public_email_is_still_an_error(
     )
     assert res.headers["location"] == "/?auth=error"
     assert _registered() == []
+
+
+def test_a_look_alike_unicode_address_is_not_stored_on_a_new_account(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Lower-casing turns "\u212aim@x.com" into "kim@x.com", so storing it would
+    let a new OAuth account squat the real kim@x.com (and a magic link the real
+    owner later redeems would sign them into it). Turns red if: a non-ASCII
+    provider address is stored on account creation."""
+    _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="\u212aim@x.com")
+    _callback(
+        oauth_client, "google", state=_state_from_start_response(_start(oauth_client, "google"))
+    )
+    [user] = _registered()
+    assert user.email is None
