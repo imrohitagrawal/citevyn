@@ -64,8 +64,12 @@ describe("ApiKeysDrawer", () => {
     expect(screen.getByTestId("snippet-claude").textContent).toContain(`Bearer cvk_${"a".repeat(32)}_`);
     // Codex: the key goes in an environment variable, never in config.toml
     // (Codex's documented bearer_token_env_var).
+    expect(screen.getByTestId("snippet-codex-env").textContent).toBe(
+      `export CITEVYN_API_KEY=cvk_${"a".repeat(32)}_${"b".repeat(64)}`,
+    );
     const codex = screen.getByTestId("snippet-codex").textContent ?? "";
-    expect(codex).toContain(`export CITEVYN_API_KEY=cvk_${"a".repeat(32)}_`);
+    expect(codex).not.toContain("cvk_");
+    expect(codex).not.toContain("export");
     expect(codex).toContain("[mcp_servers.citevyn]");
     expect(codex).toContain('bearer_token_env_var = "CITEVYN_API_KEY"');
     expect(codex).toMatch(/url = "https?:\/\/[^"]+\/v1\/mcp"/);
@@ -181,6 +185,42 @@ describe("review round", () => {
     await user.click(make);
     expect(createKey).toHaveBeenCalledTimes(1);
     finish({ ...KEY, key: "cvk_x" });
+  });
+
+  it("a revoked key leaves the list even when the refresh fails", async () => {
+    // Turns red if: the revoked row stays and can be revoked a second time.
+    vi.mocked(revokeKey).mockResolvedValue();
+    vi.mocked(listKeys).mockResolvedValueOnce([KEY]).mockRejectedValueOnce(new Error("down"));
+    open();
+    await revoke(KEY.name);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: `Revoke ${KEY.name}` })).toBeNull();
+  });
+
+  it("while one revoke is running, another key cannot be revoked", async () => {
+    // Turns red if: the busy guard in revoke is dropped.
+    const OTHER = { ...KEY, key_id: "k2", name: "Other key" };
+    vi.mocked(listKeys).mockResolvedValue([KEY, OTHER]);
+    vi.mocked(revokeKey).mockReturnValue(new Promise(() => undefined));
+    open();
+    const user = userEvent.setup();
+    await revoke(KEY.name);
+    await user.click(screen.getByRole("button", { name: `Revoke ${OTHER.name}` }));
+    const again = screen.queryByRole("button", { name: `Really revoke ${OTHER.name}` });
+    if (again) await user.click(again);
+    expect(revokeKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("making a key cancels a pending 'Really revoke?'", async () => {
+    // Turns red if: the armed revoke survives a make.
+    vi.mocked(listKeys).mockResolvedValue([KEY]);
+    vi.mocked(createKey).mockResolvedValue({ ...KEY, key_id: "k2", key: "cvk_x" });
+    open();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: `Revoke ${KEY.name}` }));
+    await user.click(screen.getByRole("button", { name: "Make a key" }));
+    await screen.findByTestId("new-key");
+    expect(screen.getByRole("button", { name: `Revoke ${KEY.name}` })).toBeTruthy();
   });
 
   it("after a revoke, focus stays in the drawer", async () => {

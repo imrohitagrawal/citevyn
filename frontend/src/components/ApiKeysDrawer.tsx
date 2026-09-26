@@ -28,14 +28,18 @@ function snippets(key: string, origin: string): { id: string; label: string; tex
       label: "Claude Code",
       text: `claude mcp add --transport http citevyn ${url} --header "Authorization: Bearer ${key}"`,
     },
+    // Codex reads the key from an environment variable (its documented
+    // bearer_token_env_var), so the key is never written into config.toml.
+    // Two snippets, because they are pasted into two different places.
     {
-      // Codex reads the key from an environment variable (its documented
-      // bearer_token_env_var), so the key is never written into config.toml.
+      id: "codex-env",
+      label: "Codex, step 1: add to your shell profile (for example ~/.zshrc)",
+      text: `export CITEVYN_API_KEY=${key}`,
+    },
+    {
       id: "codex",
-      label: "Codex (shell, then ~/.codex/config.toml)",
-      text:
-        `export CITEVYN_API_KEY=${key}\n\n` +
-        `[mcp_servers.citevyn]\nurl = "${url}"\nbearer_token_env_var = "CITEVYN_API_KEY"`,
+      label: "Codex, step 2: add to ~/.codex/config.toml",
+      text: `[mcp_servers.citevyn]\nurl = "${url}"\nbearer_token_env_var = "CITEVYN_API_KEY"`,
     },
   ];
 }
@@ -80,6 +84,7 @@ export default function ApiKeysDrawer({
   const make = async () => {
     if (busy) return; // one make at a time
     setBusy(true);
+    setConfirming(null); // a make cancels an armed revoke
     setError(null);
     try {
       const name = `Key made ${new Date().toISOString().slice(0, 10)}`;
@@ -95,7 +100,7 @@ export default function ApiKeysDrawer({
 
   // Two clicks: "Revoke" asks, "Really revoke" does it. One request at a time.
   const revoke = async (key: ApiKeyView) => {
-    if (busy) return;
+    if (busy) return; // one revoke or make at a time
     if (confirming !== key.key_id) {
       setConfirming(key.key_id);
       return;
@@ -106,6 +111,8 @@ export default function ApiKeysDrawer({
     try {
       await revokeKey(key.key_id);
       if (created?.key_id === key.key_id) setCreated(null);
+      // Gone even if the refresh below fails, so it cannot be revoked twice.
+      setKeys((prev) => prev?.filter((k) => k.key_id !== key.key_id) ?? prev);
       await refresh();
     } catch (e) {
       setError(refusal(e));
