@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.answer.orchestrator import OrchestratorError
 from app.api.routes.about import router as about_router
 from app.api.routes.admin import router as admin_router
+from app.api.routes.api_keys import router as api_keys_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.billing import router as billing_router
 from app.api.routes.client_config import router as client_config_router
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(feedback_router)
     app.include_router(billing_router)
+    app.include_router(api_keys_router)
     # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.

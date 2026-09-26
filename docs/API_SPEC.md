@@ -769,6 +769,25 @@ Entitlement is never decided by these calls: every protected request reads the
   challenge. Missing, wrong, forged, expired or reused: 403 `bot_check_failed`.
   OAuth sign-in is not checked.
 
+### API keys (ADR-0005 Phase 6A)
+
+Making a key is Pro (capability `api_keys`); listing and revoking need only a
+signed-in account (`manage_account`), so a lapsed Pro account can still revoke
+its keys. 404 unless the access model is on. A key is not revoked by signing out
+everywhere or by a password change. A route that accepts keys checks the owner's
+plan on every call.
+
+- `POST /v1/me/api-keys` `{"name": "laptop"}` (1 to 64 characters, no control or formatting characters) → `201
+  {request_id, key_id, name, prefix, scope, created_at, last_used_at, key}`.
+  `key` (`cvk_<32 hex>_<64 hex>`) is returned ONCE and stored only as a SHA-256
+  hash. 409 `too_many_api_keys` at 10 live keys.
+- `GET /v1/me/api-keys` → `{request_id, keys: [{key_id, name, prefix, scope,
+  created_at, last_used_at}]}`: live keys only, never the key itself.
+- `DELETE /v1/me/api-keys/{key_id}` → 204. Someone else's key, an unknown id or
+  an already-revoked key is 404.
+
+A key authenticates the MCP server (Phase 6B) as `Authorization: Bearer cvk_...`.
+
 ### Answer allowance on `POST /v1/sessions/{id}/messages`
 
 With the access model on, each answered question (a cited answer, fresh or
@@ -1117,4 +1136,5 @@ Notes:
 | plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. Also returned by `POST /v1/sessions/{id}/messages` when a Free account has used its free trial: `details` = `{capability: "chat", required_tier: "pro", reason: "trial_used", used, limit}`. |
 | verification_required | 403. A Free account has not verified its email address, so it has no free trial yet (ADR-0005 §1). Redeem a magic link, or sign in with a provider that verifies the same address. Only with the access model on. |
 | bot_check_failed | 403. `POST /v1/auth/register` or `POST /v1/auth/magic-link/request` came without a valid, unused proof-of-work solution in `X-CiteVyn-Bot-Check`. Get a new challenge and try again. Only with the access model on. |
+| too_many_api_keys | 409. The account already has the maximum number of live API keys (10); revoke one first. Only with the access model on. |
 | quota_exceeded | 429. A Pro account used this month's answered questions. `details` = `{used, limit, resets_at}` (the first of next month, UTC). Only with the access model on. |
