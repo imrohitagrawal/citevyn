@@ -7,10 +7,10 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "./api";
 import { botCheckHeaders, solveChallenge } from "./botCheck";
-import { getClientConfig } from "./clientConfig";
+import { loadClientConfig } from "./clientConfig";
 
 vi.mock("./api", () => ({ apiFetch: vi.fn() }));
-vi.mock("./clientConfig", () => ({ getClientConfig: vi.fn() }));
+vi.mock("./clientConfig", () => ({ loadClientConfig: vi.fn() }));
 
 function challengeFor(number: number, maxnumber = 30) {
   const salt = "abc123?expires=9999999999";
@@ -42,14 +42,16 @@ describe("botCheckHeaders", () => {
   it("returns no header, and makes no request, when the check is off", async () => {
     // Turns red if: the challenge is fetched while the access model is off
     // (today's page must make no extra request).
-    vi.mocked(getClientConfig).mockReturnValue({ access_model: false, bot_check: null });
+    vi.mocked(loadClientConfig).mockResolvedValue({ access_model: false, bot_check: null });
     expect(await botCheckHeaders()).toEqual({});
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
   it("fetches a challenge and returns the solved one as base64url JSON", async () => {
     // Turns red if: the header name, the encoding or the payload shape changes.
-    vi.mocked(getClientConfig).mockReturnValue({ access_model: true, bot_check: { kind: "pow" } });
+    // Found in review: reading a snapshot that had not loaded yet sent no
+    // header. It must WAIT for the config. Turns red if: it reads a snapshot.
+    vi.mocked(loadClientConfig).mockResolvedValue({ access_model: true, bot_check: { kind: "pow" } });
     const c = challengeFor(9);
     vi.mocked(apiFetch).mockResolvedValue({ request_id: "r", challenge: c });
     const headers = await botCheckHeaders();

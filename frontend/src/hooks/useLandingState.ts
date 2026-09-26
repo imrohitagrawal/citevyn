@@ -962,6 +962,9 @@ export function useLandingState() {
       // answer to an unrelated question misleads, and reaching matchKB here
       // pulls the whole canned KB into a live build's eager bundle (+2.3 KB).
       if (getClientConfig().access_model && getAuthSnapshot().status !== "signed-in") {
+        // Retryable: once signed in, the same question must go live, not flash
+        // this reply (the duplicate guard only lets failed questions through).
+        failedQuestionsRef.current.add(text.trim().toLowerCase());
         streamBot("Sign in with a free account to get cited answers.", {
           refusal: false,
           finalSources: [],

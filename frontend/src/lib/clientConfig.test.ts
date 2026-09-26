@@ -66,3 +66,17 @@ it("a demo build makes no request at all", async () => {
   await loadClientConfig();
   expect(apiFetch).not.toHaveBeenCalled();
 });
+
+
+it("a failed fetch is tried again by the next caller", async () => {
+  // Found in review: caching the failure left the page OFF until a reload, so
+  // sign-up sent no bot check and every retry got the same 403. Turns red if:
+  // a failure is cached.
+  vi.mocked(isLiveMode).mockReturnValue(true);
+  vi.mocked(apiFetch)
+    .mockRejectedValueOnce(new Error("blip"))
+    .mockResolvedValueOnce({ access_model: true, bot_check: { kind: "pow" } });
+  expect((await loadClientConfig()).access_model).toBe(false);
+  expect((await loadClientConfig()).access_model).toBe(true);
+  expect(apiFetch).toHaveBeenCalledTimes(2);
+});

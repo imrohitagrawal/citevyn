@@ -10,7 +10,7 @@
  * stays ``'self'``.
  */
 import { apiFetch } from "./api";
-import { getClientConfig } from "./clientConfig";
+import { loadClientConfig } from "./clientConfig";
 
 export interface Challenge {
   algorithm: string;
@@ -33,9 +33,11 @@ export async function solveChallenge(c: Challenge): Promise<number> {
   throw new Error("No solution to the sign-up check.");
 }
 
-/** ``{}`` while the check is off; otherwise one freshly solved challenge. */
+/** ``{}`` while the check is off; otherwise one freshly solved challenge.
+ * Waits for the config: a snapshot read before it loaded sent no header, and the
+ * server refused the sign-up (found in review). */
 export async function botCheckHeaders(): Promise<Record<string, string>> {
-  if (!getClientConfig().bot_check) return {};
+  if (!(await loadClientConfig()).bot_check) return {};
   const { challenge } = await apiFetch<{ challenge: Challenge }>("/v1/auth/challenge");
   const number = await solveChallenge(challenge);
   const json = JSON.stringify({ ...challenge, number });

@@ -41,7 +41,10 @@ export function loadClientConfig(): Promise<ClientConfig> {
       listeners.forEach((l) => l());
       return snapshot;
     })
-    .catch(() => OFF);
+    .catch(() => {
+      loading = null; // a failure is not remembered: the next caller asks again
+      return OFF;
+    });
   return loading;
 }
 

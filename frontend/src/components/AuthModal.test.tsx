@@ -853,3 +853,29 @@ describe("the sign-up bot check (ADR-0005 Phase 5)", () => {
     );
   });
 });
+
+
+describe("a refused bot check (ADR-0005 Phase 5)", () => {
+  it("says to reload, not to complete a check the user cannot see", async () => {
+    // Turns red if: the server's "complete the check and try again" is shown
+    // verbatim (there is no visible check, and retrying the same page fails).
+    const { register } = await import("../lib/api");
+    const { ApiClientError } = await import("../lib/types");
+    vi.mocked(register).mockRejectedValueOnce(
+      new ApiClientError("Please complete the check and try again.", 403, {
+        request_id: "r",
+        status: "error",
+        error: { code: "bot_check_failed", message: "Please complete the check and try again." },
+      }),
+    );
+    const user = userEvent.setup();
+    renderModal();
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByText("Need an account? Register"));
+    await user.type(within(dialog).getByLabelText("Email"), "carol@example.com");
+    await user.type(within(dialog).getByLabelText("Password"), "correct horse battery");
+    await user.click(within(dialog).getByRole("button", { name: "Create account" }));
+    expect(await within(dialog).findByText(/reload the page/i)).toBeTruthy();
+    expect(within(dialog).queryByText(/complete the check/i)).toBeNull();
+  });
+});

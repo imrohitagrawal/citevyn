@@ -313,7 +313,10 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
         err instanceof ApiClientError
           ? err.status === 404 && mode === "magic-link"
             ? "Email sign-in isn't available right now."
-            : err.message
+            : err.errorCode() === "bot_check_failed"
+              ? // There is no visible check to complete: reloading fetches a fresh config.
+                "We couldn't confirm this came from your browser. Please reload the page and try again."
+              : err.message
           : "Something went wrong. Try again.",
       );
     } finally {

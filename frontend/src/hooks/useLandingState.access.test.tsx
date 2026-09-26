@@ -86,6 +86,39 @@ describe("anonymous visitors with the access model on", () => {
     expect(bot.refusal).toBe(false); // not a "NO SOURCE" content refusal
   });
 
+  it("after signing in, the same question goes live (it is not locked out)", async () => {
+    // Found in review: the sign-in reply did not mark the question retryable,
+    // so the duplicate guard flashed the old bubble and never asked. Turns red
+    // if: the reply is not recorded as retryable.
+    vi.mocked(getClientConfig).mockReturnValue(ON);
+    vi.mocked(askQuestion).mockResolvedValue({
+      request_id: "r",
+      message_id: "m",
+      answer: "Live answer.",
+      citations: [{ source_name: "S", title: "T", url: "https://x", chunk_id: "c", marker: 1 }],
+      domain: "claude_code",
+      intent: "how_to",
+      confidence: "high",
+      cache_hit: false,
+      retrieval_strategy: "hybrid",
+      unsupported: false,
+      no_answer: false,
+      source_version_hash: "h",
+      answer_policy_version: "v1",
+    } as unknown as Awaited<ReturnType<typeof askQuestion>>);
+    const { result } = renderHook(() => useLandingState());
+    act(() => result.current.send("How do permissions work?"));
+    await settle();
+    expect(askQuestion).not.toHaveBeenCalled();
+    vi.mocked(getAuthSnapshot).mockReturnValue({
+      status: "signed-in",
+      user: { user_id: "usr_1", email: "a@x.com" },
+    } as ReturnType<typeof getAuthSnapshot>);
+    act(() => result.current.send("How do permissions work?"));
+    await settle();
+    expect(askQuestion).toHaveBeenCalledTimes(1);
+  });
+
   it("partner: with the access model off they ask live, exactly as today", async () => {
     // Turns red if: the sample path is taken while the model is off.
     const { result } = renderHook(() => useLandingState());
