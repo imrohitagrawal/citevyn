@@ -788,6 +788,29 @@ plan on every call.
 
 A key authenticates the MCP server (Phase 6B) as `Authorization: Bearer cvk_...`.
 
+### Shareable answers (ADR-0005 Phase 6C)
+
+A frozen copy of one answer, its citations and its "docs as of" date, readable
+by anyone with the link. Making a share is Pro (capability `share_answer`);
+listing and revoking need only a signed-in account (`manage_account`), so a
+lapsed Pro account can still revoke its links. 404 unless the access model is on.
+
+- `POST /v1/sessions/{session_id}/messages/{message_id}/share` → `201 {request_id,
+  share_id, url, question, created_at}`, where `url` is `/s/<share_id>` (32 hex
+  characters, 128 random bits). Only the caller's own answer with sources: a
+  question or a refusal is 422 `validation_error`; someone else's session is 404.
+  The question, answer and citations are copied at this moment: deleting the
+  conversation later does not change the page. Sharing an answer that already has
+  a live share returns that share with 200. 409 `too_many_shares` at 100 live shares.
+- `GET /v1/me/shares` → `{request_id, shares: [{share_id, url, question,
+  created_at}]}`: live shares only, newest first; `question` is cut to 200 characters.
+- `DELETE /v1/me/shares/{share_id}` → 204. Someone else's share, an unknown id or
+  an already-revoked share is 404.
+- `GET /s/{share_id}` → the public HTML page (no credential). 404 once revoked,
+  or for an unknown or malformed id. Sent with `X-Robots-Tag: noindex` and
+  `Cache-Control: no-store`. Every piece of text is escaped; nothing in the
+  question or answer becomes a link; a citation links only to an http(s) URL.
+
 ### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
 
 For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's
@@ -1164,4 +1187,5 @@ Notes:
 | verification_required | 403. A Free account has not verified its email address, so it has no free trial yet (ADR-0005 §1). Redeem a magic link, or sign in with a provider that verifies the same address. Only with the access model on. |
 | bot_check_failed | 403. `POST /v1/auth/register` or `POST /v1/auth/magic-link/request` came without a valid, unused proof-of-work solution in `X-CiteVyn-Bot-Check`. Get a new challenge and try again. Only with the access model on. |
 | too_many_api_keys | 409. The account already has the maximum number of live API keys (10); revoke one first. Only with the access model on. |
+| too_many_shares | 409. The account already has the maximum number of live shared answers (100); revoke one first. Only with the access model on. |
 | quota_exceeded | 429. A Pro account used this month's answered questions. `details` = `{used, limit, resets_at}` (the first of next month, UTC). Only with the access model on. |

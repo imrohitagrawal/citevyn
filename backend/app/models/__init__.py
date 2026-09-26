@@ -38,6 +38,7 @@ from app.models.oauth_nonces import OAuthNonce
 from app.models.provider_calls import ProviderCall
 from app.models.retrieved_evidence import RetrievedEvidence
 from app.models.sessions import Session
+from app.models.shared_answers import SharedAnswer
 from app.models.user_identities import UserIdentity
 from app.models.user_signals import AnswerFeedback, SourceRequest
 from app.models.users import User
@@ -79,6 +80,7 @@ __all__ = [
     "RetrievedEvidence",
     "RetrievalType",
     "Session",
+    "SharedAnswer",
     "TermType",
     "TimestampMixin",
     "User",

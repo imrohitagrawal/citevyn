@@ -1247,3 +1247,38 @@ def test_migration_0020_api_keys_round_trip(alembic_config: AlembicConfig) -> No
     alembic_downgrade(alembic_config, "0019")
     assert "api_keys" not in tables()
     assert "bot_check_uses" in tables()  # partner: only 0020's table went
+
+
+def test_migration_0021_shared_answers_round_trip(alembic_config: AlembicConfig) -> None:
+    """0021 (``shared_answers``; ADR-0005 Phase 6C) creates the table with its
+    share_id primary key and both indexes; message_id is SET NULL so the frozen
+    copy outlives the conversation, user_id CASCADE so it dies with the account.
+    RED if the table, key, an index or either delete rule is wrong, or the table
+    survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert "shared_answers" in tables()
+    with engine.connect() as connection:
+        pk = [r[1] for r in connection.exec_driver_sql("PRAGMA table_info(shared_answers)") if r[5]]
+        indexes = {r[1] for r in connection.exec_driver_sql("PRAGMA index_list('shared_answers')")}
+        on_delete = {
+            r[3]: r[6]
+            for r in connection.exec_driver_sql("PRAGMA foreign_key_list('shared_answers')")
+        }
+    assert pk == ["share_id"]
+    assert {"ix_shared_answers_user_id", "ix_shared_answers_message_id"} <= indexes
+    assert on_delete == {"user_id": "CASCADE", "message_id": "SET NULL"}
+
+    alembic_downgrade(alembic_config, "0020")
+    assert "shared_answers" not in tables()
+    assert "api_keys" in tables()  # partner: only 0021's table went
