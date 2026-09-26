@@ -68,6 +68,20 @@ describe("UsageMeter", () => {
     vi.mocked(getMembership).mockRejectedValue(new Error("down"));
     const { container } = render(<UsageMeter answered={0} />);
     await new Promise((r) => setTimeout(r, 0));
+    expect(getMembership).toHaveBeenCalled(); // partner: it did try to read
     expect(container.textContent).toBe("");
   });
+});
+
+
+it("a failed upgrade from the meter is said plainly", async () => {
+  // Found in review: the rejection was unhandled and the click did nothing
+  // visible. Turns red if: the failure is swallowed.
+  vi.mocked(getMembership).mockResolvedValue(
+    membership({ kind: "trial", used: 3, limit: 25, remaining: 22, resets_at: null, verified: true }),
+  );
+  vi.mocked(startCheckout).mockRejectedValueOnce(new Error("down"));
+  render(<UsageMeter answered={0} />);
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Upgrade" }));
+  expect((await screen.findByRole("alert")).textContent).toMatch(/couldn't start the upgrade/i);
 });

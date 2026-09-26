@@ -22,7 +22,14 @@ vi.mock("../lib/authStore", () => ({
   subscribeAuth: vi.fn(() => () => {}),
 }));
 vi.mock("./AuthModal", () => ({
-  default: ({ initialMode }: { initialMode?: string }) => <div role="dialog">auth:{initialMode}</div>,
+  default: ({ initialMode, onAuthenticated }: { initialMode?: string; onAuthenticated?: () => void }) => (
+    <div role="dialog">
+      auth:{initialMode}
+      <button type="button" onClick={onAuthenticated}>
+        finish-registering
+      </button>
+    </div>
+  ),
 }));
 
 const ALLOWANCE = { free_trial_answers: 25, pro_monthly_answers: 1000 };
@@ -118,5 +125,38 @@ describe("AccessPricing", () => {
     render(<AccessPricing allowance={ALLOWANCE} onOpenChat={onOpenChat} />);
     await user.click(screen.getByRole("button", { name: "Start asking" }));
     expect(onOpenChat).toHaveBeenCalled();
+  });
+});
+
+
+describe("after registering from a paid plan", () => {
+  it("continues to checkout with the interval that was chosen", async () => {
+    // Found in review: registering from Upgrade dropped the choice. Turns red
+    // if: registration does not resume checkout with the chosen interval.
+    const user = userEvent.setup();
+    render(<AccessPricing allowance={ALLOWANCE} onOpenChat={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Yearly" }));
+    await user.click(screen.getByRole("button", { name: "Upgrade to Pro" }));
+    await user.click(await screen.findByRole("button", { name: "finish-registering" }));
+    expect(startCheckout).toHaveBeenCalledWith("year");
+  });
+
+  it("registering from the free plan does not start a checkout", async () => {
+    // Partner. Turns red if: every registration resumes a checkout.
+    const user = userEvent.setup();
+    render(<AccessPricing allowance={ALLOWANCE} onOpenChat={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Create a free account" }));
+    await user.click(await screen.findByRole("button", { name: "finish-registering" }));
+    expect(startCheckout).not.toHaveBeenCalled();
+  });
+
+  it("the free plan's button stays the same element, so focus can return to it", () => {
+    // Found in review: swapping the button on sign-in left the modal's focus
+    // target detached. Turns red if: two different buttons are rendered.
+    const { rerender } = render(<AccessPricing allowance={ALLOWANCE} onOpenChat={vi.fn()} />);
+    const before = screen.getByRole("button", { name: "Create a free account" });
+    signedIn();
+    rerender(<AccessPricing allowance={{ ...ALLOWANCE }} onOpenChat={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Start asking" })).toBe(before);
   });
 });

@@ -33,15 +33,17 @@ export default function AccessPricing({
   const [error, setError] = useState<string | null>(null);
   const [registering, setRegistering] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null);
+  // Registering from Upgrade continues to checkout afterwards, with the
+  // interval chosen before (found in review: the choice was dropped).
+  const resumeCheckout = useRef(false);
 
-  const register = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const register = (e: React.MouseEvent<HTMLButtonElement>, thenCheckout: boolean) => {
     trigger.current = e.currentTarget;
+    resumeCheckout.current = thenCheckout;
     setRegistering(true);
   };
 
-  const upgrade = async (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (busy) return;
-    if (!signedIn) return register(e);
+  const checkout = async () => {
     setBusy(true);
     setError(null);
     try {
@@ -55,6 +57,12 @@ export default function AccessPricing({
     } finally {
       setBusy(false);
     }
+  };
+
+  const upgrade = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (busy) return;
+    if (!signedIn) return register(e, true);
+    void checkout();
   };
 
   const [price, unit] = PRICE[interval];
@@ -85,7 +93,7 @@ export default function AccessPricing({
               Start asking
             </button>
           ) : (
-            <button type="button" className="cta cta-outlined" onClick={register}>
+            <button type="button" className="cta cta-outlined" onClick={(e) => register(e, false)}>
               Create a free account
             </button>
           )}
@@ -113,7 +121,14 @@ export default function AccessPricing({
       {registering && (
         <LazyChunkBoundary label="auth-modal" onError={() => setRegistering(false)}>
           <Suspense fallback={null}>
-            <AuthModal triggerRef={trigger} initialMode="register" onClose={() => setRegistering(false)} />
+            <AuthModal
+              triggerRef={trigger}
+              initialMode="register"
+              onAuthenticated={() => {
+                if (resumeCheckout.current) void checkout();
+              }}
+              onClose={() => setRegistering(false)}
+            />
           </Suspense>
         </LazyChunkBoundary>
       )}

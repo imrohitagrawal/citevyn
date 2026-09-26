@@ -47,7 +47,14 @@ describe("startCheckout", () => {
     expect(assign).toHaveBeenCalledWith("https://billing.stripe.com/p/session/1");
   });
 
-  it.each(["http://checkout.stripe.com/x", "https://evil.example/stripe.com", "javascript:alert(1)"])(
+  it.each([
+    "http://checkout.stripe.com/x",
+    "https://evil.example/stripe.com",
+    "javascript:alert(1)",
+    "https://stripe.com.evil.example/x",
+    "https://checkout.stripe.com@evil.example/",
+    "https://evilstripe.com/x",
+  ])(
     "never navigates to an address that is not Stripe over https: %s",
     async (url) => {
       // Turns red if: the address is not checked before navigating.
@@ -65,4 +72,13 @@ describe("getMembership", () => {
     await getMembership();
     expect(apiFetch).toHaveBeenCalledWith("/v1/billing/membership");
   });
+});
+
+
+it("the portal refuses a non-Stripe address too", async () => {
+  // Turns red if: openPortal navigates without the host check.
+  const { openPortal } = await import("./billing");
+  vi.mocked(apiFetch).mockResolvedValue({ url: "https://evil.example/portal" });
+  await expect(openPortal()).rejects.toThrow();
+  expect(assign).not.toHaveBeenCalled();
 });

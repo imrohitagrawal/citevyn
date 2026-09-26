@@ -13,6 +13,7 @@ import { getMembership, startCheckout, type Usage } from "../lib/billing";
 export default function UsageMeter({ answered }: { answered: number }) {
   const [usage, setUsage] = useState<Usage | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -45,12 +46,16 @@ export default function UsageMeter({ answered }: { answered: number }) {
           onClick={() => {
             if (busy) return;
             setBusy(true);
-            startCheckout("month").finally(() => setBusy(false));
+            setError(false);
+            startCheckout("month")
+              .catch(() => setError(true))
+              .finally(() => setBusy(false));
           }}
         >
           Upgrade
         </button>
       )}
+      {error && <span role="alert">We couldn't start the upgrade. Please try again later.</span>}
     </div>
   );
 }
