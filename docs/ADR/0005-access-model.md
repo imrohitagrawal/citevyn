@@ -233,6 +233,16 @@ answer, condense, alias-check and query-embedding calls are all attributed. The
 allowance itself (Phase 4B-2) counts ANSWERS, not model calls: a cache hit is a
 cited answer that makes no model call, and a refusal can make several.
 
+**As built (Phase 4B-2):** the allowance is counted from `answer_usage` (migration
+0018), one row per answered question, written with the answer in one transaction.
+This departs from "metering on `provider_calls`" above, for the reason just given.
+A Pro "month" is the calendar month in UTC, not the Stripe billing period: yearly
+plans have no monthly period, and the count must not depend on webhook freshness.
+Free counts every answer ever; a lapsed Pro account has usually already used its
+25. Each row records its tier, and Pro counts only Pro rows, so upgrading
+mid-month gives the whole Pro allowance (found in review). See `docs/ACCESS_POLICY.md` for the error each case returns and the small
+overshoot two simultaneous questions can cause.
+
 #### CSRF
 
 Browser requests are protected by three things together: the session cookie is

@@ -736,7 +736,10 @@ Entitlement is never decided by these calls: every protected request reads the
 - `GET /v1/billing/membership` → `{tier: "free"|"pro", status, interval,
   current_period_end, cancel_at_period_end, grace_until, subscriptions:
   [{status, interval, current_period_end}], allowance: {free_trial_answers,
-  pro_monthly_answers}}`. The top-level fields describe one subscription: a paid
+  pro_monthly_answers}, usage: {kind: "trial"|"monthly", used, limit, remaining,
+  resets_at, verified}}`. `usage` counts answered questions (refusals never);
+  a Free account that is not verified has a limit of 0. The top-level fields
+  describe one subscription: a paid
   one that is not ending, else any paid one, else the latest. `subscriptions`
   lists them all, so paying twice is visible.
 - `POST /v1/billing/webhook` — Stripe only. No bearer or cookie: the
@@ -747,6 +750,16 @@ Entitlement is never decided by these calls: every protected request reads the
   one naming no account we have), `ignored` or `duplicate` (a redelivery:
   acknowledged, not re-applied). `422` for a bad signature or body; `503` when the live read of
   the subscription from Stripe fails (Stripe retries).
+
+### Answer allowance on `POST /v1/sessions/{id}/messages`
+
+With the access model on, each answered question (a cited answer, fresh or
+cached) uses one of the account's allowance; refusals, no-answers, greetings and
+errors never do. Free: the free trial, once, verified accounts only. Pro: a number
+per calendar month (UTC). When it is used up the route answers before any paid
+call: 403 `verification_required` (Free, not verified), 403 `plan_required` with
+`details.reason = "trial_used"` (Free), or 429 `quota_exceeded` with
+`details.resets_at` (Pro). The hourly limit still applies on top.
 
 ## 8. Feedback and the gap log (ADR-0005 §6)
 
@@ -1083,4 +1096,6 @@ Notes:
 | promotion_blocked | Index promotion refused: the candidate has no completed evaluation run, or measured a pass rate below `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE` |
 | billing_unavailable | 503. Stripe could not be reached or refused a checkout or portal call. Fixed message; Stripe's error body is never forwarded. Only with `CITEVYN_ACCESS_MODEL_ENABLED` on (ADR-0005 Phase 4). |
 | already_subscribed | 409. The account already has Pro; a second checkout would bill it twice. Open the billing portal instead. Only with the access model on. |
-| plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. |
+| plan_required | 403. The signed-in caller's plan lacks the capability this route needs (`docs/ACCESS_POLICY.md`). `details` = `{capability, required_tier}`. Only emitted when `CITEVYN_ACCESS_MODEL_ENABLED` is on (ADR-0005). An anonymous caller in the same position gets 401 `auth_required` with the same `details`. Also returned by `POST /v1/sessions/{id}/messages` when a Free account has used its free trial: `details` = `{capability: "chat", required_tier: "pro", reason: "trial_used", used, limit}`. |
+| verification_required | 403. A Free account has not verified its email address, so it has no free trial yet (ADR-0005 §1). Redeem a magic link, or sign in with a provider that verifies the same address. Only with the access model on. |
+| quota_exceeded | 429. A Pro account used this month's answered questions. `details` = `{used, limit, resets_at}` (the first of next month, UTC). Only with the access model on. |

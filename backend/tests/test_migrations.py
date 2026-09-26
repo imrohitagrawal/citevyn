@@ -1162,3 +1162,32 @@ def test_migration_0017_verified_and_who_paid_round_trip(alembic_config: Alembic
     assert "memberships" in {  # partner: only 0017's columns went
         r[0] for r in engine.connect().exec_driver_sql("SELECT name FROM sqlite_master").all()
     }
+
+
+def test_migration_0018_answer_usage_round_trip(alembic_config: AlembicConfig) -> None:
+    """0018 (``answer_usage``; ADR-0005 Phase 4B-2) creates the table with its
+    (user_id, occurred_at) index and the downgrade drops it. RED if the table or
+    the index is missing at head, or the table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def tables() -> set[str]:
+        with engine.connect() as connection:
+            return {
+                r[0]
+                for r in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).all()
+            }
+
+    assert "answer_usage" in tables()
+    with engine.connect() as connection:
+        indexes = {
+            ix[1]: [r[2] for r in connection.exec_driver_sql(f"PRAGMA index_info('{ix[1]}')")]
+            for ix in connection.exec_driver_sql("PRAGMA index_list('answer_usage')").all()
+        }
+    assert indexes.get("ix_answer_usage_user_occurred") == ["user_id", "occurred_at"]
+
+    alembic_downgrade(alembic_config, "0017")
+    assert "answer_usage" not in tables()
+    assert "memberships" in tables()  # partner: only 0018's table went

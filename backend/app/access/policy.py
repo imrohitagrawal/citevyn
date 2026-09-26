@@ -75,7 +75,7 @@ class Allowance(enum.StrEnum):
     none = "none"
     #: A one-time allowance per verified account (the free trial).
     once = "once"
-    #: A monthly allowance that resets each billing period.
+    #: A monthly allowance that resets on the first of each calendar month (UTC).
     monthly = "monthly"
 
 

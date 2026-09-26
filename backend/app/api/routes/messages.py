@@ -29,8 +29,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access.deps import requires
-from app.access.policy import Capability
+from app.access.deps import requires, tier_for_principal
+from app.access.policy import Capability, Tier
+from app.access.quota import is_counted_answer, refuse_if_used_up, usage_for, usage_row
 from app.answer.orchestrator import Orchestrator
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
@@ -187,6 +188,23 @@ async def post_message(
         )
 
     await require_session(db, request_id=request_id, session_id=session_id, user_id=principal_id)
+    # The answer allowance (ADR-0005 Phase 4B-2), only with the access model on,
+    # checked before any paid call. The tier comes from the principal this
+    # request already resolved, on this session: a second cookie lookup could
+    # see a logout that landed in between and wave the caller through.
+    tier: Tier | None = None
+    if settings.access_model_enabled:
+        tier = await tier_for_principal(db, principal_id, datetime.now(UTC))
+        if tier is Tier.anonymous:
+            # The ``chat`` capability refuses anonymous callers first; reaching
+            # here anyway fails closed, never unmetered.
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.auth_required,
+                message="Sign in to use this.",
+            )
+        usage = await usage_for(db, principal_id, tier, settings, datetime.now(UTC))
+        refuse_if_used_up(usage, tier, request_id)
     orchestrator = Orchestrator(settings, db)
     # Every paid call made while answering (the answer, condense, alias check,
     # query embedding) is recorded against the asker (ADR-0005 §2, Quota).
@@ -196,6 +214,10 @@ async def post_message(
             request_id=request_id,
             session_id=session_id,
         )
+    # Only an answered question uses allowance, recorded in the same transaction
+    # as the answer: a request that fails records nothing.
+    if tier is not None and is_counted_answer(response):
+        db.add(usage_row(principal_id, tier, response, request_id, datetime.now(UTC)))
     # ``Orchestrator.ask`` mutates ``db`` (adds + flushes) but does not
     # commit; commit here so the message + audit rows survive the
     # request boundary.

@@ -72,6 +72,14 @@ class APIErrorCode(StrEnum):
     # Spec-side (ADR-0005 Phase 4). 409: the account already has Pro, so a second
     # checkout would bill it twice. The client should open the billing portal.
     already_subscribed = "already_subscribed"
+    # Spec-side (ADR-0005 Phase 4B). 403: a Free account that has not proved its
+    # email address has no free trial (ADR-0005 §1); verifying is what helps.
+    verification_required = "verification_required"
+    # Spec-side (ADR-0005 Phase 4B). 429: a Pro account used this month's
+    # answered questions. ``details.resets_at`` says when the allowance returns.
+    # (A Free account whose trial is used gets 403 ``plan_required``: upgrading
+    # is what helps it, not waiting.)
+    quota_exceeded = "quota_exceeded"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -98,6 +106,8 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.plan_required: 403,
     APIErrorCode.billing_unavailable: 503,
     APIErrorCode.already_subscribed: 409,
+    APIErrorCode.verification_required: 403,
+    APIErrorCode.quota_exceeded: 429,
     APIErrorCode.internal_error: 500,
 }
 
