@@ -579,10 +579,11 @@ def test_the_portal_opens_the_customer_that_keeps_billing(env: pytest.MonkeyPatc
     with TestClient(_app(calls, url="https://billing.stripe.com/p/session/x")) as client:
         account = _register(client)
         _post_event(client, _sub_event("evt_1", account))  # sub_1, cus_1, continuing
-        ending = _sub_event("evt_2", account, cancel_at_period_end=True)
-        ending["data"]["object"].update(id="sub_2", customer="cus_2")
-        LIVE["sub_2"] = dict(ending["data"]["object"])
-        _post_event(client, ending)
+        # Built as sub_2 from the start, so the fake Stripe's sub_1 stays continuing.
+        _post_event(
+            client,
+            _sub_event("evt_2", account, cancel_at_period_end=True, id="sub_2", customer="cus_2"),
+        )
         res = client.post("/v1/billing/portal", headers=DEMO)
         view = client.get("/v1/billing/membership", headers=DEMO).json()
     assert res.status_code == 200

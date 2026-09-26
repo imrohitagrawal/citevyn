@@ -533,7 +533,10 @@ async def test_h2_metadata_naming_an_unknown_account_cannot_freeze_it_either(ses
     _live(status="active")
     await _apply(session, _sub_event("evt_1"))
     _live(status="canceled", account="usr_" + "f" * 32)
-    await _apply(session, _sub_event("evt_2", kind="customer.subscription.deleted"))
+    outcome = await _apply(session, _sub_event("evt_2", kind="customer.subscription.deleted"))
+    assert outcome == "applied_account_mismatch"
+    m = await _membership(session)
+    assert m is not None and m.status == "canceled"
     assert not await _pro(session)
 
 
@@ -582,3 +585,111 @@ def test_k_the_primary_row_is_a_paid_one_that_is_not_ending() -> None:
     assert primary([lapsed, ending], NOW) is ending
     assert primary([lapsed], NOW) is lapsed
     assert primary([], NOW) is None
+
+
+def test_k_an_account_in_grace_is_described_by_its_grace_row() -> None:
+    """A payment failed on one subscription (still Pro, in grace) and another was
+    cancelled more recently. The user must see the grace row, so they see the
+    7-day warning. Turns red if: primary picks paid rows by status alone."""
+    from app.billing.memberships import primary
+
+    in_grace = _m(status="past_due", grace_until=NOW + timedelta(days=3))
+    lapsed = _m(status="canceled")
+    assert primary([lapsed, in_grace], NOW) is in_grace
+
+
+async def test_the_mismatch_is_logged_for_support(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Support moves a subscription by hand, so they need the log line. Turns red
+    if: the mismatch warning is not emitted."""
+    await _user(session)
+    await _user(session, OTHER)
+    _live(status="active")
+    await _apply(session, _sub_event("evt_1"))
+    _live(status="active", account=OTHER)
+    with caplog.at_level("WARNING", logger="citevyn.billing"):
+        await _apply(session, _sub_event("evt_2"))
+    [record] = [
+        r for r in caplog.records if r.getMessage() == "billing_subscription_account_mismatch"
+    ]
+    assert record.__dict__["subscription"] == "sub_1"
+
+
+async def test_the_mismatch_is_judged_on_the_read_inside_the_lock(session: Any) -> None:
+    """The metadata is cleared between the first read and the one inside the lock.
+    Turns red if: the mismatch check uses the first, unlocked read."""
+    await _user(session)
+    _live(status="active")
+    await _apply(session, _sub_event("evt_1"))
+    reads: list[int] = []
+
+    async def cleared_on_second_read(sub_id: str) -> dict[str, Any]:
+        reads.append(1)
+        return _live(status="active", account=ACCOUNT if len(reads) == 1 else None)
+
+    outcome = await apply_event(
+        session,
+        _sub_event("evt_2"),
+        fetch_subscription=cleared_on_second_read,
+        grace_days=7,
+        now=NOW,
+    )
+    assert len(reads) == 2
+    assert outcome == "applied_account_mismatch"
+
+
+async def test_a_concurrent_handlers_committed_write_is_not_kept_by_a_stale_row(
+    tmp_path: Any,
+) -> None:
+    """Lost update on an EXISTING row (found in review). Handler A loads the row
+    before the lock; handler B then commits past_due with a grace; A's read inside
+    the lock says active (the payment recovered). A must store active. Turns red
+    if: the in-lock read returns the object loaded before the lock without
+    refreshing it (no populate_existing): only columns differing from that stale
+    copy are written, so B's past_due survives and the payer drops to Free after
+    7 days. Uses a file database so two sessions see each other's commits."""
+    from sqlalchemy import update
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'race.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    make = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+    try:
+        async with make() as s:
+            await _user(s)
+            _live(status="active")
+            await _apply(s, _sub_event("evt_1"))
+            await s.commit()
+        reads: list[int] = []
+
+        async def b_commits_during_a(sub_id: str) -> dict[str, Any]:
+            reads.append(1)
+            if len(reads) == 2:  # B held the lock, stored past_due, released
+                async with make() as b:
+                    await b.execute(
+                        update(Membership).values(
+                            status="past_due", grace_until=NOW + timedelta(days=7)
+                        )
+                    )
+                    await b.commit()
+            return _live(status="active")
+
+        async with make() as a:
+            await apply_event(
+                a,
+                _invoice_event("evt_A", "invoice.paid"),
+                fetch_subscription=b_commits_during_a,
+                grace_days=7,
+                now=NOW,
+            )
+            await a.commit()
+        async with make() as r:
+            m = await _membership(r)
+        assert len(reads) == 2
+        assert m is not None and m.status == "active" and m.grace_until is None
+    finally:
+        await engine.dispose()

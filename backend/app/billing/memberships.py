@@ -208,8 +208,16 @@ async def _sync(
 
 
 async def _row(db: AsyncSession, sub_id: str) -> Membership | None:
+    # populate_existing: the read inside the lock must see what another handler
+    # committed. Without it SQLAlchemy returns the object loaded BEFORE the lock
+    # with its old values, and only columns that differ from those are written, so
+    # a newer concurrent write (a past_due and its grace) survived a recovery.
     return (
-        await db.execute(select(Membership).where(Membership.stripe_subscription_id == sub_id))
+        await db.execute(
+            select(Membership)
+            .where(Membership.stripe_subscription_id == sub_id)
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
 
 
