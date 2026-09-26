@@ -1,6 +1,6 @@
 # Cancelling
 
-Cancel Pro at any time: in the chat, press Manage billing under the question box. It opens Stripe's billing portal, where you can also change your card. You keep Pro until the end of the period you already paid for; you are not charged again.
+Cancel Pro at any time: in the chat, press Manage billing just above the question box (it shows while you have Pro). It opens Stripe's billing portal, where you can also change your card. You keep Pro until the end of the period you already paid for; you are not charged again.
 
 # Failed payments
 
@@ -16,4 +16,4 @@ If a renewal payment fails, Pro continues for 7 days while the payment is retrie
 
 # Charges we didn't intend
 
-If you were charged twice (for example by starting checkout in two tabs), both subscriptions show in your account. [OWNER: say you will refund the duplicate, and how.]
+If you were charged twice (for example by starting checkout in two tabs), contact us at [OWNER: address] and we will [OWNER: refund the duplicate, and how].

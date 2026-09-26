@@ -1,5 +1,5 @@
 /**
- * ADR-0005 Phase 5B-2: the usage meter under the chat composer ("n of N
+ * ADR-0005 Phase 5B-2: the usage meter just above the chat composer ("n of N
  * left"). Each test says which change turns it red.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";

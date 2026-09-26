@@ -1,5 +1,5 @@
 /**
- * UsageMeter — "n of N left", under the chat composer (ADR-0005 Phase 5B-2).
+ * UsageMeter — "n of N left", just above the chat composer (ADR-0005 Phase 5B-2).
  * Mounted only with the access model on and the caller signed in. Re-reads the
  * membership after each answer. A failed read renders nothing: the chat must
  * never break, or show wrong numbers, because the meter could not load.
