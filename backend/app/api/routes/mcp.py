@@ -107,9 +107,16 @@ async def mcp(
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         return _error(None, -32600, "Request too large.")  # refused unread
-    raw = await request.body()
-    if len(raw) > MAX_BODY_BYTES:
-        return _error(None, -32600, "Request too large.")
+    # Read in pieces and stop at the cap: a chunked body has no Content-Length,
+    # and reading it whole first would hold it all in memory.
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            return _error(None, -32600, "Request too large.")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     try:
         parsed: object = json.loads(raw, parse_constant=_reject_constant)
     except (ValueError, RecursionError):
@@ -211,12 +218,16 @@ async def _ask_docs(
                 "source": clean_field(str(c.get("source_name") or ""), 80),
             }
         )
-    # A per-request marker frames the answer; the text cannot forge it.
-    text = clean_answer(str(response.get("answer") or ""), nonce=secrets.token_hex(6))
-    if citations:
-        text += "\n\nSources:\n" + "\n".join(
-            f"[{c['marker']}] {c['title']} — {c['url']}" for c in citations
-        )
+    sources = (
+        "Sources:\n" + "\n".join(f"[{c['marker']}] {c['title']} — {c['url']}" for c in citations)
+        if citations
+        else ""
+    )
+    # A per-request marker frames the answer AND its sources (found in review:
+    # sources outside the frame could read as trusted server text).
+    text = clean_answer(
+        str(response.get("answer") or ""), nonce=secrets.token_hex(6), appendix=sources
+    )
     return _result(
         rid,
         {

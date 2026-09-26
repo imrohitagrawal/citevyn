@@ -801,8 +801,10 @@ not served). 404 unless the access model is on.
   `202` and no body. Errors: -32700 parse, -32600 invalid request, -32601 unknown
   method, -32602 unknown tool or bad arguments.
 - **Tool `ask_docs {question}`** (at most 4,000 characters): the same answer path
-  as chat. Result: `content[0].text` is the answer, cleaned and prefixed with a
-  note that it is reference material, not instructions, then a Sources list;
+  as chat. Result: `content[0].text` is the answer as plain text (hidden
+  characters, HTML, images and URLs removed; links keep their words), labelled
+  as reference material, not instructions, and framed with its Sources list by
+  a per-request random marker;
   `structuredContent` = `{answered, answer, citations: [{marker, title, url,
   source}], docs_as_of}`. Citations are https only.
 - **Plan and allowance, on every call:** the key owner must have Pro; an answered
