@@ -3127,3 +3127,162 @@ async def test_a_dual_active_non_exact_answer_names_the_index_not_the_embedder(
         "a dual-active database must not send the operator to the embedder config"
     )
     assert "answer_cache_write_skipped_vector_unavailable" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Cross-vendor comparison answers (ADR-0005 §5, Phase 6E)
+# ---------------------------------------------------------------------------
+
+_COMPARE_Q = "How do the rate limits compare between the Claude API and Gemini?"
+
+
+class _CitingLLM:
+    """Answers citing exactly ``markers``, and records the prompt it was given."""
+
+    def __init__(self, markers: list[int]) -> None:
+        self.markers = markers
+        self.users: list[str] = []
+
+    async def complete(self, *, system: str, user: str, max_tokens: int, temperature: float) -> Any:
+        from app.llm.types import LLMResult
+
+        self.users.append(user)
+        cites = " ".join(f"[{m}]" for m in self.markers)
+        return LLMResult(
+            text=f"Here is the comparison {cites}.",
+            input_tokens=1,
+            output_tokens=1,
+            model="fake",
+            provider="stub",
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def _compare(
+    session: Any, *, on: bool, markers: list[int], question: str = _COMPARE_Q
+) -> tuple[dict[str, Any], _CitingLLM]:
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=2)
+    evidence[0].product_area, evidence[0].source_name = "claude_api", "claude_api"
+    evidence[1].product_area, evidence[1].source_name = "gemini_api", "gemini_api"
+    llm = _CitingLLM(markers)
+    orchestrator = Orchestrator(
+        _settings(comparison_answers=on), session, llm=llm, retriever=_FakeRetriever(evidence)
+    )
+    response = await orchestrator.ask(
+        question=question, request_id="req_cmp", session_id=uuid.uuid4()
+    )
+    return response, llm
+
+
+async def test_comparison_off_leaves_the_prompt_answer_and_policy_unchanged(session: Any) -> None:
+    """Turns red if: the setting's default changes anything for anyone."""
+    response, llm = await _compare(session, on=False, markers=[1])
+    assert "Note:" not in llm.users[0]
+    assert response["answer"] == "Here is the comparison [1]."
+    assert response["answer_policy_version"] == _settings().answer_policy_version
+
+
+async def test_comparison_on_asks_for_each_product_by_name(session: Any) -> None:
+    """Turns red if: the instruction is not sent, or names the wrong products."""
+    _, llm = await _compare(session, on=True, markers=[1, 2])
+    note = next(line for line in llm.users[0].splitlines() if line.startswith("Note:"))
+    assert "the Claude API" in note and "the Gemini API" in note
+    assert llm.users[0].index("Note:") < llm.users[0].index("EVIDENCE:")
+
+
+async def test_comparison_on_says_which_named_product_is_not_cited(session: Any) -> None:
+    """The model cited only the Claude API chunk. Turns red if: the answer is
+    served as if complete, or the note names the wrong product."""
+    response, _ = await _compare(session, on=True, markers=[1])
+    assert response["answer"].endswith(
+        "The documentation I have does not cover the Gemini API for this question."
+    )
+    assert response["answer_policy_version"] == _settings().answer_policy_version + "+cmp"
+
+
+async def test_comparison_on_adds_nothing_when_every_product_is_cited(session: Any) -> None:
+    """Turns red if: a note is added to a complete comparison."""
+    response, _ = await _compare(session, on=True, markers=[1, 2])
+    assert response["answer"] == "Here is the comparison [1] [2]."
+
+
+async def test_comparison_on_leaves_a_single_product_question_alone(session: Any) -> None:
+    """Turns red if: the instruction or the note reaches a one-product question."""
+    # It cites the Gemini chunk: a note would wrongly say the Claude API is not
+    # covered if the multi-product check were dropped.
+    response, llm = await _compare(
+        session, on=True, markers=[2], question="What are the Claude API rate limits?"
+    )
+    assert "Note:" not in llm.users[0]
+    assert "does not cover" not in response["answer"]
+
+
+async def test_an_answer_cached_with_comparisons_off_is_not_served_with_them_on(
+    session: Any,
+) -> None:
+    """Turns red if: the cache key ignores the setting (a stale, un-noted answer
+    would then be served after the owner turns comparisons on)."""
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=2)
+    evidence[0].product_area, evidence[0].source_name = "claude_api", "claude_api"
+    evidence[1].product_area, evidence[1].source_name = "gemini_api", "gemini_api"
+
+    async def ask(on: bool) -> tuple[dict[str, Any], _CitingLLM]:
+        llm = _CitingLLM([1])
+        orch = Orchestrator(
+            _settings(comparison_answers=on), session, llm=llm, retriever=_FakeRetriever(evidence)
+        )
+        return await orch.ask(question=_COMPARE_Q, request_id="req", session_id=uuid.uuid4()), llm
+
+    first, _ = await ask(False)
+    again_off, llm_off = await ask(False)
+    assert again_off["cache_hit"] is True and llm_off.users == []  # partner: the cache works
+    on, llm_on = await ask(True)
+    assert on["cache_hit"] is False and len(llm_on.users) == 1
+    assert "does not cover the Gemini API" in on["answer"]
+    assert first["cache_hit"] is False
+
+
+async def test_a_product_never_searched_is_never_named_or_called_uncovered(session: Any) -> None:
+    """Four products named; retrieve_multi searches the first three. Turns red if:
+    the instruction names the fourth, or the note says the docs do not cover it."""
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=3)
+    for hit, area in zip(evidence, ["claude_code", "claude_api", "gemini_api"], strict=True):
+        hit.product_area, hit.source_name = area, area
+    llm = _CitingLLM([1, 2, 3])
+    orchestrator = Orchestrator(
+        _settings(comparison_answers=True), session, llm=llm, retriever=_FakeRetriever(evidence)
+    )
+    response = await orchestrator.ask(
+        question="How do Claude Code, Codex, the Claude API and Gemini compare on rate limits?",
+        request_id="req_four",
+        session_id=uuid.uuid4(),
+    )
+    note = next(line for line in llm.users[0].splitlines() if line.startswith("Note:"))
+    assert "Codex" not in note
+    assert "Claude Code" in note  # partner: the searched products are named
+    assert "does not cover" not in response["answer"]
+
+
+async def test_a_degraded_retrieval_never_blames_the_docs(session: Any) -> None:
+    """A product missing because its search failed is an outage, not a gap in the
+    docs (#142). Turns red if: the note is added after a degraded retrieval."""
+    await _seed_index_version(session)
+    evidence = await _evidence(session, count=2)
+    evidence[0].product_area, evidence[0].source_name = "claude_api", "claude_api"
+    evidence[1].product_area, evidence[1].source_name = "gemini_api", "gemini_api"
+    orchestrator = Orchestrator(
+        _settings(comparison_answers=True),
+        session,
+        llm=_CitingLLM([1]),
+        retriever=_FakeRetriever(evidence, vector_degrade=VectorDegrade.unavailable),
+    )
+    response = await orchestrator.ask(
+        question=_COMPARE_Q, request_id="req_deg", session_id=uuid.uuid4()
+    )
+    assert response["no_answer"] is False
+    assert "does not cover" not in response["answer"]

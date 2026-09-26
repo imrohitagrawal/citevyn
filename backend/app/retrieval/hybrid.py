@@ -48,6 +48,9 @@ _logger = logging.getLogger("citevyn.retrieval")
 # per-area searches are sequential (shared session) and each embeds the query, so
 # this bounds cost/latency; a realistic cross-product question names 2–3 products.
 _MAX_MULTIHOP_DOMAINS = 3
+#: Public name for the cap: the orchestrator's comparison instruction and note
+#: must name only the products ``retrieve_multi`` actually searches (Phase 6E).
+MAX_MULTIHOP_DOMAINS = _MAX_MULTIHOP_DOMAINS
 
 
 # Precedence for :func:`_combine_degrades`, most severe first. It is a LIST and
@@ -79,6 +82,40 @@ def _combine_degrades(degrades: list[VectorDegrade]) -> VectorDegrade:
         if any(d is reason for d in degrades):
             return reason
     return VectorDegrade.none
+
+
+def _keep_each_area(
+    reranked: list[EvidenceHit], merged: list[EvidenceHit], areas: list[str], *, top_k: int
+) -> list[EvidenceHit]:
+    """Every named product that returned evidence keeps its best chunk (Phase 6E).
+
+    The round-robin merge puts each product's best chunk first, but the rerank's
+    ``top_k`` cut (or a real reranker) can still drop a product entirely, and a
+    comparison answer then cannot cite it. A missing product's best chunk (its
+    first in ``merged``) replaces the LAST chunk of a product that has more than
+    one, so no product loses its only chunk and the list never grows past
+    ``top_k``. When every product is already present, the list is unchanged; at
+    today's settings (identity reranker, top_k 6, at most 3 products) that is
+    always the case.
+    """
+    kept = list(reranked)
+    for area in areas:
+        if any(h.product_area == area for h in kept):
+            continue
+        best = next((h for h in merged if h.product_area == area), None)
+        if best is None:
+            continue  # this product returned nothing: never invent evidence
+        counts: dict[str, int] = {}
+        for h in kept:
+            counts[h.product_area] = counts.get(h.product_area, 0) + 1
+        spare = next(
+            (i for i in range(len(kept) - 1, -1, -1) if counts[kept[i].product_area] > 1), None
+        )
+        if spare is not None:
+            kept[spare] = best
+        elif len(kept) < top_k:
+            kept.append(best)
+    return kept
 
 
 def _round_robin_merge(per_area_hits: list[list[EvidenceHit]]) -> list[EvidenceHit]:
@@ -367,7 +404,9 @@ class HybridRetriever:
             for a in areas
         ]
         merged = _round_robin_merge([r.hits for r in per_area])
-        reranked = await self._reranker.rerank(question, merged, top_k=top_k)
+        reranked = _keep_each_area(
+            await self._reranker.rerank(question, merged, top_k=top_k), merged, areas, top_k=top_k
+        )
         for idx, hit in enumerate(reranked, start=1):
             hit.rank = idx
         return await self._finalize(

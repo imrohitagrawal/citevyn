@@ -400,6 +400,13 @@ class Settings(BaseSettings):
     #     retrieval) + the existing LLM grounding-refusal (the final net). Set
     #     ``False`` to restore the old refuse-before-retrieval behavior.
     answer_when_grounded: bool = True
+    # Cross-vendor comparison answers (ADR-0005 §5, Phase 6E). When a question
+    # names two or more products, the prompt asks for each product to be answered
+    # with its own citations, and an answer that cites none of a named product's
+    # evidence gets one plain sentence saying the docs do not cover it. Default OFF:
+    # whether the prompt helps can only be measured by the paid judged eval, which
+    # is the owner's call. The answer cache keys on it (policy version "+cmp").
+    comparison_answers: bool = False
     # Confidence gate for the GLOBAL vector result (see app/retrieval/confidence.py).
     # An off-corpus query's nearest chunk is either barely related (below the floor)
     # or one of a muddle of ~equal weak matches (below the margin); an in-corpus

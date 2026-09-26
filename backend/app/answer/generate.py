@@ -70,16 +70,23 @@ def _format_evidence(hit: EvidenceHit, *, index: int) -> str:
     )
 
 
-def build_user_prompt(question: str, evidence: list[EvidenceHit]) -> str:
+def build_user_prompt(
+    question: str, evidence: list[EvidenceHit], *, instruction: str | None = None
+) -> str:
     """Build the user prompt for the LLM client.
 
     Empty evidence emits the ``EVIDENCE: NONE`` sentinel so the
-    contract in :mod:`app.llm.prompts` is honored.
+    contract in :mod:`app.llm.prompts` is honored. ``instruction`` (Phase 6E,
+    comparison answers) goes on its own line BEFORE the evidence block; with
+    none, the prompt is byte-for-byte what it was.
     """
+    head = f"Question: {question.strip()}\n"
+    if instruction:
+        head += f"Note: {instruction}\n"
     if not evidence:
-        return f"Question: {question.strip()}\n{_NO_EVIDENCE_SENTINEL}\n"
+        return f"{head}{_NO_EVIDENCE_SENTINEL}\n"
     body = "\n".join(_format_evidence(hit, index=i + 1) for i, hit in enumerate(evidence))
-    return f"Question: {question.strip()}\nEVIDENCE:\n{body}\n"
+    return f"{head}EVIDENCE:\n{body}\n"
 
 
 class AnswerGenerator:
@@ -99,6 +106,8 @@ class AnswerGenerator:
         self,
         question: str,
         evidence: list[EvidenceHit],
+        *,
+        instruction: str | None = None,
     ) -> LLMResult:
         """Call the LLM with the evidence block embedded for ``question``.
 
@@ -106,7 +115,7 @@ class AnswerGenerator:
         citation validator against ``result.text`` and the evidence
         list before deciding whether the answer is grounded.
         """
-        user = build_user_prompt(question, evidence)
+        user = build_user_prompt(question, evidence, instruction=instruction)
         return await self._llm.complete(
             system=SYSTEM_PROMPT,
             user=user,
