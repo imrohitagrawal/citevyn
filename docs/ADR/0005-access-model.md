@@ -270,6 +270,18 @@ OpenRouter data policy are confirmed. Drafting the refund page found that a
 paying user had no way to reach the billing portal to cancel, so the usage
 meter now offers Pro accounts "Manage billing".
 
+**As built (Phase 6B): the MCP server.** `POST /v1/mcp`, written without an MCP
+library (five JSON-RPC methods over one POST did not justify a dependency). An
+API key authenticates it; a browser cookie never does, so it cannot be driven
+cross-site. The key owner's plan, allowance and hourly limit are re-read on
+every call, because a key proves identity, not the plan. Output cleaning
+(`app/mcp/clean.py`) removes what hides from a reader (control, format, bidi,
+zero-width and tag characters), HTML and markdown images, and non-https links,
+caps length, and labels the answer as reference material. It cannot recognise a
+persuasive sentence in plain words; the label and the separate structured
+citations are the defence there. The route inventory gained a third credential
+class, API key, with an executed 401 check.
+
 #### CSRF
 
 Browser requests are protected by three things together: the session cookie is

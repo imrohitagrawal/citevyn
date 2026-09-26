@@ -39,6 +39,7 @@ from app.api.routes.feedback import router as feedback_router
 from app.api.routes.health import router as health_router
 from app.api.routes.legal import router as legal_router
 from app.api.routes.magic_link import router as magic_link_router
+from app.api.routes.mcp import router as mcp_router
 from app.api.routes.me import router as me_router
 from app.api.routes.messages import router as messages_router
 from app.api.routes.oauth import router as oauth_router
@@ -142,6 +143,7 @@ def create_app() -> FastAPI:
     app.include_router(feedback_router)
     app.include_router(billing_router)
     app.include_router(api_keys_router)
+    app.include_router(mcp_router)
     # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.

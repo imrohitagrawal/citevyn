@@ -788,6 +788,31 @@ plan on every call.
 
 A key authenticates the MCP server (Phase 6B) as `Authorization: Bearer cvk_...`.
 
+### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
+
+For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's
+streamable-HTTP transport, answering with JSON (no server-sent stream; `GET` is
+not served). 404 unless the access model is on.
+
+- **Auth:** `Authorization: Bearer cvk_...` (an API key). A browser cookie or the
+  demo bearer is refused with 401.
+- **Methods:** `initialize` (protocol versions 2025-06-18, 2025-03-26,
+  2024-11-05), `ping`, `tools/list`, `tools/call`. A notification (no `id`) gets
+  `202` and no body. Errors: -32700 parse, -32600 invalid request, -32601 unknown
+  method, -32602 unknown tool or bad arguments.
+- **Tool `ask_docs {question}`** (at most 4,000 characters): the same answer path
+  as chat. Result: `content[0].text` is the answer, cleaned and prefixed with a
+  note that it is reference material, not instructions, then a Sources list;
+  `structuredContent` = `{answered, answer, citations: [{marker, title, url,
+  source}], docs_as_of}`. Citations are https only.
+- **Plan and allowance, on every call:** the key owner must have Pro; an answered
+  question counts against the same allowance as chat (recorded with channel
+  `mcp`); the account's hourly limit applies. These refusals are tool results
+  with `isError: true`, so the agent can read them.
+
+Install (Claude Code): `claude mcp add --transport http citevyn
+https://<site>/v1/mcp --header "Authorization: Bearer cvk_..."`.
+
 ### Answer allowance on `POST /v1/sessions/{id}/messages`
 
 With the access model on, each answered question (a cited answer, fresh or
