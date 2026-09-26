@@ -22,12 +22,18 @@
  * `noValidate`, so the browser's own popup never replaces our announced message).
  * One request at a time: a submit while one is in flight is refused and
  * announced, which also makes a double-submit send once.
+ *
+ * "Share" (ADR-0005 Phase 6C-2, access model on, answers with sources only)
+ * makes a public, frozen copy of this question and answer, copies its link, and
+ * says who can see it and how to stop sharing it.
  */
 import { useRef, useState } from "react";
 import { apiFetch } from "../lib/api";
 import { ApiClientError } from "../lib/types";
 import { isSubmitKey, questionLength } from "../lib/composerInput";
 import { MAX_FEEDBACK_COMMENT, MAX_SOURCE_NOTE, MAX_SOURCE_URL } from "../lib/feedbackLimits";
+import { useClientConfig } from "../lib/clientConfig";
+import { shareAnswer, shareLink } from "../lib/shares";
 
 const REASONS: Array<[string, string]> = [
   ["wrong", "Wrong"],
@@ -44,9 +50,20 @@ interface Props {
   question: string;
   /** Offer "Request this source": the answer was refused for want of a source. */
   offerSourceRequest?: boolean;
+  /** An answer with sources: it can be shared (with the access model on). */
+  shareable?: boolean;
 }
 
-export default function AnswerActions({ sessionId, messageId, question, offerSourceRequest }: Props) {
+export default function AnswerActions({
+  sessionId,
+  messageId,
+  question,
+  offerSourceRequest,
+  shareable,
+}: Props) {
+  const accessModel = useClientConfig().access_model; // a hook: never behind a condition
+  const canShare = !!shareable && accessModel;
+  const [shared, setShared] = useState<string | null>(null);
   const [rating, setRating] = useState<"up" | "down" | null>(null);
   const [panel, setPanel] = useState<"report" | "source" | null>(null);
   const [reason, setReason] = useState("wrong");
@@ -117,6 +134,42 @@ export default function AnswerActions({ sessionId, messageId, question, offerSou
     }
   };
 
+  const share = async () => {
+    if (busy.current) { // one request at a time, shared with feedback
+      setStatus("Still sending. Please wait a moment.");
+      return;
+    }
+    busy.current = true;
+    setStatus("");
+    try {
+      const link = shareLink(await shareAnswer(sessionId, messageId), window.location.origin);
+      if (!link) throw new Error("unexpected share link");
+      setShared(link);
+      const copied = await navigator.clipboard?.writeText(link).then(
+        () => true,
+        () => false,
+      );
+      setStatus(copied ? "Link copied." : "Link ready. Copy it below.");
+    } catch (err) {
+      const e = err instanceof ApiClientError ? err : null;
+      const code = e?.errorCode();
+      // Only a failure a retry can fix says "try again".
+      setStatus(
+        code === "plan_required"
+          ? "Sharing answers is part of Pro."
+          : code === "too_many_shares"
+            ? "You have shared the most answers allowed. Stop sharing one under Shared links first."
+            : e?.status === 422
+              ? "This answer cannot be shared."
+              : e?.status === 401
+                ? "Please sign in to share."
+                : "Could not share that. Please try again.",
+      );
+    } finally {
+      busy.current = false;
+    }
+  };
+
   const sendSourceRequest = async () => {
     const link = url.trim();
     if (link && !/^https?:\/\/\S+$/i.test(link)) {
@@ -164,7 +217,22 @@ export default function AnswerActions({ sessionId, messageId, question, offerSou
             Request this source
           </button>
         )}
+        {canShare && (
+          <button type="button" className="answer-action" onClick={() => void share()}>
+            Share
+          </button>
+        )}
       </div>
+      {shared && (
+        <p className="answer-actions-note" data-testid="share-link">
+          Anyone with this link can see this question and answer:{" "}
+          <a href={shared} target="_blank" rel="noopener noreferrer">
+            {shared}
+          </a>
+          . Deleting this chat does not remove it; stop sharing it under Shared links in your
+          account menu.
+        </p>
+      )}
       {rating === "down" && <p className="answer-actions-note">You reported this answer.</p>}
 
       {panel === "report" && (

@@ -43,6 +43,7 @@ interface ChatViewProps {
       sessionId: string;
       question: string;
       offerSourceRequest: boolean;
+      shareable?: boolean;
     };
   }>;
   chatEmpty: boolean;
@@ -645,7 +646,10 @@ export function ChatView({
                   {m.answerRef && (
                     <LazyChunkBoundary label="answer-actions">
                       <Suspense fallback={null}>
-                        <AnswerActions {...m.answerRef} />
+                        {/* Keyed by the answer, not the list position: resuming another
+                            chat reuses positions, and a shared link or a vote must never
+                            carry over to a different answer (review, Phase 6C-2). */}
+                        <AnswerActions key={m.answerRef.messageId} {...m.answerRef} />
                       </Suspense>
                     </LazyChunkBoundary>
                   )}

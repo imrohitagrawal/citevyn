@@ -136,13 +136,15 @@ describe("useLandingState — live send path", () => {
       sessionId: "sess-1",
       question: "How do permissions work?",
       offerSourceRequest: false,
+      // A cited answer can be shared (ADR-0005 Phase 6C-2).
+      shareable: true,
     });
     expect(result.current.chatView[0].answerRef).toBeUndefined(); // partner: not on the question
   });
 
   it("invites a source request only for an in-scope refusal", async () => {
     // Turns red if: an out-of-scope refusal ("best laptop") invites gap-log
-    // requests, or an in-scope one does not.
+    // requests, or an in-scope one does not; or a refusal is shareable.
     const { result } = renderHook(() => useLandingState());
     mockAskQuestion.mockResolvedValueOnce(
       askResponse({ message_id: "a", no_answer: true, unsupported: false, citations: [] }),
@@ -155,9 +157,9 @@ describe("useLandingState — live send path", () => {
     act(() => result.current.send("Best laptop?"));
     await settle();
     const refs = result.current.chatView.filter((v) => v.answerRef).map((v) => v.answerRef);
-    expect(refs.map((r) => [r?.messageId, r?.offerSourceRequest])).toEqual([
-      ["a", true],
-      ["b", false],
+    expect(refs.map((r) => [r?.messageId, r?.offerSourceRequest, r?.shareable])).toEqual([
+      ["a", true, false],
+      ["b", false, false],
     ]);
   });
 

@@ -1706,6 +1706,7 @@ export function useLandingState() {
                 // In scope but refused for want of a source: the gap log's case.
                 // An out-of-scope refusal ("best laptop") would only add noise.
                 offerSourceRequest: !!m.refusal && !m.outOfScope,
+                shareable: (m.sources?.length ?? 0) > 0, // the server rule: has citations
               }
             : undefined,
       })),
