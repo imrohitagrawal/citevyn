@@ -7,8 +7,10 @@ still clear theirs. All of it is 404 unless ``CITEVYN_ACCESS_MODEL_ENABLED`` is 
 
 * ``page``: one of the watched vendor pages (``app/watch/pages.py``), by its
   URL (the readable one or its Markdown twin).
-* ``term``: 2 to 64 characters, looked for (ignoring case) in the lines a
-  change added or removed: a flag (``--permission-mode``), a model id, a command.
+* ``term``: 2 to 64 characters, stored ignoring case, looked for (ignoring
+  case) anywhere in the lines a change added or removed: a flag
+  (``--permission-mode``), a model id, a command. It is a substring match, so
+  ``--resume`` also matches ``--resume-session``.
 
 At most :data:`MAX_WATCHES` per account. Watching the same thing twice returns
 the existing watch.
@@ -63,6 +65,8 @@ class NewWatch(BaseModel):
     def _valid(self) -> NewWatch:
         value = self.value.strip()
         if self.kind == "page":
+            # A fragment or a trailing slash is the same page.
+            value = value.split("#", 1)[0].rstrip("/")
             url = value if value in _PAGES else _BY_HUMAN.get(value)
             if url is None:
                 raise ValueError("value must be one of the watched pages (GET /v1/me/watches)")
@@ -74,7 +78,9 @@ class NewWatch(BaseModel):
         # single lines, and must not hide text (a right-to-left override).
         if any(unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in value):
             raise ValueError("a term cannot contain control or formatting characters")
-        self.value = value
+        # Matching ignores case, so the stored term does too: "--Foo" and
+        # "--foo" are one watch (the unique constraint sees one value).
+        self.value = value.casefold()
         return self
 
 

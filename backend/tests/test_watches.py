@@ -21,7 +21,7 @@ from app.core.config import get_settings
 from app.core.db import get_sessionmaker
 from app.main import create_app
 from app.models import Base, Membership, Watch
-from app.watch.diff import MAX_LINE_CHARS, MAX_LINES, changed_lines
+from app.watch.diff import MAX_CHANGED_CHARS, changed_lines
 from app.watch.match import matches
 from app.watch.pages import WATCHED_PAGES, human_url
 from tests.conftest import bot_check_headers
@@ -39,17 +39,36 @@ def test_changed_lines_are_the_added_and_removed_lines_in_page_order() -> None:
     """Turns red if: order is lost, a moved line counts, or a blank line is kept."""
     old = "# A\nkeep\n--old-flag\n\nmoved\n"
     new = "# A\nmoved\nkeep\n--new-flag\n\n\nthird\n"
-    assert changed_lines(old, new) == {"added": ["--new-flag", "third"], "removed": ["--old-flag"]}
+    assert changed_lines(old, new) == {
+        "added": ["--new-flag", "third"],
+        "removed": ["--old-flag"],
+        "truncated": False,
+    }
     # A new blank line between two lines is a real added line, and still left out.
-    assert changed_lines("a\nb", "a\n\nb") == {"added": [], "removed": []}
+    assert changed_lines("a\nb", "a\n\nb") == {"added": [], "removed": [], "truncated": False}
 
 
-def test_changed_lines_are_bounded() -> None:
-    """Turns red if: a rewrite stores unbounded text."""
-    new = "".join(f"line {i} " + "x" * 500 + "\n" for i in range(MAX_LINES + 50))
+def test_a_term_deep_in_a_long_paragraph_still_matches() -> None:
+    """Vendor Markdown puts a paragraph on one line. Turns red if: lines are cut
+    short, so a term past the cut never matches (the review's probe)."""
+    old = "Intro " * 60 + "old tail"
+    new = "Intro " * 60 + "use --permission-mode plan"
+    lines = changed_lines(old, new)
+    assert matches("term", "--permission-mode", url="u", lines=lines)
+    many = "".join(f"line {i}\n" for i in range(300)) + "--new-flag\n"
+    assert matches("term", "--new-flag", url="u", lines=changed_lines("", many))
+
+
+def test_changed_lines_are_bounded_and_say_so() -> None:
+    """Turns red if: a rewrite stores unbounded text, cuts a line in half, or
+    hides that later lines were dropped."""
+    line = "x" * 1000
+    new = "\n".join(f"{i}{line}" for i in range(MAX_CHANGED_CHARS // 1000 + 50))
     got = changed_lines("", new)
-    assert len(got["added"]) == MAX_LINES
-    assert all(len(line) == MAX_LINE_CHARS for line in got["added"])
+    assert got["truncated"] is True
+    assert sum(len(x) for x in got["added"]) <= MAX_CHANGED_CHARS
+    assert all(x.endswith(line) for x in got["added"])  # whole lines only
+    assert changed_lines("a", "b")["truncated"] is False  # partner
 
 
 def test_a_page_watch_matches_only_its_page() -> None:
@@ -153,12 +172,20 @@ def _rows() -> list[Watch]:
 
 
 def test_with_the_setting_off_there_are_no_watches(env: pytest.MonkeyPatch) -> None:
-    """Turns red if: any watch route answers while the access model is off."""
+    """Turns red if: any watch route answers while the access model is off (a
+    REAL watch is used for delete, so a missing check cannot hide behind a
+    'not found')."""
+    _on(env)
     with TestClient(create_app()) as client:
-        _signed_in(client)
-        assert _watch(client, "term", "--x").status_code == 404
+        user = _signed_in(client)
+        _membership(user)
+        wid = _watch(client, "term", "--x").json()["watch_id"]
+        env.setenv("CITEVYN_ACCESS_MODEL_ENABLED", "false")
+        get_settings.cache_clear()
+        assert _watch(client, "term", "--y").status_code == 404
         assert client.get("/v1/me/watches", headers=DEMO).status_code == 404
-        assert client.delete(f"/v1/me/watches/{'0' * 32}", headers=DEMO).status_code == 404
+        assert client.delete(f"/v1/me/watches/{wid}", headers=DEMO).status_code == 404
+    assert len(_rows()) == 1
 
 
 def test_a_free_account_cannot_make_a_watch(env: pytest.MonkeyPatch) -> None:
@@ -186,8 +213,12 @@ def test_pro_watches_a_page_by_either_url_and_a_term(env: pytest.MonkeyPatch) ->
         assert PAGE.title in page.json()["label"]
         again = _watch(client, "page", PAGE.url)
         assert (again.status_code, again.json()["watch_id"]) == (200, page.json()["watch_id"])
-        term = _watch(client, "term", "  --permission-mode  ")
+        term = _watch(client, "term", "  --Permission-Mode  ")
         assert (term.status_code, term.json()["value"]) == (201, "--permission-mode")
+        same = _watch(client, "term", "--PERMISSION-MODE")  # one watch, any case
+        assert (same.status_code, same.json()["watch_id"]) == (200, term.json()["watch_id"])
+        slash = _watch(client, "page", human_url(PAGE.url) + "/#section")  # same page
+        assert (slash.status_code, slash.json()["watch_id"]) == (200, page.json()["watch_id"])
         listed = client.get("/v1/me/watches", headers=DEMO).json()
         assert [w["kind"] for w in listed["watches"]] == ["page", "term"]
         assert len(listed["pages"]) == len(WATCHED_PAGES)
@@ -227,6 +258,8 @@ def test_there_is_a_cap_on_watches(env: pytest.MonkeyPatch) -> None:
         res = _watch(client, "term", "--b")
         assert res.status_code == 409
         assert res.json()["error"]["code"] == "too_many_watches"
+        # Watching something you already watch is not a new watch, even at the cap.
+        assert _watch(client, "term", "--A").status_code == 200
 
 
 def test_a_lapsed_account_can_still_list_and_remove(env: pytest.MonkeyPatch) -> None:

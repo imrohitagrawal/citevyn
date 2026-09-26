@@ -860,9 +860,13 @@ account (`manage_account`). 404 unless the access model is on.
 - `POST /v1/me/watches` `{"kind": "page"|"term", "value": ...}` → `201
   {request_id, watch_id, kind, value, label, created_at}`.
   - `page`: one of the watched pages, by its readable URL or its Markdown twin
-    (stored as the twin); anything else is 422.
-  - `term`: 2 to 64 characters, no control or formatting characters; matched,
-    ignoring case, in the lines a change added or removed.
+    (a fragment or trailing slash is ignored; stored as the twin); anything
+    else is 422.
+  - `term`: 2 to 64 characters, no control or formatting characters; stored
+    and matched ignoring case, as a substring of the lines a change added or
+    removed (`--resume` also matches `--resume-session`). A change keeps whole
+    lines up to about 200,000 characters; past that, later lines are not
+    searched (the change records `truncated`).
   - Watching the same thing again returns the existing watch with 200. 409
     `too_many_watches` at 25 watches.
 - `GET /v1/me/watches` → `{request_id, watches: [...], pages: [{url, title,
