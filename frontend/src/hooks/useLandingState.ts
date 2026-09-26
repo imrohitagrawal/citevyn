@@ -28,6 +28,7 @@ import {
   overLengthNudge,
 } from "../lib/composerNudge";
 import { getAuthSnapshot } from "../lib/authStore";
+import { getClientConfig } from "../lib/clientConfig";
 import { isModalDialogOpen } from "../lib/dialogStack";
 import { scrollToSection } from "../lib/scrollToSection";
 import {
@@ -792,7 +793,21 @@ export function useLandingState() {
       // "the corpus had no answer", which is wrong here (#120). ``errorKind`` drives a
       // distinct rate-limit / connection-error notice instead.
       let errorKind: "rate_limit" | "error" | "rejected" = "error";
-      if (apiErr?.isRateLimited()) {
+      // ADR-0005: the allowance refusals. Checked before the 429 branch: a used
+      // Pro month is a 429 but waiting a moment will not clear it (§8b).
+      const code = apiErr?.errorCode();
+      const refused: Record<string, [string, string]> = {
+        plan_required: ["Free questions used", "You've used your free questions. Upgrade to Pro to keep asking."],
+        quota_exceeded: ["Monthly questions used", "You've used this month's questions. They come back on the 1st."],
+        verification_required: ["Verify your email", "Verify your email to start your free questions: sign in with a link sent to it."],
+      };
+      if (code === "auth_required" && getClientConfig().access_model) {
+        refused.auth_required = ["Sign in to ask", "Sign in to ask live questions."];
+      }
+      if (code && refused[code]) {
+        [title, message] = refused[code];
+        errorKind = "rejected";
+      } else if (apiErr?.isRateLimited()) {
         kind = "warning";
         errorKind = "rate_limit";
         title = "Too many requests";
@@ -942,6 +957,17 @@ export function useLandingState() {
   // by the first-ask and retry paths so both behave identically.
   const routeQuestion = useCallback(
     (text: string) => {
+      // ADR-0005: with the access model on, an anonymous visitor never gets a
+      // live (paid) answer. Not a canned KB answer either: the nearest canned
+      // answer to an unrelated question misleads, and reaching matchKB here
+      // pulls the whole canned KB into a live build's eager bundle (+2.3 KB).
+      if (getClientConfig().access_model && getAuthSnapshot().status !== "signed-in") {
+        streamBot("Sign in with a free account to get cited answers.", {
+          refusal: false,
+          finalSources: [],
+        });
+        return;
+      }
       if (live) {
         // Live: the backend now indexes an "About CiteVyn" source (#49), so
         // questions about CiteVyn itself (Pro/membership/coverage) flow through

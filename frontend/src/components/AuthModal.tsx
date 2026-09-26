@@ -33,6 +33,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { API_BASE_URL } from "../lib/api";
 import { requestMagicLink, updatePassword } from "../lib/authActions";
+import { botCheckHeaders } from "../lib/botCheck";
 import { ApiClientError } from "../lib/types";
 import { GitHubIcon, GoogleIcon } from "./icons/ProviderIcons";
 
@@ -270,7 +271,7 @@ export function AuthModal({ triggerRef, onClose, onAuthenticated, initialMode = 
       if (mode === "login") {
         await signIn(email, password);
       } else if (mode === "register") {
-        await signUp(email, password);
+        await signUp(email, password, await botCheckHeaders());
       } else if (mode === "magic-link") {
         await requestMagicLink(email);
         setCooldownUntil(Date.now() + MAGIC_LINK_COOLDOWN_SECONDS * 1000);

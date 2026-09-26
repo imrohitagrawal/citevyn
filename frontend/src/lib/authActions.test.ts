@@ -7,6 +7,8 @@ import { getAuthSnapshot, __testOnly } from "./authStore";
  * (docs/API_SPEC.md §4c), and that a successful password update applies the
  * refreshed identity to the store.
  */
+vi.mock("./botCheck", () => ({ botCheckHeaders: vi.fn(() => Promise.resolve({})) }));
+
 vi.mock("./api", () => ({
   apiFetch: vi.fn(),
   getCurrentUser: vi.fn(() => Promise.resolve(null)),
@@ -66,5 +68,22 @@ describe("authActions", () => {
       body: JSON.stringify({ current_password: "old passphrase", new_password: "new passphrase 12345" }),
     });
     expect(getAuthSnapshot()).toEqual({ status: "signed-in", user: USER });
+  });
+});
+
+
+describe("the sign-up bot check on a magic-link request (ADR-0005 Phase 5)", () => {
+  it("sends the solved check when the server asks for one", async () => {
+    // Turns red if: the magic-link request skips the bot-check header.
+    const { apiFetch } = await import("./api");
+    const { botCheckHeaders } = await import("./botCheck");
+    vi.mocked(botCheckHeaders).mockResolvedValueOnce({ "X-CiteVyn-Bot-Check": "proof" });
+    vi.mocked(apiFetch).mockResolvedValueOnce({ request_id: "r", status: "accepted" });
+    await requestMagicLink("a@example.com");
+    expect(apiFetch).toHaveBeenCalledWith("/v1/auth/magic-link/request", {
+      method: "POST",
+      body: JSON.stringify({ email: "a@example.com" }),
+      headers: { "X-CiteVyn-Bot-Check": "proof" },
+    });
   });
 });
