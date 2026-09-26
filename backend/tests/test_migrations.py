@@ -1120,3 +1120,45 @@ def test_a_citevyn_log_record_still_reaches_a_handler_after_a_migration(
         f"a citevyn.request record did not reach the capture handler after a "
         f"migration ran in-process (#374); captured: {emitted!r}"
     )
+
+
+def test_migration_0017_verified_and_who_paid_round_trip(alembic_config: AlembicConfig) -> None:
+    """0017 (ADR-0005 Phase 4B-1) adds users.email_verified_at and
+    provider_calls.user_id + paid_by. An existing spend row must read
+    paid_by='platform'. RED if a column is missing at head, paid_by has no
+    server default (the insert below fails NOT NULL), or a column survives the
+    downgrade."""
+    alembic_upgrade(alembic_config, "0016")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO provider_calls (call_id, occurred_at, kind, call_site, provider, "
+            "model, input_tokens, output_tokens, attempts, cost_usd, priced, tokens_estimated) "
+            "VALUES ('33333333-3333-3333-3333-333333333333', CURRENT_TIMESTAMP, 'llm', "
+            "'answer', 'router', 'm', 1, 1, 1, 0, 1, 0)"
+        )
+
+    def columns(table: str) -> set[str]:
+        with engine.connect() as connection:
+            return {r[1] for r in connection.exec_driver_sql(f"PRAGMA table_info({table})").all()}
+
+    alembic_upgrade(alembic_config, "head")
+    assert "email_verified_at" in columns("users")
+    assert {"user_id", "paid_by"} <= columns("provider_calls")
+    with engine.connect() as connection:
+        paid_by = connection.exec_driver_sql("SELECT paid_by FROM provider_calls").scalar_one()
+    assert paid_by == "platform"
+    with engine.begin() as connection:  # a new row without paid_by gets the default
+        connection.exec_driver_sql(
+            "INSERT INTO provider_calls (call_id, occurred_at, kind, call_site, provider, "
+            "model, input_tokens, output_tokens, attempts, cost_usd, priced, tokens_estimated) "
+            "VALUES ('44444444-4444-4444-4444-444444444444', CURRENT_TIMESTAMP, 'llm', "
+            "'answer', 'router', 'm', 1, 1, 1, 0, 1, 0)"
+        )
+
+    alembic_downgrade(alembic_config, "0016")
+    assert "email_verified_at" not in columns("users")
+    assert not ({"user_id", "paid_by"} & columns("provider_calls"))
+    assert "memberships" in {  # partner: only 0017's columns went
+        r[0] for r in engine.connect().exec_driver_sql("SELECT name FROM sqlite_master").all()
+    }

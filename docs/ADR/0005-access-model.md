@@ -110,8 +110,14 @@ Developers' top frustration with AI answers is that they are "almost right"
   address, never on another account found by email (OAuth never links by email).
   Google's `email_verified` must be the boolean `true`. A GitHub public email
   counts only if GitHub's `/user/emails` lists it as verified: `/user` carries no
-  verified flag. The first stamp is kept. `email` has no change path today; one
-  added later must clear the stamp in the same write.
+  verified flag; if that call fails, the user still signs in, unverified. Only
+  an ASCII provider address can verify (Python lower-cases look-alikes such as
+  the Kelvin sign to ASCII letters). The first stamp is kept. `email` has no
+  change path today; one added later must clear the stamp in the same write.
+  **Known limit (by design, for the owner):** plus-addressing (`me+1@`), Gmail
+  dots and catch-all domains each give a separate verified address, so one
+  person can hold several trials. "Once per verified account" allows that; the
+  bot check at sign-up (Phase 5) and the global spend cap bound the cost.
 
 ### 2. Six concerns, one mechanism each
 

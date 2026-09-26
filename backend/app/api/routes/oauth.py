@@ -286,14 +286,24 @@ async def _fetch_identity(
         # /user's public email carries no verified flag, so /user/emails decides
         # (the ``user:email`` scope is requested). A public email counts only if
         # GitHub lists it as verified; with none, the primary verified address.
-        emails = await get_json(
-            client=client,
-            url="https://api.github.com/user/emails",
-            headers={**auth_header, "Accept": "application/vnd.github+json"},
-            timeout_seconds=timeout_seconds,
-            provider="GitHub",
-            error_event="github_emails_error",
-        )
+        try:
+            emails = await get_json(
+                client=client,
+                url="https://api.github.com/user/emails",
+                headers={**auth_header, "Accept": "application/vnd.github+json"},
+                timeout_seconds=timeout_seconds,
+                provider="GitHub",
+                error_event="github_emails_error",
+            )
+        except OAuthProviderError:
+            if not public:
+                raise
+            # A public-email user never needed this call before Phase 4B, so its
+            # failure must not block sign-in: sign in with no email and no
+            # verification, rather than trust an unconfirmed address.
+            return _Identity(
+                provider_account_id=provider_account_id, email=None, email_verified=False
+            )
         # The endpoint returns a JSON array, not an object; get_json's
         # dict[str, Any] contract only describes the OBJECT case, so the
         # array is cast back here rather than widening that shared helper.

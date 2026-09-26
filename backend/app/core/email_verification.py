@@ -28,7 +28,9 @@ async def mark_email_verified(
     Returns whether the account is now verified. The first stamp is kept; a
     later proof does not move it. The caller commits.
     """
-    if not proven_email:
+    # ASCII only: Python lower-cases look-alikes such as the Kelvin sign (U+212A)
+    # to ASCII letters, so a different mailbox could otherwise match.
+    if not proven_email or not proven_email.isascii():
         return False
     user = await db.get(User, user_id)
     if user is None or user.email is None:

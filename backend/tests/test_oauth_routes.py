@@ -1879,3 +1879,85 @@ def test_connecting_a_provider_that_has_not_verified_the_address_does_not_verify
     ok = _callback(oauth_client, "google", state=_state_from_start_response(start))
     assert ok.headers["location"] == "/?connect=ok&provider=google"
     assert _by_email("me@example.com").email_verified_at is None
+
+
+def test_a_failing_github_email_list_still_signs_a_public_email_user_in(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Before Phase 4B a user with a public GitHub email never called
+    /user/emails; now it decides verification. If it fails, sign-in must still
+    work, with no email stored and no stamp. Turns red if: the failure aborts
+    the login, or the unconfirmed public email is treated as verified."""
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "t", "token_type": "bearer"})
+        if url.startswith("https://api.github.com/user/emails"):
+            return httpx.Response(500, json={})
+        if url.startswith("https://api.github.com/user"):
+            return httpx.Response(
+                200, json={"id": _GITHUB_ACCOUNT_ID, "login": "o", "email": "pub@example.com"}
+            )
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    res = _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    assert res.headers["location"] == "/?auth=ok"
+    [user] = _registered()
+    assert user.email is None and user.email_verified_at is None
+
+
+def test_a_look_alike_unicode_address_never_verifies(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Python lower-cases the Kelvin sign (U+212A) to ASCII 'k', so a provider
+    address "\u212aim@x.com" would match an account's "kim@x.com" although it
+    is a different mailbox. Only an ASCII provider address may verify. Turns red
+    if: non-ASCII addresses are compared after lower-casing."""
+    _register(oauth_client, "kim@x.com")
+    _link_identity_to(
+        oauth_client,
+        monkeypatch,
+        "google",
+        account_id=_GOOGLE_SUB,
+        email="\u212aim@x.com",
+    )
+    assert _by_email("kim@x.com").email_verified_at is None
+
+
+def test_a_failing_github_email_list_without_a_public_email_is_still_an_error(
+    monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
+) -> None:
+    """Partner of the public-email fallback: with no public email the list is
+    the only source, and a failure stays a provider error, as before Phase 4B.
+    Turns red if: the fallback is widened to every user."""
+    import app.api.routes.oauth as oauth_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.startswith("https://github.com/login/oauth/access_token"):
+            return httpx.Response(200, json={"access_token": "t", "token_type": "bearer"})
+        if url.startswith("https://api.github.com/user/emails"):
+            return httpx.Response(500, json={})
+        if url.startswith("https://api.github.com/user"):
+            return httpx.Response(200, json={"id": _GITHUB_ACCOUNT_ID, "login": "o", "email": None})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(
+        oauth_module,
+        "_build_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    res = _callback(
+        oauth_client, "github", state=_state_from_start_response(_start(oauth_client, "github"))
+    )
+    assert res.headers["location"] == "/?auth=error"
+    assert _registered() == []
