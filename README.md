@@ -262,6 +262,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
 | `GET  /health/index`        | none   | Active index + vector-arm health              |
 | `GET  /legal/{slug}`        | none   | Draft Terms, Privacy, Refunds, No-training (404 unless the access model is on) |
+| `GET  /s/{share_id}`        | none   | A shared answer: a frozen public copy (404 unless the access model is on, or once revoked) |
 | `GET  /v1/config`           | none   | Whether the access model is on (the UI reads it before sign-in) |
 | `GET  /v1/auth/challenge`   | none   | Sign-up proof-of-work challenge (404 unless the access model is on) |
 | `GET  /about`               | none   | HTML page every CiteVyn self-citation links to |
@@ -293,6 +294,9 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `POST /v1/me/api-keys`      | demo   | Make an API key, shown once (Pro; 404 unless the access model is on) |
 | `GET  /v1/me/api-keys`      | demo   | List your API keys (first characters only) |
 | `DELETE /v1/me/api-keys/{key_id}` | demo | Revoke an API key |
+| `POST /v1/sessions/{session_id}/messages/{message_id}/share` | demo | Share one of your answers as a public, frozen page (Pro; 404 unless the access model is on) |
+| `GET  /v1/me/shares`        | demo   | List your shared answers |
+| `DELETE /v1/me/shares/{share_id}` | demo | Revoke a shared answer |
 | `POST /v1/mcp`             | api key | MCP server: `ask_docs` returns a finished, cited answer (Pro; 404 unless the access model is on) |
 | `POST /v1/billing/webhook`  | none   | Stripe webhook; the signature is the credential (404 unless the access model is on) |
 | `GET  /v1/admin/source_requests` | admin | The gap log: requested sources, newest first |

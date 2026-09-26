@@ -318,6 +318,10 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("POST", "/v1/me/api-keys"): Capability.api_keys,
     ("GET", "/v1/me/api-keys"): Capability.manage_account,
     ("DELETE", "/v1/me/api-keys/{key_id}"): Capability.manage_account,
+    ("POST", "/v1/sessions/{session_id}/messages/{message_id}/share"): Capability.share_answer,
+    ("GET", "/v1/me/shares"): Capability.manage_account,
+    ("DELETE", "/v1/me/shares/{share_id}"): Capability.manage_account,
+    ("GET", "/s/{share_id}"): Capability.public,
     ("POST", "/v1/mcp"): Capability.mcp_ask,
     ("POST", "/v1/billing/webhook"): Capability.public,
     ("GET", "/v1/admin/source_requests"): Capability.operate,
@@ -351,7 +355,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 46
+    assert len(EXPECTED_CAPABILITY) == 50
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -400,6 +404,9 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("POST", "/v1/me/api-keys"),
     ("GET", "/v1/me/api-keys"),
     ("DELETE", "/v1/me/api-keys/{key_id}"),
+    ("POST", "/v1/sessions/{session_id}/messages/{message_id}/share"),
+    ("GET", "/v1/me/shares"),
+    ("DELETE", "/v1/me/shares/{share_id}"),
     ("POST", "/v1/auth/magic-link/request"),
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
@@ -421,6 +428,10 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
 EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ("GET", "/about"): "public marketing/legal copy",
     ("GET", "/legal/{slug}"): "draft legal pages; 404 unless the access model is on",
+    (
+        "GET",
+        "/s/{share_id}",
+    ): "a shared answer, public by design; 404 unless the access model is on",
     ("GET", "/health"): "liveness probe, called by the platform before any key exists",
     ("GET", "/health/dependencies"): "readiness probe, same reason",
     ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
@@ -462,6 +473,7 @@ PATH_PARAM_VALUES: dict[str, str] = {
     "provider": "github",
     "slug": "terms",
     "key_id": "0" * 32,
+    "share_id": "0" * 32,
 }
 
 _PARAM_RE = re.compile(r"\{([^}]+)\}")
@@ -640,6 +652,9 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("POST", "/v1/me/api-keys"),
         ("GET", "/v1/me/api-keys"),
         ("DELETE", "/v1/me/api-keys/{key_id}"),
+        ("POST", "/v1/sessions/{session_id}/messages/{message_id}/share"),
+        ("GET", "/v1/me/shares"),
+        ("DELETE", "/v1/me/shares/{share_id}"),
         ("GET", "/v1/me/export"),
         ("GET", "/v1/me/sessions"),
         ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),

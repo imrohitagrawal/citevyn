@@ -45,6 +45,7 @@ from app.api.routes.messages import router as messages_router
 from app.api.routes.oauth import router as oauth_router
 from app.api.routes.search import router as search_router
 from app.api.routes.sessions import router as sessions_router
+from app.api.routes.shares import router as shares_router
 from app.core.config import get_settings
 from app.core.cors import configure_cors
 from app.core.errors import (
@@ -144,6 +145,8 @@ def create_app() -> FastAPI:
     app.include_router(billing_router)
     app.include_router(api_keys_router)
     app.include_router(mcp_router)
+    # Before _mount_frontend too: /s/{share_id} would otherwise hit the catch-all.
+    app.include_router(shares_router)
     # Must be included BEFORE _mount_frontend: the mount at "/" is a catch-all
     # and would answer /about with a 307 to /about/ instead, silently. See
     # app/api/routes/about.py and tests/test_about_page.py.

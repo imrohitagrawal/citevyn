@@ -86,6 +86,9 @@ class APIErrorCode(StrEnum):
     # Spec-side (ADR-0005 Phase 6A). 409: the account already has the maximum
     # number of live API keys; revoke one first.
     too_many_api_keys = "too_many_api_keys"
+    # Spec-side (ADR-0005 Phase 6C). 409: the account already has the maximum
+    # number of live shared answers; revoke one first.
+    too_many_shares = "too_many_shares"
     # Transport helpers (not in the spec, but needed to keep the envelope
     # uniform across the app).
     validation_error = "validation_error"
@@ -116,6 +119,7 @@ _STATUS_CODE: dict[APIErrorCode, int] = {
     APIErrorCode.quota_exceeded: 429,
     APIErrorCode.bot_check_failed: 403,
     APIErrorCode.too_many_api_keys: 409,
+    APIErrorCode.too_many_shares: 409,
     APIErrorCode.internal_error: 500,
 }
 

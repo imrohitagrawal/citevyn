@@ -84,7 +84,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `weekly_digest` | — | yes | yes | The weekly "what changed" email (no route yet) |
 | `mcp_ask` | — | — | yes | Cited answers through the MCP server (no route yet) |
 | `api_keys` | — | — | yes | Personal API keys (no route yet) |
-| `share_answer` | — | — | yes | Shareable answers (no route yet) |
+| `share_answer` | — | — | yes | Shareable answers |
 | `usage_insights` | — | — | yes | The usage page (no route yet) |
 | `watch_alerts` | — | — | yes | Real-time "what changed" alerts (no route yet) |
 | `byok` | — | — | yes | Bring your own OpenRouter key (no route yet) |
@@ -128,6 +128,10 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `POST` | `/v1/me/api-keys` | `api_keys` |
 | `GET` | `/v1/me/api-keys` | `manage_account` |
 | `DELETE` | `/v1/me/api-keys/{key_id}` | `manage_account` |
+| `POST` | `/v1/sessions/{session_id}/messages/{message_id}/share` | `share_answer` |
+| `GET` | `/v1/me/shares` | `manage_account` |
+| `DELETE` | `/v1/me/shares/{share_id}` | `manage_account` |
+| `GET` | `/s/{share_id}` | `public` |
 | `POST` | `/v1/mcp` | `mcp_ask` |
 | `POST` | `/v1/billing/webhook` | `public` |
 | `GET` | `/v1/admin/source_requests` | `operate` |

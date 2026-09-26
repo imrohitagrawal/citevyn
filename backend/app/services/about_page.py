@@ -324,6 +324,23 @@ def render_about_page(
         # pointing at an anchor that did not exist.
         body = "<p>The source documents for this page are not available.</p>"
         toc = ""
+    return render_page(
+        page_title=page_title,
+        description=description,
+        lead=lead,
+        lead_class=lead_class,
+        main_html=f"{toc}\n{body}\n",
+    )
+
+
+def render_page(
+    *, page_title: str, description: str, lead: str, lead_class: str, main_html: str
+) -> str:
+    """The page shell shared by ``/about``, ``/legal/*`` and ``/s/*``.
+
+    Every argument but ``main_html`` is escaped here. ``main_html`` is inserted
+    as it is: the caller builds it, and must have escaped everything in it.
+    """
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -354,8 +371,7 @@ def render_about_page(
         f'<p class="{html.escape(lead_class, quote=True)}">{html.escape(lead)}</p>\n'
         "</header>\n"
         "<main>\n"
-        f"{toc}\n"
-        f"{body}\n"
+        f"{main_html}"
         "</main>\n"
         '<footer class="about-footer"><a href="/">Back to CiteVyn</a></footer>\n'
         "</div>\n"
@@ -372,5 +388,6 @@ __all__ = [
     "document_anchor",
     "render_about_page",
     "render_markdown",
+    "render_page",
     "slugify",
 ]
