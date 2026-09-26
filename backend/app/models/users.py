@@ -61,3 +61,8 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When the account asked for the weekly "what changed" digest (ADR-0005 §5,
+    # Phase 7B). Opt-in: NULL means no digest. Cleared by unsubscribing.
+    digest_opt_in_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

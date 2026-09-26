@@ -323,6 +323,10 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("DELETE", "/v1/me/shares/{share_id}"): Capability.manage_account,
     ("GET", "/s/{share_id}"): Capability.public,
     ("GET", "/v1/me/usage"): Capability.usage_insights,
+    ("GET", "/v1/me/digest"): Capability.weekly_digest,
+    ("PUT", "/v1/me/digest"): Capability.weekly_digest,
+    ("GET", "/digest/unsubscribe"): Capability.public,
+    ("POST", "/digest/unsubscribe"): Capability.public,
     ("POST", "/v1/mcp"): Capability.mcp_ask,
     ("POST", "/v1/billing/webhook"): Capability.public,
     ("GET", "/v1/admin/source_requests"): Capability.operate,
@@ -356,7 +360,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 51
+    assert len(EXPECTED_CAPABILITY) == 55
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -409,6 +413,8 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("GET", "/v1/me/shares"),
     ("DELETE", "/v1/me/shares/{share_id}"),
     ("GET", "/v1/me/usage"),
+    ("GET", "/v1/me/digest"),
+    ("PUT", "/v1/me/digest"),
     ("POST", "/v1/auth/magic-link/request"),
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
@@ -434,6 +440,8 @@ EXPECTED_OPEN: dict[tuple[str, str], str] = {
         "GET",
         "/s/{share_id}",
     ): "a shared answer, public by design; 404 unless the access model is on",
+    ("GET", "/digest/unsubscribe"): "the unsubscribe page; the emailed token is the credential",
+    ("POST", "/digest/unsubscribe"): "one-click unsubscribe; the emailed token is the credential",
     ("GET", "/health"): "liveness probe, called by the platform before any key exists",
     ("GET", "/health/dependencies"): "readiness probe, same reason",
     ("GET", "/health/index"): "index/vector-arm health, surfaced in the public UI",
@@ -658,6 +666,8 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("GET", "/v1/me/shares"),
         ("DELETE", "/v1/me/shares/{share_id}"),
         ("GET", "/v1/me/usage"),
+        ("GET", "/v1/me/digest"),
+        ("PUT", "/v1/me/digest"),
         ("GET", "/v1/me/export"),
         ("GET", "/v1/me/sessions"),
         ("PUT", "/v1/sessions/{session_id}/messages/{message_id}/feedback"),

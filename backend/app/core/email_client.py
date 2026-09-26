@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,12 +58,17 @@ class EmailDeliveryError(RuntimeError):
 
 @dataclass(frozen=True)
 class EmailMessage:
-    """One outbound message. ``text`` is the plain-text alternative to ``html``."""
+    """One outbound message. ``text`` is the plain-text alternative to ``html``.
+
+    ``headers`` are extra mail headers (e.g. ``List-Unsubscribe`` on the weekly
+    digest, RFC 8058). None for transactional mail, which is unchanged.
+    """
 
     to_addr: str
     subject: str
     text: str
     html: str
+    headers: Mapping[str, str] | None = None
 
 
 class EmailClient(Protocol):
@@ -101,13 +107,15 @@ class ResendEmailClient:
         self._transport = transport
 
     async def send(self, message: EmailMessage) -> None:
-        payload = {
+        payload: dict[str, object] = {
             "from": self._from_addr,
             "to": [message.to_addr],
             "subject": message.subject,
             "text": message.text,
             "html": message.html,
         }
+        if message.headers:
+            payload["headers"] = dict(message.headers)
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             async with httpx.AsyncClient(transport=self._transport) as client:
@@ -183,10 +191,12 @@ class FileOutboxEmailClient:
         self._directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         path = self._directory / f"{stamp}-{secrets.token_hex(4)}.eml"
+        extra = "".join(f"{k}: {v}\n" for k, v in (message.headers or {}).items())
         body = (
             f"To: {message.to_addr}\n"
             f"Subject: {message.subject}\n"
             f"Date: {datetime.now(UTC).isoformat()}\n"
+            f"{extra}"
             "\n"
             f"{message.text}\n"
             "\n"

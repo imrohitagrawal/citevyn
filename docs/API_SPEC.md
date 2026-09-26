@@ -829,6 +829,28 @@ access model is on.
 The days count exactly what the allowance counts (platform-paid Pro answers
 this month), so `totals.total` always equals `usage.used`. Refusals never count.
 
+### The weekly digest (ADR-0005 Phase 7B)
+
+A weekly email of the watched vendor pages that changed (from the docs
+watcher). Opt-in. 404 unless the access model is on.
+
+- `GET /v1/me/digest` → `{request_id, subscribed, verified}` (capability
+  `weekly_digest`: any account).
+- `PUT /v1/me/digest` `{"subscribed": true|false}` → the same shape. Turning it
+  on needs a verified address: 403 `verification_required`. Turning it off never
+  does.
+- `GET /digest/unsubscribe?t=<send_id>.<token>` → an HTML page with one button.
+  It changes nothing: mail scanners open links.
+- `POST /digest/unsubscribe?t=<send_id>.<token>` → unsubscribes (the button, or
+  RFC 8058 one-click from the mail app; no cookie needed). Idempotent. A wrong
+  token is a 404 page and changes nothing; a missing or over-long `t` is 422.
+  Links do not expire. Each email has its own random token;
+  only its hash is stored.
+
+Every digest email carries `List-Unsubscribe` and
+`List-Unsubscribe-Post: List-Unsubscribe=One-Click`. At most one email per
+account per week; a week with no changes sends none.
+
 ### The MCP server: `POST /v1/mcp` (ADR-0005 Phase 6B)
 
 For AI agents (Claude Code, Codex, any MCP client). JSON-RPC 2.0 over MCP's
