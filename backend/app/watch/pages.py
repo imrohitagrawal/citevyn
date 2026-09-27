@@ -3,8 +3,9 @@
 A fixed, reviewed list: the watcher fetches exactly these URLs and nothing it
 finds along the way. Each is the vendor's own Markdown version of a key page,
 chosen from the vendor's ``llms.txt`` index where one exists. Checked on
-2026-09-27: every URL returned 200 ``text/markdown``, robots.txt allowed it, and
-two fetches seconds apart were byte-identical (so a diff means a real change).
+2026-09-27 (the Codex additions on 2026-09-28): every URL returned 200
+``text/markdown``, robots.txt allowed it, and two fetches seconds apart were
+byte-identical (so a diff means a real change).
 
 Edit this list to change what is watched; the hosts allowlist follows from it.
 """
@@ -73,6 +74,25 @@ WATCHED_PAGES: tuple[WatchedPage, ...] = (
         "codex", "AGENTS.md", "https://learn.chatgpt.com/docs/agent-configuration/agents-md.md"
     ),
     WatchedPage("codex", "Rules", "https://learn.chatgpt.com/docs/agent-configuration/rules.md"),
+    # Added 2026-09-28 at the owner's request; each checked the same way.
+    WatchedPage("codex", "Pricing", "https://learn.chatgpt.com/docs/pricing.md"),
+    WatchedPage("codex", "Models", "https://learn.chatgpt.com/docs/models.md"),
+    WatchedPage("codex", "Codex CLI", "https://learn.chatgpt.com/docs/codex/cli.md"),
+    WatchedPage(
+        "codex",
+        "Configuration reference",
+        "https://learn.chatgpt.com/docs/config-file/config-reference.md",
+    ),
+    WatchedPage(
+        "codex",
+        "Environment variables",
+        "https://learn.chatgpt.com/docs/config-file/environment-variables.md",
+    ),
+    WatchedPage("codex", "MCP", "https://learn.chatgpt.com/docs/extend/mcp.md"),
+    WatchedPage("codex", "Sandbox", "https://learn.chatgpt.com/docs/sandboxing.md"),
+    WatchedPage(
+        "codex", "Non-interactive mode", "https://learn.chatgpt.com/docs/non-interactive-mode.md"
+    ),
     # Gemini API (no llms.txt; each page has a .md.txt twin)
     WatchedPage("gemini_api", "Models", "https://ai.google.dev/gemini-api/docs/models.md.txt"),
     WatchedPage(
