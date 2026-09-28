@@ -91,6 +91,23 @@ async def test_embed_query_happy_path() -> None:
     assert seen["has_task_type"] is False
 
 
+async def test_embed_asks_for_providers_that_keep_nothing() -> None:
+    # Red if the "provider" block is dropped or loosened: a question is embedded
+    # before it is answered, so this call carries the question text too.
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json=_data([[0.1, 0.2, 0.3, 0.4]]))
+
+    client = _client(handler, dim=4)
+    try:
+        await client.embed("what is the rate limit?")
+    finally:
+        await client.aclose()
+    assert seen["provider"] == {"zdr": True, "data_collection": "deny"}
+
+
 async def test_embed_documents_batch_happy_path() -> None:
     seen: dict[str, object] = {}
 

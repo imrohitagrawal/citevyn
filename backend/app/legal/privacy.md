@@ -14,7 +14,7 @@ No advertising or analytics trackers. Fonts and scripts are served from our own 
 # Who else receives data
 
 - Hosting and storage: Fly.io (servers), Neon (database), Upstash (rate-limit counters).
-- Answering: your question, and earlier questions in the same conversation when you ask a follow-up, are sent to the AI provider that writes the answer and to the provider that turns them into a search vector. Today both are Google (Gemini) [OWNER: confirm the production provider settings]; if Gemini is unavailable, OpenRouter writes the answer and passes the text on to the model's own maker. We don't send your account id, email or IP address to them.
+- Answering: your question, and earlier questions in the same conversation when you ask a follow-up, are sent to the AI provider that writes the answer and to the provider that turns them into a search vector. Today both are Google (Gemini); if Gemini is unavailable, OpenRouter writes the answer, using only providers with a zero data retention policy (see No training). We don't send your account id, email or IP address to them.
 - Email: Resend sends sign-in links and security notices to your address.
 - Payments: Stripe receives your email address and an internal account id when you upgrade.
 - Sign-in: GitHub or Google, only if you choose to sign in with them.
