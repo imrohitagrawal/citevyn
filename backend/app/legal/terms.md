@@ -11,7 +11,7 @@ Answers are written by an AI model from the cited pages. The model can misread o
 - You need an account to ask live questions. You can sign up with an email address and password, a one-time email link, GitHub or Google.
 - The free trial is a set number of answered questions, once, for an account that has verified its email address. A question CiteVyn refuses or cannot answer does not use your allowance.
 - Keep your sign-in to yourself. You are responsible for what happens under your account.
-- [OWNER: minimum age, e.g. 13 or 16 depending on where you offer the service.]
+- You must be at least 18 to use CiteVyn. CiteVyn is not meant for children, and we do not knowingly collect personal information from anyone under 18. If we learn an account belongs to someone under 18, we will close it and delete its data.
 
 # Pro
 
