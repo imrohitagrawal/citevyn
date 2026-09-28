@@ -22,6 +22,12 @@ from app.llm._http import post_json
 from app.llm.errors import LLMUnavailable
 from app.llm.types import LLMProvider, LLMResult
 
+# Sent on every call: route only to providers that keep nothing (zero data
+# retention) and do not collect the text. The privacy page promises this, so it
+# is set per request rather than trusted to the account's settings alone.
+# OpenRouter answers "no endpoints" rather than falling back to one that keeps data.
+_PRIVACY: dict[str, Any] = {"zdr": True, "data_collection": "deny"}
+
 
 def _extract_text(choices: list[dict[str, Any]]) -> str:
     """Return the assistant message content of the first choice.
@@ -82,6 +88,7 @@ class OpenRouterLLMClient:
             "model": self._model,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "provider": dict(_PRIVACY),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

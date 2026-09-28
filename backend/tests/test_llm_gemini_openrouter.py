@@ -342,6 +342,25 @@ async def test_openrouter_happy_path() -> None:
     assert result.provider == "router"
 
 
+async def test_openrouter_asks_for_providers_that_keep_nothing() -> None:
+    # Red if the "provider" block is dropped or loosened: the privacy page says
+    # OpenRouter only uses providers that neither store nor train on questions.
+    import json as _json
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(_json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Answer [1]."}}]})
+
+    client = _openrouter_client(handler)
+    try:
+        await client.complete(system="sys", user="q", max_tokens=16, temperature=0.0)
+    finally:
+        await client.aclose()
+    assert seen["provider"] == {"zdr": True, "data_collection": "deny"}
+
+
 async def test_openrouter_empty_content_raises_unavailable() -> None:
     # 200 OK but the assistant message carries no content — raise so a blank
     # answer is never returned.

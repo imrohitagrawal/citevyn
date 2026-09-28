@@ -189,6 +189,9 @@ class OpenRouterEmbedder:
             # Sent explicitly so a change to the model's default output size cannot
             # silently shift the vector space out from under an already-built index.
             "dimensions": self._dim,
+            # The question itself is embedded, so it gets the same promise as an
+            # answer: only providers that keep nothing and do not collect the text.
+            "provider": {"zdr": True, "data_collection": "deny"},
         }
         data = await self._post(url, payload)
         rows = data.get("data")
