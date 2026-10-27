@@ -91,6 +91,7 @@ def test_the_owner_note_check_finds_a_note() -> None:
         "Contact: [OWNER: address].",
         "x [owner:  y]",
         "[ OWNER : x]",
+        "[  OWNER: x]",
         "[Owner note: x]",
         "[OWNER]",
         "[OWNER - x]",
