@@ -437,6 +437,77 @@ can see them (the seed commits per source, and a re-seed runs against an
 already-active `v1`). Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a key) and
 re-seed to get a live, stamped vector arm.
 
+### 3.8 Delete an account on request
+
+The privacy page promises to delete an account's data on request. Do it within
+30 days of the request. There is no delete button; the operator runs one
+command (#511).
+
+**1. Check the requester controls the address.** Act only on a request sent
+from the account's address, or one whose sender has replied from that address
+to an email you sent it. Never delete because someone else asked.
+
+**2. Wake the machine** (it scales to zero, and `fly ssh console` needs a
+running machine):
+
+```bash
+curl -sS -o /dev/null https://citevyn.stackclimb.com/health
+```
+
+**3. Dry run.** It prints, per table, how many rows would go, and changes
+nothing:
+
+```bash
+fly ssh console -a citevyn -C "python -m app.worker.cli delete-account --email person@example.com"
+```
+
+- Exit `0`: the plan is printed. Read it.
+- Exit `1`: no account has that address. Check the spelling with the
+  requester. Case and surrounding spaces do not matter.
+- Exit `2`: the account has a subscription that can still bill (anything but
+  `canceled` or `incomplete_expired`, including `past_due` after our grace,
+  because the provider keeps retrying the card). Cancel it at the payment
+  provider first, **immediately, not at the end of the period** (a subscription
+  set to cancel at period end stays `active` until then). Wait until the
+  provider's webhook has marked it canceled, then run the dry run again.
+
+**4. Delete.** The same command with `--yes`. It runs in one transaction and
+prints the account id and the trial count it kept:
+
+```bash
+fly ssh console -a citevyn -C "python -m app.worker.cli delete-account --email person@example.com --yes"
+```
+
+**5. Reply to the requester** that the account and its data are deleted.
+
+**What is deleted:** the `users` row and every row that references it: sign-in
+sessions, linked GitHub and Google identities, sign-in links, conversations and
+their messages, feedback and source requests, answer usage, API keys, shared
+answer links, watches, digest and alert send records, and membership rows. The
+foreign keys do this (`ON DELETE CASCADE`). A Postgres test
+(`test_delete_account_clears_every_table_that_references_users_on_postgres`)
+checks every table that references `users`, read from the models.
+
+**What is kept, by design:**
+
+- `provider_calls`: the record of paid model calls (tokens and cost, under the
+  old account id). No question text and no address.
+- `audit_events`: the security log of sign-ins and answered questions. The rows
+  stay with the account link cleared (`ON DELETE SET NULL`). They hold no
+  address.
+- `stripe_events`: the payment-event log (event id, type, old account id).
+- `deleted_accounts`: one row per deleted address, holding the SHA-256 of the
+  address (not the address), the trial answers it used and the date. If the
+  same address signs up again, those answers still count against its free
+  trial, so deleting an account cannot restart the trial
+  (`docs/ACCESS_POLICY.md`). A second deletion adds to the count.
+
+Outside this database, the payment provider keeps its own customer record and
+the email provider its delivery logs, under their own retention.
+
+Anonymous `anon_*` visitors have no address, so this command does not apply to
+them.
+
 ## 4. Backup & restore
 
 ### 4.1 Backups (operator)
