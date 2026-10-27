@@ -22,7 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.api.routes.legal import LEGAL_PAGES, PUBLISHED, has_owner_note
+from app.api.routes.legal import _PUBLISHED_LEAD, LEGAL_PAGES, PUBLISHED, has_owner_note
 from app.core.config import get_settings
 from app.main import create_app
 
@@ -71,7 +71,7 @@ def test_a_published_page_is_served_as_final(
     assert res.headers["content-type"].startswith("text/html")
     assert "x-robots-tag" not in res.headers
     assert "DRAFT" not in res.text and "not in effect" not in res.text
-    assert "Last updated 28 October 2026." in res.text
+    assert f"Last updated {LAST_UPDATED}." in res.text
     title = LEGAL_PAGES[slug][0]
     assert f"<h1>{html.escape(title)}</h1>" in res.text
     assert "<h2" in res.text
@@ -111,11 +111,13 @@ OWN_WORDS = {
     "refunds": "refunded in full if you ask within 14 days",
 }
 
-#: SHA-256 of each published file when "Last updated 28 October 2026" was set.
-#: Change a published page's text -> update the date in legal.py AND these.
+#: The date the published text below was last changed, and the SHA-256 of
+#: each published file on that date. Change a published page's text -> update
+#: LAST_UPDATED, these hashes, and ``_PUBLISHED_LEAD`` in legal.py together.
+LAST_UPDATED = "28 October 2026"
 TEXT_AS_OF_DATE = {
     "terms": "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
-    "privacy": "78242bf5478d0187dd3e3afddd4d5a26cc081d0c6c7512f1e0ce468cf306a869",
+    "privacy": "e0922fac865cf7ad9d0fbd534d1d682a1df0d1c87279d3ca1bfa50a432013aa1",
     "refunds": "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
 }
 
@@ -139,8 +141,11 @@ def test_the_last_updated_date_moves_with_the_text(slug: str) -> None:
 
     text = (_LEGAL_DIR / LEGAL_PAGES[slug][1]).read_bytes()
     assert hashlib.sha256(text).hexdigest() == TEXT_AS_OF_DATE[slug], (
-        f"{slug} changed: update the 'Last updated' date in legal.py and this hash"
+        f"{slug} changed: set LAST_UPDATED to today, update this hash, "
+        "and update _PUBLISHED_LEAD in legal.py"
     )
+    # A hash bump has to sit beside the date the page shows.
+    assert f"Last updated {LAST_UPDATED}." == _PUBLISHED_LEAD
 
 
 @pytest.mark.parametrize("slug", PUBLIC)

@@ -1,11 +1,11 @@
 # What we collect
 
 - Account: your email address (the one you sign up with, or, if you sign up with GitHub or Google, the verified address that provider gives us), a one-way hash of your password if you set one (Argon2id; we cannot read your password), whether and when you verified your email, and, if you sign in with GitHub or Google, that provider's account number for you.
-- Sign-in: one cookie holds your session. It is HttpOnly, sent only over HTTPS in production, and lasts up to 180 days. Visitors who are not signed in also get this cookie. It holds only a random ID and a secret that proves the cookie is yours, not your name or email.
+- Sign-in: one cookie holds your session. It is HttpOnly, sent only over HTTPS in production, and lasts up to 180 days. Visitors who ask a question without signing in also get this cookie. It holds only a random ID and a secret that proves the cookie is yours, not your name or email.
 - Questions and answers: the full text of what you ask and the answers you get, with their citations. An answer to a common question can be reused, for up to 24 hours, for anyone who asks the same question; the reused copy does not record who asked.
 - Feedback you choose to send: ratings, reasons, and anything you type in a comment or a "request a source" note.
 - Usage: a record of each answered question against your allowance, and a record of each paid model call (for cost control), both linked to your account.
-- Shared answers (Pro): if you share an answer, a copy of that question and answer, with its citations, is stored and shown on a public page to anyone who has the link, until you stop sharing it.
+- Shared answers (Pro): if you share an answer, a copy of that question and answer, with its citations, is stored and shown on a public page to anyone who has the link, until you stop sharing it. The stored copy is kept until your account is deleted.
 - Settings you choose: whether you get the weekly digest, the pages or terms you watch for changes, and the names of any API keys you create. We store only a one-way hash of each key.
 - Billing (Pro only): our payment provider's customer and subscription identifiers for your account. Your card details go to the payment provider, not to us.
 
