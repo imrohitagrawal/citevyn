@@ -520,7 +520,13 @@ timing the database stops one of the two to break a lock wait: then either the
 request gets a generic error, or this command exits 3 and can simply be run
 again. Either way the answer is never saved under the deleted account.
 
-**5. Reply to the requester** that the account and its data are deleted.
+**5. Record it in the deletion log, then reply.** Add one line to the deletion
+log: the date and time (UTC) and the user id the command printed. Keep the log
+OUTSIDE the database and its backups (a private note the owner keeps), because
+a restore from an older backup brings the account back and §4.2 needs the log
+to delete it again. Do not write the email address in it. Then tell the
+requester the account and its data are deleted, and that any copies in backups
+are gone within 30 more days (§4.1).
 
 **6. 24 hours later, check the payment provider again** for that customer. A
 subscription that still names the deleted account and can still bill also
@@ -571,14 +577,28 @@ make backup
 
 This invokes the `backup` profile — a one-shot `postgres:16-alpine`
 container that runs `pg_dump --format=custom` against the live
-database and writes to `./backups/citevyn-<UTC>.dump`. Keep at
-least 7 days of dumps; the script does not rotate.
+database and writes to `./backups/citevyn-<UTC>.dump`.
+
+**Keep dumps for 30 days, never longer** (owner decision on #546). The privacy
+page promises that a deleted account's data leaves the live database within 30
+days and every backup within 30 more, so all copies are gone within 60 days.
+The script does not rotate, so delete old dumps on a schedule:
+
+```bash
+find ./backups -name 'citevyn-*.dump' -mtime +29 -delete
+```
+
+The same 30-day limit applies to every copy: a dump copied to a laptop or to
+cloud storage, and any weekly or monthly copy. Keep none beyond 30 days. Neon's
+own restore history must also stay at 30 days or less (Neon console ->
+Settings; Free plan is 6 hours, Launch at most 7 days, Scale at most 30).
 
 To schedule nightly backups, add a cron job on the host:
 
 ```cron
 # /etc/cron.d/citevyn-backup
 0 3 * * *  cd /opt/citevyn && make backup >> /var/log/citevyn/backup.log 2>&1
+30 3 * * * cd /opt/citevyn && find ./backups -name 'citevyn-*.dump' -mtime +29 -delete
 ```
 
 ### 4.2 Restore
@@ -595,6 +615,13 @@ make restore FILE=infra/docker/backups/citevyn-20260620T030000Z.dump
 # Restart api + worker
 docker compose -f infra/docker/docker-compose.yml --profile prod up -d api worker
 ```
+
+**Before restarting api + worker, delete again every account deleted since the
+dump was taken.** A restore brings those accounts back (and loses their
+tombstones). For each line in the deletion log (§3.8 step 5) dated after the
+dump, run `python -m app.worker.cli delete-account --user-id usr_... --yes`
+against the restored database. Only then restart. The privacy page promises
+this.
 
 The `restore` target runs `pg_restore --clean --if-exists` inside
 the backup container. It drops and recreates the affected

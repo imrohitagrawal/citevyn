@@ -866,7 +866,9 @@ database — which is precisely why check (1) above is not optional.
 Neon's free tier keeps a short point-in-time-restore window; use the Neon
 console's branch/restore for a bad-data incident. For an off-provider copy,
 `pg_dump` the Neon DSN from your laptop on the same cadence RUNBOOK §4.1
-prescribes (7 days retained, no rotation built in).
+prescribes: keep dumps 30 days, never longer, and delete older ones (§4.1 has
+the command). After any restore, re-apply deletions from the deletion log
+(RUNBOOK §4.2) before serving traffic.
 
 ---
 

@@ -117,7 +117,7 @@ OWN_WORDS = {
 LAST_UPDATED = "28 October 2026"
 TEXT_AS_OF_DATE = {
     "terms": "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
-    "privacy": "e0922fac865cf7ad9d0fbd534d1d682a1df0d1c87279d3ca1bfa50a432013aa1",
+    "privacy": "6a86b0fba0ddef8722d320125db74ba372946413c31f53687fcf9ae6b0dbb1c0",
     "refunds": "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
 }
 
