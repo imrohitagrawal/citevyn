@@ -393,6 +393,8 @@ def test_the_dry_run_counts_what_would_go_and_changes_nothing(maker: Maker) -> N
     assert plan.rows["answer_usage"] == 4
     assert set(plan.rows) | set(plan.kept) == set(user_references())
     assert plan.kept == {"audit_events": 1}
+    # Review F3: chat messages hang off sessions, not users; still counted.
+    assert plan.indirect == {"messages": 1}
     assert all(n == 1 for t, n in plan.rows.items() if t != "answer_usage")
     # Nothing changed.
     assert count(maker, User, User.user_id == user_id) == 1
@@ -555,6 +557,70 @@ def test_pro_monthly_is_not_affected_by_a_tombstone(maker: Maker) -> None:
     assert trial_used(maker, new_id).used == 4  # partner: the tombstone is there
 
 
+def test_an_account_with_no_address_skips_the_tombstone_lookup(maker: Maker) -> None:
+    """Review A6. OAuth can store ``email=None`` (oauth.py). Turns red if:
+    usage_for hashes a missing address (it would raise) instead of skipping
+    the tombstone lookup."""
+    user_id = add_user(maker, None, answers=2)
+    usage = trial_used(maker, user_id)
+    assert (usage.kind, usage.used) == ("trial", 2)
+
+
+# ---------------------------------------------------------------------------
+# By account id: accounts with no stored address (review F2)
+# ---------------------------------------------------------------------------
+
+
+def test_an_account_with_no_address_is_deleted_by_its_id(maker: Maker) -> None:
+    """oauth.py stores ``email=None`` for an unverified, non-ASCII or taken
+    provider address, so such an account cannot be named by address. Turns red
+    if: --user-id cannot find it, or a tombstone is written for it (there is
+    no address to key it by, and such an account never had a trial)."""
+    user_id = add_user(maker, None, answers=1)
+    plan = run(maker, lambda s: plan_deletion(s, user_id=user_id))
+    assert plan.user_id == user_id
+    report = run(maker, lambda s: delete_account(s, None, NOW, user_id=user_id))
+    assert report.user_id == user_id
+    assert report.tombstone_total is None
+    assert count(maker, User, User.user_id == user_id) == 0
+    assert count(maker, DeletedAccount) == 0
+
+
+def test_by_id_an_account_with_an_address_still_gets_its_tombstone(maker: Maker) -> None:
+    """Turns red if: the id path skips the tombstone for an account that has
+    an address (it could then restart its trial)."""
+    user_id = add_user(maker, EMAIL, answers=2)
+    report = run(maker, lambda s: delete_account(s, None, NOW, user_id=user_id))
+    assert report.tombstone_total == 2
+    stone = tombstone(maker, EMAIL)
+    assert stone is not None and stone.trial_answers_used == 2
+
+
+@pytest.mark.parametrize("bad", ["demo_user", "admin", "anon_" + "a" * 32, "usr_nobody"])
+def test_by_id_only_an_existing_registered_account_is_found(maker: Maker, bad: str) -> None:
+    """Turns red if: --user-id can delete a shared or anonymous principal
+    (``demo_user`` holds every bearer-token visitor's chats) or invents one."""
+
+    async def _seed(s: AsyncSession) -> None:
+        for user_id in ("demo_user", "admin", "anon_" + "a" * 32):
+            s.add(User(user_id=user_id, role=UserRole.demo_user, created_at=NOW))
+        await s.commit()
+
+    run(maker, _seed)
+    with pytest.raises(AccountNotFound):
+        run(maker, lambda s: delete_account(s, None, NOW, user_id=bad))
+    assert count(maker, User) == 3
+
+
+def test_exactly_one_of_address_or_id_is_required(maker: Maker) -> None:
+    """Turns red if: both or neither are accepted (which one wins would be a
+    guess)."""
+    with pytest.raises(ValueError):
+        run(maker, lambda s: plan_deletion(s))
+    with pytest.raises(ValueError):
+        run(maker, lambda s: plan_deletion(s, EMAIL, user_id="usr_x"))
+
+
 # ---------------------------------------------------------------------------
 # The command
 # ---------------------------------------------------------------------------
@@ -634,3 +700,54 @@ def test_the_command_exits_2_for_a_live_subscription(cli_db: Maker, capsys: Any)
     # The dry run says so up front, with the same exit code.
     assert cli.main(["delete-account", "--email", EMAIL]) == 2
     assert "payment provider" in capsys.readouterr().out
+
+
+def test_the_command_deletes_by_user_id(cli_db: Maker, capsys: Any) -> None:
+    """Review F2. Turns red if: --user-id is not wired to the deletion."""
+    from app.worker import cli
+
+    user_id = add_user(cli_db, None)
+    assert cli.main(["delete-account", "--user-id", user_id]) == 0
+    assert count(cli_db, User, User.user_id == user_id) == 1  # dry run
+    assert cli.main(["delete-account", "--user-id", user_id, "--yes"]) == 0
+    assert "Deleted" in capsys.readouterr().out
+    assert count(cli_db, User, User.user_id == user_id) == 0
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["delete-account"],
+        ["delete-account", "--email", EMAIL, "--user-id", "usr_x"],
+    ],
+)
+def test_the_command_needs_exactly_one_of_email_or_user_id(cli_db: Maker, argv: list[str]) -> None:
+    """Turns red if: the two flags stop being one required, exclusive group."""
+    from app.worker import cli
+
+    add_user(cli_db, EMAIL)
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2  # argparse's usage error
+    assert count(cli_db, User) == 1
+
+
+@pytest.mark.parametrize("where", ["plan_deletion", "delete_account"])
+def test_an_unexpected_error_exits_3_and_changes_nothing(
+    cli_db: Maker, capsys: Any, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """Review F5. Turns red if: an unexpected failure escapes as a traceback,
+    or exits 1 (which means "no such account" and would mislead the
+    operator)."""
+    from app.worker import cli
+
+    user_id = add_user(cli_db, EMAIL)
+
+    async def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(f"app.services.account_deletion.{where}", boom)
+    assert cli.main(["delete-account", "--email", EMAIL, "--yes"]) == 3
+    out = capsys.readouterr().out
+    assert "RuntimeError" in out and "Nothing was changed" in out
+    assert count(cli_db, User, User.user_id == user_id) == 1
