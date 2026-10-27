@@ -102,8 +102,9 @@ PG_SUITE = "tests.test_pg_integration"
 
 # That population AS MEASURED: 15 test functions at ``d4763d6``, and
 # ``pytest -m postgres`` reports exactly 15 skipped with the URL unset. Raised
-# to 16 by #511, which added
-# ``test_delete_account_clears_every_table_that_references_users_on_postgres``.
+# to 17 by #511, which added
+# ``test_delete_account_clears_every_table_that_references_users_on_postgres``
+# and ``test_an_answer_being_saved_holds_off_the_account_deletion_on_postgres``.
 #
 # Compared as a BASELINE that must not shrink, not as a round floor. An earlier
 # version used 10, which meant a third of the suite could be deleted with the
@@ -111,7 +112,7 @@ PG_SUITE = "tests.test_pg_integration"
 # avoids by comparing `missed` against a recorded number rather than a
 # percentage. Adding a Postgres test never reddens it; deliberately removing one
 # is a one-line update here in the same change.
-MEASURED_PG_TESTS = 16
+MEASURED_PG_TESTS = 17
 
 # The marks ``tests/test_pg_integration.py`` may carry at MODULE level, by NAME.
 # ``skip`` is deliberately NOT here: ``pytest.mark.skip`` skips all 15 tests on a
@@ -431,7 +432,7 @@ def test_the_postgres_suite_has_tests_to_skip_in_the_first_place() -> None:
     ]
     assert len(declared) >= MEASURED_PG_TESTS, (
         f"tests/test_pg_integration.py declares {len(declared)} test function(s), "
-        f"below the {MEASURED_PG_TESTS} measured (15 at d4763d6, +1 by #511). The guards in this "
+        f"below the {MEASURED_PG_TESTS} measured (15 at d4763d6, +2 by #511). The guards in this "
         "file assert that a populated suite really ran; over an empty suite they "
         "assert nothing."
     )

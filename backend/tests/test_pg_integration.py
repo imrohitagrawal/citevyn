@@ -1154,3 +1154,55 @@ async def test_delete_account_clears_every_table_that_references_users_on_postgr
             assert stone is not None and stone.trial_answers_used == 1
     finally:
         await engine.dispose()
+
+
+async def test_an_answer_being_saved_holds_off_the_account_deletion_on_postgres(
+    pg_schema: str,
+) -> None:
+    """#511 review F1, the race window: once ``_ensure_user`` has checked the
+    chat session, the account cannot be deleted until that answer's
+    transaction ends, so the check cannot go stale before the message
+    inserts. The key-share lock it takes on the session row does this; the
+    deletion's cascade needs that row.
+
+    Turns red if: ``_ensure_user`` stops locking the session row
+    (``with_for_update`` dropped): the deletion then goes through at once.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.answer.orchestrator import Orchestrator
+    from app.core.config import Settings
+    from app.models import Session as ChatSession
+    from app.models import User, UserRole
+    from app.services.account_deletion import delete_account
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    user_id, sid = "usr_" + "c" * 32, uuid.uuid4()
+    try:
+        async with maker() as s:
+            s.add(User(user_id=user_id, role=UserRole.demo_user, created_at=now, email="l@x.com"))
+            await s.flush()
+            s.add(ChatSession(session_id=sid, user_id=user_id, created_at=now, expires_at=now))
+            await s.commit()
+
+        async with maker() as answering:
+            orchestrator = Orchestrator(Settings(llm_provider="stub"), answering)
+            assert await orchestrator._ensure_user(sid) == user_id
+            async with maker() as deleting:
+                await deleting.execute(text("SET LOCAL lock_timeout = '300ms'"))
+                with pytest.raises(DBAPIError, match="lock"):
+                    await delete_account(deleting, "l@x.com", now)
+            await answering.rollback()
+
+        # Partner: with the answer's transaction over, the same deletion works.
+        async with maker() as deleting:
+            report = await delete_account(deleting, "l@x.com", now)
+        assert report.user_id == user_id
+    finally:
+        await engine.dispose()
