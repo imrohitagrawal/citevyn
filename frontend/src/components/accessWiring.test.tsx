@@ -47,6 +47,23 @@ function strip() {
   );
 }
 
+describe("the footer", () => {
+  it.each([[OFF], [ON]])("links the published legal pages whatever the model says", async (config) => {
+    // Turns red if: a footer link is dropped, points elsewhere, or only shows
+    // with the model on (a payment provider's review needs them public).
+    vi.mocked(useClientConfig).mockReturnValue(config);
+    strip();
+    await settleLazy();
+    const nav = screen.getByRole("navigation", { name: "Legal" });
+    const links = Array.from(nav.querySelectorAll("a")).map((a) => [a.textContent, a.getAttribute("href")]);
+    expect(links).toEqual([
+      ["Terms", "/legal/terms"],
+      ["Privacy", "/legal/privacy"],
+      ["Refunds", "/legal/refunds"],
+    ]);
+  });
+});
+
 describe("the pricing section", () => {
   it("is today's section with the model off", async () => {
     // Turns red if: the new section renders while the model is off.

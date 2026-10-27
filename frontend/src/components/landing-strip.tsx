@@ -578,6 +578,11 @@ export function Footer() {
           <span>Claude · Claude Code · Codex · Gemini</span>
         </div>
         <div className="footer-copy">© 2026 CiteVyn. Answers from official docs only.</div>
+        <nav className="footer-legal" aria-label="Legal">
+          <a href="/legal/terms">Terms</a>
+          <a href="/legal/privacy">Privacy</a>
+          <a href="/legal/refunds">Refunds</a>
+        </nav>
       </div>
     </footer>
   );
