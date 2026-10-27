@@ -575,9 +575,10 @@ them.
 make backup
 ```
 
-This invokes the `backup` profile — a one-shot `postgres:16-alpine`
+This invokes the `backup` profile — a one-shot `postgres:18-alpine`
 container that runs `pg_dump --format=custom` against the live
-database and writes to `./backups/citevyn-<UTC>.dump`.
+database and writes to `infra/docker/backups/citevyn-<UTC>.dump`
+(the compose file's `./backups`, relative to `infra/docker/`).
 
 **Keep dumps for 30 days, never longer** (owner decision on #546). The privacy
 page promises that a deleted account's data leaves the live database within 30
@@ -585,20 +586,29 @@ days and every backup within 30 more, so all copies are gone within 60 days.
 The script does not rotate, so delete old dumps on a schedule:
 
 ```bash
-find ./backups -name 'citevyn-*.dump' -mtime +29 -delete
+find ./infra/docker/backups -name 'citevyn-*.dump' -mtime +29 -delete
 ```
 
+(Run from the repo root. `-mtime +29` matches files 30 full days old or older.)
+
 The same 30-day limit applies to every copy: a dump copied to a laptop or to
-cloud storage, and any weekly or monthly copy. Keep none beyond 30 days. Neon's
-own restore history must also stay at 30 days or less (Neon console ->
-Settings; Free plan is 6 hours, Launch at most 7 days, Scale at most 30).
+cloud storage, and any weekly or monthly copy. Keep none beyond 30 days. On
+Neon (production) the same limit covers every copy Neon keeps:
+- the restore history window: 30 days or less (Neon console -> Settings; Free
+  plan is 6 hours, Launch at most 7 days, Scale at most 30);
+- scheduled snapshots (paid plans; Neon's default keeps them 35 days): set
+  their retention to 30 days or less;
+- manual snapshots (they never expire on their own): give each an end date
+  within 30 days, or delete it within 30 days;
+- the `<branch>_old_<timestamp>` branch a restore leaves behind: delete it
+  within 30 days of the restore.
 
 To schedule nightly backups, add a cron job on the host:
 
 ```cron
 # /etc/cron.d/citevyn-backup
 0 3 * * *  cd /opt/citevyn && make backup >> /var/log/citevyn/backup.log 2>&1
-30 3 * * * cd /opt/citevyn && find ./backups -name 'citevyn-*.dump' -mtime +29 -delete
+30 3 * * * cd /opt/citevyn && find ./infra/docker/backups -name 'citevyn-*.dump' -mtime +29 -delete
 ```
 
 ### 4.2 Restore
@@ -616,12 +626,28 @@ make restore FILE=infra/docker/backups/citevyn-20260620T030000Z.dump
 docker compose -f infra/docker/docker-compose.yml --profile prod up -d api worker
 ```
 
-**Before restarting api + worker, delete again every account deleted since the
-dump was taken.** A restore brings those accounts back (and loses their
-tombstones). For each line in the deletion log (§3.8 step 5) dated after the
-dump, run `python -m app.worker.cli delete-account --user-id usr_... --yes`
-against the restored database. Only then restart. The privacy page promises
-this.
+**Before restarting api + worker, delete again the accounts in the deletion
+log.** A restore brings deleted accounts back (and loses their tombstones). For
+every line in the deletion log (§3.8 step 5) from the last 60 days, run, with
+api and worker still stopped:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml --profile prod run --rm --no-deps \
+  worker python -m app.worker.cli delete-account --user-id usr_... --yes
+```
+
+Only then restart. The privacy page promises this. What the exit codes mean
+here:
+- `0`: deleted again.
+- `1`: no such account in this copy (it was created after the dump). Fine.
+- `2`: the copy still shows a subscription that can bill. It was cancelled
+  before the original deletion (§3.8 step 3). Confirm at the payment provider
+  that it is cancelled, then on the restored database run
+  `UPDATE memberships SET status='canceled' WHERE account_id='usr_...';`
+  and run the command again.
+
+The tombstone written again counts only the free-trial answers in the dump, so
+it can be a little lower than the original. That is acceptable.
 
 The `restore` target runs `pg_restore --clean --if-exists` inside
 the backup container. It drops and recreates the affected

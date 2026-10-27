@@ -865,10 +865,32 @@ database — which is precisely why check (1) above is not optional.
 
 Neon's free tier keeps a short point-in-time-restore window; use the Neon
 console's branch/restore for a bad-data incident. For an off-provider copy,
-`pg_dump` the Neon DSN from your laptop on the same cadence RUNBOOK §4.1
-prescribes: keep dumps 30 days, never longer, and delete older ones (§4.1 has
-the command). After any restore, re-apply deletions from the deletion log
-(RUNBOOK §4.2) before serving traffic.
+`pg_dump` the Neon DSN from your laptop: keep dumps 30 days, never longer, and
+delete older ones (RUNBOOK §4.1). Every copy Neon keeps has the same 30-day
+limit (§4.1 lists them: history window, snapshots, the `_old_` branch a
+restore leaves).
+
+**Restoring production, and re-applying deletions.** A Neon restore goes live
+within seconds, because the app reconnects to the same address, so deleted
+accounts are back until you delete them again. Do it straight away. (Do not
+use `fly scale count 0` to keep the app off: it destroys the machines, and
+Fly cannot scale back up from zero without a full `fly deploy`.)
+
+1. Before restoring, open the deletion log (RUNBOOK §3.8 step 5) and prepare
+   the commands below for every entry from the last 60 days.
+2. Restore in the Neon console.
+3. Immediately, from your laptop, run each one against the Neon database:
+
+   ```bash
+   cd backend
+   CITEVYN_DATABASE_URL='<the Neon DSN>' .venv/bin/python -m app.worker.cli \
+     delete-account --user-id usr_... --yes
+   ```
+
+   Exit codes as in RUNBOOK §4.2 (`1` is fine; `2` needs the membership fix
+   described there).
+4. Within 30 days, delete the `<branch>_old_<timestamp>` branch the restore
+   left behind.
 
 ---
 
