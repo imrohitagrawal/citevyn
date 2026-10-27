@@ -296,7 +296,7 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
         # The type only: a message can carry SQL with the address in it.
         print(
             f"Unexpected error ({type(exc).__name__}). Nothing was changed: the "
-            "deletion is one transaction. Check the logs and run it again."
+            "deletion is one transaction. Check the database is reachable and run it again."
         )
         return 3
     if report.tombstone_total is None:

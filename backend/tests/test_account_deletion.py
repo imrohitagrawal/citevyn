@@ -563,9 +563,10 @@ def test_a_session_deleted_elsewhere_is_gone_even_if_this_session_still_holds_it
     """Review F1, the identity-map half. A request that still holds the
     Session object it loaded (say from ``require_session``) must not trust
     that copy after another connection deleted the account. Turns red if:
-    ``_ensure_user`` reads the session from the identity map
-    (``populate_existing`` dropped) or re-creates it, instead of raising
-    ``SessionGone``."""
+    ``_ensure_user`` reads the session from the identity map (both
+    ``populate_existing`` AND ``with_for_update`` dropped: either alone
+    makes SQLAlchemy skip the identity map) or re-creates it, instead of
+    raising ``SessionGone``."""
     from app.answer.orchestrator import Orchestrator, SessionGone
     from app.models import Session as ChatSession
 

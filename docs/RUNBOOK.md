@@ -499,7 +499,8 @@ fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli delete
   provider's webhook has marked it canceled, then run the dry run again.
 - Exit `3`: an unexpected error (the database unreachable, say). The command
   prints the error type only. The deletion is one transaction, so nothing
-  changed. Check the logs and run it again.
+  changed. Check the database is reachable (for example the `/health`
+  check) and run it again.
 - The command reads only CiteVyn's copy of the subscription status. Before
   `--yes`, also look the customer up in the payment provider's dashboard and
   confirm nothing there can still bill. If the provider shows the subscription
@@ -514,7 +515,10 @@ fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli delete
 ```
 
 An answer that was being produced for the account at that moment is not saved:
-its request gets a 404, like any unknown chat session.
+its request usually gets a 404, like any unknown chat session. In a rare
+timing the database stops one of the two to break a lock wait: then either the
+request gets a generic error, or this command exits 3 and can simply be run
+again. Either way the answer is never saved under the deleted account.
 
 **5. Reply to the requester** that the account and its data are deleted.
 
