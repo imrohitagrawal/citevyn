@@ -4,7 +4,7 @@ Cancel Pro at any time: in the chat, press Manage billing just above the questio
 
 # Failed payments
 
-If a renewal payment fails, Pro continues for 7 days while the payment is retried. If it still has not gone through, the account returns to the free tier. Nothing in your history is deleted.
+If a renewal payment fails, Pro continues for 7 days while the payment is retried. If it still has not gone through, the account returns to the free tier, and the Manage billing button goes away with Pro. Our payment provider may still retry the payment after that; if a retry succeeds, Pro resumes. To stop the retries and cancel, email rohit@stackclimb.com. Nothing is deleted.
 
 # Refunds
 

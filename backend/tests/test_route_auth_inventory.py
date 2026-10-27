@@ -443,7 +443,10 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
 # this is the list an attacker reads first.
 EXPECTED_OPEN: dict[tuple[str, str], str] = {
     ("GET", "/about"): "public marketing/legal copy",
-    ("GET", "/legal/{slug}"): "draft legal pages; 404 unless the access model is on",
+    (
+        "GET",
+        "/legal/{slug}",
+    ): "published Terms/Privacy/Refunds; the No-training draft 404s while off",
     (
         "GET",
         "/s/{share_id}",

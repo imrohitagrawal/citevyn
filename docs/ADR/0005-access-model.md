@@ -258,6 +258,8 @@ of scripting sign-ups; it does not prove a human. If abuse shows it is too weak,
 a vendor can replace it behind the same header without changing the routes.
 `GET /v1/config` tells the web client whether the access model is on.
 
+**Amended 2026-10-28:** Terms, Privacy and Refunds are owner-approved and PUBLISHED: served whatever the access model says, without the DRAFT notice or noindex, linked from the site footer, so a payment provider's site review can see them. Only No-training is still a draft. The text below is the Phase 5C state.
+
 **As built (Phase 5C): draft legal pages.** `GET /legal/{terms,privacy,refunds,no-training}`
 serves the drafts from `backend/app/legal/*.md`, rendered like `/about`, with a
 visible "DRAFT, not in effect" notice and `X-Robots-Tag: noindex`, and a 404

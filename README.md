@@ -261,7 +261,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /health`              | none   | DB-free liveness probe                        |
 | `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
 | `GET  /health/index`        | none   | Active index + vector-arm health              |
-| `GET  /legal/{slug}`        | none   | Draft Terms, Privacy, Refunds, No-training (404 unless the access model is on) |
+| `GET  /legal/{slug}`        | none   | Terms, Privacy, Refunds (published); No-training (a draft: 404 unless the access model is on) |
 | `GET  /s/{share_id}`        | none   | A shared answer: a frozen public copy (404 unless the access model is on, or once revoked) |
 | `GET  /v1/config`           | none   | Whether the access model is on (the UI reads it before sign-in) |
 | `GET  /v1/auth/challenge`   | none   | Sign-up proof-of-work challenge (404 unless the access model is on) |

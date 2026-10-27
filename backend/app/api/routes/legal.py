@@ -52,7 +52,9 @@ PUBLISHED: frozenset[str] = frozenset({"terms", "privacy", "refunds"})
 #: Change this date whenever a published page's text changes.
 _PUBLISHED_LEAD = "Last updated 28 October 2026."
 
-_OWNER_NOTE = re.compile(r"\[\s*owner\s*:", re.IGNORECASE)
+# Any bracket (ASCII or full-width), then anything but letters, then "owner" as
+# a word: "[OWNER: x]", "[ OWNER : x]", "[Owner note: x]", "\uff3bOWNER\uff1ax\uff3d", "[OWNER]".
+_OWNER_NOTE = re.compile(r"[\[\uff3b][^a-z\]\uff3d]*owner\b", re.IGNORECASE)
 
 
 def has_owner_note(text: str) -> bool:

@@ -77,7 +77,7 @@ def test_a_published_page_is_served_as_final(
     assert "<h2" in res.text
 
 
-@pytest.mark.parametrize("slug", PUBLIC)
+@pytest.mark.parametrize("slug", sorted(PUBLISHED))
 def test_a_published_page_has_no_owner_note_left(slug: str) -> None:
     """Turns red if: a page goes public with an unanswered owner note in it."""
     text = (_LEGAL_DIR / LEGAL_PAGES[slug][1]).read_text(encoding="utf-8")
@@ -87,9 +87,59 @@ def test_a_published_page_has_no_owner_note_left(slug: str) -> None:
 def test_the_owner_note_check_finds_a_note() -> None:
     """Partner of the check above: it must actually find notes. Turns red if:
     has_owner_note stops matching (then the check above proves nothing)."""
-    assert has_owner_note("Contact: [OWNER: address].")
-    assert has_owner_note("x [owner:  y]")
+    for note in [
+        "Contact: [OWNER: address].",
+        "x [owner:  y]",
+        "[ OWNER : x]",
+        "[Owner note: x]",
+        "[OWNER]",
+        "[OWNER - x]",
+        "\uff3bOWNER\uff1ax\uff3d",
+        "[\u200bOWNER: x]",
+    ]:
+        assert has_owner_note(note), note
     assert not has_owner_note("Contact: rohit@stackclimb.com.")
+    assert not has_owner_note("the owner of the account")
+
+
+#: Each published page's own words, so a page can't quietly serve another
+#: page's file (the <h1> comes from the title table, not the file).
+OWN_WORDS = {
+    "terms": "CiteVyn is provided &quot;as is&quot;",
+    "privacy": "Argon2id",
+    "refunds": "refunded in full if you ask within 14 days",
+}
+
+#: SHA-256 of each published file when "Last updated 28 October 2026" was set.
+#: Change a published page's text -> update the date in legal.py AND these.
+TEXT_AS_OF_DATE = {
+    "terms": "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
+    "privacy": "78242bf5478d0187dd3e3afddd4d5a26cc081d0c6c7512f1e0ce468cf306a869",
+    "refunds": "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
+}
+
+
+@pytest.mark.parametrize("slug", sorted(PUBLISHED))
+def test_each_published_page_serves_its_own_file(slug: str) -> None:
+    """Turns red if: LEGAL_PAGES points a slug at another page's file."""
+    with TestClient(create_app()) as client:
+        res = client.get(f"/legal/{slug}")
+    assert OWN_WORDS[slug] in res.text
+    for other, words in OWN_WORDS.items():
+        if other != slug:
+            assert words not in res.text
+
+
+@pytest.mark.parametrize("slug", sorted(PUBLISHED))
+def test_the_last_updated_date_moves_with_the_text(slug: str) -> None:
+    """Turns red if: a published page's text changes but its fingerprint here
+    does not. When it does, update "Last updated" in legal.py too."""
+    import hashlib
+
+    text = (_LEGAL_DIR / LEGAL_PAGES[slug][1]).read_bytes()
+    assert hashlib.sha256(text).hexdigest() == TEXT_AS_OF_DATE[slug], (
+        f"{slug} changed: update the 'Last updated' date in legal.py and this hash"
+    )
 
 
 @pytest.mark.parametrize("slug", PUBLIC)

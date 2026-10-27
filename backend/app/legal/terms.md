@@ -4,7 +4,7 @@ CiteVyn answers questions about the Claude API, Claude Code, Codex and Gemini fr
 
 # Preview
 
-CiteVyn is in preview. Until paid plans launch, you can ask questions without an account, within an hourly limit, and nothing is billed. The Accounts and Pro sections below take effect when paid plans launch; this page will say when.
+CiteVyn is in preview. Until paid plans launch, you can ask questions without an account, within an hourly limit, and nothing is billed. Two parts of these terms take effect only when paid plans launch: needing an account to ask questions, with its free trial, and the Pro section. This page will say when. Everything else applies now.
 
 # Who can use CiteVyn
 
@@ -16,7 +16,7 @@ Answers are written by an AI model from the cited pages. The model can misread o
 
 # Accounts
 
-- You need an account to ask live questions. You can sign up with an email address and password, a one-time email link, GitHub or Google.
+- You need an account to ask live questions. You can sign up with an email address and password, or with GitHub or Google. You can also sign in with a one-time link sent to your account's email address.
 - The free trial is a set number of answered questions, once, for an account that has verified its email address. A question CiteVyn refuses or cannot answer does not use your allowance.
 - Keep your sign-in to yourself. You are responsible for what happens under your account.
 
@@ -24,7 +24,7 @@ Answers are written by an AI model from the cited pages. The model can misread o
 
 - Pro is billed monthly or yearly through our payment provider. It includes a monthly number of answered questions, counted per calendar month in UTC, plus the per-hour limit that applies to everyone.
 - You can cancel at any time. Pro stays active until the end of the period you paid for.
-- If a payment fails, Pro continues for 7 days while the payment is retried; after that the account returns to the free tier. Your history stays.
+- If a payment fails, Pro continues for 7 days while the payment is retried; after that the account returns to the free tier. If a later retry succeeds, Pro resumes. Nothing is deleted.
 - Refunds: see the Refund Policy.
 
 # Fair use
