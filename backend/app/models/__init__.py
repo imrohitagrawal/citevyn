@@ -13,6 +13,7 @@ from app.models.auth_sessions import AuthSession
 from app.models.base import GUID, Base, PickledEmbedding, TimestampMixin
 from app.models.bot_check import BotCheckUse
 from app.models.chunks import Chunk
+from app.models.deleted_accounts import DeletedAccount
 from app.models.digest import DigestSend
 from app.models.doc_watch import DocChange, DocSnapshot
 from app.models.documents import Document
@@ -66,6 +67,7 @@ __all__ = [
     "AuthSession",
     "Base",
     "Chunk",
+    "DeletedAccount",
     "Confidence",
     "Document",
     "DocumentStatus",

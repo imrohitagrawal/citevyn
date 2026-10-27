@@ -228,6 +228,16 @@ def _strip_flag_tokens(question: str) -> str:
     return " ".join(_FLAG_TOKEN_RE.sub(" ", question).split())
 
 
+class SessionGone(LookupError):
+    """The chat session no longer exists: it was deleted (with its account,
+    #511) while the question was being answered. The route answers like an
+    unknown session (404), and nothing is saved."""
+
+    def __init__(self, session_id: uuid.UUID) -> None:
+        super().__init__(f"session {session_id} no longer exists")
+        self.session_id = session_id
+
+
 class OrchestratorError(RuntimeError):
     """Raised when the orchestrator cannot answer the question at all.
 
@@ -405,9 +415,16 @@ class Orchestrator:
         llm: LLMClient | None = None,
         retriever: _RetrieverLike | None = None,
         cache: AnswerCacheStore | None = None,
+        create_missing_session: bool = False,
     ) -> None:
         self._settings = settings
         self._session = session
+        # Unit tests and the eval harness pass bare session ids and want the
+        # rows made for them. Production routes always create the session
+        # first, so for them a missing row means it was deleted mid-request
+        # and must never be re-created (#511 review F1).
+        self._create_missing_session = create_missing_session
+        self._session_owner: dict[uuid.UUID, str] = {}
         self._llm = llm or get_llm_client(settings)
         # An explicitly-injected retriever always wins (tests). The DEFAULT is
         # built lazily in ``ask`` — only after the active index version is
@@ -1449,26 +1466,40 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def _ensure_user(self, session_id: uuid.UUID) -> str:
-        """Make sure a User + Session row pair exists for ``session_id``.
+        """Return the owner of ``session_id``, whose Session row must exist.
 
-        The orchestrator writes messages against a session the Slice 7
-        route already created. To keep the orchestrator unit-testable
-        without that scaffolding, this helper upserts the minimum
-        rows needed to satisfy foreign keys when the caller passes a
-        bare ``session_id``. Returns the ``user_id`` to attach to
-        audit events.
+        The orchestrator writes messages against a session the route already
+        created. If that row is gone, the session was deleted (with its
+        account, #511) while the question was answered: raise
+        :class:`SessionGone` and save nothing. Until #511's review this
+        re-created the row under ``demo_user``, so an answer in flight during
+        an account deletion survived it.
 
-        This used to claim it raises ``RuntimeError`` when a session row
-        references an unresolvable user. It never did — there is no ``raise``
-        here, no caller catches one, and no route retries on it. The real
-        behaviour is the opposite: the missing ``users`` row is created and
-        the caller proceeds. Corrected rather than implemented, because
-        under #286's foreign-key enforcement that branch is now unreachable
-        anyway: ``sessions.user_id`` is ``ON DELETE CASCADE``, so a session
-        cannot outlive its user.
+        Only with ``create_missing_session=True`` (unit tests and the eval
+        harness, which pass bare ids) are the ``demo_user`` and Session rows
+        made instead. ``sessions.user_id`` is ``ON DELETE CASCADE``, so an
+        existing session always has its user.
         """
-        session = await self._session.get(Session, session_id)
-        user_id = session.user_id if session is not None else "demo_user"
+        known = self._session_owner.get(session_id)
+        if known is not None:
+            return known
+        # Read the row from the DATABASE (not the identity map, which can still
+        # hold it after a concurrent delete) and hold a key-share lock on it
+        # until commit (Postgres; SQLite ignores it), so the account cannot be
+        # deleted between this check and the message inserts.
+        session = await self._session.get(
+            Session,
+            session_id,
+            populate_existing=True,
+            with_for_update={"key_share": True},
+        )
+        if session is not None:
+            # ``sessions.user_id`` is ON DELETE CASCADE: the user row exists.
+            self._session_owner[session_id] = session.user_id
+            return session.user_id
+        if not self._create_missing_session:
+            raise SessionGone(session_id)
+        user_id = "demo_user"
 
         # The parent ``users`` row FIRST, in its own flush. ``sessions``
         # and ``audit_events`` both carry a foreign key onto it, and this
@@ -1493,20 +1524,19 @@ class Orchestrator:
             )
             await self._session.flush()
 
-        if session is None:
-            # Caller passed a bare UUID with no Session row yet.
-            # Create it so the message inserts do not trip the FK on
-            # ``messages.session_id``.
-            self._session.add(
-                Session(
-                    session_id=session_id,
-                    user_id=user_id,
-                    channel="chat",
-                    created_at=_utcnow(),
-                    expires_at=_utcnow_from_seconds(self._settings.index_session_ttl_seconds),
-                )
+        # A bare UUID with no Session row yet (tests only): create it so the
+        # message inserts do not trip the FK on ``messages.session_id``.
+        self._session.add(
+            Session(
+                session_id=session_id,
+                user_id=user_id,
+                channel="chat",
+                created_at=_utcnow(),
+                expires_at=_utcnow_from_seconds(self._settings.index_session_ttl_seconds),
             )
-            await self._session.flush()
+        )
+        await self._session.flush()
+        self._session_owner[session_id] = user_id
         return user_id
 
     async def _persist_messages(
@@ -1710,5 +1740,6 @@ __all__ = [
     "Orchestrator",
     "OrchestratorError",
     "RetrievalStrategy",
+    "SessionGone",
     "is_greeting",
 ]

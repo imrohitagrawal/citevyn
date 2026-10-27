@@ -7,6 +7,7 @@ Usage:
     citevyn-worker run --index-version v-test
     citevyn-worker evaluate --index-version v-test   # promotion gate evidence
     citevyn-worker list-sources
+    citevyn-worker delete-account (--email E | --user-id usr_...) [--yes]  # (#511)
 
 The CLI is intentionally thin: it builds a single
 :class:`IngestionRunner` and drives it through one source
@@ -83,6 +84,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_digest()
     if args.command == "alerts":
         return _cmd_alerts()
+    if args.command == "delete-account":
+        return asyncio.run(_delete_account(args.email, args.user_id, yes=args.yes))
     parser.print_help()
     return 1
 
@@ -225,6 +228,86 @@ async def _alerts(settings: Settings, client: EmailClient) -> int:
         f"not Pro {stats.skipped_not_pro}{', stopped at the per-run cap' if stats.capped else ''}"
     )
     return 0 if stats.failed == 0 else 3
+
+
+async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) -> int:
+    """Delete one account on request (#511; ``docs/RUNBOOK.md`` §3.8, "Delete
+    an account on request"), named by ``--email`` or, for an account with no
+    stored address, ``--user-id``. Without ``yes``, a dry run: print what would
+    go and change nothing.
+
+    Exit codes: 0 done (or dry run printed); 1 no account, or more than one,
+    matches; 2 refused, the account has a subscription that can still bill; 3
+    an unexpected error (the deletion is one transaction, so nothing changed).
+    """
+    from app.core.db import get_sessionmaker
+    from app.services.account_deletion import (
+        AccountNotFound,
+        AmbiguousAddress,
+        SubscriptionStillLive,
+        delete_account,
+        plan_deletion,
+    )
+
+    named = f"address {email.strip().lower()}" if email is not None else f"id {user_id}"
+    try:
+        async with get_sessionmaker()() as db:
+            plan = await plan_deletion(db, email, user_id=user_id)
+            print(f"Account {plan.user_id} ({named})")
+            for table, n in plan.rows.items():
+                print(f"  {table}: {n} row(s) deleted")
+            for table, n in plan.indirect.items():
+                print(f"  {table}: {n} row(s) deleted with their parent rows")
+            for table, n in plan.kept.items():
+                print(f"  {table}: {n} row(s) kept, account link cleared")
+            print("  plus the rows that hang off these (retrieved evidence, sign-in nonces)")
+            if plan.has_address:
+                print(
+                    f"  trial answers used: {plan.trial_answers_used} "
+                    f"(already on the tombstone: {plan.carried_over})"
+                )
+            else:
+                print("  no stored address: no tombstone will be kept")
+            if plan.live_subscriptions:
+                raise SubscriptionStillLive(plan.live_subscriptions)
+            if not yes:
+                print("Dry run: nothing was changed. Re-run with --yes to delete.")
+                return 0
+            report = await delete_account(db, email, datetime.now(UTC), user_id=user_id)
+    except AccountNotFound:
+        # ``--user-id`` names only ``usr_`` accounts, never demo_user/anon_*.
+        print(f"No account has the {named}. Nothing was changed.")
+        return 1
+    except AmbiguousAddress as exc:
+        print(
+            f"{exc.matches} accounts have the {named} once case and spaces are ignored. "
+            "Nothing was changed; resolve this by hand."
+        )
+        return 1
+    except SubscriptionStillLive as exc:
+        print(
+            f"Refused: the account has a subscription that can still bill "
+            f"({', '.join(exc.statuses)}). Cancel it at the payment provider first, "
+            "wait until it shows as canceled here, then run this again. "
+            "Nothing was changed."
+        )
+        return 2
+    except Exception as exc:  # noqa: BLE001 - reported, never a bare traceback
+        # The type only: a message can carry SQL with the address in it.
+        print(
+            f"Unexpected error ({type(exc).__name__}). Nothing was changed: the "
+            "deletion is one transaction. Check the database is reachable and run it again."
+        )
+        return 3
+    if report.tombstone_total is None:
+        kept = "no tombstone (the account had no address)"
+    else:
+        kept = f"the tombstone for this address now holds {report.tombstone_total}"
+    print(
+        f"Deleted account {report.user_id}. Trial answers used: "
+        f"{report.trial_answers_used}; {kept}."
+    )
+    return 0
 
 
 def _cmd_list_sources() -> int:
@@ -391,6 +474,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "alerts",
         help="Email Pro accounts the doc changes that match their watches (needs "
         "CITEVYN_WATCH_ALERTS_ENABLED=true).",
+    )
+
+    delete_account = sub.add_parser(
+        "delete-account",
+        help="Delete an account on request (#511). A dry run unless --yes is given.",
+    )
+    # Exactly one way to name the account: its address, or (for an account
+    # with no stored address) its usr_ id.
+    named = delete_account.add_mutually_exclusive_group(required=True)
+    named.add_argument("--email", help="The account's address.")
+    named.add_argument(
+        "--user-id", help="The account's usr_ id, for an account with no stored address."
+    )
+    delete_account.add_argument(
+        "--yes", action="store_true", help="Really delete (default: print the plan only)."
     )
 
     evaluate = sub.add_parser(

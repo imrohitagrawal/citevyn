@@ -473,7 +473,7 @@ candidate index against the shipped corpus and write the `EvaluationRun` row the
 gate reads:
 
 ```bash
-fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version <candidate>"
+fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli evaluate --index-version <candidate>'"
 ```
 
 Exit `0` means it measured at or above `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE`

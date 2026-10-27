@@ -59,8 +59,13 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 - The tier is worked out from the principal the request already resolved, on
   the same database session; a caller the route sees as anonymous is refused,
   never answered without a check.
-- Deleting an account deletes its usage rows; there is no delete route today.
-  One added later must not let the same address start a fresh trial.
+- Deleting an account deletes its usage rows. There is no delete route; the
+  operator deletes on request (`RUNBOOK.md` §3.8). The deletion keeps a
+  tombstone in `deleted_accounts`: the SHA-256 of the address (not the address)
+  and the trial answers the account used. If the same address signs up again,
+  in any case or with spaces around it, those answers still count against its
+  free trial, so deleting an account cannot restart the trial. A second
+  deletion adds to the count. Pro's monthly count ignores the tombstone.
 - Two questions sent at the same moment near the limit can both be answered: the
   check and the write are not one step, because locking the account for a whole
   model call would block its Stripe webhooks. The overshoot is at most the number
