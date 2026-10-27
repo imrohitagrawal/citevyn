@@ -437,6 +437,130 @@ can see them (the seed commits per source, and a re-seed runs against an
 already-active `v1`). Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a key) and
 re-seed to get a live, stamped vector arm.
 
+### 3.8 Delete an account on request
+
+The privacy page promises to delete an account's data on request. Do it within
+30 days of the request. There is no delete button; the operator runs one
+command (#511).
+
+**1. Check the requester controls the account.** Act only on a request sent
+from the account's address, or one whose sender has replied from that address
+to an email you sent it. Never delete because someone else asked.
+
+Some accounts have **no stored address**: a GitHub or Google sign-in whose
+address the provider reported as unverified, was not plain ASCII, or already
+belonged to another account. Name those by their account id (`usr_…`)
+instead, found read-only in the Neon SQL editor (the console DEPLOY_FLY.md
+§2.1 uses). For GitHub, ask for their GitHub login;
+`https://api.github.com/users/<login>` gives its numeric `id`, which is what
+CiteVyn stores:
+
+```sql
+SELECT u.user_id, u.email, u.created_at
+FROM user_identities i JOIN users u ON u.user_id = i.user_id
+WHERE i.provider = 'github' AND i.provider_account_id = '<numeric id>';
+```
+
+Check control the same way: the request comes from the address on that GitHub
+profile, or the requester proves the login some other way you trust. For
+Google, CiteVyn stores only Google's account number, which the requester
+cannot easily give and no address maps to; decide such a request case by case.
+
+**2. Wake the machine** (it scales to zero, and `fly ssh console` needs a
+running machine):
+
+```bash
+curl -sS -o /dev/null https://citevyn.stackclimb.com/health
+```
+
+**3. Dry run.** It prints how many rows would go per table that references the
+account, the chat messages that go with its sessions, and the rows kept with
+the account link cleared. Rows that hang off those (retrieved evidence,
+sign-in nonces) go too and are not counted. It changes nothing. `cd /app` is
+required (DEPLOY_FLY.md §4.2: otherwise `No module named 'app'`):
+
+```bash
+fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli delete-account --email person@example.com'"
+# or, for an account with no stored address:
+fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli delete-account --user-id usr_…'"
+```
+
+- Exit `0`: the plan is printed. Read it.
+- Exit `1`: no account matches. Check the spelling with the requester. Case
+  and surrounding spaces in an address do not matter. `--user-id` accepts only
+  `usr_` accounts, never `demo_user`, `admin` or an `anon_` visitor. Exit `1`
+  also when two older accounts have the same address in different case; the
+  command says so and changes nothing, and that needs resolving by hand.
+- Exit `2`: the account has a subscription that can still bill (anything but
+  `canceled` or `incomplete_expired`, including `past_due` after our grace,
+  because the provider keeps retrying the card). Cancel it at the payment
+  provider first, **immediately, not at the end of the period** (a subscription
+  set to cancel at period end stays `active` until then). Wait until the
+  provider's webhook has marked it canceled, then run the dry run again.
+- Exit `3`: an unexpected error (the database unreachable, say). The command
+  prints the error type only. The deletion is one transaction, so nothing
+  changed. Check the database is reachable (for example the `/health`
+  check) and run it again.
+- The command reads only CiteVyn's copy of the subscription status. Before
+  `--yes`, also look the customer up in the payment provider's dashboard and
+  confirm nothing there can still bill. If the provider shows the subscription
+  canceled but the dry run still refuses, the cancellation event was lost
+  (#503): resend it from the provider's dashboard, then run the dry run again.
+
+**4. Delete.** The same command with `--yes`. It runs in one transaction and
+prints the account id and the trial count it kept:
+
+```bash
+fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli delete-account --email person@example.com --yes'"
+```
+
+An answer that was being produced for the account at that moment is not saved:
+its request usually gets a 404, like any unknown chat session. In a rare
+timing the database stops one of the two to break a lock wait: then either the
+request gets a generic error, or this command exits 3 and can simply be run
+again. Either way the answer is never saved under the deleted account.
+
+**5. Reply to the requester** that the account and its data are deleted.
+
+**6. 24 hours later, check the payment provider again** for that customer. A
+subscription that still names the deleted account and can still bill also
+shows in the logs as `billing_subscription_account_missing` (account id and
+subscription id). Cancel it at the provider if you find one.
+
+**What is deleted:** the `users` row and every row that references it: sign-in
+sessions, linked GitHub and Google identities, sign-in links, conversations and
+their messages, feedback and source requests, answer usage, API keys, shared
+answer links, watches, digest and alert send records, and membership rows. The
+foreign keys do this (`ON DELETE CASCADE`). A Postgres test
+(`test_delete_account_clears_every_table_that_references_users_on_postgres`)
+checks every table that references `users`, read from the models.
+
+**What is kept, by design:**
+
+- `provider_calls`: the record of paid model calls (tokens and cost, under the
+  old account id). No question text and no address.
+- `audit_events`: the security log of sign-ins and answered questions. The rows
+  stay with the account link cleared (`ON DELETE SET NULL`). They hold no
+  address.
+- `stripe_events`: the payment-event log (event id, type, old account id).
+- `deleted_accounts`: one row per deleted address, holding the SHA-256 of the
+  address (not the address), the trial answers it used and the date. If the
+  same address signs up again, those answers still count against its free
+  trial, so deleting an account cannot restart the trial
+  (`docs/ACCESS_POLICY.md`). A second deletion adds to the count. An account
+  with no stored address gets no row (it never had a trial).
+
+The answer cache (`answer_cache`) keeps a question's normalised text and its
+answer, linked to no account. A row stops being served once it expires
+(`CITEVYN_CACHE_TTL_SECONDS`, default 24 hours), but nothing purges expired
+rows: one stays in the table until the same question is cached again.
+
+Outside this database, the payment provider keeps its own customer record and
+the email provider its delivery logs, under their own retention.
+
+Anonymous `anon_*` visitors cannot be named, so this command does not apply to
+them.
+
 ## 4. Backup & restore
 
 ### 4.1 Backups (operator)
