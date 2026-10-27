@@ -639,7 +639,10 @@ docker compose -f infra/docker/docker-compose.yml --profile prod run --rm --no-d
 Only then restart. The privacy page promises this. What the exit codes mean
 here:
 - `0`: deleted again.
-- `1`: no such account in this copy (it was created after the dump). Fine.
+- `1`: no such account in this copy (deleted before the dump, or created after
+  it). Fine.
+- `3`: an unexpected error; nothing changed. Check the database connection and
+  run it again.
 - `2`: the copy still shows a subscription that can bill. It was cancelled
   before the original deletion (§3.8 step 3). Confirm at the payment provider
   that it is cancelled, then on the restored database run

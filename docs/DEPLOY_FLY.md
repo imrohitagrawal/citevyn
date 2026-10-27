@@ -882,13 +882,15 @@ Fly cannot scale back up from zero without a full `fly deploy`.)
 3. Immediately, from your laptop, run each one against the Neon database:
 
    ```bash
-   cd backend
+   cd /path/to/citevyn/backend   # the repo's backend folder, with its .venv
    CITEVYN_DATABASE_URL='<the Neon DSN>' .venv/bin/python -m app.worker.cli \
      delete-account --user-id usr_... --yes
    ```
 
-   Exit codes as in RUNBOOK §4.2 (`1` is fine; `2` needs the membership fix
-   described there).
+   Exit codes as in RUNBOOK §4.2 (`1` is fine; `3` means nothing changed, so
+   run it again; `2` needs the membership fix described there). The app is
+   live meanwhile, so run every other entry first and handle the `2`s last,
+   quickly.
 4. Within 30 days, delete the `<branch>_old_<timestamp>` branch the restore
    left behind.
 
