@@ -1,19 +1,21 @@
 # Cancelling
 
-Cancel Pro at any time: in the chat, press Manage billing just above the question box (it shows while you have Pro). It opens Stripe's billing portal, where you can also change your card. You keep Pro until the end of the period you already paid for; you are not charged again.
+Cancel Pro at any time: in the chat, press Manage billing just above the question box (it shows while you have Pro). It opens our payment provider's billing page, where you can also change your card. You keep Pro until the end of the period you already paid for; you are not charged again.
 
 # Failed payments
 
-If a renewal payment fails, Pro continues for 7 days while the payment is retried. If it still has not gone through, the account returns to the free tier. Nothing in your history is deleted.
+If a renewal payment fails, Pro continues for 7 days while the payment is retried. If it still has not gone through, the account returns to the free tier, and the Manage billing button goes away with Pro. Our payment provider may still retry the payment after that; if a retry succeeds, Pro resumes. To stop the retries and cancel, email rohit@stackclimb.com. Nothing is deleted.
 
 # Refunds
 
-[OWNER: choose and state the policy. For example: no refunds for partial periods except where the law requires them; or a full refund if requested within N days of the first charge; and how yearly plans are treated.]
+- Your first Pro payment, monthly or yearly, is refunded in full if you ask within 14 days of paying. This applies once per customer.
+- Otherwise we don't refund part-used months or years, except where the law requires it or we charged you by mistake.
+- If the law where you live gives you a right to cancel and get money back, that right applies on top of this policy.
 
 # How to ask
 
-[OWNER: contact address, and how long a refund takes to reach the card.]
+Email rohit@stackclimb.com from the address on your account. A refund goes back to the card or account you paid with and usually arrives within 5 to 10 business days.
 
 # Charges we didn't intend
 
-If you were charged twice (for example by starting checkout in two tabs), contact us at [OWNER: address] and we will [OWNER: refund the duplicate, and how].
+If you were charged twice (for example by starting checkout in two tabs), contact us at rohit@stackclimb.com and we will refund the duplicate charge in full.
