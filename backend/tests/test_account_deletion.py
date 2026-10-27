@@ -557,6 +557,46 @@ def test_pro_monthly_is_not_affected_by_a_tombstone(maker: Maker) -> None:
     assert trial_used(maker, new_id).used == 4  # partner: the tombstone is there
 
 
+def test_a_session_deleted_elsewhere_is_gone_even_if_this_session_still_holds_it(
+    maker: Maker,
+) -> None:
+    """Review F1, the identity-map half. A request that still holds the
+    Session object it loaded (say from ``require_session``) must not trust
+    that copy after another connection deleted the account. Turns red if:
+    ``_ensure_user`` reads the session from the identity map
+    (``populate_existing`` dropped) or re-creates it, instead of raising
+    ``SessionGone``."""
+    from app.answer.orchestrator import Orchestrator, SessionGone
+    from app.models import Session as ChatSession
+
+    user_id = add_user(maker, EMAIL)
+    sid = uuid.uuid4()
+
+    async def _go() -> None:
+        async with maker() as s:
+            s.add(
+                ChatSession(
+                    session_id=sid,
+                    user_id=user_id,
+                    created_at=NOW,
+                    expires_at=NOW + timedelta(days=1),
+                )
+            )
+            await s.commit()
+        async with maker() as s:
+            held = await s.get(ChatSession, sid)  # kept alive in the identity map
+            assert held is not None
+            async with maker() as other:
+                await delete_account(other, EMAIL, NOW)
+            with pytest.raises(SessionGone):
+                await Orchestrator(Settings(llm_provider="stub"), s)._ensure_user(sid)
+            await s.rollback()
+
+    asyncio.run(_go())
+    assert count(maker, User) == 0  # no demo_user made
+    assert count(maker, Message) == 0
+
+
 def test_an_account_with_no_address_skips_the_tombstone_lookup(maker: Maker) -> None:
     """Review A6. OAuth can store ``email=None`` (oauth.py). Turns red if:
     usage_for hashes a missing address (it would raise) instead of skipping
