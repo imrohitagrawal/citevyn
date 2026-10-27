@@ -1,9 +1,9 @@
 """Delete an account on request (#511). Operator only: there is no route.
 
-The privacy page promises: "If you ask us to delete your account, we delete its
-data within 30 days". The operator runs ``citevyn-worker delete-account`` (see
-``docs/RUNBOOK.md``, "Delete an account on request"), which calls
-:func:`plan_deletion` (the dry run) and then :func:`delete_account`.
+The privacy page promises to delete an account and its data on request. The
+operator runs ``python -m app.worker.cli delete-account`` (``docs/RUNBOOK.md``
+§3.8, "Delete an account on request"), which calls :func:`plan_deletion` (the
+dry run) and then :func:`delete_account`.
 
 What a deletion does, in ONE transaction:
 
@@ -48,6 +48,15 @@ ENDED_STATUSES = frozenset({"canceled", "incomplete_expired"})
 
 class AccountNotFound(Exception):
     """No account has this address."""
+
+
+class AmbiguousAddress(Exception):
+    """More than one account has this address once case and spaces are
+    ignored (rows stored before addresses were normalised)."""
+
+    def __init__(self, matches: int) -> None:
+        super().__init__(f"{matches} accounts match")
+        self.matches = matches
 
 
 class SubscriptionStillLive(Exception):
@@ -96,13 +105,19 @@ def _user_references() -> list[tuple[Table, Column[str], bool]]:
 
 
 async def _find(db: AsyncSession, email: str, *, lock: bool) -> User:
-    query = select(User).where(User.email == email.strip().lower())
+    # Case and spaces are ignored on the STORED side too: provider addresses
+    # were stored verbatim before ADR-0004 PR 14, and nothing lower-cased them.
+    # Operator-only and rare, so a scan of ``users`` is fine here.
+    stored = func.lower(func.trim(User.email))
+    query = select(User).where(stored == email.strip().lower())
     if lock:
         query = query.with_for_update()
-    user = (await db.execute(query)).scalar_one_or_none()
-    if user is None:
+    users = (await db.execute(query)).scalars().all()
+    if not users:
         raise AccountNotFound(email)
-    return user
+    if len(users) > 1:
+        raise AmbiguousAddress(len(users))
+    return users[0]
 
 
 async def _plan(db: AsyncSession, user: User) -> DeletionPlan:
@@ -171,6 +186,7 @@ async def delete_account(db: AsyncSession, email: str, now: datetime) -> Deletio
 __all__ = [
     "ENDED_STATUSES",
     "AccountNotFound",
+    "AmbiguousAddress",
     "DeletionPlan",
     "DeletionReport",
     "SubscriptionStillLive",

@@ -463,13 +463,20 @@ fly ssh console -a citevyn -C "python -m app.worker.cli delete-account --email p
 
 - Exit `0`: the plan is printed. Read it.
 - Exit `1`: no account has that address. Check the spelling with the
-  requester. Case and surrounding spaces do not matter.
+  requester. Case and surrounding spaces do not matter. Exit `1` also when two
+  older accounts have the same address in different case; the command says so
+  and changes nothing, and that needs resolving by hand.
 - Exit `2`: the account has a subscription that can still bill (anything but
   `canceled` or `incomplete_expired`, including `past_due` after our grace,
   because the provider keeps retrying the card). Cancel it at the payment
   provider first, **immediately, not at the end of the period** (a subscription
   set to cancel at period end stays `active` until then). Wait until the
   provider's webhook has marked it canceled, then run the dry run again.
+- The command reads only CiteVyn's copy of the subscription status. Before
+  `--yes`, also look the customer up in the payment provider's dashboard and
+  confirm nothing there can still bill. If the provider shows the subscription
+  canceled but the dry run still refuses, the cancellation event was lost
+  (#503): resend it from the provider's dashboard, then run the dry run again.
 
 **4. Delete.** The same command with `--yes`. It runs in one transaction and
 prints the account id and the trial count it kept:
@@ -501,6 +508,10 @@ checks every table that references `users`, read from the models.
   same address signs up again, those answers still count against its free
   trial, so deleting an account cannot restart the trial
   (`docs/ACCESS_POLICY.md`). A second deletion adds to the count.
+
+The answer cache (`answer_cache`) keeps a question's normalised text and its
+answer, linked to no account, until it expires (`CITEVYN_CACHE_TTL_SECONDS`,
+default 24 hours).
 
 Outside this database, the payment provider keeps its own customer record and
 the email provider its delivery logs, under their own retention.

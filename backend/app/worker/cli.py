@@ -235,12 +235,14 @@ async def _delete_account(email: str, *, yes: bool) -> int:
     account on request"). Without ``yes``, a dry run: print what would go and
     change nothing.
 
-    Exit codes: 0 done (or dry run printed); 1 no account has this address; 2
-    refused, the account has a subscription that can still bill.
+    Exit codes: 0 done (or dry run printed); 1 no account, or more than one,
+    has this address; 2 refused, the account has a subscription that can still
+    bill.
     """
     from app.core.db import get_sessionmaker
     from app.services.account_deletion import (
         AccountNotFound,
+        AmbiguousAddress,
         SubscriptionStillLive,
         delete_account,
         plan_deletion,
@@ -266,6 +268,12 @@ async def _delete_account(email: str, *, yes: bool) -> int:
             report = await delete_account(db, email, datetime.now(UTC))
         except AccountNotFound:
             print(f"No account has the address {email.strip().lower()}. Nothing was changed.")
+            return 1
+        except AmbiguousAddress as exc:
+            print(
+                f"{exc.matches} accounts have the address {email.strip().lower()} once case "
+                "and spaces are ignored. Nothing was changed; resolve this by hand."
+            )
             return 1
         except SubscriptionStillLive as exc:
             print(

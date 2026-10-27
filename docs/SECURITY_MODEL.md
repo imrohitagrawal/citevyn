@@ -283,7 +283,7 @@ MVP does not support:
 > `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`, default 20 minutes; the
 > inside-window residual is recorded in ADR-0004) remains the other backup,
 > and the operator can delete an account on request with
-> `citevyn-worker delete-account` (`RUNBOOK.md` §3.8, "Delete an account on
+> `python -m app.worker.cli delete-account` (`RUNBOOK.md` §3.8, "Delete an account on
 > request"). Magic
 > links only work once the sending domain is verified with the email
 > provider (`CITEVYN_RESEND_API_KEY`); until then the request route 404s.

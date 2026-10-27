@@ -1,7 +1,7 @@
 """Deleting an account on request (#511).
 
-The privacy page promises "If you ask us to delete your account, we delete its
-data within 30 days". The free trial is once per address (ADR-0005 §1,
+The privacy page promises to delete an account and its data on request; the
+runbook says within 30 days. The free trial is once per address (ADR-0005 §1,
 ``docs/ACCESS_POLICY.md``), so the deletion keeps a tombstone (the SHA-256 of the
 address and the trial answers it used) and the trial count carries over if the
 same address signs up again.
@@ -57,6 +57,7 @@ from app.models import (
 from app.models import Session as ChatSession
 from app.services.account_deletion import (
     AccountNotFound,
+    AmbiguousAddress,
     SubscriptionStillLive,
     delete_account,
     email_hash,
@@ -344,6 +345,30 @@ def test_the_hash_is_sha256_hex_of_the_normalised_address() -> None:
     assert len(expected) == 64
 
 
+def test_an_older_mixed_case_address_is_still_found(maker: Maker) -> None:
+    """Provider addresses were stored verbatim before ADR-0004 PR 14
+    (``oauth.py``), and no migration lower-cased them. Turns red if: the lookup
+    compares the stored address exactly, so such an account cannot be deleted
+    and the runbook's "case does not matter" is false."""
+    user_id = add_user(maker, " Person@Example.COM")
+    delete(maker, EMAIL)
+    assert count(maker, User, User.user_id == user_id) == 0
+    assert tombstone(maker, EMAIL) is not None  # keyed by the normalised address
+
+
+def test_two_accounts_that_differ_only_in_case_are_refused(maker: Maker) -> None:
+    """Turns red if: an address matching two older rows deletes one of them
+    at random instead of stopping for the operator."""
+    add_user(maker, "Person@example.com")
+    add_user(maker, EMAIL)
+    with pytest.raises(AmbiguousAddress):
+        run(maker, lambda s: plan_deletion(s, EMAIL))
+    with pytest.raises(AmbiguousAddress):
+        delete(maker, EMAIL)
+    assert count(maker, User) == 2
+    assert count(maker, DeletedAccount) == 0
+
+
 # ---------------------------------------------------------------------------
 # The dry run
 # ---------------------------------------------------------------------------
@@ -581,6 +606,19 @@ def test_the_command_exits_1_for_an_unknown_address(cli_db: Maker, capsys: Any) 
     assert cli.main(["delete-account", "--email", EMAIL, "--yes"]) == 1
     assert "No account" in capsys.readouterr().out
     assert count(cli_db, User) == 1
+
+
+def test_the_command_exits_1_when_the_address_matches_two_accounts(
+    cli_db: Maker, capsys: Any
+) -> None:
+    """Turns red if: the ambiguous case crashes with a traceback or exits 0."""
+    from app.worker import cli
+
+    add_user(cli_db, "Person@example.com")
+    add_user(cli_db, EMAIL)
+    assert cli.main(["delete-account", "--email", EMAIL, "--yes"]) == 1
+    assert "2 accounts" in capsys.readouterr().out
+    assert count(cli_db, User) == 2
 
 
 def test_the_command_exits_2_for_a_live_subscription(cli_db: Maker, capsys: Any) -> None:
