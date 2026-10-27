@@ -531,10 +531,10 @@ async def test_ensure_user_on_a_fresh_database_does_not_violate_the_fk_on_postgr
     from sqlalchemy import select as _select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.answer.orchestrator import Orchestrator
     from app.core.config import Settings
     from app.models import Session as SessionModel
     from app.models import User as UserModel
+    from tests.orchestrator_double import Orchestrator
 
     alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
 

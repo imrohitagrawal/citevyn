@@ -31,7 +31,6 @@ import pytest
 from sqlalchemy import select
 
 from app.answer.orchestrator import (
-    Orchestrator,
     OrchestratorError,
     RetrievalStrategy,
 )
@@ -55,6 +54,7 @@ from app.models.enums import (
 from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
 from tests.conftest import seed_catalog, seed_chat_session, seed_evidence_chunks
+from tests.orchestrator_double import Orchestrator
 
 pytestmark = pytest.mark.asyncio
 
@@ -2055,7 +2055,7 @@ async def test_ensure_user_writes_the_user_row_before_the_session_row(
     """
     from sqlalchemy import event
 
-    from app.answer.orchestrator import Orchestrator as _Orch
+    from tests.orchestrator_double import Orchestrator as _Orch
 
     inserts: list[str] = []
     sync_engine = session.get_bind()
@@ -2098,7 +2098,7 @@ async def test_strategy_for_labels_from_evidence_not_intent() -> None:
     ``if intent is Intent.exact_lookup: return exact_lookup`` fails the
     fell-through and mixed cases below.
     """
-    from app.answer.orchestrator import Orchestrator, RetrievalStrategy
+    from app.answer.orchestrator import RetrievalStrategy
 
     all_exact = [_hit_with_type(RetrievalType.exact)]
     fell_through = [_hit_with_type(RetrievalType.keyword)]

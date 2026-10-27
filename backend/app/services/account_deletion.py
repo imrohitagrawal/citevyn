@@ -38,12 +38,12 @@ from sqlalchemy import Column, Table, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.quota import counted_rows
+
+# Subscription statuses that can no longer bill (one definition, shared with
+# the webhook's warning). Anything else blocks the deletion: fail closed.
+from app.billing.memberships import ENDED_STATUSES
 from app.models import Base, DeletedAccount, Membership, User
 from app.models.deleted_accounts import email_hash
-
-# Subscription statuses that can no longer bill. Anything else, including a
-# status the provider adds later, blocks the deletion: fail closed.
-ENDED_STATUSES = frozenset({"canceled", "incomplete_expired"})
 
 
 class AccountNotFound(Exception):

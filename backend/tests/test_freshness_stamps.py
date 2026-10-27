@@ -95,8 +95,8 @@ async def test_a_cached_answer_keeps_its_dates(session: Any) -> None:
     Driven at the orchestrator, like the other cache tests: through the route the
     stub embedder degrades retrieval, and degraded answers are never cached.
     """
-    from app.answer.orchestrator import Orchestrator
     from app.llm.stub import StubLLMClient
+    from tests.orchestrator_double import Orchestrator
     from tests.test_answer_orchestrator import (
         _evidence,
         _FakeRetriever,

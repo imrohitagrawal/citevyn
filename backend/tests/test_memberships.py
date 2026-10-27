@@ -447,6 +447,38 @@ async def test_a_subscription_for_an_unknown_account_is_logged_not_applied(sessi
     assert await _membership(session) is None
 
 
+async def test_a_billable_subscription_for_a_missing_account_logs_a_warning(
+    session: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#511 review F4: after an account is deleted, a subscription that still
+    names it and can still bill must be visible to the operator, not just an
+    ``unmatched`` row. The warning carries the account id and the
+    subscription, never an address.
+
+    Turns red if: the warning is dropped, or it also fires for a subscription
+    that has ended (noise), or for one that names no account."""
+    import logging
+
+    gone = "usr_" + "f" * 32
+    caplog.set_level(logging.WARNING, logger="citevyn.billing")
+    _live("sub_1", account=gone, status="active")
+    assert await _apply(session, _sub_event("evt_1", "sub_1")) == "unmatched"
+    warned = [r for r in caplog.records if r.getMessage() == "billing_subscription_account_missing"]
+    assert len(warned) == 1
+    assert getattr(warned[0], "account", None) == gone
+    assert getattr(warned[0], "subscription", None) == "sub_1"
+    assert "@" not in repr(warned[0].__dict__)
+
+    caplog.clear()
+    _live("sub_2", account=gone, status="canceled")
+    assert await _apply(session, _sub_event("evt_2", "sub_2")) == "unmatched"
+    _live("sub_3", account=None, status="active")
+    assert await _apply(session, _sub_event("evt_3", "sub_3")) == "unmatched"
+    assert not [
+        r for r in caplog.records if r.getMessage() == "billing_subscription_account_missing"
+    ]
+
+
 async def test_an_invoice_in_the_newer_api_shape_is_matched(session: Any) -> None:
     """Newer Stripe API versions put the subscription under
     ``parent.subscription_details``. Turns red if: only the old field is read."""
