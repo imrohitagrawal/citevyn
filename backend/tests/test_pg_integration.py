@@ -1053,3 +1053,104 @@ async def test_the_keyword_arm_answers_the_370_scenario_on_postgres(pg_schema: s
             assert [h.chunk_id for h in cut] == [cid for _d, _o, cid in tie_rows[:3]]
     finally:
         await engine.dispose()
+
+
+async def test_delete_account_clears_every_table_that_references_users_on_postgres(
+    pg_schema: str,
+) -> None:
+    """#511 on the engine that ships: after ``delete_account`` on a migrated
+    Postgres, every table with a foreign key onto ``users.user_id`` has no row
+    left for the account (``CASCADE``) or keeps it with the link cleared
+    (``SET NULL``); chat messages go with their session; ``provider_calls`` and
+    ``stripe_events`` (no foreign key) survive; a second account is untouched;
+    the tombstone is written.
+
+    The table list comes from the models' metadata and is checked against the
+    migrated database's own foreign keys, so a new table that references users
+    cannot be missed: ``seed_every_reference`` fails until it has a builder.
+
+    Turns red if: a migration gives a user foreign key ``RESTRICT``/``NO
+    ACTION`` (the delete raises) or ``SET NULL`` where the model says
+    ``CASCADE`` (the row survives); or ``delete_account`` stops deleting the
+    ``users`` row or writing the tombstone.
+    """
+    from datetime import UTC, datetime
+    from typing import Any
+
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import Base, DeletedAccount, Message, ProviderCall, StripeEvent, User, UserRole
+    from app.models import Session as ChatSession
+    from app.services.account_deletion import delete_account, email_hash
+    from tests.test_account_deletion import seed_every_reference, user_references
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    gone, kept = "usr_" + "d" * 32, "usr_" + "e" * 32
+    try:
+        async with maker() as s:
+            fk_rows = await s.execute(
+                text(
+                    "SELECT kcu.table_name, kcu.column_name, rc.delete_rule "
+                    "FROM information_schema.referential_constraints rc "
+                    "JOIN information_schema.key_column_usage kcu "
+                    "  ON kcu.constraint_name = rc.constraint_name "
+                    " AND kcu.constraint_schema = rc.constraint_schema "
+                    "JOIN information_schema.constraint_column_usage ccu "
+                    "  ON ccu.constraint_name = rc.constraint_name "
+                    " AND ccu.constraint_schema = rc.constraint_schema "
+                    "WHERE rc.constraint_schema = :schema "
+                    "  AND ccu.table_name = 'users' AND ccu.column_name = 'user_id'"
+                ),
+                {"schema": pg_schema},
+            )
+            migrated = {(r[0], r[1], r[2]) for r in fk_rows.all()}
+            modelled = {(t, c, rule) for t, (c, rule) in user_references().items()}
+            assert migrated == modelled
+            assert len(modelled) >= 14  # not vacuous: the referencing tables of today
+
+            for user_id, email in ((gone, "gone@example.com"), (kept, "kept@example.com")):
+                s.add(
+                    User(
+                        user_id=user_id,
+                        role=UserRole.demo_user,
+                        created_at=now,
+                        email=email,
+                        email_verified_at=now,
+                    )
+                )
+                await s.flush()
+                await seed_every_reference(s, user_id, now)
+            await s.commit()
+
+        async with maker() as s:
+            report = await delete_account(s, "  Gone@Example.com", now)
+        assert report.user_id == gone
+        assert report.trial_answers_used == 1  # the seeded answer_usage row
+
+        async with maker() as s:
+
+            async def n(table: Any, *where: Any) -> int:
+                query = select(func.count()).select_from(table).where(*where)
+                return int((await s.execute(query)).scalar_one())
+
+            assert await n(User, User.user_id == gone) == 0
+            for name, (column, rule) in user_references().items():
+                table = Base.metadata.tables[name]
+                assert await n(table, table.c[column] == gone) == 0, name
+                assert await n(table, table.c[column] == kept) == 1, name  # partner
+                if rule == "SET NULL":
+                    assert await n(table, table.c[column].is_(None)) == 1, name
+            # Messages have no user column: they go with their chat session.
+            # Each account had one, so exactly the kept account's is left.
+            assert await n(Message) == 1
+            assert await n(Message, Message.session_id.in_(select(ChatSession.session_id))) == 1
+            assert await n(ProviderCall, ProviderCall.user_id == gone) == 1
+            assert await n(StripeEvent, StripeEvent.account_id == gone) == 1
+            stone = await s.get(DeletedAccount, email_hash("gone@example.com"))
+            assert stone is not None and stone.trial_answers_used == 1
+    finally:
+        await engine.dispose()

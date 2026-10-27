@@ -7,6 +7,7 @@ Usage:
     citevyn-worker run --index-version v-test
     citevyn-worker evaluate --index-version v-test   # promotion gate evidence
     citevyn-worker list-sources
+    citevyn-worker delete-account --email E [--yes]  # dry run, or delete (#511)
 
 The CLI is intentionally thin: it builds a single
 :class:`IngestionRunner` and drives it through one source
@@ -83,6 +84,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_digest()
     if args.command == "alerts":
         return _cmd_alerts()
+    if args.command == "delete-account":
+        return asyncio.run(_delete_account(args.email, yes=args.yes))
     parser.print_help()
     return 1
 
@@ -225,6 +228,58 @@ async def _alerts(settings: Settings, client: EmailClient) -> int:
         f"not Pro {stats.skipped_not_pro}{', stopped at the per-run cap' if stats.capped else ''}"
     )
     return 0 if stats.failed == 0 else 3
+
+
+async def _delete_account(email: str, *, yes: bool) -> int:
+    """Delete one account on request (#511; ``docs/RUNBOOK.md``, "Delete an
+    account on request"). Without ``yes``, a dry run: print what would go and
+    change nothing.
+
+    Exit codes: 0 done (or dry run printed); 1 no account has this address; 2
+    refused, the account has a subscription that can still bill.
+    """
+    from app.core.db import get_sessionmaker
+    from app.services.account_deletion import (
+        AccountNotFound,
+        SubscriptionStillLive,
+        delete_account,
+        plan_deletion,
+    )
+
+    async with get_sessionmaker()() as db:
+        try:
+            plan = await plan_deletion(db, email)
+            print(f"Account {plan.user_id} ({email.strip().lower()})")
+            for table, n in plan.rows.items():
+                print(f"  {table}: {n} row(s) deleted")
+            for table, n in plan.kept.items():
+                print(f"  {table}: {n} row(s) kept, account link cleared")
+            print(
+                f"  trial answers used: {plan.trial_answers_used} "
+                f"(already on the tombstone: {plan.carried_over})"
+            )
+            if plan.live_subscriptions:
+                raise SubscriptionStillLive(plan.live_subscriptions)
+            if not yes:
+                print("Dry run: nothing was changed. Re-run with --yes to delete.")
+                return 0
+            report = await delete_account(db, email, datetime.now(UTC))
+        except AccountNotFound:
+            print(f"No account has the address {email.strip().lower()}. Nothing was changed.")
+            return 1
+        except SubscriptionStillLive as exc:
+            print(
+                f"Refused: the account has a subscription that can still bill "
+                f"({', '.join(exc.statuses)}). Cancel it at the payment provider first, "
+                "wait until it shows as canceled here, then run this again. "
+                "Nothing was changed."
+            )
+            return 2
+    print(
+        f"Deleted account {report.user_id}. Trial answers used: {report.trial_answers_used}; "
+        f"the tombstone for this address now holds {report.tombstone_total}."
+    )
+    return 0
 
 
 def _cmd_list_sources() -> int:
@@ -391,6 +446,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "alerts",
         help="Email Pro accounts the doc changes that match their watches (needs "
         "CITEVYN_WATCH_ALERTS_ENABLED=true).",
+    )
+
+    delete_account = sub.add_parser(
+        "delete-account",
+        help="Delete an account on request (#511). A dry run unless --yes is given.",
+    )
+    delete_account.add_argument("--email", required=True, help="The account's address.")
+    delete_account.add_argument(
+        "--yes", action="store_true", help="Really delete (default: print the plan only)."
     )
 
     evaluate = sub.add_parser(

@@ -7,6 +7,8 @@ question, written by the answer route in the same transaction as the answer.
 
 * **Free:** ``access_free_trial_answers`` answered questions, ever, and only for a
   VERIFIED account (``users.email_verified_at``). An unverified account has none.
+  Trial answers used by a DELETED account with the same address still count
+  (``deleted_accounts``, #511), so deleting an account cannot restart the trial.
 * **Pro:** ``access_pro_monthly_answers`` Pro answers per calendar month in UTC
   (rows record their tier, so trial answers never count against it). Not the
   Stripe billing period: yearly plans have no monthly period, and the count must
@@ -34,7 +36,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.policy import POLICY, Allowance, Capability, Tier
 from app.core.config import Settings
 from app.core.errors import APIErrorCode, error_response
-from app.models import AnswerUsage, User
+from app.models import AnswerUsage, DeletedAccount, User
+from app.models.deleted_accounts import email_hash
 
 
 def is_counted_answer(response: Mapping[str, object]) -> bool:
@@ -110,6 +113,15 @@ async def usage_for(
         return Usage(kind="none", used=0, limit=0, resets_at=None, verified=verified)
     query = select(func.count()).where(*counted_rows(user_id, since))
     used = int((await db.execute(query)).scalar_one())
+    if allowance is Allowance.once and user is not None and user.email:
+        # The trial is once per ADDRESS: answers used by a deleted account with
+        # the same address still count (#511, ``app.services.account_deletion``).
+        carried = await db.scalar(
+            select(DeletedAccount.trial_answers_used).where(
+                DeletedAccount.email_hash == email_hash(user.email)
+            )
+        )
+        used += carried or 0
     return Usage(kind=kind, used=used, limit=limit, resets_at=resets_at, verified=verified)
 
 
