@@ -219,6 +219,16 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     );
   };
 
+  // #546: the account was deleted from the account menu. The menu itself drops
+  // to "Sign in" straight after, so the confirmation lives here.
+  const handleAccountDeleted = () => {
+    addToast({
+      kind: "success",
+      title: "Account deleted",
+      message: "Your account and its data are deleted. You are signed out everywhere.",
+    });
+  };
+
   // #447: a dialog's code could not be fetched (usually a deploy replaced it
   // under an open tab). The dialog has already closed itself; say so, plainly,
   // rather than leave a click that seems to do nothing.
@@ -240,6 +250,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}
             onOpenFailed={handleOpenFailed}
+            onAccountDeleted={handleAccountDeleted}
           />
 
           {/* Landing View */}
@@ -339,6 +350,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
             onAuthenticated={handleAuthenticated}
             onResumeSession={resumeSession}
             onOpenFailed={handleOpenFailed}
+            onAccountDeleted={handleAccountDeleted}
           />
           <ChatView
             messages={chatView}

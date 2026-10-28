@@ -135,6 +135,15 @@ export async function logout(): Promise<void> {
   }
 }
 
+/**
+ * Drop to signed-out without a logout call: the account was deleted (#546),
+ * so the server has already removed every session and cleared the cookie.
+ */
+export function signedOutLocally(): void {
+  latestIdentityToken++;
+  setState({ status: "anonymous", user: null });
+}
+
 /** Re-export so ``ApiClientError`` callers (the AuthModal form) don't need a second import. */
 export { ApiClientError };
 
