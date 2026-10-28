@@ -185,6 +185,21 @@ def test_an_anonymous_caller_is_refused(step_up_app: Path) -> None:  # noqa: F81
     assert r.json()["error"]["code"] == "auth_required"
 
 
+def test_an_anonymous_visitor_with_a_session_cookie_is_refused(
+    step_up_app: Path,  # noqa: F811
+) -> None:
+    """An anonymous visitor holds a real session cookie once they chat.
+    Turns red if: the registered-account check is dropped (the step-up check
+    would then answer 403 instead of 401)."""
+    client = _client()
+    r = client.post("/v1/sessions", json={}, headers={"Authorization": DEMO_BEARER})
+    assert r.status_code in (200, 201), r.text
+    assert client.cookies  # partner: the visitor does have a session
+    r = _delete(client)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
+
+
 @pytest.mark.parametrize("status", ["active", "past_due", "trialing"])
 def test_a_live_subscription_must_be_cancelled_first(step_up_app: Path, status: str) -> None:  # noqa: F811
     """Cancelling at the payment provider is not done here (a live payment
@@ -225,6 +240,40 @@ def test_redis_down_refuses_with_a_503_and_changes_nothing(
     monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
     r = _delete(browser)
     assert r.status_code == 503
+    assert _count(User, User.user_id == user_id) == 1
+
+
+class WriteFails:
+    """Redis answers reads (the sign-in gate) but refuses the write."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        import redis.exceptions
+
+        if name == "zadd":
+
+            async def _fail(*_a: Any, **_k: Any) -> Any:
+                raise redis.exceptions.ConnectionError("write refused")
+
+            return _fail
+        return getattr(self._real, name)
+
+
+def test_a_failed_list_write_is_a_503_and_changes_nothing(
+    step_up_app: Path,  # noqa: F811
+    fake: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate's read works, the deletion's write fails. Turns red if: the
+    route lets DeletionListUnavailable escape as a 500, or deletes anyway."""
+    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(WriteFails(fake), KEY))
+    user_id = _register(_client())
+    browser = _sign_in_with_link(step_up_app)
+    r = _delete(browser)
+    assert r.status_code == 503
+    assert "Nothing was deleted" in r.json()["error"]["message"]
     assert _count(User, User.user_id == user_id) == 1
 
 
