@@ -651,7 +651,9 @@ of time, it logs `deletions_reapply_failed_at_startup` and tries again a
 minute later, then every hour while it runs. In between it refuses those
 accounts at every sign-in, session lookup, API key and shared-answer page. The
 digest and alert email commands re-apply the list before sending, and send
-nothing if they cannot. Nothing to run by hand. To see it happened, look for
+nothing if they cannot (exit `4`; run them again). Run them on the app machine:
+anywhere without `CITEVYN_REDIS_URL` they print a WARNING and send without
+re-applying. Nothing to run by hand. To see it happened, look for
 the `deletions_reapplied` log line (counts only: `listed`, `deleted_again`,
 `failed`).
 

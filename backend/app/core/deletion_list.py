@@ -36,7 +36,8 @@ Redis down:
   and can be retried. The rate limiter also fails closed on a Redis outage, so
   the app is unavailable then anyway.
 * when the gate asks: the request is refused with a 503 (fail closed), as
-  the rate limiter does in that state, never answered as if signed out.
+  the rate limiter does in that state, never answered as if signed out. This
+  includes the public shared-answer page, which has no rate limiter.
 
 No Redis configured (local work, tests): there is no list, deletions work as
 before, and the gate lets everyone through. Production always sets
@@ -136,7 +137,7 @@ async def is_listed(user_id: str) -> bool:
         raise error_response(
             request_id=get_current_request_id(),
             code=APIErrorCode.rate_limiter_unavailable,
-            message="Sign-in is temporarily unavailable. Try again shortly.",
+            message="Temporarily unavailable. Try again shortly.",
         ) from exc
 
 

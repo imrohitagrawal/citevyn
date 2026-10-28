@@ -137,10 +137,11 @@ def _cmd_digest() -> int:
     Exit codes: 0 done (including "no changes, nothing sent"); 2 the digest or
     the access model is off, the site URL is unset, or no email delivery is
     configured; 3 some sends failed (they are
-    retried by the next run); 1 an unexpected error. Schedule ONE run at a time,
-    weekly, AFTER the docs watcher has finished (never while it runs: a change
-    it commits mid-run can be missed, #524); re-running in the same week mails
-    no one twice.
+    retried by the next run); 4 nothing was sent, because account deletions
+    could not be re-applied first (#546): run it again; 1 an unexpected error.
+    Schedule ONE run at a time, weekly, AFTER the docs watcher has finished
+    (never while it runs: a change it commits mid-run can be missed, #524);
+    re-running in the same week mails no one twice.
     """
     settings = get_settings()
     if not settings.weekly_digest_enabled:
@@ -181,7 +182,13 @@ async def _reapply_deletions_first() -> bool:
 
     outside = deletion_list.current()
     if outside is None:
-        return True  # no Redis configured: no list to apply (local work)
+        # No Redis configured: no list to apply (local work). Said out loud, as
+        # delete-account does: run anywhere but the app machine, this matters.
+        print(
+            "WARNING: CITEVYN_REDIS_URL is not set, so account deletions were not "
+            "re-applied first. Run this on the app machine (RUNBOOK §3.8)."
+        )
+        return True
     try:
         await reapply_deletions(get_sessionmaker(), outside, datetime.now(UTC))
     except Exception as exc:  # noqa: BLE001 - reported; sending nothing is the safe side
@@ -199,7 +206,7 @@ async def _digest(settings: Settings, client: EmailClient) -> int:
     from app.services.digest import send_weekly_digest
 
     if not await _reapply_deletions_first():
-        return 3
+        return 4
     async with get_sessionmaker()() as db:
         stats = await send_weekly_digest(db, client, settings, now=datetime.now(UTC))
     print(
@@ -214,7 +221,9 @@ def _cmd_alerts() -> int:
 
     Exit codes: 0 done; 2 alerts or the access model is off, the site URL is
     unset, or no email delivery is configured; 3 some sends failed (retried by
-    the next run); 1 an unexpected error. Schedule ONE run at a time, after the
+    the next run); 4 nothing was sent, because account deletions could not be
+    re-applied first (#546): run it again; 1 an unexpected error. Schedule ONE
+    run at a time, after the
     docs watcher (a change it commits mid-run is picked up by the next run).
     """
     settings = get_settings()
@@ -248,7 +257,7 @@ async def _alerts(settings: Settings, client: EmailClient) -> int:
     from app.services.alerts import send_watch_alerts
 
     if not await _reapply_deletions_first():
-        return 3
+        return 4
     async with get_sessionmaker()() as db:
         stats = await send_watch_alerts(db, client, settings, now=datetime.now(UTC))
     print(

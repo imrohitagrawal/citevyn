@@ -919,6 +919,30 @@ def test_email_jobs_send_nothing_when_re_apply_fails(
     monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
     monkeypatch.setattr("app.services.digest.send_weekly_digest", fake_send)
     monkeypatch.setattr("app.services.alerts.send_watch_alerts", fake_send)
-    assert asyncio.run(getattr(cli, job)(object(), object())) == 3
+    assert asyncio.run(getattr(cli, job)(object(), object())) == 4  # not 3: "some sends failed"
     assert sent == []
     assert "nothing was sent" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("job", ["_digest", "_alerts"])
+def test_email_jobs_warn_when_no_redis_is_configured(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, job: str
+) -> None:
+    """Round-2 finding. Turns red if: a job skips the re-apply silently."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.worker import cli
+
+    _cli_user(tmp_path, monkeypatch)
+
+    async def fake_send(*_a: Any, **_k: Any) -> Any:
+        return SimpleNamespace(
+            changes=0, sent=0, failed=0, skipped_already_sent=0, skipped_not_pro=0, capped=False
+        )
+
+    monkeypatch.setattr(deletion_list, "current", lambda: None)
+    monkeypatch.setattr("app.services.digest.send_weekly_digest", fake_send)
+    monkeypatch.setattr("app.services.alerts.send_watch_alerts", fake_send)
+    assert asyncio.run(getattr(cli, job)(object(), object())) == 0
+    assert "CITEVYN_REDIS_URL is not set" in capsys.readouterr().out
