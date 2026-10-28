@@ -15,7 +15,7 @@ No advertising or analytics trackers. Fonts and scripts are served from our own 
 
 # Who else receives data
 
-- Hosting and storage: Fly.io (servers), Neon (database), Upstash (rate-limit counters).
+- Hosting and storage: Fly.io (servers), Neon (database), Upstash (rate-limit counters and a list of recently deleted account IDs).
 - Answering: your question, and earlier questions in the same conversation when you ask a follow-up, are sent to the AI provider that writes the answer and to the provider that turns them into a search vector. Today both are Google (Gemini), which keeps API requests for 55 days to detect abuse. If Gemini is unavailable, OpenRouter writes the answer, using only providers that have a zero data retention policy and do not collect the text. We don't send your account id, email or IP address to them.
 - Email: Resend sends sign-in links and security notices to your address, and, if you turn them on, the weekly digest and watch alerts.
 - Payments: our payment provider receives your email address and an internal account id when you upgrade, and handles the payment itself. It also collects your billing details, such as your country for tax, and keeps its own records under its own privacy policy.
@@ -25,14 +25,14 @@ Our servers, database and rate-limit counters are in the United States (US East)
 
 # How long we keep it
 
-Today, conversations, feedback and usage records are kept until the account is deleted; there is no automatic deletion yet. A conversation shows in your History, and can be exported, for 24 hours after it starts; after that, or once you close it, it is hidden from you but not erased. Records of paid model calls, a security log of sign-ins and answered questions, and our payment-event log are kept after an account is deleted, without your email. Shared answers stay public until you stop sharing them or your account is deleted. If you ask us to delete your account, we delete its data from our live systems within 30 days, apart from those records. Copies may remain in our backups for up to 30 more days, until those backups are deleted on schedule, so every backup copy is gone within 60 days of your request. We do not use backups for anything else, and if we ever restore from one, we delete your data from it again straight away. We also keep a one-way code made from your email address and the number of free-trial questions the account used, so the same address cannot start a new free trial.
+Today, conversations, feedback and usage records are kept until the account is deleted; there is no automatic deletion yet. A conversation shows in your History, and can be exported, for 24 hours after it starts; after that, or once you close it, it is hidden from you but not erased. Records of paid model calls, a security log of sign-ins and answered questions, and our payment-event log are kept after an account is deleted, without your email. Shared answers stay public until you stop sharing them or your account is deleted. If you delete your account yourself, its data leaves our live systems at once; if you ask us by email, within 30 days. Either way, we keep only the records above. We also keep your account's random ID and the date it was deleted for 60 days, outside our database, so a backup restore cannot bring the account back. Copies may remain in our backups for up to 30 more days, until those backups are deleted on schedule, so every backup copy is gone within 60 days of your request. We do not use backups for anything else, and if we ever restore from one, we delete your data from it again straight away. We also keep a one-way code made from your email address and the number of free-trial questions the account used, so the same address cannot start a new free trial.
 
 If you use CiteVyn without an account, your questions are stored under the random ID in your cookie and kept the same way. No email is attached, so we can find them only if you tell us that ID, or sign up or sign in from the same browser, which moves them into your account.
 
 # Your choices
 
 - Export the conversations your History shows (up to the newest 500) as JSON or Markdown from the History drawer.
-- Ask us to delete your account and its data by emailing rohit@stackclimb.com. There is no self-service delete button yet.
+- Delete your account yourself: open the account menu and choose Delete account. We first email you a sign-in link to confirm it is you. If your account has no email address, or you would rather ask us, email rohit@stackclimb.com and we will do it within 30 days.
 - Ask for a copy of your data, or for something in it to be corrected, by emailing rohit@stackclimb.com. We reply within 30 days. Depending on where you live, the law may give you further rights; email us to use them.
 
 # Contact
