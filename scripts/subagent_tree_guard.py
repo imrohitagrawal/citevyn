@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SubagentStart / SubagentStop hook: a sub-agent must leave the main checkout alone.
+"""Sub-agent hooks (start, stop, and alert delivery): a sub-agent must leave the main checkout alone.
 
 WHY THIS EXISTS. Reviewers here are told to read, not write, and twice one did
 write: a "read-only" review agent ran `git checkout` in the shared checkout and
@@ -220,11 +220,15 @@ def _deliver_alert(
         return None
     texts = []
     for alert in sorted(folder.glob("*.txt")):
+        # Claim the file first: of two concurrent calls, only the one whose rename
+        # succeeds reads it, so an alert is shown exactly once.
+        claimed = alert.with_suffix(".taken")
         try:
-            texts.append(alert.read_text(encoding="utf-8").strip())
-            alert.unlink()
+            os.rename(alert, claimed)
         except FileNotFoundError:
-            continue  # taken by a concurrent call of the same session
+            continue
+        texts.append(claimed.read_text(encoding="utf-8").strip())
+        claimed.unlink(missing_ok=True)
     text = "\n".join(x for x in texts if x)
     if not text:
         return None
@@ -238,8 +242,11 @@ def _prune_alerts(main: Path) -> None:
     """Alerts nobody collected within two days (a session that ended)."""
     cutoff = time.time() - 2 * 24 * 3600
     for old in _alerts_root(main).glob("*/*.txt"):
-        if old.stat().st_mtime < cutoff:
-            old.unlink(missing_ok=True)
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue  # delivered while we looked
 
 
 def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] | None:
@@ -247,7 +254,8 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
     agent_id = str(payload.get("agent_id") or "")
     session_id = str(payload.get("session_id") or "")
     if event in ("PreToolUse", "UserPromptSubmit"):
-        # Only the main session's own calls carry no agent_id (measured).
+        # Only the main session's own calls carry no agent_id, and a sub-agent's
+        # stop carries its parent's session_id (both measured 2026-10-29).
         return None if agent_id else _deliver_alert(project_dir, session_id, str(event))
     if not agent_id:
         # A shared fallback name would let one agent's start overwrite another's
@@ -313,8 +321,11 @@ def _prune(folder: Path) -> None:
     """Delete start records older than two days (agents that are long gone)."""
     cutoff = time.time() - 2 * 24 * 3600
     for old in folder.glob("*.json"):
-        if old.stat().st_mtime < cutoff:
-            old.unlink(missing_ok=True)
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
 
 
 def main() -> int:

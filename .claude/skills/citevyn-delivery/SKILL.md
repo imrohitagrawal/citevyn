@@ -169,8 +169,8 @@ Cleanup is part of done, not optional.
 
 `scripts/subagent_tree_guard.py` runs on every sub-agent start and stop. If the main checkout's
 HEAD, branch, `git status`, uncommitted content, a branch tip or the stash changed while a
-sub-agent ran, the user sees `MAIN CHECKOUT CHANGED` at once, and the main session's next tool
-call carries the same warning to the main model. The agent is also told to report it, but do not
+sub-agent ran, the user sees `MAIN CHECKOUT CHANGED` at once, and the next tool call or message
+of the session that ran the agent carries the same warning to its main model. The agent is also told to report it, but do not
 rely on that: in a live test (2026-10-29) an agent ignored the instruction. Stop and find out who
 changed it before anything else. So do not touch the main checkout yourself while agents run:
 the guard cannot tell your change from theirs.
