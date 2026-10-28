@@ -440,8 +440,14 @@ re-seed to get a live, stamped vector arm.
 ### 3.8 Delete an account on request
 
 The privacy page promises to delete an account's data on request. Do it within
-30 days of the request. There is no delete button; the operator runs one
-command (#511).
+30 days of the request.
+
+Most people do it themselves: the account menu has **Delete account** (#546).
+It asks them to confirm by opening a sign-in link emailed to them, refuses
+while a subscription can still bill, and runs the same deletion as the command
+below (tombstone, deletion list, every session signed out). The command is for
+requests that arrive by email: an account with no stored address (it cannot
+get a link), or anyone who asks us instead (#511).
 
 **1. Check the requester controls the account.** Act only on a request sent
 from the account's address, or one whose sender has replied from that address
