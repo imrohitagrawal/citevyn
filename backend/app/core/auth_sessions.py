@@ -426,6 +426,11 @@ async def revoke_current_session(
     return principal_id
 
 
+def clear_session_cookie(response: Response, settings: Settings) -> None:
+    """Tell the browser to drop its session cookie (the account was deleted, #546)."""
+    response.delete_cookie(key=_cookie_name(settings), path="/")
+
+
 def step_up_active(session: AuthSession, settings: Settings) -> bool:
     """Whether ``session`` may set a password without the current one (ADR-0004 PR 15).
 
@@ -501,6 +506,7 @@ async def resolve_principal(
 
 __all__ = [
     "claim_and_login",
+    "clear_session_cookie",
     "ensure_auth_session",
     "resolve_principal",
     "resolve_principal_by_auth_session_id",

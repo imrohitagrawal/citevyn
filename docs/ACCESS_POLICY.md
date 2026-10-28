@@ -79,7 +79,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 |---|---|---|---|---|
 | `public` | yes | yes | yes | Health probes and public pages |
 | `sign_in` | yes | yes | yes | Sign up, sign in, sign out, "who am I" |
-| `manage_account` | — | yes | yes | Change one's own password |
+| `manage_account` | — | yes | yes | Change one's own password; delete one's own account |
 | `chat` | — | yes | yes | Ask a live question |
 | `history` | — | yes | yes | Read or delete one's own conversations |
 | `exact_search` | — | yes | yes | Exact flag and command lookup |
@@ -116,6 +116,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `GET` | `/v1/auth/oauth/{provider}/connect/start` | `sign_in` |
 | `GET` | `/v1/auth/oauth/{provider}/callback` | `sign_in` |
 | `POST` | `/v1/auth/me/password` | `manage_account` |
+| `POST` | `/v1/auth/me/delete` | `manage_account` |
 | `POST` | `/v1/sessions` | `chat` |
 | `POST` | `/v1/sessions/{session_id}/messages` | `chat` |
 | `GET` | `/v1/me/sessions` | `history` |
