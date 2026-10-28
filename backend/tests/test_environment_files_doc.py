@@ -1,24 +1,28 @@
-"""docs/ENVIRONMENT_FILES.md names every env file the code reads, and holds no value.
+"""docs/ENVIRONMENT_FILES.md has a row for every env file the code reads, and holds no value.
 
 WHY THIS FILE EXISTS
 --------------------
-Three local env files are read by three different launch paths (the backend run
-from ``backend/``, Docker Compose, the Vite dev server), and nothing said which
-was which: ``.env.example`` told operators to copy it to ``.env``, which the
-backend never reads unless started from the repo root. The guide fixes that; this
+Four local env files are read by different commands (the backend run from
+``backend/``, the Makefile's migrate/seed/demo run from the repo root, Docker
+Compose, Vite), and nothing said which was which: ``.env.example`` told operators
+to copy it to ``.env`` without saying which ``.env``. The guide fixes that; this
 file stops it going stale, and stops anyone pasting a real value into a page of a
 PUBLIC repository.
 
-The paths are derived from what the code reads, not hand-listed: the backend's
-from ``Settings.model_config["env_file"]``, Compose's from every ``env_file:``
-entry in ``docker-compose.yml``, and the templates from ``git ls-files``. Only
-Vite's ``.env.local`` is a convention with no config line to read.
+The paths are derived from what the code reads where a config line exists: the
+backend file from ``Settings.model_config["env_file"]`` (read in ``backend/`` and
+at the repo root, because ``uv run --project backend`` keeps the caller's folder),
+Compose's from every ``env_file:`` in ``docker-compose.yml``, and the templates
+from ``git ls-files``. Only Vite's ``.env.local`` is a convention with no config
+line to read.
 
 Which change turns each test red:
   * a new ``env_file:`` in compose, a renamed Settings env file, or a new
-    ``*.env.example``, with no matching row in the guide;
-  * a ``.gitignore`` change that stops ignoring one of the live files;
-  * a ``NAME_KEY=value`` style assignment pasted into the guide.
+    ``*.env.example``, with no table row in the guide that starts with it;
+  * a ``.gitignore`` change that stops ignoring one of the live files, or one of
+    the backup-style names (``.env~``, ``.env-old``, ``.envrc``);
+  * a ``NAME_KEY=value`` / ``NAME_KEY: "value"`` assignment, or a URL carrying a
+    password, pasted into the guide.
 """
 
 from __future__ import annotations
@@ -37,15 +41,23 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GUIDE = _REPO_ROOT / "docs" / "ENVIRONMENT_FILES.md"
 _COMPOSE = _REPO_ROOT / "infra" / "docker" / "docker-compose.yml"
 
-# KEY / SECRET / TOKEN / PASSWORD assigned something that is not empty, a
-# placeholder in angle brackets, or a shell expansion.
-_SECRET_ASSIGNMENT = re.compile(r"\b[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)\s*=\s*[^\s\"'$<]")
+# KEY / SECRET / TOKEN / PASSWORD given a value with ``=`` or ``:``, quoted or
+# not. Not flagged: nothing after it, an ``<angle placeholder>``, a ``$VAR``
+# expansion, or a closing quote/bracket (``grep '^NAME='`` names, it does not set).
+_SECRET_ASSIGNMENT = re.compile(
+    r"\b[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD)\s*[=:]\s*[\"']?[^\s\"'$<)]"
+)
+# scheme://user:password@host
+_URL_CREDENTIAL = re.compile(r"://[^/\s:@]+:[^@\s/]+@")
+
+# Names a backup or editor leaves behind. Each must be ignored like the real file.
+_BACKUP_STYLE = ("backend/.env~", "backend/.env-old", "infra/docker/.env.bak", ".envrc")
 
 
 def _compose_env_files() -> set[str]:
     compose: dict[str, Any] = yaml.safe_load(_COMPOSE.read_text(encoding="utf-8"))
-    found: set[str] = set()
     services: dict[str, dict[str, Any]] = compose["services"]
+    found: set[str] = set()
     for service in services.values():
         entries: Any = service.get("env_file") or []
         for entry in [entries] if isinstance(entries, str) else entries:
@@ -55,8 +67,8 @@ def _compose_env_files() -> set[str]:
 
 
 def _live_env_files() -> set[str]:
-    backend = f"backend/{Settings.model_config.get('env_file')}"
-    return {backend, "frontend/.env.local", *_compose_env_files()}
+    name = str(Settings.model_config.get("env_file"))
+    return {f"backend/{name}", name, "frontend/.env.local", *_compose_env_files()}
 
 
 def _templates() -> set[str]:
@@ -81,27 +93,38 @@ def _git_ignored(path: str) -> bool:
     )
 
 
+def _table_rows() -> set[str]:
+    """The first cell of every table row in the guide, without its backticks."""
+    rows: set[str] = set()
+    for line in _GUIDE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\| `([^`]+)`", line)
+        if m:
+            rows.add(m.group(1).split(" ")[0])
+    return rows
+
+
 def test_the_derivations_find_the_files_at_all() -> None:
     # Partner to every test below: an empty set would make each of them vacuous.
     assert _compose_env_files() == {"infra/docker/.env"}
-    assert "backend/.env" in _live_env_files()
+    assert {"backend/.env", ".env", "frontend/.env.local"} <= _live_env_files()
     assert {
         ".env.example",
         "frontend/.env.example",
         "infra/docker/prod.env.example",
     } <= _templates()
+    assert len(_table_rows()) >= 7
 
 
 @pytest.mark.parametrize("path", sorted(_live_env_files() | _templates()))
-def test_the_guide_names_every_env_file(path: str) -> None:
-    assert f"`{path}`" in _GUIDE.read_text(encoding="utf-8"), (
-        f"{path} is read by the code (or is a tracked template) but docs/ENVIRONMENT_FILES.md "
-        "does not say what reads it. Add a row to its table."
+def test_the_guide_has_a_table_row_for_every_env_file(path: str) -> None:
+    assert path in _table_rows(), (
+        f"{path} is read by the code (or is a tracked template) but no row of the table in "
+        "docs/ENVIRONMENT_FILES.md starts with it. Add one saying what reads it."
     )
 
 
-@pytest.mark.parametrize("path", sorted(_live_env_files()))
-def test_every_live_env_file_is_git_ignored(path: str) -> None:
+@pytest.mark.parametrize("path", sorted(_live_env_files() | set(_BACKUP_STYLE)))
+def test_every_live_or_backup_env_file_is_git_ignored(path: str) -> None:
     assert _git_ignored(path), f"{path} holds secrets and must stay git-ignored"
 
 
@@ -111,11 +134,11 @@ def test_templates_are_not_ignored(path: str) -> None:
     assert not _git_ignored(path)
 
 
-def test_the_guide_holds_no_secret_shaped_assignment() -> None:
+def test_the_guide_holds_no_value() -> None:
     hits = [
         line
         for line in _GUIDE.read_text(encoding="utf-8").splitlines()
-        if _SECRET_ASSIGNMENT.search(line)
+        if _SECRET_ASSIGNMENT.search(line) or _URL_CREDENTIAL.search(line)
     ]
     assert hits == [], f"docs/ENVIRONMENT_FILES.md looks like it holds a value: {hits}"
 
@@ -124,13 +147,21 @@ def test_the_guide_holds_no_secret_shaped_assignment() -> None:
     ("line", "flagged"),
     [
         ("CITEVYN_OPENROUTER_API_KEY=sk-or-v1-abc", True),
+        ('CITEVYN_OPENROUTER_API_KEY="sk-or-v1-abc"', True),
+        ("CITEVYN_OPENROUTER_API_KEY='sk-or-v1-abc'", True),
+        ("CITEVYN_OPENROUTER_API_KEY: sk-or-v1-abc", True),
         ("POSTGRES_PASSWORD=hunter2", True),
+        ("CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:Xy7pass@db.example/citevyn", True),
+        ("rediss://default:AbCd123@eu1.example.io:6379", True),
         ("grep '^CITEVYN_OPENROUTER_API_KEY=' backend/.env", False),
         ('K=$(grep "^X_KEY=" f); curl -H "Authorization: Bearer $K"', False),
         ("CITEVYN_ADMIN_API_KEY=<generate one>", False),
+        ("CITEVYN_ADMIN_API_KEY=", False),
+        ("https://citevyn.example/legal/privacy", False),
     ],
 )
-def test_the_secret_pattern_flags_values_and_not_names(line: str, flagged: bool) -> None:
-    # Partner to the test above: the pattern must catch a real value, or "no hits"
-    # proves nothing.
-    assert bool(_SECRET_ASSIGNMENT.search(line)) is flagged
+def test_the_value_patterns_flag_values_and_not_names(line: str, flagged: bool) -> None:
+    # Partner to the test above: the patterns must catch a real value, or "no
+    # hits" proves nothing; and must pass the doc's own name-only commands.
+    found = bool(_SECRET_ASSIGNMENT.search(line) or _URL_CREDENTIAL.search(line))
+    assert found is flagged

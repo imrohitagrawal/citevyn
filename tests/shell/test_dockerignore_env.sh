@@ -18,7 +18,8 @@
 # where it FAILS so the suite cannot go green by never running.
 #
 # Which change turns each case red:
-#   absent — `**/` dropped from the `**/.env` or `**/.env.*` rule in .dockerignore
+#   absent — `**/` dropped from the `**/.env*` rule in .dockerignore, or the
+#            rule narrowed so a backup-style name (.env~, .env-old, .envrc) passes
 #   kept   — `!**/.env.example` dropped, or the build copied nothing at all
 # ────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -48,7 +49,7 @@ mkdir -p "${CTX}/backend/app" "${CTX}/infra/docker" "${CTX}/frontend"
 cp "${REPO_ROOT}/.dockerignore" "${CTX}/.dockerignore"
 printf 'FROM scratch\nCOPY . /ctx\n' > "${CTX}/Dockerfile"
 
-SECRET_FILES=".env backend/.env infra/docker/.env infra/docker/.env.old-bak frontend/.env.local frontend/.env.production"
+SECRET_FILES=".env .envrc backend/.env backend/.env-old backend/.env~ infra/docker/.env infra/docker/.env.old-bak frontend/.env.local frontend/.env.production"
 KEPT_FILES=".env.example frontend/.env.example backend/app/canary.py"
 for f in ${SECRET_FILES} ${KEPT_FILES}; do echo "PLACEHOLDER=1" > "${CTX}/${f}"; done
 

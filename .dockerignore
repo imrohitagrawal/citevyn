@@ -27,8 +27,7 @@ htmlcov/
 # ``infra/docker/.env`` and ``frontend/.env.local`` into every build context
 # (measured; see docs/ENVIRONMENT_FILES.md). tests/shell/test_dockerignore_env.sh
 # builds a real context to prove they stay out.
-**/.env
-**/.env.*
+**/.env*
 !**/.env.example
 *.log
 *.pid
