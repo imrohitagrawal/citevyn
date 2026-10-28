@@ -12,9 +12,9 @@ htmlcov/
 .venv
 venv/
 
-# Environment
-.env
-.env.*
+# Environment: every .env-prefixed name (.env, .env.local, .env~, .env-old,
+# .envrc, ...), except the tracked templates. docs/ENVIRONMENT_FILES.md.
+.env*
 !.env.example
 
 # IDE / OS

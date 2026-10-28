@@ -127,8 +127,12 @@ the full workflow.
 
 ## 5. Configuration
 
-All knobs live in environment variables (loaded from `.env` for
-local dev, or passed via `docker compose --env-file` in production).
+All knobs live in environment variables. Locally they load from
+`backend/.env` (backend started from `backend/`), a repo-root `.env`
+(`make migrate` / `seed` / `demo`, which run from the root) or
+`infra/docker/.env` (Docker Compose); production on Fly reads Fly secrets and `fly.toml`'s `[env]`, no `.env` file. Which
+file each launch path reads, and how to look after them:
+[`docs/ENVIRONMENT_FILES.md`](docs/ENVIRONMENT_FILES.md).
 Every knob is documented in [`.env.example`](.env.example) — or, for the
 handful that nothing reads, exempted by name with a reason in
 `backend/tests/test_settings_env_vars_are_documented.py`, which fails the
@@ -370,8 +374,9 @@ Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
   429 response includes `Retry-After`.
 - **Containers run as non-root** (uid 1001). The api process has
   no shell, no package manager — minimal attack surface.
-- **Secret hygiene.** `.env` and `infra/docker/.env` are
-  git-ignored; the example files contain only placeholders.
+- **Secret hygiene.** `backend/.env`, `infra/docker/.env` and
+  `frontend/.env.local` are git-ignored and kept out of every docker build
+  context; the example files contain only placeholders.
 
 Full threat model: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 
