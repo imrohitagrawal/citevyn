@@ -28,6 +28,13 @@ What a deletion does, in ONE transaction:
    cleared (``audit_events``, ``ON DELETE SET NULL``). ``provider_calls`` and
    ``stripe_events`` have no foreign key and are kept: spend already incurred
    and the payment-event log.
+6. Records the account id on the deletion list OUTSIDE the database
+   (``app.core.deletion_list``, #546), just before committing, so a restore
+   from an older backup cannot quietly bring the account back. If the list
+   cannot be written, nothing is deleted.
+
+:func:`reapply_deletions` deletes again every listed account a restore brought
+back. The app runs it at startup and every hour (:func:`keep_reapplying`).
 
 Anonymous ``anon_*`` visitors and the shared ``demo_user``/``admin`` rows are
 out of scope: only ``usr_`` accounts can be named.
@@ -35,20 +42,32 @@ out of scope: only ``usr_`` accounts can be named.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Column, Table, delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.access.quota import counted_rows
 
 # Subscription statuses that can no longer bill (one definition, shared with
 # the webhook's warning). Anything else blocks the deletion: fail closed.
 from app.billing.memberships import ENDED_STATUSES
+from app.core import deletion_list
 from app.core.auth_sessions import is_registered_principal
+from app.core.deletion_list import KEEP, DeletionList
 from app.models import Base, DeletedAccount, Membership, Message, Session, User
 from app.models.deleted_accounts import email_hash
+
+_logger = logging.getLogger("citevyn.account_deletion")
+
+#: How often a running app re-applies the list, and how soon it tries again
+#: after a failed run.
+REAPPLY_EVERY_SECONDS = 3600
+REAPPLY_RETRY_SECONDS = 60
+_sleep = asyncio.sleep  # replaced in tests
 
 
 class AccountNotFound(Exception):
@@ -179,39 +198,56 @@ async def plan_deletion(
     return await _plan(db, await _find(db, email, user_id, lock=False))
 
 
+async def _remove(db: AsyncSession, user: User, plan: DeletionPlan, when: datetime) -> int | None:
+    """Write the tombstone and delete the ``users`` row. Does not commit.
+    Returns the tombstone's new total, or None for an account with no address."""
+    total: int | None = None
+    if user.email:
+        # An account with no address never had a trial (it cannot be
+        # verified) and has nothing to key a tombstone by.
+        key = email_hash(user.email)
+        stone = await db.get(DeletedAccount, key, with_for_update=True)
+        if stone is None:
+            stone = DeletedAccount(email_hash=key, trial_answers_used=0, deleted_at=when)
+            db.add(stone)
+        stone.trial_answers_used += plan.trial_answers_used
+        stone.deleted_at = when
+        total = stone.trial_answers_used
+        await db.flush()
+    # A bulk DELETE, so the database's own ON DELETE rules run (the models
+    # declare no ORM relationships to cascade through).
+    await db.execute(delete(User).where(User.user_id == user.user_id))
+    return total
+
+
 async def delete_account(
     db: AsyncSession, email: str | None, now: datetime, *, user_id: str | None = None
 ) -> DeletionReport:
     """Delete the account named by address or ``user_id`` (exactly one),
-    keeping its tombstone when it has an address. Commits.
+    keeping its tombstone when it has an address, and record it on the
+    deletion list outside the database. Commits.
 
-    Raises :class:`AccountNotFound`, :class:`AmbiguousAddress` or
-    :class:`SubscriptionStillLive` before writing anything; any other failure
-    rolls the whole deletion back."""
+    Raises :class:`AccountNotFound`, :class:`AmbiguousAddress`,
+    :class:`SubscriptionStillLive` or
+    :class:`~app.core.deletion_list.DeletionListUnavailable` before anything
+    is committed; any other failure rolls the whole deletion back."""
+    outside = deletion_list.current()
+    listed: str | None = None
     try:
         user = await _find(db, email, user_id, lock=True)
         plan = await _plan(db, user)
         if plan.live_subscriptions:
             raise SubscriptionStillLive(plan.live_subscriptions)
-        total: int | None = None
-        if user.email:
-            # An account with no address never had a trial (it cannot be
-            # verified) and has nothing to key a tombstone by.
-            key = email_hash(user.email)
-            stone = await db.get(DeletedAccount, key, with_for_update=True)
-            if stone is None:
-                stone = DeletedAccount(email_hash=key, trial_answers_used=0, deleted_at=now)
-                db.add(stone)
-            stone.trial_answers_used += plan.trial_answers_used
-            stone.deleted_at = now
-            total = stone.trial_answers_used
-            await db.flush()
-        # A bulk DELETE, so the database's own ON DELETE rules run (the models
-        # declare no ORM relationships to cascade through).
-        await db.execute(delete(User).where(User.user_id == user.user_id))
+        total = await _remove(db, user, plan, now)
+        if outside is not None:
+            # Last before the commit: a list we cannot write means no deletion.
+            await outside.record(user.user_id, now)
+            listed = user.user_id
         await db.commit()
     except BaseException:
         await db.rollback()
+        if listed is not None:
+            await _unlist_if_still_there(db, outside, listed)
         raise
     return DeletionReport(
         user_id=plan.user_id,
@@ -224,14 +260,111 @@ async def delete_account(
     )
 
 
+async def _unlist_if_still_there(
+    db: AsyncSession, outside: DeletionList | None, user_id: str
+) -> None:
+    """The commit failed after the account was listed. If the account is still
+    there, the deletion did not happen: unlist it, or the hourly re-apply would
+    delete an account whose deletion was reported as failed. If it is gone (the
+    commit landed and only the reply was lost), or we cannot tell, keep it
+    listed: the person asked for the deletion, and a restore must not undo it."""
+    assert outside is not None
+    try:
+        still_there = await db.scalar(select(User.user_id).where(User.user_id == user_id))
+        if still_there is not None:
+            await outside.forget(user_id)
+    except Exception:  # noqa: BLE001 - best effort; the original error is re-raised
+        _logger.warning("deletion_unlist_failed")
+
+
+@dataclass(frozen=True)
+class ReapplyReport:
+    """What one :func:`reapply_deletions` run did (counts only)."""
+
+    listed: int
+    deleted_again: int
+
+
+async def reapply_deletions(
+    make: async_sessionmaker[AsyncSession], outside: DeletionList, now: datetime
+) -> ReapplyReport:
+    """Delete again every listed account that is in the database: only a
+    restore from an older backup can bring one back (account ids are never
+    reused). Each goes the way the first deletion went (tombstone written
+    back, every referencing row with it), WITHOUT the subscription check: that
+    check passed when the account was first deleted, and the restored copy
+    shows the membership as it was before. Each account in its own
+    transaction, its row locked, so two machines running this at once delete
+    it once.
+
+    Raises :class:`~app.core.deletion_list.DeletionListUnavailable` when the
+    list cannot be read. Logs counts only, never an id or an address."""
+    entries = await outside.entries(now)
+    async with make() as db:
+        present = list(
+            await db.scalars(select(User.user_id).where(User.user_id.in_(list(entries))))
+        )
+        # Every deletion in the last KEEP that kept a tombstone also listed the
+        # account, so more recent tombstones than entries means entries went
+        # missing (evicted, or a deletion made where no Redis was configured).
+        recent = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(DeletedAccount)
+                .where(DeletedAccount.deleted_at > now - KEEP)
+            )
+            or 0
+        )
+    if recent > len(entries):
+        _logger.error(
+            "deletion_list_missing_entries",
+            extra={"listed": len(entries), "recent_tombstones": recent},
+        )
+    deleted_again = 0
+    for user_id in sorted(present):
+        async with make() as db:
+            try:
+                user = await _find(db, None, user_id, lock=True)
+                await _remove(db, user, await _plan(db, user), entries[user_id])
+                await db.commit()
+            except AccountNotFound:
+                continue  # another machine got there first
+            except BaseException:
+                await db.rollback()
+                raise
+        deleted_again += 1
+    _logger.info(
+        "deletions_reapplied", extra={"listed": len(entries), "deleted_again": deleted_again}
+    )
+    return ReapplyReport(listed=len(entries), deleted_again=deleted_again)
+
+
+async def keep_reapplying(make: async_sessionmaker[AsyncSession], outside: DeletionList) -> None:
+    """Run :func:`reapply_deletions` every hour, for as long as the app runs
+    (the caller cancels it at shutdown). The first run is an hour in: startup
+    has just run it. A failed run is logged and tried again sooner."""
+    delay = REAPPLY_EVERY_SECONDS
+    while True:
+        await _sleep(delay)
+        try:
+            await reapply_deletions(make, outside, datetime.now(UTC))
+            delay = REAPPLY_EVERY_SECONDS
+        except Exception as exc:  # noqa: BLE001 - logged; the loop must survive
+            _logger.error("deletions_reapply_failed", extra={"error": type(exc).__name__})
+            delay = REAPPLY_RETRY_SECONDS
+
+
 __all__ = [
     "ENDED_STATUSES",
     "AccountNotFound",
     "AmbiguousAddress",
     "DeletionPlan",
     "DeletionReport",
+    "ReapplyReport",
     "SubscriptionStillLive",
     "delete_account",
     "email_hash",
+    "keep_reapplying",
     "plan_deletion",
+    "reapply_deletions",
 ]

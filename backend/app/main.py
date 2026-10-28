@@ -16,9 +16,11 @@ Slice 9a adds a :class:`lifespan` context manager that:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -94,13 +96,47 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
             "embedding_provider": settings.embedding_provider,
         },
     )
+    reapplying = await _start_reapplying_deletions()
     try:
         yield
     finally:
         _logger.info("app_shutdown")
+        if reapplying is not None:
+            reapplying.cancel()
         await shutdown_llm_client()
         await shutdown_embedder()
         await shutdown_redis_client()
+
+
+#: How long startup may spend re-applying deletions before serving anyway.
+_REAPPLY_AT_STARTUP_SECONDS = 15.0
+
+
+async def _start_reapplying_deletions() -> asyncio.Task[None] | None:
+    """Delete again any deleted account a restore brought back (#546), before
+    serving, then keep doing it every hour. A failure here is logged and the
+    app serves anyway: the deletion list's gate refuses a listed account at
+    every sign-in and session lookup, and fails closed when Redis is down, so
+    keeping the public pages down too would protect nothing more."""
+    from app.core import deletion_list
+    from app.core.db import get_sessionmaker
+    from app.services.account_deletion import keep_reapplying, reapply_deletions
+
+    outside = deletion_list.current()
+    if outside is None:
+        if get_settings().environment == "production":
+            # Production sets CITEVYN_REDIS_URL (fly.toml: the limiter needs it
+            # too); without it no deletion is listed and none is re-applied.
+            _logger.error("deletion_list_not_configured")
+        return None
+    make = get_sessionmaker()
+    try:
+        await asyncio.wait_for(
+            reapply_deletions(make, outside, datetime.now(UTC)), _REAPPLY_AT_STARTUP_SECONDS
+        )
+    except Exception as exc:  # noqa: BLE001 - logged; serving anyway is deliberate
+        _logger.error("deletions_reapply_failed_at_startup", extra={"error": type(exc).__name__})
+    return asyncio.create_task(keep_reapplying(make, outside))
 
 
 def create_app() -> FastAPI:

@@ -870,29 +870,24 @@ delete older ones (RUNBOOK §4.1). Every copy Neon keeps has the same 30-day
 limit (§4.1 lists them: history window, snapshots, the `_old_` branch a
 restore leaves).
 
-**Restoring production, and re-applying deletions.** A Neon restore goes live
-within seconds, because the app reconnects to the same address, so deleted
-accounts are back until you delete them again. Do it straight away. (Do not
-use `fly scale count 0` to keep the app off: it destroys the machines, and
-Fly cannot scale back up from zero without a full `fly deploy`.)
+**Restoring production.** A Neon restore goes live within seconds, because the
+app reconnects to the same address, so deleted accounts are back in the
+database. The app deletes them again on its own (#546): it refuses them at
+every sign-in and session lookup straight away, deletes them at its next
+startup or within the hour, whichever comes first, and writes their tombstones
+back (RUNBOOK §4.2). Nothing to run by hand for deletions. (Do not use
+`fly scale count 0` to keep the app off: it destroys the machines, and Fly
+cannot scale back up from zero without a full `fly deploy`.)
 
-1. Before restoring, open the deletion log (RUNBOOK §3.8 step 5) and prepare
-   the commands below for every entry from the last 60 days.
-2. Restore in the Neon console.
-3. Immediately, from your laptop, run each one against the Neon database:
-
-   ```bash
-   cd /path/to/citevyn/backend   # the repo's backend folder, with its .venv
-   CITEVYN_DATABASE_URL='<the Neon DSN>' .venv/bin/python -m app.worker.cli \
-     delete-account --user-id usr_... --yes
-   ```
-
-   Exit codes as in RUNBOOK §4.2 (`1` is fine; `3` means nothing changed, so
-   run it again; `2` needs the membership fix described there). The app is
-   live meanwhile, so run every other entry first and handle the `2`s last,
-   quickly.
-4. Within 30 days, delete the `<branch>_old_<timestamp>` branch the restore
-   left behind.
+1. Restore in the Neon console.
+2. Confirm the restore is what you wanted (the app works, the data is right).
+   To have deletions re-applied at once rather than within the hour, restart
+   the app: `fly apps restart citevyn`; then look for the `deletions_reapplied`
+   log line (`fly logs -a citevyn`).
+3. Once the restore is confirmed, delete the `<branch>_old_<timestamp>` branch
+   it left behind (Neon console -> Branches). It is a full copy of the database
+   from before the restore, deleted accounts included, so it must not outlive
+   the 30-day backup limit; deleting it straight away is simplest.
 
 ---
 

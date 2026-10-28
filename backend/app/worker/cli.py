@@ -240,7 +240,9 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
     matches; 2 refused, the account has a subscription that can still bill; 3
     an unexpected error (the deletion is one transaction, so nothing changed).
     """
+    from app.core import deletion_list
     from app.core.db import get_sessionmaker
+    from app.core.deletion_list import DeletionListUnavailable
     from app.services.account_deletion import (
         AccountNotFound,
         AmbiguousAddress,
@@ -270,6 +272,14 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
                 print("  no stored address: no tombstone will be kept")
             if plan.live_subscriptions:
                 raise SubscriptionStillLive(plan.live_subscriptions)
+            if deletion_list.current() is None:
+                # #546: only the app machine has CITEVYN_REDIS_URL. Run from
+                # anywhere else, the deletion is real but a restore undoes it.
+                print(
+                    "  WARNING: CITEVYN_REDIS_URL is not set, so this deletion is not "
+                    "recorded outside the database and a restore from an older backup "
+                    "would bring the account back. Run it on the app machine (RUNBOOK §3.8)."
+                )
             if not yes:
                 print("Dry run: nothing was changed. Re-run with --yes to delete.")
                 return 0
@@ -292,6 +302,13 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
             "Nothing was changed."
         )
         return 2
+    except DeletionListUnavailable:
+        print(
+            "Refused: the deletion list outside the database (Redis) could not be "
+            "written, and a deletion it does not record would be undone by a restore. "
+            "Nothing was changed. Run it again once Redis is reachable."
+        )
+        return 3
     except Exception as exc:  # noqa: BLE001 - reported, never a bare traceback
         # The type only: a message can carry SQL with the address in it.
         print(

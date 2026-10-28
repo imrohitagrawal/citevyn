@@ -520,13 +520,19 @@ timing the database stops one of the two to break a lock wait: then either the
 request gets a generic error, or this command exits 3 and can simply be run
 again. Either way the answer is never saved under the deleted account.
 
-**5. Record it in the deletion log, then reply.** Add one line to the deletion
-log: the date and time (UTC) and the user id the command printed. Keep the log
-OUTSIDE the database and its backups (a private note the owner keeps), because
-a restore from an older backup brings the account back and §4.2 needs the log
-to delete it again. Do not write the email address in it. Then tell the
-requester the account and its data are deleted, and that any copies in backups
-are gone within 30 more days (§4.1).
+**5. Reply.** Tell the requester the account and its data are deleted, and
+that any copies in backups are gone within 30 more days (§4.1).
+
+Nothing else to record. The command also wrote the account id (never the
+address) and the date to the deletion list in Redis, outside the database and
+its backups (#546, `backend/app/core/deletion_list.py`). If a restore ever
+brings the account back, the app deletes it again on its own: at startup,
+every hour while it runs, and in between it refuses the account at every
+sign-in, session lookup and API key. Entries are kept 60 days. If Redis cannot
+be written, the command refuses (exit `3`, "the deletion list ... could not be
+written") and nothing changes: run it again once Redis is up. Run the command
+on the app machine as above: run anywhere without `CITEVYN_REDIS_URL` set, it
+prints a WARNING and the deletion is not listed.
 
 **6. 24 hours later, check the payment provider again** for that customer. A
 subscription that still names the deleted account and can still bill also
@@ -583,13 +589,10 @@ database and writes to `infra/docker/backups/citevyn-<UTC>.dump`
 **Keep dumps for 30 days, never longer** (owner decision on #546). The privacy
 page promises that a deleted account's data leaves the live database within 30
 days and every backup within 30 more, so all copies are gone within 60 days.
-The script does not rotate, so delete old dumps on a schedule:
-
-```bash
-find ./infra/docker/backups -name 'citevyn-*.dump' -mtime +29 -delete
-```
-
-(Run from the repo root. `-mtime +29` matches files 30 full days old or older.)
+`backup.sh` does this itself: after it has written a new, non-empty dump, it
+deletes every `citevyn-*.dump` in `infra/docker/backups/` that is 30 days old
+or older. If the dump fails, it exits non-zero and deletes nothing (the old
+dumps are then the only copies). Tested by `tests/shell/test_backup_prune.sh`.
 
 The same 30-day limit applies to every copy: a dump copied to a laptop or to
 cloud storage, and any weekly or monthly copy. Keep none beyond 30 days. On
@@ -600,15 +603,15 @@ Neon (production) the same limit covers every copy Neon keeps:
   their retention to 30 days or less;
 - manual snapshots (they never expire on their own): give each an end date
   within 30 days, or delete it within 30 days;
-- the `<branch>_old_<timestamp>` branch a restore leaves behind: delete it
-  within 30 days of the restore.
+- the `<branch>_old_<timestamp>` branch a restore leaves behind: delete it as
+  soon as the restore is confirmed (DEPLOY_FLY.md §6.2).
 
-To schedule nightly backups, add a cron job on the host:
+To schedule nightly backups, add a cron job on the host. Pruning is part of
+`make backup`, so this one line is all:
 
 ```cron
 # /etc/cron.d/citevyn-backup
 0 3 * * *  cd /opt/citevyn && make backup >> /var/log/citevyn/backup.log 2>&1
-30 3 * * * cd /opt/citevyn && find ./infra/docker/backups -name 'citevyn-*.dump' -mtime +29 -delete
 ```
 
 ### 4.2 Restore
@@ -626,28 +629,21 @@ make restore FILE=infra/docker/backups/citevyn-20260620T030000Z.dump
 docker compose -f infra/docker/docker-compose.yml --profile prod up -d api worker
 ```
 
-**Before restarting api + worker, delete again the accounts in the deletion
-log.** A restore brings deleted accounts back (and loses their tombstones). For
-every line in the deletion log (§3.8 step 5) from the last 60 days, run, with
-api and worker still stopped:
+**Deleted accounts are deleted again on their own.** A restore brings deleted
+accounts back (and loses their tombstones). When the api starts, before it
+serves anything, it deletes again every account on the deletion list in Redis
+(§3.8 step 5) that the restore brought back, tombstone included, whatever
+subscription status the restored copy shows (the subscription was checked when
+the account was first deleted). It does the same every hour while it runs, and
+in between refuses those accounts at every sign-in and session lookup. Nothing
+to run by hand. To see it happened, look for the `deletions_reapplied` log
+line (counts only: `listed`, `deleted_again`).
 
-```bash
-docker compose -f infra/docker/docker-compose.yml --profile prod run --rm --no-deps \
-  worker python -m app.worker.cli delete-account --user-id usr_... --yes
-```
-
-Only then restart. The privacy page promises this. What the exit codes mean
-here:
-- `0`: deleted again.
-- `1`: no such account in this copy (deleted before the dump, or created after
-  it). Fine.
-- `3`: an unexpected error; nothing changed. Check the database connection and
-  run it again.
-- `2`: the copy still shows a subscription that can bill. It was cancelled
-  before the original deletion (§3.8 step 3). Confirm at the payment provider
-  that it is cancelled, then on the restored database run
-  `UPDATE memberships SET status='canceled' WHERE account_id='usr_...';`
-  and run the command again.
+If that line says `deletion_list_missing_entries` instead, there are more
+recent tombstones in the database than entries on the list: entries went
+missing (Redis lost data, or someone deleted an account where no Redis was
+configured). Those accounts cannot be found automatically; check Redis
+(Upstash eviction must stay off) and tell the owner.
 
 The tombstone written again counts only the free-trial answers in the dump, so
 it can be a little lower than the original. That is acceptable.
