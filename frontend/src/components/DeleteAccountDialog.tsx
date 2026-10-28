@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { getCurrentUser } from "../lib/api";
 import { deleteMyAccount, requestMagicLink } from "../lib/authActions";
 import { signedOutLocally } from "../lib/authStore";
 import { ApiClientError } from "../lib/types";
@@ -33,8 +34,14 @@ function deleteRefusal(err: unknown): string {
     const code = err.errorCode();
     // The server's message names the next step (cancel the subscription first).
     if (code === "already_subscribed") return err.message;
+    // Refused before anything was written: the server says so.
+    if (code === "rate_limiter_unavailable" || code === "rate_limited") {
+      return "Could not delete your account right now. Nothing was deleted. Try again shortly.";
+    }
   }
-  return "Could not delete your account. Nothing was deleted. Try again shortly.";
+  // Anything else (a 500, a lost reply) may have come after the deletion
+  // committed, so do not claim either way (review finding).
+  return "We could not confirm the deletion. Reload the page: if you are signed out, your account is deleted.";
 }
 
 function linkRefusal(err: unknown): string {
@@ -69,8 +76,25 @@ export default function DeleteAccountDialog({
   useEffect(() => {
     dialogRef.current?.focus();
     const trigger = triggerRef.current;
-    return () => trigger?.focus();
+    // After a deletion the menu re-renders as "Sign in" on the same ref, so
+    // focus goes there, not to the account button that no longer exists.
+    return () => (triggerRef.current ?? trigger)?.focus();
   }, [triggerRef]);
+
+  // The emailed link signs in a NEW tab; this tab's identity was loaded before
+  // that, so ask the server afresh (its cookie may already be confirmed).
+  useEffect(() => {
+    let live = true;
+    getCurrentUser().then(
+      (fresh) => {
+        if (live && fresh?.password_step_up) setConfirmed(true);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
   useFocusTrap(dialogRef, { onEscape: onClose });
 
   const sendLink = async () => {
@@ -115,13 +139,13 @@ export default function DeleteAccountDialog({
     body =
       stage === "link-sent" ? (
         <p role="status">
-          {`We sent a sign-in link to ${user.email}. Open it in this browser, then, within a few minutes, come back to this menu and choose Delete account again.`}
+          {`We sent a sign-in link to ${user.email}. Open it in this browser, then, within 10 minutes, come back to this menu and choose Delete account again.`}
         </p>
       ) : (
         <>
           {expired && <p role="alert">Your confirmation has run out. Get a new link.</p>}
           <p>
-            {`To confirm it is you, we will email a sign-in link to ${user.email}. Open it in this browser, then come back here within a few minutes.`}
+            {`To confirm it is you, we will email a sign-in link to ${user.email}. Open it in this browser, then come back here within 10 minutes.`}
           </p>
           <button type="button" onClick={() => void sendLink()} style={primaryStyle}>
             Email me a link
@@ -132,11 +156,13 @@ export default function DeleteAccountDialog({
     body = (
       <>
         <p>
-          This deletes your account and everything in it: your conversations, shared links, API keys, watches and
-          sign-in methods. It cannot be undone.
+          This deletes your account, your conversations, shared links, API keys, watches and sign-in methods. It
+          cannot be undone.
         </p>
         <p className="drawer-note">
-          Copies in our backups are deleted within 30 days. If you pay for a plan, cancel it first.
+          We keep, without your email: records of paid model calls, the security log, payment events, and a one-way
+          code of your email address so a new free trial cannot start. Copies in our backups are deleted within 30
+          days. If you pay for a plan, cancel it first.
         </p>
         <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
           <button

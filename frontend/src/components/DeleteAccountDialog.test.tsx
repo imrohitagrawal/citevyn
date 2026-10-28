@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import DeleteAccountDialog, { DELETION_CONTACT } from "./DeleteAccountDialog";
 import { deleteMyAccount, requestMagicLink } from "../lib/authActions";
 import { signedOutLocally } from "../lib/authStore";
+import { getCurrentUser } from "../lib/api";
 import { ApiClientError } from "../lib/types";
 
 vi.mock("../lib/authActions", () => ({
@@ -17,6 +18,7 @@ vi.mock("../lib/authActions", () => ({
   requestMagicLink: vi.fn(),
 }));
 vi.mock("../lib/authStore", () => ({ signedOutLocally: vi.fn() }));
+vi.mock("../lib/api", () => ({ getCurrentUser: vi.fn(() => Promise.resolve(null)) }));
 
 const USER = {
   request_id: "req_1",
@@ -54,6 +56,7 @@ function apiError(status: number, code: string, message = "server says") {
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  vi.mocked(getCurrentUser).mockResolvedValue(null);
 });
 
 describe("DeleteAccountDialog", () => {
@@ -85,8 +88,9 @@ describe("DeleteAccountDialog", () => {
   });
 
   it("deletes a confirmed account, confirms it, then signs out", async () => {
-    // Turns red if: the delete call, the confirmation or the local sign-out is dropped,
-    // or the sign-out runs before the confirmation (the menu would unmount it).
+    // Turns red if: the delete call, the confirmation or the local sign-out is
+    // dropped, or they run in the other order (the confirmation is meant to be
+    // queued while the person is still shown as signed in).
     const order: string[] = [];
     vi.mocked(deleteMyAccount).mockResolvedValue();
     vi.mocked(signedOutLocally).mockImplementation(() => order.push("signed-out"));
@@ -118,13 +122,46 @@ describe("DeleteAccountDialog", () => {
     expect(onDeleted).not.toHaveBeenCalled();
   });
 
-  it("says nothing was deleted when the server fails", async () => {
-    // Turns red if: a failure leaves the person unsure whether the account is gone.
+  it("says nothing was deleted when the server refused before writing", async () => {
+    // Turns red if: a known no-write refusal (Redis down) reads as uncertain.
     vi.mocked(deleteMyAccount).mockRejectedValue(apiError(503, "rate_limiter_unavailable"));
     open({ password_step_up: true });
     await userEvent.setup().click(screen.getByRole("button", { name: "Delete my account" }));
     expect((await screen.findByRole("alert")).textContent).toContain("Nothing was deleted");
     expect(signedOutLocally).not.toHaveBeenCalled();
+  });
+
+  it("does not claim nothing was deleted after an unknown failure", async () => {
+    // Review finding: a 500 can come after the deletion committed. Turns red
+    // if: an unknown failure says "Nothing was deleted".
+    vi.mocked(deleteMyAccount).mockRejectedValue(apiError(500, "internal_error"));
+    open({ password_step_up: true });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Delete my account" }));
+    const text = (await screen.findByRole("alert")).textContent ?? "";
+    expect(text).toContain("could not confirm");
+    expect(text).not.toContain("Nothing was deleted");
+  });
+
+  it("re-reads the confirmation from the server, so the original tab works", async () => {
+    // Review finding: the emailed link signs in a NEW tab; this tab loaded
+    // password_step_up=false before that. Turns red if: the dialog trusts
+    // only the identity it was opened with.
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...USER, password_step_up: true });
+    open({ password_step_up: false });
+    expect(await screen.findByRole("button", { name: "Delete my account" })).toBeTruthy();
+  });
+
+  it("sends one delete for a double click", async () => {
+    // Turns red if: the in-flight guard is dropped.
+    let finish: () => void = () => {};
+    vi.mocked(deleteMyAccount).mockImplementation(() => new Promise<void>((r) => (finish = r)));
+    open({ password_step_up: true });
+    const user = userEvent.setup();
+    const button = screen.getByRole("button", { name: "Delete my account" });
+    await user.click(button);
+    await user.click(screen.getByRole("button", { name: "Deleting…" }));
+    expect(deleteMyAccount).toHaveBeenCalledTimes(1);
+    finish();
   });
 
   it("tells an account with no address to email us, with no button", async () => {

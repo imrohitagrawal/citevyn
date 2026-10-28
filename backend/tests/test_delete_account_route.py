@@ -214,6 +214,10 @@ def test_a_live_subscription_must_be_cancelled_first(step_up_app: Path, status: 
     assert body["code"] == "already_subscribed"
     assert "cancel" in body["message"].lower()
     assert _count(User, User.user_id == user_id) == 1
+    # The audit line is in the deletion's transaction: no deletion, no line.
+    from tests.test_password_step_up import _audit_metadata
+
+    assert _audit_metadata("account_deleted") == []
 
 
 def test_an_ended_subscription_does_not_block(step_up_app: Path) -> None:  # noqa: F811
@@ -322,4 +326,31 @@ def test_me_reports_the_confirmation_the_route_needs(step_up_app: Path) -> None:
     assert _me(client).json()["password_step_up"] is False
     browser = _sign_in_with_link(step_up_app)
     assert _me(browser).json()["password_step_up"] is True
-    assert _login(_client(), PASSWORD).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("environment", "name", "secure"),
+    [
+        ("production", "__Host-citevyn_session", True),
+        ("local", "citevyn_session", False),
+    ],
+)
+def test_the_cookie_is_cleared_with_the_attributes_it_was_set_with(
+    environment: str, name: str, secure: bool
+) -> None:
+    """Review finding: a browser ignores a ``__Host-`` Set-Cookie without
+    ``Secure``, so in production the dead cookie stayed. Turns red if:
+    clearing drops Secure in production (logout and delete share it)."""
+    from types import SimpleNamespace
+
+    from fastapi import Response
+
+    from app.core.auth_sessions import clear_session_cookie
+
+    response = Response()
+    clear_session_cookie(response, SimpleNamespace(environment=environment))  # type: ignore[arg-type]
+    header = response.headers["set-cookie"]
+    assert header.startswith(f"{name}=")
+    assert "Max-Age=0" in header and "Path=/" in header
+    assert ("Secure" in header) is secure
+    assert "HttpOnly" in header

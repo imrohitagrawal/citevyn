@@ -225,7 +225,7 @@ export function LandingPage({ theme, onThemeChange }: LandingPageProps) {
     addToast({
       kind: "success",
       title: "Account deleted",
-      message: "Your account and its data are deleted. You are signed out everywhere.",
+      message: "Your account is deleted, and you are signed out everywhere.",
     });
   };
 

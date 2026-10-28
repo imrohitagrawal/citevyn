@@ -581,15 +581,30 @@ async def delete_my_account(
             code=APIErrorCode.verification_required,
             message="Confirm it is you first: sign in with a link emailed to you.",
         )
+    # The security log keeps a line, linked to no account (the account is going;
+    # its older rows have the link cleared the same way, ON DELETE SET NULL).
+    # Flushed on THIS session before the deletion, so delete_account's one
+    # commit writes both or neither (review finding: a second commit could
+    # fail after the account was gone, answering 500 with no audit row).
+    await record_audit_event(
+        db,
+        action=AuditAction.login,
+        user_id=None,
+        role=UserRole.demo_user,
+        metadata={"event": "account_deleted", "step_up": "magic_link"},
+    )
     try:
         await delete_account(db, None, datetime.now(UTC), user_id=current.user_id)
     except SubscriptionStillLive as exc:
         raise error_response(
             request_id=request_id,
             code=APIErrorCode.already_subscribed,
+            # Not "cancel, then come back": a subscription set to end at the
+            # period's end stays live until then (review finding).
             message=(
-                "Your subscription can still bill. Cancel it first, wait until it "
-                "shows as cancelled, then delete your account."
+                "Your subscription can still bill, so your account cannot be deleted "
+                "yet. Cancel the subscription, or email rohit@stackclimb.com and we "
+                "will delete the account once nothing can bill."
             ),
         ) from exc
     except AccountNotFound as exc:  # deleted meanwhile (another tab, the operator)
@@ -604,16 +619,6 @@ async def delete_my_account(
             code=APIErrorCode.rate_limiter_unavailable,
             message="Temporarily unavailable. Nothing was deleted. Try again shortly.",
         ) from exc
-    # The security log keeps a line, linked to no account (the account is gone;
-    # its older rows had the link cleared the same way, ON DELETE SET NULL).
-    await record_audit_event(
-        db,
-        action=AuditAction.login,
-        user_id=None,
-        role=UserRole.demo_user,
-        metadata={"event": "account_deleted", "step_up": "magic_link"},
-    )
-    await db.commit()
     # Every AuthSession row went with the account (ON DELETE CASCADE), so every
     # device is signed out; this browser also drops the dead cookie.
     clear_session_cookie(response, settings)

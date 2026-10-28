@@ -282,7 +282,9 @@ MVP does not support:
 > linking (`connect/start`, which requires a session created within
 > `CITEVYN_OAUTH_CONNECT_MAX_SESSION_AGE_SECONDS`, default 20 minutes; the
 > inside-window residual is recorded in ADR-0004) remains the other backup,
-> and the operator can delete an account on request with
+> the account holder can delete it from the account menu after a fresh
+> email-link sign-in (`POST /v1/auth/me/delete`, #546), and the operator can
+> delete an account on request with
 > `python -m app.worker.cli delete-account` (`RUNBOOK.md` §3.8, "Delete an account on
 > request"). Magic
 > links only work once the sending domain is verified with the email

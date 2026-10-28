@@ -418,7 +418,7 @@ async def revoke_current_session(
     """
     cookie_value = request.cookies.get(_cookie_name(settings))
     row = await _lookup_auth_session(db, cookie_value) if cookie_value else None
-    response.delete_cookie(key=_cookie_name(settings), path="/")
+    clear_session_cookie(response, settings)
     if row is None:
         return None
     principal_id = row.user_id
@@ -427,8 +427,20 @@ async def revoke_current_session(
 
 
 def clear_session_cookie(response: Response, settings: Settings) -> None:
-    """Tell the browser to drop its session cookie (the account was deleted, #546)."""
-    response.delete_cookie(key=_cookie_name(settings), path="/")
+    """Tell the browser to drop its session cookie (logout; a deleted account, #546).
+
+    With the SAME attributes ``_issue_cookie`` sets. In production the name is
+    ``__Host-`` prefixed, and a browser ignores a ``__Host-`` Set-Cookie that
+    lacks ``Secure``: a bare ``delete_cookie(key, path)`` left the dead cookie
+    in place there (review finding; tests run outside production, where the
+    name has no prefix, so they never saw it)."""
+    response.delete_cookie(
+        key=_cookie_name(settings),
+        path="/",
+        secure=settings.environment == "production",
+        httponly=True,
+        samesite="lax",
+    )
 
 
 def step_up_active(session: AuthSession, settings: Settings) -> bool:
