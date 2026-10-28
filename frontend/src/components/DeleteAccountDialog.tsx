@@ -123,7 +123,7 @@ export default function DeleteAccountDialog({
           <p>
             {`To confirm it is you, we will email a sign-in link to ${user.email}. Open it in this browser, then come back here within a few minutes.`}
           </p>
-          <button type="button" onClick={() => void sendLink()}>
+          <button type="button" onClick={() => void sendLink()} style={primaryStyle}>
             Email me a link
           </button>
         </>
@@ -138,12 +138,19 @@ export default function DeleteAccountDialog({
         <p className="drawer-note">
           Copies in our backups are deleted within 30 days. If you pay for a plan, cancel it first.
         </p>
-        <button type="button" onClick={() => void remove()} aria-disabled={stage === "deleting"}>
-          {stage === "deleting" ? "Deleting…" : "Delete my account"}
-        </button>{" "}
-        <button type="button" onClick={onClose}>
-          Cancel
-        </button>
+        <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
+          <button
+            type="button"
+            onClick={() => void remove()}
+            aria-disabled={stage === "deleting"}
+            style={primaryStyle}
+          >
+            {stage === "deleting" ? "Deleting…" : "Delete my account"}
+          </button>
+          <button type="button" onClick={onClose} style={secondaryStyle}>
+            Cancel
+          </button>
+        </div>
       </>
     );
   }
@@ -177,3 +184,27 @@ export default function DeleteAccountDialog({
     document.body,
   );
 }
+
+// The same two button looks as the password nudge (components/Nudge.tsx).
+const primaryStyle: React.CSSProperties = {
+  background: "var(--ink, #111)",
+  color: "var(--text-inverse, #fff)",
+  border: "none",
+  borderRadius: "6px",
+  padding: "6px 12px",
+  font: "inherit",
+  fontSize: "13px",
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const secondaryStyle: React.CSSProperties = {
+  background: "transparent",
+  color: "var(--muted, #666)",
+  border: "1px solid var(--border, #e5e7eb)",
+  borderRadius: "6px",
+  padding: "6px 12px",
+  font: "inherit",
+  fontSize: "13px",
+  cursor: "pointer",
+};
