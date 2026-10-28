@@ -2,8 +2,10 @@
 
 This repository is **public**. This page names files, variables and rules. It
 never holds a value, and nothing you add to it may hold one either:
-`backend/tests/test_environment_files_doc.py` fails the build if a secret-shaped
-assignment or a URL with a password appears here.
+`backend/tests/test_environment_files_doc.py` fails the build on the common
+shapes (`NAME_KEY=value`, `NAME_SECRET: "value"`, `scheme://user:password@host`).
+It is a net, not a proof: a bare key or a JSON value can still slip past it, so
+review additions to this page by eye too.
 
 ## Which file each command reads
 
@@ -14,9 +16,9 @@ command, not on where the code lives.
 
 | File | In git? | Read by | How |
 |---|---|---|---|
-| `backend/.env` | No (ignored) | `make test`, `make eval`, `uvicorn` started from `backend/`; `make budget` when the key is not in `infra/docker/.env` | `Settings` (these commands `cd backend` first); `scripts/check_budget.sh` sources it for the OpenRouter key |
-| `.env` (repo root) | No (ignored) | `make migrate`, `make seed`, `make demo`, `make smoke`, `make ci-smoke` | `Settings`, because these run `uv run --project backend ...` from the repo root. They **never** read `backend/.env`. If the root file is absent, `Settings` defaults apply (stub providers) |
-| `infra/docker/.env` | No (ignored) | Everything through Docker Compose (`make db-up`, `make deploy`, `make refresh`, the `db`/`api`/`worker`/`backup`/`caddy` containers); `_env_guard.sh` (deploy, refresh, backup, rollback); `deploy_verify.sh`; `make budget`; `make demo-frontend` (the client token it bakes into the bundle) | Compose `env_file:` passes it to each container and fills the `${VAR}` slots in `docker-compose.yml`; the scripts source it |
+| `backend/.env` | No (ignored) | `make test`, `make eval`, `uvicorn` started from `backend/`; the server that `make smoke` / `make e2e` start; `make budget` when the key is not in `infra/docker/.env` | `Settings` (these commands `cd backend` first); `scripts/check_budget.sh` sources it for the OpenRouter key |
+| `.env` (repo root) | No (ignored) | `make migrate`, `make seed`, `make demo`, `make ci-smoke`; the migrate and seed steps of `make smoke` / `make e2e` | `Settings`, because these run `uv run --project backend ...` from the repo root, so they do not read `backend/.env`. `make smoke` mixes the two: it seeds with the root file and serves with `backend/.env`, so keep their embedder settings the same. If the root file is absent, `Settings` defaults apply (stub providers) |
+| `infra/docker/.env` | No (ignored) | Everything through Docker Compose (`make db-up`, `make deploy`, `make refresh`, the `db`/`api`/`worker`/`backup`/`caddy` containers); `_env_guard.sh` (deploy, refresh, backup, restore, rollback); `deploy_verify.sh`; `make budget`; `make demo-frontend` (the client token it bakes into the bundle) | Compose `env_file:` passes it to each container and fills the `${VAR}` slots in `docker-compose.yml`; the scripts source it |
 | `frontend/.env.local` | No (ignored) | `npm run dev` (also the dev server Playwright starts), and every `vite build`: `npm run build`, `make demo-frontend` | Vite loads it. Only `VITE_*` names reach the browser bundle, and **whatever it sets is baked into `frontend/dist`** unless the command sets the same name itself |
 | `.env.example` | Yes | Nobody at run time | Template for `backend/.env` (and a root `.env`) |
 | `infra/docker/prod.env.example` | Yes | `make env-bootstrap` copies it when `infra/docker/.env` is missing | Template for `infra/docker/.env` |
@@ -79,15 +81,19 @@ the check below.
   docker pattern matches from the root only, so `.dockerignore` uses
   `**/.env*`. Before that fix every nested file above reached the build context:
   sent to the build daemon (local Docker with `fly deploy --local-only`, Fly's
-  remote builder otherwise). No final image held one, because the images copy
-  only `backend/app`, `db` and the built bundle.
+  remote builder otherwise). No final image held one of the files, because the
+  images copy only `backend/app`, `db` and the built bundle; but the bundle
+  stage copied `frontend/`, so any `VITE_*` value in `frontend/.env.local` that
+  the Dockerfile does not set itself would have been baked into it.
   `tests/shell/test_dockerignore_env.sh` builds a real context to prove they
   stay out.
 - **Every container gets every secret.** Compose's `env_file:` gives the whole
   file to each service that lists it, including the internet-facing `caddy`.
   Narrowing this is tracked in #555.
-- **No copies or backups inside the repo folder.** They are ignored by git, but
-  each is a second copy of live keys that nobody rotates. Delete them.
+- **No copies or backups inside the repo folder.** Git ignores them only when
+  the name starts with `.env` (`backend/env.bak` or `infra/docker/prod.env` would
+  be committable), and even ignored, each is a second copy of live keys that
+  nobody rotates. Delete them.
 - **Use model names the price list knows.** The cost meter prices exact model
   ids (`backend/app/cost/pricing.py`). An alias such as `gemini-flash-latest`
   is recorded as unpriced (#492).

@@ -128,8 +128,9 @@ the full workflow.
 ## 5. Configuration
 
 All knobs live in environment variables. Locally they load from
-`backend/.env` (backend started from `backend/`) or `infra/docker/.env`
-(Docker Compose); production on Fly reads Fly secrets and no file. Which
+`backend/.env` (backend started from `backend/`), a repo-root `.env`
+(`make migrate` / `seed` / `demo`, which run from the root) or
+`infra/docker/.env` (Docker Compose); production on Fly reads Fly secrets and `fly.toml`'s `[env]`, no `.env` file. Which
 file each launch path reads, and how to look after them:
 [`docs/ENVIRONMENT_FILES.md`](docs/ENVIRONMENT_FILES.md).
 Every knob is documented in [`.env.example`](.env.example) — or, for the
