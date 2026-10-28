@@ -3,7 +3,8 @@
 This repository is **public**. This page names files, variables and rules. It
 never holds a value, and nothing you add to it may hold one either:
 `backend/tests/test_environment_files_doc.py` fails the build on the common
-shapes (`NAME_KEY=value`, `NAME_SECRET: "value"`, `scheme://user:password@host`).
+shapes: a name ending in KEY, SECRET, TOKEN or PASSWORD given a value, or a URL
+that carries a password.
 It is a net, not a proof: a bare key or a JSON value can still slip past it, so
 review additions to this page by eye too.
 
