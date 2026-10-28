@@ -301,6 +301,7 @@ EXPECTED_CAPABILITY: dict[tuple[str, str], Capability] = {
     ("GET", "/v1/auth/oauth/{provider}/connect/start"): Capability.sign_in,
     ("GET", "/v1/auth/oauth/{provider}/callback"): Capability.sign_in,
     ("POST", "/v1/auth/me/password"): Capability.manage_account,
+    ("POST", "/v1/auth/me/delete"): Capability.manage_account,
     ("POST", "/v1/sessions"): Capability.chat,
     ("POST", "/v1/sessions/{session_id}/messages"): Capability.chat,
     ("GET", "/v1/me/sessions"): Capability.history,
@@ -365,7 +366,7 @@ def test_the_capability_map_covers_the_whole_credential_inventory() -> None:
     """Partner: the capability walk and the credential walk see the same routes,
     so a route cannot escape one of them. Turns red if: they diverge."""
     assert set(EXPECTED_CAPABILITY) == set(INVENTORY)
-    assert len(EXPECTED_CAPABILITY) == 60
+    assert len(EXPECTED_CAPABILITY) == 61
 
 
 def test_operate_is_exactly_the_admin_key_class() -> None:
@@ -426,6 +427,7 @@ EXPECTED_BEARER: set[tuple[str, str]] = {
     ("POST", "/v1/auth/magic-link/request"),
     ("GET", "/v1/auth/me"),
     ("POST", "/v1/auth/me/password"),
+    ("POST", "/v1/auth/me/delete"),
     ("POST", "/v1/auth/register"),
     ("GET", "/v1/me/export"),
     ("GET", "/v1/me/sessions"),
@@ -672,6 +674,7 @@ def test_the_walk_recurses_past_the_first_level() -> None:
         ("POST", "/v1/auth/magic-link/request"),
         ("GET", "/v1/auth/me"),
         ("POST", "/v1/auth/me/password"),
+        ("POST", "/v1/auth/me/delete"),
         ("POST", "/v1/auth/register"),
         ("POST", "/v1/search/exact"),
     }

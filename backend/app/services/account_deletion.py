@@ -1,9 +1,10 @@
-"""Delete an account on request (#511). Operator only: there is no route.
+"""Delete an account on request (#511) or by its owner (#546).
 
 The privacy page promises to delete an account and its data on request. The
-operator runs ``python -m app.worker.cli delete-account`` (``docs/RUNBOOK.md``
-§3.8, "Delete an account on request"), which calls :func:`plan_deletion` (the
-dry run) and then :func:`delete_account`.
+account holder does it from the account menu (``POST /v1/auth/me/delete``,
+after a fresh email confirmation), or the operator runs ``python -m
+app.worker.cli delete-account`` (``docs/RUNBOOK.md`` §3.8), which calls
+:func:`plan_deletion` (the dry run) and then :func:`delete_account`.
 
 What a deletion does, in ONE transaction:
 

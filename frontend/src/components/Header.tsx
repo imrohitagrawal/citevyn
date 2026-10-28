@@ -18,6 +18,8 @@ interface HeaderProps {
   onResumeSession?: (sessionId: string) => void;
   /** #447: a dialog opened from the account menu could not be loaded. */
   onOpenFailed?: () => void;
+  /** #546: the signed-in account was deleted from the account menu. */
+  onAccountDeleted?: () => void;
 }
 
 export function Header({
@@ -30,6 +32,7 @@ export function Header({
   onAuthenticated,
   onResumeSession,
   onOpenFailed,
+  onAccountDeleted,
 }: HeaderProps) {
   return (
     <header className="header">
@@ -68,6 +71,7 @@ export function Header({
             onAuthenticated={onAuthenticated}
             onResumeSession={onResumeSession}
             onOpenFailed={onOpenFailed}
+            onAccountDeleted={onAccountDeleted}
           />
           <button onClick={onAskClick} className="cta-button">
             Try the demo

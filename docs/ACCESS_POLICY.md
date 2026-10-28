@@ -59,8 +59,9 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 - The tier is worked out from the principal the request already resolved, on
   the same database session; a caller the route sees as anonymous is refused,
   never answered without a check.
-- Deleting an account deletes its usage rows. There is no delete route; the
-  operator deletes on request (`RUNBOOK.md` §3.8). The deletion keeps a
+- Deleting an account deletes its usage rows. The account holder deletes it
+  from the account menu (`POST /v1/auth/me/delete`, after a fresh email
+  confirmation), or the operator does on request (`RUNBOOK.md` §3.8). The deletion keeps a
   tombstone in `deleted_accounts`: the SHA-256 of the address (not the address)
   and the trial answers the account used. If the same address signs up again,
   in any case or with spaces around it, those answers still count against its
@@ -79,7 +80,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 |---|---|---|---|---|
 | `public` | yes | yes | yes | Health probes and public pages |
 | `sign_in` | yes | yes | yes | Sign up, sign in, sign out, "who am I" |
-| `manage_account` | — | yes | yes | Change one's own password |
+| `manage_account` | — | yes | yes | Change one's own password; delete one's own account |
 | `chat` | — | yes | yes | Ask a live question |
 | `history` | — | yes | yes | Read or delete one's own conversations |
 | `exact_search` | — | yes | yes | Exact flag and command lookup |
@@ -116,6 +117,7 @@ re-reads the key owner's tier, allowance and hourly limit on every call.
 | `GET` | `/v1/auth/oauth/{provider}/connect/start` | `sign_in` |
 | `GET` | `/v1/auth/oauth/{provider}/callback` | `sign_in` |
 | `POST` | `/v1/auth/me/password` | `manage_account` |
+| `POST` | `/v1/auth/me/delete` | `manage_account` |
 | `POST` | `/v1/sessions` | `chat` |
 | `POST` | `/v1/sessions/{session_id}/messages` | `chat` |
 | `GET` | `/v1/me/sessions` | `history` |
