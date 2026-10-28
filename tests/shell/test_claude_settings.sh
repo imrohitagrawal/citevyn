@@ -7,7 +7,8 @@
 # Which change turns each case red:
 #   hooks-only      — any key besides "hooks" added (permissions, enabledPlugins)
 #   scripts-exist   — a hooked script renamed or deleted without updating the hook
-#   guard-wired     — the SubagentStart or SubagentStop entry dropped, its command made
+#   guard-wired     — the SubagentStart, SubagentStop or (alert delivery) PreToolUse entry
+#                     dropped, its command made
 #                     a no-op or pointed at another script, or given a matcher
 #   scripts-named   — the hooks file emptied or unparsed (fewer than 3 scripts named)
 #   local-ignored   — `.claude/*` removed from .gitignore (global excludes ignored here)
@@ -48,7 +49,7 @@ _check "scripts-named" "yes" "$([ "$named" -ge 3 ] && echo yes || echo "no ($nam
 _check "scripts-exist" "0" "$missing"
 
 GUARD_CMD='[ -f "$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py" ] || exit 0; exec python3 "$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py"'
-for ev in SubagentStart SubagentStop; do
+for ev in SubagentStart SubagentStop PreToolUse; do
   # The exact command, in a group with no matcher: a substring check let a no-op
   # command, the wrong script, or a matcher that matches no agent all pass.
   _check "guard-wired-$ev" "1" "$(python3 -c '

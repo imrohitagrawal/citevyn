@@ -24,6 +24,9 @@ WHAT IT DOES
    never trapped. If another hook is already holding the agent back
    (`stop_hook_active`), it does not block at all, only warns.
    No record (the start hook did not run): says so to the user, never silence.
+3. PreToolUse (the main session's own tool calls only): delivers any alert a
+   stop raised to the main model, once, and shows it to the user. This is the
+   channel that does not depend on the sub-agent obeying the block.
 
 A stop can fire more than once for one agent. Seen 2026-10-29 in a probe: with
 the plugins installed here, an agent's first SubagentStop was held back by another
@@ -57,6 +60,7 @@ import time
 from pathlib import Path
 
 _STATE_DIR = "subagent-tree-guard"
+_ALERT = "ALERT.txt"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -178,9 +182,51 @@ def describe(before: dict[str, str], after: dict[str, str]) -> str:
     return ", ".join(parts)
 
 
+def _alert_path(project_dir: Path) -> Path:
+    """The shared alert file. Fast path without git when `.git` is a folder,
+    because this runs before every tool call of the main session."""
+    dot_git = project_dir / ".git"
+    if dot_git.is_dir():
+        return dot_git / _STATE_DIR / _ALERT
+    common = Path(_git(project_dir, "rev-parse", "--git-common-dir").strip())
+    if not common.is_absolute():
+        common = project_dir / common
+    return common / _STATE_DIR / _ALERT
+
+
+def _raise_alert(main: Path, warning: str) -> None:
+    alert = _alert_path(main)
+    alert.parent.mkdir(parents=True, exist_ok=True)
+    with alert.open("a", encoding="utf-8") as f:
+        f.write(warning + "\n")
+
+
+def _deliver_alert(project_dir: Path) -> dict[str, object] | None:
+    """PreToolUse in the MAIN session: hand any pending alert to the main model
+    once. A sub-agent's report is not a reliable channel (measured 2026-10-29:
+    an agent ignored the block reason and reported that no hook had spoken)."""
+    alert = _alert_path(project_dir)
+    if not alert.is_file():
+        return None
+    text = alert.read_text(encoding="utf-8").strip()
+    alert.unlink(missing_ok=True)
+    if not text:
+        return None
+    return {
+        "systemMessage": text,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": text,
+        },
+    }
+
+
 def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] | None:
     event = payload.get("hook_event_name")
     agent_id = str(payload.get("agent_id") or "")
+    if event == "PreToolUse":
+        # Only the main session's own calls carry no agent_id (measured).
+        return None if agent_id else _deliver_alert(project_dir)
     if not agent_id:
         # A shared fallback name would let one agent's start overwrite another's
         # record, and the first agent's change would then pass unseen.
@@ -219,6 +265,8 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
         f"MAIN CHECKOUT CHANGED while a sub-agent ran: {main}: {change}. "
         "Stop, find out who changed it, and report before doing anything else."
     )
+    if not state["blocked"] and not state["warned"]:
+        _raise_alert(main, warning)
     if state["blocked"] or payload.get("stop_hook_active"):
         state["warned"] = True
         record.write_text(json.dumps(state), encoding="utf-8")
@@ -226,6 +274,9 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
     state["blocked"] = True
     record.write_text(json.dumps(state), encoding="utf-8")
     return {
+        # Shown to the user at once: the reason below reaches only the sub-agent,
+        # which may ignore it, and a second stop may never come.
+        "systemMessage": warning,
         "decision": "block",
         "reason": (
             f"The main checkout {main} changed while you ran: {change}. Do not try "
@@ -244,14 +295,26 @@ def _prune(folder: Path) -> None:
 
 
 def main() -> int:
+    payload: object = None
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise TypeError("hook input is not a JSON object")
         project = Path(
             os.environ.get("CLAUDE_PROJECT_DIR") or str(payload.get("cwd") or ".")
         )
         out = handle(payload, project)
     except Exception as exc:  # noqa: BLE001 — fail open, loudly
-        out = {"systemMessage": f"subagent tree guard failed open: {exc!r}"}
+        # Loud on start and stop. Silent before tool calls: that path runs on every
+        # call, and the stop hook still reports any change it finds.
+        pretool = (
+            isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse"
+        )
+        out = (
+            None
+            if pretool
+            else {"systemMessage": f"subagent tree guard failed open: {exc!r}"}
+        )
     if out:
         print(json.dumps(out))
     return 0
