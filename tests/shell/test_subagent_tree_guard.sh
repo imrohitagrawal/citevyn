@@ -24,8 +24,11 @@
 #   no-record — the missing-record branch returning nothing (silent non-check)
 #   block-also-warns-the-user — the systemMessage dropped from the block (live
 #               2026-10-29: a sub-agent ignored the block reason and no second stop came)
-#   alert-*   — the alert file not written, not delivered to the main session's next
-#               tool call, delivered to a sub-agent's call instead, or not cleared
+#   alert-*   — the alert not written, not delivered to the main session's next
+#               tool call or message, delivered to a sub-agent's call or to another
+#               session, not cleared, read only from a `.git` folder (worktree
+#               sessions), or one shared file overwritten (two-alerts-*)
+#   later-stops-raise-no-new-alert — the alert raised again on every later stop
 #   branch-*  — refs/heads dropped from the snapshot (deleted), or new branches
 #               flagged (created must stay silent)
 #   no-agent-id — a missing agent_id falling back to one shared record
@@ -63,19 +66,21 @@ _hook() {
   python3 -c '
 import json, sys
 print(json.dumps({"hook_event_name": sys.argv[1], "agent_id": sys.argv[2],
-                  "stop_hook_active": sys.argv[3] == "true", "cwd": "/"}))
-' "$2" "$3" "$active" | CLAUDE_PROJECT_DIR="$1" python3 "$GUARD"
+                  "stop_hook_active": sys.argv[3] == "true", "cwd": "/",
+                  "session_id": sys.argv[4]}))
+' "$2" "$3" "$active" "${SID:-s-main}" | CLAUDE_PROJECT_DIR="$1" python3 "$GUARD"
 }
 
 _pretool() {
-  # _pretool <project_dir> [agent_id] -> prints the hook's stdout for a PreToolUse call
+  # _pretool <project_dir> [agent_id] [session] [event] -> the hook's stdout for a main-session call
   python3 -c '
 import json, sys
-d = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/"}
+d = {"hook_event_name": sys.argv[3], "tool_name": "Bash", "tool_input": {"command": "ls"},
+     "cwd": "/", "session_id": sys.argv[2]}
 if sys.argv[1]:
     d["agent_id"] = sys.argv[1]
 print(json.dumps(d))
-' "${2:-}" | CLAUDE_PROJECT_DIR="$1" python3 "$GUARD"
+' "${2:-}" "${3:-s-main}" "${4:-PreToolUse}" | CLAUDE_PROJECT_DIR="$1" python3 "$GUARD"
 }
 
 _verdict() {
@@ -166,6 +171,29 @@ git -C "$R" checkout -q -- tracked.txt; rm -f "$R/notes.txt"
 
 _hook "$R" SubagentStart a4 >/dev/null
 git -C "$R" -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved
+# Alerts belong to the session whose agent raised them (review of the first fix:
+# one shared file let another session take them, and old ones arrived as new).
+_pretool "$R" >/dev/null   # collect alerts left by the cases above
+_hook "$R" SubagentStart b1 >/dev/null; _hook "$R" SubagentStart b1b >/dev/null
+SID=s-other _hook "$R" SubagentStart b2 >/dev/null
+echo b > "$R/b1.txt"
+SID=s-other _hook "$R" SubagentStop b2 >/dev/null
+_hook "$R" SubagentStop b1 >/dev/null
+_hook "$R" SubagentStop b1b >/dev/null
+_check "alert-not-taken-by-another-session" no "$(_pretool "$R" "" s-third | grep -q additionalContext && echo yes || echo no)"
+BOTH="$(_pretool "$R")"
+_check "two-alerts-same-session-both-delivered" 2 "$(printf '%s' "$BOTH" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].count("MAIN CHECKOUT CHANGED"))')"
+_check "other-session-alert-still-pending" yes "$(_pretool "$R" "" s-other | grep -q additionalContext && echo yes || echo no)"
+_hook "$R" SubagentStop b1 true >/dev/null
+_check "later-stops-raise-no-new-alert" "" "$(_pretool "$R")"
+rm -f "$R/b1.txt"
+_hook "$R" SubagentStart b3 >/dev/null; echo c > "$R/b3.txt"; _hook "$R" SubagentStop b3 >/dev/null
+_check "alert-reaches-a-worktree-session" yes "$(_pretool "${WORK}/linked" | grep -q additionalContext && echo yes || echo no)"
+rm -f "$R/b3.txt"
+_hook "$R" SubagentStart b4 >/dev/null; echo d > "$R/b4.txt"; _hook "$R" SubagentStop b4 >/dev/null
+_check "alert-delivered-on-next-user-message" yes "$(_pretool "$R" "" s-main UserPromptSubmit | grep -q '"hookEventName": "UserPromptSubmit"' && echo yes || echo no)"
+rm -f "$R/b4.txt"
+
 _check "fires-head-moved" block "$(_hook "$R" SubagentStop a4 | _verdict)"
 
 _hook "$R" SubagentStart a5 >/dev/null

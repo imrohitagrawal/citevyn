@@ -18,14 +18,13 @@ WHAT IT DOES
 2. SubagentStop: compares with the start record.
    Unchanged: says nothing.
    Changed: blocks the stop ONCE and tells the sub-agent to end its report with
-   a `MAIN CHECKOUT CHANGED:` line. A SubagentStop hook cannot speak to the
-   main model directly; the sub-agent's report is the one channel that reaches
-   it. Every later stop only shows the user the warning, once, so an agent is
+   a `MAIN CHECKOUT CHANGED:` line, shows the user the warning, and leaves an
+   alert for the main session (point 3). Every later stop only warns, once, so an agent is
    never trapped. If another hook is already holding the agent back
    (`stop_hook_active`), it does not block at all, only warns.
    No record (the start hook did not run): says so to the user, never silence.
-3. PreToolUse (the main session's own tool calls only): delivers any alert a
-   stop raised to the main model, once, and shows it to the user. This is the
+3. PreToolUse and UserPromptSubmit (the main session's own calls only): deliver
+   the alerts this session's agents raised to the main model, each once. This is the
    channel that does not depend on the sub-agent obeying the block.
 
 A stop can fire more than once for one agent. Seen 2026-10-29 in a probe: with
@@ -60,7 +59,6 @@ import time
 from pathlib import Path
 
 _STATE_DIR = "subagent-tree-guard"
-_ALERT = "ALERT.txt"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -182,51 +180,75 @@ def describe(before: dict[str, str], after: dict[str, str]) -> str:
     return ", ".join(parts)
 
 
-def _alert_path(project_dir: Path) -> Path:
-    """The shared alert file. Fast path without git when `.git` is a folder,
-    because this runs before every tool call of the main session."""
+def _alerts_root(project_dir: Path) -> Path:
+    """Where alerts wait. Fast path without git when `.git` is a folder, because
+    delivery runs before every tool call of the main session."""
     dot_git = project_dir / ".git"
     if dot_git.is_dir():
-        return dot_git / _STATE_DIR / _ALERT
+        return dot_git / _STATE_DIR / "alerts"
     common = Path(_git(project_dir, "rev-parse", "--git-common-dir").strip())
     if not common.is_absolute():
         common = project_dir / common
-    return common / _STATE_DIR / _ALERT
+    return common / _STATE_DIR / "alerts"
 
 
-def _raise_alert(main: Path, warning: str) -> None:
-    alert = _alert_path(main)
-    alert.parent.mkdir(parents=True, exist_ok=True)
-    with alert.open("a", encoding="utf-8") as f:
-        f.write(warning + "\n")
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name) or "unknown"
 
 
-def _deliver_alert(project_dir: Path) -> dict[str, object] | None:
-    """PreToolUse in the MAIN session: hand any pending alert to the main model
-    once. A sub-agent's report is not a reliable channel (measured 2026-10-29:
-    an agent ignored the block reason and reported that no hook had spoken)."""
-    alert = _alert_path(project_dir)
-    if not alert.is_file():
+def _raise_alert(main: Path, session_id: str, agent_id: str, warning: str) -> None:
+    """One file per alert, in the folder of the session whose agent raised it:
+    another session cannot take it, two alerts cannot overwrite each other, and
+    a reader never sees half a file (written aside, then renamed into place)."""
+    folder = _alerts_root(main) / _safe(session_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{time.time_ns()}-{_safe(agent_id)}.txt"
+    tmp = folder / f".{name}.tmp"
+    tmp.write_text(warning, encoding="utf-8")
+    os.replace(tmp, folder / name)
+
+
+def _deliver_alert(
+    project_dir: Path, session_id: str, event: str
+) -> dict[str, object] | None:
+    """The main session's next tool call or message: hand this session's pending
+    alerts to the main model, each once. A sub-agent's report is not a reliable
+    channel (measured 2026-10-29: an agent ignored the block reason and reported
+    that no hook had spoken)."""
+    folder = _alerts_root(project_dir) / _safe(session_id)
+    if not folder.is_dir():
         return None
-    text = alert.read_text(encoding="utf-8").strip()
-    alert.unlink(missing_ok=True)
+    texts = []
+    for alert in sorted(folder.glob("*.txt")):
+        try:
+            texts.append(alert.read_text(encoding="utf-8").strip())
+            alert.unlink()
+        except FileNotFoundError:
+            continue  # taken by a concurrent call of the same session
+    text = "\n".join(x for x in texts if x)
     if not text:
         return None
     return {
         "systemMessage": text,
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": text,
-        },
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": text},
     }
+
+
+def _prune_alerts(main: Path) -> None:
+    """Alerts nobody collected within two days (a session that ended)."""
+    cutoff = time.time() - 2 * 24 * 3600
+    for old in _alerts_root(main).glob("*/*.txt"):
+        if old.stat().st_mtime < cutoff:
+            old.unlink(missing_ok=True)
 
 
 def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] | None:
     event = payload.get("hook_event_name")
     agent_id = str(payload.get("agent_id") or "")
-    if event == "PreToolUse":
+    session_id = str(payload.get("session_id") or "")
+    if event in ("PreToolUse", "UserPromptSubmit"):
         # Only the main session's own calls carry no agent_id (measured).
-        return None if agent_id else _deliver_alert(project_dir)
+        return None if agent_id else _deliver_alert(project_dir, session_id, str(event))
     if not agent_id:
         # A shared fallback name would let one agent's start overwrite another's
         # record, and the first agent's change would then pass unseen.
@@ -241,6 +263,7 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
     if event == "SubagentStart":
         record.parent.mkdir(parents=True, exist_ok=True)
         _prune(record.parent)
+        _prune_alerts(main)
         state = {"start": snapshot(main), "blocked": False, "warned": False}
         record.write_text(json.dumps(state), encoding="utf-8")
         return None
@@ -266,7 +289,7 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
         "Stop, find out who changed it, and report before doing anything else."
     )
     if not state["blocked"] and not state["warned"]:
-        _raise_alert(main, warning)
+        _raise_alert(main, session_id, agent_id, warning)
     if state["blocked"] or payload.get("stop_hook_active"):
         state["warned"] = True
         record.write_text(json.dumps(state), encoding="utf-8")

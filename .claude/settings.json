@@ -65,6 +65,16 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
     ]
   }
 }
