@@ -80,22 +80,25 @@ the check below.
   into an issue, a PR, a CI log, a chat or a support thread.
 - **Kept out of docker builds.** The build context is the repo root, and a
   docker pattern matches from the root only, so `.dockerignore` uses
-  `**/.env*`. The old bare `.env` rule excluded only the root file. What
+  `**/.env*`. The old bare `.env` and `.env.*` rules excluded only the root files. What
   that let through depends on the builder (measured 2026-10-29 with Docker
   29.7, placeholder files, the old rules and the same `COPY` lines as
   `infra/docker/Dockerfile.api`):
   - **BuildKit** (the default) uploads only the paths the Dockerfile copies.
     `backend/.env` and `infra/docker/.env` were not sent.
     `frontend/.env.local` was, because the bundle stage copies all of
-    `frontend/`; any `VITE_*` value in it that the Dockerfile does not set
-    itself would have been baked into the bundle. Today that file holds only
-    `VITE_API_LIVE`.
+    `frontend/`; any `VITE_*` name in it that the frontend code reads and the
+    Dockerfile does not set itself would have been baked into the bundle.
+    Today that file holds only `VITE_API_LIVE`, which the Dockerfile sets, so
+    nothing from it reached a bundle.
   - **The legacy builder** (`DOCKER_BUILDKIT=0`) sends the whole context, so
     all three files went to the daemon.
 
   No final image held `backend/.env` or `infra/docker/.env`: the images copy
-  only `backend/app`, `db` and the built bundle. Which builder Fly's remote
-  builder uses was not measured. The `**/` rule still matters: it keeps the
+  only `backend/app`, `db` and the built bundle. Neither of `fly deploy`'s
+  paths was measured: `--local-only` (flyctl drives local Docker) or the remote
+  builder (Fly's own, or Depot; see [`DEPLOY_FLY.md`](DEPLOY_FLY.md)). The
+  `**/` rule still matters: it keeps the
   files out of a legacy build and out of any future `COPY` of a whole folder.
   `tests/shell/test_dockerignore_env.sh` builds a real context to prove they
   stay out.

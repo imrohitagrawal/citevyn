@@ -23,10 +23,10 @@ htmlcov/
 
 # Local config and secrets
 # ``**/`` is required: a docker pattern matches from the context root only, so a
-# bare ``.env`` excluded the root file and let ``backend/.env``,
-# ``infra/docker/.env`` and ``frontend/.env.local`` into every build context
-# (measured; see docs/ENVIRONMENT_FILES.md). tests/shell/test_dockerignore_env.sh
-# builds a real context to prove they stay out.
+# bare ``.env`` excluded only the root file. The legacy builder then sent every
+# nested env file; BuildKit sent ``frontend/.env.local``, because the bundle
+# stage copies ``frontend/`` (measured; see docs/ENVIRONMENT_FILES.md).
+# tests/shell/test_dockerignore_env.sh builds a real context to prove they stay out.
 **/.env*
 !**/.env.example
 *.log
