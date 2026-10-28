@@ -23,12 +23,16 @@ venv/
 .vscode/
 
 # Claude Code agent state (per-machine; not part of the project)
-# Local Claude Code config stays out of git (settings, local skills) —
-# EXCEPT the shared, committed `rag-eval` project skill.
+# Local Claude Code config stays out of git (settings.local.json with your
+# permissions and plugins, local skills) — EXCEPT the shared, committed
+# `.claude/settings.json` (hooks only) and the `rag-eval` and
+# `citevyn-delivery` project skills.
 .claude/*
+!.claude/settings.json
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/rag-eval/
+!.claude/skills/citevyn-delivery/
 
 # Logs
 *.log
@@ -67,5 +71,5 @@ playwright-report-live/
 # Generated eval / golden run reports (make eval / make golden write here)
 artifacts/
 
-# Local live-verification symlink to the built frontend (see docs/NEXT_SESSION_PROMPT.md); never commit it.
+# Local live-verification symlink to the built frontend (see docs/archive/2026-10/NEXT_SESSION_PROMPT.md); never commit it.
 backend/frontend_dist
