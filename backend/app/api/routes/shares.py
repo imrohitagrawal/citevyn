@@ -33,6 +33,7 @@ from app.access.deps import requires
 from app.access.policy import Capability
 from app.answer.orchestrator import docs_as_of
 from app.api.routes.messages import require_message, require_session
+from app.core import deletion_list
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
@@ -203,6 +204,9 @@ async def shared_page(
 ) -> HTMLResponse:
     row = await db.get(SharedAnswer, share_id) if _SHARE_ID.fullmatch(share_id) else None
     if row is None or row.revoked_at is not None:
+        raise _not_found(request)
+    # A deleted account a restore brought back: its shares are gone (#546).
+    if await deletion_list.is_listed(row.user_id):
         raise _not_found(request)
     page = render_shared_answer_page(
         question=row.question,

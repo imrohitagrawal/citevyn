@@ -137,10 +137,11 @@ def _cmd_digest() -> int:
     Exit codes: 0 done (including "no changes, nothing sent"); 2 the digest or
     the access model is off, the site URL is unset, or no email delivery is
     configured; 3 some sends failed (they are
-    retried by the next run); 1 an unexpected error. Schedule ONE run at a time,
-    weekly, AFTER the docs watcher has finished (never while it runs: a change
-    it commits mid-run can be missed, #524); re-running in the same week mails
-    no one twice.
+    retried by the next run); 4 nothing was sent, because account deletions
+    could not be re-applied first (#546): run it again; 1 an unexpected error.
+    Schedule ONE run at a time, weekly, AFTER the docs watcher has finished
+    (never while it runs: a change it commits mid-run can be missed, #524);
+    re-running in the same week mails no one twice.
     """
     settings = get_settings()
     if not settings.weekly_digest_enabled:
@@ -170,10 +171,42 @@ def _cmd_digest() -> int:
     return asyncio.run(_digest(settings, client))
 
 
+async def _reapply_deletions_first() -> bool:
+    """Before a job that emails accounts, delete again any deleted account a
+    restore brought back (#546): this process is not the app, so the app's
+    startup and hourly runs do not cover it. False (send nothing) when that
+    cannot be done."""
+    from app.core import deletion_list
+    from app.core.db import get_sessionmaker
+    from app.services.account_deletion import reapply_deletions
+
+    outside = deletion_list.current()
+    if outside is None:
+        # No Redis configured: no list to apply (local work). Said out loud, as
+        # delete-account does: run anywhere but the app machine, this matters.
+        print(
+            "WARNING: CITEVYN_REDIS_URL is not set, so account deletions were not "
+            "re-applied first. Run this on the app machine (RUNBOOK §3.8)."
+        )
+        return True
+    try:
+        await reapply_deletions(get_sessionmaker(), outside, datetime.now(UTC))
+    except Exception as exc:  # noqa: BLE001 - reported; sending nothing is the safe side
+        print(
+            f"Could not re-apply account deletions first ({type(exc).__name__}), so nothing "
+            "was sent: a deleted account a restore brought back could have been emailed. "
+            "Run it again."
+        )
+        return False
+    return True
+
+
 async def _digest(settings: Settings, client: EmailClient) -> int:
     from app.core.db import get_sessionmaker
     from app.services.digest import send_weekly_digest
 
+    if not await _reapply_deletions_first():
+        return 4
     async with get_sessionmaker()() as db:
         stats = await send_weekly_digest(db, client, settings, now=datetime.now(UTC))
     print(
@@ -188,7 +221,9 @@ def _cmd_alerts() -> int:
 
     Exit codes: 0 done; 2 alerts or the access model is off, the site URL is
     unset, or no email delivery is configured; 3 some sends failed (retried by
-    the next run); 1 an unexpected error. Schedule ONE run at a time, after the
+    the next run); 4 nothing was sent, because account deletions could not be
+    re-applied first (#546): run it again; 1 an unexpected error. Schedule ONE
+    run at a time, after the
     docs watcher (a change it commits mid-run is picked up by the next run).
     """
     settings = get_settings()
@@ -221,6 +256,8 @@ async def _alerts(settings: Settings, client: EmailClient) -> int:
     from app.core.db import get_sessionmaker
     from app.services.alerts import send_watch_alerts
 
+    if not await _reapply_deletions_first():
+        return 4
     async with get_sessionmaker()() as db:
         stats = await send_watch_alerts(db, client, settings, now=datetime.now(UTC))
     print(
@@ -240,7 +277,9 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
     matches; 2 refused, the account has a subscription that can still bill; 3
     an unexpected error (the deletion is one transaction, so nothing changed).
     """
+    from app.core import deletion_list
     from app.core.db import get_sessionmaker
+    from app.core.deletion_list import DeletionListUnavailable
     from app.services.account_deletion import (
         AccountNotFound,
         AmbiguousAddress,
@@ -270,6 +309,14 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
                 print("  no stored address: no tombstone will be kept")
             if plan.live_subscriptions:
                 raise SubscriptionStillLive(plan.live_subscriptions)
+            if deletion_list.current() is None:
+                # #546: only the app machine has CITEVYN_REDIS_URL. Run from
+                # anywhere else, the deletion is real but a restore undoes it.
+                print(
+                    "  WARNING: CITEVYN_REDIS_URL is not set, so this deletion is not "
+                    "recorded outside the database and a restore from an older backup "
+                    "would bring the account back. Run it on the app machine (RUNBOOK §3.8)."
+                )
             if not yes:
                 print("Dry run: nothing was changed. Re-run with --yes to delete.")
                 return 0
@@ -292,6 +339,13 @@ async def _delete_account(email: str | None, user_id: str | None, *, yes: bool) 
             "Nothing was changed."
         )
         return 2
+    except DeletionListUnavailable:
+        print(
+            "Refused: the deletion list outside the database (Redis) could not be "
+            "written, and a deletion it does not record would be undone by a restore. "
+            "Nothing was changed. Run it again once Redis is reachable."
+        )
+        return 3
     except Exception as exc:  # noqa: BLE001 - reported, never a bare traceback
         # The type only: a message can carry SQL with the address in it.
         print(

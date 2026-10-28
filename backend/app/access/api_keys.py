@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import deletion_list
 from app.core.token_secrets import generate_token, hash_token, verify_token
 from app.models import ApiKey
 
@@ -56,6 +57,8 @@ async def authenticate_api_key(db: AsyncSession, raw: str) -> ApiKey | None:
     if row is None or row.revoked_at is not None:
         return None
     if not verify_token(secret, row.secret_hash):
+        return None
+    if await deletion_list.is_listed(row.user_id):  # restored after deletion (#546)
         return None
     row.last_used_at = datetime.now(UTC)
     return row
