@@ -114,7 +114,7 @@ _PLAIN_LITERAL_RE = re.compile(r'^(?:"[A-Za-z0-9_.:/-]+"|[A-Za-z0-9_.:/-]+)$')
 # be invisible to both at once; see `_deploy_commands` for the measured case.
 #
 # `fly(?:ctl)?` -- `flyctl` is the binary's real name, used at
-# `docs/NEXT_SESSION_PROMPT.md:90` and in #385's own body. `\s+` rather than one
+# `docs/archive/2026-10/NEXT_SESSION_PROMPT.md:90` and in #385's own body. `\s+` rather than one
 # space -- `fly  deploy` and `fly\tdeploy` are the same command to a shell. The
 # repeating `(?:-\S+(?:\s+[^-\s]\S*)?\s+)*` admits GLOBAL FLAGS before the
 # subcommand: `fly -a citevyn deploy ...` and `fly -t TOK -a app deploy ...`.
@@ -814,7 +814,7 @@ def test_the_citation_check_follows_redirects() -> None:
 # which DISCARDS comments, so no existing test could see that line at all.
 #
 # INVISIBLE BY CONSTRUCTION, with no allowlist entry to rot: prose anywhere
-# (`CHANGELOG.md`, `docs/NEXT_SESSION_PROMPT.md`, `docs/BACKLOG.md` table cells,
+# (`CHANGELOG.md`, `docs/archive/`, `docs/BACKLOG.md` table cells,
 # `Dockerfile.api`'s comment) is neither a markdown code block nor a toml/sh
 # comment line, and a `.py` file is neither -- which is why the
 # `fly deploy --app citevyn --build-arg ...` string in THIS file needs no
