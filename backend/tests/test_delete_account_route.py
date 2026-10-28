@@ -425,3 +425,24 @@ def test_logout_and_delete_both_clear_through_the_shared_helper(
     else:
         assert _delete(browser).status_code == 200
     assert calls == [1]
+
+
+def test_an_account_deleted_meanwhile_is_a_401(
+    step_up_app: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another tab, or the operator, deleted it between the session lookup and
+    the deletion. Turns red if: that race answers a 500 instead of the 401
+    the client treats as "signed out"."""
+    from app.services import account_deletion
+
+    _register(_client())
+    browser = _sign_in_with_link(step_up_app)
+
+    async def gone(*_a: Any, **_k: Any) -> Any:
+        raise account_deletion.AccountNotFound("usr_x")
+
+    monkeypatch.setattr(account_deletion, "delete_account", gone)
+    r = _delete(browser)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "auth_required"
