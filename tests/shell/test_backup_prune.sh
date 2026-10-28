@@ -44,8 +44,8 @@ run_backup() {
     mkdir -p "${DIR}/scripts" "${DIR}/backups" "${DIR}/bin" "${DIR}/backups/sub"
     cp "${SCRIPTS}/backup.sh" "${SCRIPTS}/_env_guard.sh" "${DIR}/scripts/"
     cat > "${DIR}/.env" <<'ENV'
-POSTGRES_PASSWORD=0123456789abcdef0123456789abcdef
-CITEVYN_ADMIN_API_KEY=fedcba9876543210fedcba9876543210
+POSTGRES_PASSWORD=realprodsecret
+CITEVYN_ADMIN_API_KEY=fixture-admin-key-not-a-real-secret
 CITEVYN_ACME_EMAIL=ops@example.com
 CITEVYN_PUBLIC_HOST=citevyn.example.com
 CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:s3cret@db:5432/citevyn
