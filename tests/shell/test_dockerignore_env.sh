@@ -3,11 +3,15 @@
 # test_dockerignore_env.sh — no local env file reaches a docker build context.
 #
 # A docker pattern matches from the context root only (unlike .gitignore), so
-# the old bare `.env` / `.env.*` rules excluded the root file and let
-# backend/.env, infra/docker/.env and frontend/.env.local into every build:
-# uploaded to Fly's remote builder on `fly deploy`, and frontend/.env.local
-# copied into the stage that bakes the browser bundle. Measured with this exact
-# harness before the fix; see docs/ENVIRONMENT_FILES.md.
+# the old bare `.env` / `.env.*` rules excluded only the root files. Measured
+# 2026-10-29 with placeholder files: BuildKit uploads only the Dockerfile's
+# COPY paths, so of the nested files only frontend/.env.local was sent (the
+# stage that bakes the browser bundle copies all of frontend/); the legacy
+# builder sends the whole context, so backend/.env and infra/docker/.env went
+# too. See docs/ENVIRONMENT_FILES.md.
+#
+# This harness builds with BuildKit and `COPY . /ctx`, which makes BuildKit
+# send everything not ignored: the same set the legacy builder sends.
 #
 # The real .dockerignore is copied into a small scratch context of placeholder
 # files and built with `FROM scratch` + `--output type=local`, so docker itself
