@@ -873,17 +873,20 @@ restore leaves).
 **Restoring production.** A Neon restore goes live within seconds, because the
 app reconnects to the same address, so deleted accounts are back in the
 database. The app deletes them again on its own (#546): it refuses them at
-every sign-in and session lookup straight away, deletes them at its next
-startup or within the hour, whichever comes first, and writes their tombstones
-back (RUNBOOK §4.2). Nothing to run by hand for deletions. (Do not use
+every sign-in, session lookup, API key and shared-answer page straight away,
+deletes them at its next startup or within the hour, whichever comes first,
+and writes their tombstones back (RUNBOOK §4.2). Nothing to run by hand for deletions. (Do not use
 `fly scale count 0` to keep the app off: it destroys the machines, and Fly
 cannot scale back up from zero without a full `fly deploy`.)
 
 1. Restore in the Neon console.
 2. Confirm the restore is what you wanted (the app works, the data is right).
-   To have deletions re-applied at once rather than within the hour, restart
-   the app: `fly apps restart citevyn`; then look for the `deletions_reapplied`
-   log line (`fly logs -a citevyn`).
+   Then have deletions re-applied at once rather than within the hour: if the
+   machine is running, `fly apps restart citevyn`; if it has stopped
+   (`fly status -a citevyn`), wake it with
+   `curl -sS -o /dev/null https://citevyn.stackclimb.com/health`, which starts
+   it, and every start re-applies. Look for the `deletions_reapplied` log line
+   (`fly logs -a citevyn`).
 3. Once the restore is confirmed, delete the `<branch>_old_<timestamp>` branch
    it left behind (Neon console -> Branches). It is a full copy of the database
    from before the restore, deleted accounts included, so it must not outlive

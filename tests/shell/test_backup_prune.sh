@@ -12,8 +12,8 @@
 # this runs anywhere: no daemon, no database.
 #
 # Which change turns each case red:
-#   ok     — the prune line removed, or its age changed from +29
-#   29-day — the age tightened below 30 days
+#   ok     — the prune line removed, or its age changed from +29 (the
+#            30-day file catches +30, the 29-day file catches +28)
 #   others — the name filter (citevyn-*.dump) or -maxdepth 1 dropped
 #   fail / stale / empty — the "new non-empty dump" check removed or moved
 #                          after the prune
@@ -55,6 +55,7 @@ ENV
 
     echo old > "${DIR}/backups/citevyn-20260901T030000Z.dump"; age 31 "${DIR}/backups/citevyn-20260901T030000Z.dump"
     echo edge > "${DIR}/backups/citevyn-20260929T030000Z.dump"; age 29 "${DIR}/backups/citevyn-20260929T030000Z.dump"
+    echo edge > "${DIR}/backups/citevyn-20260928T030000Z.dump"; age 30.01 "${DIR}/backups/citevyn-20260928T030000Z.dump"
     echo keep > "${DIR}/backups/notes.txt"; age 40 "${DIR}/backups/notes.txt"
     echo keep > "${DIR}/backups/citevyn-20260801T030000Z.sql"; age 40 "${DIR}/backups/citevyn-20260801T030000Z.sql"
     echo keep > "${DIR}/backups/sub/citevyn-20260801T030000Z.dump"; age 40 "${DIR}/backups/sub/citevyn-20260801T030000Z.dump"
@@ -80,6 +81,7 @@ run_backup ok
 [[ ${RC} -eq 0 ]] && pass "ok: exits 0" || { fail "ok: exit ${RC}"; cat "${DIR}/out.txt"; }
 present citevyn-20261028T030000Z.dump && pass "ok: the new dump is kept" || fail "ok: new dump missing"
 ! present citevyn-20260901T030000Z.dump && pass "ok: a 31-day-old dump is deleted" || fail "ok: 31-day-old dump kept"
+! present citevyn-20260928T030000Z.dump && pass "ok: a 30-day-old dump is deleted" || fail "ok: 30-day-old dump kept"
 present citevyn-20260929T030000Z.dump && pass "ok: a 29-day-old dump is kept" || fail "ok: 29-day-old dump deleted"
 present notes.txt && present citevyn-20260801T030000Z.sql && pass "ok: other files are never touched" || fail "ok: a non-dump file was deleted"
 present sub/citevyn-20260801T030000Z.dump && pass "ok: subdirectories are not searched" || fail "ok: a dump in a subdirectory was deleted"

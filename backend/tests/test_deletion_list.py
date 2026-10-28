@@ -296,6 +296,42 @@ async def test_redis_down_refuses_the_deletion_and_changes_nothing(
     assert await stone(maker) is None
 
 
+class LandsThenTimesOut:
+    """Redis stores the write, then the reply times out."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        import redis.exceptions
+
+        method = getattr(self._real, name)
+
+        async def _call(*a: Any, **k: Any) -> Any:
+            result = await method(*a, **k)
+            if name == "zadd":
+                raise redis.exceptions.TimeoutError("reply lost")
+            return result
+
+        return _call
+
+
+async def test_a_list_write_that_lands_but_times_out_is_undone(
+    maker: Maker, fake: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding (all three reviewers): the command says "Nothing was
+    changed", so the entry must not stay behind for the hourly run to act on.
+    Turns red if: ``listed`` is set only after record() returns."""
+    the_list = DeletionList(LandsThenTimesOut(fake), KEY)
+    monkeypatch.setattr(deletion_list, "current", lambda: the_list)
+    user_id = await add_user(maker)
+    async with maker() as s:
+        with pytest.raises(DeletionListUnavailable):
+            await delete_account(s, EMAIL, NOW)
+    assert await users(maker, user_id) == 1
+    assert await fake.zscore(KEY, user_id) is None
+
+
 async def test_without_a_redis_url_the_deletion_still_works(
     maker: Maker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -411,6 +447,30 @@ async def test_re_apply_is_idempotent(maker: Maker, listed: DeletionList) -> Non
     assert restored_stone is not None and restored_stone.trial_answers_used == 2
 
 
+async def test_one_failing_account_does_not_stop_the_rest(
+    maker: Maker, listed: DeletionList, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding. Turns red if: re-apply stops at the first account that
+    fails, or swallows the failure (the caller must retry soon)."""
+    first = await add_user(maker, "a@example.com")
+    second = await add_user(maker, "b@example.com")
+    for user_id in (first, second):
+        await listed.record(user_id, NOW)
+    bad = min(first, second)  # re-apply goes in sorted order: fail the first
+    real_remove = account_deletion._remove
+
+    async def remove(db: AsyncSession, user: User, *a: Any) -> Any:
+        if user.user_id == bad:
+            raise RuntimeError("foreign key")
+        return await real_remove(db, user, *a)
+
+    monkeypatch.setattr(account_deletion, "_remove", remove)
+    with pytest.raises(RuntimeError):
+        await reapply_deletions(maker, listed, NOW)
+    assert await users(maker, bad) == 1
+    assert await users(maker, max(first, second)) == 0
+
+
 async def test_re_apply_logs_counts_never_ids_or_addresses(
     maker: Maker, listed: DeletionList, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -473,13 +533,34 @@ async def test_is_listed(listed: DeletionList) -> None:
     assert await deletion_list.is_listed("anon_" + "0" * 32) is False
 
 
-async def test_is_listed_fails_closed_when_redis_is_down(
+async def test_is_listed_fails_closed_with_a_503_when_redis_is_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Turns red if: a Redis outage lets a possibly-deleted account through."""
+    """Turns red if: a Redis outage lets a possibly-deleted account through, or
+    answers as if signed out (the caller would mint a new cookie over the
+    person's own)."""
     monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
-    assert await deletion_list.is_listed("usr_any") is True
+    with pytest.raises(HTTPException) as raised:
+        await deletion_list.is_listed("usr_any")
+    assert raised.value.status_code == 503
     assert await deletion_list.is_listed("anon_" + "0" * 32) is False
+
+
+async def test_a_redis_blip_on_the_cookie_path_is_a_503_not_a_sign_out(
+    maker: Maker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding: one failed ZSCORE made resolve_principal mint an
+    anonymous cookie over a signed-in user's. Turns red if: the session lookup
+    answers None when the list cannot be read."""
+    from app.core.auth_sessions import _lookup_auth_session
+
+    user_id = await add_user(maker)
+    cookie = await _session_for(maker, user_id)
+    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
+    async with maker() as s:
+        with pytest.raises(HTTPException) as raised:
+            await _lookup_auth_session(s, cookie)
+    assert raised.value.status_code == 503
 
 
 async def test_is_listed_is_false_without_redis(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,17 +677,36 @@ async def test_startup_re_applies_before_serving(
         assert await users(maker, user_id) == 0
 
 
-async def test_startup_still_serves_when_redis_is_down(
-    maker: Maker, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("redis_up", "first_delay"), [(True, 3600), (False, 60)])
+async def test_startup_serves_anyway_and_retries_soon_after_a_failure(
+    maker: Maker,
+    fake: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    redis_up: bool,
+    first_delay: float,
 ) -> None:
     """The gate fails closed per request, so a failed startup re-apply must not
-    keep the public pages down. Turns red if: the lifespan raises."""
+    keep the public pages down; and the next try must not wait an hour.
+    Turns red if: the lifespan raises, the retry delay is an hour, or the
+    background task is left running after shutdown."""
     from app.main import _lifespan, create_app
 
-    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
+    client = fake if redis_up else Broken()
+    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(client, KEY))
     monkeypatch.setattr("app.core.db.get_sessionmaker", lambda: maker)
+    seen: dict[str, Any] = {}
+    real_loop = account_deletion.keep_reapplying
+
+    async def loop(*a: Any, **k: Any) -> None:
+        seen["first_delay"] = k.get("first_delay")
+        seen["task"] = __import__("asyncio").current_task()
+        await real_loop(*a, **k)
+
+    monkeypatch.setattr(account_deletion, "keep_reapplying", loop)
     async with _lifespan(create_app()):
-        pass
+        await __import__("asyncio").sleep(0)  # let the task start
+    assert seen["first_delay"] == first_delay
+    assert seen["task"].done()
 
 
 @pytest.mark.parametrize(("environment", "logged"), [("production", True), ("local", False)])
@@ -659,6 +759,45 @@ async def test_the_hourly_loop_re_applies_and_retries_after_a_failure(
     # the retry is sooner; after a success, an hour again.
     assert waits == [3600, 60, 3600]
     assert len(calls) == 2
+
+
+async def test_a_restored_account_s_shared_answer_is_not_served(
+    maker: Maker, listed: DeletionList
+) -> None:
+    """Breaker finding: the public share page is reached without any session.
+    Turns red if: /s/{id} stops consulting the list."""
+    from app.api.routes import shares
+    from app.models import SharedAnswer
+
+    user_id = await add_user(maker)
+    share_id = uuid.uuid4().hex
+    async with maker() as s:
+        s.add(
+            SharedAnswer(
+                share_id=share_id,
+                user_id=user_id,
+                question="q",
+                answer="a",
+                citations=[],
+                docs_as_of=None,
+                answered_at=NOW,
+                created_at=NOW,
+            )
+        )
+        await s.commit()
+    from starlette.requests import Request
+
+    request = Request(
+        {"type": "http", "headers": [], "method": "GET", "path": "/", "state": {"request_id": "t"}}
+    )
+    async with maker() as s:
+        page = await shares.shared_page(request, share_id, None, s)  # partner
+        assert page.status_code == 200
+    await listed.record(user_id, NOW)
+    async with maker() as s:
+        with pytest.raises(HTTPException) as raised:
+            await shares.shared_page(request, share_id, None, s)
+    assert raised.value.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -726,3 +865,60 @@ def test_the_command_does_not_warn_when_the_list_is_configured(
     monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
     assert cli.main(["delete-account", "--email", EMAIL]) == 0  # dry run: no write
     assert "CITEVYN_REDIS_URL is not set" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("job", ["_digest", "_alerts"])
+def test_email_jobs_re_apply_deletions_first(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, job: str
+) -> None:
+    """Breaker finding: the digest and alert jobs are separate processes, so
+    the app's startup and hourly runs do not cover them. Turns red if: a job
+    sends without re-applying first."""
+    import asyncio
+
+    from app.worker import cli
+
+    make, user_id = _cli_user(tmp_path, monkeypatch)
+    order: list[str] = []
+
+    async def fake_reapply(*_a: Any, **_k: Any) -> Any:
+        order.append("reapply")
+        return account_deletion.ReapplyReport(listed=0, deleted_again=0)
+
+    async def fake_send(*_a: Any, **_k: Any) -> Any:
+        order.append("send")
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            changes=0, sent=0, failed=0, skipped_already_sent=0, skipped_not_pro=0, capped=False
+        )
+
+    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
+    monkeypatch.setattr(account_deletion, "reapply_deletions", fake_reapply)
+    monkeypatch.setattr("app.services.digest.send_weekly_digest", fake_send)
+    monkeypatch.setattr("app.services.alerts.send_watch_alerts", fake_send)
+    assert asyncio.run(getattr(cli, job)(object(), object())) == 0
+    assert order == ["reapply", "send"]
+
+
+@pytest.mark.parametrize("job", ["_digest", "_alerts"])
+def test_email_jobs_send_nothing_when_re_apply_fails(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any, job: str
+) -> None:
+    """Turns red if: a job emails accounts after the re-apply failed."""
+    import asyncio
+
+    from app.worker import cli
+
+    _cli_user(tmp_path, monkeypatch)
+    sent: list[int] = []
+
+    async def fake_send(*_a: Any, **_k: Any) -> Any:
+        sent.append(1)
+
+    monkeypatch.setattr(deletion_list, "current", lambda: DeletionList(Broken(), KEY))
+    monkeypatch.setattr("app.services.digest.send_weekly_digest", fake_send)
+    monkeypatch.setattr("app.services.alerts.send_watch_alerts", fake_send)
+    assert asyncio.run(getattr(cli, job)(object(), object())) == 3
+    assert sent == []
+    assert "nothing was sent" in capsys.readouterr().out

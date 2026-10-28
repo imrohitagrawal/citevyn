@@ -527,8 +527,10 @@ Nothing else to record. The command also wrote the account id (never the
 address) and the date to the deletion list in Redis, outside the database and
 its backups (#546, `backend/app/core/deletion_list.py`). If a restore ever
 brings the account back, the app deletes it again on its own: at startup,
-every hour while it runs, and in between it refuses the account at every
-sign-in, session lookup and API key. Entries are kept 60 days. If Redis cannot
+every hour while it runs, and before every digest or alert email run; in
+between it refuses the account at every sign-in, session lookup, API key and
+shared-answer page. Entries are kept at least 60 days (older ones are dropped
+at the next re-apply). If Redis cannot
 be written, the command refuses (exit `3`, "the deletion list ... could not be
 written") and nothing changes: run it again once Redis is up. Run the command
 on the app machine as above: run anywhere without `CITEVYN_REDIS_URL` set, it
@@ -594,6 +596,16 @@ deletes every `citevyn-*.dump` in `infra/docker/backups/` that is 30 days old
 or older. If the dump fails, it exits non-zero and deletes nothing (the old
 dumps are then the only copies). Tested by `tests/shell/test_backup_prune.sh`.
 
+A dump made any other way (for example `pg_dump` of the Neon database from a
+laptop, DEPLOY_FLY.md §6.2) is not pruned by the script. Delete those by hand,
+from the folder that holds them:
+
+```bash
+find <folder> -maxdepth 1 -name 'citevyn-*.dump' -mtime +29 -delete
+```
+
+(`-mtime +29` matches files 30 full days old or older.)
+
 The same 30-day limit applies to every copy: a dump copied to a laptop or to
 cloud storage, and any weekly or monthly copy. Keep none beyond 30 days. On
 Neon (production) the same limit covers every copy Neon keeps:
@@ -630,20 +642,29 @@ docker compose -f infra/docker/docker-compose.yml --profile prod up -d api worke
 ```
 
 **Deleted accounts are deleted again on their own.** A restore brings deleted
-accounts back (and loses their tombstones). When the api starts, before it
-serves anything, it deletes again every account on the deletion list in Redis
+accounts back (and loses their tombstones). When the api starts, it spends up
+to 15 seconds deleting again every account on the deletion list in Redis
 (§3.8 step 5) that the restore brought back, tombstone included, whatever
 subscription status the restored copy shows (the subscription was checked when
-the account was first deleted). It does the same every hour while it runs, and
-in between refuses those accounts at every sign-in and session lookup. Nothing
-to run by hand. To see it happened, look for the `deletions_reapplied` log
-line (counts only: `listed`, `deleted_again`).
+the account was first deleted). Then it serves. If that run fails or runs out
+of time, it logs `deletions_reapply_failed_at_startup` and tries again a
+minute later, then every hour while it runs. In between it refuses those
+accounts at every sign-in, session lookup, API key and shared-answer page. The
+digest and alert email commands re-apply the list before sending, and send
+nothing if they cannot. Nothing to run by hand. To see it happened, look for
+the `deletions_reapplied` log line (counts only: `listed`, `deleted_again`,
+`failed`).
 
-If that line says `deletion_list_missing_entries` instead, there are more
-recent tombstones in the database than entries on the list: entries went
-missing (Redis lost data, or someone deleted an account where no Redis was
-configured). Those accounts cannot be found automatically; check Redis
-(Upstash eviction must stay off) and tell the owner.
+If an error line `deletion_list_missing_entries` appears (just before
+`deletions_reapplied`), there are more recent tombstones in the database than
+entries on the list: entries went missing (Redis lost data, or someone deleted
+an account where no Redis was configured). Those accounts cannot be found
+automatically; check Redis and tell the owner. The check compares counts only,
+so it catches a lost list, not every lost entry. On Upstash, eviction must
+stay off (Upstash console -> the database -> Configuration). On the
+self-hosted compose stack, the `redis` service keeps its data inside the
+container, so recreating it loses the list: back up or persist Redis before
+relying on this there.
 
 The tombstone written again counts only the free-trial answers in the dump, so
 it can be a little lower than the original. That is acceptable.

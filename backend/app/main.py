@@ -103,6 +103,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
         _logger.info("app_shutdown")
         if reapplying is not None:
             reapplying.cancel()
+            # Let a run in progress roll back before the Redis client closes.
+            await asyncio.gather(reapplying, return_exceptions=True)
         await shutdown_llm_client()
         await shutdown_embedder()
         await shutdown_redis_client()
@@ -117,10 +119,16 @@ async def _start_reapplying_deletions() -> asyncio.Task[None] | None:
     serving, then keep doing it every hour. A failure here is logged and the
     app serves anyway: the deletion list's gate refuses a listed account at
     every sign-in and session lookup, and fails closed when Redis is down, so
-    keeping the public pages down too would protect nothing more."""
+    keeping the public pages down too would protect nothing more. After a
+    failed startup run the next try is a minute later, not an hour."""
     from app.core import deletion_list
     from app.core.db import get_sessionmaker
-    from app.services.account_deletion import keep_reapplying, reapply_deletions
+    from app.services.account_deletion import (
+        REAPPLY_EVERY_SECONDS,
+        REAPPLY_RETRY_SECONDS,
+        keep_reapplying,
+        reapply_deletions,
+    )
 
     outside = deletion_list.current()
     if outside is None:
@@ -130,13 +138,15 @@ async def _start_reapplying_deletions() -> asyncio.Task[None] | None:
             _logger.error("deletion_list_not_configured")
         return None
     make = get_sessionmaker()
+    first_delay: float = REAPPLY_EVERY_SECONDS
     try:
         await asyncio.wait_for(
             reapply_deletions(make, outside, datetime.now(UTC)), _REAPPLY_AT_STARTUP_SECONDS
         )
     except Exception as exc:  # noqa: BLE001 - logged; serving anyway is deliberate
         _logger.error("deletions_reapply_failed_at_startup", extra={"error": type(exc).__name__})
-    return asyncio.create_task(keep_reapplying(make, outside))
+        first_delay = REAPPLY_RETRY_SECONDS  # not an hour: try again soon
+    return asyncio.create_task(keep_reapplying(make, outside, first_delay=first_delay))
 
 
 def create_app() -> FastAPI:

@@ -170,10 +170,36 @@ def _cmd_digest() -> int:
     return asyncio.run(_digest(settings, client))
 
 
+async def _reapply_deletions_first() -> bool:
+    """Before a job that emails accounts, delete again any deleted account a
+    restore brought back (#546): this process is not the app, so the app's
+    startup and hourly runs do not cover it. False (send nothing) when that
+    cannot be done."""
+    from app.core import deletion_list
+    from app.core.db import get_sessionmaker
+    from app.services.account_deletion import reapply_deletions
+
+    outside = deletion_list.current()
+    if outside is None:
+        return True  # no Redis configured: no list to apply (local work)
+    try:
+        await reapply_deletions(get_sessionmaker(), outside, datetime.now(UTC))
+    except Exception as exc:  # noqa: BLE001 - reported; sending nothing is the safe side
+        print(
+            f"Could not re-apply account deletions first ({type(exc).__name__}), so nothing "
+            "was sent: a deleted account a restore brought back could have been emailed. "
+            "Run it again."
+        )
+        return False
+    return True
+
+
 async def _digest(settings: Settings, client: EmailClient) -> int:
     from app.core.db import get_sessionmaker
     from app.services.digest import send_weekly_digest
 
+    if not await _reapply_deletions_first():
+        return 3
     async with get_sessionmaker()() as db:
         stats = await send_weekly_digest(db, client, settings, now=datetime.now(UTC))
     print(
@@ -221,6 +247,8 @@ async def _alerts(settings: Settings, client: EmailClient) -> int:
     from app.core.db import get_sessionmaker
     from app.services.alerts import send_watch_alerts
 
+    if not await _reapply_deletions_first():
+        return 3
     async with get_sessionmaker()() as db:
         stats = await send_watch_alerts(db, client, settings, now=datetime.now(UTC))
     print(

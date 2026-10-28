@@ -12,9 +12,11 @@ touch, and the app re-applies it on its own
   while it sleeps is caught when it wakes;
 * every hour while it runs: a Neon restore goes live in seconds, machine awake
   or not;
+* before every digest or alert email run (``app.worker.cli``: those run as
+  separate processes);
 * and in between, :func:`is_listed` refuses a listed account at every sign-in,
-  session lookup and API-key check, so a restored account cannot be used before
-  the re-apply removes it.
+  session lookup, API-key check and shared-answer page, so a restored account
+  cannot be used before the re-apply removes it.
 
 What is stored: one sorted set, ``<CITEVYN_REDIS_KEY_PREFIX>:deleted_accounts``.
 Each member is an account id (``usr_…``, random, never the address); its score
@@ -33,8 +35,8 @@ Redis down:
   be undone for good by the next restore, silently; a refused one is visible
   and can be retried. The rate limiter also fails closed on a Redis outage, so
   the app is unavailable then anyway.
-* when the gate asks: the account is treated as listed (fail closed). The
-  limiter already refuses most requests in that state.
+* when the gate asks: the request is refused with a 503 (fail closed), as
+  the rate limiter does in that state, never answered as if signed out.
 
 No Redis configured (local work, tests): there is no list, deletions work as
 before, and the gate lets everyone through. Production always sets
@@ -48,6 +50,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.errors import APIErrorCode, error_response
+from app.core.middleware import get_current_request_id
 from app.core.redis_client import get_redis_client
 
 _logger = logging.getLogger("citevyn.deletion_list")
@@ -111,8 +115,15 @@ def current() -> DeletionList | None:
 
 
 async def is_listed(user_id: str) -> bool:
-    """Whether ``user_id`` must be refused: it was deleted (a restore may have
-    brought it back), or the list cannot be read (fail closed)."""
+    """Whether ``user_id`` was deleted (a restore may have brought it back),
+    so must be refused. For request paths only.
+
+    When the list cannot be read this raises a 503 rather than answering:
+    answering True would look like "no session" to the caller, which then
+    mints a fresh anonymous cookie over the person's real one and signs them
+    out for good on one Redis timeout (review finding). The 503 carries
+    ``rate_limiter_unavailable``, the code for "Redis is unreachable" that
+    the client already handles: the list lives in the same Redis."""
     if not user_id.startswith(_REGISTERED_PREFIX):
         return False
     the_list = current()
@@ -122,7 +133,11 @@ async def is_listed(user_id: str) -> bool:
         return await the_list.contains(user_id)
     except DeletionListUnavailable as exc:
         _logger.warning("deletion_list_unreadable", extra={"error": str(exc)})
-        return True
+        raise error_response(
+            request_id=get_current_request_id(),
+            code=APIErrorCode.rate_limiter_unavailable,
+            message="Sign-in is temporarily unavailable. Try again shortly.",
+        ) from exc
 
 
 __all__ = [

@@ -241,8 +241,10 @@ async def delete_account(
         total = await _remove(db, user, plan, now)
         if outside is not None:
             # Last before the commit: a list we cannot write means no deletion.
-            await outside.record(user.user_id, now)
+            # ``listed`` is set FIRST: a write that reached Redis but whose
+            # reply timed out must be undone too (review finding).
             listed = user.user_id
+            await outside.record(user.user_id, now)
         await db.commit()
     except BaseException:
         await db.rollback()
@@ -321,6 +323,8 @@ async def reapply_deletions(
             extra={"listed": len(entries), "recent_tombstones": recent},
         )
     deleted_again = 0
+    failures = 0
+    failed: Exception | None = None
     for user_id in sorted(present):
         async with make() as db:
             try:
@@ -329,21 +333,37 @@ async def reapply_deletions(
                 await db.commit()
             except AccountNotFound:
                 continue  # another machine got there first
-            except BaseException:
+            except Exception as exc:  # noqa: BLE001 - one account must not stop the rest
                 await db.rollback()
-                raise
+                failures += 1
+                failed = failed or exc
+                continue
         deleted_again += 1
     _logger.info(
-        "deletions_reapplied", extra={"listed": len(entries), "deleted_again": deleted_again}
+        "deletions_reapplied",
+        extra={
+            "listed": len(entries),
+            "deleted_again": deleted_again,
+            "failed": failures,
+        },
     )
+    if failed is not None:
+        # Every other account was still handled; the caller retries soon.
+        raise failed
     return ReapplyReport(listed=len(entries), deleted_again=deleted_again)
 
 
-async def keep_reapplying(make: async_sessionmaker[AsyncSession], outside: DeletionList) -> None:
+async def keep_reapplying(
+    make: async_sessionmaker[AsyncSession],
+    outside: DeletionList,
+    *,
+    first_delay: float = REAPPLY_EVERY_SECONDS,
+) -> None:
     """Run :func:`reapply_deletions` every hour, for as long as the app runs
-    (the caller cancels it at shutdown). The first run is an hour in: startup
-    has just run it. A failed run is logged and tried again sooner."""
-    delay = REAPPLY_EVERY_SECONDS
+    (the caller cancels it at shutdown). The first run is ``first_delay`` in:
+    an hour after a startup run that worked, sooner after one that failed. A
+    failed run is logged and tried again sooner."""
+    delay = first_delay
     while True:
         await _sleep(delay)
         try:
