@@ -89,6 +89,16 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_LENGTH)
 
 
+class DeleteAccountRequest(BaseModel):
+    """Body for ``POST /v1/auth/me/delete`` (#546): the account the page
+    SHOWS. The server deletes the account the cookie belongs to; if another
+    tab has since signed this browser into a different account, the two
+    differ and nothing is deleted (review finding: a stale tab labelled with
+    one address could otherwise delete the other account)."""
+
+    user_id: str = Field(min_length=1, max_length=64)
+
+
 class PasswordUpdateRequest(BaseModel):
     """Body for ``POST /v1/auth/me/password`` (ADR-0004 PR 14).
 
@@ -531,7 +541,8 @@ async def update_password(
     dependencies=[Depends(requires(Capability.manage_account))],
     summary="Delete the signed-in account and its data.",
     description=(
-        "Needs a fresh email confirmation: the caller's own session must have "
+        "Body: the user_id the page shows; it must be the session's account "
+        "(422 otherwise). Needs a fresh email confirmation: the caller's own session must have "
         "been signed in with an emailed link within the step-up window (403 "
         "verification_required otherwise). 409 already_subscribed while a "
         "subscription can still bill. On success every session of the account "
@@ -541,6 +552,7 @@ async def update_password(
 async def delete_my_account(
     request: Request,
     response: Response,
+    body: DeleteAccountRequest,
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_session)],
     _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
@@ -549,6 +561,10 @@ async def delete_my_account(
     ``delete-account`` command does (``app.services.account_deletion``): one
     transaction, the tombstone kept, the account recorded on the deletion list
     outside the database, and refused while a subscription can still bill.
+
+    **The account the page shows** (``body.user_id``) must be the cookie's
+    account, or nothing is deleted: another tab may have signed this browser
+    into a different account since the page loaded.
 
     **Proof of the inbox, from the server-held row only:** ``step_up_active``
     on the CALLER'S OWN session, the same predicate that lets a forgotten
@@ -574,6 +590,12 @@ async def delete_my_account(
             request_id=request_id,
             code=APIErrorCode.auth_required,
             message="Sign in to delete your account.",
+        )
+    if body.user_id != current.user_id:
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.validation_error,
+            message="This page is signed in to a different account. Reload it and try again.",
         )
     if not step_up_active(current, settings):
         raise error_response(

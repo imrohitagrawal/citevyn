@@ -43,8 +43,15 @@ from tests.test_password_step_up import OLD as PASSWORD
 KEY = "test:deleted_accounts"
 
 
-def _delete(client: Any) -> Any:
-    return client.post("/v1/auth/me/delete", headers={"Authorization": DEMO_BEARER})
+def _delete(client: Any, user_id: str | None = None) -> Any:
+    """Delete as the page does: naming the account it shows (by default the
+    account this browser is signed in to)."""
+    if user_id is None:
+        me = client.get("/v1/auth/me", headers={"Authorization": DEMO_BEARER})
+        user_id = me.json()["user_id"] if me.status_code == 200 else "usr_" + "0" * 32
+    return client.post(
+        "/v1/auth/me/delete", json={"user_id": user_id}, headers={"Authorization": DEMO_BEARER}
+    )
 
 
 def _count(model: Any, *where: Any) -> int:
@@ -185,6 +192,21 @@ def test_an_anonymous_caller_is_refused(step_up_app: Path) -> None:  # noqa: F81
     assert r.json()["error"]["code"] == "auth_required"
 
 
+def test_a_page_showing_another_account_deletes_nothing(
+    step_up_app: Path,  # noqa: F811
+) -> None:
+    """Round-2 finding: a tab still labelled with account A, in a browser that
+    another tab has since signed into account B with a link. Turns red if: the
+    server deletes the cookie's account without checking it is the one shown."""
+    a = _register(_client())
+    browser = _sign_in_with_link(step_up_app)  # this browser is now account A too
+    r = _delete(browser, user_id="usr_" + "b" * 32)  # the page shows someone else
+    assert r.status_code == 422
+    assert "different account" in r.json()["error"]["message"]
+    assert _count(User, User.user_id == a) == 1
+    assert _delete(browser).status_code == 200  # partner: naming it right works
+
+
 def test_an_anonymous_visitor_with_a_session_cookie_is_refused(
     step_up_app: Path,  # noqa: F811
 ) -> None:
@@ -195,7 +217,7 @@ def test_an_anonymous_visitor_with_a_session_cookie_is_refused(
     r = client.post("/v1/sessions", json={}, headers={"Authorization": DEMO_BEARER})
     assert r.status_code in (200, 201), r.text
     assert client.cookies  # partner: the visitor does have a session
-    r = _delete(client)
+    r = _delete(client, user_id="usr_" + "0" * 32)
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "auth_required"
 
@@ -354,3 +376,52 @@ def test_the_cookie_is_cleared_with_the_attributes_it_was_set_with(
     assert "Max-Age=0" in header and "Path=/" in header
     assert ("Secure" in header) is secure
     assert "HttpOnly" in header
+
+
+def test_a_failed_audit_write_deletes_nothing(
+    step_up_app: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-2 finding: the audit line and the deletion share one commit.
+    Turns red if: the audit row is written after the deletion commits (the
+    account would be gone with no audit line and a 500)."""
+    user_id = _register(_client())
+    browser = _sign_in_with_link(step_up_app)
+
+    async def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr("app.api.routes.auth.record_audit_event", boom)
+    with pytest.raises(RuntimeError):  # the test client re-raises; production answers 500
+        _delete(browser)
+    assert _count(User, User.user_id == user_id) == 1
+
+
+@pytest.mark.parametrize("route", ["logout", "delete"])
+def test_logout_and_delete_both_clear_through_the_shared_helper(
+    step_up_app: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """Round-2 finding: the production-cookie test calls the helper directly,
+    so a route going back to a bare delete_cookie stayed green. Turns red if:
+    either route stops clearing through clear_session_cookie."""
+    from app.core import auth_sessions
+
+    calls: list[int] = []
+    real = auth_sessions.clear_session_cookie
+
+    def spy(*a: Any, **k: Any) -> None:
+        calls.append(1)
+        real(*a, **k)
+
+    monkeypatch.setattr(auth_sessions, "clear_session_cookie", spy)
+    monkeypatch.setattr("app.api.routes.auth.clear_session_cookie", spy)
+    _register(_client())
+    browser = _sign_in_with_link(step_up_app)
+    if route == "logout":
+        r = browser.post("/v1/auth/logout", headers={"Authorization": DEMO_BEARER})
+        assert r.status_code in (200, 204), r.text
+    else:
+        assert _delete(browser).status_code == 200
+    assert calls == [1]

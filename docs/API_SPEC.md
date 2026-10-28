@@ -363,7 +363,14 @@ credential never reaches the server log.
 POST /v1/auth/me/delete
 ```
 
-No body. Deletes the caller's own account and its data (#546) with the same
+```json
+{ "user_id": "usr_..." }
+```
+
+The `user_id` is the account the page shows; if it is not the session's
+account (another tab signed this browser into a different one), 422
+`validation_error` and nothing is deleted. Deletes the caller's own account
+and its data (#546) with the same
 code as the operator's `delete-account` command (RUNBOOK §3.8): one
 transaction, the address's free-trial tombstone kept, the account id
 recorded on the deletion list outside the database. Requires the demo

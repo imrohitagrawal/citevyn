@@ -32,8 +32,9 @@ type Stage = "explain" | "link-sent" | "deleting";
 function deleteRefusal(err: unknown): string {
   if (err instanceof ApiClientError) {
     const code = err.errorCode();
-    // The server's message names the next step (cancel the subscription first).
-    if (code === "already_subscribed") return err.message;
+    // The server's message names the next step (cancel the subscription
+    // first; reload, because this browser is now another account).
+    if (code === "already_subscribed" || code === "validation_error") return err.message;
     // Refused before anything was written: the server says so.
     if (code === "rate_limiter_unavailable" || code === "rate_limited") {
       return "Could not delete your account right now. Nothing was deleted. Try again shortly.";
@@ -87,14 +88,16 @@ export default function DeleteAccountDialog({
     let live = true;
     getCurrentUser().then(
       (fresh) => {
-        if (live && fresh?.password_step_up) setConfirmed(true);
+        // Only for the SAME account: another tab may have signed this browser
+        // into a different one (review finding; the server checks it too).
+        if (live && fresh?.user_id === user.user_id && fresh.password_step_up) setConfirmed(true);
       },
       () => {},
     );
     return () => {
       live = false;
     };
-  }, []);
+  }, [user.user_id]);
   useFocusTrap(dialogRef, { onEscape: onClose });
 
   const sendLink = async () => {
@@ -113,7 +116,7 @@ export default function DeleteAccountDialog({
     setError(null);
     setStage("deleting");
     try {
-      await deleteMyAccount();
+      await deleteMyAccount(user.user_id);
     } catch (err) {
       setStage("explain");
       if (err instanceof ApiClientError && err.errorCode() === "verification_required") {

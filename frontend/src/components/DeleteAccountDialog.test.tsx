@@ -98,6 +98,7 @@ describe("DeleteAccountDialog", () => {
     onDeleted.mockImplementation(() => order.push("confirmed"));
     await userEvent.setup().click(screen.getByRole("button", { name: "Delete my account" }));
     expect(deleteMyAccount).toHaveBeenCalledTimes(1);
+    expect(deleteMyAccount).toHaveBeenCalledWith("usr_a"); // the account shown
     expect(order).toEqual(["confirmed", "signed-out"]);
   });
 
@@ -149,6 +150,26 @@ describe("DeleteAccountDialog", () => {
     vi.mocked(getCurrentUser).mockResolvedValue({ ...USER, password_step_up: true });
     open({ password_step_up: false });
     expect(await screen.findByRole("button", { name: "Delete my account" })).toBeTruthy();
+  });
+
+  it("does not unlock when the browser is now signed in to another account", async () => {
+    // Round-2 finding: tab shows A; another tab signed this browser into B
+    // with a link. Turns red if: the fresh read unlocks without comparing ids.
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...USER, user_id: "usr_b", password_step_up: true });
+    open({ password_step_up: false });
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByRole("button", { name: "Delete my account" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Email me a link" })).toBeTruthy();
+  });
+
+  it("shows the server's 'different account' refusal", async () => {
+    // Turns red if: the 422 reads like an unknown failure.
+    const message = "This page is signed in to a different account. Reload it and try again.";
+    vi.mocked(deleteMyAccount).mockRejectedValue(apiError(422, "validation_error", message));
+    open({ password_step_up: true });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Delete my account" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(message);
   });
 
   it("sends one delete for a double click", async () => {

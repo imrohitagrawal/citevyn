@@ -49,10 +49,15 @@ export async function updatePassword(newPassword: string, currentPassword?: stri
  * Delete the signed-in account (#546). The server needs this session to have
  * been signed in with an emailed link a few minutes ago (403
  * ``verification_required`` otherwise) and refuses while a subscription can
- * still bill (409 ``already_subscribed``). On success the account, its data
- * and every session are gone; the caller then drops to signed-out with
- * ``authStore.signedOutLocally``.
+ * still bill (409 ``already_subscribed``). ``userId`` is the account the page
+ * SHOWS: the server deletes the cookie's account only if it is that one (422
+ * otherwise; another tab may have signed this browser into a different
+ * account). On success the account, its data and every session are gone; the
+ * caller then drops to signed-out with ``authStore.signedOutLocally``.
  */
-export async function deleteMyAccount(): Promise<void> {
-  await apiFetch<{ deleted: boolean }>("/v1/auth/me/delete", { method: "POST" });
+export async function deleteMyAccount(userId: string): Promise<void> {
+  await apiFetch<{ deleted: boolean }>("/v1/auth/me/delete", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
 }
