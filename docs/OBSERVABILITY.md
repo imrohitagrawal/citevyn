@@ -166,7 +166,7 @@ For enterprise, use configurable trace sampling, but always trace:
 
 ## 9. Retention
 
-MVP suggested retention:
+MVP suggested retention. **Not in force:** nothing deletes these on a schedule today. The published Privacy Policy is the source of truth for what is kept and for how long (request logs: Fly.io keeps them 7 days).
 
 | Data | Retention |
 |---|---:|

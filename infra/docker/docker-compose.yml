@@ -38,7 +38,7 @@
 # Treat ``docker compose config`` output as secret material: do
 # not paste it into an issue, a CI log, or a support thread.
 # Narrowing this properly means per-service ``env_file`` scoping
-# or compose ``secrets:``; neither is done yet. See #200.
+# or compose ``secrets:``; neither is done yet. See #555.
 # ────────────────────────────────────────────────────────────────────────────
 
 x-logging: &default-logging

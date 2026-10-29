@@ -119,7 +119,7 @@ export default function AccessPricing({
         </div>
       </div>
       <p className="legal-links">
-        {/* Drafts until the owner approves them (ADR-0005 Phase 5C). */}
+        {/* Terms, Privacy and Refunds are published; No training is still a draft. */}
         <a href="/legal/terms">Terms</a> · <a href="/legal/privacy">Privacy</a> ·{" "}
         <a href="/legal/refunds">Refunds</a> · <a href="/legal/no-training">No training</a>
       </p>

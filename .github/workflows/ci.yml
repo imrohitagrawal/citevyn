@@ -51,6 +51,10 @@ jobs:
         run: /bin/bash --version | head -1
       - name: Run every tests/shell suite
         run: make test-shell
+      # Next-session prompts hold approvals, spend limits and plans, so they live
+      # in the owner's private notes. One committed here would publish them.
+      - name: No prompt files in the public repo
+        run: make public-prompt-guard
 
   test:
     name: pytest + lint

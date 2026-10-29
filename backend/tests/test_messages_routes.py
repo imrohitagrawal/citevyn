@@ -773,3 +773,66 @@ def test_every_paid_call_while_answering_is_billed_to_the_asker(
     # This visitor never signed in, so its principal is an anonymous one.
     assert str(getattr(billing, "user_id", "")).startswith("anon_")
     assert get_billing().user_id is None  # restored after the request
+
+
+def test_an_account_deleted_while_its_answer_is_in_flight_gets_404_and_keeps_nothing(
+    seeded_app: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#511 review F1: the account is deleted (the operator's delete-account,
+    cascading to its chat sessions) after ``require_session`` passed and
+    while the answer is being produced. The route must answer like an unknown
+    session (404 ``not_found``) and commit nothing: no messages, and no
+    session re-created under ``demo_user``.
+
+    Turns red if: ``Orchestrator._ensure_user`` re-creates a missing session
+    row in production (the old unit-test fallback), or the route lets
+    ``SessionGone`` escape as a 500."""
+    from sqlalchemy import delete, func, select
+
+    import app.core.rate_limit as rate_limit
+    from app.answer.orchestrator import Orchestrator
+    from app.models import Message, Session, User
+
+    rate_limit.reset_limiter()
+    real_ask = Orchestrator.ask
+
+    async def delete_then_ask(self: Orchestrator, **kw: object) -> object:
+        # Another connection deletes the account, as the operator's command
+        # would, between require_session and the answer being saved.
+        async with get_sessionmaker()() as other:
+            owner = await other.scalar(
+                select(Session.user_id).where(Session.session_id == kw["session_id"])
+            )
+            await other.execute(delete(User).where(User.user_id == owner))
+            await other.commit()
+        return await real_ask(self, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Orchestrator, "ask", delete_then_ask)
+    create = seeded_app.post(
+        "/v1/sessions", json={"channel": "chat"}, headers={"Authorization": DEMO_BEARER}
+    )
+    assert create.status_code == 201, create.json()
+    session_id = create.json()["session_id"]
+    res = seeded_app.post(
+        f"/v1/sessions/{session_id}/messages",
+        json={"message": "How do I install Claude Code?"},
+        headers={"Authorization": DEMO_BEARER},
+    )
+    assert res.status_code == 404, res.json()
+    assert res.json()["error"]["code"] == "not_found"
+
+    async def _counts() -> tuple[int, int, int]:
+        async with get_sessionmaker()() as s:
+            sid = uuid.UUID(session_id)
+            messages = await s.scalar(
+                select(func.count()).select_from(Message).where(Message.session_id == sid)
+            )
+            sessions = await s.scalar(
+                select(func.count()).select_from(Session).where(Session.session_id == sid)
+            )
+            demo = await s.scalar(
+                select(func.count()).select_from(Session).where(Session.user_id == "demo_user")
+            )
+            return int(messages or 0), int(sessions or 0), int(demo or 0)
+
+    assert asyncio.run(_counts()) == (0, 0, 0)

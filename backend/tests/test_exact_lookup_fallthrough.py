@@ -25,7 +25,6 @@ from sqlalchemy import select
 
 from app.answer.orchestrator import (
     _FLAG_TOKEN_RE,
-    Orchestrator,
     RetrievalStrategy,
     _strip_flag_tokens,
 )
@@ -35,6 +34,7 @@ from app.models import AuditEvent, RetrievalType
 from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
 from tests.conftest import seed_evidence_chunks
+from tests.orchestrator_double import Orchestrator
 from tests.test_answer_orchestrator import _seed_index_version, _settings
 
 pytestmark = pytest.mark.asyncio

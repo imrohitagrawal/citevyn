@@ -37,6 +37,16 @@ afterEach(() => {
 });
 
 describe("AccountMenu signed-in dropdown", () => {
+  it("offers Delete account with the access model off, and it opens the dialog", async () => {
+    // #546. Turns red if: the item is removed, hidden behind the access model
+    // (accounts exist either way), or wired to the wrong dialog.
+    const user = userEvent.setup();
+    render(<AccountMenu />);
+    await user.click(await screen.findByRole("button", { name: "a@example.com" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete account" }));
+    expect(await screen.findByRole("dialog", { name: "Delete account" })).toBeInTheDocument();
+  });
+
   it("opens on trigger click and shows Sign out", async () => {
     const user = userEvent.setup();
     render(<AccountMenu />);
@@ -87,7 +97,7 @@ describe("AccountMenu signed-in dropdown", () => {
     );
     // Between History and Sign out, per the plan.
     const names = screen.getAllByRole("menuitem").map((el) => el.textContent);
-    expect(names).toEqual(["History", "Sign-in methods", "Sign out"]);
+    expect(names).toEqual(["History", "Sign-in methods", "Delete account", "Sign out"]);
     await user.click(item);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(await screen.findByRole("dialog", { name: "Sign-in methods" })).toBeInTheDocument();
@@ -170,6 +180,7 @@ describe("AccountMenu with no stored email (#288)", () => {
     expect(screen.getAllByRole("menuitem").map((el) => el.textContent)).toEqual([
       "History",
       "Sign-in methods",
+      "Delete account",
       "Sign out",
     ]);
   });

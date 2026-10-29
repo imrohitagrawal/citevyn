@@ -473,7 +473,7 @@ candidate index against the shipped corpus and write the `EvaluationRun` row the
 gate reads:
 
 ```bash
-fly ssh console -a citevyn -C "python -m app.worker.cli evaluate --index-version <candidate>"
+fly ssh console -a citevyn -C "sh -c 'cd /app && python -m app.worker.cli evaluate --index-version <candidate>'"
 ```
 
 Exit `0` means it measured at or above `CITEVYN_INDEX_PROMOTION_MIN_PASS_RATE`
@@ -865,8 +865,32 @@ database — which is precisely why check (1) above is not optional.
 
 Neon's free tier keeps a short point-in-time-restore window; use the Neon
 console's branch/restore for a bad-data incident. For an off-provider copy,
-`pg_dump` the Neon DSN from your laptop on the same cadence RUNBOOK §4.1
-prescribes (7 days retained, no rotation built in).
+`pg_dump` the Neon DSN from your laptop: keep dumps 30 days, never longer, and
+delete older ones (RUNBOOK §4.1). Every copy Neon keeps has the same 30-day
+limit (§4.1 lists them: history window, snapshots, the `_old_` branch a
+restore leaves).
+
+**Restoring production.** A Neon restore goes live within seconds, because the
+app reconnects to the same address, so deleted accounts are back in the
+database. The app deletes them again on its own (#546): it refuses them at
+every sign-in, session lookup, API key and shared-answer page straight away,
+deletes them at its next startup or within the hour, whichever comes first,
+and writes their tombstones back (RUNBOOK §4.2). Nothing to run by hand for deletions. (Do not use
+`fly scale count 0` to keep the app off: it destroys the machines, and Fly
+cannot scale back up from zero without a full `fly deploy`.)
+
+1. Restore in the Neon console.
+2. Confirm the restore is what you wanted (the app works, the data is right).
+   Then have deletions re-applied at once rather than within the hour: if the
+   machine is running, `fly apps restart citevyn`; if it has stopped
+   (`fly status -a citevyn`), wake it with
+   `curl -sS -o /dev/null https://citevyn.stackclimb.com/health`, which starts
+   it, and every start re-applies. Look for the `deletions_reapplied` log line
+   (`fly logs -a citevyn`).
+3. Once the restore is confirmed, delete the `<branch>_old_<timestamp>` branch
+   it left behind (Neon console -> Branches). It is a full copy of the database
+   from before the restore, deleted accounts included, so it must not outlive
+   the 30-day backup limit; deleting it straight away is simplest.
 
 ---
 

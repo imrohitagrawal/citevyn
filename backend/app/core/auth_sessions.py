@@ -45,8 +45,11 @@ from sqlalchemy import delete, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import deletion_list
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
+from app.core.errors import APIErrorCode, error_response
+from app.core.middleware import get_current_request_id
 from app.core.rate_limit import rate_limited_demo
 from app.models import AuthSession, Session, User, UserRole
 
@@ -125,6 +128,10 @@ async def _lookup_auth_session(db: AsyncSession, cookie_value: str) -> AuthSessi
     if not secrets.compare_digest(_hash_secret(secret), row.secret_hash):
         return None
     if _to_naive_utc(row.expires_at) <= _to_naive_utc(_now()):
+        return None
+    # A deleted account a restore brought back, until the re-apply removes it
+    # (#546, ``app.core.deletion_list``).
+    if await deletion_list.is_listed(row.user_id):
         return None
     return row
 
@@ -302,6 +309,8 @@ async def resolve_principal_by_auth_session_id(
         return None
     if _to_naive_utc(row.expires_at) <= _to_naive_utc(_now()):
         return None
+    if await deletion_list.is_listed(row.user_id):  # #546
+        return None
     return row.user_id
 
 
@@ -362,7 +371,16 @@ async def claim_and_login(
     ``magic_link_verified_at`` (ADR-0004 PR 15, #293) is passed ONLY by the
     magic-link confirm route and lands on the new session row; every other
     caller leaves it ``None``.
+
+    A deleted account a restore brought back is refused with a 401 before
+    anything is written (#546, ``app.core.deletion_list``).
     """
+    if await deletion_list.is_listed(user_id):
+        raise error_response(
+            request_id=get_current_request_id(),
+            code=APIErrorCode.auth_required,
+            message="This account cannot sign in.",
+        )
     cookie_value = request.cookies.get(_cookie_name(settings))
     old_row = await _lookup_auth_session(db, cookie_value) if cookie_value else None
 
@@ -400,12 +418,29 @@ async def revoke_current_session(
     """
     cookie_value = request.cookies.get(_cookie_name(settings))
     row = await _lookup_auth_session(db, cookie_value) if cookie_value else None
-    response.delete_cookie(key=_cookie_name(settings), path="/")
+    clear_session_cookie(response, settings)
     if row is None:
         return None
     principal_id = row.user_id
     await db.delete(row)
     return principal_id
+
+
+def clear_session_cookie(response: Response, settings: Settings) -> None:
+    """Tell the browser to drop its session cookie (logout; a deleted account, #546).
+
+    With the SAME attributes ``_issue_cookie`` sets. In production the name is
+    ``__Host-`` prefixed, and a browser ignores a ``__Host-`` Set-Cookie that
+    lacks ``Secure``: a bare ``delete_cookie(key, path)`` left the dead cookie
+    in place there (review finding; tests run outside production, where the
+    name has no prefix, so they never saw it)."""
+    response.delete_cookie(
+        key=_cookie_name(settings),
+        path="/",
+        secure=settings.environment == "production",
+        httponly=True,
+        samesite="lax",
+    )
 
 
 def step_up_active(session: AuthSession, settings: Settings) -> bool:
@@ -483,6 +518,7 @@ async def resolve_principal(
 
 __all__ = [
     "claim_and_login",
+    "clear_session_cookie",
     "ensure_auth_session",
     "resolve_principal",
     "resolve_principal_by_auth_session_id",

@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from app.answer.orchestrator import Orchestrator, RetrievalStrategy
+from app.answer.orchestrator import RetrievalStrategy
 from app.cache.answer_cache import (
     NoOpAnswerCacheStore,
     build_cache_key,
@@ -41,6 +41,7 @@ from app.models import (
 from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
 from app.routing.intent import Intent
 from tests.conftest import seed_evidence_chunks
+from tests.orchestrator_double import Orchestrator
 
 pytestmark = pytest.mark.asyncio
 

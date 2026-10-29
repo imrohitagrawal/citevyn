@@ -296,7 +296,7 @@ for (const theme of THEMES) {
       expect(await cta.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(T.ink);
       // prices
       const prices = await page.locator(".price").allInnerTexts();
-      expect(prices).toEqual(["$0", "$12", "Custom"]);
+      expect(prices).toEqual(["$0", "$9", "Custom"]);
     });
 
     test("FAQ: --ink questions, --muted answer + sign, one open by default", async ({ page }) => {

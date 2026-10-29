@@ -12,3 +12,11 @@
 #     (``local-demo-key``) shipped by ``.env.example``; it is not
 #     a secret.
 1d62074e0ebbb622233f6189a2c630d2c4252cfc:README.md:curl-auth-header:64
+
+#   * tests/shell/test_backup_prune.sh:47-48 at 7f8092f (#546, PR 1) — the
+#     fake .env the backup-prune test writes so backup.sh's env guard passes.
+#     Random-looking hex fixtures, not secrets; the file now uses the same
+#     low-entropy fixtures as test_env_guard.sh, but that commit stays in the
+#     PR's scanned range.
+7f8092fa4f911af11dc54e883d1a250ed77a613a:tests/shell/test_backup_prune.sh:generic-api-key:47
+7f8092fa4f911af11dc54e883d1a250ed77a613a:tests/shell/test_backup_prune.sh:generic-api-key:48
