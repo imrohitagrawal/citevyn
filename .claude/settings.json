@@ -22,6 +22,14 @@
             "command": "echo '{\"systemMessage\":\"Pre-PR reminder: run the release-readiness-review gate + a blast-radius review (AGENTS.md) before opening this PR.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"BACKSTOP REMINDER: Before opening this PR, confirm you have run the release-readiness-review skill (ship/no-ship gate) and the blast-radius-aware review from AGENTS.md on the new commits, and addressed findings.\"}}'"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -53,6 +61,16 @@
           {
             "type": "command",
             "statusMessage": "Checking the main checkout is unchanged",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
           }
         ]

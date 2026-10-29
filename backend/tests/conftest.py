@@ -209,8 +209,10 @@ _CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
         "chunk_text": (
             "CiteVyn Pro is not live yet. CiteVyn is currently an MVP demo "
             "and everything here is free to try, with or without an "
-            "account. Pro is planned to add higher rate limits, exact "
-            "lookups, and shareable answers."
+            "account. Pro is planned at $9 a month or $91 a year, with "
+            "1,000 answered questions a month, an MCP server and API keys "
+            "for your coding tools, shareable answers, usage insights, and "
+            "alerts when the docs you watch change."
         ),
     },
     {
