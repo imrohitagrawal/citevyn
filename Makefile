@@ -37,7 +37,7 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell coverage coverage-gate ci \
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell prompt-check public-prompt-guard coverage coverage-gate ci \
         build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
@@ -114,6 +114,12 @@ test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scr
 	if [ "$$found" -eq 0 ]; then echo "no suites found in tests/shell/ — expected at least one" >&2; exit 1; fi; \
 	if [ "$$failed" -ne 0 ]; then printf "%s of %s shell suite(s) FAILED:%b\n" "$$failed" "$$found" "$$names" >&2; exit 1; fi; \
 	echo "all $$found shell suite(s) passed"
+
+prompt-check: ## Check the private next-session prompt (needs PRIVATE_NOTES_DIR, or PROMPT=path)
+	python3 scripts/check_next_prompt.py --file "$${PROMPT:-$${PRIVATE_NOTES_DIR:?set PRIVATE_NOTES_DIR or PROMPT}/citevyn/NEXT-SESSION-PROMPT.md}"
+
+public-prompt-guard: ## Fail if any prompt file sits at the root of this public repo
+	python3 scripts/check_next_prompt.py --root .
 
 test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL)
 	cd backend && uv run pytest -m postgres -q

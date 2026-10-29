@@ -39,6 +39,15 @@ Follow this workflow for non-trivial changes:
 9. Run review before finalizing.
 10. Provide a ship/no-ship summary with evidence.
 
+**Before any work package, read `.claude/skills/citevyn-delivery/SKILL.md`.** It is the one
+home of how a package is delivered: the roles, the 8 lenses and which packages need which,
+the two review rounds, who merges, the deploy and production check, cleanup, and the
+next-session prompt (kept in the owner's private notes, never here; `make prompt-check`
+refuses one without its sections). Owner decisions are recorded, restated plainly, in
+[`docs/DECISIONS.md`](docs/DECISIONS.md); read it before asking the owner anything. This
+repository is public: the skill's "Public repository" section says what may never be committed. The
+review sizing below (T0-T3) still decides how many reviewers each lens gets.
+
 ## Repository layout
 
 - `frontend/`: UI code and client-side behavior.
@@ -162,6 +171,10 @@ contradicted:
 
 1. Read [`docs/BACKLOG.md`](docs/BACKLOG.md) — the in-repo index of tracked follow-ups.
 2. Check the live list: `gh issue list --state open` (GitHub is the source of truth).
+3. Check for other live sessions before choosing work: transcript last-write times under
+   `~/.claude/projects/<this repo's folder>/`, `ps aux | grep claude`, and
+   `git worktree list`. If another session owns what you need, stop and say so.
+4. Run `df -h .` and write the number down; show it again after cleanup.
 
 Cross-check both against the task at hand. When you open, close, or supersede a GitHub
 issue, update the matching row in `docs/BACKLOG.md` in the same change so the index and

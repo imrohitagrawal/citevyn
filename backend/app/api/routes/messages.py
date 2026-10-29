@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.deps import requires, tier_for_principal
 from app.access.policy import Capability, Tier
 from app.access.quota import is_counted_answer, refuse_if_used_up, usage_for, usage_row
-from app.answer.orchestrator import Orchestrator
+from app.answer.orchestrator import Orchestrator, SessionGone
 from app.core.auth_sessions import resolve_principal
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
@@ -209,11 +209,20 @@ async def post_message(
     # Every paid call made while answering (the answer, condense, alias check,
     # query embedding) is recorded against the asker (ADR-0005 §2, Quota).
     with billed_to(principal_id):
-        response = await orchestrator.ask(
-            question=body.message,
-            request_id=request_id,
-            session_id=session_id,
-        )
+        try:
+            response = await orchestrator.ask(
+                question=body.message,
+                request_id=request_id,
+                session_id=session_id,
+            )
+        except SessionGone:
+            # Deleted (with its account) while the answer was produced: the
+            # same 404 as an unknown session, and nothing is committed.
+            raise error_response(
+                request_id=request_id,
+                code=APIErrorCode.not_found,
+                message=f"Session {session_id} not found.",
+            ) from None
     # Only an answered question uses allowance, recorded in the same transaction
     # as the answer: a request that fails records nothing.
     if tier is not None and is_counted_answer(response):

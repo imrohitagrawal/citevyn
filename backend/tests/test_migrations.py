@@ -1419,3 +1419,26 @@ def test_migration_0025_alert_sends_round_trip(alembic_config: AlembicConfig) ->
     alembic_downgrade(alembic_config, "0024")
     assert columns("alert_sends") == set()
     assert "watch_id" in columns("watches")  # partner: only 0025 went
+
+
+def test_migration_0026_deleted_accounts_round_trip(alembic_config: AlembicConfig) -> None:
+    """0026 (``deleted_accounts``; #511). RED if the table, its address-hash
+    primary key or a NOT NULL is missing, or the table survives the downgrade."""
+    alembic_upgrade(alembic_config, "head")
+    engine = create_engine(alembic_config.get_main_option("sqlalchemy.url"))
+
+    def info(table: str) -> dict[str, tuple[int, int]]:
+        # column name -> (notnull, primary-key position)
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").all()
+        return {r[1]: (r[3], r[5]) for r in rows}
+
+    assert info("deleted_accounts") == {
+        "email_hash": (1, 1),
+        "trial_answers_used": (1, 0),
+        "deleted_at": (1, 0),
+    }
+
+    alembic_downgrade(alembic_config, "0025")
+    assert info("deleted_accounts") == {}
+    assert "alert_id" in info("alert_sends")  # partner: only 0026 went

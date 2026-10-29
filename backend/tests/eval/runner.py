@@ -30,12 +30,14 @@ import pathlib
 import uuid
 from typing import Any
 
-from app.answer.orchestrator import Orchestrator, OrchestratorError
+from app.answer.orchestrator import OrchestratorError
 from app.core.config import Settings, get_settings
 from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.stub import StubLLMClient
 
+# Bare session ids per case: the harness wants the rows made for it (#511).
+from ..orchestrator_double import Orchestrator
 from .cases import EvalCase, filter_cases, load_cases
 from .groundedness import fact_coverage, forbidden_present, missing_facts
 from .judge import JudgeParseError, score_answer_panel_async

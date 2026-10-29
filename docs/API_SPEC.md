@@ -360,6 +360,35 @@ the confirm URL (`app.core.logging.RedactQueryCredentialsFilter`), so the
 credential never reaches the server log.
 
 ```http
+POST /v1/auth/me/delete
+```
+
+```json
+{ "user_id": "usr_..." }
+```
+
+The `user_id` is the account the page shows; if it is not the session's
+account (another tab signed this browser into a different one), 422
+`validation_error` and nothing is deleted. Deletes the caller's own account
+and its data (#546) with the same
+code as the operator's `delete-account` command (RUNBOOK §3.8): one
+transaction, the address's free-trial tombstone kept, the account id
+recorded on the deletion list outside the database. Requires the demo
+bearer and a **registered** session (401 `auth_required` otherwise) whose
+**own** session row carries a `magic_link_verified_at` stamp younger than
+`CITEVYN_PASSWORD_STEP_UP_WINDOW_SECONDS`, the same step-up as below: a
+password session, another session's stamp or an older one gets 403
+`verification_required` ("Confirm it is you first: sign in with a link
+emailed to you."). 409 `already_subscribed` while any subscription can
+still bill, judged from CiteVyn's own copy of the subscription status
+(the operator also checks the payment provider's dashboard; #503). Nothing
+is cancelled here. 503 `rate_limiter_unavailable` when the deletion list (Redis)
+cannot be written; nothing is deleted. On success, 200 `{"deleted": true}`,
+the session cookie is cleared, every session of the account is gone with
+it, and the audit log keeps one row linked to no account (`event:
+"account_deleted"`).
+
+```http
 POST /v1/auth/me/password
 ```
 

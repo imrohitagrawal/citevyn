@@ -20,6 +20,8 @@ const ApiKeysDrawer = lazy(() => import("./ApiKeysDrawer"));
 const SharedLinksDrawer = lazy(() => import("./SharedLinksDrawer"));
 const UsageDrawer = lazy(() => import("./UsageDrawer"));
 const AlertsDrawer = lazy(() => import("./AlertsDrawer"));
+// #546: with the access model on or off, like the account itself.
+const DeleteAccountDialog = lazy(() => import("./DeleteAccountDialog"));
 
 interface AccountMenuProps {
   /**
@@ -40,6 +42,8 @@ interface AccountMenuProps {
    * the reader, since only it owns the toasts.
    */
   onOpenFailed?: () => void;
+  /** #546: the account was deleted; the caller confirms it (it owns the toasts). */
+  onAccountDeleted?: () => void;
 }
 
 /** Label for the account trigger, which must never be empty.
@@ -65,6 +69,7 @@ export function AccountMenu({
   onAuthenticated,
   onResumeSession,
   onOpenFailed,
+  onAccountDeleted,
 }: AccountMenuProps) {
   const { status, user, signOut } = useAuth();
   const [modalOpen, setModalOpen] = useState(false);
@@ -75,6 +80,7 @@ export function AccountMenu({
   const [sharesOpen, setSharesOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const accessModel = useClientConfig().access_model;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -91,6 +97,7 @@ export function AccountMenu({
     setSharesOpen(false);
     setUsageOpen(false);
     setAlertsOpen(false);
+    setDeleteOpen(false);
     triggerRef.current?.focus();
     onOpenFailed?.();
   };
@@ -233,6 +240,18 @@ export function AccountMenu({
             <button
               type="button"
               role="menuitem"
+              aria-haspopup="dialog"
+              onClick={() => {
+                setMenuOpen(false);
+                setDeleteOpen(true);
+              }}
+              style={menuItemStyle}
+            >
+              Delete account
+            </button>
+            <button
+              type="button"
+              role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
                 void signOut();
@@ -282,6 +301,21 @@ export function AccountMenu({
           <LazyChunkBoundary label="api-keys" onError={openFailed}>
             <Suspense fallback={null}>
               <ApiKeysDrawer triggerRef={triggerRef} onClose={() => setKeysOpen(false)} />
+            </Suspense>
+          </LazyChunkBoundary>
+        )}
+        {deleteOpen && (
+          <LazyChunkBoundary label="delete-account" onError={openFailed}>
+            <Suspense fallback={null}>
+              <DeleteAccountDialog
+                user={user}
+                triggerRef={triggerRef}
+                onClose={() => setDeleteOpen(false)}
+                onDeleted={() => {
+                  setDeleteOpen(false);
+                  onAccountDeleted?.();
+                }}
+              />
             </Suspense>
           </LazyChunkBoundary>
         )}
