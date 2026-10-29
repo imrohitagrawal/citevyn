@@ -18,6 +18,21 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-29 — One shared public-content guard that covers every client
+There is one public-content guard, kept in the shared CI repository and used by
+every repository instead of a copy per project. It covers every way an agent or
+a person publishes, and no layer removes a check another layer had: a git
+pre-push hook for pushes, a `gh` wrapper that checks what `gh` posts at the
+moment it runs, a Claude Code hook for GitHub tools and for ways round the
+guard, and a CI step on public repositories as a backstop.
+
+### 2026-10-29 — The owner's two published contact addresses are allowed
+The commit address and the business contact address are public on purpose
+(commits and the legal pages already show them). The guard allows exactly those
+two addresses wherever they appear; any other personal address is still
+blocked. The list lives in one file in the shared guard, and changing it is its
+own reviewed change.
+
 ### 2026-10-29 — Dependency alerts are fixed by the agent, every session
 Open Dependabot alerts and their pull requests are handled by the working agent at
 the start of every session, without being asked: critical and high before planned
