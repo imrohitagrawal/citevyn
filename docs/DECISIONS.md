@@ -18,6 +18,17 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — Text that is already public is no reason to pass the guard
+The public-content guard checks every file a change adds or changes whole, and
+every commit message, name and pull request title and body, with no exemption
+for text that already appears somewhere public. A leak that is already public
+must not be copied, kept or extended without a warning, so editing a file that
+holds an old match blocks until it is cleaned. The only exemptions are the
+listed public addresses, the rules' own allowlists (example domains, shared
+home folders), and an address already used on commits, on author lines only.
+This repository's test files were moved to example addresses first, so it holds
+no match the guard would report.
+
 ### 2026-10-29 — One shared public-content guard that covers every client
 There is one public-content guard, kept in the shared CI repository and used by
 every repository instead of a copy per project. It covers every way an agent or

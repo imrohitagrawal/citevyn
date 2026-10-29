@@ -483,7 +483,7 @@ def test_a_redis_dsn_with_a_query_password_is_redacted_before_it_is_logged() -> 
     assert "password=[REDACTED]" in line, line
     # PARTNER 1: the userinfo form still works (this is not "the whole DSN is
     # blanked", which would lose the host an operator needs).
-    assert "***@host.upstash.io" in _redact_url("rediss://default:SECRET@host.upstash.io:6379")
+    assert "***@host.example.com" in _redact_url("rediss://default:SECRET@host.example.com:6379")
     # PARTNER 2: a DSN with no credential at all survives intact, so the
     # redaction is not simply eating every URL.
     assert _redact_url("redis://localhost:6379/0") == "redis://localhost:6379/0"

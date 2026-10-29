@@ -1919,18 +1919,18 @@ def test_a_look_alike_unicode_address_never_verifies(
     monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
 ) -> None:
     """Python lower-cases the Kelvin sign (U+212A) to ASCII 'k', so a provider
-    address "\u212aim@x.com" would match an account's "kim@x.com" although it
+    address "\u212aim@example.com" would match an account's "kim@example.com" although it
     is a different mailbox. Only an ASCII provider address may verify. Turns red
     if: non-ASCII addresses are compared after lower-casing."""
-    _register(oauth_client, "kim@x.com")
+    _register(oauth_client, "kim@example.com")
     _link_identity_to(
         oauth_client,
         monkeypatch,
         "google",
         account_id=_GOOGLE_SUB,
-        email="\u212aim@x.com",
+        email="\u212aim@example.com",
     )
-    assert _by_email("kim@x.com").email_verified_at is None
+    assert _by_email("kim@example.com").email_verified_at is None
 
 
 def test_a_failing_github_email_list_without_a_public_email_is_still_an_error(
@@ -1966,11 +1966,11 @@ def test_a_failing_github_email_list_without_a_public_email_is_still_an_error(
 def test_a_look_alike_unicode_address_is_not_stored_on_a_new_account(
     monkeypatch: pytest.MonkeyPatch, oauth_client: TestClient
 ) -> None:
-    """Lower-casing turns "\u212aim@x.com" into "kim@x.com", so storing it would
-    let a new OAuth account squat the real kim@x.com (and a magic link the real
+    """Lower-casing turns "\u212aim@example.com" into "kim@example.com", so storing it would
+    let a new OAuth account squat the real kim@example.com (and a magic link the real
     owner later redeems would sign them into it). Turns red if: a non-ASCII
     provider address is stored on account creation."""
-    _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="\u212aim@x.com")
+    _patch_provider(monkeypatch, "google", account_id=_GOOGLE_SUB, email="\u212aim@example.com")
     _callback(
         oauth_client, "google", state=_state_from_start_response(_start(oauth_client, "google"))
     )

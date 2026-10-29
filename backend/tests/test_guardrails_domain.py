@@ -261,7 +261,7 @@ def test_canonical_name_is_never_narrowed_by_the_identifier_guards(question: str
         "why does sitewin.example.com return 502?",
         "the file sitevin.py failed",
         "see /srv/sitewin/config.yml",
-        "email me at bob@sitewin.io",
+        "email me at bob@sitewin.test",
         # ...and as the LEADING segment. Guarding only one side left these open.
         "sitewin@example.com is the contact",
         "SITEWIN-1234 is blocked",

@@ -152,7 +152,7 @@ def test_the_guide_holds_no_value() -> None:
         ("CITEVYN_OPENROUTER_API_KEY: sk-or-v1-abc", True),
         ("POSTGRES_PASSWORD=hunter2", True),
         ("CITEVYN_DATABASE_URL=postgresql+psycopg://citevyn:Xy7pass@db.example/citevyn", True),
-        ("rediss://default:AbCd123@eu1.example.io:6379", True),
+        ("rediss://default:AbCd123@eu1.example.com:6379", True),
         ("grep '^CITEVYN_OPENROUTER_API_KEY=' backend/.env", False),
         ('K=$(grep "^X_KEY=" f); curl -H "Authorization: Bearer $K"', False),
         ("CITEVYN_ADMIN_API_KEY=<generate one>", False),

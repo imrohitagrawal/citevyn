@@ -16,7 +16,7 @@ vi.mock("../lib/billing", () => ({ startCheckout: vi.fn(() => Promise.resolve())
 // A STABLE snapshot, like the real store: useSyncExternalStore loops forever
 // if every read returns a new object.
 const ANON = { status: "anonymous", user: null };
-const SIGNED_IN = { status: "signed-in", user: { user_id: "usr_1", email: "a@x.com" } };
+const SIGNED_IN = { status: "signed-in", user: { user_id: "usr_1", email: "a@example.com" } };
 vi.mock("../lib/authStore", () => ({
   getAuthSnapshot: vi.fn(() => ANON),
   subscribeAuth: vi.fn(() => () => {}),
