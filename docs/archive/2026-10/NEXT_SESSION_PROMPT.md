@@ -2,7 +2,7 @@
 
 ---
 
-Fresh-context continuation for CiteVyn. Repo: `/Users/rohitagrawal/Projects/citevyn`.
+Fresh-context continuation for CiteVyn. Repo: this repository's checkout.
 
 Before planning anything, read `AGENTS.md`, `code_review.md`, `docs/BACKLOG.md`, the session
 memory notes, and run `gh issue list --state open`. **Re-verify every fact below against the
