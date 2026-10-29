@@ -4,7 +4,7 @@
  * and no meter mounts. Each test says which change turns it red.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { LandingStripBottom } from "./landing-strip";
 import { ChatView } from "./ChatView";
 import { useClientConfig } from "../lib/clientConfig";
@@ -72,6 +72,25 @@ describe("the pricing section", () => {
     await settleLazy();
     expect(screen.getByText("$9")).toBeTruthy();
     expect(screen.queryByText("access-pricing")).toBeNull();
+  });
+
+  it("shows the decided Pro plan with the model off", async () => {
+    // Turns red if: the card's price, yearly price or any Pro feature drifts
+    // from the decided plan (ADR-0005), e.g. "Higher rate limits" comes back.
+    vi.mocked(useClientConfig).mockReturnValue(OFF);
+    strip();
+    await settleLazy();
+    const card = screen.getByText("Pro").closest(".pricing-card") as HTMLElement;
+    expect(within(card).getByText("$9")).toBeTruthy();
+    expect(within(card).getByText("/month or $91/year")).toBeTruthy();
+    expect(within(card).getAllByRole("listitem").map((li) => li.textContent?.replace(/^✓\s*/, ""))).toEqual([
+      "Everything in Demo",
+      "1,000 answered questions a month",
+      "MCP server and API keys for your coding tools",
+      "Shareable answers",
+      "Usage insights",
+      "Alerts when the docs you watch change",
+    ]);
   });
 
   it("is the new section with the model on", async () => {

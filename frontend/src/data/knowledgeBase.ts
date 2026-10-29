@@ -193,7 +193,7 @@ export const KB: Record<string, KBEntry> = {
     // Saved history moved OUT of this answer (ADR-0004): it is a Free-tier
     // feature now, unlocked by signing in, not a Pro promise — the account
     // system exists to keep that claim honest, not to sell it.
-    a: "Pro isn't live yet — CiteVyn is an early demo, and everything here is free to try. Sign in (optional, free) to keep your chat history across visits. Pro will add higher rate limits, exact lookups, and shareable answers. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
+    a: "Pro isn't live yet — CiteVyn is an early demo, and everything here is free to try. Sign in (optional, free) to keep your chat history across visits. Pro is planned at $9 a month or $91 a year, with 1,000 answered questions a month, an MCP server and API keys for your coding tools, shareable answers, usage insights, and alerts when the docs you watch change. For now, ask me anything about Claude, Claude Code, Codex, or Gemini.",
     sources: [],
   },
 };

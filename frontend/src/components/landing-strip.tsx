@@ -352,11 +352,13 @@ const tierDefs: Array<{
   },
   {
     name: "Pro",
-    // The decided price (ADR-0005): $9 a month or $91 a year. Kept in step with
-    // AccessPricing.tsx, which shows the same plan when the access model is on.
+    // The decided plan (ADR-0005): $9 a month or $91 a year, 1,000 answered
+    // questions a month. AccessPricing.tsx shows the same plan when the access
+    // model is on and reads the allowance from the server
+    // (access_pro_monthly_answers); this card types it, so change both together.
     price: "$9",
-    unit: "/month",
-    desc: "For developers who live in the docs. $91 if paid yearly. Planned — not billed yet.",
+    unit: "/month or $91/year",
+    desc: "For developers who live in the docs. Planned — not billed yet.",
     cta: "Notify me",
     featured: true,
     action: "getPro",
