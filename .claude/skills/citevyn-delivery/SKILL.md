@@ -49,7 +49,9 @@ asked to look.
 2. Critical and high alerts are fixed before planned work.
 3. Medium and low alerts are fixed in the same session when the fix is a patch or minor bump.
 4. One pull request at a time, every required check green. `main` is strict, so bring the next
-   branch up to date after each merge (`gh pr update-branch <n>`).
+   branch up to date after each merge (`gh pr update-branch <n>`; if that reports a conflict,
+   comment `@dependabot rebase` on the pull request instead). With grouped security updates on,
+   Dependabot may close a pull request and open a grouped one: list again before acting.
 5. A runtime package (one the shipped app imports) also gets the backend suite run against
    the new lock and a boot of the built image. A runtime fix reaches users only by a deploy:
    deploy when the prompt approves it, then check production.
