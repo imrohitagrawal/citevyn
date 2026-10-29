@@ -352,18 +352,21 @@ const tierDefs: Array<{
   },
   {
     name: "Pro",
-    price: "$12",
+    // The decided price (ADR-0005): $9 a month or $91 a year. Kept in step with
+    // AccessPricing.tsx, which shows the same plan when the access model is on.
+    price: "$9",
     unit: "/month",
-    desc: "For developers who live in the docs. Planned — not billed yet.",
+    desc: "For developers who live in the docs. $91 if paid yearly. Planned — not billed yet.",
     cta: "Notify me",
     featured: true,
     action: "getPro",
     features: [
       "Everything in Demo",
-      "Higher rate limits & faster models",
-      "Exact lookup for flags, commands & config keys",
+      "1,000 answered questions a month",
+      "MCP server and API keys for your coding tools",
       "Shareable answers",
-      "Usage & cost insights",
+      "Usage insights",
+      "Alerts when the docs you watch change",
     ],
   },
   {

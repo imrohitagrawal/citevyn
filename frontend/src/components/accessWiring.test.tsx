@@ -70,7 +70,7 @@ describe("the pricing section", () => {
     vi.mocked(useClientConfig).mockReturnValue(OFF);
     strip();
     await settleLazy();
-    expect(screen.getByText("$12")).toBeTruthy();
+    expect(screen.getByText("$9")).toBeTruthy();
     expect(screen.queryByText("access-pricing")).toBeNull();
   });
 
@@ -79,7 +79,7 @@ describe("the pricing section", () => {
     vi.mocked(useClientConfig).mockReturnValue(ON);
     strip();
     expect(await screen.findByText("access-pricing")).toBeTruthy();
-    expect(screen.queryByText("$12")).toBeNull();
+    expect(screen.queryByText("$9")).toBeNull();
   });
 });
 

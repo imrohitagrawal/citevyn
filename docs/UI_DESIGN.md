@@ -554,7 +554,7 @@ plus "Not covered? It says so — no guessing." line.
 
 - 3 tiers in a row (gap 20px):
   1. **Demo** — $0/forever, outlined CTA
-  2. **Pro** — $12/month, **featured** (ink border, yellow top bar,
+  2. **Pro** — $9/month ($91 a year), **featured** (ink border, yellow top bar,
      "POPULAR" badge, filled CTA). Clicking "Get Pro" opens chat with a
      specific Pro-related question.
   3. **Enterprise** — Custom, outlined CTA (intentionally no-op in demo)
