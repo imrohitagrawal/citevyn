@@ -104,8 +104,8 @@ a ship and what does not). This section adds *how much* review to run and *which
 After every substantive change, size the review to the blast radius — not "always one
 reviewer" and not "always many". Selection = *(surface changed) × (dependents × severity
 × reversibility)*. Prioritize the pre-installed plugins/skills below; fall back to a
-`general-purpose` agent only if none fit. **Always pass sub-agents the explicit absolute
-repo path `/Users/rohitagrawal/Projects/citevyn`** — their shell otherwise defaults to a
+`general-purpose` agent only if none fit. **Always pass sub-agents the repo's explicit absolute
+path (`git rev-parse --show-toplevel`)** — their shell otherwise defaults to a
 stale path and they review the wrong tree.
 
 | Tier | Trigger (blast radius) | Orchestration |
@@ -175,6 +175,8 @@ contradicted:
    `~/.claude/projects/<this repo's folder>/`, `ps aux | grep claude`, and
    `git worktree list`. If another session owns what you need, stop and say so.
 4. Run `df -h .` and write the number down; show it again after cleanup.
+5. List the open Dependabot alerts and Dependabot pull requests, and fix them as the
+   delivery skill's Dependencies section says: critical and high before planned work.
 
 Cross-check both against the task at hand. When you open, close, or supersede a GitHub
 issue, update the matching row in `docs/BACKLOG.md` in the same change so the index and
