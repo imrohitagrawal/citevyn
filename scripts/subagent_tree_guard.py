@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SubagentStart / SubagentStop hook: a sub-agent must leave the main checkout alone.
+"""Sub-agent hooks (start, stop, and alert delivery): a sub-agent must leave the main checkout alone.
 
 WHY THIS EXISTS. Reviewers here are told to read, not write, and twice one did
 write: a "read-only" review agent ran `git checkout` in the shared checkout and
@@ -18,12 +18,14 @@ WHAT IT DOES
 2. SubagentStop: compares with the start record.
    Unchanged: says nothing.
    Changed: blocks the stop ONCE and tells the sub-agent to end its report with
-   a `MAIN CHECKOUT CHANGED:` line. A SubagentStop hook cannot speak to the
-   main model directly; the sub-agent's report is the one channel that reaches
-   it. Every later stop only shows the user the warning, once, so an agent is
+   a `MAIN CHECKOUT CHANGED:` line, shows the user the warning, and leaves an
+   alert for the main session (point 3). Every later stop only warns, once, so an agent is
    never trapped. If another hook is already holding the agent back
    (`stop_hook_active`), it does not block at all, only warns.
    No record (the start hook did not run): says so to the user, never silence.
+3. PreToolUse and UserPromptSubmit (the main session's own calls only): deliver
+   the alerts this session's agents raised to the main model, each once. This is the
+   channel that does not depend on the sub-agent obeying the block.
 
 A stop can fire more than once for one agent. Seen 2026-10-29 in a probe: with
 the plugins installed here, an agent's first SubagentStop was held back by another
@@ -178,9 +180,83 @@ def describe(before: dict[str, str], after: dict[str, str]) -> str:
     return ", ".join(parts)
 
 
+def _alerts_root(project_dir: Path) -> Path:
+    """Where alerts wait. Fast path without git when `.git` is a folder, because
+    delivery runs before every tool call of the main session."""
+    dot_git = project_dir / ".git"
+    if dot_git.is_dir():
+        return dot_git / _STATE_DIR / "alerts"
+    common = Path(_git(project_dir, "rev-parse", "--git-common-dir").strip())
+    if not common.is_absolute():
+        common = project_dir / common
+    return common / _STATE_DIR / "alerts"
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name) or "unknown"
+
+
+def _raise_alert(main: Path, session_id: str, agent_id: str, warning: str) -> None:
+    """One file per alert, in the folder of the session whose agent raised it:
+    another session cannot take it, two alerts cannot overwrite each other, and
+    a reader never sees half a file (written aside, then renamed into place)."""
+    folder = _alerts_root(main) / _safe(session_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{time.time_ns()}-{_safe(agent_id)}.txt"
+    tmp = folder / f".{name}.tmp"
+    tmp.write_text(warning, encoding="utf-8")
+    os.replace(tmp, folder / name)
+
+
+def _deliver_alert(
+    project_dir: Path, session_id: str, event: str
+) -> dict[str, object] | None:
+    """The main session's next tool call or message: hand this session's pending
+    alerts to the main model, each once. A sub-agent's report is not a reliable
+    channel (measured 2026-10-29: an agent ignored the block reason and reported
+    that no hook had spoken)."""
+    folder = _alerts_root(project_dir) / _safe(session_id)
+    if not folder.is_dir():
+        return None
+    texts = []
+    for alert in sorted(folder.glob("*.txt")):
+        # Claim the file first: of two concurrent calls, only the one whose rename
+        # succeeds reads it, so an alert is shown exactly once.
+        claimed = alert.with_suffix(".taken")
+        try:
+            os.rename(alert, claimed)
+        except FileNotFoundError:
+            continue
+        texts.append(claimed.read_text(encoding="utf-8").strip())
+        claimed.unlink(missing_ok=True)
+    text = "\n".join(x for x in texts if x)
+    if not text:
+        return None
+    return {
+        "systemMessage": text,
+        "hookSpecificOutput": {"hookEventName": event, "additionalContext": text},
+    }
+
+
+def _prune_alerts(main: Path) -> None:
+    """Alerts nobody collected within two days (a session that ended)."""
+    cutoff = time.time() - 2 * 24 * 3600
+    for old in _alerts_root(main).glob("*/*.txt"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue  # delivered while we looked
+
+
 def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] | None:
     event = payload.get("hook_event_name")
     agent_id = str(payload.get("agent_id") or "")
+    session_id = str(payload.get("session_id") or "")
+    if event in ("PreToolUse", "UserPromptSubmit"):
+        # Only the main session's own calls carry no agent_id, and a sub-agent's
+        # stop carries its parent's session_id (both measured 2026-10-29).
+        return None if agent_id else _deliver_alert(project_dir, session_id, str(event))
     if not agent_id:
         # A shared fallback name would let one agent's start overwrite another's
         # record, and the first agent's change would then pass unseen.
@@ -195,6 +271,7 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
     if event == "SubagentStart":
         record.parent.mkdir(parents=True, exist_ok=True)
         _prune(record.parent)
+        _prune_alerts(main)
         state = {"start": snapshot(main), "blocked": False, "warned": False}
         record.write_text(json.dumps(state), encoding="utf-8")
         return None
@@ -219,6 +296,8 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
         f"MAIN CHECKOUT CHANGED while a sub-agent ran: {main}: {change}. "
         "Stop, find out who changed it, and report before doing anything else."
     )
+    if not state["blocked"] and not state["warned"]:
+        _raise_alert(main, session_id, agent_id, warning)
     if state["blocked"] or payload.get("stop_hook_active"):
         state["warned"] = True
         record.write_text(json.dumps(state), encoding="utf-8")
@@ -226,6 +305,9 @@ def handle(payload: dict[str, object], project_dir: Path) -> dict[str, object] |
     state["blocked"] = True
     record.write_text(json.dumps(state), encoding="utf-8")
     return {
+        # Shown to the user at once: the reason below reaches only the sub-agent,
+        # which may ignore it, and a second stop may never come.
+        "systemMessage": warning,
         "decision": "block",
         "reason": (
             f"The main checkout {main} changed while you ran: {change}. Do not try "
@@ -239,19 +321,34 @@ def _prune(folder: Path) -> None:
     """Delete start records older than two days (agents that are long gone)."""
     cutoff = time.time() - 2 * 24 * 3600
     for old in folder.glob("*.json"):
-        if old.stat().st_mtime < cutoff:
-            old.unlink(missing_ok=True)
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+        except FileNotFoundError:
+            continue
 
 
 def main() -> int:
+    payload: object = None
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise TypeError("hook input is not a JSON object")
         project = Path(
             os.environ.get("CLAUDE_PROJECT_DIR") or str(payload.get("cwd") or ".")
         )
         out = handle(payload, project)
     except Exception as exc:  # noqa: BLE001 — fail open, loudly
-        out = {"systemMessage": f"subagent tree guard failed open: {exc!r}"}
+        # Loud on start and stop. Silent before tool calls: that path runs on every
+        # call, and the stop hook still reports any change it finds.
+        pretool = (
+            isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse"
+        )
+        out = (
+            None
+            if pretool
+            else {"systemMessage": f"subagent tree guard failed open: {exc!r}"}
+        )
     if out:
         print(json.dumps(out))
     return 0

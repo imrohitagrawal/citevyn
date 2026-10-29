@@ -153,8 +153,8 @@ MVP_SOURCES: tuple[SourceSpec, ...] = (
         # citevyn.com/app could later be squatted). TODO(deploy): confirm the
         # final /about route once CiteVyn is hosted.
         source_url="/about",
-        content_as_of=date(2026, 9, 1),
-        content_sha256="9252d5784d81d2ab21a066d27f0d5565b7d00911b8440880987676544acdcbef",
+        content_as_of=date(2026, 10, 29),
+        content_sha256="35d2e9179a9968c441e1c3aa6590af1a9e134b6838370119433ccf8e45f46b2b",
     ),
     SourceSpec(
         # Cross-cutting AI concepts/glossary (#112 follow-up): lets CiteVyn answer
