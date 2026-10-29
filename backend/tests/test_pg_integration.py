@@ -531,10 +531,10 @@ async def test_ensure_user_on_a_fresh_database_does_not_violate_the_fk_on_postgr
     from sqlalchemy import select as _select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.answer.orchestrator import Orchestrator
     from app.core.config import Settings
     from app.models import Session as SessionModel
     from app.models import User as UserModel
+    from tests.orchestrator_double import Orchestrator
 
     alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
 
@@ -1051,5 +1051,158 @@ async def test_the_keyword_arm_answers_the_370_scenario_on_postgres(pg_schema: s
             # first three are the same three however many more exist.
             cut = await tie_arm.retrieve("model", product_area="claude_code", limit=3)
             assert [h.chunk_id for h in cut] == [cid for _d, _o, cid in tie_rows[:3]]
+    finally:
+        await engine.dispose()
+
+
+async def test_delete_account_clears_every_table_that_references_users_on_postgres(
+    pg_schema: str,
+) -> None:
+    """#511 on the engine that ships: after ``delete_account`` on a migrated
+    Postgres, every table with a foreign key onto ``users.user_id`` has no row
+    left for the account (``CASCADE``) or keeps it with the link cleared
+    (``SET NULL``); chat messages go with their session; ``provider_calls`` and
+    ``stripe_events`` (no foreign key) survive; a second account is untouched;
+    the tombstone is written.
+
+    The table list comes from the models' metadata and is checked against the
+    migrated database's own foreign keys, so a new table that references users
+    cannot be missed: ``seed_every_reference`` fails until it has a builder.
+
+    Turns red if: a migration gives a user foreign key ``RESTRICT``/``NO
+    ACTION`` (the delete raises) or ``SET NULL`` where the model says
+    ``CASCADE`` (the row survives); or ``delete_account`` stops deleting the
+    ``users`` row or writing the tombstone.
+    """
+    from datetime import UTC, datetime
+    from typing import Any
+
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.models import Base, DeletedAccount, Message, ProviderCall, StripeEvent, User, UserRole
+    from app.models import Session as ChatSession
+    from app.services.account_deletion import delete_account, email_hash
+    from tests.test_account_deletion import seed_every_reference, user_references
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    gone, kept = "usr_" + "d" * 32, "usr_" + "e" * 32
+    try:
+        async with maker() as s:
+            fk_rows = await s.execute(
+                text(
+                    "SELECT kcu.table_name, kcu.column_name, rc.delete_rule "
+                    "FROM information_schema.referential_constraints rc "
+                    "JOIN information_schema.key_column_usage kcu "
+                    "  ON kcu.constraint_name = rc.constraint_name "
+                    " AND kcu.constraint_schema = rc.constraint_schema "
+                    "JOIN information_schema.constraint_column_usage ccu "
+                    "  ON ccu.constraint_name = rc.constraint_name "
+                    " AND ccu.constraint_schema = rc.constraint_schema "
+                    "WHERE rc.constraint_schema = :schema "
+                    "  AND ccu.table_name = 'users' AND ccu.column_name = 'user_id'"
+                ),
+                {"schema": pg_schema},
+            )
+            migrated = {(r[0], r[1], r[2]) for r in fk_rows.all()}
+            modelled = {(t, c, rule) for t, (c, rule) in user_references().items()}
+            assert migrated == modelled
+            assert len(modelled) >= 14  # not vacuous: the referencing tables of today
+
+            for user_id, email in ((gone, "gone@example.com"), (kept, "kept@example.com")):
+                s.add(
+                    User(
+                        user_id=user_id,
+                        role=UserRole.demo_user,
+                        created_at=now,
+                        email=email,
+                        email_verified_at=now,
+                    )
+                )
+                await s.flush()
+                await seed_every_reference(s, user_id, now)
+            await s.commit()
+
+        async with maker() as s:
+            report = await delete_account(s, "  Gone@Example.com", now)
+        assert report.user_id == gone
+        assert report.trial_answers_used == 1  # the seeded answer_usage row
+
+        async with maker() as s:
+
+            async def n(table: Any, *where: Any) -> int:
+                query = select(func.count()).select_from(table).where(*where)
+                return int((await s.execute(query)).scalar_one())
+
+            assert await n(User, User.user_id == gone) == 0
+            for name, (column, rule) in user_references().items():
+                table = Base.metadata.tables[name]
+                assert await n(table, table.c[column] == gone) == 0, name
+                assert await n(table, table.c[column] == kept) == 1, name  # partner
+                if rule == "SET NULL":
+                    assert await n(table, table.c[column].is_(None)) == 1, name
+            # Messages have no user column: they go with their chat session.
+            # Each account had one, so exactly the kept account's is left.
+            assert await n(Message) == 1
+            assert await n(Message, Message.session_id.in_(select(ChatSession.session_id))) == 1
+            assert await n(ProviderCall, ProviderCall.user_id == gone) == 1
+            assert await n(StripeEvent, StripeEvent.account_id == gone) == 1
+            stone = await s.get(DeletedAccount, email_hash("gone@example.com"))
+            assert stone is not None and stone.trial_answers_used == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_an_answer_being_saved_holds_off_the_account_deletion_on_postgres(
+    pg_schema: str,
+) -> None:
+    """#511 review F1, the race window: once ``_ensure_user`` has checked the
+    chat session, the account cannot be deleted until that answer's
+    transaction ends, so the check cannot go stale before the message
+    inserts. The key-share lock it takes on the session row does this; the
+    deletion's cascade needs that row.
+
+    Turns red if: ``_ensure_user`` stops locking the session row
+    (``with_for_update`` dropped): the deletion then goes through at once.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.answer.orchestrator import Orchestrator
+    from app.core.config import Settings
+    from app.models import Session as ChatSession
+    from app.models import User, UserRole
+    from app.services.account_deletion import delete_account
+
+    alembic_upgrade(_alembic_config_for_schema(pg_schema), "head")
+    engine = create_async_engine(_pg_url_with_schema(pg_schema))
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    user_id, sid = "usr_" + "c" * 32, uuid.uuid4()
+    try:
+        async with maker() as s:
+            s.add(User(user_id=user_id, role=UserRole.demo_user, created_at=now, email="l@x.com"))
+            await s.flush()
+            s.add(ChatSession(session_id=sid, user_id=user_id, created_at=now, expires_at=now))
+            await s.commit()
+
+        async with maker() as answering:
+            orchestrator = Orchestrator(Settings(llm_provider="stub"), answering)
+            assert await orchestrator._ensure_user(sid) == user_id
+            async with maker() as deleting:
+                await deleting.execute(text("SET LOCAL lock_timeout = '300ms'"))
+                with pytest.raises(DBAPIError, match="lock"):
+                    await delete_account(deleting, "l@x.com", now)
+            await answering.rollback()
+
+        # Partner: with the answer's transaction over, the same deletion works.
+        async with maker() as deleting:
+            report = await delete_account(deleting, "l@x.com", now)
+        assert report.user_id == user_id
     finally:
         await engine.dispose()

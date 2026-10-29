@@ -1,0 +1,239 @@
+/**
+ * DeleteAccountDialog — delete your own account (#546). Opened from the
+ * account menu, with the access model on or off (accounts exist either way).
+ *
+ * Deleting needs a fresh email confirmation, decided by the server from this
+ * session's own row (``password_step_up`` on /me is the same fact): a password
+ * alone, or a laptop left signed in, is not enough. So the dialog has three
+ * shapes:
+ *
+ * - no stored address (some GitHub/Google sign-ins): it cannot be confirmed
+ *   here, so the person is told to email us;
+ * - not confirmed yet: "Email me a link", then come back;
+ * - confirmed: what is deleted, and the button that does it.
+ *
+ * A live subscription is refused by the server with a plain message; this
+ * dialog never cancels anything at the payment provider.
+ */
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useFocusTrap } from "../hooks/useFocusTrap";
+import { getCurrentUser } from "../lib/api";
+import { deleteMyAccount, requestMagicLink } from "../lib/authActions";
+import { signedOutLocally } from "../lib/authStore";
+import { ApiClientError } from "../lib/types";
+import type { AuthUserResponse } from "../lib/types";
+
+/** Where a deletion request goes when the dialog cannot do it (privacy page). */
+export const DELETION_CONTACT = "rohit@stackclimb.com";
+
+type Stage = "explain" | "link-sent" | "deleting";
+
+function deleteRefusal(err: unknown): string {
+  if (err instanceof ApiClientError) {
+    const code = err.errorCode();
+    // The server's message names the next step (cancel the subscription
+    // first; reload, because this browser is now another account).
+    if (code === "already_subscribed" || code === "validation_error") return err.message;
+    // Refused before anything was written: the server says so.
+    if (code === "rate_limiter_unavailable" || code === "rate_limited") {
+      return "Could not delete your account right now. Nothing was deleted. Try again shortly.";
+    }
+  }
+  // Anything else (a 500, a lost reply) may have come after the deletion
+  // committed, so do not claim either way (review finding).
+  return "We could not confirm the deletion. Reload the page: if you are signed out, your account is deleted.";
+}
+
+function linkRefusal(err: unknown): string {
+  if (err instanceof ApiClientError && err.isRateLimited()) {
+    return "A link was sent moments ago. Check your inbox, or try again in a minute.";
+  }
+  if (err instanceof ApiClientError && err.status === 404) {
+    return `Email links are not available right now. To delete your account, email ${DELETION_CONTACT}.`;
+  }
+  return "Could not send the link. Try again shortly.";
+}
+
+export default function DeleteAccountDialog({
+  user,
+  triggerRef,
+  onClose,
+  onDeleted,
+}: {
+  user: AuthUserResponse;
+  triggerRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+  /** Fires once the account is gone, before the menu drops to signed-out. */
+  onDeleted: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const [stage, setStage] = useState<Stage>("explain");
+  // The server is the judge; a 403 here means the confirmation ran out.
+  const [confirmed, setConfirmed] = useState(user.password_step_up);
+  const [expired, setExpired] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+    const trigger = triggerRef.current;
+    // After a deletion the menu re-renders as "Sign in" on the same ref, so
+    // focus goes there, not to the account button that no longer exists.
+    return () => (triggerRef.current ?? trigger)?.focus();
+  }, [triggerRef]);
+
+  // The emailed link signs in a NEW tab; this tab's identity was loaded before
+  // that, so ask the server afresh (its cookie may already be confirmed).
+  useEffect(() => {
+    let live = true;
+    getCurrentUser().then(
+      (fresh) => {
+        // Only for the SAME account: another tab may have signed this browser
+        // into a different one (review finding; the server checks it too).
+        if (live && fresh?.user_id === user.user_id && fresh.password_step_up) setConfirmed(true);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [user.user_id]);
+  useFocusTrap(dialogRef, { onEscape: onClose });
+
+  const sendLink = async () => {
+    if (!user.email) return;
+    setError(null);
+    try {
+      await requestMagicLink(user.email);
+      setStage("link-sent");
+    } catch (err) {
+      setError(linkRefusal(err));
+    }
+  };
+
+  const remove = async () => {
+    if (stage === "deleting") return;
+    setError(null);
+    setStage("deleting");
+    try {
+      await deleteMyAccount(user.user_id);
+    } catch (err) {
+      setStage("explain");
+      if (err instanceof ApiClientError && err.errorCode() === "verification_required") {
+        setConfirmed(false);
+        setExpired(true);
+        return;
+      }
+      setError(deleteRefusal(err));
+      return;
+    }
+    onDeleted();
+    signedOutLocally();
+  };
+
+  let body: React.ReactNode;
+  if (!user.email) {
+    body = (
+      <p>
+        {`Your account has no email address, so we cannot confirm it is you here. To delete it, email ${DELETION_CONTACT} and say which GitHub or Google account you sign in with.`}
+      </p>
+    );
+  } else if (!confirmed) {
+    body =
+      stage === "link-sent" ? (
+        <p role="status">
+          {`We sent a sign-in link to ${user.email}. Open it in this browser, then, within 10 minutes, come back to this menu and choose Delete account again.`}
+        </p>
+      ) : (
+        <>
+          {expired && <p role="alert">Your confirmation has run out. Get a new link.</p>}
+          <p>
+            {`To confirm it is you, we will email a sign-in link to ${user.email}. Open it in this browser, then come back here within 10 minutes.`}
+          </p>
+          <button type="button" onClick={() => void sendLink()} style={primaryStyle}>
+            Email me a link
+          </button>
+        </>
+      );
+  } else {
+    body = (
+      <>
+        <p>
+          This deletes your account, your conversations, shared links, API keys, watches and sign-in methods. It
+          cannot be undone.
+        </p>
+        <p className="drawer-note">
+          We keep, without your email: records of paid model calls, the security log, payment events, and a one-way
+          code of your email address so a new free trial cannot start. Copies in our backups are deleted within 30
+          days. If you pay for a plan, cancel it first.
+        </p>
+        <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
+          <button
+            type="button"
+            onClick={() => void remove()}
+            aria-disabled={stage === "deleting"}
+            style={primaryStyle}
+          >
+            {stage === "deleting" ? "Deleting…" : "Delete my account"}
+          </button>
+          <button type="button" onClick={onClose} style={secondaryStyle}>
+            Cancel
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return createPortal(
+    <div
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="drawer-backdrop"
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Delete account"
+        tabIndex={-1}
+        className="drawer-panel"
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <h2 style={{ margin: 0, fontSize: "18px" }}>Delete account</h2>
+          <button type="button" onClick={onClose} aria-label="Close" className="drawer-close">
+            ×
+          </button>
+        </div>
+        {body}
+        {error && <p role="alert">{error}</p>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// The same two button looks as the password nudge (components/Nudge.tsx).
+const primaryStyle: React.CSSProperties = {
+  background: "var(--ink, #111)",
+  color: "var(--text-inverse, #fff)",
+  border: "none",
+  borderRadius: "6px",
+  padding: "6px 12px",
+  font: "inherit",
+  fontSize: "13px",
+  fontWeight: 600,
+  cursor: "pointer",
+};
+
+const secondaryStyle: React.CSSProperties = {
+  background: "transparent",
+  color: "var(--muted, #666)",
+  border: "1px solid var(--border, #e5e7eb)",
+  borderRadius: "6px",
+  padding: "6px 12px",
+  font: "inherit",
+  fontSize: "13px",
+  cursor: "pointer",
+};

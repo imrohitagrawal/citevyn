@@ -2,7 +2,8 @@
  * authActions — the wire calls only a LAZY surface needs (ADR-0004 PR 14).
  *
  * ``requestMagicLink`` and ``updatePassword`` are imported solely by the
- * lazy-loaded ``AuthModal``, so keeping them here (not in ``api.ts`` /
+ * lazy-loaded ``AuthModal`` (and ``deleteMyAccount`` and ``requestMagicLink``
+ * by the lazy ``DeleteAccountDialog``), so keeping them here (not in ``api.ts`` /
  * ``authStore.ts``, both eager) lets Vite bundle them into the modal's own
  * chunk: the eager bundle is held to a 66.0 kB gzip ceiling with little
  * headroom (see ``docs/BACKLOG.md`` #270), and every visitor should not pay for
@@ -42,4 +43,21 @@ export async function updatePassword(newPassword: string, currentPassword?: stri
   await applyIdentityFrom(
     apiFetch<AuthUserResponse>("/v1/auth/me/password", { method: "POST", body: JSON.stringify(body) }),
   );
+}
+
+/**
+ * Delete the signed-in account (#546). The server needs this session to have
+ * been signed in with an emailed link a few minutes ago (403
+ * ``verification_required`` otherwise) and refuses while a subscription can
+ * still bill (409 ``already_subscribed``). ``userId`` is the account the page
+ * SHOWS: the server deletes the cookie's account only if it is that one (422
+ * otherwise; another tab may have signed this browser into a different
+ * account). On success the account, its data and every session are gone; the
+ * caller then drops to signed-out with ``authStore.signedOutLocally``.
+ */
+export async function deleteMyAccount(userId: string): Promise<void> {
+  await apiFetch<{ deleted: boolean }>("/v1/auth/me/delete", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
 }

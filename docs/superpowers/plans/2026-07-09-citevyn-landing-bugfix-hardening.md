@@ -4,7 +4,7 @@
 
 **Goal:** Fix the confirmed bugs and code-quality/test-coverage gaps found by the verify / verification-before-completion / taste-check / pr-test-analyzer reviews of the CiteVyn landing page, without regressing the 94 passing UI tests, while keeping the "one theme system, zero hardcoded colors" invariant intact.
 
-**Architecture:** React 18 + Vite SPA. One `useLandingState` hook holds all state/behavior (a `useReducer` + derived data); presentational components (`Header`, `Hero`, `landing-sections`, `ChatView`, `LandingPage`) read from it. All color/spacing lives in CSS custom properties in `src/styles/tokens.css` (light via `:root,[data-theme="light"]`, dark via `[data-theme="dark"]`); component styles in `src/styles/landing.css` consume `var(--…)` only. Design source-of-truth: `/Users/rohitagrawal/Downloads/design_handoff_citevyn_landing/CiteVyn Landing v2.dc.html` + `README.md` — the prototype runtime `support.js` is NOT ported.
+**Architecture:** React 18 + Vite SPA. One `useLandingState` hook holds all state/behavior (a `useReducer` + derived data); presentational components (`Header`, `Hero`, `landing-sections`, `ChatView`, `LandingPage`) read from it. All color/spacing lives in CSS custom properties in `src/styles/tokens.css` (light via `:root,[data-theme="light"]`, dark via `[data-theme="dark"]`); component styles in `src/styles/landing.css` consume `var(--…)` only. Design source-of-truth: the design hand-off `CiteVyn Landing v2.dc.html` + its `README.md` (kept outside the repository) — the prototype runtime `support.js` is NOT ported.
 
 **Tech Stack:** React 18, TypeScript, Vite 5 (dev server on **port 3000**), Playwright (`@playwright/test`), Vitest (unit, optional), stylelint (`color-no-hex` guardrail).
 
@@ -19,7 +19,7 @@
 
 ## Working directory
 
-All paths below are relative to `frontend/` = `/Users/rohitagrawal/Documents/Projects/project-with-RAG/CiteVyn-AI/citevyn-ai/citevyn-ai/frontend`.
+All paths below are relative to `frontend/` in the repository.
 
 ## Out of scope (explicitly do NOT fix)
 

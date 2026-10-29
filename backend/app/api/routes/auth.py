@@ -35,6 +35,7 @@ from app.access.policy import Capability
 from app.core.auth_sessions import (
     REGISTERED_USER_PREFIX,
     claim_and_login,
+    clear_session_cookie,
     is_registered_principal,
     revoke_current_session,
     revoke_other_sessions,
@@ -86,6 +87,16 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=1, max_length=_PASSWORD_MAX_LENGTH)
+
+
+class DeleteAccountRequest(BaseModel):
+    """Body for ``POST /v1/auth/me/delete`` (#546): the account the page
+    SHOWS. The server deletes the account the cookie belongs to; if another
+    tab has since signed this browser into a different account, the two
+    differ and nothing is deleted (review finding: a stale tab labelled with
+    one address could otherwise delete the other account)."""
+
+    user_id: str = Field(min_length=1, max_length=64)
 
 
 class PasswordUpdateRequest(BaseModel):
@@ -518,6 +529,122 @@ async def update_password(
             request_id,
         )
     return await _auth_user_payload(db, request_id, user, session=current, settings=settings)
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/auth/me/delete
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/me/delete",
+    dependencies=[Depends(requires(Capability.manage_account))],
+    summary="Delete the signed-in account and its data.",
+    description=(
+        "Body: the user_id the page shows; it must be the session's account "
+        "(422 otherwise). Needs a fresh email confirmation: the caller's own session must have "
+        "been signed in with an emailed link within the step-up window (403 "
+        "verification_required otherwise). 409 already_subscribed while a "
+        "subscription can still bill. On success every session of the account "
+        "is gone and the caller's cookie is cleared (docs/API_SPEC.md §4c, #546)."
+    ),
+)
+async def delete_my_account(
+    request: Request,
+    response: Response,
+    body: DeleteAccountRequest,
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_session)],
+    _demo_user_id: Annotated[str, Depends(rate_limited_demo)],
+) -> dict[str, Any]:
+    """Delete the caller's own account, exactly as the operator's
+    ``delete-account`` command does (``app.services.account_deletion``): one
+    transaction, the tombstone kept, the account recorded on the deletion list
+    outside the database, and refused while a subscription can still bill.
+
+    **The account the page shows** (``body.user_id``) must be the cookie's
+    account, or nothing is deleted: another tab may have signed this browser
+    into a different account since the page loaded.
+
+    **Proof of the inbox, from the server-held row only:** ``step_up_active``
+    on the CALLER'S OWN session, the same predicate that lets a forgotten
+    password be replaced. A password alone, or an unattended signed-in
+    browser, is not enough to delete an account. The request body carries
+    nothing. An account with no stored address cannot get a link, so it is
+    refused here and deleted on request by the operator (RUNBOOK §3.8).
+
+    Cancelling a live subscription is NOT done here: that is an action at the
+    payment provider, which the person does first.
+    """
+    from app.core.deletion_list import DeletionListUnavailable
+    from app.services.account_deletion import (
+        AccountNotFound,
+        SubscriptionStillLive,
+        delete_account,
+    )
+
+    request_id = _request_id(request)
+    current = await try_resolve_auth_session(request, db, settings)
+    if current is None or not is_registered_principal(current.user_id):
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.auth_required,
+            message="Sign in to delete your account.",
+        )
+    if body.user_id != current.user_id:
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.validation_error,
+            message="This page is signed in to a different account. Reload it and try again.",
+        )
+    if not step_up_active(current, settings):
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.verification_required,
+            message="Confirm it is you first: sign in with a link emailed to you.",
+        )
+    # The security log keeps a line, linked to no account (the account is going;
+    # its older rows have the link cleared the same way, ON DELETE SET NULL).
+    # Flushed on THIS session before the deletion, so delete_account's one
+    # commit writes both or neither (review finding: a second commit could
+    # fail after the account was gone, answering 500 with no audit row).
+    await record_audit_event(
+        db,
+        action=AuditAction.login,
+        user_id=None,
+        role=UserRole.demo_user,
+        metadata={"event": "account_deleted", "step_up": "magic_link"},
+    )
+    try:
+        await delete_account(db, None, datetime.now(UTC), user_id=current.user_id)
+    except SubscriptionStillLive as exc:
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.already_subscribed,
+            # Not "cancel, then come back": a subscription set to end at the
+            # period's end stays live until then (review finding).
+            message=(
+                "Your subscription can still bill, so your account cannot be deleted "
+                "yet. Cancel the subscription, or email rohit@stackclimb.com and we "
+                "will delete the account once nothing can bill."
+            ),
+        ) from exc
+    except AccountNotFound as exc:  # deleted meanwhile (another tab, the operator)
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.auth_required,
+            message="Sign in to delete your account.",
+        ) from exc
+    except DeletionListUnavailable as exc:
+        raise error_response(
+            request_id=request_id,
+            code=APIErrorCode.rate_limiter_unavailable,
+            message="Temporarily unavailable. Nothing was deleted. Try again shortly.",
+        ) from exc
+    # Every AuthSession row went with the account (ON DELETE CASCADE), so every
+    # device is signed out; this browser also drops the dead cookie.
+    clear_session_cookie(response, settings)
+    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------

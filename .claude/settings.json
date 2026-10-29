@@ -1,0 +1,80 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking for a discard of uncommitted work",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/discard_guard.py\""
+          },
+          {
+            "type": "command",
+            "if": "Bash(git push *)",
+            "statusMessage": "Pre-push readiness reminder",
+            "command": "echo '{\"systemMessage\":\"Pre-push reminder: run the release-readiness-review gate + a blast-radius review (AGENTS.md) before this push.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"BACKSTOP REMINDER: Before this git push, confirm you have run the release-readiness-review skill (ship/no-ship gate) and the blast-radius-aware review from AGENTS.md on the new commits, and addressed findings.\"}}'"
+          },
+          {
+            "type": "command",
+            "if": "Bash(gh pr create *)",
+            "statusMessage": "Pre-PR readiness reminder",
+            "command": "echo '{\"systemMessage\":\"Pre-PR reminder: run the release-readiness-review gate + a blast-radius review (AGENTS.md) before opening this PR.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"BACKSTOP REMINDER: Before opening this PR, confirm you have run the release-readiness-review skill (ship/no-ship gate) and the blast-radius-aware review from AGENTS.md on the new commits, and addressed findings.\"}}'"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checkpointing the tree",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/checkpoint.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Recording the main checkout",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking the main checkout is unchanged",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\" ] || exit 0; exec python3 \"$CLAUDE_PROJECT_DIR/scripts/subagent_tree_guard.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -65,6 +65,11 @@ from app.models import Membership, StripeEvent, User
 # future, is NOT Pro: an unknown state must fail closed.
 _PAID = frozenset({"active", "trialing"})
 
+# Statuses that can no longer bill. Anything else, including a status Stripe
+# adds later, is treated as still able to bill: fail closed. Shared with the
+# account deletion (#511), which refuses while any subscription is not ended.
+ENDED_STATUSES = frozenset({"canceled", "incomplete_expired"})
+
 _SUBSCRIPTION_EVENTS = frozenset(
     {
         "customer.subscription.created",
@@ -184,7 +189,16 @@ async def _sync(
         await db.execute(select(User).where(User.user_id == account).with_for_update())
     ).scalar_one_or_none()
     if locked is None:
-        return "unmatched", account  # a new subscription naming no account we have
+        # A new subscription naming no account we have. If it can still bill,
+        # someone is paying for an account that does not exist (deleted while
+        # subscribed, #511): say so. Ids only, never an address.
+        status = str(first.get("status") or "")
+        if status not in ENDED_STATUSES:
+            _logger.warning(
+                "billing_subscription_account_missing",
+                extra={"account": account, "subscription": sub_id, "status": status[:32]},
+            )
+        return "unmatched", account
     sub = await fetch_subscription(sub_id)
     m = await _row(db, sub_id)
     if m is None:
@@ -296,6 +310,7 @@ def primary(memberships: Sequence[Membership], now: datetime) -> Membership | No
 
 
 __all__ = [
+    "ENDED_STATUSES",
     "FetchSubscription",
     "account_is_pro",
     "apply_event",

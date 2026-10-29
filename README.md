@@ -127,8 +127,12 @@ the full workflow.
 
 ## 5. Configuration
 
-All knobs live in environment variables (loaded from `.env` for
-local dev, or passed via `docker compose --env-file` in production).
+All knobs live in environment variables. Locally they load from
+`backend/.env` (backend started from `backend/`), a repo-root `.env`
+(`make migrate` / `seed` / `demo`, which run from the root) or
+`infra/docker/.env` (Docker Compose); production on Fly reads Fly secrets and `fly.toml`'s `[env]`, no `.env` file. Which
+file each launch path reads, and how to look after them:
+[`docs/ENVIRONMENT_FILES.md`](docs/ENVIRONMENT_FILES.md).
 Every knob is documented in [`.env.example`](.env.example) — or, for the
 handful that nothing reads, exempted by name with a reason in
 `backend/tests/test_settings_env_vars_are_documented.py`, which fails the
@@ -261,7 +265,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /health`              | none   | DB-free liveness probe                        |
 | `GET  /health/dependencies` | none   | DB / Redis / provider readiness                |
 | `GET  /health/index`        | none   | Active index + vector-arm health              |
-| `GET  /legal/{slug}`        | none   | Draft Terms, Privacy, Refunds, No-training (404 unless the access model is on) |
+| `GET  /legal/{slug}`        | none   | Terms, Privacy, Refunds (published); No-training (a draft: 404 unless the access model is on) |
 | `GET  /s/{share_id}`        | none   | A shared answer: a frozen public copy (404 unless the access model is on, or once revoked) |
 | `GET  /v1/config`           | none   | Whether the access model is on (the UI reads it before sign-in) |
 | `GET  /v1/auth/challenge`   | none   | Sign-up proof-of-work challenge (404 unless the access model is on) |
@@ -277,6 +281,7 @@ admin routes use the `X-Admin-API-Key` header (**not** bearer).
 | `GET  /v1/auth/magic-link/confirm` | none | Confirm page for an emailed link (read-only; never consumes) |
 | `POST /v1/auth/magic-link/confirm` | none | Redeem the link (form POST from that page; redirect) |
 | `POST /v1/auth/me/password` | demo | Set or change the signed-in account's password (revokes other sessions) |
+| `POST /v1/auth/me/delete` | demo | Delete the signed-in account and its data (needs a fresh email-link sign-in; #546) |
 | `GET  /v1/me/sessions`      | demo   | List the caller's own chat sessions, newest first |
 | `GET  /v1/me/export`        | demo   | Download the caller's own history (`?format=json` or `markdown`) |
 | `POST /v1/sessions`         | demo   | Open a chat session                           |
@@ -369,8 +374,9 @@ Full details: [`docs/RUNBOOK.md`](docs/RUNBOOK.md) and
   429 response includes `Retry-After`.
 - **Containers run as non-root** (uid 1001). The api process has
   no shell, no package manager — minimal attack surface.
-- **Secret hygiene.** `.env` and `infra/docker/.env` are
-  git-ignored; the example files contain only placeholders.
+- **Secret hygiene.** `backend/.env`, `infra/docker/.env` and
+  `frontend/.env.local` are git-ignored and kept out of every docker build
+  context; the example files contain only placeholders.
 
 Full threat model: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 
