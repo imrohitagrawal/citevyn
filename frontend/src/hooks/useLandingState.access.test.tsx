@@ -116,7 +116,7 @@ describe("anonymous visitors with the access model on", () => {
     expect(askQuestion).not.toHaveBeenCalled();
     vi.mocked(getAuthSnapshot).mockReturnValue({
       status: "signed-in",
-      user: { user_id: "usr_1", email: "a@x.com" },
+      user: { user_id: "usr_1", email: "a@example.com" },
     } as ReturnType<typeof getAuthSnapshot>);
     act(() => result.current.send("How do permissions work?"));
     await settle();
@@ -136,7 +136,7 @@ describe("anonymous visitors with the access model on", () => {
     vi.mocked(getClientConfig).mockReturnValue(ON);
     vi.mocked(getAuthSnapshot).mockReturnValue({
       status: "signed-in",
-      user: { user_id: "usr_1", email: "a@x.com" },
+      user: { user_id: "usr_1", email: "a@example.com" },
     } as ReturnType<typeof getAuthSnapshot>);
     const { result } = renderHook(() => useLandingState());
     act(() => result.current.send("How do permissions work?"));
@@ -150,7 +150,7 @@ describe("allowance refusals get their own honest copy", () => {
     vi.mocked(getClientConfig).mockReturnValue(config);
     vi.mocked(getAuthSnapshot).mockReturnValue({
       status: "signed-in",
-      user: { user_id: "usr_1", email: "a@x.com" },
+      user: { user_id: "usr_1", email: "a@example.com" },
     } as ReturnType<typeof getAuthSnapshot>);
     vi.mocked(askQuestion).mockRejectedValue(err);
     const { result } = renderHook(() => useLandingState());

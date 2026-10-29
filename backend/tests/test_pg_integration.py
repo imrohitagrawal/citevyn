@@ -1186,7 +1186,11 @@ async def test_an_answer_being_saved_holds_off_the_account_deletion_on_postgres(
     user_id, sid = "usr_" + "c" * 32, uuid.uuid4()
     try:
         async with maker() as s:
-            s.add(User(user_id=user_id, role=UserRole.demo_user, created_at=now, email="l@x.com"))
+            s.add(
+                User(
+                    user_id=user_id, role=UserRole.demo_user, created_at=now, email="l@example.com"
+                )
+            )
             await s.flush()
             s.add(ChatSession(session_id=sid, user_id=user_id, created_at=now, expires_at=now))
             await s.commit()
@@ -1197,12 +1201,12 @@ async def test_an_answer_being_saved_holds_off_the_account_deletion_on_postgres(
             async with maker() as deleting:
                 await deleting.execute(text("SET LOCAL lock_timeout = '300ms'"))
                 with pytest.raises(DBAPIError, match="lock"):
-                    await delete_account(deleting, "l@x.com", now)
+                    await delete_account(deleting, "l@example.com", now)
             await answering.rollback()
 
         # Partner: with the answer's transaction over, the same deletion works.
         async with maker() as deleting:
-            report = await delete_account(deleting, "l@x.com", now)
+            report = await delete_account(deleting, "l@example.com", now)
         assert report.user_id == user_id
     finally:
         await engine.dispose()

@@ -92,7 +92,7 @@ const signInUser = () => userEvent.setup({ delay: null });
 async function openAuthModalAndSignIn(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "Sign in" }));
   const dialog = await screen.findByRole("dialog");
-  await user.type(within(dialog).getByLabelText("Email"), "a@b.co");
+  await user.type(within(dialog).getByLabelText("Email"), "a@b.test");
   await user.type(within(dialog).getByLabelText("Password"), "pw");
   await user.click(within(dialog).getByRole("button", { name: "Sign in" }));
 }

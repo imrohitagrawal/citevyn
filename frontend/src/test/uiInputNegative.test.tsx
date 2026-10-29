@@ -1090,7 +1090,7 @@ const AUTH_MODES_BY_LABEL = {
     arrive: async (user) => {
       renderModal("login");
       const dialog = screen.getByRole("dialog");
-      await user.type(within(dialog).getByLabelText("Email"), "a@b.com");
+      await user.type(within(dialog).getByLabelText("Email"), "a@example.com");
       await user.type(within(dialog).getByLabelText("Password"), "hunter2hunter2");
     },
     pending: () => vi.mocked(login) as never,
@@ -1103,7 +1103,7 @@ const AUTH_MODES_BY_LABEL = {
     arrive: async (user) => {
       renderModal("register");
       const dialog = screen.getByRole("dialog");
-      await user.type(within(dialog).getByLabelText("Email"), "a@b.com");
+      await user.type(within(dialog).getByLabelText("Email"), "a@example.com");
       await user.type(within(dialog).getByLabelText("Password"), "hunter2hunter2");
     },
     pending: () => vi.mocked(register) as never,
@@ -1116,7 +1116,7 @@ const AUTH_MODES_BY_LABEL = {
     arrive: async (user) => {
       renderModal("magic-link");
       const dialog = screen.getByRole("dialog");
-      await user.type(within(dialog).getByLabelText("Email"), "a@b.com");
+      await user.type(within(dialog).getByLabelText("Email"), "a@example.com");
     },
     pending: () => vi.mocked(requestMagicLink) as never,
   },

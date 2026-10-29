@@ -12,7 +12,7 @@ import { getAuthSnapshot } from "../lib/authStore";
 
 vi.mock("../lib/clientConfig", () => ({ useClientConfig: vi.fn() }));
 const ANON = { status: "anonymous", user: null };
-const SIGNED_IN = { status: "signed-in", user: { user_id: "usr_1", email: "a@x.com" } };
+const SIGNED_IN = { status: "signed-in", user: { user_id: "usr_1", email: "a@example.com" } };
 vi.mock("../lib/authStore", () => ({
   getAuthSnapshot: vi.fn(() => ANON),
   subscribeAuth: vi.fn(() => () => {}),
