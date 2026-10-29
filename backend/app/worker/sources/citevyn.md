@@ -20,8 +20,10 @@ signed-in account is a convenience, not a requirement.
 ## CiteVyn Pro and membership
 
 CiteVyn Pro is not live yet. CiteVyn is currently an MVP demo and everything
-here is free to try, with or without an account. Pro is planned to add higher
-rate limits, exact lookups, and shareable answers. For now there is no paid
+here is free to try, with or without an account. Pro is planned at $9 a month
+or $91 a year, with 1,000 answered questions a month, an MCP server and API keys
+for your coding tools, shareable answers, usage insights, and alerts when the
+docs you watch change. For now there is no paid
 tier and no billing — you can ask anything about Claude, Claude Code, Codex,
 or Gemini at no cost.
 
