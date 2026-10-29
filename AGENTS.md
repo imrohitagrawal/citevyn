@@ -104,8 +104,8 @@ a ship and what does not). This section adds *how much* review to run and *which
 After every substantive change, size the review to the blast radius — not "always one
 reviewer" and not "always many". Selection = *(surface changed) × (dependents × severity
 × reversibility)*. Prioritize the pre-installed plugins/skills below; fall back to a
-`general-purpose` agent only if none fit. **Always pass sub-agents the explicit absolute
-repo path `/Users/rohitagrawal/Projects/citevyn`** — their shell otherwise defaults to a
+`general-purpose` agent only if none fit. **Always pass sub-agents the repo's explicit absolute
+path (`git rev-parse --show-toplevel`)** — their shell otherwise defaults to a
 stale path and they review the wrong tree.
 
 | Tier | Trigger (blast radius) | Orchestration |
