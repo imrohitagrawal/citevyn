@@ -18,6 +18,15 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-29 — Dependency alerts are fixed by the agent, every session
+Open Dependabot alerts and their pull requests are handled by the working agent at
+the start of every session, without being asked: critical and high before planned
+work, medium and low in the same session when a patch or minor bump fixes them,
+one pull request at a time with every required check green. Major-version bumps
+become their own work package. Merging such fixes is approved standing; deploying
+a runtime fix still needs the session's deploy approval. Rules: the delivery
+skill's Dependencies section.
+
 ### 2026-10-29 — Session prompts and working notes are kept private
 Next-session prompts and other session working notes live in a private
 repository, not in this one. This repository carries the delivery process, the

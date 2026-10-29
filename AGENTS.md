@@ -175,6 +175,8 @@ contradicted:
    `~/.claude/projects/<this repo's folder>/`, `ps aux | grep claude`, and
    `git worktree list`. If another session owns what you need, stop and say so.
 4. Run `df -h .` and write the number down; show it again after cleanup.
+5. List the open Dependabot alerts and Dependabot pull requests, and fix them as the
+   delivery skill's Dependencies section says: critical and high before planned work.
 
 Cross-check both against the task at hand. When you open, close, or supersede a GitHub
 issue, update the matching row in `docs/BACKLOG.md` in the same change so the index and

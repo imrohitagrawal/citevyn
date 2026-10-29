@@ -36,6 +36,28 @@ board file: here GitHub issues are the truth, and `docs/BACKLOG.md` is their ind
    false, stop and say so.
 5. Ask the owner every open question in ONE batch, with your recommendation marked. Build what
    needs no decision while you wait; never guess an owner decision.
+6. List the open Dependabot alerts and Dependabot pull requests (see Dependencies below).
+
+## Dependencies
+
+Dependency alerts are the agent's job, every session; the owner is told what was fixed, never
+asked to look.
+
+1. At the start of every session, list both:
+   `gh api 'repos/imrohitagrawal/citevyn/dependabot/alerts?state=open&per_page=100'` and
+   `gh pr list --author app/dependabot`.
+2. Critical and high alerts are fixed before planned work.
+3. Medium and low alerts are fixed in the same session when the fix is a patch or minor bump.
+4. One pull request at a time, every required check green. `main` is strict, so bring the next
+   branch up to date after each merge (`gh pr update-branch <n>`).
+5. A runtime package (one the shipped app imports) also gets the backend suite run against
+   the new lock and a boot of the built image. A runtime fix reaches users only by a deploy:
+   deploy when the prompt approves it, then check production.
+6. A lock change you make yourself: use a uv at least as new as the one that wrote
+   `backend/uv.lock`, so its format line does not change (`uvx --from uv uv lock
+   --upgrade-package <name>`).
+7. A major-version bump becomes its own work package, with its own issue.
+8. Report each alert as fixed, in progress, or deferred to a named package.
 
 ## The 8 lenses, sized to the package
 
