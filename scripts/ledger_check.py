@@ -21,9 +21,10 @@ How the ledger is read (line-based, not a full Markdown parser):
 - A section is closed when its heading, or any heading above it, has the word
   "closed" or "resolved" in it ("### Closed — kept for the record", "## Recently
   closed", "## Earlier follow-ups (all resolved)"). Every other table is open.
-- Text a reader never sees is skipped: lines inside ``` or ~~~ fences, and
-  HTML comments that start a line (`<!--` to `-->`, over several lines too).
-  One left open at the end of the file is an error (exit 2), not a pass.
+- Code fences and HTML comments are refused, not read: a line that opens a
+  fence (``` or ~~~, indented at most three spaces) or holds `<!--` is an error
+  (exit 2) naming the line. Emulating them is how rows got hidden or counted
+  wrongly; the ledger has never needed either.
 - `#N` counts only on its own: `other/repo#7` names another repository's issue.
 
 Each violation line ends with what to change.
@@ -55,12 +56,13 @@ HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 CLOSED_HEADING = re.compile(r"\b(closed|resolved)\b", re.IGNORECASE)
 ISSUE_REF = re.compile(r"(?<![\w./-])#(\d+)")
 CELL_SPLIT = re.compile(r"(?<!\\)\|")
-GH_LINE = re.compile(r"^(\d+) (open|closed) (true|false)(?: (\S+)(?: (.*))?)?$")
+GH_LINE = re.compile(r"^(\d+) (open|closed) (true|false) (\S+) (.+)$")
 JQ = (
     '.[] | "\\(.number) \\(.state) \\(has("pull_request")) '
     '\\((.closed_at // "-")[0:10]) \\(.title | @json)"'
 )
-FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+FENCE = re.compile(r"^ {0,3}(```|~~~)")
+REFUSED = "the ledger check does not read code fences or HTML comments; write it as plain text or link to it"
 
 
 class ReadError(Exception):
@@ -79,8 +81,8 @@ class Row:
 class Item:
     state: str  # "open" or "closed"
     is_pr: bool
-    closed_on: str = "-"  # YYYY-MM-DD, or "-" while open
-    title: str = ""
+    closed_on: str  # YYYY-MM-DD, or "-" while open
+    title: str
 
 
 @dataclass
@@ -94,32 +96,12 @@ class Report:
 def parse_ledger(text: str) -> list[Row]:
     rows: list[Row] = []
     stack: list[tuple[int, bool]] = []  # (heading level, closed)
-    fence = ""  # the opening fence while inside one
-    fence_line = 0
-    in_comment = False
-    comment_line = 0
-    # Split on "\n" only: str.splitlines() also breaks on U+2028 and friends.
+    # Split on "\n" only: str.splitlines() also breaks on U+2028 and friends,
+    # which would shift every line number after one. read_text() has already
+    # turned "\r\n" into "\n".
     for lineno, line in enumerate(text.split("\n"), start=1):
-        line = line.removesuffix("\r")
-        if in_comment:
-            in_comment = "-->" not in line
-            continue
-        marker = FENCE.match(line)
-        if fence:
-            if (
-                marker
-                and marker.group(1)[0] == fence[0]
-                and len(marker.group(1)) >= len(fence)
-            ):
-                fence = ""
-            continue
-        if marker:
-            fence, fence_line = marker.group(1), lineno
-            continue
-        if line.lstrip().startswith("<!--"):
-            in_comment = "-->" not in line.split("<!--", 1)[1]
-            comment_line = lineno
-            continue
+        if FENCE.match(line) or "<!--" in line:
+            raise ReadError(f"line {lineno}: {REFUSED}")
         heading = HEADING.match(line)
         if heading:
             level = len(heading.group(1))
@@ -145,17 +127,6 @@ def parse_ledger(text: str) -> list[Row]:
                 struck=cells[1].strip().startswith("~~"),
                 closed_section=bool(stack) and stack[-1][1],
             )
-        )
-    # Left open, either hides the rest of the file, and what is left could pass.
-    if fence:
-        raise ReadError(
-            f"the code fence opened at line {fence_line} of the ledger is never "
-            "closed, so it hides the rest of the file"
-        )
-    if in_comment:
-        raise ReadError(
-            f"the HTML comment opened at line {comment_line} of the ledger is never "
-            "closed, so it hides the rest of the file"
         )
     return rows
 
@@ -196,21 +167,20 @@ def fetch_items(repo: str) -> dict[int, Item]:
         if not match:
             raise ReadError(f"unexpected line from gh: {raw.strip()[:80]!r}")
         number = int(match.group(1))
+        # --paginate can return an issue twice if one is opened during the read
+        # (the pages shift); that errors, which is the safe direction.
         if number in items:
             raise ReadError(f"gh returned #{number} more than once")
-        title = ""
-        if match.group(5) is not None:
-            try:
-                decoded = json.loads(match.group(5))
-            except ValueError as exc:
-                raise ReadError(f"unexpected title from gh for #{number}") from exc
-            if not isinstance(decoded, str):
-                raise ReadError(f"unexpected title from gh for #{number}")
-            title = decoded
+        try:
+            title = json.loads(match.group(5))
+        except ValueError as exc:
+            raise ReadError(f"unexpected title from gh for #{number}") from exc
+        if not isinstance(title, str):
+            raise ReadError(f"unexpected title from gh for #{number}")
         items[number] = Item(
             state=match.group(2),
             is_pr=match.group(3) == "true",
-            closed_on=match.group(4) or "-",
+            closed_on=match.group(4),
             title=title,
         )
     if not items:
