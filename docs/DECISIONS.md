@@ -23,8 +23,8 @@ CiteVyn's history holds matches for the public-content guard's rules (mostly
 session-link trailers in old commit messages; no live credential). The history
 is not rewritten: a rewrite would break signed merges, pull-request diffs and
 every recorded commit id, and could not reach GitHub's read-only pull-request
-refs anyway. The scheduled scan records today's old matches as a baseline and
-alerts only on new ones; a match still in a current file is cleaned in normal
+refs anyway. The planned scheduled scan (not built yet) will record today's old
+matches as a baseline and alert only on new ones; a match still in a current file is cleaned in normal
 work. History is rewritten only for a credential that cannot be rotated.
 
 ### 2026-10-30 — The backend reads no env file; the Makefile loads `backend/.env`
