@@ -68,6 +68,7 @@ jobs:
           echo "GET /health/index -> $code"
           python3 - <<'PY'
           import json, sys
+          from datetime import datetime
 
           with open("/tmp/index.json") as fh:
               body = json.load(fh)
@@ -78,7 +79,9 @@ jobs:
           ratio = arm.get("embedded_ratio")
           match = arm.get("embedder_match")
 
-          print(f"status={status} vector_arm={arm_status} embedded_ratio={ratio} embedder_match={match}")
+          # !r throughout: a value printed raw that starts a line with "::" is a
+          # workflow command in this log.
+          print(f"status={status!r} vector_arm={arm_status!r} embedded_ratio={ratio!r} embedder_match={match!r}")
 
           problems = []
           if status != "ready":
@@ -98,7 +101,7 @@ jobs:
               # of to `promote_version`.
               count = arm.get("active_index_count")
               problems.append(
-                  f"vector_arm is AMBIGUOUS — {count} index versions are marked "
+                  f"vector_arm is AMBIGUOUS — {count!r} index versions are marked "
                   "active; promote a version that is NOT currently active "
                   "(?force=true if it has no passing eval run) to converge"
               )
@@ -115,6 +118,60 @@ jobs:
               # alert would pair a true diagnosis with a meaningless one and send
               # the operator to ADR-0003 instead of to promote_version.
               problems.append("embedder_match is False — query/index embedders disagree")
+
+          # The query embedder (the provider that turns each question into a
+          # search vector) refusing this account: an empty prepaid balance or a
+          # bad key. Search then silently drops to keyword-only while every
+          # answer still returns 200, so nothing else here notices. Decided on
+          # the known-good value (#460): only "ok" passes. "unconfigured" (no
+          # Redis set) and "unavailable" (Redis unreadable) page too: production
+          # always sets Redis, and without it this check is switched off. A body
+          # without the block (a build from before it, or a rollback to one)
+          # pages for the same reason. Which status it was is in the app's log.
+          embedder = body.get("query_embedder")
+          if not isinstance(embedder, dict):
+              problems.append(
+                  "query_embedder block is missing: this build predates the "
+                  "query-embedder check (rolled back?), so a refused embedding "
+                  "provider would go unnoticed"
+              )
+          else:
+              state = embedder.get("state")
+              print(f"query_embedder={state!r}")
+              if state == "refused":
+                  since = embedder.get("refused_since")
+                  # Printed into this log, where a line starting "::" is a
+                  # workflow command: only a timestamp that reads back
+                  # unchanged is passed through (fromisoformat alone accepts
+                  # any separator, a newline included).
+                  try:
+                      ok = datetime.fromisoformat(since).isoformat() == since
+                  except (TypeError, ValueError):
+                      ok = False
+                  if not ok:
+                      since = "<invalid>"
+                  reason = (
+                      f"query embedder: the provider has refused this account since {since}. "
+                      "Search is keyword-only. Most often the provider account's prepaid "
+                      "credit is used up (add credit in its billing console); otherwise the "
+                      "embedding key is wrong or revoked. After fixing, ask the site one NEW "
+                      "question (a repeated one is answered from cache and clears nothing). "
+                      "docs/RUNBOOK.md §3.4a"
+                  )
+                  print(f"::error title=Query embedder refused::{reason}")
+                  problems.append(reason)
+              elif state == "unconfigured":
+                  problems.append(
+                      "query embedder: no Redis is configured, so refusals are not tracked "
+                      "(set CITEVYN_REDIS_URL)"
+                  )
+              elif state == "unavailable":
+                  problems.append(
+                      "query embedder: the app could not read Redis in time, so refusals "
+                      "are not tracked (check Redis; the rate limiter depends on it too)"
+                  )
+              elif state != "ok":
+                  problems.append(f"query embedder: unrecognised state {state!r}")
 
           if problems:
               print("FAIL: " + "; ".join(problems), file=sys.stderr)

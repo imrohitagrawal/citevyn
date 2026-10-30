@@ -46,11 +46,18 @@ LEGAL_PAGES: dict[str, tuple[str, str]] = {
     "no-training": ("We Don't Train on Your Questions", "no-training.md"),
 }
 
-#: Owner-approved 2026-10-28. No-training waits on two owner checks (#492).
-PUBLISHED: frozenset[str] = frozenset({"terms", "privacy", "refunds"})
+#: Owner-approved: Terms, Privacy and Refunds 2026-10-28; No-training 2026-10-30,
+#: once the owner confirmed the two provider settings that page states (#492).
+PUBLISHED: frozenset[str] = frozenset({"terms", "privacy", "refunds", "no-training"})
 
-#: Change this date whenever a published page's text changes.
-_PUBLISHED_LEAD = "Last updated 28 October 2026."
+#: When each published page's text last changed. Change a page's date whenever
+#: its text changes; the others keep theirs.
+LAST_UPDATED: dict[str, str] = {
+    "terms": "28 October 2026",
+    "privacy": "28 October 2026",
+    "refunds": "28 October 2026",
+    "no-training": "30 October 2026",
+}
 
 # Any bracket (ASCII or full-width), then anything but letters, then "owner" as
 # a word: "[OWNER: x]", "[ OWNER : x]", "[Owner note: x]", "\uff3bOWNER\uff1ax\uff3d", "[OWNER]".
@@ -95,7 +102,7 @@ async def legal_page(
                 [(title, markdown)],
                 page_title=title,
                 description=f"CiteVyn {title}.",
-                lead=_PUBLISHED_LEAD,
+                lead=f"Last updated {LAST_UPDATED[slug]}.",
             )
         )
     html = render_about_page(

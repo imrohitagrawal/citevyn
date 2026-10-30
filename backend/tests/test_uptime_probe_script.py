@@ -63,6 +63,9 @@ def _run(body: dict[str, Any], tmp_path: Path) -> subprocess.CompletedProcess[st
     )
 
 
+_OK_EMBEDDER: dict[str, Any] = {"state": "ok", "refused_since": None}
+
+
 def _arm(**over: Any) -> dict[str, Any]:
     arm = {
         "status": "healthy",
@@ -72,7 +75,7 @@ def _arm(**over: Any) -> dict[str, Any]:
         "active_index_count": 1,
     }
     arm.update(over)
-    return {"status": "ready", "vector_arm": arm}
+    return {"status": "ready", "vector_arm": arm, "query_embedder": _OK_EMBEDDER}
 
 
 @pytest.mark.parametrize(
@@ -111,6 +114,7 @@ def _arm(**over: Any) -> dict[str, Any]:
                     "embedded_ratio": 1.0,
                     "embedder_match": True,
                 },
+                "query_embedder": _OK_EMBEDDER,
             },
             0,
             "",
@@ -161,3 +165,101 @@ def test_a_genuine_embedder_mismatch_is_still_reported(tmp_path: Path) -> None:
     result = _run(_arm(status="mismatch", healthy=False, embedder_match=False), tmp_path)
     assert result.returncode == 1
     assert "embedders disagree" in result.stderr
+
+
+def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
+    body = _arm()
+    body["query_embedder"] = {"state": state, "refused_since": since}
+    return body
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "expected_exit", "expected_reason"),
+    [
+        ("embedder ok", _with_embedder("ok"), 0, ""),
+        # The empty-prepaid-balance case: search has silently dropped to
+        # keyword-only while answers keep coming. This is the page, and it says
+        # what to do and how to clear it.
+        (
+            "embedder refused",
+            _with_embedder("refused", "2026-10-30T12:00:00+00:00"),
+            1,
+            "the provider has refused this account since 2026-10-30T12:00:00+00:00",
+        ),
+        ("embedder refused, clearing step", _with_embedder("refused"), 1, "ask the site one NEW"),
+        # Production always sets Redis: without it this alert is off, so say so.
+        ("embedder unconfigured", _with_embedder("unconfigured"), 1, "no Redis"),
+        ("embedder unavailable", _with_embedder("unavailable"), 1, "could not read Redis"),
+        # Decided on the known-good value (#460): anything else pages.
+        ("embedder unrecognised state", _with_embedder("degraded"), 1, "unrecognised"),
+        # The state an earlier build reported for "not tracked"; it must not
+        # creep back in as a pass.
+        ("embedder old unknown state", _with_embedder("unknown"), 1, "unrecognised"),
+        (
+            "embedder refused, bad time",
+            _with_embedder("refused", "not-a-timestamp"),
+            1,
+            "<invalid>",
+        ),
+    ],
+    ids=lambda v: v if isinstance(v, str) and " " in v else "",
+)
+def test_query_embedder_state(
+    tmp_path: Path, name: str, body: dict[str, Any], expected_exit: int, expected_reason: str
+) -> None:
+    """Red when: the probe stops reading ``query_embedder``, passes anything but
+    "ok", or loses the reason text the owner acts on."""
+    result = _run(body, tmp_path)
+    assert result.returncode == expected_exit, (name, result.stdout, result.stderr)
+    if expected_reason:
+        assert expected_reason in result.stderr
+
+
+def test_a_refusal_is_annotated_on_the_run_page(tmp_path: Path) -> None:
+    """Red when: the refusal is only in the job log. GitHub's failure email
+    names the step; an ``::error`` line puts the reason on the run page."""
+    result = _run(_with_embedder("refused", "2026-10-30T12:00:00+00:00"), tmp_path)
+    assert any(line.startswith("::error ") for line in result.stdout.splitlines()), result.stdout
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+def test_a_body_without_the_block_pages(tmp_path: Path, missing: str) -> None:
+    """Red when: a body without ``query_embedder`` passes. A rollback to a build
+    that predates the block would otherwise switch this alert off silently."""
+    body = _arm()
+    if missing == "absent":
+        del body["query_embedder"]
+    else:
+        body["query_embedder"] = None
+    result = _run(body, tmp_path)
+    assert result.returncode == 1
+    assert "query_embedder block is missing" in result.stderr
+
+
+def test_a_forged_refusal_time_cannot_write_a_workflow_command(tmp_path: Path) -> None:
+    """Red when: the probe prints a refusal time it did not validate. A line in
+    a GitHub Actions log that starts with ``::`` is a workflow command."""
+    body = _with_embedder("refused", "x\n::warning::forged")
+    result = _run(body, tmp_path)
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "::warning::forged" not in out
+    assert "<invalid>" in out
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _with_embedder("refused", "2026-10-30\n::warning::forged"),
+        # fromisoformat accepts any separator; the probe must not.
+        _with_embedder("refused", "2026-10-30\n12:00:00"),
+        {**_arm(), "status": "ready\n::warning title=x::injected"},
+    ],
+    ids=["refused-since", "iso-separator", "status-field"],
+)
+def test_no_body_field_starts_a_workflow_command(tmp_path: Path, body: dict[str, Any]) -> None:
+    """Red when: a field from the response body is printed raw. A line in a
+    GitHub Actions log that starts with ``::`` is a workflow command."""
+    result = _run(body, tmp_path)
+    lines = (result.stdout + result.stderr).splitlines()
+    assert not any(line.startswith("::warning") for line in lines), lines

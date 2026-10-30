@@ -263,6 +263,34 @@ both fail fast at startup if the provider/key/dimension are misconfigured.
 returns no hits (logged as `vector_retrieval_degraded_embedder_unavailable`) and
 answers still come from exact-term + keyword retrieval — the request does not fail.
 
+**The uptime probe says "query embedder: the provider has refused this account".**
+A live query was refused by the embedding provider for a reason that is about
+the account, not the question, so every question is searched by keyword only
+until it is fixed (`/health/index` shows `query_embedder.state: "refused"`). The
+run page carries the same message as an error annotation. Which refusal it was
+is in the app's log (`fly logs`): `query_embedder_account_refused` carries the
+`status_code`. If that line has scrolled away, check the credit first, then the
+key.
+
+- **402:** the provider account's prepaid credit is used up. Add credit in the
+  provider's billing console.
+- **401, 403, or on Gemini a 400 naming the key (`API_KEY_INVALID`):** the key
+  is wrong, revoked, expired or not allowed this model. Check the
+  `CITEVYN_GEMINI_API_KEY` secret and the key's project.
+
+The state clears on the next question that gets a vector back. After the fix,
+ask the site one NEW, specific question: a repeated question is answered from
+the answer cache and a greeting never reaches search, so neither clears it.
+Then re-read `/health/index`. To clear it by hand, delete the Redis key
+`<CITEVYN_REDIS_KEY_PREFIX>:query_embedder_refused_since`. Transient failures
+(timeouts, 429, 5xx) are never recorded here (#576 lists what is not covered).
+
+**The probe says "query embedder: no Redis is configured" or "could not read
+Redis in time".** Refusals are tracked in Redis, so the check above is off.
+Production always sets `CITEVYN_REDIS_URL`; restore it if it is missing. "In
+time" means the read took over 2 s, or failed: check Redis, which the rate
+limiter also depends on (§3.3).
+
 ### 3.5 Caddy won't issue the certificate
 
 **Symptom:** `curl https://citevyn.example.com/health` returns

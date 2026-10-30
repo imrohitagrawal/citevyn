@@ -46,6 +46,49 @@ _logger = logging.getLogger("citevyn.embeddings")
 # Status codes treated as transient "provider unavailable" — retried in-provider.
 _UNAVAILABLE_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
+# Gemini refusing the ACCOUNT, not one request: 402 is an empty prepaid
+# balance, 401/403 a key without access. A bad, revoked or expired key is a 400
+# whose body names the key (measured 2026-10-30: 400 INVALID_ARGUMENT, reason
+# API_KEY_INVALID), so a 400 counts only with one of these reasons.
+_ACCOUNT_REFUSAL_STATUSES: frozenset[int] = frozenset({401, 402, 403})
+_KEY_REFUSAL_REASONS: frozenset[str] = frozenset({"API_KEY_INVALID", "API_KEY_EXPIRED"})
+
+
+def _is_account_refusal(response: httpx.Response) -> bool:
+    """Whether this error response means Gemini refuses the account.
+
+    Never raises: it runs inside the error path, where anything but
+    EmbedderUnavailable would turn a degraded answer into a failed one, so an
+    unreadable body (bad JSON, deep nesting, an over-long number) is simply
+    not a refusal."""
+    if response.status_code in _ACCOUNT_REFUSAL_STATUSES:
+        return True
+    if response.status_code != 400:
+        return False
+    try:
+        return _names_a_bad_key(json.loads(response.content))
+    except (ValueError, TypeError, RecursionError):
+        return False
+
+
+def _names_a_bad_key(body: object) -> bool:
+    """Whether a google.rpc.Status body carries an ErrorInfo naming the key."""
+    if not isinstance(body, dict):
+        return False
+    error = cast(dict[str, object], body).get("error")
+    if not isinstance(error, dict):
+        return False
+    details = cast(dict[str, object], error).get("details")
+    if not isinstance(details, list):
+        return False
+    for detail in cast(list[object], details):
+        if isinstance(detail, dict):
+            reason = cast(dict[str, object], detail).get("reason")
+            if isinstance(reason, str) and reason in _KEY_REFUSAL_REASONS:
+                return True
+    return False
+
+
 # Cap the upstream body kept in the SERVER log — enough to debug, never unbounded,
 # and never surfaced to the caller.
 _ERROR_BODY_LOG_LIMIT = 500
@@ -228,13 +271,20 @@ class GeminiEmbedder:
 
             if response.status_code in _UNAVAILABLE_STATUSES:
                 self._log_error_body(label, response)
-                last_exc = EmbedderUnavailable(f"Gemini embeddings returned {response.status_code}")
+                last_exc = EmbedderUnavailable(
+                    f"Gemini embeddings returned {response.status_code}",
+                    status_code=response.status_code,
+                )
                 continue
             if response.status_code >= 400:
                 # Non-transient client error (e.g. 401/403 auth, 400 bad request).
                 # Do not retry; surface a generic message.
                 self._log_error_body(label, response)
-                raise EmbedderUnavailable(f"Gemini embeddings returned {response.status_code}")
+                raise EmbedderUnavailable(
+                    f"Gemini embeddings returned {response.status_code}",
+                    status_code=response.status_code,
+                    account_refused=_is_account_refusal(response),
+                )
 
             try:
                 raw: Any = json.loads(response.content)

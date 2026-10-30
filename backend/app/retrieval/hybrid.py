@@ -31,6 +31,7 @@ from app.embeddings import (
     EmbedderUnavailable,
     IndexStampStatus,
     is_index_embedder_mismatch,
+    query_health,
 )
 from app.models import IndexVersion
 from app.models.enums import RetrievalType
@@ -482,13 +483,21 @@ class HybridRetriever:
             return [], arm_degrade
         try:
             hits = await vector.retrieve(question, product_area=product_area, limit=limit)
-            return hits, VectorDegrade.none
-        except EmbedderUnavailable:
+        except EmbedderUnavailable as exc:
             _logger.warning(
                 "vector_retrieval_degraded_embedder_unavailable",
-                extra={"request_id": get_current_request_id()},
+                extra={"request_id": get_current_request_id(), "status_code": exc.status_code},
             )
+            # An account refusal (an empty prepaid balance, a revoked key) fails
+            # every query until someone acts, so it is recorded for the uptime
+            # probe; a transient failure is not (query_health decides which).
+            await query_health.record_failure(exc)
             return [], VectorDegrade.unavailable
+        # A clean return means a vector came back: the retriever's only early
+        # returns (no embedder, not Postgres) are local and test setups, which
+        # have no Redis, so nothing is cleared there.
+        await query_health.record_success()
+        return hits, VectorDegrade.none
 
     async def _vector_arm_degrade(self) -> VectorDegrade:
         """Whether the vector arm may run against the index being queried, AND WHY NOT

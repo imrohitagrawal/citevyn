@@ -454,3 +454,47 @@ async def test_the_row_cap_can_never_truncate_away_an_active_row(
     # so the assertion above is about truncation and not about an empty table.
     total = len((await session.execute(select(IndexVersion))).scalars().all())
     assert total > _MAX_INDEX_ROWS
+
+
+def test_health_index_reports_the_query_embedder_in_every_shape(
+    app_with_seeded_session_for_resolution, session, monkeypatch
+) -> None:
+    """The query embedder can be refused whatever state the index is in, so the
+    block is in the ready shape AND the ambiguous one (the pre_index shape is
+    covered in test_health.py).
+
+    Turns RED if either return path in the route drops ``query_embedder``."""
+    import asyncio
+
+    from app.embeddings import query_health
+    from app.services import index_resolution
+
+    class _RefusedTracker:
+        async def status(self) -> dict[str, str | None]:
+            return {"state": "refused", "refused_since": "2026-10-30T12:00:00+00:00"}
+
+    monkeypatch.setattr(query_health, "current", lambda: _RefusedTracker())
+    identity = configured_embedder_identity(get_settings())
+    asyncio.get_event_loop().run_until_complete(
+        seed_catalog(session, embedder=StubEmbedder(dim=identity.dim), embedder_identity=identity)
+    )
+    expected = {"state": "refused", "refused_since": "2026-10-30T12:00:00+00:00"}
+
+    with TestClient(app_with_seeded_session_for_resolution) as client:
+        ready = client.get("/health/index").json()
+    assert ready["status"] == "ready" and ready["active_index"] is not None
+    assert ready["query_embedder"] == expected
+
+    def _always_ambiguous(rows):
+        return index_resolution.IndexPartition(
+            active=index_resolution.ActiveIndexResolution(
+                state=ActiveIndexState.ambiguous, active_count=2, row=None
+            ),
+            previous_good=None,
+        )
+
+    monkeypatch.setattr(index_resolution, "partition_index_rows", _always_ambiguous)
+    with TestClient(app_with_seeded_session_for_resolution) as client:
+        ambiguous = client.get("/health/index").json()
+    assert ambiguous["vector_arm"]["status"] == "ambiguous"
+    assert ambiguous["query_embedder"] == expected

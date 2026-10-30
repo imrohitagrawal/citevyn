@@ -50,10 +50,17 @@ curl -sS https://openrouter.ai/api/v1/key \
   -H "Authorization: Bearer $CITEVYN_OPENROUTER_API_KEY"
 ```
 
-A 402 from the provider already degrades correctly today and needs no code change:
-the LLM path collapses any `>=400` to `LLMUnavailable`, and the embedder's `>=400`
-branch raises `EmbedderUnavailable` **without retrying**. The request surfaces as a
-transient 5xx, not as a content refusal — which is the right shape (see §3).
+A 402 from the provider degrades without a content refusal: the LLM path collapses
+any `>=400` to `LLMUnavailable`, and the embedder's `>=400` branch raises
+`EmbedderUnavailable` **without retrying**. Neither fails the request on its own:
+
+- **Answer model:** with a fallback provider configured, the fallback answers
+  (`FallbackLLMClient` logs a warning). Only when both refuse is it a transient
+  5xx (see §3). Neither case is monitored yet (#576).
+- **Query embedder:** the vector arm returns no hits and the answer comes from
+  keyword search. That used to be visible only in the log; an account refusal
+  is now recorded and reported as `query_embedder.state: "refused"` on
+  `/health/index`, which fails the uptime probe (`docs/RUNBOOK.md`, §3.4a).
 
 ---
 

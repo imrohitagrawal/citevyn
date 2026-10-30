@@ -15,6 +15,8 @@ Mirrors ``tests/test_llm_gemini_openrouter.py``: the provider HTTP is mocked wit
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -393,3 +395,123 @@ def test_missing_key_raises_eagerly() -> None:
             dim=4,
             timeout_seconds=5.0,
         )
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 429, 503])
+async def test_error_carries_its_http_status_code(status: int) -> None:
+    """Red when: ``status_code`` stops being set on an HTTP error. The query
+    embedder's health tracker tells an account refusal (402 = empty prepaid
+    balance) from a transient failure by this field alone; the message stays
+    generic so the body cannot leak (#50)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="body")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code == status
+
+
+async def test_timeout_error_has_no_status_code() -> None:
+    """Red when: a timeout is given an HTTP status it never had (it would be
+    read as an account refusal if it were 401-403)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code is None
+
+
+def _google_error(code: int, status: str, reason: str | None) -> str:
+    """The error body Google's APIs send (google.rpc.Status with an ErrorInfo)."""
+    details = (
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason}] if reason else []
+    )
+    return json.dumps(
+        {"error": {"code": code, "message": "m", "status": status, "details": details}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "refused"),
+    [
+        (402, "x", True),
+        (401, "x", True),
+        (403, _google_error(403, "PERMISSION_DENIED", None), True),
+        # Measured 2026-10-30: an invalid key is a 400 INVALID_ARGUMENT naming
+        # the key, not a 401. Without this case a revoked key stays silent.
+        (400, _google_error(400, "INVALID_ARGUMENT", "API_KEY_INVALID"), True),
+        (400, _google_error(400, "INVALID_ARGUMENT", "API_KEY_EXPIRED"), True),
+        # An ordinary bad request (one odd input) is not the account's fault.
+        (400, _google_error(400, "INVALID_ARGUMENT", None), False),
+        # An ErrorInfo naming something other than the key.
+        (400, _google_error(400, "INVALID_ARGUMENT", "FIELD_INVALID"), False),
+        (400, "not json", False),
+        (400, json.dumps({"error": "a string, not an object"}), False),
+        (400, json.dumps(["API_KEY_INVALID"]), False),
+        (400, json.dumps({"error": {"details": "API_KEY_INVALID"}}), False),
+        (429, _google_error(429, "RESOURCE_EXHAUSTED", None), False),
+        (503, "x", False),
+        (404, "not found", False),
+    ],
+)
+async def test_gemini_marks_account_refusals(status: int, body: str, refused: bool) -> None:
+    """Red when: an account refusal (401/402/403, or a 400 that names the API
+    key) is not marked ``account_refused``, or any other error is. The query
+    embedder's health tracker pages on this flag alone."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body)
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.account_refused is refused
+    assert info.value.status_code == status
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A reason that is not text: `in` on a set would raise TypeError.
+        json.dumps({"error": {"details": [{"reason": ["API_KEY_INVALID"]}]}}),
+        json.dumps({"error": {"details": [{"reason": {}}]}}),
+        # Nesting deep enough to exhaust the JSON parser's recursion.
+        "[" * 100_000,
+        # An integer longer than Python's int-parsing limit.
+        '{"error": ' + "9" * 5000 + "}",
+    ],
+    ids=["list-reason", "dict-reason", "deep-nesting", "huge-int"],
+)
+async def test_an_unreadable_400_body_is_still_a_plain_embedder_failure(body: str) -> None:
+    """Red when: reading the 400 body can raise anything but EmbedderUnavailable.
+    The retriever catches only that, so any other error would fail the question
+    instead of degrading it to keyword search."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text=body)
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.account_refused is False

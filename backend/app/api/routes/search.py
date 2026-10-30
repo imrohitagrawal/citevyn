@@ -27,6 +27,7 @@ from app.access.policy import Capability
 from app.core.config import Settings, get_settings
 from app.core.db import get_session
 from app.core.rate_limit import rate_limited_demo
+from app.embeddings import query_health
 from app.models.enums import TermType
 from app.services.exact_lookup import (
     MAX_RESULTS,
@@ -183,6 +184,11 @@ async def health_index(
     the read path has failed closed, and there is no single index to report on.
     """
     request_id = _request_id(request)
+    # Whether the provider is refusing this account (an empty prepaid balance,
+    # a revoked key): search then silently drops to keyword-only. Reported in
+    # every shape, since it does not depend on the index. Public route (#273):
+    # the block says THAT and since when, never the status code or provider.
+    query_embedder = await query_health.status()
 
     # Resolve both rows through the SHARED resolver (#264) so this route names
     # the same active index the retrieval gate and the orchestrator do. It used
@@ -215,6 +221,7 @@ async def health_index(
             "status": "ready",
             "active_index": None,
             "previous_good_index": _index_payload(previous) if previous else None,
+            "query_embedder": query_embedder,
             "vector_arm": ambiguous_vector_health(settings, active_count=resolution.active_count),
             # NOT "promote one of them": ``promote_version`` returns early and
             # writes nothing when the target is already ``active``, so promoting
@@ -238,6 +245,7 @@ async def health_index(
             "status": "pre_index",
             "active_index": None,
             "previous_good_index": None,
+            "query_embedder": query_embedder,
             "vector_arm": None,
             "message": "No active index exists yet.",
         }
@@ -252,6 +260,7 @@ async def health_index(
         "status": "ready" if active is not None else "degraded",
         "active_index": _index_payload(active) if active else None,
         "previous_good_index": _index_payload(previous) if previous else None,
+        "query_embedder": query_embedder,
         "vector_arm": vector_arm,
         "message": None,
     }
