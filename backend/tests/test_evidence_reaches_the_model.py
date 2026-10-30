@@ -93,9 +93,10 @@ async def test_update_commands_in_claude_code_installation_reach_the_model() -> 
     """The prompt sent for "How do I update Claude Code?" carries the update commands.
 
     Red when: the evidence cap in app/answer/generate.py is shorter than the
-    shipped claude_code.md Installation chunk (it is 400 today; the chunk is
-    about 1,300 characters and "claude update" starts near character 940), or
-    that section stops naming "claude update" and "brew upgrade".
+    shipped claude_code.md Installation chunk (the cap is 1,500; it was 400
+    before #579, and the chunk is 1,318 characters with "claude update" at
+    character 937 and "brew upgrade" at 1,090), or that section stops naming
+    "claude update" and "brew upgrade".
     """
     spec = get_source("claude_code")
     installation = [c for c in _chunks(spec) if c.heading == "Installation"]
@@ -143,7 +144,8 @@ def test_a_huge_evidence_text_is_still_cut() -> None:
     """The cap still exists, so the prompt stays bounded.
 
     Partner to the test above: that one would pass if truncation were simply
-    deleted. This one passes today and must keep passing after the fix.
+    deleted. It passed with the old 400-character cap and must keep passing with
+    any cap sized to the shipped corpus.
 
     Red when: the evidence cap in app/answer/generate.py is removed, or raised
     past 10,000 characters per chunk.

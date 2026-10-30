@@ -124,8 +124,8 @@ coverage**:
 `CITEVYN_EVAL_JUDGE_PANEL=1` further caps each run at 2 judge calls/case (1 rubric
 framing + the adversarial veto) instead of the local default of 4.
 
-**CI does not sample cases.** `--judge-subset N` exists for local iteration, but 43 of
-the 60 golden cases carry a zero-tolerance judge-independent oracle (injection,
+**CI does not sample cases.** `--judge-subset N` exists for local iteration, but 44 of
+the 61 golden cases carry a zero-tolerance judge-independent oracle (injection,
 multi-turn echo, per-case groundedness, refusal leak, judge-only) that sampling would
 *switch off* rather than average down — so the honest saving ceiling is ~28%. The
 subset always retains those cases, and the runner **fails** the run if one is ever
