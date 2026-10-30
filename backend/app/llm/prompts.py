@@ -13,9 +13,14 @@ Citation contract:
   refuse with the no-answer paragraph below and emit no markers.
 * One marker per bracket: ``[1][2]``, never ``[1, 2]`` (#554). A grouped
   marker that slips through is split by
-  :func:`app.llm.validation.expand_grouped_markers` before validation.
+  :func:`app.llm.validation.expand_grouped_markers` for display, so each
+  index gets its marker and source card, but a grouped index never counts
+  toward confidence or the uncited-answer gate: only markers written singly
+  do.
 * A sentence saying the evidence does not contain the answer carries no
-  marker, and the answer never says "based on the provided evidence" (#554).
+  marker (#554). This rule is enforced by THIS PROMPT ONLY; no code can tell
+  such a sentence from any other. The answer also never says "based on the
+  provided evidence", which a judged-eval case checks.
 
 Formatting contract (#303):
 

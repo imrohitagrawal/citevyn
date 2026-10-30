@@ -232,15 +232,6 @@ def _strip_flag_tokens(question: str) -> str:
     return " ".join(_FLAG_TOKEN_RE.sub(" ", question).split())
 
 
-def _with_expanded_markers(llm_result: LLMResult) -> LLMResult:
-    """The model's result with grouped markers split (``[1, 2]`` -> ``[1][2]``, #554).
-
-    Both generation paths call this before ``validate_citations``, so the text
-    that is validated is the same text that is served, stored and cached.
-    """
-    return llm_result.model_copy(update={"text": expand_grouped_markers(llm_result.text)})
-
-
 class SessionGone(LookupError):
     """The chat session no longer exists: it was deleted (with its account,
     #511) while the question was being answered. The route answers like an
@@ -851,13 +842,17 @@ class Orchestrator:
             # the cause is 429, otherwise to ``internal_error`` (500).
             raise OrchestratorError(str(exc)) from exc
 
-        # Split grouped markers ("[1, 2]" -> "[1][2]", #554) BEFORE validating,
-        # and keep the split text: it is what is served, stored and cached.
-        llm_result = _with_expanded_markers(llm_result)
-
-        # Validate citations; a hard-fail collapses to a no-answer
-        # response carrying the citation_validation_failed reason
-        # in the audit event.
+        # Validate citations on the RAW text, groups intact; a hard-fail
+        # collapses to a no-answer response carrying the
+        # citation_validation_failed reason in the audit event.
+        #
+        # Grouped markers ("[1, 2]", #554) are shown but not counted: every
+        # index the answer shows gets a card (``cited_indices``), but the
+        # uncited gate, the #208 retry and confidence below use only the
+        # markers written singly (``singly_cited_indices``). A "the docs do not
+        # list this [1, 2, 3]" sentence is where the model groups everything,
+        # so counting groups would serve, at high confidence, exactly the
+        # answers #174 refuses.
         validation = validate_citations(answer_text=llm_result.text, evidence=evidence)
         if not validation.valid:
             return await self._respond_validation_failed(
@@ -906,7 +901,7 @@ class Orchestrator:
         # the retry ONLY if it grounds. Off-corpus and genuinely ungrounded questions
         # keep the original refusal, and a bare flag lookup that DID ground never reaches
         # here, so the exact fast path is untouched.
-        if not validation.cited_indices and strategy is RetrievalStrategy.exact_lookup:
+        if not validation.singly_cited_indices and strategy is RetrievalStrategy.exact_lookup:
             retried = await self._retry_without_exact_lookup(
                 retriever=retriever,
                 retrieval_query=retrieval_query,
@@ -918,7 +913,7 @@ class Orchestrator:
                 evidence, vector_degrade, llm_result, validation = retried
                 strategy = self._strategy_for(Intent.faq, evidence)
 
-        if not validation.cited_indices:
+        if not validation.singly_cited_indices:
             return await self._respond_no_answer(
                 request_id=request_id,
                 session_id=session_id,
@@ -938,9 +933,11 @@ class Orchestrator:
         # actually referenced. The trace keeps every retrieved chunk.
         #
         # ``validation.cited_indices`` is guaranteed non-empty here — an uncited
-        # answer returned above. The old ``else list(range(1, len(evidence)+1))``
-        # fallback was what attached every chunk to an ungrounded answer (#174);
-        # it is gone rather than left dormant.
+        # answer returned above, and expansion never removes a single marker, so
+        # ``cited_indices`` is never empty while ``singly_cited_indices`` is not.
+        # The old ``else list(range(1, len(evidence)+1))`` fallback was what
+        # attached every chunk to an ungrounded answer (#174); it is gone rather
+        # than left dormant.
         #
         # Each citation carries ``marker``: the 1-based evidence index the model
         # actually wrote in the text. Without it the client can only number the
@@ -950,7 +947,8 @@ class Orchestrator:
         # rejected gaps outright; now that gaps are legitimate (#215), the wire
         # has to carry the number rather than let the client guess it.
         used_indices = sorted(set(validation.cited_indices))
-        answer_text = llm_result.text
+        # The served, stored and cached text has its groups split (#554).
+        answer_text = expand_grouped_markers(llm_result.text)
         if multi_hop and self._settings.comparison_answers and vector_degrade is VectorDegrade.none:
             # Phase 6E: a named product the answer cites nothing for is said out
             # loud, never left as a silently half-answered comparison. Only the
@@ -963,7 +961,8 @@ class Orchestrator:
         visible_citations = [
             Citation(chunk_to_citation(evidence[i - 1]) | {"marker": i}) for i in used_indices
         ]
-        confidence = self._confidence_for(used_indices, len(evidence))
+        # Confidence counts only the markers written singly (#554).
+        confidence = self._confidence_for(validation.singly_cited_indices, len(evidence))
 
         response = await self._persist_and_respond(
             request_id=request_id,
@@ -1075,9 +1074,10 @@ class Orchestrator:
             # than turning a 200 no-answer into a 5xx.
             return None
 
-        llm_result = _with_expanded_markers(llm_result)
         validation = validate_citations(answer_text=llm_result.text, evidence=result.hits)
-        if not validation.valid or not validation.cited_indices:
+        # Kept only when grounded by a marker written singly: a group-only
+        # answer is uncited here exactly as on the main path (#554).
+        if not validation.valid or not validation.singly_cited_indices:
             return None
         return (result.hits, result.vector_degrade, llm_result, validation)
 

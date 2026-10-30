@@ -550,9 +550,10 @@ class Settings(BaseSettings):
     #
     # v8 -> v9 (#554): the system prompt now asks for one marker per bracket,
     # bans citing a "not in the evidence" sentence and the "based on the
-    # provided evidence" phrasing, and grouped markers ("[1, 2]") are split
-    # before validation. The same question can produce a DIFFERENT answer, and
-    # a v8 row can hold a grouped marker the client shows as literal text.
+    # provided evidence" phrasing, and grouped markers ("[1, 2]") are split for
+    # display (shown with cards, never counted). The same question can produce
+    # a DIFFERENT answer, and a v8 row can hold a grouped marker the client
+    # shows as literal text.
     answer_policy_version: str = "v9"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
