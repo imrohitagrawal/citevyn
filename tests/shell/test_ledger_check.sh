@@ -124,7 +124,7 @@ CLEAN="# Backlog
 
 # GitHub's answer for CLEAN: four issues in the right states, plus an open and a
 # closed pull request that no row names.
-CLEAN_GH="1 open false
+CLEAN_GH="1 open false - \"t\"
 2 closed false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
@@ -176,7 +176,7 @@ _run "$CLEAN" "${CLEAN_GH}
 7 open false - \"t\""
 _expect r1-missing-row 1 '^R1 #7: '
 
-_run "$CLEAN" "1 open false
+_run "$CLEAN" "1 open false - \"t\"
 2 open false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
@@ -189,7 +189,7 @@ _run "$CLEAN" "${CLEAN_GH}
 _expect r1-ignores-open-prs 0 '^ledger_check: 0 violations' '#12'
 
 # --- R2 ----------------------------------------------------------------------
-_run "$CLEAN" "1 closed false
+_run "$CLEAN" "1 closed false - \"t\"
 2 closed false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
@@ -216,7 +216,7 @@ _run "${CLEAN}
 _expect r2-pull-request 1 '^R2 #10: .*pull request'
 
 # --- R3 ----------------------------------------------------------------------
-_run "$CLEAN" "1 open false
+_run "$CLEAN" "1 open false - \"t\"
 2 open false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
@@ -224,7 +224,7 @@ _run "$CLEAN" "1 open false
 6 open false - \"t\""
 _expect r3-struck-but-open 1 '^R3 #2: .*open'
 
-_run "$CLEAN" "1 open false
+_run "$CLEAN" "1 open false - \"t\"
 2 closed false - \"t\"
 3 open false - \"t\"
 4 closed false - \"t\"
@@ -232,7 +232,7 @@ _run "$CLEAN" "1 open false
 6 open false - \"t\""
 _expect r3-closed-section-open 1 '^R3 #3: .*open'
 
-_run "$CLEAN" "1 open false
+_run "$CLEAN" "1 open false - \"t\"
 2 closed false - \"t\"
 3 closed false - \"t\"
 4 open false - \"t\"
@@ -262,7 +262,7 @@ _run "$CLEAN" "$CLEAN_GH"
 _expect mid-cell-strike-is-unstruck 0 '^ledger_check: 0 violations' '#[56]'
 
 # --- the partner: a violation is really counted -------------------------------
-_run "$CLEAN" "1 closed false
+_run "$CLEAN" "1 closed false - \"t\"
 2 closed false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
@@ -276,7 +276,7 @@ if [ "$n" = "2" ]; then _ok violations-are-counted-lines; else _bad violations-a
 # --- a pull request's own closing issues (--will-close) -----------------------
 # On a pull request the ledger is written in its final state: the row of an
 # issue the pull request closes is already struck while GitHub still says open.
-OPEN2="1 open false
+OPEN2="1 open false - \"t\"
 2 open false - \"t\"
 3 closed false - \"t\"
 4 closed false - \"t\"
