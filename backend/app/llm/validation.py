@@ -17,6 +17,15 @@ Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
   index exceeded the evidence count — discarded a correct answer. See
   the stripping note below for exactly which code forms are covered and
   which are deliberately not.
+* A grouped marker such as ``[1, 2, 3]`` is NOT a marker, but the
+  orchestrator never validates one: it calls :func:`expand_grouped_markers`
+  first, which rewrites the group as ``[1][2][3]`` (#554). Only digits
+  separated by commas count as a group, with spaces or tabs allowed around
+  the commas and nowhere else. Ranges such as ``[1-3]`` are deliberately NOT
+  expanded: the model is never asked for them, and reading a dash as "every
+  index between" could attach a source card the model did not cite. Groups
+  inside markdown code are left alone, by the same definition of code as the
+  scanner below.
 * Uncited evidence bullets — including bullets SKIPPED between two cited
   ones — are reported as a warning, not a failure (the model may
   legitimately not cite every retrieved chunk). A gap is therefore
@@ -99,6 +108,10 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?
 
 _WHITESPACE_RE = re.compile(r"\s")
 
+# Stands in for each code character when :func:`_strip_code` keeps offsets.
+# Not a digit, bracket, comma or space, so no marker group can match across it.
+_CODE_MASK = "\0"
+
 
 def _fence_run(line: str) -> tuple[str, int] | None:
     """Return ``(fence_char, run_length)`` if ``line`` starts a run of 3+ ticks/tildes.
@@ -180,8 +193,14 @@ def _closes(line: str, open_fence: tuple[str, int], bare_reachable_after: int) -
     return bare_reachable_after < open_fence[1]
 
 
-def _strip_code(text: str) -> str:
+def _strip_code(text: str, *, keep_offsets: bool = False) -> str:
     """Blank out markdown code so ``[n]`` inside it is not read as a marker.
+
+    With ``keep_offsets`` every code character is replaced by
+    :data:`_CODE_MASK` instead, so the result has the same length as ``text``
+    and a match in it sits at the same offsets in ``text``. That is how
+    :func:`expand_grouped_markers` reuses this definition of code without
+    a second one.
 
     Line-oriented by design (see the note above): an unbalanced backtick can
     never reach past the line it appears on.
@@ -228,7 +247,7 @@ def _strip_code(text: str) -> str:
         if open_fence is not None:
             if _closes(line, open_fence, reachable[open_fence[0]][i + 1]):
                 open_fence = None
-            out.append("")
+            out.append(_CODE_MASK * len(line) if keep_offsets else "")
             continue
         match = _FENCE_OPEN_RE.match(line)
         if match:
@@ -250,13 +269,16 @@ def _strip_code(text: str) -> str:
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
             if simple or reachable[fence[0]][i + 1] >= len(fence):
                 open_fence = (fence[0], len(fence))
-                out.append("")
+                out.append(_CODE_MASK * len(line) if keep_offsets else "")
                 continue
         # Inline spans collapse to a SPACE, never to the empty string.
         # Deleting outright welds neighbours into a marker never written:
         # ``[`x`99]`` would become ``[99]``, fabricating a citation from
         # untrusted output that the range check then refuses the answer over.
-        out.append(_INLINE_CODE_RE.sub(" ", line))
+        if keep_offsets:
+            out.append(_INLINE_CODE_RE.sub(lambda m: _CODE_MASK * len(m[0]), line))
+        else:
+            out.append(_INLINE_CODE_RE.sub(" ", line))
     return "\n".join(out)
 
 
@@ -280,6 +302,39 @@ def _cited_markers(answer_text: str) -> list[str]:
       refusal and no new retry can exist.
     """
     return _CITATION_RE.findall(_strip_code(answer_text)) or _CITATION_RE.findall(answer_text)
+
+
+# A grouped marker (#554): digits separated by commas, with spaces or tabs
+# around the commas only. ``[ 1, 2 ]``, ``[1,]``, ``[1-3]`` and ``[1 2]`` do
+# not match, and a group never spans a line.
+_GROUPED_MARKER_RE = re.compile(r"\[\d+(?:[ \t]*,[ \t]*\d+)+\]")
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def expand_grouped_markers(text: str) -> str:
+    """Rewrite each grouped marker ``[1, 2, 3]`` as ``[1][2][3]`` (#554).
+
+    A real model answered in production with ``[1, 2, 3, 4, 5, 6]``. The
+    contract allows only ``[n]``, so the group was not a marker: the client
+    showed it as literal text, and an answer whose ONLY citations were grouped
+    would have been refused as uncited. Splitting it keeps every index the
+    model wrote, so an out-of-range index in a group still fails the range
+    check exactly as ``[1][9]`` does.
+
+    Everything outside a group is returned byte for byte, line endings
+    included, and groups inside markdown code (as :func:`_strip_code` defines
+    it) are left alone. Ranges are not expanded; see the module docstring.
+    Idempotent: the output holds no group.
+    """
+    masked = _strip_code(text, keep_offsets=True)
+    pieces: list[str] = []
+    last = 0
+    for match in _GROUPED_MARKER_RE.finditer(masked):
+        pieces.append(text[last : match.start()])
+        pieces.append("".join(f"[{n}]" for n in _DIGITS_RE.findall(match[0])))
+        last = match.end()
+    pieces.append(text[last:])
+    return "".join(pieces)
 
 
 # Substring of the refusal the model is contractually required to emit

@@ -66,7 +66,11 @@ from app.llm.errors import LLMUnavailable
 from app.llm.factory import get_llm_client
 from app.llm.protocol import LLMClient
 from app.llm.types import LLMResult
-from app.llm.validation import CitationValidationResult, validate_citations
+from app.llm.validation import (
+    CitationValidationResult,
+    expand_grouped_markers,
+    validate_citations,
+)
 from app.models import (
     Confidence,
     Message,
@@ -226,6 +230,15 @@ def _strip_flag_tokens(question: str) -> str:
     naturally to the embedder.
     """
     return " ".join(_FLAG_TOKEN_RE.sub(" ", question).split())
+
+
+def _with_expanded_markers(llm_result: LLMResult) -> LLMResult:
+    """The model's result with grouped markers split (``[1, 2]`` -> ``[1][2]``, #554).
+
+    Both generation paths call this before ``validate_citations``, so the text
+    that is validated is the same text that is served, stored and cached.
+    """
+    return llm_result.model_copy(update={"text": expand_grouped_markers(llm_result.text)})
 
 
 class SessionGone(LookupError):
@@ -838,6 +851,10 @@ class Orchestrator:
             # the cause is 429, otherwise to ``internal_error`` (500).
             raise OrchestratorError(str(exc)) from exc
 
+        # Split grouped markers ("[1, 2]" -> "[1][2]", #554) BEFORE validating,
+        # and keep the split text: it is what is served, stored and cached.
+        llm_result = _with_expanded_markers(llm_result)
+
         # Validate citations; a hard-fail collapses to a no-answer
         # response carrying the citation_validation_failed reason
         # in the audit event.
@@ -1058,6 +1075,7 @@ class Orchestrator:
             # than turning a 200 no-answer into a 5xx.
             return None
 
+        llm_result = _with_expanded_markers(llm_result)
         validation = validate_citations(answer_text=llm_result.text, evidence=result.hits)
         if not validation.valid or not validation.cited_indices:
             return None

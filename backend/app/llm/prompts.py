@@ -11,6 +11,11 @@ Citation contract:
   listed the evidence.
 * When the user message contains no evidence bullets, the model MUST
   refuse with the no-answer paragraph below and emit no markers.
+* One marker per bracket: ``[1][2]``, never ``[1, 2]`` (#554). A grouped
+  marker that slips through is split by
+  :func:`app.llm.validation.expand_grouped_markers` before validation.
+* A sentence saying the evidence does not contain the answer carries no
+  marker, and the answer never says "based on the provided evidence" (#554).
 
 Formatting contract (#303):
 
@@ -36,6 +41,9 @@ SYSTEM_PROMPT = (
     "claim must be followed by a bracketed citation marker like [1] that "
     "references the matching evidence bullet. Do not invent facts, links, or "
     "commands that are not present in the evidence.\n"
+    "Put each citation in its own brackets, like [1][2], never grouped like "
+    "[1, 2]. Do not cite a sentence that says the evidence does not contain the "
+    'answer. Never write "based on the provided evidence" or similar phrasing.\n'
     "Formatting: write plain prose. The ONLY markup you may use is **bold** for "
     "emphasis, `backticks` for inline code, flags or file names, and lines "
     'beginning with "- " (or "* ") for bullet points. Do not use headings, tables, links, '

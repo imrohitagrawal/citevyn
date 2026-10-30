@@ -547,7 +547,13 @@ class Settings(BaseSettings):
     # shipped chunk, so the model now sees text it never saw, and the same
     # question can produce a DIFFERENT answer (the v5 -> v6 test). Answers
     # cached from cut evidence must not be served for their remaining TTL.
-    answer_policy_version: str = "v8"
+    #
+    # v8 -> v9 (#554): the system prompt now asks for one marker per bracket,
+    # bans citing a "not in the evidence" sentence and the "based on the
+    # provided evidence" phrasing, and grouped markers ("[1, 2]") are split
+    # before validation. The same question can produce a DIFFERENT answer, and
+    # a v8 row can hold a grouped marker the client shows as literal text.
+    answer_policy_version: str = "v9"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 
