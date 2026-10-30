@@ -1012,10 +1012,10 @@ def test_connect_start_404s_for_unknown_or_unconfigured_provider(
 ) -> None:
     """RED if oauth_connect_start stops calling _require_provider.
 
-    Empty-string overrides rather than delenv: a developer's local
-    ``backend/.env`` with real Google keys would otherwise silently
-    re-configure the provider the moment the env var is removed
-    (pydantic-settings falls back to the env file) and turn this into a 302.
+    Empty-string overrides rather than delenv: when ``Settings`` read a
+    developer's local ``backend/.env``, real Google keys there would silently
+    re-configure the provider the moment the env var was removed and turn
+    this into a 302. It reads no file now; the overrides stay explicit.
     """
     _register(oauth_client, "prov@example.com")
     assert _connect_start(oauth_client, "facebook").status_code == 404

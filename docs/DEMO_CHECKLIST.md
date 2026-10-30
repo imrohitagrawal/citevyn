@@ -26,7 +26,7 @@ a checklist that fails on its own first step trains people to skip it.
       users + the catalog. It does **not** start the API or the
       frontend — the next two boxes each need their own process.
       To build the app images instead, that is `make image-smoke`.
-- [ ] API up: `cd backend && uv run uvicorn app.main:app --reload` in
+- [ ] API up: `make api` in
       its own shell, then `curl http://localhost:8000/health` returns
       `{"status":"ok"}`. (There is no `/healthz` route — the endpoints
       are `/health`, `/health/dependencies`, and `/health/index`.)

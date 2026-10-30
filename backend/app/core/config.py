@@ -57,7 +57,12 @@ def _is_weak_secret(value: str, *, default: str) -> bool:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CITEVYN_",
-        env_file=".env",
+        # The app reads the process environment only, as it does on Fly. It used
+        # to read ".env" from whatever folder the command ran in, so the same
+        # checkout gave `make test` and `make migrate` different settings. The
+        # Makefile now loads backend/.env for the development commands
+        # (scripts/with_env.py); see docs/ENVIRONMENT_FILES.md.
+        env_file=None,
         extra="ignore",
         # Required by ``public_client_token``'s ``validation_alias``. Setting a
         # validation alias REPLACES the field name as an input key, so without

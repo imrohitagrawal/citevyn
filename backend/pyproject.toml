@@ -13,6 +13,10 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.14.2",
+    # Imported directly by scripts/with_env.py (the Makefile's env-file loader),
+    # including its parser module; declared rather than borrowed from
+    # pydantic-settings so a change to that package cannot remove it.
+    "python-dotenv>=1.2.2",
     "redis>=8.0.1",
     "sqlalchemy[asyncio]>=2.0.52",
     "uvicorn[standard]>=0.52.3",

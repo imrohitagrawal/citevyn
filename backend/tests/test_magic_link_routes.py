@@ -53,8 +53,8 @@ def magic_app_factory(
 ) -> Generator[Callable[..., Path], None, None]:
     """Build the app against a temp SQLite DB + a temp outbox; returns the outbox dir.
 
-    Env overrides are set with ``setenv`` (never ``delenv``): a local
-    ``backend/.env`` would otherwise feed real values into ``Settings()``.
+    Env overrides are set with ``setenv`` (never ``delenv``): when ``Settings``
+    read a local ``backend/.env``, a removed variable fell back to its real value.
     """
     import app.core.rate_limit as rate_limit
 

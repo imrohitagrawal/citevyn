@@ -33,8 +33,11 @@ embedding column is added in a later migration.
 Run from the repository root unless noted.
 
 ```bash
-# Apply all migrations (against whatever CITEVYN_DATABASE_URL points to)
-uv run alembic -c db/alembic.ini upgrade head
+# Apply all migrations to DB_URL (default: the compose db), loading backend/.env
+make migrate
+
+# The other alembic commands. These read no env file: set CITEVYN_DATABASE_URL
+# in the shell.
 
 # Roll back the most recent migration
 uv run alembic -c db/alembic.ini downgrade -1
@@ -71,7 +74,7 @@ the top-level `backend/README.md` for the full command sequence.
 `admin`) idempotently. Run after `upgrade head`:
 
 ```bash
-uv run python -m db.seed.seed_users
+make seed    # seed_users, then seed_catalog (ingests the corpus), with backend/.env
 ```
 
 The script is safe to re-run; it skips rows that already exist.

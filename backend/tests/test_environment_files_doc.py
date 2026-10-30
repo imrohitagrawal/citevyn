@@ -2,25 +2,25 @@
 
 WHY THIS FILE EXISTS
 --------------------
-Four local env files are read by different commands (the backend run from
-``backend/``, the Makefile's migrate/seed/demo run from the repo root, Docker
-Compose, Vite), and nothing said which was which: ``.env.example`` told operators
-to copy it to ``.env`` without saying which ``.env``. The guide fixes that; this
-file stops it going stale, and stops anyone pasting a real value into a page of a
-PUBLIC repository.
+Several local env files are read by different commands (the Makefile's
+development commands, Docker Compose, Vite), and nothing used to say which was
+which: ``.env.example`` told operators to copy it to ``.env`` without saying which
+``.env``. The guide fixes that; this file stops it going stale, and stops anyone
+pasting a real value into a page of a PUBLIC repository.
 
 The paths are derived from what the code reads where a config line exists: the
-backend file from ``Settings.model_config["env_file"]`` (read in ``backend/`` and
-at the repo root, because ``uv run --project backend`` keeps the caller's folder),
-Compose's from every ``env_file:`` in ``docker-compose.yml``, and the templates
-from ``git ls-files``. Only Vite's ``.env.local`` is a convention with no config
-line to read.
+backend file from the Makefile's ``DEV_ENV_FILE_DEFAULT`` (``Settings`` reads
+no file; the Makefile loads this one through ``scripts/with_env.py``), Compose's
+from every ``env_file:`` in ``docker-compose.yml``, and the templates from
+``git ls-files``. Only Vite's ``.env.local`` is a convention with no config line
+to read.
 
 Which change turns each test red:
-  * a new ``env_file:`` in compose, a renamed Settings env file, or a new
-    ``*.env.example``, with no table row in the guide that starts with it;
-  * a ``.gitignore`` change that stops ignoring one of the live files, or one of
-    the backup-style names (``.env~``, ``.env-old``, ``.envrc``);
+  * a new ``env_file:`` in compose, a new ``DEV_ENV_FILE_DEFAULT`` in the Makefile,
+    or a new ``*.env.example``, with no table row in the guide that starts with it;
+  * a ``.gitignore`` change that stops ignoring one of the live files, one of the
+    backup-style names (``.env~``, ``.env-old``, ``.envrc``), or the retired root
+    ``.env``;
   * a ``NAME_KEY=value`` / ``NAME_KEY: "value"`` assignment, or a URL carrying a
     password, pasted into the guide.
 """
@@ -35,11 +35,10 @@ from typing import Any
 import pytest
 import yaml
 
-from app.core.config import Settings
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GUIDE = _REPO_ROOT / "docs" / "ENVIRONMENT_FILES.md"
 _COMPOSE = _REPO_ROOT / "infra" / "docker" / "docker-compose.yml"
+_MAKEFILE = _REPO_ROOT / "Makefile"
 
 # KEY / SECRET / TOKEN / PASSWORD given a value with ``=`` or ``:``, quoted or
 # not. Not flagged: nothing after it, an ``<angle placeholder>``, a ``$VAR``
@@ -50,8 +49,10 @@ _SECRET_ASSIGNMENT = re.compile(
 # scheme://user:password@host
 _URL_CREDENTIAL = re.compile(r"://[^/\s:@]+:[^@\s/]+@")
 
-# Names a backup or editor leaves behind. Each must be ignored like the real file.
-_BACKUP_STYLE = ("backend/.env~", "backend/.env-old", "infra/docker/.env.bak", ".envrc")
+# Names a backup or editor leaves behind, and the repo-root ``.env`` that
+# ``make migrate``/``seed``/``demo`` used to read (retired, but an old checkout
+# may still hold one). Each must be ignored like a live file.
+_BACKUP_STYLE = ("backend/.env~", "backend/.env-old", "infra/docker/.env.bak", ".envrc", ".env")
 
 
 def _compose_env_files() -> set[str]:
@@ -66,9 +67,17 @@ def _compose_env_files() -> set[str]:
     return found
 
 
+def _dev_env_file() -> str:
+    """The Makefile's ``DEV_ENV_FILE_DEFAULT := <path>``: what the development commands load."""
+    found = re.findall(
+        r"^DEV_ENV_FILE_DEFAULT\s*:=\s*(\S+)\s*$", _MAKEFILE.read_text(encoding="utf-8"), re.M
+    )
+    assert len(found) == 1, f"expected one `DEV_ENV_FILE_DEFAULT :=` line in the Makefile: {found}"
+    return found[0]
+
+
 def _live_env_files() -> set[str]:
-    name = str(Settings.model_config.get("env_file"))
-    return {f"backend/{name}", name, "frontend/.env.local", *_compose_env_files()}
+    return {_dev_env_file(), "frontend/.env.local", *_compose_env_files()}
 
 
 def _templates() -> set[str]:
@@ -106,7 +115,7 @@ def _table_rows() -> set[str]:
 def test_the_derivations_find_the_files_at_all() -> None:
     # Partner to every test below: an empty set would make each of them vacuous.
     assert _compose_env_files() == {"infra/docker/.env"}
-    assert {"backend/.env", ".env", "frontend/.env.local"} <= _live_env_files()
+    assert {"backend/.env", "frontend/.env.local"} <= _live_env_files()
     assert {
         ".env.example",
         "frontend/.env.example",

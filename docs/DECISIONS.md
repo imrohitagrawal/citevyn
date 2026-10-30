@@ -28,6 +28,32 @@ nothing, whether the exact-lookup retry runs, or a comparison answer's "the
 documentation I have does not cover X" note; only markers written one per
 bracket count, so grounding is judged as before.
 
+### 2026-10-31 — Old git history is kept as it is; new matches are what get fixed
+CiteVyn's history holds matches for the public-content guard's rules (mostly
+session-link trailers in old commit messages; no live credential). The history
+is not rewritten: a rewrite would break signed merges, pull-request diffs and
+every recorded commit id, and could not reach GitHub's read-only pull-request
+refs anyway. The planned scheduled scan (not built yet) will record today's old
+matches as a baseline and alert only on new ones; a match still in a current file is cleaned in normal
+work. History is rewritten only for a credential that cannot be rotated.
+
+### 2026-10-30 — The backend reads no env file; the Makefile loads `backend/.env`
+`Settings` reads only the process environment, as it already does on Fly. It
+used to read `.env` from whatever folder a command ran in, so `make test` read
+`backend/.env` while `make migrate`, `seed` and `demo` read a repo-root `.env`
+(the root file is now retired). The development commands load `backend/.env`
+through `scripts/with_env.py`, with the same parser as before and the shell
+winning: `make api`, `worker`, `migrate`, `seed`, `demo`, `ci-smoke`, `eval`,
+`golden`, `golden-smoke`, `test-pg`, and every backend step of `make smoke` and
+`make e2e`. Commands that newly read the file: `migrate`, `seed`, `demo`,
+`ci-smoke` (when the file exists), and the migrate and seed steps of `smoke`
+and `e2e`, whose server step read it already (seeding now uses the embedder
+the file names, and the seed prints that name first). `make test` and coverage load no file, as in
+CI. `make demo-frontend` keeps reading its token from `infra/docker/.env`: the
+plan to move it assumed the local backend served that bundle, but its real
+user is the compose release check (`deploy_verify.sh`). Details:
+`docs/ENVIRONMENT_FILES.md`.
+
 ### 2026-10-30 — The query embedder is checked every 3 hours, riding the uptime probe
 `/health/index` makes one tiny embedding call at most once every 3 hours for the
 whole app, so an empty prepaid balance is noticed with no visitors and the
