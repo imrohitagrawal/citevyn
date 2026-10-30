@@ -308,8 +308,9 @@ def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, objec
     the module; ``get_settings`` is cached; and reloading a module pytest is
     holding collected items from is a side effect no assertion needs.
 
-    ``cwd`` is the caller's ``tmp_path``. ``Settings`` declares ``env_file=".env"``
-    and resolves it against the CWD, and running from the repo ROOT was not enough:
+    ``cwd`` is the caller's ``tmp_path``. ``Settings`` used to declare ``env_file=".env"``
+    and resolve it against the CWD (it reads no file now; the tmp cwd is kept as a
+    second guard), and running from the repo ROOT was not enough:
     ``.gitignore`` ignores ``.env`` at any level, so a dev box can legitimately
     carry a repo-root ``.env``, and if it set ``CITEVYN_PG_TEST_URL`` this test
     would red for nobody's mistake. A fresh ``tmp_path`` has no ``.env`` by

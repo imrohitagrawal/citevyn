@@ -87,7 +87,10 @@ def test_each_dev_target_runs_through_the_wrapper(target: str) -> None:
 def test_the_test_suite_loads_no_env_file(target: str) -> None:
     # Red when: `make test`/`coverage` start loading backend/.env (the wrapper) or drop
     # --no-env-file, so local runs stop matching CI, which has no file.
-    lines = [line for line in _dry_run(target).splitlines() if "pytest" in line]
+    # `make -n` also prints the recipe's `@#` comment lines; only commands count.
+    lines = [
+        line for line in _dry_run(target).splitlines() if "uv run" in line and "pytest" in line
+    ]
     assert lines, f"`make -n {target}` runs no pytest"
     for line in lines:
         assert _WRAPPER not in line
@@ -200,10 +203,12 @@ def _smoke_uv_lines() -> list[str]:
 def test_smoke_runs_every_backend_step_through_the_wrapper() -> None:
     # Red when: a smoke.sh step (migrate, either seed, the server) runs `uv run`
     # without the wrapper, bringing back the "seed with one file, serve with another" mix.
+    text = (_REPO / "scripts" / "smoke.sh").read_text(encoding="utf-8")
+    assert 'WITH_ENV="$REPO_ROOT/scripts/with_env.py"' in text
     lines = _smoke_uv_lines()
     assert len(lines) >= 4, lines  # migrate, seed users, seed catalog, uvicorn
     for line in lines:
-        assert "with_env" in line, line
+        assert 'python "$WITH_ENV"' in line, line
         assert "--no-env-file" in line, line
 
 

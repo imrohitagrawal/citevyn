@@ -18,6 +18,22 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — The backend reads no env file; the Makefile loads `backend/.env`
+`Settings` reads only the process environment, as it already does on Fly. It
+used to read `.env` from whatever folder a command ran in, so `make test` read
+`backend/.env` while `make migrate`, `seed` and `demo` read a repo-root `.env`
+(the root file is now retired). The development commands load `backend/.env`
+through `scripts/with_env.py`, with the same parser as before and the shell
+winning: `make api`, `worker`, `migrate`, `seed`, `demo`, `ci-smoke`, `eval`,
+`golden`, `golden-smoke`, `test-pg`, and every backend step of `make smoke` and
+`make e2e`. Commands that newly read the file: `migrate`, `seed`, `demo`,
+`smoke` and `e2e` (seed and smoke now ingest with the embedder it names, and
+the seed prints that name first). `make test` and coverage load no file, as in
+CI. `make demo-frontend` keeps reading its token from `infra/docker/.env`: the
+plan to move it assumed the local backend served that bundle, but its real
+user is the compose release check (`deploy_verify.sh`). Details:
+`docs/ENVIRONMENT_FILES.md`.
+
 ### 2026-10-30 — The query embedder is checked every 3 hours, riding the uptime probe
 `/health/index` makes one tiny embedding call at most once every 3 hours for the
 whole app, so an empty prepaid balance is noticed with no visitors and the

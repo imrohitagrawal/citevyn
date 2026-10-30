@@ -104,7 +104,9 @@ def test_values_match_python_dotenv_and_the_shell_wins(tmp_path: Path) -> None:
     assert seen["UNQUOTED_DOLLAR"] == "ab$cdef"  # uv 0.11.18 gives "ab"
     assert seen["DOUBLE_DOLLAR"] == "ab$cdef"
     assert seen["DOUBLE_BRACE"] == "xsrc-placeholdery"
-    assert seen["SINGLE_BRACE"] == "x${SOURCE_NAME}y"
+    # python-dotenv 1.2.2 expands ${NAME} inside single quotes too, unlike a shell.
+    # Measured, and kept: it is what Settings read before, so values do not change.
+    assert seen["SINGLE_BRACE"] == "xsrc-placeholdery"
     assert seen["EMPTY"] == ""
     assert seen["EXPORTED"] == "exported-placeholder"
     assert seen["INLINE"] == "inline-placeholder"
