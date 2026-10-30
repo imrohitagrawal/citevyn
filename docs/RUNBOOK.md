@@ -286,9 +286,10 @@ Then re-read `/health/index`. To clear it by hand, delete the Redis key
 (timeouts, 429, 5xx) are never recorded here (#576 lists what is not covered).
 
 **The probe says "query embedder: no Redis is configured" or "could not read
-Redis".** Refusals are tracked in Redis, so the check above is off. Production
-always sets `CITEVYN_REDIS_URL`; restore it, or see §3.3 if Redis itself is down
-(the rate limiter will be refusing requests too).
+Redis in time".** Refusals are tracked in Redis, so the check above is off.
+Production always sets `CITEVYN_REDIS_URL`; restore it if it is missing. "In
+time" means the read took over 2 s, or failed: check Redis, which the rate
+limiter also depends on (§3.3).
 
 ### 3.5 Caddy won't issue the certificate
 
