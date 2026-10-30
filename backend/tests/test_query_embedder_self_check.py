@@ -533,8 +533,9 @@ async def test_a_hanging_check_is_cut_by_the_backstop(
 async def test_the_route_helper_runs_the_check_before_returning(
     tracker: query_health.QueryEmbedderHealth, monkeypatch
 ) -> None:
-    """Red when: maybe_self_check stops passing settings or the builder
-    through, or defers the check (the probe would read the previous result)."""
+    """Red when: maybe_self_check stops passing the builder through, or defers
+    the check (the probe would read the previous result). Its settings
+    pass-through has its own test below."""
     monkeypatch.setattr(query_health, "current", lambda: tracker)
 
     await query_health.maybe_self_check(
@@ -654,3 +655,41 @@ async def test_an_embedder_without_a_close_method_is_fine(
     await query_health.run_self_check(tracker, settings=_settings(), build=lambda _s: _NoClose())
 
     assert (await tracker.status())["state"] == "ok"
+
+
+async def test_the_route_helper_uses_the_settings_it_is_given(
+    tracker: query_health.QueryEmbedderHealth, monkeypatch
+) -> None:
+    """Red when: maybe_self_check reads the process settings instead of the
+    ones passed in (interval 0 would then not switch the check off)."""
+    monkeypatch.setattr(query_health, "current", lambda: tracker)
+    embedder = _FakeEmbedder()
+
+    await query_health.maybe_self_check(settings=_settings(0), build=lambda _s: embedder)
+
+    assert embedder.calls == 0
+
+
+def test_the_whole_check_fits_inside_the_probes_curl_limit() -> None:
+    """Red when: the backstop plus the lock claim's ceiling (and the status
+    read after it) can outlast the uptime probe's --max-time on /health/index,
+    which would page a false outage."""
+    import re
+
+    text = WORKFLOW.read_text()
+    limits = [int(m) for m in re.findall(r"--max-time (\d+)[^\n]*\n?[^\n]*/health/index", text)]
+    if not limits:
+        limits = [
+            int(m.group(1))
+            for line in text.splitlines()
+            if "/health/index" in line
+            for m in [re.search(r"--max-time (\d+)", line)]
+            if m
+        ]
+    assert limits, "found no --max-time on the /health/index request"
+    budget = (
+        query_health.STATUS_CEILING_SECONDS  # the lock claim
+        + query_health.SELF_CHECK_BACKSTOP_SECONDS
+        + query_health.STATUS_CEILING_SECONDS  # the status read
+    )
+    assert budget < min(limits) - 10, (budget, limits)
