@@ -132,6 +132,12 @@ def test_without_a_shell_value_the_file_value_is_used(tmp_path: Path) -> None:
         ('PLACEHOLDER_KEY="wpe-unterminated-value', "wpe-unterminated-value"),
         # No name at all.
         ("=wpe-nameless-value", "wpe-nameless-value"),
+        # Names no shell could set: python-dotenv accepts them, the wrapper must not.
+        ("PLACE-HOLDER=wpe-dashed-value", "wpe-dashed-value"),
+        ("1PLACEHOLDER=wpe-digit-value", "wpe-digit-value"),
+        # The same name as line 1 in another case: Settings ignores case, so which
+        # of the two it would read is not obvious. Refused.
+        ("good_before=wpe-case-twin-value", "wpe-case-twin-value"),
     ],
 )
 def test_a_malformed_line_fails_by_line_number_and_prints_no_value(
@@ -179,3 +185,96 @@ def test_the_wrapped_command_exit_code_is_kept(tmp_path: Path) -> None:
     env_file.write_text("A=1\n", encoding="utf-8")
     result = _run([str(env_file), "--", sys.executable, "-c", "raise SystemExit(7)"], _clean_env())
     assert result.returncode == 7
+
+
+_SETTINGS_DB_URL = "from app.core.config import Settings; print(Settings().database_url)"
+
+
+def _settings_env(**extra: str) -> dict[str, str]:
+    env = _clean_env(PYTHONPATH=str(_WRAPPER.parents[1] / "backend"), **extra)
+    for name in [k for k in env if k.upper() == "CITEVYN_DATABASE_URL"]:
+        del env[name]
+    env.update(extra)
+    return env
+
+
+def test_a_name_in_another_case_does_not_beat_the_shell(tmp_path: Path) -> None:
+    # Red when: the shell-wins check compares names case-sensitively. Settings matches
+    # names ignoring case, so a lowercase name from the file would beat the shell's.
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("citevyn_database_url=sqlite:///from-the-file\n", encoding="utf-8")
+    result = _run(
+        [str(env_file), "--", sys.executable, "-c", _SETTINGS_DB_URL],
+        _settings_env(CITEVYN_DATABASE_URL="sqlite:///from-the-shell"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "sqlite:///from-the-shell"
+
+
+def test_a_name_in_another_case_still_loads_when_the_shell_is_silent(tmp_path: Path) -> None:
+    # Partner: the case-blind check must not drop the file's value outright.
+    # Red when: a lowercase name in the file is skipped even with no shell value.
+    env_file = tmp_path / "dev.env"
+    env_file.write_text("citevyn_database_url=sqlite:///from-the-file\n", encoding="utf-8")
+    result = _run([str(env_file), "--", sys.executable, "-c", _SETTINGS_DB_URL], _settings_env())
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "sqlite:///from-the-file"
+
+
+def _unreadable(tmp_path: Path, kind: str) -> Path:
+    path = tmp_path / f"{kind}.env"
+    if kind == "dangling-symlink":
+        path.symlink_to(tmp_path / "nowhere.env")
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("A=1\n", encoding="utf-8")
+        path.chmod(0o000)
+    return path
+
+
+@pytest.mark.parametrize("kind", ["dangling-symlink", "directory", "no-permission"])
+def test_optional_covers_only_a_path_that_does_not_exist(tmp_path: Path, kind: str) -> None:
+    # Red when: `--optional` treats a path that EXISTS but cannot be read (a broken
+    # link, a folder, no permission) as "not found" and runs without the file.
+    if kind == "no-permission" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    path = _unreadable(tmp_path, kind)
+    marker = "the-wrapped-command-ran"
+    result = _run(
+        ["--optional", str(path), "--", sys.executable, "-c", f"print({marker!r})"], _clean_env()
+    )
+    assert result.returncode == 2
+    assert marker not in result.stdout
+    assert str(path) in result.stderr
+    assert "not found" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_byte_order_mark_does_not_glue_to_the_first_name(tmp_path: Path) -> None:
+    # Red when: the file is read as plain utf-8, so a BOM becomes part of the first
+    # name and that setting silently never arrives.
+    env_file = tmp_path / "dev.env"
+    env_file.write_bytes(b"\xef\xbb\xbfEXPORTED=bom-placeholder\n")
+    result = _dump_through_wrapper(env_file, _clean_env())
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["EXPORTED"] == "bom-placeholder"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"A=wpe-bin-value\xff\xfe\n", b"A=wpe-bin-value\x00tail\n"],
+    ids=["not-utf8", "nul-byte"],
+)
+def test_a_file_that_is_not_text_fails_cleanly(tmp_path: Path, content: bytes) -> None:
+    # Red when: undecodable bytes or a NUL crash with a traceback (which can quote the
+    # file), or are loaded anyway.
+    env_file = tmp_path / "dev.env"
+    env_file.write_bytes(content)
+    result = _run([str(env_file), "--", sys.executable, "-c", "print('ran')"], _clean_env())
+    output = result.stdout + result.stderr
+    assert result.returncode == 2
+    assert "UTF-8" in result.stderr
+    assert "Traceback" not in output
+    assert "wpe-bin-value" not in output
+    assert "ran" not in result.stdout

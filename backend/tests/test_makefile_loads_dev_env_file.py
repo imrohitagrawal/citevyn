@@ -105,6 +105,30 @@ def test_an_explicit_file_that_is_missing_stops_make() -> None:
         assert "DEV_ENV_FILE" in result.stderr
 
 
+@pytest.mark.parametrize("target", ["demo", "ci-smoke"])
+def test_a_missing_explicit_file_stops_make_before_docker_starts(target: str) -> None:
+    # Red when: the existence check moves back into the recipes, so `demo`/`ci-smoke`
+    # start docker (db-up) before `migrate` notices the file is missing.
+    result = _make("-n", target, "DEV_ENV_FILE=/nonexistent/wpe.env")
+    assert result.returncode != 0
+    assert "DEV_ENV_FILE" in result.stderr
+    assert "docker" not in result.stdout
+
+
+@pytest.mark.parametrize("how", ["command line", "environment"])
+def test_an_empty_dev_env_file_means_the_optional_default(how: str) -> None:
+    # Red when: `DEV_ENV_FILE=` is treated as an explicit (missing) file, or make and
+    # smoke.sh disagree on it (smoke.sh treats empty as unset).
+    args, env = (["DEV_ENV_FILE="], None) if how == "command line" else ([], {"DEV_ENV_FILE": ""})
+    migrate = _make("-n", "migrate", *args, env=env)
+    assert migrate.returncode == 0, migrate.stderr
+    line = next(line for line in migrate.stdout.splitlines() if _WRAPPER in line)
+    assert f"--optional '{_REPO / 'backend' / '.env'}'" in line
+    smoke = _make("-n", "smoke", *args, env=env)
+    assert smoke.returncode == 0, smoke.stderr
+    assert "DEV_ENV_FILE='' bash scripts/smoke.sh" in smoke.stdout
+
+
 def test_an_explicit_file_is_passed_as_required(tmp_path: Path) -> None:
     # Red when: an explicit file is marked optional (a later deletion would go unnoticed).
     env_file = tmp_path / "chosen.env"
@@ -128,34 +152,53 @@ def test_the_default_file_is_optional_and_absolute(tmp_path: Path) -> None:
     assert f"--optional '{tmp_path.resolve() / 'backend' / '.env'}'" in line
 
 
-def _stand_in_tools(root: Path) -> dict[str, str]:
-    """A sandbox where the real migrate recipe runs without uv, a venv or a database.
+def _stand_in_uv(bin_dir: Path) -> dict[str, str]:
+    """A ``uv`` that drops its own options and runs the rest with this interpreter.
 
-    ``uv`` drops its own options and runs the rest with this interpreter (which has
-    python-dotenv); ``alembic`` prints what it was given. The real wrapper is linked
-    in, because the recipe names it relative to the folder make runs in.
+    Like ``uv run``, it puts the interpreter's folder on PATH, so the commands the
+    wrapper starts (``python``, a console script) resolve the way they would in the
+    backend's environment, and a command that does not exist there fails here. The
+    sandbox's own folder stays first, so its stand-ins win.
     """
-    (root / "scripts").mkdir()
-    (root / "scripts" / "with_env.py").symlink_to(_REPO / _WRAPPER)
-    bin_dir = root / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     uv = bin_dir / "uv"
+    venv_bin = Path(sys.executable).parent
     uv.write_text(
         "#!/bin/sh\n"
         'while [ "$#" -gt 0 ] && [ "$1" != python ]; do shift; done\n'
         "shift\n"
+        f'PATH="{bin_dir}:{venv_bin}:$PATH"; export PATH\n'
         f'exec "{sys.executable}" "$@"\n',
         encoding="utf-8",
     )
-    alembic = bin_dir / "alembic"
+    uv.chmod(0o755)
+    return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+
+def _stand_in_tools(root: Path) -> dict[str, str]:
+    """A sandbox where the real migrate recipe runs without a database.
+
+    ``alembic`` prints the database URL the APP would use (a real ``Settings()``,
+    which matches names ignoring case) and one marker from the file. The real
+    wrapper is linked in, because the recipe names it relative to the folder make
+    runs in.
+    """
+    (root / "scripts").mkdir()
+    (root / "scripts" / "with_env.py").symlink_to(_REPO / _WRAPPER)
+    env = _stand_in_uv(root / "bin")
+    alembic = root / "bin" / "alembic"
+    # A Python script, not a shell one: a shell rebuilds the environment it passes
+    # on, which can reorder or drop names and hide a case clash Settings would see.
     alembic.write_text(
-        "#!/bin/sh\n"
-        'echo "alembic-ran db=$CITEVYN_DATABASE_URL from_file=${WPE_FROM_FILE:-unset}"\n',
+        f"#!{sys.executable}\n"
+        "import os\n"
+        "from app.core.config import Settings\n"
+        "print('alembic-ran db=' + Settings().database_url\n"
+        "      + ' from_file=' + os.environ.get('WPE_FROM_FILE', 'unset'))\n",
         encoding="utf-8",
     )
-    uv.chmod(0o755)
     alembic.chmod(0o755)
-    return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    return {**env, "PYTHONPATH": str(_REPO / "backend")}
 
 
 def test_migrate_runs_with_no_default_file(tmp_path: Path) -> None:
@@ -169,13 +212,15 @@ def test_migrate_runs_with_no_default_file(tmp_path: Path) -> None:
     assert "backend/.env" in result.stderr  # the one-line notice
 
 
-def test_migrate_reads_the_file_and_its_own_db_url_wins(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["CITEVYN_DATABASE_URL", "citevyn_database_url"])
+def test_migrate_reads_the_file_and_its_own_db_url_wins(tmp_path: Path, name: str) -> None:
     # Red when: `make migrate` stops loading backend/.env, or the file's database URL
-    # beats the one the Makefile sets inline (migrations would hit the wrong database).
+    # beats the one the Makefile sets inline (migrations would hit the wrong database),
+    # including when the file spells the name in another case (Settings ignores case).
     env = _stand_in_tools(tmp_path)
     (tmp_path / "backend").mkdir()
     (tmp_path / "backend" / ".env").write_text(
-        "CITEVYN_DATABASE_URL=sqlite:///from-the-file\nWPE_FROM_FILE=loaded\n", encoding="utf-8"
+        f"{name}=sqlite:///from-the-file\nWPE_FROM_FILE=loaded\n", encoding="utf-8"
     )
     result = _make(
         "-f",
@@ -188,6 +233,17 @@ def test_migrate_reads_the_file_and_its_own_db_url_wins(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "db=sqlite:///from-make" in result.stdout
     assert "from_file=loaded" in result.stdout
+
+
+def test_make_worker_resolves_and_runs_the_worker(tmp_path: Path) -> None:
+    # Red when: `make worker` names a command the backend environment does not have
+    # (uv installs no `citevyn-worker` script: the project is not packaged).
+    env_file = tmp_path / "placeholder.env"
+    env_file.write_text("WPE_PLACEHOLDER=1\n", encoding="utf-8")
+    env = _stand_in_uv(tmp_path / "bin")
+    result = _make("worker", "ARGS=list-sources", f"DEV_ENV_FILE={env_file}", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "claude_api" in result.stdout
 
 
 def _smoke_uv_lines() -> list[str]:
@@ -212,16 +268,40 @@ def test_smoke_runs_every_backend_step_through_the_wrapper() -> None:
         assert "--no-env-file" in line, line
 
 
-def test_smoke_stops_on_an_explicit_file_that_is_missing() -> None:
-    # Red when: smoke.sh runs (and starts docker) with an explicitly named file missing.
-    result = subprocess.run(
-        ["bash", str(_REPO / "scripts" / "smoke.sh")],
+def _run_smoke_without_tools(tmp_path: Path, dev_env_file: str) -> subprocess.CompletedProcess[str]:
+    """Run smoke.sh with a PATH holding only ``dirname`` and ``basename``.
+
+    So it can never reach docker, curl or uv, even on a CI runner that has them:
+    the run ends at the env-file check or at the first ``require_cmd``.
+    """
+    bin_dir = tmp_path / "smoke-bin"
+    bin_dir.mkdir()
+    for tool in ("dirname", "basename"):
+        found = shutil.which(tool)
+        assert found, f"{tool} not found"
+        (bin_dir / tool).symlink_to(found)
+    bash = shutil.which("bash")
+    assert bash, "bash not found"
+    return subprocess.run(
+        [bash, str(_REPO / "scripts" / "smoke.sh")],
         capture_output=True,
         text=True,
-        env={**os.environ, "DEV_ENV_FILE": "/nonexistent/wpe.env", "PATH": "/usr/bin:/bin"},
+        env={**os.environ, "DEV_ENV_FILE": dev_env_file, "PATH": str(bin_dir)},
         check=False,
         timeout=60,
     )
+
+
+def test_smoke_stops_on_an_explicit_file_that_is_missing(tmp_path: Path) -> None:
+    # Red when: smoke.sh runs (and starts docker) with an explicitly named file missing.
+    result = _run_smoke_without_tools(tmp_path, "/nonexistent/wpe.env")
     assert result.returncode != 0
     assert "/nonexistent/wpe.env" in result.stderr
     assert "missing required command" not in result.stderr
+
+
+def test_smoke_treats_an_empty_dev_env_file_as_the_default(tmp_path: Path) -> None:
+    # Red when: smoke.sh treats `DEV_ENV_FILE=` as an explicit missing file (make
+    # passes it empty for the default). It must get past the check, to the docker one.
+    result = _run_smoke_without_tools(tmp_path, "")
+    assert "missing required command: docker" in result.stderr
