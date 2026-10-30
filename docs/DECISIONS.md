@@ -18,6 +18,15 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — A review seat that returned nothing is open, and blocks
+A reviewer that was stopped, failed, timed out, was refused or returned nothing
+leaves its seat open. Each package keeps a seat list (every required reviewer,
+with its result or "OPEN" and why); an open seat blocks the merge and "done"
+and is named in the closing status block. It is filled by the same role
+another way, or taken to the owner, who may decide to go ahead with it open.
+The rule lives in the delivery skill's Review section; the shared rules for
+every project carry it separately.
+
 ### 2026-10-30 — The guard is switched on before every repository is clean
 The public-content guard is switched on before every repository is clean. An
 existing finding blocks a change only when that change edits the file that

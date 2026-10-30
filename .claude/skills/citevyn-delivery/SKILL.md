@@ -138,6 +138,20 @@ fixer may ADD a new regression test file.
   root cause, write a smaller plan.
 - Before each merge, run `release-readiness-review` as the ship/no-ship gate.
 
+### Seat list: an empty seat is open
+
+A reviewer that was stopped, failed, timed out, was refused or returned nothing has not found
+nothing: its seat is still open.
+
+- Each package keeps a seat list in its pull request body: one line per required seat (the
+  T0-T3 tier and the lens table above say which), written `<seat>: <reviewer>, <commit>,
+  <result>` or `<seat>: OPEN: <why>`. Update it after every round.
+- An OPEN seat blocks the merge and "done", and the closing status block names it.
+- Fill an open seat with the same role another way: a fresh reviewer of that role, or the Codex
+  role meant for it. Never reword a refused task to get past a safety filter.
+- If it cannot be filled, take it to the owner. The owner may decide to go ahead with the seat
+  open; record that in `docs/DECISIONS.md`, and keep the seat listed as OPEN.
+
 ## Gates
 
 Run them yourself, one at a time, and read exit codes without a pipe. In a worktree: the backend
@@ -148,6 +162,8 @@ changed. The pull request's own required checks on GitHub are the truth; a local
 
 ## Merge, deploy, check production
 
+- Merge only when every required check is green, every reproduced blocker is fixed and no seat
+  on the seat list is OPEN (or the owner has decided to go ahead with it open).
 - One pull request at a time. Squash-merge with an explicit subject and body. Never write a close
   keyword next to an issue number unless that merge is meant to close it; write `Refs #N`
   otherwise. `main` is protected and strict: after each merge, the next branch merges `main` in.
@@ -176,8 +192,9 @@ Cleanup is part of done, not optional.
 ## End of session
 
 1. Closing status block: **Done / Verified myself / Cleanup / Pending / Next action**. Say what is
-   pushed, merged and in production; keep what you ran apart from what an agent reported. If
-   nothing is outstanding, say "nothing pending — safe to close this session".
+   pushed, merged and in production; keep what you ran apart from what an agent reported; name
+   every OPEN review seat. If nothing is outstanding, say "nothing pending — safe to close this
+   session".
 2. Write the next prompt to the owner's private notes, at
    `$PRIVATE_NOTES_DIR/citevyn/NEXT-SESSION-PROMPT.md`, never in this repo (it holds approvals,
    spend limits and plans; CI fails if a prompt file appears at this repo's root). It needs a
