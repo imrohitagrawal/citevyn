@@ -66,45 +66,24 @@ _OWNER_WORDS = re.compile(
 _ABOUT_OWNER = re.compile(
     r"\bowner|\bdecision|\bmessage|\bCHG\b|change[- ]?log", re.IGNORECASE
 )
-#: A sentence that names the private notes routes the words there...
-_PRIVATE_NOTES = re.compile(
-    r"decisions-verbatim|PRIVATE_NOTES_DIR|private (?:notes|register)", re.IGNORECASE
-)
-#: ...as long as the words go TO the private notes, not FROM them, and no other
-#: clause moves them on. A private place right after in/into/to (or from/out of).
-_PRIVATE_PLACE = (
-    r"(?:\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*|private (?:notes|register))"
-)
+#: The ONE allowed sentence about the owner's words: a short lead, the phrase,
+#: at most three more words, then in/into/to a private-notes place, and the
+#: sentence ends. "Record the owner's exact words in `citevyn/decisions-verbatim/`."
+#: Anything else that mentions copying the owner's words is refused: a list of
+#: public places, verbs or objects can never be complete, so the check allows
+#: one shape instead of guessing where the words go.
 _PRIVATE_PATH = re.compile(r"\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*")
-_TO_PRIVATE = re.compile(
-    r"\b(?:in|into|to|under|inside)\s+(?:\S+\s+){0,2}?" + _PRIVATE_PLACE, re.IGNORECASE
+_PRIVATE_PLACE = (
+    r"(?:`?\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*`?"
+    r"|(?:the\s+)?(?:owner['\u2019]s\s+)?private (?:notes|register))"
 )
-_FROM_PRIVATE = re.compile(
-    r"\b(?:from|out of)\s+(?:\S+\s+){0,2}?" + _PRIVATE_PLACE, re.IGNORECASE
-)
-#: A verb that puts the words somewhere. A clause holding the phrase but none of
-#: these only describes the words (a reading-list note next to a private path).
-_MOVE = re.compile(
-    r"\b(?:cop(?:y|ies|ied)|past(?:e|es|ed)|puts?|add(?:s|ed)?|mov(?:e|es|ed)"
-    r"|insert(?:s|ed)?|quot(?:e|es|ed|ing)|cit(?:e|es|ed|ing)|post(?:s|ed)?"
-    r"|publish(?:es|ed)?|record(?:s|ed)?|writ(?:e|es|ten)|keep|carr(?:y|ies))\b",
+_LEAD = r"(?:\d{1,9}[.)]\s+|[-*+]\s+)?(?:(?!(?:into|onto|to|in|on|from)\b)\S+\s+){0,8}?"
+#: A putting verb: a private path next to one is being moved, not just named.
+_SHARE = re.compile(
+    r"\b(?:cop(?:y|ies)|paste|attach|move|post|put|include|add|send|share|publish"
+    r"|upload|quote|cite)\b",
     re.IGNORECASE,
 )
-#: A later clause that moves "them" (the words) on, or opens a second
-#: destination ("... and in the release notes").
-_BACK_REFERENCE = re.compile(
-    _MOVE.pattern + r"\s+(?:them|it|those|these|the (?:words|quotes?|messages?))\b",
-    re.IGNORECASE,
-)
-_ANOTHER_PLACE = re.compile(r"^\s*(?:also\s+)?(?:in|into|to|onto|on)\b", re.IGNORECASE)
-#: A clause that refuses the move, or restates instead of copying.
-_REFUSED_OR_PLAIN = re.compile(
-    r"\b(?:never|not|no|cannot|without)\b|n['\u2019]t\b|\bout of\b"
-    r"|\brestate|\bplainly|\bparaphras|\bsummar|\bown words\b",
-    re.IGNORECASE,
-)
-#: "and"/"then" only between spaces: "review-and-planning" is one word.
-_CLAUSE_BREAK = re.compile(r"[,()]|(?<=\s)(?:and|then)(?=\s)", re.IGNORECASE)
 #: "never quote this message", "do not record the owner's message verbatim",
 #: "you cannot copy ... verbatim", "without quoting it verbatim",
 #: "plainly rather than verbatim": a negation up to four words before the phrase,
@@ -117,6 +96,17 @@ _NEGATED = re.compile(
 )
 #: How far back a negation is looked for; bounds the work on a very long sentence.
 _NEGATION_REACH = 80
+_ALLOWED_SHAPE = re.compile(
+    _LEAD
+    + r"(?:"
+    + _OWNER_WORDS.pattern
+    + r")"
+    + r"(?:\s+(?!(?:in|into|to|on|onto|and|or|plus|then)\b)\S+){0,3}?"
+    + r"\s+(?:in|into|to|under)\s+"
+    + _PRIVATE_PLACE
+    + r"[\s`'\")]*[.;]?\s*$",
+    re.IGNORECASE,
+)
 #: A list item or a heading starts a new block; other lines continue the one above.
 _BLOCK_START = re.compile(r"^\s*(?:[-*+]|\d{1,9}[.)]|#{1,6})\s")
 _SENTENCE_END = re.compile(r"[.;!?](?=\s)")
@@ -180,41 +170,6 @@ def has_process_line(lines: list[str]) -> bool:
     return False
 
 
-def _clauses(sentence: str) -> list[tuple[int, str]]:
-    """(start offset, text) of each clause, split at commas, brackets, "and", "then"."""
-    out, begin = [], 0
-    for m in _CLAUSE_BREAK.finditer(sentence):
-        out.append((begin, sentence[begin : m.start()]))
-        begin = m.end()
-    out.append((begin, sentence[begin:]))
-    return out
-
-
-def _sends_words_public(sentence: str, at: int) -> bool:
-    """False only when the sentence keeps the owner's words in the private notes.
-
-    The phrase at offset ``at`` must sit in a clause that sends the words TO a
-    private place, or only describes them (no putting verb). Taking them FROM a
-    private place is a leak, and so is any other clause that moves them on
-    ("copy them into ...") or opens a second destination ("and in the release
-    notes"), unless that clause refuses it or restates plainly.
-    """
-    if not _PRIVATE_NOTES.search(sentence):
-        return True
-    clauses = _clauses(sentence)
-    own = next(text for begin, text in reversed(clauses) if begin <= at)
-    if _FROM_PRIVATE.search(own) and not _TO_PRIVATE.search(own):
-        return True
-    if not _TO_PRIVATE.search(own) and _MOVE.search(own):
-        return True
-    for _, text in clauses:
-        if text is own or _PRIVATE_NOTES.search(text) or _REFUSED_OR_PLAIN.search(text):
-            continue
-        if _BACK_REFERENCE.search(text) or _ANOTHER_PLACE.search(text):
-            return True
-    return False
-
-
 def owner_words_lines(text: str) -> list[int]:
     """Line numbers where a sentence tells a session to copy the owner's own
     words somewhere other than the private notes.
@@ -222,15 +177,17 @@ def owner_words_lines(text: str) -> list[int]:
     The owner's words live only in the private notes (the delivery skill's
     "Public repository" section); a prompt that says "record verbatim as the
     next CHG row" sends them into a public change log. A sentence is refused when
-    it holds an `_OWNER_WORDS` phrase that is not negated, is about the owner
-    (`_ABOUT_OWNER`), and names no private-notes place (`_PRIVATE_NOTES`).
+    it holds an `_OWNER_WORDS` phrase that is not negated and is about the owner
+    (`_ABOUT_OWNER`), unless the whole sentence is the one allowed shape
+    (`_ALLOWED_SHAPE`): "Record the owner's exact words in
+    `<project>/decisions-verbatim/`." on its own. "Copy the owner's exact words
+    from decisions-verbatim into DECISIONS.md", and every other shape, is refused.
+    A private path that merely contains "verbatim" is not a phrase, unless the
+    sentence also puts it somewhere (`_SHARE`).
 
     Prompts are hard-wrapped, so wrapped lines are joined into one block and judged
     by sentence: where the wrap falls cannot change the result. The raw text is
-    read, fences and comments included, because an agent follows those too. A
-    sentence that names the private notes passes only when the words go TO them
-    (see ``_sends_words_public``): "copy the owner's exact words from
-    decisions-verbatim into DECISIONS.md" is refused. Like the section check,
+    read, fences and comments included, because an agent follows those too. Like the section check,
     this guards against a session's mistake, not against wording chosen to slip
     past it.
     """
@@ -260,10 +217,12 @@ def owner_words_lines(text: str) -> list[int]:
                 private = [
                     (p.start(), p.end()) for p in _PRIVATE_PATH.finditer(sentence)
                 ]
+                allowed = _ALLOWED_SHAPE.match(sentence.strip())
                 for m in _OWNER_WORDS.finditer(sentence):
                     if any(a <= m.start() < b for a, b in private):
-                        continue  # "verbatim" inside a private-notes path
-                    if not _sends_words_public(sentence, m.start()):
+                        if not _SHARE.search(sentence):
+                            continue  # a private path that merely contains "verbatim"
+                    elif allowed:
                         continue
                     if not _NEGATED.search(
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
@@ -287,7 +246,8 @@ def file_problems(path: Path) -> list[str]:
             found.append(f"{path.name} has no visible '## {section}' heading")
     found.extend(
         f"{path.name} line {number}: may tell a session to copy the owner's own words; "
-        "restate the decision plainly, or send the words to the private notes "
+        "restate the decision plainly, or use the one allowed sentence on its own: "
+        "'Record the owner's exact words in <project>/decisions-verbatim/.' "
         "(about test or tool output? say 'exact output' instead)"
         for number in owner_words_lines(text)
     )
