@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,3 +63,47 @@ def test_index_reports_pre_index_status(app_with_session) -> None:
         assert body["active_index"] is None
         assert body["previous_good_index"] is None
         assert body["request_id"].startswith("req_")
+
+
+def test_index_reports_the_query_embedder_with_no_tracker(app_with_session, monkeypatch) -> None:
+    """Red when: the ``query_embedder`` block is dropped from the pre_index
+    shape, or reports "ok" when nothing is tracked (no Redis), which would hide
+    a refusal from the uptime probe."""
+    from app.embeddings import query_health
+
+    monkeypatch.setattr(query_health, "current", lambda: None)
+    with TestClient(app_with_session) as client:
+        body = client.get("/health/index").json()
+
+    assert body["status"] == "pre_index"
+    assert body["query_embedder"] == {"state": "unknown", "refused_since": None}
+
+
+def test_index_reports_a_refused_query_embedder_without_detail(
+    app_with_session, monkeypatch
+) -> None:
+    """Red when: the route stops reading the tracker, or the public block starts
+    carrying the status code, the provider or a nested ``healthy`` key.
+
+    The route is public (#273), so the block says only THAT the provider refuses
+    the account and since when; which refusal it was is in the server log.
+    ``deploy_verify.sh`` greps the whole body for ``"healthy": true``, so a
+    nested ``healthy`` here could let a broken deploy pass that check."""
+    from app.embeddings import query_health
+
+    since = "2026-10-30T12:00:00+00:00"
+
+    class _RefusedTracker:
+        async def status(self) -> dict[str, str | None]:
+            return {"state": "refused", "refused_since": since}
+
+    monkeypatch.setattr(query_health, "current", lambda: _RefusedTracker())
+
+    with TestClient(app_with_session) as client:
+        body = client.get("/health/index").json()
+
+    block = body["query_embedder"]
+    assert block == {"state": "refused", "refused_since": since}
+    text = json.dumps(block).lower()
+    for leak in ("402", "payment", "gemini", "openrouter", "healthy", "balance"):
+        assert leak not in text, leak

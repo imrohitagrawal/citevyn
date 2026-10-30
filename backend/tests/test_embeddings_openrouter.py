@@ -417,3 +417,22 @@ def test_missing_key_raises_eagerly() -> None:
             dim=4,
             timeout_seconds=5.0,
         )
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 429, 503])
+async def test_error_carries_its_http_status_code(status: int) -> None:
+    """Red when: ``status_code`` stops being set on an HTTP error (the query
+    embedder's health tracker reads it; OpenRouter answers 402 when its
+    credits run out)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="body")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code == status

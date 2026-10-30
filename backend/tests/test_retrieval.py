@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -2195,3 +2196,88 @@ async def _demote_every_index(session) -> None:
     for row in (await session.execute(_select(IndexVersion))).scalars().all():
         row.status = IndexStatus.candidate
     await session.flush()
+
+
+@pytest.fixture
+async def embedder_health(monkeypatch) -> Any:
+    """A fakeredis-backed query-embedder health tracker, made current."""
+    import fakeredis.aioredis as fake_aioredis
+
+    from app.embeddings import query_health
+
+    client = fake_aioredis.FakeRedis(decode_responses=True)
+    tracker = query_health.QueryEmbedderHealth(client, "test:query_embedder_refused_since")
+    monkeypatch.setattr(query_health, "current", lambda: tracker)
+    yield tracker
+    await client.aclose()
+
+
+async def test_hybrid_records_an_account_refusal(seeded_session, embedder_health) -> None:
+    """Red when: the vector arm's EmbedderUnavailable handler stops passing the
+    status code to the health tracker. An empty prepaid balance (402) then
+    degrades search to keyword-only with nothing for the uptime probe to see,
+    which is what happened in production on 2026-10-29."""
+    from app.embeddings import EmbedderUnavailable
+
+    class _RefusedVector:
+        async def retrieve(self, question, *, product_area, limit):
+            raise EmbedderUnavailable("Gemini embeddings returned 402", status_code=402)
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _RefusedVector(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+    )
+
+    # Still degrades, never raises: the answer comes from the lexical arms.
+    assert result == ([], VectorDegrade.unavailable)
+    assert (await embedder_health.status())["state"] == "refused"
+
+
+async def test_hybrid_clears_the_refusal_after_a_successful_embedding(
+    seeded_session, embedder_health
+) -> None:
+    """Red when: a successful vector retrieval stops clearing the refusal, so a
+    topped-up balance keeps the probe red until someone deletes the key."""
+    await embedder_health.record_failure(402, now=datetime.now(UTC))
+
+    class _WorkingVector:
+        async def retrieve(self, question, *, product_area, limit):
+            return []
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _WorkingVector(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+    )
+
+    assert result == ([], VectorDegrade.none)
+    assert (await embedder_health.status())["state"] == "ok"
+
+
+async def test_hybrid_skipped_arm_does_not_clear_the_refusal(
+    seeded_session, embedder_health
+) -> None:
+    """Red when: the success path runs for an arm that never embedded (the gate
+    skipped it), clearing a refusal nothing has disproved."""
+    await embedder_health.record_failure(402, now=datetime.now(UTC))
+
+    class _NeverCalled:
+        async def retrieve(self, question, *, product_area, limit):
+            raise AssertionError("the gate skipped this arm")
+
+    h = HybridRetriever(seeded_session, active_index_version="v1")
+    result = await h._safe_vector_retrieve(
+        _NeverCalled(),  # type: ignore[arg-type]
+        "anything",
+        product_area=Domain.claude_api.value,
+        limit=5,
+        arm_degrade=VectorDegrade.mismatch,
+    )
+
+    assert result == ([], VectorDegrade.mismatch)
+    assert (await embedder_health.status())["state"] == "refused"

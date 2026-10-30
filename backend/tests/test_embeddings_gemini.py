@@ -393,3 +393,40 @@ def test_missing_key_raises_eagerly() -> None:
             dim=4,
             timeout_seconds=5.0,
         )
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403, 429, 503])
+async def test_error_carries_its_http_status_code(status: int) -> None:
+    """Red when: ``status_code`` stops being set on an HTTP error. The query
+    embedder's health tracker tells an account refusal (402 = empty prepaid
+    balance) from a transient failure by this field alone; the message stays
+    generic so the body cannot leak (#50)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="body")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code == status
+
+
+async def test_timeout_error_has_no_status_code() -> None:
+    """Red when: a timeout is given an HTTP status it never had (it would be
+    read as an account refusal if it were 401-403)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code is None

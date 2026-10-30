@@ -161,3 +161,51 @@ def test_a_genuine_embedder_mismatch_is_still_reported(tmp_path: Path) -> None:
     result = _run(_arm(status="mismatch", healthy=False, embedder_match=False), tmp_path)
     assert result.returncode == 1
     assert "embedders disagree" in result.stderr
+
+
+def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
+    body = _arm()
+    body["query_embedder"] = {"state": state, "refused_since": since}
+    return body
+
+
+@pytest.mark.parametrize(
+    ("name", "body", "expected_exit", "expected_reason"),
+    [
+        ("embedder ok", _with_embedder("ok"), 0, ""),
+        # The empty-prepaid-balance case: search has silently dropped to
+        # keyword-only while answers keep coming. This is the page.
+        (
+            "embedder refused",
+            _with_embedder("refused", "2026-10-30T12:00:00+00:00"),
+            1,
+            "query embedder: the provider has refused this account since 2026-10-30T12:00:00+00:00",
+        ),
+        # A value this probe does not know is a failure, not a pass (#460: decide
+        # on what is known to be good, not on a list of known-bad values).
+        ("embedder unrecognised state", _with_embedder("degraded"), 1, "unrecognised"),
+        # Redis could not be read, or none is configured: nothing to say about the
+        # embedder, and Redis has its own symptoms. Not a page.
+        ("embedder unknown", _with_embedder("unknown"), 0, ""),
+    ],
+    ids=lambda v: v if isinstance(v, str) and " " in v else "",
+)
+def test_query_embedder_state(
+    tmp_path: Path, name: str, body: dict[str, Any], expected_exit: int, expected_reason: str
+) -> None:
+    """Red when: the probe stops reading ``query_embedder``, pages on "unknown",
+    or passes a state it does not recognise."""
+    result = _run(body, tmp_path)
+    assert result.returncode == expected_exit, (name, result.stdout, result.stderr)
+    if expected_reason:
+        assert expected_reason in result.stderr
+
+
+def test_a_backend_without_the_block_does_not_page(tmp_path: Path) -> None:
+    """Red when: a body from a backend that predates the block fails the probe.
+    The workflow merges before the deploy that adds the field, and a probe in
+    between must not page for that."""
+    body = _arm()
+    assert "query_embedder" not in body
+    result = _run(body, tmp_path)
+    assert result.returncode == 0, result.stderr
