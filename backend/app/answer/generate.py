@@ -39,6 +39,8 @@ _NO_EVIDENCE_SENTINEL = "EVIDENCE: NONE"
 # retrieved (#552: "claude update" sits at character ~900 of the Installation
 # section). It stays a cap so one oversized chunk cannot flood the prompt;
 # test_evidence_reaches_the_model.py checks every shipped chunk fits whole.
+# When a section outgrows it, raise the cap or split the section in the
+# source: never shorten the evidence the model sees.
 _SNIPPET_MAX_CHARS = 1500
 
 
