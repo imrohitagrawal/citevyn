@@ -1,0 +1,60 @@
+# Ledger check: docs/BACKLOG.md must agree with GitHub's issues.
+#
+# Runs scripts/ledger_check.py (its rules are in that file's docstring) on every
+# pull request and once a day, so a row that goes stale when an issue is closed
+# or opened outside a pull request is seen within a day.
+#
+# ADVISORY. This workflow is not one of main's required checks, so a red run
+# never blocks a merge. It still goes red on a violation, so drift is visible.
+#
+# WHAT MAKES IT BLOCKING: 14 consecutive clean scheduled runs on main. Then the
+# owner adds the "ledger check" job to main's required status checks (a branch
+# protection change, which is the owner's action), and this comment and the
+# header of docs/BACKLOG.md are updated in the same change.
+#
+# A failure to reach GitHub exits 2 and turns the run red; it is never a pass.
+
+name: ledger (advisory)
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *" # daily, off the hour
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: ledger-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger:
+    name: ledger check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: BACKLOG.md agrees with GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # On a pull request the ledger is written in its final state, so the
+          # issues this pull request closes are already struck: pass them in.
+          args=()
+          if [ -n "${PR_NUMBER}" ]; then
+            closes="$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json closingIssuesReferences \
+              --jq '.closingIssuesReferences[] | select("\(.repository.owner.login)/\(.repository.name)" == env.REPO) | .number')"
+            if [ -n "${closes}" ]; then
+              # shellcheck disable=SC2206 # one number per line, split on purpose
+              args=(--will-close ${closes})
+            fi
+          fi
+          python3 scripts/ledger_check.py --repo "${REPO}" ${args[@]+"${args[@]}"}

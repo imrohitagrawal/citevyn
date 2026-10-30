@@ -9,6 +9,18 @@ in the same change.
 > This file mirrors GitHub issues; GitHub is the source of truth for status. If a row
 > here and the issue disagree, trust the issue and fix the row.
 
+**The ledger check.** `python3 scripts/ledger_check.py` compares this file with GitHub and
+prints one line per disagreement: R1, an open issue with no un-struck row in an open table;
+R2, an un-struck row in an open table whose issue is closed or is a pull request; R3, a struck
+row (title starting `~~`) or a row under a heading that says "closed" or "resolved", whose
+issue is still open. A row's issue numbers are the `#N` in its first cell, so a note with no
+issue uses `—` there. Pull requests are not issues. The `ledger (advisory)` workflow runs it on
+every pull request and daily. **It is advisory:** it is not a required check and cannot block a
+merge. **What makes it blocking:** 14 consecutive clean daily runs on `main`; then the owner adds
+its `ledger check` job to `main`'s required checks and this paragraph is updated in the same
+change. An issue stays open until its production check, so a row struck before the issue is
+closed reports R3 until it is closed; that is real drift, and one reason it is advisory today.
+
 ## Roadmap milestones
 
 Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §11–12):
