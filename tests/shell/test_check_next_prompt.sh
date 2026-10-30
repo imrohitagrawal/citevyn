@@ -30,6 +30,47 @@
 #                       BOM not stripped (the BOM sits on the **Process:** line)
 #   fails-process-label-then-quote — a block quote accepted as the Process text
 #   fails-line-separator — splitlines() used (it splits on U+2028)
+#   words-fails-*     — owner_words_lines returning nothing; a phrase dropped from
+#                       _OWNER_WORDS (word-for-word, exact-words, own-words,
+#                       quote-this-message, citing-pasted-message, record-verbatim);
+#                       a word dropped from _ABOUT_OWNER (message-alone,
+#                       decision-alone, chg-row); the straight-only apostrophe
+#                       (curly-apostrophe); the raw text swapped for visible_lines
+#                       (inside-fence); wrapped lines judged one by one
+#                       (wrapped-sentence); list items joined into one block
+#                       (next-list-item); the exemption widened from the sentence
+#                       to the block (private-notes-in-another-sentence); the
+#                       negation window crossing "but" or punctuation
+#                       (not-paraphrased-but, negation-across-colon); a heading's
+#                       text exempting the paragraph under it (after-private-heading);
+#                       naming the private notes excusing a clause that sends the
+#                       words to a public place (from-private-into-public,
+#                       private-and-public-together, private-then-public-clause,
+#                       private-source-pr-body, from-private-*, out-of-private-*,
+#                       restate-with-words-from-private, private-and-also-in-*,
+#                       the re-check leaks, shape-*): any sentence about the owner's
+#                       words that is not the one allowed shape passing
+#                       (also lead-*, filler-in-brackets, public-path-named-private,
+#                       anchor-in-a-public-file: a free lead, punctuation-hidden
+#                       filler, or a public path that merely contains the name;
+#                       append-private-file, paste-far-from-the-path: a putting verb
+#                       missing or judged only near the path; docs-segment-later,
+#                       dot-dot-out-of-private: a public path read as private;
+#                       lead-verb-outside-the-set, lead-copy-into-public: the lead
+#                       loosened)
+#   words-passes-*    — the negation rule removed or narrowed (never-quote,
+#                       never-copy-owners-words, rather-than, curly-dont, cannot,
+#                       mustnt, without, nor); the "about
+#                       the owner" condition removed (failure-output,
+#                       other-sentence); ";" no longer ending a sentence
+#                       (semicolon-splits); the private-notes exemption removed or
+#                       narrowed (decisions-verbatim, wrapped-route, private-register);
+#                       the one allowed shape refused (allowed-*, including a
+#                       putting verb or a private path as the place), or a
+#                       private path that merely contains "verbatim" read as an
+#                       instruction (verbatim-inside-a-path)
+#   words-names-*     — the refusal echoing the line, naming no line, or naming
+#                       the block's first line instead of the phrase's line
 
 set -euo pipefail
 
@@ -88,6 +129,26 @@ _without() {
   printf '%s\n' "$GOOD" | grep -vxF -- "$1"
 }
 
+_with_item() {
+  # _with_item <text> -> GOOD with its one Items entry replaced by <text>
+  printf '%s\n' "$GOOD" | python3 -c 'import sys; print(sys.stdin.read().replace("1. Something.", sys.argv[1]), end="")' "$1"
+}
+
+_names_line() {
+  # _names_line <label> <item text> <text on the expected line>: the refusal names
+  # that line's number and never echoes the item's words.
+  local label="$1" item="$2" marker="$3" root line out
+  root="$(mktemp -d "${WORK}/words.XXXXXX")"
+  _with_item "$item" > "${root}/NEXT-SESSION-PROMPT.md"
+  line="$(grep -nF -- "$marker" "${root}/NEXT-SESSION-PROMPT.md" | cut -d: -f1)"
+  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" || true)"
+  if printf '%s' "$out" | grep -q "line ${line}:" && ! printf '%s' "$out" | grep -qF -- "$marker"; then
+    _record "$label" pass pass
+  else
+    _record "$label" pass fail
+  fi
+}
+
 echo "test_check_next_prompt.sh"
 
 _case "passes-good-prompt" pass "$GOOD"
@@ -143,6 +204,112 @@ _case "fails-fence-closed-by-shorter-fence" fail "$(_without '## Approvals')
 \`\`\`
 ## Approvals
 \`\`\`\`"
+
+# The owner's own words go to the private notes only; a prompt that tells a
+# session to copy them anywhere else is refused.
+_case "words-fails-record-verbatim" fail "$(_with_item '1. Record verbatim as the next change-log row.')"
+_case "words-fails-citing-pasted-message" fail "$(_with_item '1. Add the change-log row, citing this pasted message.')"
+_case "words-fails-quote-this-message" fail "$(_with_item '1. Quote this message in the change log.')"
+_case "words-fails-own-words" fail "$(_with_item "1. Update the CHG row above, in the owner's own words.")"
+_case "words-fails-word-for-word" fail "$(_with_item "1. Copy the owner's answer word for word into the PR body.")"
+_case "words-fails-exact-words" fail "$(_with_item "1. Put the owner's exact words in the PR body.")"
+_case "words-fails-curly-apostrophe" fail "$(_with_item "1. Update the row in the owner’s words.")"
+_case "words-fails-message-alone" fail "$(_with_item '1. Copy that message verbatim into the PR body.')"
+_case "words-fails-decision-alone" fail "$(_with_item '1. Copy the decision verbatim into the PR body.')"
+_case "words-fails-chg-row" fail "$(_with_item '1. Add a CHG row verbatim.')"
+_case "words-fails-old-decisions-line" fail "$(_with_item "   - docs/DECISIONS.md: owner decisions in the owner's exact words, newest first.")"
+_case "words-fails-wrapped-sentence" fail "$(_with_item "1. Copy the text verbatim into the
+   public change log.")"
+_case "words-fails-inside-fence" fail "$(_with_item '```
+Record verbatim as the next CHG row.
+```')"
+_case "words-fails-private-notes-in-another-sentence" fail "$(_with_item "1. Put the owner's exact words in the PR body. Keep the private notes tidy.")"
+_case "words-fails-next-list-item" fail "$(_with_item "- Keep the private notes tidy
+- Record the owner's exact words in the PR body")"
+_case "words-fails-not-paraphrased-but" fail "$(_with_item "1. Record the owner's reply in the CHG row, not paraphrased but verbatim.")"
+_case "words-fails-after-private-heading" fail "$(_with_item "## Notes (exact wording kept in the private notes)
+Record the owner's decision verbatim in docs/DECISIONS.md.")"
+# Naming the private notes does not excuse sending the words somewhere public.
+_case "words-fails-from-private-into-public" fail "$(_with_item "1. Copy the owner's exact words from decisions-verbatim into DECISIONS.md.")"
+_case "words-fails-private-and-public-together" fail "$(_with_item "1. Record the owner's exact words in docs/DECISIONS.md and in the private notes.")"
+_case "words-fails-private-then-public-clause" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and copy them into the change log.")"
+_case "words-fails-private-source-pr-body" fail "$(_with_item "1. Quote the owner's message from the private notes in the PR body verbatim.")"
+_case "words-fails-from-private-into-the-pr" fail "$(_with_item "1. Paste the owner's message from decisions-verbatim into the PR verbatim.")"
+_case "words-fails-from-private-into-pull-request" fail "$(_with_item "1. Paste the owner's exact words from the private notes into the pull request verbatim.")"
+_case "words-fails-out-of-private-into-release-notes" fail "$(_with_item "1. Copy the owner's exact words out of decisions-verbatim into the release notes.")"
+_case "words-fails-from-private-into-wiki" fail "$(_with_item "1. Copy the owner's exact words from decisions-verbatim into the wiki.")"
+_case "words-fails-from-private-onto-issues" fail "$(_with_item "1. Put the owner's exact words from decisions-verbatim on the open issues.")"
+_case "words-fails-from-private-despite-plain-word" fail "$(_with_item "1. Copy the owner's exact words from decisions-verbatim into DECISIONS.md instead of a plain summary.")"
+_case "words-fails-restate-with-words-from-private" fail "$(_with_item "1. Restate the decision in DECISIONS.md with the owner's exact words from decisions-verbatim.")"
+_case "words-fails-private-and-also-in-release-notes" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim and in the release notes.")"
+_case "words-fails-second-place-same-clause" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim and the PR body.")"
+_case "words-fails-plus-change-log" fail "$(_with_item "1. Put the owner's exact words into decisions-verbatim, plus the change log.")"
+_case "words-fails-private-to-decisions" fail "$(_with_item "1. Copy the owner's exact words in decisions-verbatim to DECISIONS.md.")"
+_case "words-fails-paste-into-before-phrase" fail "$(_with_item "1. Paste into the PR body the owner's exact words in decisions-verbatim.")"
+_case "words-fails-under-a-private-heading" fail "$(_with_item "1. Paste the owner's message verbatim into DECISIONS.md under the decisions-verbatim heading.")"
+_case "words-fails-copy-the-private-file" fail "$(_with_item "1. Copy decisions-verbatim/2026-10-30.md into the PR body.")"
+_case "words-fails-attach-the-private-file" fail "$(_with_item "1. Attach the owner's decisions-verbatim file to the issue.")"
+_case "words-fails-lead-update-with" fail "$(_with_item "1. Update DECISIONS.md with the owner's exact words in decisions-verbatim.")"
+_case "words-fails-lead-using" fail "$(_with_item "1. Write the CHG row using the owner's exact words in decisions-verbatim/2026-10-30.md.")"
+_case "words-fails-lead-fill-with" fail "$(_with_item "1. Fill the PR body with the owner's exact words in decisions-verbatim.")"
+_case "words-fails-lead-citing" fail "$(_with_item "1. Close issue 552 citing the owner's exact words in decisions-verbatim.")"
+_case "words-fails-lead-inside" fail "$(_with_item "1. Inside the PR body, record the owner's exact words in decisions-verbatim.")"
+_case "words-fails-filler-in-brackets" fail "$(_with_item "1. Record the owner's exact words (in DECISIONS.md too) in decisions-verbatim.")"
+_case "words-fails-public-path-named-private" fail "$(_with_item "1. Record the owner's exact words in docs/decisions-verbatim.md.")"
+_case "words-fails-anchor-in-a-public-file" fail "$(_with_item "1. Record the owner's exact words in docs/DECISIONS.md#decisions-verbatim.")"
+_case "words-fails-append-private-file" fail "$(_with_item "1. Append the owner's decisions-verbatim/2026-10-30.md to DECISIONS.md.")"
+_case "words-fails-lead-verb-outside-the-set" fail "$(_with_item "1. Quote the owner's exact words in decisions-verbatim.")"
+_case "words-fails-lead-copy-into-public" fail "$(_with_item "1. Put into DECISIONS the owner's exact words in decisions-verbatim.")"
+_case "words-fails-paste-far-from-the-path" fail "$(_with_item "1. For the PR body, paste the full text of the owner's decisions-verbatim/2026-10-30.md.")"
+_case "words-fails-docs-segment-later" fail "$(_with_item "1. Record the owner's exact words in citevyn/docs/decisions-verbatim/.")"
+_case "words-fails-dot-dot-out-of-private" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim/../docs/DECISIONS.md.")"
+_case "words-fails-negation-across-colon" fail "$(_with_item "1. No CI run is needed: put the owner's exact words in the PR body.")"
+
+_case "words-passes-never-quote" pass "$(_with_item '1. Restate plainly as the next CHG row; never quote this message.')"
+_case "words-passes-never-copy-owners-words" pass "$(_with_item "1. Never copy the owner's words verbatim into a public file.")"
+_case "words-passes-rather-than" pass "$(_with_item "1. Restate the owner's decision plainly rather than verbatim.")"
+_case "words-passes-curly-dont" pass "$(_with_item '1. Don’t quote this message anywhere.')"
+_case "words-passes-failure-output" pass "$(_with_item '1. Capture the verbatim failure output of each red test.')"
+_case "words-passes-other-sentence" pass "$(_with_item '1. Quote the test output verbatim. The owner decides the merge.')"
+_case "words-passes-semicolon-splits" pass "$(_with_item '1. Update the CHG row; capture the verbatim test output.')"
+_case "words-passes-decisions-verbatim" pass "$(_with_item "1. Record the owner's exact words in citevyn/decisions-verbatim/.")"
+_case "words-passes-wrapped-route" pass "$(_with_item "1. Restate the answers on the issue plainly; record the owner's exact words in
+   \`citevyn/decisions-verbatim/\`.")"
+_case "words-fails-shape-private-and-plain-public" fail "$(_with_item "1. Record the owner's exact words in citevyn/decisions-verbatim/, restate the answers on the issue plainly (public: no costs).")"
+_case "words-fails-shape-private-and-restated-decisions" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim/ and restate them plainly in DECISIONS.md.")"
+_case "words-fails-shape-private-never-public" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, never in DECISIONS.md.")"
+_case "words-fails-shape-private-and-a-pr-name" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim/, and carry PR C into the next prompt.")"
+_case "words-passes-issue-number-before" pass "$(_with_item "1. For issue #552, record the owner's exact words in decisions-verbatim.")"
+_case "words-fails-shape-issue-number-after" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim (see issue #552).")"
+_case "words-fails-shape-and-close-the-issue" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim and close the issue.")"
+_case "words-fails-shape-and-add-a-row" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and add the next CHG row.")"
+_case "words-fails-shape-then-own-words-row" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, then write the CHG row in your own words.")"
+_case "words-fails-shape-answer-review-comments" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and answer the review comments.")"
+_case "words-fails-shape-recorded-in-private" fail "$(_with_item "1. The owner's answer to issue #552 is recorded verbatim in decisions-verbatim.")"
+_case "words-fails-shape-keep-private-put-decision" fail "$(_with_item "1. Keep the owner's exact words in the private notes and put only the decision in DECISIONS.md.")"
+_case "words-fails-shape-do-not-copy-them-public" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and do not copy them into DECISIONS.md.")"
+_case "words-fails-shape-keep-them-out" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim and keep them out of DECISIONS.md.")"
+_case "words-fails-shape-reading-list-note" fail "$(_with_item "3. \`citevyn/decisions-verbatim/2026-10-30.md\` (the owner's exact words this session).")"
+_case "words-passes-verbatim-inside-a-path" pass "$(_with_item "2. This session's record: \`notes/decisions-verbatim/2026-10-29.md\` (the owner's words, evening section).")"
+_case "words-fails-shape-carry-with-them" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim/, and carry PR C into the next prompt with them.")"
+_case "words-fails-shape-and-inside-a-path" fail "$(_with_item "3. Record the answers verbatim in \`design/review-and-planning/decisions-verbatim.md\` and the status in the decision register.")"
+_case "words-passes-allowed-shape" pass "$(_with_item "1. Record the owner's exact words in \`citevyn/decisions-verbatim/\`.")"
+_case "words-passes-allowed-shape-with-lead" pass "$(_with_item "1. For issue 552, record the owner's new answers verbatim in decisions-verbatim/.")"
+_case "words-passes-allowed-shape-then-plain-sentence" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim/. Restate the answers on the issue plainly.")"
+_case "words-passes-allowed-copy-into-path" pass "$(_with_item "1. Copy the owner's exact words into decisions-verbatim/.")"
+_case "words-passes-allowed-add-to-dated-file" pass "$(_with_item "1. Add the owner's exact words to \`citevyn/decisions-verbatim/2026-10-31.md\`.")"
+_case "words-passes-allowed-private-notes-dir" pass "$(_with_item "1. Record the owner's exact words in \$PRIVATE_NOTES_DIR/citevyn/decisions-verbatim/.")"
+_case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
+_case "words-passes-cannot" pass "$(_with_item "1. You cannot copy the owner's words verbatim into a public file.")"
+_case "words-passes-mustnt" pass "$(_with_item "1. Sessions mustn't copy the owner's message verbatim.")"
+_case "words-passes-without" pass "$(_with_item "1. Restate the owner's decision without quoting it verbatim.")"
+_case "words-passes-nor" pass "$(_with_item "1. Neither summarize nor copy the owner's message verbatim.")"
+_case "words-passes-entry-number" pass "$(_with_item "1. Tell the owner their answers of 2026-10-30 (verbatim 44) are recorded.")"
+
+# The refusal names the phrase's line, never the text: the prompt is private.
+_names_line "words-names-line-not-text" '1. Record verbatim as the next change-log row.' 'next change-log row'
+_names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
+   public change log verbatim." 'public change log verbatim'
 
 _root_case "root-passes-without-prompt-files" pass README.md AGENTS.md
 _root_case "root-fails-next-session-prompt" fail README.md NEXT-SESSION-PROMPT.md

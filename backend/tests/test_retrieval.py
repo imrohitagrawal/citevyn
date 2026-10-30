@@ -1688,6 +1688,11 @@ async def test_reranker_passthrough() -> None:
             Domain.claude_code.value,
             "@anthropic-ai/claude-code",
         ),
+        # #552: the shipped Installation section answers this, but the fixture had no
+        # update text. Assert the command, not the bare word "update".
+        # Red when: the conftest claude_code fixture chunk loses "claude update", or
+        # scoped keyword retrieval stops returning that chunk for this question.
+        ("How do I update Claude Code?", Domain.claude_code.value, "claude update"),
     ],
 )
 async def test_source_named_question_word_returns_evidence_hermetically(

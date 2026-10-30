@@ -140,6 +140,10 @@ _CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
         # is answerable on the HERMETIC path (exact + keyword; the vector arm is off
         # on SQLite), the same way #87 enriched the codex/gemini fixtures. Without
         # this the hermetic run cannot see a shipped-corpus regression (#162).
+        # The last two sentences are copied verbatim from that Installation section
+        # so "How do I update Claude Code?" is answerable here too (#552). They stay
+        # in this one spec: a second claude_code spec would collide on the key
+        # claude_code#0 without any error.
         "chunk_text": (
             "Claude Code permissions are configured in the project's "
             "settings file. Use the allow/deny lists to gate tools and "
@@ -148,7 +152,11 @@ _CORPUS_FIXTURE_SPECS: list[dict[str, str]] = [
             "| bash' on macOS, Linux or WSL, or from npm with "
             "'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 "
             "or later. Confirm the install with 'claude --version' and diagnose it "
-            "with 'claude doctor'."
+            "with 'claude doctor'. Native installs auto-update in the background by "
+            "default and can also be updated on demand with 'claude update'; set "
+            "DISABLE_AUTOUPDATER=1 to turn that off. Homebrew, WinGet and Linux "
+            "package-manager installs do not auto-update — refresh those with "
+            "'brew upgrade claude-code' or 'winget upgrade Anthropic.ClaudeCode'."
         ),
     },
     {
