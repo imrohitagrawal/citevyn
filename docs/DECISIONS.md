@@ -18,6 +18,25 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — The guard is installed; repositories with old findings are cleaned one by one
+The public-content guard is installed for the owner's user account (a git
+pre-push hook that runs for every repository) and this repository's pull
+request check uses it. It was installed although some of the owner's other
+public repositories still hold old findings: a push to one of them is blocked
+only when it changes a file that holds a finding. Each of those repositories is
+cleaned in its own work, with the owner's approval.
+
+### 2026-10-30 — Archives the guard cannot open are blocked; other binaries are read by their text
+zip, tar, gzip, bzip2 and xz files are read to their last byte, or the check
+blocks. Archives the guard cannot open (7z, rar, zstd, lz4, lzip, Unix
+compress, cabinet, xar) block, so their contents are never published unread. A
+block names the file and says what to do: remove it, commit its contents
+unpacked, repack it as zip, tar.gz or tar.xz, or keep it in a private
+repository. Every other binary file (images, PDFs, videos) is checked through
+its plain text, in runs of 12 or more characters: shorter runs gave false
+blocks on ordinary photos, and text inside a binary's compressed parts is not
+read. Both gaps are written down in the guard's documentation.
+
 ### 2026-10-30 — Text that is already public is no reason to pass the guard
 The public-content guard checks every file a change adds or changes whole, and
 every commit message, name and pull request title and body, with no exemption
