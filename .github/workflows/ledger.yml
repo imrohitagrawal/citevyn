@@ -12,6 +12,12 @@
 # protection change, which is the owner's action), and this comment and the
 # header of docs/BACKLOG.md are updated in the same change.
 #
+# THE TRADE-OFF before making it blocking: a pull request run checks the whole
+# ledger against live GitHub, so an issue closed by hand or newly opened turns
+# every open pull request red until the ledger is updated. And when it becomes
+# blocking, run the checker from the base branch's copy, not the pull request's,
+# so a pull request cannot weaken the check that judges it.
+#
 # A failure to reach GitHub exits 2 and turns the run red; it is never a pass.
 
 name: ledger (advisory)
@@ -19,6 +25,9 @@ name: ledger (advisory)
 on:
   pull_request:
     branches: [main]
+    # `edited` too: the closing issues come from the PR body, which can change
+    # without a push.
+    types: [opened, synchronize, reopened, edited]
   schedule:
     - cron: "17 6 * * *" # daily, off the hour
   workflow_dispatch:

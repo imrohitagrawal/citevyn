@@ -20,6 +20,10 @@ merge. **What makes it blocking:** 14 consecutive clean daily runs on `main`; th
 its `ledger check` job to `main`'s required checks and this paragraph is updated in the same
 change. An issue stays open until its production check, so a row struck before the issue is
 closed reports R3 until it is closed; that is real drift, and one reason it is advisory today.
+The trade-off before making it blocking: a pull request run checks the whole ledger against
+live GitHub, so an issue closed by hand or newly opened turns every open pull request red until
+the ledger is updated. Once blocking, the checker should run from the base branch's copy, not
+the pull request's, so a pull request cannot weaken the check that judges it.
 
 ## Roadmap milestones
 
