@@ -70,19 +70,38 @@ _ABOUT_OWNER = re.compile(
 _PRIVATE_NOTES = re.compile(
     r"decisions-verbatim|PRIVATE_NOTES_DIR|private (?:notes|register)", re.IGNORECASE
 )
-#: ...unless one of its clauses also sends them to a public place.
-_PUBLIC_PLACE = re.compile(
-    r"DECISIONS\.md|\bdocs/|CHANGELOG|change[- ]?log|\bCHG\b"
-    r"|\b(?:PR|pull request) (?:body|title|description)"
-    r"|\bissue\b|\bcomment|commit message|README|public (?:repo|repository|file)",
+#: ...as long as the words go TO the private notes, not FROM them, and no other
+#: clause moves them on. A private place right after in/into/to (or from/out of).
+_PRIVATE_PLACE = (
+    r"(?:\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*|private (?:notes|register))"
+)
+_TO_PRIVATE = re.compile(
+    r"\b(?:in|into|to|under|inside)\s+(?:\S+\s+){0,2}?" + _PRIVATE_PLACE, re.IGNORECASE
+)
+_FROM_PRIVATE = re.compile(
+    r"\b(?:from|out of)\s+(?:\S+\s+){0,2}?" + _PRIVATE_PLACE, re.IGNORECASE
+)
+#: A verb that puts the words somewhere. A clause holding the phrase but none of
+#: these only describes the words (a reading-list note next to a private path).
+_MOVE = re.compile(
+    r"\b(?:cop(?:y|ies|ied)|past(?:e|es|ed)|puts?|add(?:s|ed)?|mov(?:e|es|ed)"
+    r"|insert(?:s|ed)?|quot(?:e|es|ed|ing)|cit(?:e|es|ed|ing)|post(?:s|ed)?"
+    r"|publish(?:es|ed)?|record(?:s|ed)?|writ(?:e|es|ten)|keep|carr(?:y|ies))\b",
     re.IGNORECASE,
 )
-#: A public clause that restates the decision, or refuses the public place, is fine.
-_PLAIN_OR_NEGATED = re.compile(
-    r"\brestate|\bplainly|\bparaphras|\bsummar|^\s*(?:but\s+)?(?:never|not|no)\b",
+#: A later clause that moves "them" (the words) on, or opens a second
+#: destination ("... and in the release notes").
+_BACK_REFERENCE = re.compile(
+    r"\b(?:them|it|those|these|the (?:words|quotes?|messages?))\b", re.IGNORECASE
+)
+_ANOTHER_PLACE = re.compile(r"^\s*(?:also\s+)?(?:in|into|to|onto|on)\b", re.IGNORECASE)
+#: A clause that refuses the move, or restates instead of copying.
+_REFUSED_OR_PLAIN = re.compile(
+    r"\b(?:never|not|no|cannot|without)\b|n['\u2019]t\b|\bout of\b"
+    r"|\brestate|\bplainly|\bparaphras|\bsummar|\bown words\b",
     re.IGNORECASE,
 )
-_CLAUSE = re.compile(r"[,()]|\band\b|\bthen\b", re.IGNORECASE)
+_CLAUSE_BREAK = re.compile(r"[,()]|\band\b|\bthen\b", re.IGNORECASE)
 #: "never quote this message", "do not record the owner's message verbatim",
 #: "you cannot copy ... verbatim", "without quoting it verbatim",
 #: "plainly rather than verbatim": a negation up to four words before the phrase,
@@ -158,15 +177,40 @@ def has_process_line(lines: list[str]) -> bool:
     return False
 
 
-def _sends_words_public(sentence: str) -> bool:
-    """True unless the sentence routes the words to the private notes and no
-    clause of it also sends them to a public place."""
+def _clauses(sentence: str) -> list[tuple[int, str]]:
+    """(start offset, text) of each clause, split at commas, brackets, "and", "then"."""
+    out, begin = [], 0
+    for m in _CLAUSE_BREAK.finditer(sentence):
+        out.append((begin, sentence[begin : m.start()]))
+        begin = m.end()
+    out.append((begin, sentence[begin:]))
+    return out
+
+
+def _sends_words_public(sentence: str, at: int) -> bool:
+    """False only when the sentence keeps the owner's words in the private notes.
+
+    The phrase at offset ``at`` must sit in a clause that sends the words TO a
+    private place, or only describes them (no putting verb). Taking them FROM a
+    private place is a leak, and so is any other clause that moves them on
+    ("copy them into ...") or opens a second destination ("and in the release
+    notes"), unless that clause refuses it or restates plainly.
+    """
     if not _PRIVATE_NOTES.search(sentence):
         return True
-    return any(
-        _PUBLIC_PLACE.search(clause) and not _PLAIN_OR_NEGATED.search(clause)
-        for clause in _CLAUSE.split(sentence)
-    )
+    clauses = _clauses(sentence)
+    own = next(text for begin, text in reversed(clauses) if begin <= at)
+    if _FROM_PRIVATE.search(own) and not _TO_PRIVATE.search(own):
+        return True
+    if not _TO_PRIVATE.search(own) and _MOVE.search(own):
+        return True
+    for _, text in clauses:
+        if text is own or _PRIVATE_NOTES.search(text) or _REFUSED_OR_PLAIN.search(text):
+            continue
+        moves_them = _MOVE.search(text) and _BACK_REFERENCE.search(text)
+        if moves_them or _ANOTHER_PLACE.search(text):
+            return True
+    return False
 
 
 def owner_words_lines(text: str) -> list[int]:
@@ -182,9 +226,8 @@ def owner_words_lines(text: str) -> list[int]:
     Prompts are hard-wrapped, so wrapped lines are joined into one block and judged
     by sentence: where the wrap falls cannot change the result. The raw text is
     read, fences and comments included, because an agent follows those too. A
-    sentence that names the private notes passes only when none of its clauses
-    (split at commas, brackets, "and", "then") also names a public place without
-    restating plainly or refusing it: "copy the owner's exact words from
+    sentence that names the private notes passes only when the words go TO them
+    (see ``_sends_words_public``): "copy the owner's exact words from
     decisions-verbatim into DECISIONS.md" is refused. Like the section check,
     this guards against a session's mistake, not against wording chosen to slip
     past it.
@@ -211,8 +254,10 @@ def owner_words_lines(text: str) -> list[int]:
         begin = 0
         for end in [m.end() for m in _SENTENCE_END.finditer(joined)] + [len(joined)]:
             sentence = joined[begin:end]
-            if _ABOUT_OWNER.search(sentence) and _sends_words_public(sentence):
+            if _ABOUT_OWNER.search(sentence):
                 for m in _OWNER_WORDS.finditer(sentence):
+                    if not _sends_words_public(sentence, m.start()):
+                        continue
                     if not _NEGATED.search(
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
                     ):

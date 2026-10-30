@@ -46,7 +46,9 @@
 #                       naming the private notes excusing a clause that sends the
 #                       words to a public place (from-private-into-public,
 #                       private-and-public-together, private-then-public-clause,
-#                       private-source-pr-body)
+#                       private-source-pr-body, from-private-*, out-of-private-*,
+#                       restate-with-words-from-private, private-and-also-in-*):
+#                       the words must go TO the private notes, never FROM them
 #   words-passes-*    — the negation rule removed or narrowed (never-quote,
 #                       never-copy-owners-words, rather-than, curly-dont, cannot,
 #                       mustnt, without, nor); the "about
@@ -58,6 +60,10 @@
 #                       leak (private-and-plain-public, private-and-restated-decisions,
 #                       private-never-public); a PR's name read as its body
 #                       (private-and-a-pr-name);
+#                       a passing mention of a public place, a refused or plain
+#                       follow-on clause, or a reading-list note counted as a leak
+#                       (issue-number-*, and-*, then-own-words-row, recorded-in-private,
+#                       keep-*, do-not-copy-them-public, reading-list-note);
 #                       "verbatim <number>" counted (entry-number)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
@@ -224,6 +230,14 @@ _case "words-fails-from-private-into-public" fail "$(_with_item "1. Copy the own
 _case "words-fails-private-and-public-together" fail "$(_with_item "1. Record the owner's exact words in docs/DECISIONS.md and in the private notes.")"
 _case "words-fails-private-then-public-clause" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and copy them into the change log.")"
 _case "words-fails-private-source-pr-body" fail "$(_with_item "1. Quote the owner's message from the private notes in the PR body verbatim.")"
+_case "words-fails-from-private-into-the-pr" fail "$(_with_item "1. Paste the owner's message from decisions-verbatim into the PR verbatim.")"
+_case "words-fails-from-private-into-pull-request" fail "$(_with_item "1. Paste the owner's exact words from the private notes into the pull request verbatim.")"
+_case "words-fails-out-of-private-into-release-notes" fail "$(_with_item "1. Copy the owner's exact words out of decisions-verbatim into the release notes.")"
+_case "words-fails-from-private-into-wiki" fail "$(_with_item "1. Copy the owner's exact words from decisions-verbatim into the wiki.")"
+_case "words-fails-from-private-onto-issues" fail "$(_with_item "1. Put the owner's exact words from decisions-verbatim on the open issues.")"
+_case "words-fails-from-private-despite-plain-word" fail "$(_with_item "1. Copy the owner's exact words from decisions-verbatim into DECISIONS.md instead of a plain summary.")"
+_case "words-fails-restate-with-words-from-private" fail "$(_with_item "1. Restate the decision in DECISIONS.md with the owner's exact words from decisions-verbatim.")"
+_case "words-fails-private-and-also-in-release-notes" fail "$(_with_item "1. Record the owner's exact words in decisions-verbatim and in the release notes.")"
 _case "words-fails-negation-across-colon" fail "$(_with_item "1. No CI run is needed: put the owner's exact words in the PR body.")"
 
 _case "words-passes-never-quote" pass "$(_with_item '1. Restate plainly as the next CHG row; never quote this message.')"
@@ -240,6 +254,17 @@ _case "words-passes-private-and-plain-public" pass "$(_with_item "1. Record the 
 _case "words-passes-private-and-restated-decisions" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim/ and restate them plainly in DECISIONS.md.")"
 _case "words-passes-private-never-public" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, never in DECISIONS.md.")"
 _case "words-passes-private-and-a-pr-name" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim/, and carry PR C into the next prompt.")"
+_case "words-passes-issue-number-before" pass "$(_with_item "1. For issue #552, record the owner's exact words in decisions-verbatim.")"
+_case "words-passes-issue-number-after" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim (see issue #552).")"
+_case "words-passes-and-close-the-issue" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim and close the issue.")"
+_case "words-passes-and-add-a-row" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and add the next CHG row.")"
+_case "words-passes-then-own-words-row" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, then write the CHG row in your own words.")"
+_case "words-passes-answer-review-comments" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and answer the review comments.")"
+_case "words-passes-recorded-in-private" pass "$(_with_item "1. The owner's answer to issue #552 is recorded verbatim in decisions-verbatim.")"
+_case "words-passes-keep-private-put-decision" pass "$(_with_item "1. Keep the owner's exact words in the private notes and put only the decision in DECISIONS.md.")"
+_case "words-passes-do-not-copy-them-public" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and do not copy them into DECISIONS.md.")"
+_case "words-passes-keep-them-out" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim and keep them out of DECISIONS.md.")"
+_case "words-passes-reading-list-note" pass "$(_with_item "3. \`citevyn/decisions-verbatim/2026-10-30.md\` (the owner's exact words this session).")"
 _case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
 _case "words-passes-cannot" pass "$(_with_item "1. You cannot copy the owner's words verbatim into a public file.")"
 _case "words-passes-mustnt" pass "$(_with_item "1. Sessions mustn't copy the owner's message verbatim.")"
