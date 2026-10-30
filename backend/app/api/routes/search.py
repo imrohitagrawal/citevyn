@@ -188,6 +188,10 @@ async def health_index(
     # a revoked key): search then silently drops to keyword-only. Reported in
     # every shape, since it does not depend on the index. Public route (#273):
     # the block says THAT and since when, never the status code or provider.
+    # At most once per interval app-wide, check the account with one tiny call
+    # (so a refusal is learned with no visitors, and clears after a top-up),
+    # BEFORE reading the state, so this probe sees the result.
+    await query_health.maybe_self_check()
     query_embedder = await query_health.status()
 
     # Resolve both rows through the SHARED resolver (#264) so this route names

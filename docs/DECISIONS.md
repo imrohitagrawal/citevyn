@@ -18,6 +18,20 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — The query embedder is checked every 3 hours, riding the uptime probe
+`/health/index` makes one tiny embedding call at most once every 3 hours for the
+whole app, so an empty prepaid balance is noticed with no visitors and the
+alert clears by itself after a top-up. It only rides the uptime probe's
+existing request and never schedules its own wake-up, so the scale-to-zero
+machine is not kept up longer. The interval is a setting (0 turns it off).
+
+### 2026-10-30 — The uptime workflow keeps itself enabled; a dead-man's switch comes later
+GitHub disables scheduled workflows in a public repository after 60 days with
+no activity, which would stop the uptime alerts silently. The workflow
+re-enables itself through the API on every scheduled run. Later, the probe
+will also ping an outside dead-man's switch that emails when the pings stop;
+setting up that account is the owner's step.
+
 ### 2026-10-30 — Paid model calls are for final validation only
 Code changes are built and tested without paid model calls: stub providers,
 the free retrieval eval, and recorded evidence. Paid calls are kept for the
