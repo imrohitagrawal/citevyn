@@ -48,7 +48,9 @@ def test_default_retrieval_and_cache_settings() -> None:
     # ``active``: their ``source_version_hash`` is a constant ``""``, so nothing else
     # in the key evicts them while the database stays ambiguous, and a cache hit
     # returns before the #352 gate — or any of its WARNs — can run.
-    assert settings.answer_policy_version == "v7"
+    # v8 (#552): the evidence cap holds a whole shipped chunk, so the same
+    # question can now get a different answer.
+    assert settings.answer_policy_version == "v8"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 
