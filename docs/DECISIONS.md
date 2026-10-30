@@ -18,6 +18,15 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-31 — Old git history is kept as it is; new matches are what get fixed
+CiteVyn's history holds matches for the public-content guard's rules (mostly
+session-link trailers in old commit messages; no live credential). The history
+is not rewritten: a rewrite would break signed merges, pull-request diffs and
+every recorded commit id, and could not reach GitHub's read-only pull-request
+refs anyway. The scheduled scan records today's old matches as a baseline and
+alerts only on new ones; a match still in a current file is cleaned in normal
+work. History is rewritten only for a credential that cannot be rotated.
+
 ### 2026-10-30 — The backend reads no env file; the Makefile loads `backend/.env`
 `Settings` reads only the process environment, as it already does on Fly. It
 used to read `.env` from whatever folder a command ran in, so `make test` read
