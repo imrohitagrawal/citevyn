@@ -53,7 +53,9 @@
 #                       (also lead-*, filler-in-brackets, public-path-named-private,
 #                       anchor-in-a-public-file: a free lead, punctuation-hidden
 #                       filler, or a public path that merely contains the name;
-#                       append-/pasted-private-file: a putting verb missing)
+#                       append-/pasted-private-file: a putting verb missing;
+#                       lead-verb-outside-the-set, lead-copy-into-public: the lead
+#                       loosened)
 #   words-passes-*    — the negation rule removed or narrowed (never-quote,
 #                       never-copy-owners-words, rather-than, curly-dont, cannot,
 #                       mustnt, without, nor); the "about
@@ -64,7 +66,8 @@
 #                       the one allowed shape refused (allowed-*, including a
 #                       putting verb or a private path as the place), or a
 #                       private path that merely contains "verbatim" read as an
-#                       instruction (verbatim-inside-a-path)
+#                       instruction (verbatim-inside-a-path), or a putting verb far
+#                       from the path counted (verb-far-from-the-path)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
 
@@ -255,6 +258,8 @@ _case "words-fails-public-path-named-private" fail "$(_with_item "1. Record the 
 _case "words-fails-anchor-in-a-public-file" fail "$(_with_item "1. Record the owner's exact words in docs/DECISIONS.md#decisions-verbatim.")"
 _case "words-fails-append-private-file" fail "$(_with_item "1. Append the owner's decisions-verbatim/2026-10-30.md to DECISIONS.md.")"
 _case "words-fails-pasted-private-file" fail "$(_with_item "1. The owner's decisions-verbatim/2026-10-30.md is pasted into the PR body.")"
+_case "words-fails-lead-verb-outside-the-set" fail "$(_with_item "1. Quote the owner's exact words in decisions-verbatim.")"
+_case "words-fails-lead-copy-into-public" fail "$(_with_item "1. Put into DECISIONS the owner's exact words in decisions-verbatim.")"
 _case "words-fails-negation-across-colon" fail "$(_with_item "1. No CI run is needed: put the owner's exact words in the PR body.")"
 
 _case "words-passes-never-quote" pass "$(_with_item '1. Restate plainly as the next CHG row; never quote this message.')"
@@ -291,6 +296,7 @@ _case "words-passes-allowed-shape-then-plain-sentence" pass "$(_with_item "1. Re
 _case "words-passes-allowed-copy-into-path" pass "$(_with_item "1. Copy the owner's exact words into decisions-verbatim/.")"
 _case "words-passes-allowed-add-to-dated-file" pass "$(_with_item "1. Add the owner's exact words to \`citevyn/decisions-verbatim/2026-10-31.md\`.")"
 _case "words-passes-allowed-private-notes-dir" pass "$(_with_item "1. Record the owner's exact words in \$PRIVATE_NOTES_DIR/citevyn/decisions-verbatim/.")"
+_case "words-passes-verb-far-from-the-path" pass "$(_with_item "2. Read \`notes/decisions-verbatim/2026-10-29.md\` (the owner's words, evening section at the end) before anything is published.")"
 _case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
 _case "words-passes-cannot" pass "$(_with_item "1. You cannot copy the owner's words verbatim into a public file.")"
 _case "words-passes-mustnt" pass "$(_with_item "1. Sessions mustn't copy the owner's message verbatim.")"
