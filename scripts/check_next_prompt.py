@@ -66,10 +66,23 @@ _OWNER_WORDS = re.compile(
 _ABOUT_OWNER = re.compile(
     r"\bowner|\bdecision|\bmessage|\bCHG\b|change[- ]?log", re.IGNORECASE
 )
-#: A sentence that names the private notes routes the words there.
+#: A sentence that names the private notes routes the words there...
 _PRIVATE_NOTES = re.compile(
     r"decisions-verbatim|PRIVATE_NOTES_DIR|private (?:notes|register)", re.IGNORECASE
 )
+#: ...unless one of its clauses also sends them to a public place.
+_PUBLIC_PLACE = re.compile(
+    r"DECISIONS\.md|\bdocs/|CHANGELOG|change[- ]?log|\bCHG\b"
+    r"|\b(?:PR|pull request) (?:body|title|description)"
+    r"|\bissue\b|\bcomment|commit message|README|public (?:repo|repository|file)",
+    re.IGNORECASE,
+)
+#: A public clause that restates the decision, or refuses the public place, is fine.
+_PLAIN_OR_NEGATED = re.compile(
+    r"\brestate|\bplainly|\bparaphras|\bsummar|^\s*(?:but\s+)?(?:never|not|no)\b",
+    re.IGNORECASE,
+)
+_CLAUSE = re.compile(r"[,()]|\band\b|\bthen\b", re.IGNORECASE)
 #: "never quote this message", "do not record the owner's message verbatim",
 #: "you cannot copy ... verbatim", "without quoting it verbatim",
 #: "plainly rather than verbatim": a negation up to four words before the phrase,
@@ -145,6 +158,17 @@ def has_process_line(lines: list[str]) -> bool:
     return False
 
 
+def _sends_words_public(sentence: str) -> bool:
+    """True unless the sentence routes the words to the private notes and no
+    clause of it also sends them to a public place."""
+    if not _PRIVATE_NOTES.search(sentence):
+        return True
+    return any(
+        _PUBLIC_PLACE.search(clause) and not _PLAIN_OR_NEGATED.search(clause)
+        for clause in _CLAUSE.split(sentence)
+    )
+
+
 def owner_words_lines(text: str) -> list[int]:
     """Line numbers where a sentence tells a session to copy the owner's own
     words somewhere other than the private notes.
@@ -158,9 +182,12 @@ def owner_words_lines(text: str) -> list[int]:
     Prompts are hard-wrapped, so wrapped lines are joined into one block and judged
     by sentence: where the wrap falls cannot change the result. The raw text is
     read, fences and comments included, because an agent follows those too. A
-    sentence that names the private notes passes even if it also copies words out
-    of them; like the section check, this guards against a session's mistake,
-    not against wording chosen to slip past it.
+    sentence that names the private notes passes only when none of its clauses
+    (split at commas, brackets, "and", "then") also names a public place without
+    restating plainly or refusing it: "copy the owner's exact words from
+    decisions-verbatim into DECISIONS.md" is refused. Like the section check,
+    this guards against a session's mistake, not against wording chosen to slip
+    past it.
     """
     blocks: list[list[tuple[int, str]]] = []
     for number, line in enumerate(text.replace("\r\n", "\n").split("\n"), start=1):
@@ -184,7 +211,7 @@ def owner_words_lines(text: str) -> list[int]:
         begin = 0
         for end in [m.end() for m in _SENTENCE_END.finditer(joined)] + [len(joined)]:
             sentence = joined[begin:end]
-            if _ABOUT_OWNER.search(sentence) and not _PRIVATE_NOTES.search(sentence):
+            if _ABOUT_OWNER.search(sentence) and _sends_words_public(sentence):
                 for m in _OWNER_WORDS.finditer(sentence):
                     if not _NEGATED.search(
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
