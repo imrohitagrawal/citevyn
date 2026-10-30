@@ -75,6 +75,7 @@ _PRIVATE_NOTES = re.compile(
 _PRIVATE_PLACE = (
     r"(?:\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*|private (?:notes|register))"
 )
+_PRIVATE_PATH = re.compile(r"\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*")
 _TO_PRIVATE = re.compile(
     r"\b(?:in|into|to|under|inside)\s+(?:\S+\s+){0,2}?" + _PRIVATE_PLACE, re.IGNORECASE
 )
@@ -92,7 +93,8 @@ _MOVE = re.compile(
 #: A later clause that moves "them" (the words) on, or opens a second
 #: destination ("... and in the release notes").
 _BACK_REFERENCE = re.compile(
-    r"\b(?:them|it|those|these|the (?:words|quotes?|messages?))\b", re.IGNORECASE
+    _MOVE.pattern + r"\s+(?:them|it|those|these|the (?:words|quotes?|messages?))\b",
+    re.IGNORECASE,
 )
 _ANOTHER_PLACE = re.compile(r"^\s*(?:also\s+)?(?:in|into|to|onto|on)\b", re.IGNORECASE)
 #: A clause that refuses the move, or restates instead of copying.
@@ -101,7 +103,8 @@ _REFUSED_OR_PLAIN = re.compile(
     r"|\brestate|\bplainly|\bparaphras|\bsummar|\bown words\b",
     re.IGNORECASE,
 )
-_CLAUSE_BREAK = re.compile(r"[,()]|\band\b|\bthen\b", re.IGNORECASE)
+#: "and"/"then" only between spaces: "review-and-planning" is one word.
+_CLAUSE_BREAK = re.compile(r"[,()]|(?<=\s)(?:and|then)(?=\s)", re.IGNORECASE)
 #: "never quote this message", "do not record the owner's message verbatim",
 #: "you cannot copy ... verbatim", "without quoting it verbatim",
 #: "plainly rather than verbatim": a negation up to four words before the phrase,
@@ -207,8 +210,7 @@ def _sends_words_public(sentence: str, at: int) -> bool:
     for _, text in clauses:
         if text is own or _PRIVATE_NOTES.search(text) or _REFUSED_OR_PLAIN.search(text):
             continue
-        moves_them = _MOVE.search(text) and _BACK_REFERENCE.search(text)
-        if moves_them or _ANOTHER_PLACE.search(text):
+        if _BACK_REFERENCE.search(text) or _ANOTHER_PLACE.search(text):
             return True
     return False
 
@@ -255,7 +257,12 @@ def owner_words_lines(text: str) -> list[int]:
         for end in [m.end() for m in _SENTENCE_END.finditer(joined)] + [len(joined)]:
             sentence = joined[begin:end]
             if _ABOUT_OWNER.search(sentence):
+                private = [
+                    (p.start(), p.end()) for p in _PRIVATE_PATH.finditer(sentence)
+                ]
                 for m in _OWNER_WORDS.finditer(sentence):
+                    if any(a <= m.start() < b for a, b in private):
+                        continue  # "verbatim" inside a private-notes path
                     if not _sends_words_public(sentence, m.start()):
                         continue
                     if not _NEGATED.search(

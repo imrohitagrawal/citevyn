@@ -64,6 +64,11 @@
 #                       follow-on clause, or a reading-list note counted as a leak
 #                       (issue-number-*, and-*, then-own-words-row, recorded-in-private,
 #                       keep-*, do-not-copy-them-public, reading-list-note);
+#                       "verbatim" inside a private path read as a phrase
+#                       (verbatim-inside-a-path); "them" anywhere read as the moved
+#                       object (carry-with-them);
+#                       "and" inside a hyphenated word read as a clause break
+#                       (and-inside-a-path);
 #                       "verbatim <number>" counted (entry-number)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
@@ -265,6 +270,9 @@ _case "words-passes-keep-private-put-decision" pass "$(_with_item "1. Keep the o
 _case "words-passes-do-not-copy-them-public" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim, and do not copy them into DECISIONS.md.")"
 _case "words-passes-keep-them-out" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim and keep them out of DECISIONS.md.")"
 _case "words-passes-reading-list-note" pass "$(_with_item "3. \`citevyn/decisions-verbatim/2026-10-30.md\` (the owner's exact words this session).")"
+_case "words-passes-verbatim-inside-a-path" pass "$(_with_item "2. This session's record: \`notes/decisions-verbatim/2026-10-29.md\` (the owner's words, evening section).")"
+_case "words-passes-carry-with-them" pass "$(_with_item "1. Record the owner's exact words in decisions-verbatim/, and carry PR C into the next prompt with them.")"
+_case "words-passes-and-inside-a-path" pass "$(_with_item "3. Record the answers verbatim in \`design/review-and-planning/decisions-verbatim.md\` and the status in the decision register.")"
 _case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
 _case "words-passes-cannot" pass "$(_with_item "1. You cannot copy the owner's words verbatim into a public file.")"
 _case "words-passes-mustnt" pass "$(_with_item "1. Sessions mustn't copy the owner's message verbatim.")"
