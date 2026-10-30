@@ -55,6 +55,13 @@
 #   r1-says-what-to-change   — R1 without the fix, or without the issue's title
 #   r2-says-what-to-change   — R2 without the fix, or without GitHub's closing date
 #   r3-says-what-to-change   — R3 without the fix
+#   unclosed-fence-is-error / unclosed-comment-is-error — a fence or comment left
+#                              open at the end hiding the rest of the ledger,
+#                              which then passes on what is left
+#   longer-fence-not-closed-by-shorter — a ```` fence closed by a ``` line
+#   title-with-line-separator — gh's output split on more than "\n" (U+2028 in a
+#                              title then breaks the line), or titles not JSON
+#   repeated-number-is-error — a later line for the same number silently winning
 
 set -euo pipefail
 
@@ -320,6 +327,7 @@ _run "${CLEAN}
 ## Notes
 
 <!--
+still inside the comment
 | [#7](${U}/7) | A row inside a comment |
 -->
 " "${CLEAN_GH}
@@ -329,9 +337,33 @@ _expect comment-row-ignored 1 '^R1 #7: '
 _run "${CLEAN/Closed — kept for the record/Closed — kept for the record
 
 <!-- a comment that spans lines
+still inside the comment
 # not a heading
 -->}" "$CLEAN_GH"
 _expect comment-heading-ignored 0 '^ledger_check: 0 violations' '^R[123] '
+
+# A fence or comment left open hides everything after it. Opened just below the
+# closed heading, it hides that section's rows, and what is left would pass.
+_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
+
+\`\`\`}" "$CLEAN_GH"
+_expect unclosed-fence-is-error 2 'ERROR: .*fence.*line [0-9]+' '0 violations|^R[123] '
+
+_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
+
+<!-- never closed}" "$CLEAN_GH"
+_expect unclosed-comment-is-error 2 'ERROR: .*comment.*line [0-9]+' '0 violations|^R[123] '
+
+_run "${CLEAN}
+## Examples
+
+\`\`\`\`
+\`\`\`
+| [#7](${U}/7) | Inside a four-backtick fence |
+\`\`\`\`
+" "${CLEAN_GH}
+7 open false"
+_expect longer-fence-not-closed-by-shorter 1 '^R1 #7: '
 
 # --- references to another repository ------------------------------------------
 _run "${CLEAN}
@@ -345,10 +377,10 @@ _expect other-repo-ref-ignored 0 '^ledger_check: 0 violations' '#7'
 
 # --- each violation says what to change -------------------------------------------
 _run "$CLEAN" "${CLEAN_GH}
-7 open false - Seventh thing"
+7 open false - \"Seventh thing\""
 _expect r1-says-what-to-change 1 '^R1 #7: .*add a row for #7 "Seventh thing" to an open table'
 
-_run "$CLEAN" "1 closed false 2026-09-07 Open thing
+_run "$CLEAN" "1 closed false 2026-09-07 \"Open thing\"
 2 closed false
 3 closed false
 4 closed false
@@ -381,6 +413,17 @@ _expect gh-empty-is-error 2 'ERROR: .*no issues' '0 violations|^R[123] '
 _run "$CLEAN" "${CLEAN_GH}
 <html>rate limited</html>"
 _expect gh-garbage-is-error 2 'ERROR: .*unexpected' '0 violations|^R[123] '
+
+# U+2028 is a line separator to str.splitlines(); in a title it must not split
+# the line. gh's jq writes it raw inside the JSON string, as here.
+LS="$(printf '\342\200\250')"
+_run "$CLEAN" "${CLEAN_GH}
+7 open false - \"Seventh${LS}thing\""
+_expect title-with-line-separator 1 '^R1 #7: .*add a row for #7 "Seventh' 'ERROR'
+
+_run "$CLEAN" "${CLEAN_GH}
+1 closed false 2026-09-07 \"A second line for #1\""
+_expect repeated-number-is-error 2 'ERROR: .*#1.*more than once' '0 violations|^R[123] '
 
 printf '%s' "$CLEAN" > "${WORK}/BACKLOG.md"
 set +e
