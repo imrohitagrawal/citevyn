@@ -32,6 +32,7 @@ Standard library only. Exit 1 on any problem.
 from __future__ import annotations
 
 import argparse
+import bisect
 import re
 from pathlib import Path
 
@@ -63,18 +64,19 @@ _OWNER_WORDS = re.compile(
 )
 #: The sentence must be about the owner's words, not, say, a test's output.
 _ABOUT_OWNER = re.compile(
-    r"\bowner|\bdecision|\bmessage|\bCHG\b|change ?log", re.IGNORECASE
+    r"\bowner|\bdecision|\bmessage|\bCHG\b|change[- ]?log", re.IGNORECASE
 )
 #: A sentence that names the private notes routes the words there.
 _PRIVATE_NOTES = re.compile(
     r"decisions-verbatim|PRIVATE_NOTES_DIR|private (?:notes|register)", re.IGNORECASE
 )
 #: "never quote this message", "do not record the owner's message verbatim",
+#: "you cannot copy ... verbatim", "without quoting it verbatim",
 #: "plainly rather than verbatim": a negation up to four words before the phrase,
 #: with no punctuation and no "but" in between ("not paraphrased but verbatim"
 #: still asks for the words).
 _NEGATED = re.compile(
-    r"(?:\b(?:never|not|no|don['’]t)|\brather than|\binstead of)"
+    r"(?:\b(?:never|not|no|cannot|without|nor)|n['’]t|\brather than|\binstead of)"
     r"(?:\s+(?!but\b)[\w'’]+){0,4}\s+$",
     re.IGNORECASE,
 )
@@ -166,13 +168,18 @@ def owner_words_lines(text: str) -> list[int]:
             blocks.append([])
         elif _BLOCK_START.match(line) or not blocks:
             blocks.append([(number, line)])
+            if line.lstrip().startswith("#"):
+                # A heading is a block of its own: its words must not exempt
+                # the paragraph under it.
+                blocks.append([])
         else:
             blocks[-1].append((number, line))
     flagged: list[int] = []
     for block in blocks:
-        joined, starts = "", []
+        joined, offsets, numbers = "", [], []
         for number, line in block:
-            starts.append((len(joined), number))
+            offsets.append(len(joined))
+            numbers.append(number)
             joined += line.strip() + " "
         begin = 0
         for end in [m.end() for m in _SENTENCE_END.finditer(joined)] + [len(joined)]:
@@ -183,7 +190,7 @@ def owner_words_lines(text: str) -> list[int]:
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
                     ):
                         at = begin + m.start()
-                        flagged.append(max(n for pos, n in starts if pos <= at))
+                        flagged.append(numbers[bisect.bisect_right(offsets, at) - 1])
                         break
             begin = end
     return sorted(set(flagged))

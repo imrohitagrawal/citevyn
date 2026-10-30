@@ -41,9 +41,11 @@
 #                       (next-list-item); the exemption widened from the sentence
 #                       to the block (private-notes-in-another-sentence); the
 #                       negation window crossing "but" or punctuation
-#                       (not-paraphrased-but, negation-across-colon)
+#                       (not-paraphrased-but, negation-across-colon); a heading's
+#                       text exempting the paragraph under it (after-private-heading)
 #   words-passes-*    — the negation rule removed or narrowed (never-quote,
-#                       never-copy-owners-words, rather-than, curly-dont); the "about
+#                       never-copy-owners-words, rather-than, curly-dont, cannot,
+#                       mustnt, without, nor); the "about
 #                       the owner" condition removed (failure-output,
 #                       other-sentence); ";" no longer ending a sentence
 #                       (semicolon-splits); the private-notes exemption removed or
@@ -187,8 +189,8 @@ _case "fails-fence-closed-by-shorter-fence" fail "$(_without '## Approvals')
 
 # The owner's own words go to the private notes only; a prompt that tells a
 # session to copy them anywhere else is refused.
-_case "words-fails-record-verbatim" fail "$(_with_item '1. Record verbatim as the next CHG row.')"
-_case "words-fails-citing-pasted-message" fail "$(_with_item '1. Add the CHG row, citing this pasted message.')"
+_case "words-fails-record-verbatim" fail "$(_with_item '1. Record verbatim as the next change-log row.')"
+_case "words-fails-citing-pasted-message" fail "$(_with_item '1. Add the change-log row, citing this pasted message.')"
 _case "words-fails-quote-this-message" fail "$(_with_item '1. Quote this message in the change log.')"
 _case "words-fails-own-words" fail "$(_with_item "1. Update the CHG row above, in the owner's own words.")"
 _case "words-fails-word-for-word" fail "$(_with_item "1. Copy the owner's answer word for word into the PR body.")"
@@ -207,6 +209,8 @@ _case "words-fails-private-notes-in-another-sentence" fail "$(_with_item "1. Put
 _case "words-fails-next-list-item" fail "$(_with_item "- Keep the private notes tidy
 - Record the owner's exact words in the PR body")"
 _case "words-fails-not-paraphrased-but" fail "$(_with_item "1. Record the owner's reply in the CHG row, not paraphrased but verbatim.")"
+_case "words-fails-after-private-heading" fail "$(_with_item "## Notes (exact wording kept in the private notes)
+Record the owner's decision verbatim in docs/DECISIONS.md.")"
 _case "words-fails-negation-across-colon" fail "$(_with_item "1. No CI run is needed: put the owner's exact words in the PR body.")"
 
 _case "words-passes-never-quote" pass "$(_with_item '1. Restate plainly as the next CHG row; never quote this message.')"
@@ -220,10 +224,14 @@ _case "words-passes-decisions-verbatim" pass "$(_with_item "1. Record the owner'
 _case "words-passes-wrapped-route" pass "$(_with_item "1. Restate the answers on the issue plainly; record the owner's exact words in
    \`citevyn/decisions-verbatim/\`.")"
 _case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
+_case "words-passes-cannot" pass "$(_with_item "1. You cannot copy the owner's words verbatim into a public file.")"
+_case "words-passes-mustnt" pass "$(_with_item "1. Sessions mustn't copy the owner's message verbatim.")"
+_case "words-passes-without" pass "$(_with_item "1. Restate the owner's decision without quoting it verbatim.")"
+_case "words-passes-nor" pass "$(_with_item "1. Neither summarize nor copy the owner's message verbatim.")"
 _case "words-passes-entry-number" pass "$(_with_item "1. Tell the owner their answers of 2026-10-30 (verbatim 44) are recorded.")"
 
 # The refusal names the phrase's line, never the text: the prompt is private.
-_names_line "words-names-line-not-text" '1. Record verbatim as the next CHG row.' 'next CHG row'
+_names_line "words-names-line-not-text" '1. Record verbatim as the next change-log row.' 'next change-log row'
 _names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
    public change log verbatim." 'public change log verbatim'
 
