@@ -66,22 +66,36 @@ _OWNER_WORDS = re.compile(
 _ABOUT_OWNER = re.compile(
     r"\bowner|\bdecision|\bmessage|\bCHG\b|change[- ]?log", re.IGNORECASE
 )
-#: The ONE allowed sentence about the owner's words: a short lead, the phrase,
-#: at most three more words, then in/into/to a private-notes place, and the
-#: sentence ends. "Record the owner's exact words in `citevyn/decisions-verbatim/`."
+#: The ONE allowed sentence about the owner's words, every part from a fixed set:
+#: an optional list marker and "For issue #N,", one verb (record, keep, save,
+#: store, write, add, put, copy), at most four plain words, the phrase, at most
+#: two plain words, then in/into/to/under a private-notes place, and the sentence
+#: ends: "Record the owner's exact words in `citevyn/decisions-verbatim/`."
 #: Anything else that mentions copying the owner's words is refused: a list of
 #: public places, verbs or objects can never be complete, so the check allows
-#: one shape instead of guessing where the words go.
-_PRIVATE_PATH = re.compile(r"\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*")
+#: one shape instead of guessing where the words go. A later sentence that
+#: points back ("Copy them into DECISIONS.md.") is not caught: the check reads
+#: one sentence at a time.
+_PRIVATE_PATH = re.compile(r"decisions-verbatim|PRIVATE_NOTES_DIR")
+#: A private place: a path whose segment is decisions-verbatim (not under docs/,
+#: no #, URL, comma or plus), the private-notes variable, or the words.
 _PRIVATE_PLACE = (
-    r"(?:`?\S*(?:decisions-verbatim|PRIVATE_NOTES_DIR)\S*`?"
+    r"(?:[`'\"]?(?!docs/)(?:\$?PRIVATE_NOTES_DIR/|~/|[\w.$-]+/)*"
+    r"(?:decisions-verbatim(?:\.md)?|\$?PRIVATE_NOTES_DIR)(?:/[\w.-]*)*[`'\"]?"
     r"|(?:the\s+)?(?:owner['\u2019]s\s+)?private (?:notes|register))"
 )
-_LEAD = r"(?:\d{1,9}[.)]\s+|[-*+]\s+)?(?:(?!(?:into|onto|to|in|on|from)\b)\S+\s+){0,8}?"
+_PLAIN_WORD = r"(?!(?:in|into|to|on|onto|from|with|using|citing|quoting|as|and|or|plus|then)\b)[A-Za-z][A-Za-z'\u2019-]*"
+_LEAD = (
+    r"(?:\d{1,9}[.)]\s+|[-*+]\s+)?(?:for\s+(?:issue\s+)?#?\d+,\s+)?"
+    r"(?:record|keep|save|store|write|add|put|copy)\s+(?:" + _PLAIN_WORD + r"\s+){0,4}?"
+)
 #: A putting verb: a private path next to one is being moved, not just named.
 _SHARE = re.compile(
-    r"\b(?:cop(?:y|ies)|paste|attach|move|post|put|include|add|send|share|publish"
-    r"|upload|quote|cite)\b",
+    r"\b(?:cop(?:y|ies|ied)|past(?:e|es|ed)|attach(?:es|ed)?|mov(?:e|es|ed)"
+    r"|post(?:s|ed)?|puts?|includ(?:e|es|ed)|adds?|added|sends?|sent|shar(?:e|es|ed)"
+    r"|publish(?:es|ed)?|upload(?:s|ed)?|quot(?:e|es|ed)|cit(?:e|es|ed)"
+    r"|append(?:s|ed)?|commit(?:s|ted)?|embed(?:s|ded)?|mirror(?:s|ed)?"
+    r"|reproduc(?:e|es|ed)|link(?:s|ed)?)\b",
     re.IGNORECASE,
 )
 #: "never quote this message", "do not record the owner's message verbatim",
@@ -101,7 +115,9 @@ _ALLOWED_SHAPE = re.compile(
     + r"(?:"
     + _OWNER_WORDS.pattern
     + r")"
-    + r"(?:\s+(?!(?:in|into|to|on|onto|and|or|plus|then)\b)\S+){0,3}?"
+    + r"(?:\s+"
+    + _PLAIN_WORD
+    + r"){0,2}?"
     + r"\s+(?:in|into|to|under)\s+"
     + _PRIVATE_PLACE
     + r"[\s`'\")]*[.;]?\s*$",
@@ -170,6 +186,18 @@ def has_process_line(lines: list[str]) -> bool:
     return False
 
 
+def _moves_the_path(sentence: str, at: int) -> bool:
+    """True when a putting verb sits within three words of the private path at
+    ``at`` ("Append the owner's decisions-verbatim/x.md ...", "... x.md is pasted
+    into ..."). A verb elsewhere in a long sentence is not moving this path."""
+    start = sentence.rfind(" ", 0, at) + 1
+    stop = sentence.find(" ", at)
+    stop = len(sentence) if stop == -1 else stop
+    before = sentence[:start].split()[-3:]
+    after = sentence[stop:].split()[:3]
+    return _SHARE.search(" ".join(before + after)) is not None
+
+
 def owner_words_lines(text: str) -> list[int]:
     """Line numbers where a sentence tells a session to copy the owner's own
     words somewhere other than the private notes.
@@ -214,16 +242,14 @@ def owner_words_lines(text: str) -> list[int]:
         for end in [m.end() for m in _SENTENCE_END.finditer(joined)] + [len(joined)]:
             sentence = joined[begin:end]
             if _ABOUT_OWNER.search(sentence):
-                private = [
-                    (p.start(), p.end()) for p in _PRIVATE_PATH.finditer(sentence)
-                ]
-                allowed = _ALLOWED_SHAPE.match(sentence.strip())
+                if _ALLOWED_SHAPE.match(sentence.strip()):
+                    begin = end
+                    continue
+                private = [m.span() for m in _PRIVATE_PATH.finditer(sentence)]
                 for m in _OWNER_WORDS.finditer(sentence):
-                    if any(a <= m.start() < b for a, b in private):
-                        if not _SHARE.search(sentence):
-                            continue  # a private path that merely contains "verbatim"
-                    elif allowed:
-                        continue
+                    in_path = any(a <= m.start() < b for a, b in private)
+                    if in_path and not _moves_the_path(sentence, m.start()):
+                        continue  # a private path that merely contains "verbatim"
                     if not _NEGATED.search(
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
                     ):
