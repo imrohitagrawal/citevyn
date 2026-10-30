@@ -148,11 +148,15 @@ def test_a_redis_url_gives_a_tracker_under_the_configured_prefix(monkeypatch) ->
 
     settings = Settings(redis_url="redis://localhost:6379/0", redis_key_prefix="env1")
     monkeypatch.setattr(query_health, "get_settings", lambda: settings)
+    shared_client = object()
+    monkeypatch.setattr(query_health, "get_redis_client", lambda: shared_client)
 
     tracker = query_health.current()
 
     assert tracker is not None
     assert tracker.key == "env1:query_embedder_refused_since"
+    # The process-wide client, not a new connection per request.
+    assert tracker._client is shared_client
 
 
 async def test_module_helpers_without_redis_are_no_ops_and_report_unknown(monkeypatch) -> None:

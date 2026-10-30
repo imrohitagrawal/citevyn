@@ -2,12 +2,14 @@
 
 ``GET /legal/{slug}`` serves Terms, Privacy, Refunds and No-training.
 
-* Terms, Privacy and Refunds are owner-approved (2026-10-28) and PUBLISHED:
-  served whatever ``CITEVYN_ACCESS_MODEL_ENABLED`` says, with no DRAFT notice
-  and no noindex. A payment provider's site review needs them public.
-* No-training is still a DRAFT (two owner checks, issue #492): 404 while the
-  access model is off; a visible "DRAFT, not in effect" notice and
-  ``X-Robots-Tag: noindex`` while it is on.
+* All four are owner-approved and PUBLISHED (Terms, Privacy and Refunds
+  2026-10-28; No-training 2026-10-30): served whatever
+  ``CITEVYN_ACCESS_MODEL_ENABLED`` says, with no DRAFT notice and no noindex,
+  each with its own "Last updated" date. A payment provider's site review
+  needs them public.
+* A page that is not published is a DRAFT: 404 while the access model is off;
+  a visible "DRAFT, not in effect" notice and ``X-Robots-Tag: noindex`` while
+  it is on. No page is a draft today, so that gate is tested on a probe slug.
 * A published page may not contain an ``[OWNER: ...]`` note.
 
 Each test says which change turns it red.
@@ -22,13 +24,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_module
-from app.api.routes.legal import _PUBLISHED_LEAD, LEGAL_PAGES, PUBLISHED, has_owner_note
+from app.api.routes import legal
+from app.api.routes.legal import LAST_UPDATED, LEGAL_PAGES, PUBLISHED, has_owner_note
 from app.core.config import get_settings
 from app.main import create_app
 
 SLUGS = ["terms", "privacy", "refunds", "no-training"]
-PUBLIC = ["terms", "privacy", "refunds"]
-DRAFTS = ["no-training"]
+PUBLIC = ["terms", "privacy", "refunds", "no-training"]
+#: The pages a payment provider's review reads for the seller's name and contact.
+SELLER_PAGES = ["terms", "privacy", "refunds"]
+#: No page is a draft today. The draft gate is still tested, on this slug: it is
+#: added to LEGAL_PAGES (not to PUBLISHED) for the test only.
+DRAFT_PROBE = "draft-probe"
 _LEGAL_DIR = Path(__file__).resolve().parents[1] / "app" / "legal"
 
 
@@ -43,17 +50,24 @@ def test_the_four_pages_are_the_ones_the_owner_must_approve() -> None:
     assert sorted(LEGAL_PAGES) == sorted(SLUGS)
 
 
-def test_exactly_terms_privacy_and_refunds_are_published() -> None:
+def test_exactly_the_owner_approved_pages_are_published() -> None:
     """Turns red if: a page is published (or unpublished) without the owner."""
     assert sorted(PUBLISHED) == sorted(PUBLIC)
 
 
-@pytest.mark.parametrize("slug", DRAFTS)
-def test_with_the_setting_off_the_drafts_do_not_exist(slug: str) -> None:
+@pytest.fixture
+def draft(monkeypatch: pytest.MonkeyPatch) -> str:
+    """A page that exists but is not published, made from a real page's file."""
+    monkeypatch.setitem(legal.LEGAL_PAGES, DRAFT_PROBE, ("Draft Probe", "no-training.md"))
+    assert DRAFT_PROBE not in PUBLISHED
+    return DRAFT_PROBE
+
+
+def test_with_the_setting_off_a_draft_does_not_exist(draft: str) -> None:
     """The live site must not show unapproved legal text. Turns red if: a draft
     is served while the access model is off."""
     with TestClient(create_app()) as client:
-        assert client.get(f"/legal/{slug}").status_code == 404
+        assert client.get(f"/legal/{draft}").status_code == 404
 
 
 @pytest.mark.parametrize("model_on", [False, True])
@@ -71,7 +85,7 @@ def test_a_published_page_is_served_as_final(
     assert res.headers["content-type"].startswith("text/html")
     assert "x-robots-tag" not in res.headers
     assert "DRAFT" not in res.text and "not in effect" not in res.text
-    assert f"Last updated {LAST_UPDATED}." in res.text
+    assert f"Last updated {LAST_UPDATED[slug]}." in res.text
     title = LEGAL_PAGES[slug][0]
     assert f"<h1>{html.escape(title)}</h1>" in res.text
     assert "<h2" in res.text
@@ -109,16 +123,17 @@ OWN_WORDS = {
     "terms": "CiteVyn is provided &quot;as is&quot;",
     "privacy": "Argon2id",
     "refunds": "refunded in full if you ask within 14 days",
+    "no-training": "to find wrong or missing answers",
 }
 
-#: The date the published text below was last changed, and the SHA-256 of
-#: each published file on that date. Change a published page's text -> update
-#: LAST_UPDATED, these hashes, and ``_PUBLISHED_LEAD`` in legal.py together.
-LAST_UPDATED = "28 October 2026"
+#: The SHA-256 of each published file on the date ``LAST_UPDATED`` in legal.py
+#: gives it. Change a published page's text -> update its hash here and its
+#: date there together.
 TEXT_AS_OF_DATE = {
     "terms": "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
     "privacy": "45f939bc79ff12313927ac9e1ef2f0564ca0f07d073f14b5e78e6cfda7b70125",
     "refunds": "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
+    "no-training": "361af95ce1dfaa75a1b41860301d543811278b1f07cf531255cea10702f256a1",
 }
 
 
@@ -141,14 +156,17 @@ def test_the_last_updated_date_moves_with_the_text(slug: str) -> None:
 
     text = (_LEGAL_DIR / LEGAL_PAGES[slug][1]).read_bytes()
     assert hashlib.sha256(text).hexdigest() == TEXT_AS_OF_DATE[slug], (
-        f"{slug} changed: set LAST_UPDATED to today, update this hash, "
-        "and update _PUBLISHED_LEAD in legal.py"
+        f"{slug} changed: set its LAST_UPDATED date in legal.py to today and update this hash"
     )
-    # A hash bump has to sit beside the date the page shows.
-    assert f"Last updated {LAST_UPDATED}." == _PUBLISHED_LEAD
 
 
-@pytest.mark.parametrize("slug", PUBLIC)
+def test_every_published_page_has_its_own_date() -> None:
+    """Turns red if: a page is published without a "Last updated" date, or a
+    date is kept for a page that is not published."""
+    assert sorted(LAST_UPDATED) == sorted(PUBLISHED)
+
+
+@pytest.mark.parametrize("slug", SELLER_PAGES)
 def test_a_published_page_names_who_runs_the_service(slug: str) -> None:
     """A payment provider's review wants the seller's legal name and a contact.
     Turns red if: the operator line or contact address is dropped."""
@@ -159,10 +177,10 @@ def test_a_published_page_names_who_runs_the_service(slug: str) -> None:
         assert "Rohit Agrawal" in res.text
 
 
-@pytest.mark.parametrize("slug", DRAFTS)
-def test_each_draft_is_marked_draft_and_not_indexed(on: None, slug: str) -> None:
+def test_a_draft_is_marked_draft_and_not_indexed(on: None, draft: str) -> None:
     """Turns red if: the DRAFT notice or the noindex header is dropped, or the
     page renders without its own text."""
+    slug = draft
     with TestClient(create_app()) as client:
         res = client.get(f"/legal/{slug}")
     assert res.status_code == 200

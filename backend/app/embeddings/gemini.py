@@ -228,13 +228,19 @@ class GeminiEmbedder:
 
             if response.status_code in _UNAVAILABLE_STATUSES:
                 self._log_error_body(label, response)
-                last_exc = EmbedderUnavailable(f"Gemini embeddings returned {response.status_code}")
+                last_exc = EmbedderUnavailable(
+                    f"Gemini embeddings returned {response.status_code}",
+                    status_code=response.status_code,
+                )
                 continue
             if response.status_code >= 400:
                 # Non-transient client error (e.g. 401/403 auth, 400 bad request).
                 # Do not retry; surface a generic message.
                 self._log_error_body(label, response)
-                raise EmbedderUnavailable(f"Gemini embeddings returned {response.status_code}")
+                raise EmbedderUnavailable(
+                    f"Gemini embeddings returned {response.status_code}",
+                    status_code=response.status_code,
+                )
 
             try:
                 raw: Any = json.loads(response.content)

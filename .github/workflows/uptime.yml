@@ -116,6 +116,27 @@ jobs:
               # the operator to ADR-0003 instead of to promote_version.
               problems.append("embedder_match is False — query/index embedders disagree")
 
+          # The query embedder (the provider that turns each question into a
+          # search vector) refusing this account: an empty prepaid balance or a
+          # revoked key. Search then silently drops to keyword-only while every
+          # answer still returns 200, so nothing else here notices. Decided on
+          # the known-good value (#460): "ok" passes, and so does "unknown"
+          # (Redis unreadable or not configured: nothing to say, and Redis has
+          # its own symptoms). A backend from before this block has no key and
+          # is not paged on. Detail (which status) is in the app's log.
+          embedder = body.get("query_embedder")
+          if embedder is not None:
+              state = embedder.get("state")
+              print(f"query_embedder={state}")
+              if state == "refused":
+                  problems.append(
+                      "query embedder: the provider has refused this account since "
+                      f"{embedder.get('refused_since')} — search is keyword-only; "
+                      "check the embedding key and the provider account (docs/RUNBOOK.md)"
+                  )
+              elif state not in ("ok", "unknown"):
+                  problems.append(f"query embedder: unrecognised state {state!r}")
+
           if problems:
               print("FAIL: " + "; ".join(problems), file=sys.stderr)
               sys.exit(1)
