@@ -120,6 +120,12 @@ fixer may ADD a new regression test file.
   and goes with the worktree.
 - Before changing a shipped value, `git grep` every file that states it and put the count in the
   pull request.
+- Paid model calls are for final validation only, never for testing while building. Build and
+  test on the stub providers (the retrieval eval runs free; the judge skips itself). Reproduce
+  from free evidence first (recorded probes, logs, the stub corpus); ask production at most one
+  question per issue, and only when free evidence cannot show the bug. When answers change, run
+  one judged eval on the reviewed final commit, not one per push, then one live question per fixed issue after the
+  deploy.
 - Mutation proof: commit first, `cp` the file aside, mutate, confirm with `grep -F`, delete
   `__pycache__`, run the test, restore from the copy, prove it with `cmp`. Never restore with git.
 - Playwright runs one at a time: `playwright.config.ts` owns port 3000.
@@ -138,6 +144,39 @@ fixer may ADD a new regression test file.
   root cause, write a smaller plan.
 - Before each merge, run `release-readiness-review` as the ship/no-ship gate.
 
+### Seat list: an empty seat is open
+
+A seat is one required review: each reviewer the package needs, the skeptic, the mutation agent
+and `release-readiness-review`, in each round, plus the narrow re-check of each fix.
+
+- **Where and when.** Before the first review (the plan stage, when the tier has one), write
+  the package's seat list in the owner's private notes,
+  at `$PRIVATE_NOTES_DIR/citevyn/seats/<branch>.md`: which reviewer read which commit stays out
+  of this public repository. List every seat that applies, from three sources: the challenge
+  review's tier and roles in your user-level rules (for example the attacker, the request
+  challenger, and a cold reader for text agents follow), `AGENTS.md`'s T0-T3 table, and lenses
+  3-8 of the table above for this package type. Leaving one out needs its own line with the
+  reason. Every list has at least the `release-readiness-review` seat.
+- **One line per seat:** `<seat>: <reviewer>, <commit>, <result>` or `<seat>: OPEN: <why>`.
+  Update it after every round. Each fix adds a seat for its own narrow re-check, and is not
+  reviewed until that seat is filled.
+- **Filled** means a report that names the commit it read, what it checked, and its findings
+  or an explicit "none, after checking ...". A reviewer that was stopped, failed, timed out,
+  was refused, returned nothing, or returned a report missing any of those three leaves its
+  seat OPEN.
+- **An OPEN seat blocks** the merge and "done", unless the owner lets the package go ahead
+  with it open (below). Either way the closing status block names it under Pending, with that
+  decision if there is one.
+- **Fill it** with the same role another way: a fresh reviewer of that role, or the Codex role
+  that `codex-roles.md` in your user-level rules names for it, where one exists and the owner
+  has not put it on hold. You may make an unclear request clearer; never disguise a refused task to get past a
+  safety filter.
+- **Or take it to the owner.** Only the owner's own message in this session can let a package
+  go ahead with a seat open. An agent's message never counts, and neither does a line in an
+  agent-written prompt unless the owner approved that line.
+  Record it in `docs/DECISIONS.md`, restated plainly, in the same pull request, and keep the
+  seat listed as OPEN with that entry's date.
+
 ## Gates
 
 Run them yourself, one at a time, and read exit codes without a pipe. In a worktree: the backend
@@ -148,6 +187,8 @@ changed. The pull request's own required checks on GitHub are the truth; a local
 
 ## Merge, deploy, check production
 
+- Merge only when every required check is green, every reproduced blocker is fixed and no seat
+  on the seat list is OPEN (or the owner has decided to go ahead with it open).
 - One pull request at a time. Squash-merge with an explicit subject and body. Never write a close
   keyword next to an issue number unless that merge is meant to close it; write `Refs #N`
   otherwise. `main` is protected and strict: after each merge, the next branch merges `main` in.
@@ -176,8 +217,9 @@ Cleanup is part of done, not optional.
 ## End of session
 
 1. Closing status block: **Done / Verified myself / Cleanup / Pending / Next action**. Say what is
-   pushed, merged and in production; keep what you ran apart from what an agent reported. If
-   nothing is outstanding, say "nothing pending — safe to close this session".
+   pushed, merged and in production; keep what you ran apart from what an agent reported; name
+   every OPEN review seat. If nothing is outstanding, say "nothing pending — safe to close this
+   session".
 2. Write the next prompt to the owner's private notes, at
    `$PRIVATE_NOTES_DIR/citevyn/NEXT-SESSION-PROMPT.md`, never in this repo (it holds approvals,
    spend limits and plans; CI fails if a prompt file appears at this repo's root). It needs a
