@@ -50,7 +50,11 @@ def test_default_retrieval_and_cache_settings() -> None:
     # returns before the #352 gate — or any of its WARNs — can run.
     # v8 (#552): the evidence cap holds a whole shipped chunk, so the same
     # question can now get a different answer.
-    assert settings.answer_policy_version == "v8"
+    # v9 (#554): the system prompt now asks for one marker per bracket and bans
+    # citing a "not in the evidence" sentence, and grouped markers are expanded
+    # before validation, so the same question can again get a different answer.
+    # Red when: answer_policy_version is not bumped from v8 to v9.
+    assert settings.answer_policy_version == "v9"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 
