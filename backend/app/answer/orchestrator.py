@@ -848,8 +848,9 @@ class Orchestrator:
         #
         # Grouped markers ("[1, 2]", #554) are shown but not counted: every
         # index the answer shows gets a card (``cited_indices``), but the
-        # uncited gate, the #208 retry and confidence below use only the
-        # markers written singly (``singly_cited_indices``). A "the docs do not
+        # uncited gate, the #208 retry, the comparison "does not cover" note and
+        # confidence below use only the markers written singly
+        # (``singly_cited_indices``). A "the docs do not
         # list this [1, 2, 3]" sentence is where the model groups everything,
         # so counting groups would serve, at high confidence, exactly the
         # answers #174 refuses.

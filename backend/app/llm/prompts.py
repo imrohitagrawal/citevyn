@@ -15,8 +15,8 @@ Citation contract:
   marker that slips through is split by
   :func:`app.llm.validation.expand_grouped_markers` for display, so each
   index gets its marker and source card, but a grouped index never counts
-  toward confidence or the uncited-answer gate: only markers written singly
-  do.
+  toward confidence, the uncited-answer gate, the exact-lookup retry or a
+  comparison's "does not cover" note: only markers written singly do.
 * A sentence saying the evidence does not contain the answer carries no
   marker (#554). This rule is enforced by THIS PROMPT ONLY; no code can tell
   such a sentence from any other. The answer also never says "based on the

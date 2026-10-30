@@ -20,14 +20,15 @@ Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
 * Grouped markers such as ``[1, 2, 3]`` are SHOWN but never COUNTED (#554).
   :func:`expand_grouped_markers` rewrites a group as ``[1][2][3]``; that is
   the text the client gets, and every index in it gets a source card
-  (``cited_indices``). Confidence, the uncited-answer gate (#174) and the
-  #208 retry checks use ``singly_cited_indices`` instead: the markers the
-  model wrote singly, exactly what ``cited_indices`` was before #554. The
-  reason is measured: a sentence saying the docs do NOT contain the answer is
-  where the model groups everything, so counting groups turned the issue's
-  own low-confidence answer into a high-confidence one, and served a
-  "not explicitly listed [1, 2, 3]" answer that used to be refused as
-  uncited. An index written both singly and in a group counts. The range
+  (``cited_indices``). Confidence, the uncited-answer gate (#174), the
+  #208 retry checks and a comparison answer's "does not cover" note use
+  ``singly_cited_indices`` instead: the markers the model wrote singly,
+  exactly what ``cited_indices`` was before #554. The reason is measured: a
+  sentence saying the docs do NOT contain the answer is where the model
+  groups everything, so counting groups raised the issue's own answer to
+  high confidence, served a "not explicitly listed [1, 2, 3]" answer that
+  used to be refused as uncited, and hid the "does not cover" note for a
+  product cited only inside a group. An index written both singly and in a group counts. The range
   check covers both lists.
 * A group is ASCII digits separated by commas, with spaces or tabs around
   the commas and nowhere else, on one line. Ranges such as ``[1-3]`` are
@@ -374,7 +375,8 @@ class CitationValidationResult(BaseModel):
     ``1 <= n <= len(evidence)``. ``cited_indices`` is every index the answer
     SHOWS once groups are split (these get source cards);
     ``singly_cited_indices`` is the indices the model wrote singly (these
-    drive confidence and the uncited-answer and retry gates, #554). The cited
+    drive confidence, the uncited-answer and retry gates and the comparison
+    "does not cover" note, #554). The cited
     indices need NOT be contiguous; ``uncited_indices`` reports the
     bullets the model skipped. When ``answer_text`` is the no-answer
     refusal, ``valid`` is True with empty citation lists regardless of
