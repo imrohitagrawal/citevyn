@@ -80,7 +80,7 @@ _PRIVATE_PATH = re.compile(r"decisions-verbatim|PRIVATE_NOTES_DIR")
 #: A private place: a path whose segment is decisions-verbatim (not under docs/,
 #: no #, URL, comma or plus), the private-notes variable, or the words.
 _PRIVATE_PLACE = (
-    r"(?:[`'\"]?(?!docs/)(?:\$?PRIVATE_NOTES_DIR/|~/|[\w.$-]+/)*"
+    r"(?:[`'\"]?(?!docs/)(?![^\s`'\"]*(?:/docs/|\.\.|://))(?:\$?PRIVATE_NOTES_DIR/|~/|[\w.$-]+/)*"
     r"(?:decisions-verbatim(?:\.md)?|\$?PRIVATE_NOTES_DIR)(?:/[\w.-]*)*[`'\"]?"
     r"|(?:the\s+)?(?:owner['\u2019]s\s+)?private (?:notes|register))"
 )
@@ -91,11 +91,8 @@ _LEAD = (
 )
 #: A putting verb: a private path next to one is being moved, not just named.
 _SHARE = re.compile(
-    r"\b(?:cop(?:y|ies|ied)|past(?:e|es|ed)|attach(?:es|ed)?|mov(?:e|es|ed)"
-    r"|post(?:s|ed)?|puts?|includ(?:e|es|ed)|adds?|added|sends?|sent|shar(?:e|es|ed)"
-    r"|publish(?:es|ed)?|upload(?:s|ed)?|quot(?:e|es|ed)|cit(?:e|es|ed)"
-    r"|append(?:s|ed)?|commit(?:s|ted)?|embed(?:s|ded)?|mirror(?:s|ed)?"
-    r"|reproduc(?:e|es|ed)|link(?:s|ed)?)\b",
+    r"\b(?:cop(?:y|ies)|paste|attach|move|post|put|include|add|send|share|publish"
+    r"|upload|quote|cite|append)\b",
     re.IGNORECASE,
 )
 #: "never quote this message", "do not record the owner's message verbatim",
@@ -186,18 +183,6 @@ def has_process_line(lines: list[str]) -> bool:
     return False
 
 
-def _moves_the_path(sentence: str, at: int) -> bool:
-    """True when a putting verb sits within three words of the private path at
-    ``at`` ("Append the owner's decisions-verbatim/x.md ...", "... x.md is pasted
-    into ..."). A verb elsewhere in a long sentence is not moving this path."""
-    start = sentence.rfind(" ", 0, at) + 1
-    stop = sentence.find(" ", at)
-    stop = len(sentence) if stop == -1 else stop
-    before = sentence[:start].split()[-3:]
-    after = sentence[stop:].split()[:3]
-    return _SHARE.search(" ".join(before + after)) is not None
-
-
 def owner_words_lines(text: str) -> list[int]:
     """Line numbers where a sentence tells a session to copy the owner's own
     words somewhere other than the private notes.
@@ -246,9 +231,10 @@ def owner_words_lines(text: str) -> list[int]:
                     begin = end
                     continue
                 private = [m.span() for m in _PRIVATE_PATH.finditer(sentence)]
+                shares = _SHARE.search(sentence) is not None
                 for m in _OWNER_WORDS.finditer(sentence):
                     in_path = any(a <= m.start() < b for a, b in private)
-                    if in_path and not _moves_the_path(sentence, m.start()):
+                    if in_path and not shares:
                         continue  # a private path that merely contains "verbatim"
                     if not _NEGATED.search(
                         sentence[max(0, m.start() - _NEGATION_REACH) : m.start()]
