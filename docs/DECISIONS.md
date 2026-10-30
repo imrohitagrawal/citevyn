@@ -18,13 +18,12 @@ asking the owner anything; the answer may already be here.
 
 ---
 
-### 2026-10-30 — The guard is installed; repositories with old findings are cleaned one by one
-The public-content guard is installed for the owner's user account (a git
-pre-push hook that runs for every repository) and this repository's pull
-request check uses it. It was installed although some of the owner's other
-public repositories still hold old findings: a push to one of them is blocked
-only when it changes a file that holds a finding. Each of those repositories is
-cleaned in its own work, with the owner's approval.
+### 2026-10-30 — The guard is switched on before every repository is clean
+The public-content guard is switched on before every repository is clean. An
+existing finding blocks a change only when that change edits the file that
+holds it; new findings, commit messages and pull request text are always
+checked. Existing findings are cleaned in their own approved work. This
+repository's pull request check uses the guard.
 
 ### 2026-10-30 — Archives the guard cannot open are blocked; other binaries are read by their text
 zip, tar, gzip, bzip2 and xz files are read to their last byte, or the check
