@@ -637,3 +637,20 @@ def test_the_keep_enabled_job_runs_only_on_the_schedule() -> None:
     doc = yaml.safe_load(WORKFLOW.read_text())
 
     assert doc["jobs"]["keep-enabled"]["if"] == "github.event_name == 'schedule'"
+
+
+async def test_an_embedder_without_a_close_method_is_fine(
+    tracker: query_health.QueryEmbedderHealth,
+) -> None:
+    """Red when: closing assumes every embedder has ``aclose`` (the stub
+    embedder used in local runs has none, and a success must still clear)."""
+
+    class _NoClose:
+        async def embed(self, text: str) -> list[float]:
+            return [0.0]
+
+    since = await _refused(tracker)
+    assert since
+    await query_health.run_self_check(tracker, settings=_settings(), build=lambda _s: _NoClose())
+
+    assert (await tracker.status())["state"] == "ok"

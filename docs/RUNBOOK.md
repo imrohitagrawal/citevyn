@@ -285,7 +285,8 @@ makes it once per interval for the whole app, and it rides the probe's request,
 so it never wakes the machine). So after the fix the alert clears by itself
 within one interval plus a probe cycle (about 3.5 hours at most by default,
 often sooner). A check that proves nothing (a timeout, a 429, the daily spending
-cap, no free paid-call slot) waits for the next interval; each check that runs
+cap) waits for the next interval; one skipped because every paid-call slot was
+busy takes no lock, so the next probe tries again. Each check that runs
 logs one `query_embedder_self_check` line with its `outcome`
 (`ok`/`refused`/`unsettled`), so a check that never settles shows in `fly logs`. To clear it sooner, ask the
 site one NEW, specific question: a repeated question is answered from the answer
