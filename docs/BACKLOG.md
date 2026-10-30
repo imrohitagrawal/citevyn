@@ -14,7 +14,8 @@ prints one line per disagreement: R1, an open issue with no un-struck row in an 
 R2, an un-struck row in an open table whose issue is closed or is a pull request; R3, a struck
 row (title starting `~~`) or a row under a heading that says "closed" or "resolved", whose
 issue is still open. A row's issue numbers are the `#N` in its first cell, so a note with no
-issue uses `—` there. Pull requests are not issues. The `ledger (advisory)` workflow runs it on
+issue uses `—` there. Pull requests are not issues. Code fences and HTML comments are refused (the
+check stops and names the line), so write examples as plain text. The `ledger (advisory)` workflow runs it on
 every pull request and daily. **It is advisory:** it is not a required check and cannot block a
 merge. **What makes it blocking:** 14 consecutive clean daily runs on `main`; then the owner adds
 its `ledger check` job to `main`'s required checks and this paragraph is updated in the same
