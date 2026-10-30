@@ -458,6 +458,8 @@ def _google_error(code: int, status: str, reason: str | None) -> str:
         (400, _google_error(400, "INVALID_ARGUMENT", None), False),
         (400, "not json", False),
         (400, json.dumps({"error": "a string, not an object"}), False),
+        (400, json.dumps(["API_KEY_INVALID"]), False),
+        (400, json.dumps({"error": {"details": "API_KEY_INVALID"}}), False),
         (429, _google_error(429, "RESOURCE_EXHAUSTED", None), False),
         (503, "x", False),
         (404, "not found", False),
