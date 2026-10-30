@@ -154,8 +154,9 @@ jobs:
                       f"query embedder: the provider has refused this account since {since}. "
                       "Search is keyword-only. Most often the provider account's prepaid "
                       "credit is used up (add credit in its billing console); otherwise the "
-                      "embedding key is wrong or revoked. After fixing, ask the site one NEW "
-                      "question (a repeated one is answered from cache and clears nothing). "
+                      "embedding key is wrong or revoked. After fixing, it clears by itself "
+                      "within about 3.5 hours (the app's self-check); asking the site one NEW "
+                      "question clears it sooner (a repeated one is answered from cache). "
                       "docs/RUNBOOK.md §3.4a"
                   )
                   print(f"::error title=Query embedder refused::{reason}")
@@ -178,3 +179,28 @@ jobs:
               sys.exit(1)
           print("OK: index is ready and the vector arm is healthy")
           PY
+
+  # GitHub disables a public repository's scheduled workflows after 60 days
+  # with no repository activity, and then this probe (and every alert above)
+  # stops without a word. Once a day this job re-enables the workflow through
+  # the API, which is harmless while it is enabled. UNVERIFIED: whether that
+  # call also resets the 60-day timer; if it does not, a disabled probe still
+  # needs re-enabling by hand (docs/RUNBOOK.md §3.4a). Its own job, so only it
+  # holds actions: write; the probe keeps contents: read.
+  keep-enabled:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow once a day (00:00-00:59 UTC runs only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%H)" = "00" ]; then
+            gh api --method PUT "repos/${{ github.repository }}/actions/workflows/uptime.yml/enable"
+            echo "re-enabled"
+          else
+            echo "not the daily slot; nothing to do"
+          fi

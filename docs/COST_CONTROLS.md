@@ -61,6 +61,10 @@ any `>=400` to `LLMUnavailable`, and the embedder's `>=400` branch raises
   keyword search. That used to be visible only in the log; an account refusal
   is now recorded and reported as `query_embedder.state: "refused"` on
   `/health/index`, which fails the uptime probe (`docs/RUNBOOK.md`, §3.4a).
+  To learn it with no visitors, `/health/index` also embeds one word at most once
+  per `CITEVYN_QUERY_EMBEDDER_SELF_CHECK_INTERVAL_SECONDS` (default 3 h) for the
+  whole app: about 8 calls a day of a few tokens each, recorded as `self_check`
+  spend. It rides the uptime probe's request, so it adds no machine wake-ups.
 
 ---
 

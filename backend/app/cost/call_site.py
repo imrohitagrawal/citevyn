@@ -36,6 +36,9 @@ class CallSite(StrEnum):
     alias_intent = "alias_intent"
     ingest = "ingest"
     eval = "eval"
+    # The query embedder's account check behind /health/index: one tiny call
+    # per interval, so it is never counted as an answer.
+    self_check = "self_check"
     # The default. A row labelled ``unknown`` is not an error, but a persistent
     # stream of them means a call site was added without a label — worth finding,
     # since unattributed spend is exactly what makes a bill hard to act on.

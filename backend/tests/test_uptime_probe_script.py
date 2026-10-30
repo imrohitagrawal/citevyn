@@ -186,7 +186,12 @@ def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
             1,
             "the provider has refused this account since 2026-10-30T12:00:00+00:00",
         ),
-        ("embedder refused, clearing step", _with_embedder("refused"), 1, "ask the site one NEW"),
+        (
+            "embedder refused, clearing step",
+            _with_embedder("refused"),
+            1,
+            "clears by itself within about 3.5 hours",
+        ),
         # Production always sets Redis: without it this alert is off, so say so.
         ("embedder unconfigured", _with_embedder("unconfigured"), 1, "no Redis"),
         ("embedder unavailable", _with_embedder("unavailable"), 1, "could not read Redis"),

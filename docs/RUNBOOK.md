@@ -278,12 +278,23 @@ key.
   is wrong, revoked, expired or not allowed this model. Check the
   `CITEVYN_GEMINI_API_KEY` secret and the key's project.
 
-The state clears on the next question that gets a vector back. After the fix,
-ask the site one NEW, specific question: a repeated question is answered from
-the answer cache and a greeting never reaches search, so neither clears it.
-Then re-read `/health/index`. To clear it by hand, delete the Redis key
+The state clears on the next embedding that gets a vector back. With no
+visitors, `/health/index` makes one tiny embedding call of its own at most once
+every `CITEVYN_QUERY_EMBEDDER_SELF_CHECK_INTERVAL_SECONDS` (3 h; a Redis lock
+makes it once per interval for the whole app, and it rides the probe's request,
+so it never wakes the machine). So after the fix the alert clears by itself,
+usually within 3 to 3.5 hours; a check that proves nothing (a timeout, a 429,
+the daily spending cap) waits for the next interval. To clear it sooner, ask the
+site one NEW, specific question: a repeated question is answered from the answer
+cache and a greeting never reaches search, so neither clears it. Then re-read
+`/health/index`. To clear it by hand, delete the Redis key
 `<CITEVYN_REDIS_KEY_PREFIX>:query_embedder_refused_since`. Transient failures
 (timeouts, 429, 5xx) are never recorded here (#576 lists what is not covered).
+
+**The probe stopped running.** GitHub disables a public repository's scheduled
+workflows after 60 days with no activity. The workflow's `keep-enabled` job
+re-enables it once a day, but whether that also resets the 60-day timer is
+unverified; if the Actions tab shows the workflow disabled, enable it there.
 
 **The probe says "query embedder: no Redis is configured" or "could not read
 Redis in time".** Refusals are tracked in Redis, so the check above is off.

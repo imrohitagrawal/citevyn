@@ -8,10 +8,17 @@ show for it but a log line.
 
 So each refusal on the query path is recorded here, the next successful
 embedding clears it, and ``/health/index`` reports it for the uptime probe,
-which emails the owner when it fails. No call is made to find out: only real
-queries are observed, so with no traffic nothing new is learned. Which errors
-are account refusals is the provider client's call
-(``EmbedderUnavailable.account_refused``): the statuses differ by provider.
+which emails the owner when it fails. Which errors are account refusals is the
+provider client's call (``EmbedderUnavailable.account_refused``): the statuses
+differ by provider.
+
+Real queries alone learn nothing while nobody asks, and after a top-up only a
+new question clears the alert. So ``/health/index`` also runs a SELF-CHECK: one
+tiny embedding call, at most once per
+``query_embedder_self_check_interval_seconds`` app-wide (a Redis lock), fed to
+the same record. It only rides a request that is already happening (the probe
+already wakes the scale-to-zero machine): nothing here schedules a timer or a
+task, which would keep the machine up.
 
 The record lives in Redis, not in process memory: production scales to zero
 and runs more than one machine, so a probe usually wakes a machine that has
@@ -25,12 +32,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.middleware import get_current_request_id
 from app.core.redis_client import get_redis_client
+from app.cost.call_site import CallSite, call_site
 from app.embeddings.errors import EmbedderUnavailable
 
 _logger = logging.getLogger("citevyn.embeddings")
@@ -47,6 +56,16 @@ REDIS_CALL_CEILING_SECONDS = 0.5
 #: unreadable". Still well inside the client's 5 s timeout and the probe's 45 s.
 STATUS_CEILING_SECONDS = 2.0
 
+#: The self-check's provider timeout, with no retries. A safety ceiling: the
+#: live embedder's worst case (15 s x 3 attempts + backoff) would outlast the
+#: uptime probe's 45 s curl limit. It bounds the PROVIDER request only, never
+#: the metering around it, so a slow cost write is not cut off after the
+#: provider has answered (and billed).
+SELF_CHECK_TIMEOUT_SECONDS = 8.0
+
+#: The text the self-check embeds: a few tokens.
+SELF_CHECK_TEXT = "ping"
+
 _UNAVAILABLE: dict[str, str | None] = {"state": "unavailable", "refused_since": None}
 _UNCONFIGURED: dict[str, str | None] = {"state": "unconfigured", "refused_since": None}
 
@@ -54,9 +73,10 @@ _UNCONFIGURED: dict[str, str | None] = {"state": "unconfigured", "refused_since"
 class QueryEmbedderHealth:
     """One Redis key: when the provider first refused the account, or absent."""
 
-    def __init__(self, client: Any, key: str) -> None:
+    def __init__(self, client: Any, key: str, *, self_check_key: str | None = None) -> None:
         self._client = client
         self.key = key
+        self.self_check_key = self_check_key or f"{key}:self_check"
 
     async def record_failure(self, error: EmbedderUnavailable, *, now: datetime) -> None:
         """Record an account refusal; ignore every other failure."""
@@ -89,6 +109,21 @@ class QueryEmbedderHealth:
             return {"state": "ok", "refused_since": None}
         return {"state": "refused", "refused_since": _valid_time(since)}
 
+    async def claim_self_check(self, interval_seconds: int) -> bool:
+        """Whether this request may run the self-check: True only for the one
+        request per interval that sets the lock. Anything else (the lock is
+        held, or Redis failed) is False: on spend, fail closed."""
+        try:
+            won = await asyncio.wait_for(
+                self._client.set(self.self_check_key, "1", nx=True, ex=interval_seconds),
+                timeout=REDIS_CALL_CEILING_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 — no lock, no paid call
+            _log_unavailable(exc)
+            return False
+        # redis-py answers None (not False) when NX finds the key set.
+        return won is True
+
     async def _call(self, name: str, *args: Any, **kwargs: Any) -> None:
         try:
             await asyncio.wait_for(
@@ -118,14 +153,88 @@ def _log_unavailable(exc: Exception) -> None:
     _logger.warning("query_embedder_health_unavailable", extra={"error": type(exc).__name__})
 
 
+def ping_settings(settings: Settings) -> Settings:
+    """The live settings with the self-check's own timeout and no retries."""
+    return settings.model_copy(
+        update={
+            "embedding_timeout_seconds": SELF_CHECK_TIMEOUT_SECONDS,
+            "embedding_max_retries": 0,
+        }
+    )
+
+
+def _build_ping_embedder(settings: Settings) -> Any:
+    """A metered embedder of its own (so its spend is recorded), built from the
+    ping settings. Imported here: the factory imports this package."""
+    from app.embeddings.factory import build_embedder, metered_embedder
+
+    ping = ping_settings(settings)
+    return metered_embedder(build_embedder(ping), ping)
+
+
+async def run_self_check(
+    tracker: QueryEmbedderHealth,
+    *,
+    settings: Settings,
+    build: Callable[[Settings], Any] = _build_ping_embedder,
+) -> None:
+    """At most once per interval app-wide, embed one word and record the result.
+
+    Never raises: it runs inside the health route. Only a clean vector (clears)
+    and a provider's account refusal (records) change the state; a timeout, a
+    transient error or the daily spending cap proved nothing about the account.
+    """
+    interval = settings.query_embedder_self_check_interval_seconds
+    if interval == 0 or not await tracker.claim_self_check(interval):
+        return
+    embedder = build(settings)
+    try:
+        with call_site(CallSite.self_check):
+            await embedder.embed(SELF_CHECK_TEXT)
+    except EmbedderUnavailable as exc:
+        await tracker.record_failure(exc, now=datetime.now(UTC))
+        return
+    except Exception as exc:  # noqa: BLE001 — proved nothing; never fail the route
+        _logger.warning("query_embedder_self_check_unsettled", extra={"error": type(exc).__name__})
+        return
+    finally:
+        await _close(embedder)
+    await tracker.record_success()
+
+
+async def _close(embedder: Any) -> None:
+    """Close the ping's own HTTP client (the metered wrapper holds it inside)."""
+    for candidate in (embedder, getattr(embedder, "inner", None)):
+        close = getattr(candidate, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as exc:  # noqa: BLE001 — closing must not fail the route
+                _log_unavailable(exc)
+            return
+
+
 def current() -> QueryEmbedderHealth | None:
     """The tracker, or None when no Redis is configured (local runs and tests)."""
     settings = get_settings()
     if not settings.redis_url:
         return None
     return QueryEmbedderHealth(
-        get_redis_client(), f"{settings.redis_key_prefix}:query_embedder_refused_since"
+        get_redis_client(),
+        f"{settings.redis_key_prefix}:query_embedder_refused_since",
+        self_check_key=f"{settings.redis_key_prefix}:query_embedder_self_check",
     )
+
+
+async def maybe_self_check(
+    *,
+    settings: Settings | None = None,
+    build: Callable[[Settings], Any] = _build_ping_embedder,
+) -> None:
+    """The self-check behind ``/health/index``; nothing without Redis."""
+    tracker = current()
+    if tracker is not None:
+        await run_self_check(tracker, settings=settings or get_settings(), build=build)
 
 
 async def record_failure(error: EmbedderUnavailable) -> None:

@@ -389,6 +389,11 @@ class Settings(BaseSettings):
     embedding_dim: int = Field(default=1536, ge=1, le=2000)
     embedding_timeout_seconds: float = Field(default=15.0, gt=0.0)
     embedding_max_retries: int = Field(default=2, ge=0)
+    # How often /health/index may make ONE embedding call to check the query
+    # embedder's provider account (app/embeddings/query_health.py), app-wide.
+    # 3 h is the owner's decision; 0 turns it off. Each check is a paid call, so
+    # anything under 10 minutes is refused at startup rather than spent.
+    query_embedder_self_check_interval_seconds: int = Field(default=10800)
     retrieval_top_k: int = Field(default=6, ge=1)
     retrieval_max_candidates: int = Field(default=20, ge=1)
 
@@ -603,6 +608,13 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
+
+    @field_validator("query_embedder_self_check_interval_seconds")
+    @classmethod
+    def _self_check_interval_is_off_or_ten_minutes(cls, value: int) -> int:
+        if value != 0 and value < 600:
+            raise ValueError("must be 0 (off) or at least 600 seconds")
+        return value
 
     @field_validator("cors_allowed_origins", mode="before")
     @classmethod
