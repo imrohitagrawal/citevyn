@@ -954,8 +954,11 @@ class Orchestrator:
             # loud, never left as a silently half-answered comparison. Only the
             # products actually searched, and never after a degraded retrieval: a
             # product missing because its search failed is an outage, not a gap in
-            # the docs (the #142 mistake).
-            note = missing_note(missing_areas(_searched(multi_domains), evidence, used_indices))
+            # the docs (the #142 mistake). A product cited only inside a grouped
+            # marker still counts as missing (#554): groups never decide grounding.
+            note = missing_note(
+                missing_areas(_searched(multi_domains), evidence, validation.singly_cited_indices)
+            )
             if note:
                 answer_text = f"{answer_text.rstrip()}\n\n{note}"
         visible_citations = [
