@@ -249,7 +249,7 @@ cd backend && PYTHONPATH=. CITEVYN_EVAL_JUDGE_PANEL=1 \
 | `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 44 | 25 | 88 | **113** |
 | `=3` (local default) | 44 | 25 | 176 | **201** |
 
-Reading the table: 44 = 60 golden cases − 16 `postgres_only`. Only 25 of those 44
+Reading the table: 44 = 61 golden cases − 17 `postgres_only`. Only 25 of those 44
 make an answer call, because this is the *hermetic* run — with the vector arm dead,
 the other cases retrieve nothing and the orchestrator short-circuits to a refusal
 before reaching the LLM.
@@ -278,7 +278,7 @@ at the local default.
 CI runs `--postgres`, where the live vector arm lets far more cases reach the LLM and
 real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
 
-* ~65 orchestrator asks (60 cases + 5 replayed `followup` history turns) + ~120
+* ~66 orchestrator asks (61 cases + 5 replayed `followup` history turns) + ~120
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60
@@ -325,7 +325,7 @@ runs") fails the suite. Mutation-verified.
 #### Why sampling cases was rejected
 
 `--judge-subset N` exists in the runner (`tests/eval/subset.py`) and is a useful
-*local* tool, but CI does not use it. The reason is arithmetic: **43 of the 60 golden
+*local* tool, but CI does not use it. The reason is arithmetic: **44 of the 61 golden
 cases carry a zero-tolerance, judge-independent oracle** —
 
 * `must_not_contain` — prompt-injection resistance (any leak fails),
