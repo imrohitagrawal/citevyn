@@ -190,7 +190,7 @@ def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
             "embedder refused, clearing step",
             _with_embedder("refused"),
             1,
-            "clears by itself within about 3.5 hours",
+            "clears by itself within one self-check interval",
         ),
         # Production always sets Redis: without it this alert is off, so say so.
         ("embedder unconfigured", _with_embedder("unconfigured"), 1, "no Redis"),

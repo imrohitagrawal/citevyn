@@ -1185,7 +1185,8 @@ per `CITEVYN_QUERY_EMBEDDER_SELF_CHECK_INTERVAL_SECONDS` (default 3 h, 0 = off)
 for the whole app (a Redis lock, so callers cannot multiply it; none without
 Redis). It runs before the state is read, so that response carries its result.
 The call is metered as `self_check` spend, has its own short timeout with no
-retries, and never fails the route.
+retries and an overall backstop, is skipped (without taking the lock) while
+every paid-call slot is in use, and never fails the route.
 
 `status` is `pre_index` (nothing promoted yet), `ready` (an active index exists) or
 `degraded` (only a previous-good index remains). `vector_arm` is additive and does

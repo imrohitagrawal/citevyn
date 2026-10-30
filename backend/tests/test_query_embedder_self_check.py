@@ -104,16 +104,17 @@ def test_the_interval_defaults_to_three_hours() -> None:
     assert Settings().query_embedder_self_check_interval_seconds == 10800
 
 
-@pytest.mark.parametrize("value", [0, 600, 3600, 86400])
+@pytest.mark.parametrize("value", [0, 600, 3600, 86400, 604800])
 def test_the_interval_accepts_off_or_ten_minutes_and_up(value: int) -> None:
     """Red when: 0 (off) or a sane interval is rejected."""
     assert _settings(value).query_embedder_self_check_interval_seconds == value
 
 
-@pytest.mark.parametrize("value", [-1, 1, 599])
+@pytest.mark.parametrize("value", [-1, 1, 599, 604801])
 def test_the_interval_refuses_anything_shorter_than_ten_minutes(value: int) -> None:
-    """Red when: a short interval is accepted. Each check is a paid call; a
-    typo like 10 must fail at startup, not spend every probe."""
+    """Red when: a short interval is accepted (each check is a paid call; a
+    typo like 10 must fail at startup, not spend every probe), or one longer
+    than 7 days is (Redis refuses that expiry, so the check would never run)."""
     with pytest.raises(ValidationError):
         _settings(value)
 
@@ -157,11 +158,22 @@ async def test_a_new_interval_allows_a_new_check(
 
 async def test_interval_zero_switches_it_off(tracker: query_health.QueryEmbedderHealth) -> None:
     """Red when: 0 does not disable the check (the off switch for a paid call
-    on a public route)."""
+    on a public route). It must not even try the lock: Redis refuses an
+    expiry of 0, so without the guard the claim would fail every probe and log
+    a misleading Redis warning."""
     embedder = _FakeEmbedder()
+    claims: list[int] = []
+    original = tracker.claim_self_check
+
+    async def _spy(interval_seconds: int) -> bool:
+        claims.append(interval_seconds)
+        return await original(interval_seconds)
+
+    tracker.claim_self_check = _spy  # type: ignore[method-assign]
     await _run(tracker, embedder, interval=0)
 
     assert embedder.calls == 0
+    assert claims == []
 
 
 async def test_without_redis_there_is_no_check(monkeypatch) -> None:
@@ -335,3 +347,293 @@ def test_the_uptime_workflow_keeps_itself_enabled() -> None:
     assert others
     assert all(j.get("permissions") is None for j in others)
     assert doc["permissions"] == {"contents": "read"}
+
+
+# --- round-1 review: what the first version got wrong or left untested -------
+
+
+async def _refused(tracker: query_health.QueryEmbedderHealth) -> str:
+    since = query_health.datetime(2026, 10, 30, 9, 0, tzinfo=query_health.UTC)
+    await tracker.record_failure(
+        EmbedderUnavailable("x", status_code=402, account_refused=True), now=since
+    )
+    return since.isoformat()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        EmbedderUnavailable("x", status_code=503),
+        EmbedderUnavailable("x"),
+        CostLimitReached("daily cap"),
+        RuntimeError("anything else"),
+    ],
+    ids=["transient", "timeout", "daily-cap", "other"],
+)
+async def test_an_unsettled_check_never_clears_a_refusal(
+    tracker: query_health.QueryEmbedderHealth, outcome: BaseException
+) -> None:
+    """Red when: an outcome that proved nothing falls through to the success
+    path. The alert would stop while the account is still refused."""
+    since = await _refused(tracker)
+
+    await _run(tracker, _FakeEmbedder(outcome))
+
+    assert await tracker.status() == {"state": "refused", "refused_since": since}
+
+
+async def test_an_embedder_that_cannot_be_built_never_fails_the_route(
+    tracker: query_health.QueryEmbedderHealth, caplog
+) -> None:
+    """Red when: building the ping embedder can raise into the health route
+    (for example a missing provider key: startup does not check it, so such a
+    deploy boots and /health/index would answer 500 once per interval)."""
+
+    def _broken(_settings: Settings) -> Any:
+        raise RuntimeError("CITEVYN_GEMINI_API_KEY is required")
+
+    with caplog.at_level("INFO", logger="citevyn.embeddings"):
+        await query_health.run_self_check(tracker, settings=_settings(), build=_broken)
+
+    assert (await tracker.status())["state"] == "ok"
+    outcomes = [r for r in caplog.records if r.getMessage() == "query_embedder_self_check"]
+    assert [(r.__dict__["outcome"], r.__dict__["error"]) for r in outcomes] == [
+        ("unsettled", "RuntimeError")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (None, ("ok", None, None)),
+        (
+            EmbedderUnavailable("x", status_code=402, account_refused=True),
+            ("refused", "EmbedderUnavailable", 402),
+        ),
+        (EmbedderUnavailable("x", status_code=429), ("unsettled", "EmbedderUnavailable", 429)),
+        (EmbedderUnavailable("x"), ("unsettled", "EmbedderUnavailable", None)),
+        (CostLimitReached("cap"), ("unsettled", "CostLimitReached", None)),
+    ],
+    ids=["ok", "refused", "rate-limited", "timeout", "daily-cap"],
+)
+async def test_every_check_logs_one_outcome_line(
+    tracker: query_health.QueryEmbedderHealth,
+    caplog,
+    outcome: BaseException | None,
+    expected: tuple[str, str | None, int | None],
+) -> None:
+    """Red when: a check that runs leaves no outcome line. A self-check that
+    times out every interval would otherwise be invisible."""
+    with caplog.at_level("INFO", logger="citevyn.embeddings"):
+        await _run(tracker, _FakeEmbedder(outcome))
+
+    lines = [r for r in caplog.records if r.getMessage() == "query_embedder_self_check"]
+    assert [
+        (r.__dict__["outcome"], r.__dict__["error"], r.__dict__["status_code"]) for r in lines
+    ] == [expected]
+
+
+@pytest.mark.parametrize("outcome", [None, EmbedderUnavailable("x", status_code=503)])
+async def test_the_ping_client_is_closed_on_every_path(
+    tracker: query_health.QueryEmbedderHealth, outcome: BaseException | None
+) -> None:
+    """Red when: the client is closed only on one path (success is the common
+    one: a leaked pool every interval)."""
+    embedder = _FakeEmbedder(outcome)
+    await _run(tracker, embedder)
+
+    assert embedder.closed
+
+
+async def test_the_real_ping_embedder_is_metered_short_and_unretried() -> None:
+    """Red when: the production builder builds from the live settings (15 s,
+    retries), skips the meter, or leaves its HTTP client open. Every other test
+    injects a fake builder, so this is the one that holds the real path."""
+    from app.cost.metered import MeteredEmbedder
+
+    live = Settings(
+        embedding_provider="gemini",
+        gemini_api_key="test-key-not-real",
+        embedding_timeout_seconds=15.0,
+        embedding_max_retries=2,
+    )
+    embedder = query_health._build_ping_embedder(live)
+    try:
+        assert isinstance(embedder, MeteredEmbedder)
+        inner = embedder.inner
+        assert inner._timeout_seconds == query_health.SELF_CHECK_TIMEOUT_SECONDS
+        assert inner._max_retries == 0
+    finally:
+        await query_health._close(embedder)
+    assert embedder.inner._http_client.is_closed
+
+
+class _SlowSet:
+    """A Redis whose first call is slow, like a cold machine's TLS handshake."""
+
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    async def set(self, *args: Any, **kwargs: Any) -> bool:
+        await asyncio.sleep(self._delay)
+        return True
+
+
+async def test_the_lock_claim_allows_for_a_cold_connection(monkeypatch) -> None:
+    """Red when: the claim uses the answer path's short ceiling. On a woken
+    machine it is the route's first Redis call; a slow handshake must not skip
+    the check (or worse, set the lock and then skip it)."""
+    monkeypatch.setattr(query_health, "REDIS_CALL_CEILING_SECONDS", 0.05)
+    monkeypatch.setattr(query_health, "STATUS_CEILING_SECONDS", 1.0)
+    tracker = query_health.QueryEmbedderHealth(_SlowSet(0.2), KEY, self_check_key=LOCK)
+
+    assert await tracker.claim_self_check(10800) is True
+
+
+async def test_no_free_paid_call_slot_means_no_check_and_no_lock(
+    tracker: query_health.QueryEmbedderHealth, redis_client: Any, monkeypatch
+) -> None:
+    """Red when: the check queues behind answers for a paid-call slot on the
+    health route (it could pass the probe's 45 s limit), or takes the lock
+    while skipping (losing the interval)."""
+    full = asyncio.Semaphore(1)
+    await full.acquire()
+    monkeypatch.setattr(query_health, "get_semaphore", lambda _settings: full)
+    embedder = _FakeEmbedder()
+
+    await _run(tracker, embedder)
+
+    assert embedder.calls == 0
+    assert await redis_client.get(LOCK) is None
+
+
+class _HangingEmbedder(_FakeEmbedder):
+    async def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        await asyncio.sleep(60)
+        return []
+
+
+async def test_a_hanging_check_is_cut_by_the_backstop(
+    tracker: query_health.QueryEmbedderHealth, monkeypatch
+) -> None:
+    """Red when: nothing bounds the whole check. httpx's timeout is per phase
+    and the slot wait has none, so the route could hang past the probe."""
+    monkeypatch.setattr(query_health, "SELF_CHECK_BACKSTOP_SECONDS", 0.05)
+    embedder = _HangingEmbedder()
+
+    started = asyncio.get_running_loop().time()
+    await _run(tracker, embedder)
+
+    assert asyncio.get_running_loop().time() - started < 1.0
+    assert embedder.closed
+    assert (await tracker.status())["state"] == "ok"
+
+
+async def test_the_route_helper_runs_the_check_before_returning(
+    tracker: query_health.QueryEmbedderHealth, monkeypatch
+) -> None:
+    """Red when: maybe_self_check stops passing settings or the builder
+    through, or defers the check (the probe would read the previous result)."""
+    monkeypatch.setattr(query_health, "current", lambda: tracker)
+
+    await query_health.maybe_self_check(
+        settings=_settings(),
+        build=lambda _s: _FakeEmbedder(
+            EmbedderUnavailable("x", status_code=402, account_refused=True)
+        ),
+    )
+
+    assert (await tracker.status())["state"] == "refused"
+
+
+async def test_a_truthy_lock_reply_that_is_not_true_does_not_win() -> None:
+    """Red when: any truthy reply counts as winning the lock."""
+
+    class _OkReply:
+        async def set(self, *args: Any, **kwargs: Any) -> str:
+            return "OK"
+
+    tracker = query_health.QueryEmbedderHealth(_OkReply(), KEY, self_check_key=LOCK)
+
+    assert await tracker.claim_self_check(10800) is False
+
+
+def test_the_lock_key_is_scoped_by_the_redis_prefix(monkeypatch) -> None:
+    """Red when: the lock key drops the environment prefix, so two environments
+    sharing one Redis would suppress each other's checks."""
+    settings = Settings(redis_url="redis://localhost:6379/0", redis_key_prefix="env1")
+    monkeypatch.setattr(query_health, "get_settings", lambda: settings)
+    monkeypatch.setattr(query_health, "get_redis_client", lambda: object())
+
+    tracker = query_health.current()
+
+    assert tracker is not None
+    assert tracker.self_check_key == "env1:query_embedder_self_check"
+
+
+def test_the_keep_enabled_job_puts_on_every_scheduled_run_and_says_the_site_is_fine() -> None:
+    """Red when: the call is not a PUT to the enable endpoint, is gated to an
+    hour that GitHub's delayed midnight runs can miss, or a failure reads like
+    a site outage."""
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    job = doc["jobs"]["keep-enabled"]
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+
+    assert "--method PUT" in script
+    assert "/actions/workflows/uptime.yml/enable" in script
+    assert "date" not in script
+    assert "the site is fine" in script
+
+
+async def test_a_close_that_fails_never_fails_the_route(
+    tracker: query_health.QueryEmbedderHealth,
+) -> None:
+    """Red when: an error from closing the ping's client reaches the route."""
+
+    class _BadClose(_FakeEmbedder):
+        async def aclose(self) -> None:
+            raise RuntimeError("close failed")
+
+    await _run(tracker, _BadClose())
+
+    assert (await tracker.status())["state"] == "ok"
+
+
+async def test_the_embedder_is_built_only_by_the_request_that_wins_the_lock(
+    tracker: query_health.QueryEmbedderHealth,
+) -> None:
+    """Red when: the builder runs before the claim, so every health request
+    that loses the lock builds (and must close) an HTTP client for nothing."""
+    builds: list[int] = []
+
+    def _build(_settings: Settings) -> _FakeEmbedder:
+        builds.append(1)
+        return _FakeEmbedder()
+
+    for _ in range(5):
+        await query_health.run_self_check(tracker, settings=_settings(), build=_build)
+
+    assert builds == [1]
+
+
+async def test_a_hung_lock_claim_fails_closed_within_its_ceiling(monkeypatch) -> None:
+    """Red when: the claim waits on Redis without a ceiling (a hung Redis would
+    hold the health route past the probe's limit)."""
+    monkeypatch.setattr(query_health, "STATUS_CEILING_SECONDS", 0.05)
+    tracker = query_health.QueryEmbedderHealth(_SlowSet(60), KEY, self_check_key=LOCK)
+
+    assert await asyncio.wait_for(tracker.claim_self_check(10800), timeout=2) is False
+
+
+def test_the_stored_spend_label_is_self_check() -> None:
+    """Red when: the stored value changes; docs and spend queries name it."""
+    assert CallSite.self_check.value == "self_check"
+
+
+def test_the_keep_enabled_job_runs_only_on_the_schedule() -> None:
+    """Red when: the job's condition changes (inverted, it would run on manual
+    dispatch with actions: write and never on the schedule)."""
+    doc = yaml.safe_load(WORKFLOW.read_text())
+
+    assert doc["jobs"]["keep-enabled"]["if"] == "github.event_name == 'schedule'"

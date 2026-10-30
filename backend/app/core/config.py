@@ -392,8 +392,9 @@ class Settings(BaseSettings):
     # How often /health/index may make ONE embedding call to check the query
     # embedder's provider account (app/embeddings/query_health.py), app-wide.
     # 3 h is the owner's decision; 0 turns it off. Each check is a paid call, so
-    # anything under 10 minutes is refused at startup rather than spent.
-    query_embedder_self_check_interval_seconds: int = Field(default=10800)
+    # anything under 10 minutes is refused at startup rather than spent; over
+    # 7 days Redis would refuse the lock's expiry and the check would never run.
+    query_embedder_self_check_interval_seconds: int = Field(default=10800, le=604800)
     retrieval_top_k: int = Field(default=6, ge=1)
     retrieval_max_candidates: int = Field(default=20, ge=1)
 

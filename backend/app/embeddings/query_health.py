@@ -39,8 +39,10 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.core.middleware import get_current_request_id
 from app.core.redis_client import get_redis_client
+from app.cost.admission import get_semaphore
 from app.cost.call_site import CallSite, call_site
 from app.embeddings.errors import EmbedderUnavailable
+from app.embeddings.factory import build_embedder, metered_embedder
 
 _logger = logging.getLogger("citevyn.embeddings")
 
@@ -62,6 +64,14 @@ STATUS_CEILING_SECONDS = 2.0
 #: the metering around it, so a slow cost write is not cut off after the
 #: provider has answered (and billed).
 SELF_CHECK_TIMEOUT_SECONDS = 8.0
+
+#: A backstop on the whole self-check (budget read, the wait for a paid-call
+#: slot, the provider request, the cost write). httpx's timeout above applies
+#: per phase, and the slot wait has none, so without this a busy machine could
+#: hold the health route past the probe's 45 s limit and page a false outage.
+#: Hitting it is rare; if it cuts a call after the provider answered, that one
+#: call goes unmetered (logged as unsettled).
+SELF_CHECK_BACKSTOP_SECONDS = 20.0
 
 #: The text the self-check embeds: a few tokens.
 SELF_CHECK_TEXT = "ping"
@@ -114,9 +124,11 @@ class QueryEmbedderHealth:
         request per interval that sets the lock. Anything else (the lock is
         held, or Redis failed) is False: on spend, fail closed."""
         try:
+            # The health route's ceiling: on a woken machine this is the first
+            # Redis call, which also opens the connection.
             won = await asyncio.wait_for(
                 self._client.set(self.self_check_key, "1", nx=True, ex=interval_seconds),
-                timeout=REDIS_CALL_CEILING_SECONDS,
+                timeout=STATUS_CEILING_SECONDS,
             )
         except Exception as exc:  # noqa: BLE001 — no lock, no paid call
             _log_unavailable(exc)
@@ -165,9 +177,7 @@ def ping_settings(settings: Settings) -> Settings:
 
 def _build_ping_embedder(settings: Settings) -> Any:
     """A metered embedder of its own (so its spend is recorded), built from the
-    ping settings. Imported here: the factory imports this package."""
-    from app.embeddings.factory import build_embedder, metered_embedder
-
+    ping settings."""
     ping = ping_settings(settings)
     return metered_embedder(build_embedder(ping), ping)
 
@@ -181,37 +191,66 @@ async def run_self_check(
     """At most once per interval app-wide, embed one word and record the result.
 
     Never raises: it runs inside the health route. Only a clean vector (clears)
-    and a provider's account refusal (records) change the state; a timeout, a
-    transient error or the daily spending cap proved nothing about the account.
+    and a provider's account refusal (records) change the state; anything else
+    (a timeout, a transient error, the daily spending cap, an embedder that
+    cannot be built) proved nothing and changes nothing. Every check that runs
+    logs one ``query_embedder_self_check`` line with its outcome, so a check
+    that never settles is visible. An unsettled check still holds the lock, so
+    the next try is one interval later.
     """
     interval = settings.query_embedder_self_check_interval_seconds
-    if interval == 0 or not await tracker.claim_self_check(interval):
+    if interval == 0:
         return
-    embedder = build(settings)
+    # No free paid-call slot: answers are using them all. Skip without taking
+    # the lock rather than queue behind them on the health route.
+    if get_semaphore(settings).locked():
+        return
+    if not await tracker.claim_self_check(interval):
+        return
+    embedder: Any = None
     try:
+        embedder = build(settings)
         with call_site(CallSite.self_check):
-            await embedder.embed(SELF_CHECK_TEXT)
+            await asyncio.wait_for(
+                embedder.embed(SELF_CHECK_TEXT), timeout=SELF_CHECK_BACKSTOP_SECONDS
+            )
     except EmbedderUnavailable as exc:
+        outcome = "refused" if exc.account_refused else "unsettled"
+        _log_outcome(outcome, error=exc, status_code=exc.status_code)
         await tracker.record_failure(exc, now=datetime.now(UTC))
         return
     except Exception as exc:  # noqa: BLE001 — proved nothing; never fail the route
-        _logger.warning("query_embedder_self_check_unsettled", extra={"error": type(exc).__name__})
+        _log_outcome("unsettled", error=exc, status_code=None)
         return
     finally:
-        await _close(embedder)
+        if embedder is not None:
+            await _close(embedder)
+    _log_outcome("ok", error=None, status_code=None)
     await tracker.record_success()
 
 
+def _log_outcome(outcome: str, *, error: Exception | None, status_code: int | None) -> None:
+    # The error's type only: provider and Redis errors can echo URLs or bodies.
+    _logger.log(
+        logging.INFO if outcome == "ok" else logging.WARNING,
+        "query_embedder_self_check",
+        extra={
+            "outcome": outcome,
+            "error": type(error).__name__ if error is not None else None,
+            "status_code": status_code,
+        },
+    )
+
+
 async def _close(embedder: Any) -> None:
-    """Close the ping's own HTTP client (the metered wrapper holds it inside)."""
-    for candidate in (embedder, getattr(embedder, "inner", None)):
-        close = getattr(candidate, "aclose", None)
-        if close is not None:
-            try:
-                await close()
-            except Exception as exc:  # noqa: BLE001 — closing must not fail the route
-                _log_unavailable(exc)
-            return
+    """Close the ping's own HTTP client (the metered wrapper passes it on)."""
+    close = getattr(embedder, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception as exc:  # noqa: BLE001 — closing must not fail the route
+        _log_unavailable(exc)
 
 
 def current() -> QueryEmbedderHealth | None:
