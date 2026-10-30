@@ -98,8 +98,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 3. Bring up Postgres + Redis + apply migrations + seed demo data
 make demo
 
-# 4. Run the API on SQLite (no DB required)
-cd backend && uv run uvicorn app.main:app --reload
+# 4. Run the API (loads backend/.env if you have one)
+make api
 
 # 5. Smoke test
 curl -s http://localhost:8000/health
@@ -127,10 +127,10 @@ the full workflow.
 
 ## 5. Configuration
 
-All knobs live in environment variables. Locally they load from
-`backend/.env` (backend started from `backend/`), a repo-root `.env`
-(`make migrate` / `seed` / `demo`, which run from the root) or
-`infra/docker/.env` (Docker Compose); production on Fly reads Fly secrets and `fly.toml`'s `[env]`, no `.env` file. Which
+All knobs live in environment variables; the backend reads no `.env` file
+itself. Locally the `make` development targets (`make api`, `migrate`,
+`seed`, `demo`, `smoke`, `eval`, ...) load `backend/.env`, and Docker Compose
+loads `infra/docker/.env`; production on Fly reads Fly secrets and `fly.toml`'s `[env]`, no `.env` file. Which
 file each launch path reads, and how to look after them:
 [`docs/ENVIRONMENT_FILES.md`](docs/ENVIRONMENT_FILES.md).
 Every knob is documented in [`.env.example`](.env.example) — or, for the
@@ -406,17 +406,19 @@ make db-down       # tear down the stack (keeps volumes)
 If you'd rather run uvicorn outside Docker (faster reloads):
 
 ```bash
-cd backend
-uv sync                       # resolves + creates .venv
-uv run uvicorn app.main:app --reload --port 8000
+make api                      # uvicorn --reload on port 8000, with backend/.env
 ```
 
-For the worker:
+For the worker (a command-line tool; `make worker` with no `ARGS` prints its
+commands and exits 1):
 
 ```bash
-cd backend
-uv run citevyn-worker         # polls ingestion_jobs forever
+make worker ARGS=list-sources
+make worker ARGS="run --index-version v-local"
 ```
+
+The backend reads no `.env` itself: these targets load `backend/.env` (or
+`DEV_ENV_FILE=path`). See [`docs/ENVIRONMENT_FILES.md`](docs/ENVIRONMENT_FILES.md).
 
 `make test` excludes the `postgres` marker; `make test-pg` runs
 the opt-in integration tests against a real Postgres if you set

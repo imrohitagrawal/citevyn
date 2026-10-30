@@ -570,8 +570,8 @@ def test_the_coverage_target_mirrors_make_test() -> None:
         assert fragment in recipe, (
             f"`make coverage` no longer mirrors `make test` on {fragment!r} — the "
             "reported number would describe a different run than the one people use. "
-            "(`env -u` is what makes it hermetic: a local backend/.env changes which "
-            "tests pass, and so changes the number.)"
+            "(`env -u` keeps a shell's database URL out of the run, so the number "
+            "does not depend on the machine.)"
         )
     assert _COV_TARGET_RE.search(recipe) and "coverage.xml" in recipe
 
@@ -579,10 +579,10 @@ def test_the_coverage_target_mirrors_make_test() -> None:
 def test_a_local_target_runs_the_same_comparison_ci_runs() -> None:
     """`make coverage-gate` must call the same script, so CI is not the only place.
 
-    Deliberately a SEPARATE target from `make coverage`: a local checkout holding a
-    `backend/.env` fails several tests for an environment reason unrelated to any
-    change, which leaves lines unreached and would red the gate for nobody's
-    mistake. `coverage` stays the plain report; this is the opt-in parity check.
+    Deliberately a SEPARATE target from `make coverage`: it began as one because a
+    local `backend/.env` used to fail several tests for nobody's mistake (the suite
+    reads no env file now). `coverage` stays the plain report; this is the opt-in
+    parity check.
     """
     text = _MAKEFILE.read_text(encoding="utf-8")
     match = re.search(r"^coverage-gate:.*?(?=^\S)", text, flags=re.MULTILINE | re.DOTALL)

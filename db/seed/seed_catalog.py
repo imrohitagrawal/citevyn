@@ -313,6 +313,9 @@ async def seed(database_url: str) -> dict[str, int | str]:
 def main() -> None:
     """CLI entry point: seed and print a one-line summary."""
     settings = get_settings()
+    # Before the ingest, while it can still be stopped: `make seed` loads
+    # backend/.env, and a real embedder there makes this run spend money.
+    print(f"Embedding provider: {settings.embedding_provider}", flush=True)
     summary = asyncio.run(seed(settings.database_url))
     # Redact the password: this line lands in deploy.sh / CI logs (#93).
     print(
