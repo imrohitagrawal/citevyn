@@ -14,6 +14,11 @@
 #
 # Run from anywhere; the script resolves its own repo root.
 # Requirements: docker, curl, jq, uv.
+#
+# Every backend step (migrate, both seeds, the server) loads the same env file
+# through scripts/with_env.py, so the data is seeded and served with the same
+# settings. The file is DEV_ENV_FILE when set (it must exist), else
+# backend/.env when present; `make smoke DEV_ENV_FILE=path` passes it.
 
 set -Eeuo pipefail
 
@@ -28,6 +33,22 @@ DB_TIMEOUT=60
 HTTP_TIMEOUT=30
 UVICORN_LOG="$REPO_ROOT/.smoke-uvicorn.log"
 UVICORN_PID=""
+
+# Checked before anything starts, under `set -e`: a file named explicitly must
+# exist; the default may be absent (one notice per step, from the wrapper).
+WITH_ENV="$REPO_ROOT/scripts/with_env.py"
+if [[ -n "${DEV_ENV_FILE:-}" ]]; then
+  if [[ ! -f "$DEV_ENV_FILE" ]]; then
+    printf 'DEV_ENV_FILE=%s does not exist; unset it to use backend/.env when present\n' \
+      "$DEV_ENV_FILE" >&2
+    exit 1
+  fi
+  ENV_OPTIONAL=""
+  ENV_FILE="$(cd "$(dirname "$DEV_ENV_FILE")" && pwd)/$(basename "$DEV_ENV_FILE")"
+else
+  ENV_OPTIONAL="yes"
+  ENV_FILE="$REPO_ROOT/backend/.env"
+fi
 
 # --- helpers --------------------------------------------------------------
 
@@ -101,19 +122,23 @@ docker compose -f "$COMPOSE_FILE" up -d db >/dev/null
 wait_for_db
 
 log "Applying migrations to $DB_URL"
-CITEVYN_DATABASE_URL="$DB_URL" uv run --project backend alembic -c db/alembic.ini upgrade head
+CITEVYN_DATABASE_URL="$DB_URL" uv run --project backend --no-env-file \
+  python "$WITH_ENV" ${ENV_OPTIONAL:+--optional} "$ENV_FILE" -- alembic -c db/alembic.ini upgrade head
 
 log "Seeding users"
-CITEVYN_DATABASE_URL="$DB_URL" PYTHONPATH=.. uv run --project backend python -m db.seed.seed_users
+CITEVYN_DATABASE_URL="$DB_URL" PYTHONPATH=.. uv run --project backend --no-env-file \
+  python "$WITH_ENV" ${ENV_OPTIONAL:+--optional} "$ENV_FILE" -- python -m db.seed.seed_users
 
 log "Seeding catalog"
-CITEVYN_DATABASE_URL="$DB_URL" PYTHONPATH=.. uv run --project backend python -m db.seed.seed_catalog
+CITEVYN_DATABASE_URL="$DB_URL" PYTHONPATH=.. uv run --project backend --no-env-file \
+  python "$WITH_ENV" ${ENV_OPTIONAL:+--optional} "$ENV_FILE" -- python -m db.seed.seed_catalog
 
 log "Starting uvicorn in background (logs: $UVICORN_LOG)"
 (
   cd "$REPO_ROOT/backend"
   CITEVYN_DATABASE_URL="$DB_URL" \
-    uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+    uv run --no-env-file python "$WITH_ENV" ${ENV_OPTIONAL:+--optional} "$ENV_FILE" -- \
+      uvicorn app.main:app --host 127.0.0.1 --port 8000 \
       >"$UVICORN_LOG" 2>&1 &
   echo $! >"$REPO_ROOT/.smoke-uvicorn.pid"
 )

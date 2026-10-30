@@ -1028,6 +1028,37 @@ def test_seed_catalog_main_does_not_print_password(monkeypatch, capsys) -> None:
     assert "db:5432/citevyn" in out
 
 
+@pytest.mark.parametrize("provider", ["stub", "gemini"])
+def test_seed_catalog_names_the_embedder_before_ingesting(monkeypatch, capsys, provider) -> None:
+    """``make seed`` now loads ``backend/.env``; the seed must say which embedder it ingests with.
+
+    A real provider there makes the seed spend money, so the name is printed BEFORE
+    the ingest starts, where it can still be stopped. Red when: the line is removed,
+    or moved after ``seed`` runs.
+    """
+    import db.seed.seed_catalog as seedmod
+
+    real = Settings(database_url=_URL_WITH_PW, embedding_provider=provider)
+    monkeypatch.setattr(seedmod, "get_settings", lambda: real)
+    printed_before_ingest: list[str] = []
+
+    async def _fake_seed(_url: str) -> dict[str, int | str]:
+        printed_before_ingest.append(capsys.readouterr().out)
+        return {
+            "sources": 0,
+            "documents": 0,
+            "chunks": 0,
+            "exact_terms": 0,
+            "retired_documents": 0,
+            "index_version": "v1",
+            "status": "promoted",
+        }
+
+    monkeypatch.setattr(seedmod, "seed", _fake_seed)
+    seedmod.main()
+    assert printed_before_ingest == [f"Embedding provider: {provider}\n"]
+
+
 async def test_db_seed_provider_switch_reembeds_all_and_never_stamps_stale(monkeypatch) -> None:
     """Review finding (silent-failure/data-safety): switching providers on an already
     embedded DB must RE-EMBED every chunk under the new provider before re-stamping —
