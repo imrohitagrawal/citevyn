@@ -45,6 +45,16 @@
 #   will-close-unstruck-row-fails — --will-close ignored, so a row left un-struck
 #                              for an issue the pull request closes passes
 #   will-close-only-named-issues — --will-close treating every issue as closed
+#   fence-row-ignored / tilde-fence-row-ignored — rows inside ``` or ~~~ fences
+#                              read, so an example row satisfies R1
+#   fence-heading-ignored    — a `#` line inside a fence read as a heading, which
+#                              resets the closed-section state
+#   comment-row-ignored      — rows inside a multi-line <!-- --> comment read
+#   comment-heading-ignored  — a heading inside a multi-line comment read
+#   other-repo-ref-ignored   — `other/repo#7` in a first cell read as this repo's #7
+#   r1-says-what-to-change   — R1 without the fix, or without the issue's title
+#   r2-says-what-to-change   — R2 without the fix, or without GitHub's closing date
+#   r3-says-what-to-change   — R3 without the fix
 
 set -euo pipefail
 
@@ -277,6 +287,77 @@ EXTRA_ARGS="--will-close 7"
 _run "$CLEAN" "$OPEN2"
 _expect will-close-only-named-issues 1 '^R3 #2: '
 EXTRA_ARGS=""
+
+# --- text a reader never sees: fences and comments ---------------------------
+_run "${CLEAN}
+## Examples
+
+\`\`\`
+| [#7](${U}/7) | An example row inside a fence |
+\`\`\`
+" "${CLEAN_GH}
+7 open false"
+_expect fence-row-ignored 1 '^R1 #7: '
+
+_run "${CLEAN}
+## Examples
+
+~~~markdown
+| [#7](${U}/7) | An example row inside a tilde fence |
+~~~
+" "${CLEAN_GH}
+7 open false"
+_expect tilde-fence-row-ignored 1 '^R1 #7: '
+
+_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
+
+\`\`\`
+# not a heading
+\`\`\`}" "$CLEAN_GH"
+_expect fence-heading-ignored 0 '^ledger_check: 0 violations' '^R[123] '
+
+_run "${CLEAN}
+## Notes
+
+<!--
+| [#7](${U}/7) | A row inside a comment |
+-->
+" "${CLEAN_GH}
+7 open false"
+_expect comment-row-ignored 1 '^R1 #7: '
+
+_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
+
+<!-- a comment that spans lines
+# not a heading
+-->}" "$CLEAN_GH"
+_expect comment-heading-ignored 0 '^ledger_check: 0 violations' '^R[123] '
+
+# --- references to another repository ------------------------------------------
+_run "${CLEAN}
+## Upstream
+
+| Issue | Title |
+|---|---|
+| other/repo#7 | Tracked in another repository |
+" "$CLEAN_GH"
+_expect other-repo-ref-ignored 0 '^ledger_check: 0 violations' '#7'
+
+# --- each violation says what to change -------------------------------------------
+_run "$CLEAN" "${CLEAN_GH}
+7 open false - Seventh thing"
+_expect r1-says-what-to-change 1 '^R1 #7: .*add a row for #7 "Seventh thing" to an open table'
+
+_run "$CLEAN" "1 closed false 2026-09-07 Open thing
+2 closed false
+3 closed false
+4 closed false
+5 open false
+6 open false"
+_expect r2-says-what-to-change 1 '^R2 #1: .*strike the title with ~~ and add \*\*CLOSED on GitHub 2026-09-07\.\*\*, or move the row to a closed section'
+
+_run "$CLEAN" "$OPEN2"
+_expect r3-says-what-to-change 1 '^R3 #2: .*un-strike it or move it to an open table, or close the issue'
 
 # --- how GitHub is read --------------------------------------------------------
 _run "$CLEAN" "$CLEAN_GH"
