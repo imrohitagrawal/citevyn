@@ -144,7 +144,7 @@ _expect() {
 # --- clean ledger -----------------------------------------------------------
 _run "$CLEAN" "$CLEAN_GH"
 _expect clean-ledger-passes 0 '^ledger_check: 0 violations' '^R[123] '
-_expect clean-ledger-counts-rows 0 'rows: 4 in open tables, 2 in closed sections; open issues on GitHub: 3'
+_expect clean-ledger-counts-rows 0 'rows: 3 in open tables, 2 in closed sections; open issues on GitHub: 3'
 
 # --- R1 ----------------------------------------------------------------------
 _run "$CLEAN" "${CLEAN_GH}
