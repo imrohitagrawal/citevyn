@@ -536,7 +536,12 @@ class Settings(BaseSettings):
     # That second clause is the v5 -> v6 rationale above, word for word, about the
     # very same state; reaching the opposite conclusion from the same fact needed a
     # better reason than "the write path is what changed".
-    answer_policy_version: str = "v7"
+    #
+    # v7 -> v8 (#552): the evidence cap grew from 400 characters to a whole
+    # shipped chunk, so the model now sees text it never saw, and the same
+    # question can produce a DIFFERENT answer (the v5 -> v6 test). Answers
+    # cached from cut evidence must not be served for their remaining TTL.
+    answer_policy_version: str = "v8"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 
