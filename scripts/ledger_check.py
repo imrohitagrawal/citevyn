@@ -23,6 +23,7 @@ How the ledger is read (line-based, not a full Markdown parser):
   closed", "## Earlier follow-ups (all resolved)"). Every other table is open.
 - Text a reader never sees is skipped: lines inside ``` or ~~~ fences, and
   HTML comments that start a line (`<!--` to `-->`, over several lines too).
+  One left open at the end of the file is an error (exit 2), not a pass.
 - `#N` counts only on its own: `other/repo#7` names another repository's issue.
 
 Each violation line ends with what to change.
@@ -40,6 +41,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -56,7 +58,7 @@ CELL_SPLIT = re.compile(r"(?<!\\)\|")
 GH_LINE = re.compile(r"^(\d+) (open|closed) (true|false)(?: (\S+)(?: (.*))?)?$")
 JQ = (
     '.[] | "\\(.number) \\(.state) \\(has("pull_request")) '
-    '\\((.closed_at // "-")[0:10]) \\(.title)"'
+    '\\((.closed_at // "-")[0:10]) \\(.title | @json)"'
 )
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
@@ -93,8 +95,12 @@ def parse_ledger(text: str) -> list[Row]:
     rows: list[Row] = []
     stack: list[tuple[int, bool]] = []  # (heading level, closed)
     fence = ""  # the opening fence while inside one
+    fence_line = 0
     in_comment = False
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    comment_line = 0
+    # Split on "\n" only: str.splitlines() also breaks on U+2028 and friends.
+    for lineno, line in enumerate(text.split("\n"), start=1):
+        line = line.removesuffix("\r")
         if in_comment:
             in_comment = "-->" not in line
             continue
@@ -108,10 +114,11 @@ def parse_ledger(text: str) -> list[Row]:
                 fence = ""
             continue
         if marker:
-            fence = marker.group(1)
+            fence, fence_line = marker.group(1), lineno
             continue
         if line.lstrip().startswith("<!--"):
             in_comment = "-->" not in line.split("<!--", 1)[1]
+            comment_line = lineno
             continue
         heading = HEADING.match(line)
         if heading:
@@ -139,6 +146,17 @@ def parse_ledger(text: str) -> list[Row]:
                 closed_section=bool(stack) and stack[-1][1],
             )
         )
+    # Left open, either hides the rest of the file, and what is left could pass.
+    if fence:
+        raise ReadError(
+            f"the code fence opened at line {fence_line} of the ledger is never "
+            "closed, so it hides the rest of the file"
+        )
+    if in_comment:
+        raise ReadError(
+            f"the HTML comment opened at line {comment_line} of the ledger is never "
+            "closed, so it hides the rest of the file"
+        )
     return rows
 
 
@@ -152,30 +170,48 @@ def fetch_items(repo: str) -> dict[int, Item]:
         JQ,
     ]
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300, check=False
-        )
+        # Bytes, not text=True: universal newlines would turn a "\r" into a line break.
+        proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
     except FileNotFoundError as exc:
         raise ReadError("could not run gh (is the GitHub CLI installed?)") from exc
     except subprocess.TimeoutExpired as exc:
         raise ReadError("could not read issues from GitHub: gh timed out") from exc
     if proc.returncode != 0:
-        detail = (proc.stderr.strip().splitlines() or ["no message"])[0]
+        stderr = proc.stderr.decode("utf-8", "replace")
+        detail = (stderr.strip().splitlines() or ["no message"])[0]
         raise ReadError(
             f"could not read issues from GitHub (gh exit {proc.returncode}): {detail}"
         )
+    try:
+        out = proc.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReadError("gh's output is not UTF-8") from exc
     items: dict[int, Item] = {}
-    for raw in proc.stdout.splitlines():
+    # One issue per "\n"-terminated line; the title is a JSON string, so no
+    # character in it can start a new line or forge one.
+    for raw in out.split("\n"):
         if not raw.strip():
             continue
         match = GH_LINE.match(raw.strip())
         if not match:
             raise ReadError(f"unexpected line from gh: {raw.strip()[:80]!r}")
-        items[int(match.group(1))] = Item(
+        number = int(match.group(1))
+        if number in items:
+            raise ReadError(f"gh returned #{number} more than once")
+        title = ""
+        if match.group(5) is not None:
+            try:
+                decoded = json.loads(match.group(5))
+            except ValueError as exc:
+                raise ReadError(f"unexpected title from gh for #{number}") from exc
+            if not isinstance(decoded, str):
+                raise ReadError(f"unexpected title from gh for #{number}")
+            title = decoded
+        items[number] = Item(
             state=match.group(2),
             is_pr=match.group(3) == "true",
             closed_on=match.group(4) or "-",
-            title=match.group(5) or "",
+            title=title,
         )
     if not items:
         raise ReadError("GitHub returned no issues for this repository")
