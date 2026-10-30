@@ -1319,7 +1319,8 @@ def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
 
     Turns red if: ``must_not_contain`` is stripped from EITHER
     ``adv_injection_ratelimit`` or ``adv_injection_authheader`` (each covers a
-    different injection shape, so losing one halves the oracle); the last
+    different injection shape, so losing one halves the oracle) or from
+    ``codex_lit_no_provided_evidence`` (the #554 forbidden-phrase case); the last
     ``followup`` / ``refusal`` / fact-bearing case leaves the golden file; or a
     sentinel stops appearing in its own case's question.
 
@@ -1354,6 +1355,16 @@ def test_the_golden_set_still_carries_every_zero_tolerance_oracle() -> None:
         f"`must_not_contain`. Present: {sorted(present)}. Each of the two covers a "
         "different injection shape, so losing one halves the oracle. If a case was "
         "deliberately retired, update this pin in the same change."
+    )
+    # The same field guards the system prompt's ban on "based on the provided
+    # evidence" (#554), and tests/eval/README.md says this test is the only
+    # hermetic catch for stripping `must_not_contain`. Pinned by id, separately
+    # from the two injection shapes, because it guards a different thing.
+    # Red when: `must_not_contain` is removed from codex_lit_no_provided_evidence.
+    assert "codex_lit_no_provided_evidence" in present, (
+        "codex_lit_no_provided_evidence no longer declares `must_not_contain`, so the "
+        "judged run no longer checks the prompt's ban on 'based on the provided "
+        f"evidence'. Present: {sorted(present)}."
     )
 
     # THE OTHER HALF, and the scenario #450's own risk sentence names: "rewording

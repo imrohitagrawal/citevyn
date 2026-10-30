@@ -18,9 +18,14 @@ The agreed fix, which these tests pin:
   not cite. Left alone, it is simply not a marker, as it is today.
 * Markdown code is left alone, using the same definition of "code" as the #237
   scanner (``_strip_code``): inline spans and ``` / ~~~ fences.
-* The orchestrator expands BEFORE ``validate_citations`` on both generation
-  paths (the main path and the #208 exact-lookup retry), and the EXPANDED text is
-  what is stored (message row, answer cache) and returned to the client.
+* The orchestrator expands on both generation paths (the main path and the #208
+  exact-lookup retry), and the EXPANDED text is what is stored (message row,
+  answer cache) and returned to the client.
+* "Split, don't count" (owner decision after review): an index that came ONLY
+  from a group gets its marker and source card, but never counts toward
+  confidence and never satisfies the uncited-answer gate (#174). Those are
+  computed from the markers the model wrote singly, as before #554. See
+  ``test_grouped_markers_do_not_count.py``.
 * The system prompt asks for one marker per bracket, forbids citing a sentence
   that says the evidence does not contain the answer, and forbids the phrase
   "based on the provided evidence". The prompt change bumps
@@ -295,7 +300,9 @@ async def test_a_grouped_answer_is_served_stored_and_cached_in_expanded_form(
     assert response["answer"] == expanded
     assert [c["marker"] for c in response["citations"]] == [1, 2, 3]
     assert [c["chunk_id"] for c in response["citations"]] == [str(h.chunk_id) for h in evidence]
-    assert response["confidence"] == "high"
+    # Split, don't count: only [3] was written singly, so 1 of 3 -> medium, not high.
+    # Red when: indices that came only from a group are counted toward confidence.
+    assert response["confidence"] == "medium"
     assert await _assistant_content(session) == expanded
     cache_rows = (await session.execute(select(AnswerCache))).scalars().all()
     assert [row.answer for row in cache_rows] == [expanded]
@@ -345,14 +352,19 @@ async def test_the_exact_lookup_retry_also_expands_a_grouped_answer(session: Any
             _hit(_FLAG_PASSAGE, retrieval_type=RetrievalType.hybrid),
         ],
     )
-    llm = _GroundedOnlyLLM(answer_text="Yes, settings live in a config file [1, 2].")
+    # One single marker, so the answer is grounded under "split, don't count" (a
+    # group-only retry answer is refused: see test_grouped_markers_do_not_count.py).
+    llm = _GroundedOnlyLLM(answer_text="Settings live in a config file [1]. See also [1, 2].")
 
     response = await _ask(session, question=_FLAG_QUESTION, retriever=retriever, llm=llm)
 
+    expanded = "Settings live in a config file [1]. See also [1][2]."
     assert response["no_answer"] is False
-    assert response["answer"] == "Yes, settings live in a config file [1][2]."
+    assert response["answer"] == expanded
     assert [c["marker"] for c in response["citations"]] == [1, 2]
-    assert await _assistant_content(session) == "Yes, settings live in a config file [1][2]."
+    assert await _assistant_content(session) == expanded
+    # Red when: the retry path counts the grouped [2] toward confidence (2 of 2 -> high).
+    assert response["confidence"] == "medium"
 
 
 # ---------------------------------------------------------------------------
