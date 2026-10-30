@@ -30,6 +30,27 @@
 #                       BOM not stripped (the BOM sits on the **Process:** line)
 #   fails-process-label-then-quote — a block quote accepted as the Process text
 #   fails-line-separator — splitlines() used (it splits on U+2028)
+#   words-fails-*     — owner_words_lines returning nothing; a phrase dropped from
+#                       _OWNER_WORDS (word-for-word, exact-words, own-words,
+#                       quote-this-message, citing-pasted-message, record-verbatim);
+#                       a word dropped from _ABOUT_OWNER (message-alone,
+#                       decision-alone, chg-row); the straight-only apostrophe
+#                       (curly-apostrophe); the raw text swapped for visible_lines
+#                       (inside-fence); wrapped lines judged one by one
+#                       (wrapped-sentence); list items joined into one block
+#                       (next-list-item); the exemption widened from the sentence
+#                       to the block (private-notes-in-another-sentence); the
+#                       negation window crossing "but" or punctuation
+#                       (not-paraphrased-but, negation-across-colon)
+#   words-passes-*    — the negation rule removed or narrowed (never-quote,
+#                       never-copy-owners-words, rather-than, curly-dont); the "about
+#                       the owner" condition removed (failure-output,
+#                       other-sentence); ";" no longer ending a sentence
+#                       (semicolon-splits); the private-notes exemption removed or
+#                       narrowed (decisions-verbatim, wrapped-route, private-register);
+#                       "verbatim <number>" counted (entry-number)
+#   words-names-*     — the refusal echoing the line, naming no line, or naming
+#                       the block's first line instead of the phrase's line
 
 set -euo pipefail
 
@@ -88,6 +109,26 @@ _without() {
   printf '%s\n' "$GOOD" | grep -vxF -- "$1"
 }
 
+_with_item() {
+  # _with_item <text> -> GOOD with its one Items entry replaced by <text>
+  printf '%s\n' "$GOOD" | python3 -c 'import sys; print(sys.stdin.read().replace("1. Something.", sys.argv[1]), end="")' "$1"
+}
+
+_names_line() {
+  # _names_line <label> <item text> <text on the expected line>: the refusal names
+  # that line's number and never echoes the item's words.
+  local label="$1" item="$2" marker="$3" root line out
+  root="$(mktemp -d "${WORK}/words.XXXXXX")"
+  _with_item "$item" > "${root}/NEXT-SESSION-PROMPT.md"
+  line="$(grep -nF -- "$marker" "${root}/NEXT-SESSION-PROMPT.md" | cut -d: -f1)"
+  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" || true)"
+  if printf '%s' "$out" | grep -q "line ${line}:" && ! printf '%s' "$out" | grep -qF -- "$marker"; then
+    _record "$label" pass pass
+  else
+    _record "$label" pass fail
+  fi
+}
+
 echo "test_check_next_prompt.sh"
 
 _case "passes-good-prompt" pass "$GOOD"
@@ -143,6 +184,48 @@ _case "fails-fence-closed-by-shorter-fence" fail "$(_without '## Approvals')
 \`\`\`
 ## Approvals
 \`\`\`\`"
+
+# The owner's own words go to the private notes only; a prompt that tells a
+# session to copy them anywhere else is refused.
+_case "words-fails-record-verbatim" fail "$(_with_item '1. Record verbatim as the next CHG row.')"
+_case "words-fails-citing-pasted-message" fail "$(_with_item '1. Add the CHG row, citing this pasted message.')"
+_case "words-fails-quote-this-message" fail "$(_with_item '1. Quote this message in the change log.')"
+_case "words-fails-own-words" fail "$(_with_item "1. Update the CHG row above, in the owner's own words.")"
+_case "words-fails-word-for-word" fail "$(_with_item "1. Copy the owner's answer word for word into the PR body.")"
+_case "words-fails-exact-words" fail "$(_with_item "1. Put the owner's exact words in the PR body.")"
+_case "words-fails-curly-apostrophe" fail "$(_with_item "1. Update the row in the owner’s words.")"
+_case "words-fails-message-alone" fail "$(_with_item '1. Copy that message verbatim into the PR body.')"
+_case "words-fails-decision-alone" fail "$(_with_item '1. Copy the decision verbatim into the PR body.')"
+_case "words-fails-chg-row" fail "$(_with_item '1. Add a CHG row verbatim.')"
+_case "words-fails-old-decisions-line" fail "$(_with_item "   - docs/DECISIONS.md: owner decisions in the owner's exact words, newest first.")"
+_case "words-fails-wrapped-sentence" fail "$(_with_item "1. Copy the text verbatim into the
+   public change log.")"
+_case "words-fails-inside-fence" fail "$(_with_item '```
+Record verbatim as the next CHG row.
+```')"
+_case "words-fails-private-notes-in-another-sentence" fail "$(_with_item "1. Put the owner's exact words in the PR body. Keep the private notes tidy.")"
+_case "words-fails-next-list-item" fail "$(_with_item "- Keep the private notes tidy
+- Record the owner's exact words in the PR body")"
+_case "words-fails-not-paraphrased-but" fail "$(_with_item "1. Record the owner's reply in the CHG row, not paraphrased but verbatim.")"
+_case "words-fails-negation-across-colon" fail "$(_with_item "1. No CI run is needed: put the owner's exact words in the PR body.")"
+
+_case "words-passes-never-quote" pass "$(_with_item '1. Restate plainly as the next CHG row; never quote this message.')"
+_case "words-passes-never-copy-owners-words" pass "$(_with_item "1. Never copy the owner's words verbatim into a public file.")"
+_case "words-passes-rather-than" pass "$(_with_item "1. Restate the owner's decision plainly rather than verbatim.")"
+_case "words-passes-curly-dont" pass "$(_with_item '1. Don’t quote this message anywhere.')"
+_case "words-passes-failure-output" pass "$(_with_item '1. Capture the verbatim failure output of each red test.')"
+_case "words-passes-other-sentence" pass "$(_with_item '1. Quote the test output verbatim. The owner decides the merge.')"
+_case "words-passes-semicolon-splits" pass "$(_with_item '1. Update the CHG row; capture the verbatim test output.')"
+_case "words-passes-decisions-verbatim" pass "$(_with_item "1. Record the owner's exact words in citevyn/decisions-verbatim/.")"
+_case "words-passes-wrapped-route" pass "$(_with_item "1. Restate the answers on the issue plainly; record the owner's exact words in
+   \`citevyn/decisions-verbatim/\`.")"
+_case "words-passes-private-register" pass "$(_with_item "1. Record the owner's exact words in the private register.")"
+_case "words-passes-entry-number" pass "$(_with_item "1. Tell the owner their answers of 2026-10-30 (verbatim 44) are recorded.")"
+
+# The refusal names the phrase's line, never the text: the prompt is private.
+_names_line "words-names-line-not-text" '1. Record verbatim as the next CHG row.' 'next CHG row'
+_names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
+   public change log verbatim." 'public change log verbatim'
 
 _root_case "root-passes-without-prompt-files" pass README.md AGENTS.md
 _root_case "root-fails-next-session-prompt" fail README.md NEXT-SESSION-PROMPT.md
