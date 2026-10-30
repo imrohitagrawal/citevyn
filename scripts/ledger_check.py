@@ -22,6 +22,9 @@ How the ledger is read (line-based, not a full Markdown parser):
   "closed" or "resolved" in it ("### Closed — kept for the record", "## Recently
   closed", "## Earlier follow-ups (all resolved)"). Every other table is open.
 
+On a pull request the ledger is written in its final state, so the issues the
+pull request will close are passed with `--will-close` and treated as closed.
+
 GitHub is read with `gh api` (all states, every page). Exit 0 when the ledger
 agrees, 1 with one line per violation, 2 when GitHub or the ledger cannot be
 read. A failure to read GitHub is never a pass.
@@ -69,7 +72,7 @@ class Item:
 
 @dataclass
 class Report:
-    violations: list[str] = field(default_factory=list)
+    violations: list[str] = field(default_factory=list[str])
     open_rows: int = 0
     closed_rows: int = 0
     open_issues: int = 0
@@ -85,7 +88,9 @@ def parse_ledger(text: str) -> list[Row]:
             while stack and stack[-1][0] >= level:
                 stack.pop()
             parent_closed = bool(stack) and stack[-1][1]
-            stack.append((level, parent_closed or bool(CLOSED_HEADING.search(heading.group(2)))))
+            stack.append(
+                (level, parent_closed or bool(CLOSED_HEADING.search(heading.group(2))))
+            )
             continue
         if not line.startswith("|"):
             continue
@@ -107,16 +112,27 @@ def parse_ledger(text: str) -> list[Row]:
 
 
 def fetch_items(repo: str) -> dict[int, Item]:
-    cmd = ["gh", "api", "--paginate", f"repos/{repo}/issues?state=all&per_page=100", "--jq", JQ]
+    cmd = [
+        "gh",
+        "api",
+        "--paginate",
+        f"repos/{repo}/issues?state=all&per_page=100",
+        "--jq",
+        JQ,
+    ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, check=False
+        )
     except FileNotFoundError as exc:
         raise ReadError("could not run gh (is the GitHub CLI installed?)") from exc
     except subprocess.TimeoutExpired as exc:
         raise ReadError("could not read issues from GitHub: gh timed out") from exc
     if proc.returncode != 0:
         detail = (proc.stderr.strip().splitlines() or ["no message"])[0]
-        raise ReadError(f"could not read issues from GitHub (gh exit {proc.returncode}): {detail}")
+        raise ReadError(
+            f"could not read issues from GitHub (gh exit {proc.returncode}): {detail}"
+        )
     items: dict[int, Item] = {}
     for raw in proc.stdout.splitlines():
         if not raw.strip():
@@ -124,13 +140,17 @@ def fetch_items(repo: str) -> dict[int, Item]:
         match = GH_LINE.match(raw.strip())
         if not match:
             raise ReadError(f"unexpected line from gh: {raw.strip()[:80]!r}")
-        items[int(match.group(1))] = Item(state=match.group(2), is_pr=match.group(3) == "true")
+        items[int(match.group(1))] = Item(
+            state=match.group(2), is_pr=match.group(3) == "true"
+        )
     if not items:
         raise ReadError("GitHub returned no issues for this repository")
     return items
 
 
-def check(rows: list[Row], items: dict[int, Item]) -> Report:
+def check(
+    rows: list[Row], items: dict[int, Item], will_close: frozenset[int] = frozenset()
+) -> Report:
     report = Report()
     covered: set[int] = set()  # open issues with an un-struck row in an open table
     for row in rows:
@@ -146,18 +166,30 @@ def check(rows: list[Row], items: dict[int, Item]) -> Report:
             where = "un-struck in an open table"
         for number in row.numbers:
             item = items.get(number)
+            closing = item is not None and item.state == "open" and number in will_close
+            state = "closed" if closing else item.state if item else ""
             if item is None:
                 reason = "not found on GitHub"
             elif item.is_pr:
                 reason = "is a pull request, not an issue"
-            elif item.state != want:
-                reason = f"is {item.state} on GitHub"
+            elif state != want:
+                reason = (
+                    "is closed by this pull request"
+                    if closing
+                    else f"is {state} on GitHub"
+                )
             else:
                 if want == "open":
                     covered.add(number)
                 continue
-            report.violations.append(f"{rule} #{number}: {where} (line {row.line}) but {reason}")
-    open_issues = sorted(n for n, item in items.items() if item.state == "open" and not item.is_pr)
+            report.violations.append(
+                f"{rule} #{number}: {where} (line {row.line}) but {reason}"
+            )
+    open_issues = sorted(
+        n
+        for n, item in items.items()
+        if item.state == "open" and not item.is_pr and n not in will_close
+    )
     report.open_issues = len(open_issues)
     for number in open_issues:
         if number not in covered:
@@ -168,27 +200,46 @@ def check(rows: list[Row], items: dict[int, Item]) -> Report:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description="Check docs/BACKLOG.md against GitHub's issues."
+    )
     parser.add_argument("--backlog", type=Path, default=DEFAULT_BACKLOG)
     parser.add_argument("--repo", default=DEFAULT_REPO, help="OWNER/NAME")
+    parser.add_argument(
+        "--will-close",
+        type=int,
+        nargs="*",
+        default=[],
+        metavar="N",
+        help="issues the pull request under check will close: treated as closed",
+    )
     args = parser.parse_args(argv)
     try:
         try:
             text = args.backlog.read_text(encoding="utf-8")
         except OSError as exc:
-            raise ReadError(f"could not read the ledger {args.backlog}: {exc.strerror}") from exc
+            raise ReadError(
+                f"could not read the ledger {args.backlog}: {exc.strerror}"
+            ) from exc
         rows = parse_ledger(text)
         items = fetch_items(args.repo)
     except ReadError as exc:
         print(f"ledger_check: ERROR: {exc}", file=sys.stderr)
         return 2
-    report = check(rows, items)
+    report = check(rows, items, frozenset(args.will_close))
     for violation in report.violations:
         print(violation)
     print(
         f"ledger_check: {len(report.violations)} violations "
         f"(rows: {report.open_rows} in open tables, {report.closed_rows} in closed sections; "
-        f"open issues on GitHub: {report.open_issues})"
+        f"open issues on GitHub: {report.open_issues}"
+        + (
+            "; treated as closed by this pull request: "
+            + " ".join(f"#{n}" for n in args.will_close)
+            if args.will_close
+            else ""
+        )
+        + ")"
     )
     return 1 if report.violations else 0
 

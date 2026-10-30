@@ -38,6 +38,11 @@
 #   gh-garbage-is-error      — an unreadable line skipped instead of failing
 #   gh-missing-is-error      — gh not installed reported as a pass
 #   backlog-missing-is-error — a missing ledger reported as a pass
+#   will-close-struck-row-passes — --will-close ignored, so a pull request that
+#                              strikes the row of the issue it closes reads as R3
+#   will-close-unstruck-row-fails — --will-close ignored, so a row left un-struck
+#                              for an issue the pull request closes passes
+#   will-close-only-named-issues — --will-close treating every issue as closed
 
 set -euo pipefail
 
@@ -118,7 +123,7 @@ _run() {
   set +e
   OUT="$(PATH="${WORK}/bin:${PATH}" FAKE_GH_LOG="${WORK}/gh.log" FAKE_GH_OUT="${WORK}/gh.out" \
     FAKE_GH_RC="$rc" FAKE_GH_STDERR="$err" \
-    python3 "$CHECK" --backlog "${WORK}/BACKLOG.md" --repo example/repo 2>&1)"
+    python3 "$CHECK" --backlog "${WORK}/BACKLOG.md" --repo example/repo ${EXTRA_ARGS:-} 2>&1)"
   RC=$?
   set -e
 }
@@ -247,6 +252,29 @@ _run "$CLEAN" "1 closed false
 _expect violations-are-counted 1 '^ledger_check: 2 violations'
 n="$(printf '%s\n' "$OUT" | grep -Ec '^R[123] #' || true)"
 if [ "$n" = "2" ]; then _ok violations-are-counted-lines; else _bad violations-are-counted-lines "wanted 2 violation lines, got $n"; fi
+
+# --- a pull request's own closing issues (--will-close) -----------------------
+# On a pull request the ledger is written in its final state: the row of an
+# issue the pull request closes is already struck while GitHub still says open.
+OPEN2="1 open false
+2 open false
+3 closed false
+4 closed false
+5 open false
+6 open false"
+EXTRA_ARGS="--will-close 2"
+_run "$CLEAN" "$OPEN2"
+_expect will-close-struck-row-passes 0 '^ledger_check: 0 violations' '^R[123] '
+
+EXTRA_ARGS="--will-close 1 2"
+_run "$CLEAN" "$OPEN2"
+_expect will-close-unstruck-row-fails 1 '^R2 #1: .*closed by this pull request'
+
+# Partner: naming another issue must not excuse #2's struck-but-open row.
+EXTRA_ARGS="--will-close 7"
+_run "$CLEAN" "$OPEN2"
+_expect will-close-only-named-issues 1 '^R3 #2: '
+EXTRA_ARGS=""
 
 # --- how GitHub is read --------------------------------------------------------
 _run "$CLEAN" "$CLEAN_GH"
