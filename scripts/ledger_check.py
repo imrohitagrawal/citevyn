@@ -21,6 +21,11 @@ How the ledger is read (line-based, not a full Markdown parser):
 - A section is closed when its heading, or any heading above it, has the word
   "closed" or "resolved" in it ("### Closed — kept for the record", "## Recently
   closed", "## Earlier follow-ups (all resolved)"). Every other table is open.
+- Text a reader never sees is skipped: lines inside ``` or ~~~ fences, and
+  HTML comments that start a line (`<!--` to `-->`, over several lines too).
+- `#N` counts only on its own: `other/repo#7` names another repository's issue.
+
+Each violation line ends with what to change.
 
 On a pull request the ledger is written in its final state, so the issues the
 pull request will close are passed with `--will-close` and treated as closed.
@@ -46,10 +51,14 @@ DEFAULT_BACKLOG = Path(__file__).resolve().parent.parent / "docs" / "BACKLOG.md"
 
 HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 CLOSED_HEADING = re.compile(r"\b(closed|resolved)\b", re.IGNORECASE)
-ISSUE_REF = re.compile(r"#(\d+)")
+ISSUE_REF = re.compile(r"(?<![\w./-])#(\d+)")
 CELL_SPLIT = re.compile(r"(?<!\\)\|")
-GH_LINE = re.compile(r"^(\d+) (open|closed) (true|false)$")
-JQ = '.[] | "\\(.number) \\(.state) \\(has("pull_request"))"'
+GH_LINE = re.compile(r"^(\d+) (open|closed) (true|false)(?: (\S+)(?: (.*))?)?$")
+JQ = (
+    '.[] | "\\(.number) \\(.state) \\(has("pull_request")) '
+    '\\((.closed_at // "-")[0:10]) \\(.title)"'
+)
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
 class ReadError(Exception):
@@ -68,6 +77,8 @@ class Row:
 class Item:
     state: str  # "open" or "closed"
     is_pr: bool
+    closed_on: str = "-"  # YYYY-MM-DD, or "-" while open
+    title: str = ""
 
 
 @dataclass
@@ -81,7 +92,27 @@ class Report:
 def parse_ledger(text: str) -> list[Row]:
     rows: list[Row] = []
     stack: list[tuple[int, bool]] = []  # (heading level, closed)
+    fence = ""  # the opening fence while inside one
+    in_comment = False
     for lineno, line in enumerate(text.splitlines(), start=1):
+        if in_comment:
+            in_comment = "-->" not in line
+            continue
+        marker = FENCE.match(line)
+        if fence:
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+            ):
+                fence = ""
+            continue
+        if marker:
+            fence = marker.group(1)
+            continue
+        if line.lstrip().startswith("<!--"):
+            in_comment = "-->" not in line.split("<!--", 1)[1]
+            continue
         heading = HEADING.match(line)
         if heading:
             level = len(heading.group(1))
@@ -141,7 +172,10 @@ def fetch_items(repo: str) -> dict[int, Item]:
         if not match:
             raise ReadError(f"unexpected line from gh: {raw.strip()[:80]!r}")
         items[int(match.group(1))] = Item(
-            state=match.group(2), is_pr=match.group(3) == "true"
+            state=match.group(2),
+            is_pr=match.group(3) == "true",
+            closed_on=match.group(4) or "-",
+            title=match.group(5) or "",
         )
     if not items:
         raise ReadError("GitHub returned no issues for this repository")
@@ -166,24 +200,33 @@ def check(
             where = "un-struck in an open table"
         for number in row.numbers:
             item = items.get(number)
-            closing = item is not None and item.state == "open" and number in will_close
-            state = "closed" if closing else item.state if item else ""
             if item is None:
-                reason = "not found on GitHub"
+                reason, fix = "not found on GitHub", "fix the number"
             elif item.is_pr:
                 reason = "is a pull request, not an issue"
-            elif state != want:
-                reason = (
-                    "is closed by this pull request"
-                    if closing
-                    else f"is {state} on GitHub"
+                fix = "put — in the first cell and link the pull request in the title"
+            elif want == "open" and number in will_close and item.state == "open":
+                reason = "is closed by this pull request"
+                fix = (
+                    "strike the title with ~~ and add **CLOSED on GitHub <date>.**, "
+                    "or move the row to a closed section"
                 )
+            elif want == "open" and item.state == "closed":
+                reason = "is closed on GitHub"
+                fix = (
+                    "strike the title with ~~ and add "
+                    f"**CLOSED on GitHub {item.closed_on}.**, "
+                    "or move the row to a closed section"
+                )
+            elif want == "closed" and item.state == "open" and number not in will_close:
+                reason = "is open on GitHub"
+                fix = "un-strike it or move it to an open table, or close the issue"
             else:
                 if want == "open":
                     covered.add(number)
                 continue
             report.violations.append(
-                f"{rule} #{number}: {where} (line {row.line}) but {reason}"
+                f"{rule} #{number}: {where} (line {row.line}) but {reason}; {fix}"
             )
     open_issues = sorted(
         n
@@ -193,8 +236,10 @@ def check(
     report.open_issues = len(open_issues)
     for number in open_issues:
         if number not in covered:
+            title = items[number].title
             report.violations.append(
-                f"R1 #{number}: open on GitHub but has no un-struck row in an open table"
+                f"R1 #{number}: open on GitHub but has no un-struck row in an open table; "
+                f'add a row for #{number} "{title}" to an open table'
             )
     return report
 
