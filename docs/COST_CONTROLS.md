@@ -237,48 +237,39 @@ guessed.
 The judged eval (`answer-quality-eval` in `.github/workflows/ci.yml`) drives the real
 orchestrator per golden case and then scores each answer with a judge panel. Call
 volume was **counted at $0** with `scripts/measure_eval_spend.py`, which swaps in a
-counting fake provider (no network, no key). Reproduce it with:
+counting fake provider (no network, no key). The table below is that script's output,
+and the script is its only source; reproduce each row with:
 
 ```bash
 cd backend && PYTHONPATH=. CITEVYN_EVAL_JUDGE_PANEL=1 \
     uv run python ../scripts/measure_eval_spend.py
 ```
 
+(and `CITEVYN_EVAL_JUDGE_PANEL=3` for the second row).
+
 | Panel size | Judged cases (hermetic) | Answer calls | Judge calls | Total paid calls |
 |---|---|---|---|---|
-| `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 44 | 25 | 88 | **113** |
-| `=3` (local default) | 44 | 25 | 176 | **201** |
+| `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 45 | 24 | 90 | **114** |
+| `=3` (local default) | 45 | 24 | 180 | **204** |
 
-Reading the table: 44 = 60 golden cases − 16 `postgres_only`. Only 25 of those 44
+Measured on the 61-case golden set (#552). The numbers are counted, not derived, and
+they move whenever the golden set or the corpus does: re-run the script and copy its
+`judged`, `answer` and `judge` lines here.
+
+Reading the table: 45 = 61 golden cases − 16 `postgres_only`. Only 24 of those 45
 make an answer call, because this is the *hermetic* run — with the vector arm dead,
-the other cases retrieve nothing and the orchestrator short-circuits to a refusal
-before reaching the LLM.
-
-> **Reproducing these three numbers** (they are measured, not derived by arithmetic, and
-> they move whenever the golden set or the corpus does):
->
-> ```bash
-> cd backend && env -u CITEVYN_DATABASE_URL uv run python -c "
-> import asyncio
-> from tests.eval.cases import load_cases
-> from tests.eval.paths import GOLDEN_PATH
-> from tests.eval.retrieval import evaluate_retrieval
-> cs = load_cases(GOLDEN_PATH)
-> print('judged pool :', len([c for c in cs if not c.postgres_only]))
-> rep = asyncio.run(evaluate_retrieval(cs))
-> print('answer calls:', len([o for o in rep.outcomes if o.retrieved_sources]))"
-> ```
->
-> "Answer calls" is approximated by *cases that retrieve at least one chunk*, which is an
-> UPPER BOUND: the orchestrator can still decline on the confidence gate after retrieving,
-> and would then not call the LLM. Judge calls are exact — `judged pool x (panel + 1)`. The judge is `N + 1` calls per case (N framings + the
-adversarial veto), so it dominates: **~80% of calls** at the CI panel size and ~89%
-at the local default.
+most other cases retrieve nothing, and the orchestrator returns a refusal before
+reaching the LLM. The script counts answer calls where they are made, so it is exact.
+An earlier version of this section also gave a shortcut count, *cases that retrieve at
+least one chunk*; that is only an upper bound (the orchestrator can still decline after
+retrieving) and disagreed with the script, so it was removed. Judge calls are `judged cases × (panel + 1)`. The judge is `N + 1` calls per
+case (N framings + the adversarial veto), so it dominates: **~79% of calls** at the CI
+panel size and ~88% at the local default.
 
 CI runs `--postgres`, where the live vector arm lets far more cases reach the LLM and
 real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
 
-* ~65 orchestrator asks (60 cases + 5 replayed `followup` history turns) + ~120
+* ~66 orchestrator asks (61 cases + 5 replayed `followup` history turns) + ~122
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60
@@ -325,7 +316,7 @@ runs") fails the suite. Mutation-verified.
 #### Why sampling cases was rejected
 
 `--judge-subset N` exists in the runner (`tests/eval/subset.py`) and is a useful
-*local* tool, but CI does not use it. The reason is arithmetic: **43 of the 60 golden
+*local* tool, but CI does not use it. The reason is arithmetic: **44 of the 61 golden
 cases carry a zero-tolerance, judge-independent oracle** —
 
 * `must_not_contain` — prompt-injection resistance (any leak fails),

@@ -32,6 +32,14 @@
 # test_every_expected_fact_is_groundable_in_the_corpus) and the test_retrieval.py case that
 # asserts "@anthropic-ai/claude-code" is actually retrieved.
 {"id": "claude_code_lit_install", "area": "claude_code", "kind": "literal", "question": "How do I install Claude Code?", "expected_source": "claude_code", "expected_gist": "Install Claude Code with the native installer ('curl -fsSL https://claude.ai/install.sh | bash') or from npm with 'npm install -g @anthropic-ai/claude-code', which needs Node.js v22 or later.", "expect_no_answer": false, "expected_facts": ["@anthropic-ai/claude-code"], "gold_chunks": ["claude_code#0"]}
+# #552: production refused "How do I update Claude Code?" although the shipped Installation
+# section answers it; the update sentences sat past the old 400-character evidence cap. The
+# fixture's claude_code chunk carries those two sentences verbatim, so this case asks the
+# shipped text. As above, the hit-rate cannot see the content; `expected_facts` can.
+# Red when: the fixture's claude_code chunk loses "claude update"
+# (test_every_expected_fact_is_groundable_in_the_corpus), or this case is removed (the
+# priority-pool pin in test_eval_judge_subset.py).
+{"id": "claude_code_lit_update", "area": "claude_code", "kind": "literal", "question": "How do I update Claude Code?", "expected_source": "claude_code", "expected_gist": "Native installs of Claude Code auto-update in the background and can be updated on demand with 'claude update'; Homebrew and WinGet installs do not auto-update and are refreshed with 'brew upgrade claude-code' or 'winget upgrade Anthropic.ClaudeCode'.", "expect_no_answer": false, "expected_facts": ["claude update"], "gold_chunks": ["claude_code#0"]}
 {"id": "codex_lit_install", "area": "codex", "kind": "literal", "question": "How do I install the Codex CLI?", "expected_source": "codex", "expected_gist": "Install the Codex CLI globally with npm ('npm install -g @openai/codex') or with Homebrew ('brew install codex') on macOS.", "expect_no_answer": false, "expected_facts": ["npm"], "gold_chunks": ["codex#0"]}
 {"id": "gemini_api_lit_authheader", "area": "gemini_api", "kind": "literal", "question": "Which header carries the Gemini API key?", "expected_source": "gemini_api", "expected_gist": "Pass the Gemini API key in the x-goog-api-key header.", "expect_no_answer": false, "expected_facts": ["x-goog-api-key"], "gold_chunks": ["gemini_api#0"]}
 {"id": "gemini_api_lit_credfile", "area": "gemini_api", "kind": "literal", "question": "Can the Gemini CLI read the key from a credentials file?", "expected_source": "gemini_api", "expected_gist": "The Gemini CLI can read the API key from a credentials file.", "expect_no_answer": false, "expected_facts": ["credentials file"], "gold_chunks": ["gemini_api#0"]}
