@@ -252,11 +252,11 @@ cd backend && PYTHONPATH=. CITEVYN_EVAL_JUDGE_PANEL=1 \
 | `CITEVYN_EVAL_JUDGE_PANEL=1` (CI) | 45 | 24 | 90 | **114** |
 | `=3` (local default) | 45 | 24 | 180 | **204** |
 
-Measured on the 61-case golden set (#552). The numbers are counted, not derived, and
+Measured on the 62-case golden set (#552, #554). The numbers are counted, not derived, and
 they move whenever the golden set or the corpus does: re-run the script and copy its
 `judged`, `answer` and `judge` lines here.
 
-Reading the table: 45 = 61 golden cases − 16 `postgres_only`. Only 24 of those 45
+Reading the table: 45 = 62 golden cases − 17 `postgres_only`. Only 24 of those 45
 make an answer call, because this is the *hermetic* run — with the vector arm dead,
 most other cases retrieve nothing, and the orchestrator returns a refusal before
 reaching the LLM. The script counts answer calls where they are made, so it is exact.
@@ -269,7 +269,7 @@ panel size and ~88% at the local default.
 CI runs `--postgres`, where the live vector arm lets far more cases reach the LLM and
 real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
 
-* ~66 orchestrator asks (61 cases + 5 replayed `followup` history turns) + ~122
+* ~67 orchestrator asks (62 cases + 5 replayed `followup` history turns) + ~124
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60
@@ -316,7 +316,7 @@ runs") fails the suite. Mutation-verified.
 #### Why sampling cases was rejected
 
 `--judge-subset N` exists in the runner (`tests/eval/subset.py`) and is a useful
-*local* tool, but CI does not use it. The reason is arithmetic: **44 of the 61 golden
+*local* tool, but CI does not use it. The reason is arithmetic: **45 of the 62 golden
 cases carry a zero-tolerance, judge-independent oracle** —
 
 * `must_not_contain` — prompt-injection resistance (any leak fails),
@@ -328,7 +328,7 @@ cases carry a zero-tolerance, judge-independent oracle** —
 
 Sampling does not average those down; it **switches them off**. Only the judge's 1–5
 mean (`MIN_MEAN_JUDGE`) degrades gracefully. So the honest saving ceiling from
-sampling is ~28%, bought by silently disabling hard gates — strictly worse than
+sampling is ~27%, bought by silently disabling hard gates — strictly worse than
 running less often at full strength.
 
 The refusal case deserves a specific note, because it is easy to get wrong:

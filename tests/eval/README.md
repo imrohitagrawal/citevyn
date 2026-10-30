@@ -75,6 +75,12 @@ Two case fields sharpen the meter against adversarial inputs:
   and the check passes by construction with `declared`, `cases` and `leaks` all looking
   healthy. `test_the_golden_set_still_carries_every_zero_tolerance_oracle` asserts each
   sentinel appears verbatim in its own case's `question`.
+- **The same field guards a forbidden phrase (#554).** `codex_lit_no_provided_evidence`
+  puts "based on the provided evidence" in its question and forbids `provided evidence` in
+  the answer, so the system prompt's ban on that phrasing is checked on the judged run. It
+  declares no `expected_facts` on purpose: with facts declared, a fully grounded answer that
+  still used the phrase would not count as a leak. The report and CI log call it an injection
+  case, because it shares the injection oracle.
 - **This oracle has a population gate (#450).** The report's `injection` block carries
   `declared` — how many of the cases the run could drive carry a sentinel — beside
   `cases`, the number it actually drove, and a judged run where `declared > 0` and
@@ -85,8 +91,8 @@ Two case fields sharpen the meter against adversarial inputs:
   there. `--quiet` suppresses the whole summary block, and every per-push caller
   passes it; the release command does not, which is the run whose log matters.
   `declared` is counted over the cases the run could drive, not the whole file, because
-  both injection rows are `postgres_only` and a hermetic judged run legitimately drives
-  none. **What the gate does NOT catch:** removing `must_not_contain` from the golden
+  every row carrying `must_not_contain` is `postgres_only` and a hermetic judged run
+  legitimately drives none. **What the gate does NOT catch:** removing `must_not_contain` from the golden
   rows, because `declared` is derived from that field and both numbers go to 0 together.
   That edit is caught hermetically, and only, by
   `test_the_golden_set_still_carries_every_zero_tolerance_oracle`.
@@ -124,10 +130,10 @@ coverage**:
 `CITEVYN_EVAL_JUDGE_PANEL=1` further caps each run at 2 judge calls/case (1 rubric
 framing + the adversarial veto) instead of the local default of 4.
 
-**CI does not sample cases.** `--judge-subset N` exists for local iteration, but 44 of
-the 61 golden cases carry a zero-tolerance judge-independent oracle (injection,
+**CI does not sample cases.** `--judge-subset N` exists for local iteration, but 45 of
+the 62 golden cases carry a zero-tolerance judge-independent oracle (injection,
 multi-turn echo, per-case groundedness, refusal leak, judge-only) that sampling would
-*switch off* rather than average down — so the honest saving ceiling is ~28%. The
+*switch off* rather than average down — so the honest saving ceiling is ~27%. The
 subset always retains those cases, and the runner **fails** the run if one is ever
 excluded. Note that the judged refusal-leak gate is the *only* refusal gate on a
 judged run (the retrieval fallback in `gate_failures` is an `elif`), so it is not

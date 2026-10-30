@@ -17,6 +17,30 @@ Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
   index exceeded the evidence count — discarded a correct answer. See
   the stripping note below for exactly which code forms are covered and
   which are deliberately not.
+* Grouped markers such as ``[1, 2, 3]`` are SHOWN but never COUNTED (#554).
+  :func:`expand_grouped_markers` rewrites a group as ``[1][2][3]``; that is
+  the text the client gets, and every index in it gets a source card
+  (``cited_indices``). Confidence, the uncited-answer gate (#174), the
+  #208 retry checks and a comparison answer's "does not cover" note use
+  ``singly_cited_indices`` instead: the markers the model wrote singly,
+  exactly what ``cited_indices`` was before #554. The reason is measured: a
+  sentence saying the docs do NOT contain the answer is where the model
+  groups everything, so counting groups raised the issue's own answer to
+  high confidence, served a "not explicitly listed [1, 2, 3]" answer that
+  used to be refused as uncited, and hid the "does not cover" note for a
+  product cited only inside a group. An index written both singly and in a group counts. The range
+  check covers both lists.
+* A group is ASCII digits separated by commas, with spaces or tabs around
+  the commas and nowhere else, on one line. Ranges such as ``[1-3]`` are
+  deliberately NOT expanded: the model is never asked for them, and reading
+  a dash as "every index between" could attach a source card the model did
+  not cite. Groups inside markdown code, by the same definition of code as
+  the scanner below, and groups on a line that starts with a fence run, are
+  left alone.
+* The prompt also tells the model not to cite a sentence that says the
+  evidence does not contain the answer. That rule is in the PROMPT ONLY:
+  nothing here can tell such a sentence from any other. Not counting groups
+  is what limits the damage when the model breaks it by grouping.
 * Uncited evidence bullets — including bullets SKIPPED between two cited
   ones — are reported as a warning, not a failure (the model may
   legitimately not cite every retrieved chunk). A gap is therefore
@@ -99,6 +123,10 @@ _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<ticks>`+)(?!`)[^\n]*?(?<!`)(?P=ticks)(?
 
 _WHITESPACE_RE = re.compile(r"\s")
 
+# Stands in for each code character when :func:`_strip_code` keeps offsets.
+# Not a digit, bracket, comma or space, so no marker group can match across it.
+_CODE_MASK = "\0"
+
 
 def _fence_run(line: str) -> tuple[str, int] | None:
     """Return ``(fence_char, run_length)`` if ``line`` starts a run of 3+ ticks/tildes.
@@ -180,8 +208,14 @@ def _closes(line: str, open_fence: tuple[str, int], bare_reachable_after: int) -
     return bare_reachable_after < open_fence[1]
 
 
-def _strip_code(text: str) -> str:
+def _strip_code(text: str, *, keep_offsets: bool = False) -> str:
     """Blank out markdown code so ``[n]`` inside it is not read as a marker.
+
+    With ``keep_offsets`` every code character is replaced by
+    :data:`_CODE_MASK` instead, so the result has the same length as ``text``
+    and a match in it sits at the same offsets in ``text``. That is how
+    :func:`expand_grouped_markers` reuses this definition of code without
+    a second one.
 
     Line-oriented by design (see the note above): an unbalanced backtick can
     never reach past the line it appears on.
@@ -228,7 +262,7 @@ def _strip_code(text: str) -> str:
         if open_fence is not None:
             if _closes(line, open_fence, reachable[open_fence[0]][i + 1]):
                 open_fence = None
-            out.append("")
+            out.append(_CODE_MASK * len(line) if keep_offsets else "")
             continue
         match = _FENCE_OPEN_RE.match(line)
         if match:
@@ -250,13 +284,16 @@ def _strip_code(text: str) -> str:
             simple = not _WHITESPACE_RE.search(info) and not (fence[0] == "`" and "`" in info)
             if simple or reachable[fence[0]][i + 1] >= len(fence):
                 open_fence = (fence[0], len(fence))
-                out.append("")
+                out.append(_CODE_MASK * len(line) if keep_offsets else "")
                 continue
         # Inline spans collapse to a SPACE, never to the empty string.
         # Deleting outright welds neighbours into a marker never written:
         # ``[`x`99]`` would become ``[99]``, fabricating a citation from
         # untrusted output that the range check then refuses the answer over.
-        out.append(_INLINE_CODE_RE.sub(" ", line))
+        if keep_offsets:
+            out.append(_INLINE_CODE_RE.sub(lambda m: _CODE_MASK * len(m[0]), line))
+        else:
+            out.append(_INLINE_CODE_RE.sub(" ", line))
     return "\n".join(out)
 
 
@@ -282,6 +319,49 @@ def _cited_markers(answer_text: str) -> list[str]:
     return _CITATION_RE.findall(_strip_code(answer_text)) or _CITATION_RE.findall(answer_text)
 
 
+# A grouped marker (#554): ASCII digits separated by commas, with spaces or
+# tabs around the commas only. ``[ 1, 2 ]``, ``[1,]``, ``[1-3]`` and ``[1 2]``
+# do not match, and a group never spans a line. ASCII only, not ``\d``: the
+# client links ``[n]`` with ASCII digits only, so ``[１, ２]`` would become
+# markers it cannot link.
+_GROUPED_MARKER_RE = re.compile(r"\[[0-9]+(?:[ \t]*,[ \t]*[0-9]+)+\]")
+_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def expand_grouped_markers(text: str) -> str:
+    """Rewrite each grouped marker ``[1, 2, 3]`` as ``[1][2][3]`` (#554).
+
+    A real model answered in production with ``[1, 2, 3, 4, 5, 6]``. The
+    contract allows only ``[n]``, so the group was not a marker and the client
+    showed it as literal text. Splitting it shows every index the model wrote
+    as a real marker with a source card. It does not make those indices COUNT:
+    :func:`validate_citations` keeps them out of ``singly_cited_indices``.
+
+    Everything outside a group is returned byte for byte, line endings
+    included, and groups inside markdown code (as :func:`_strip_code` defines
+    it) are left alone. Ranges are not expanded; see the module docstring.
+
+    A group on a line that STARTS with a fence run is left alone too.
+    ``"```[1, 2]"`` is prose, because its info string holds a space, but
+    ``"```[1][2]"`` is a one-token info string that OPENS a fence: expanding
+    it would hide every later marker and make a second pass expand more than
+    the first. Leaving those lines alone keeps the function idempotent.
+    """
+    masked = _strip_code(text, keep_offsets=True)
+    pieces: list[str] = []
+    last = 0
+    for match in _GROUPED_MARKER_RE.finditer(masked):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if _fence_run(text[line_start : line_end if line_end != -1 else len(text)]):
+            continue
+        pieces.append(text[last : match.start()])
+        pieces.append("".join(f"[{n}]" for n in _DIGITS_RE.findall(match[0])))
+        last = match.end()
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
 # Substring of the refusal the model is contractually required to emit
 # when there is no evidence. Used so trimmed responses still pass.
 _NO_ANSWER_SUBSTRING = "do not have credible source material"
@@ -290,8 +370,13 @@ _NO_ANSWER_SUBSTRING = "do not have credible source material"
 class CitationValidationResult(BaseModel):
     """Outcome of :func:`validate_citations`.
 
-    ``valid`` is True when every ``[n]`` in the answer references a real
-    evidence bullet — that is, ``1 <= n <= len(evidence)``. The cited
+    ``valid`` is True when every ``[n]`` in the answer, written singly or in
+    a group, references a real evidence bullet — that is,
+    ``1 <= n <= len(evidence)``. ``cited_indices`` is every index the answer
+    SHOWS once groups are split (these get source cards);
+    ``singly_cited_indices`` is the indices the model wrote singly (these
+    drive confidence, the uncited-answer and retry gates and the comparison
+    "does not cover" note, #554). The cited
     indices need NOT be contiguous; ``uncited_indices`` reports the
     bullets the model skipped. When ``answer_text`` is the no-answer
     refusal, ``valid`` is True with empty citation lists regardless of
@@ -300,6 +385,7 @@ class CitationValidationResult(BaseModel):
 
     valid: bool
     cited_indices: list[int] = Field(default_factory=list[int])
+    singly_cited_indices: list[int] = Field(default_factory=list[int])
     uncited_indices: list[int] = Field(default_factory=list[int])
     reason: str | None = None
 
@@ -325,22 +411,27 @@ def validate_citations(
     """Check that ``answer_text`` references ``evidence`` correctly.
 
     Pure function — no DB, no network. Safe to call from any context
-    with arbitrary evidence.
+    with arbitrary evidence. ``answer_text`` is the model's RAW text, groups
+    intact: this function splits them itself, so it can tell a grouped index
+    from a single one.
     """
     evidence_count = len(evidence)
 
     if _is_no_answer_refusal(answer_text):
         return CitationValidationResult(valid=True)
 
-    raw_markers = _cited_markers(answer_text)
-    cited_indices = sorted({int(m) for m in raw_markers})
+    cited_indices = sorted({int(m) for m in _cited_markers(expand_grouped_markers(answer_text))})
+    singly_cited_indices = sorted({int(m) for m in _cited_markers(answer_text)})
 
-    # Hard-fail: any out-of-range marker (0 or > evidence_count).
-    out_of_range = [n for n in cited_indices if n < 1 or n > evidence_count]
+    # Hard-fail: any out-of-range marker (0 or > evidence_count), grouped or
+    # single. The union, because the two scans' code fallbacks can differ.
+    shown_or_counted = sorted(set(cited_indices) | set(singly_cited_indices))
+    out_of_range = [n for n in shown_or_counted if n < 1 or n > evidence_count]
     if out_of_range:
         return CitationValidationResult(
             valid=False,
             cited_indices=cited_indices,
+            singly_cited_indices=singly_cited_indices,
             reason=(
                 f"citation index out of range: {out_of_range}; "
                 f"evidence has {evidence_count} bullet(s)"
@@ -366,5 +457,6 @@ def validate_citations(
     return CitationValidationResult(
         valid=True,
         cited_indices=cited_indices,
+        singly_cited_indices=singly_cited_indices,
         uncited_indices=uncited,
     )

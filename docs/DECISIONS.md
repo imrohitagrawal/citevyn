@@ -18,6 +18,16 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-31 — Grouped citation markers are shown, but never counted
+Applies to how answers are cited (#554). When the model groups citations, as
+in `[1, 2, 3]`, the answer shows them as separate clickable markers
+(`[1][2][3]`), each with its source card, so every source the model named can
+still be checked. A source number that appears only inside a group never
+counts toward the answer's confidence, the check that refuses an answer citing
+nothing, whether the exact-lookup retry runs, or a comparison answer's "the
+documentation I have does not cover X" note; only markers written one per
+bracket count, so grounding is judged as before.
+
 ### 2026-10-31 — Old git history is kept as it is; new matches are what get fixed
 CiteVyn's history holds matches for the public-content guard's rules (mostly
 session-link trailers in old commit messages; no live credential). The history
