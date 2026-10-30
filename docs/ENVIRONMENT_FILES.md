@@ -42,7 +42,9 @@ Outside your machine:
 
 For a command the Makefile runs through `scripts/with_env.py`:
 
-1. A variable set in the shell beats the file.
+1. A variable set in the shell beats the file, compared ignoring case (as
+   `Settings` reads names), so `citevyn_llm_provider=router` in the file does
+   not beat `CITEVYN_LLM_PROVIDER=stub` in the shell.
    `CITEVYN_LLM_PROVIDER=router make eval` uses `router` even if `backend/.env`
    says `stub`. The same goes for what a recipe sets itself: `make migrate` and
    `make seed` set `CITEVYN_DATABASE_URL` from `DB_URL`, so a database URL in
@@ -51,9 +53,20 @@ For a command the Makefile runs through `scripts/with_env.py`:
 3. The default applies when neither sets it.
 
 The file is parsed by python-dotenv, as `Settings` parsed it before (quotes,
-`export`, `${NAME}` expansion, the last of two equal names wins). A line it
-cannot parse, or a name with no `=`, stops the command and names the line
-number; nothing from the file is printed.
+`export`, `${NAME}` expansion, the last of two equal names wins). These stop the
+command and name the line number, with nothing from the file printed: a line it
+cannot parse, a name with no `=`, a name a shell could not hold, and a name that
+repeats an earlier one in another case. A file that is not UTF-8 text stops it
+too; a leading byte-order mark is ignored.
+
+Every name in the file reaches the command's environment, not only the
+`CITEVYN_` settings. Tools that read a variable themselves now see it: for
+example `CITEVYN_EVAL_JUDGE_PANEL` in `backend/.env` now takes effect for
+`make eval`. The file is read once, when the command starts: after editing
+`backend/.env`, restart `make api` (its reload watches code, not the file).
+
+`DEV_ENV_FILE` empty counts as unset. A file named in it that does not exist
+stops make before any target runs, including `make help` and `make test`.
 
 Inside a compose container, a value in the service's `environment:` block beats
 `env_file:`. `docker-compose.yml` pins `CITEVYN_ENVIRONMENT` that way, and fills

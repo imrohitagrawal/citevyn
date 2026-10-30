@@ -27,8 +27,9 @@ through `scripts/with_env.py`, with the same parser as before and the shell
 winning: `make api`, `worker`, `migrate`, `seed`, `demo`, `ci-smoke`, `eval`,
 `golden`, `golden-smoke`, `test-pg`, and every backend step of `make smoke` and
 `make e2e`. Commands that newly read the file: `migrate`, `seed`, `demo`,
-`smoke` and `e2e` (seed and smoke now ingest with the embedder it names, and
-the seed prints that name first). `make test` and coverage load no file, as in
+`ci-smoke` (when the file exists), and the migrate and seed steps of `smoke`
+and `e2e`, whose server step read it already (seeding now uses the embedder
+the file names, and the seed prints that name first). `make test` and coverage load no file, as in
 CI. `make demo-frontend` keeps reading its token from `infra/docker/.env`: the
 plan to move it assumed the local backend served that bundle, but its real
 user is the compose release check (`deploy_verify.sh`). Details:

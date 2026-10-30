@@ -506,7 +506,8 @@ def _healthy_seed(session) -> EmbedderIdentity:
 
     Every chunk is embedded and the index stamp equals the CONFIGURED query
     embedder, so ``derive_vector_arm_status`` returns ``healthy``. Derived from
-    ``get_settings()`` rather than hard-coded so a stray ``backend/.env`` cannot
+    ``get_settings()`` rather than hard-coded so a configured embedder (from the
+    environment, or ``backend/.env`` back when ``Settings`` read it) cannot
     silently turn the control case into a ``mismatch``.
     """
     import asyncio

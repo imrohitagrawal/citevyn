@@ -409,7 +409,8 @@ If you'd rather run uvicorn outside Docker (faster reloads):
 make api                      # uvicorn --reload on port 8000, with backend/.env
 ```
 
-For the worker (a command-line tool; `make worker` alone lists its commands):
+For the worker (a command-line tool; `make worker` with no `ARGS` prints its
+commands and exits 1):
 
 ```bash
 make worker ARGS=list-sources

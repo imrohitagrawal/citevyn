@@ -161,9 +161,9 @@ def _url_configured() -> bool:
 
     ``get_settings`` is resolved through this module's globals (imported at the
     top, not inside the body) so a test can substitute it. Without that, the
-    "no URL anywhere" case would be decided by whether the checkout happens to
-    carry a ``backend/.env`` setting ``pg_test_url`` — an environment reason, for
-    nobody's mistake.
+    "no URL anywhere" case would be decided by whatever the environment happens
+    to set ``pg_test_url`` to (``Settings`` once read ``backend/.env`` too) — an
+    environment reason, for nobody's mistake.
     """
     return os.environ.get(PG_URL_ENV) is not None or get_settings().pg_test_url is not None
 
@@ -252,7 +252,7 @@ def test_the_url_reader_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv(PG_URL_ENV, raising=False)
     # Substituted, not trusted: `raising=True` (the default) means a rename of the
     # module-level import fails this test loudly instead of patching nothing and
-    # letting a real `backend/.env` decide the outcome.
+    # letting the real environment decide the outcome.
     monkeypatch.setattr(
         "tests.test_postgres_suite_is_not_vacuous.get_settings",
         lambda: SimpleNamespace(pg_test_url=None),
