@@ -9,14 +9,14 @@ which: ``.env.example`` told operators to copy it to ``.env`` without saying whi
 pasting a real value into a page of a PUBLIC repository.
 
 The paths are derived from what the code reads where a config line exists: the
-backend file from the Makefile's ``DEV_ENV_FILE ?=`` default (``Settings`` reads
+backend file from the Makefile's ``DEV_ENV_FILE_DEFAULT`` (``Settings`` reads
 no file; the Makefile loads this one through ``scripts/with_env.py``), Compose's
 from every ``env_file:`` in ``docker-compose.yml``, and the templates from
 ``git ls-files``. Only Vite's ``.env.local`` is a convention with no config line
 to read.
 
 Which change turns each test red:
-  * a new ``env_file:`` in compose, a new ``DEV_ENV_FILE`` default in the Makefile,
+  * a new ``env_file:`` in compose, a new ``DEV_ENV_FILE_DEFAULT`` in the Makefile,
     or a new ``*.env.example``, with no table row in the guide that starts with it;
   * a ``.gitignore`` change that stops ignoring one of the live files, one of the
     backup-style names (``.env~``, ``.env-old``, ``.envrc``), or the retired root
@@ -68,11 +68,11 @@ def _compose_env_files() -> set[str]:
 
 
 def _dev_env_file() -> str:
-    """The Makefile's ``DEV_ENV_FILE ?= <path>`` default: what the development commands load."""
+    """The Makefile's ``DEV_ENV_FILE_DEFAULT := <path>``: what the development commands load."""
     found = re.findall(
-        r"^DEV_ENV_FILE\s*\?=\s*(\S+)\s*$", _MAKEFILE.read_text(encoding="utf-8"), re.M
+        r"^DEV_ENV_FILE_DEFAULT\s*:=\s*(\S+)\s*$", _MAKEFILE.read_text(encoding="utf-8"), re.M
     )
-    assert len(found) == 1, f"expected one `DEV_ENV_FILE ?=` line in the Makefile, found {found}"
+    assert len(found) == 1, f"expected one `DEV_ENV_FILE_DEFAULT :=` line in the Makefile: {found}"
     return found[0]
 
 

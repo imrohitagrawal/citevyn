@@ -30,7 +30,7 @@ _WRAPPER = "scripts/with_env.py"
 # wrapper. A target missing here is a target nobody checks.
 _DEV_TARGETS: dict[str, list[str]] = {
     "api": ["uvicorn app.main:app"],
-    "worker": ["citevyn-worker"],
+    "worker": ["python -m app.worker.cli"],
     "eval": ["tests.eval.runner"],
     "golden": ["tests.golden.runner"],
     "golden-smoke": ["tests.golden.runner"],
@@ -76,7 +76,7 @@ def test_each_dev_target_runs_through_the_wrapper(target: str) -> None:
     # then read no file at all), or calls `uv run` without --no-env-file.
     lines = _dry_run(target).splitlines()
     for command in _DEV_TARGETS[target]:
-        hits = [line for line in lines if command in line]
+        hits = [line for line in lines if command in line and not line.startswith("#")]
         assert hits, f"`make -n {target}` never runs {command!r}"
         for line in hits:
             assert _WRAPPER in line, f"`make {target}` runs {command!r} without the wrapper"

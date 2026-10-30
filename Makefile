@@ -48,17 +48,27 @@ export PROFILE
 #
 # The default file may be missing (CI and a fresh clone have none; `ci-smoke`
 # runs `migrate` in CI): one line says so and the command runs on the process
-# environment. A file named explicitly (`make seed DEV_ENV_FILE=path`, or in the
-# environment) must exist, or make stops before running anything. Absolute
-# paths, because several recipes `cd backend` first.
-DEV_ENV_FILE ?= backend/.env
+# environment. An empty DEV_ENV_FILE means the default (smoke.sh agrees). A file
+# named explicitly (`make seed DEV_ENV_FILE=path`, or in the environment) must
+# exist: checked here, when the Makefile is read, so make stops before ANY
+# target runs (`demo` and `ci-smoke` would otherwise start docker first). Paths
+# are passed absolute, because several recipes `cd backend` first.
+DEV_ENV_FILE_DEFAULT := backend/.env
+DEV_ENV_FILE ?= $(DEV_ENV_FILE_DEFAULT)
 ifeq ($(origin DEV_ENV_FILE),file)
-_DEV_ENV_ARGS = --optional '$(abspath $(DEV_ENV_FILE))'
-_SMOKE_ENV =
+_DEV_ENV_EXPLICIT :=
 else
-_DEV_ENV_PATH = $(if $(wildcard $(DEV_ENV_FILE)),$(abspath $(DEV_ENV_FILE)),$(error DEV_ENV_FILE=$(DEV_ENV_FILE) does not exist; unset it to use backend/.env when present))
-_DEV_ENV_ARGS = '$(_DEV_ENV_PATH)'
-_SMOKE_ENV = DEV_ENV_FILE='$(_DEV_ENV_PATH)'
+_DEV_ENV_EXPLICIT := $(strip $(DEV_ENV_FILE))
+endif
+ifeq ($(_DEV_ENV_EXPLICIT),)
+_DEV_ENV_ARGS = --optional '$(abspath $(DEV_ENV_FILE_DEFAULT))'
+_SMOKE_ENV = DEV_ENV_FILE=''
+else
+ifeq ($(wildcard $(_DEV_ENV_EXPLICIT)),)
+$(error DEV_ENV_FILE=$(_DEV_ENV_EXPLICIT) does not exist; unset it to use backend/.env when present)
+endif
+_DEV_ENV_ARGS = '$(abspath $(_DEV_ENV_EXPLICIT))'
+_SMOKE_ENV = DEV_ENV_FILE='$(abspath $(_DEV_ENV_EXPLICIT))'
 endif
 # Runs inside `uv run --no-env-file`, so `python` is the backend's interpreter
 # (it has python-dotenv) and uv itself loads nothing.
@@ -167,7 +177,10 @@ api: ## Run the API on localhost:8000 with reload (loads DEV_ENV_FILE)
 	cd backend && uv run --no-env-file $(WITH_ENV) uvicorn app.main:app --reload --port 8000
 
 worker: ## Run the worker CLI (loads DEV_ENV_FILE); e.g. make worker ARGS=list-sources
-	cd backend && uv run --no-env-file $(WITH_ENV) citevyn-worker $(ARGS)
+	@# `python -m`, not the `citevyn-worker` script: uv installs no console scripts
+	@# for this project (it is not packaged), the same reason as Dockerfile.worker.
+	@# With no ARGS the CLI prints its commands and exits 1.
+	cd backend && uv run --no-env-file $(WITH_ENV) python -m app.worker.cli $(ARGS)
 
 env-bootstrap: ## Create infra/docker/.env from prod.env.example if absent (DEV-ONLY stub secrets)
 	@# Compose env_file: refs on every service require the file to
