@@ -45,23 +45,24 @@
 #   will-close-unstruck-row-fails — --will-close ignored, so a row left un-struck
 #                              for an issue the pull request closes passes
 #   will-close-only-named-issues — --will-close treating every issue as closed
-#   fence-row-ignored / tilde-fence-row-ignored — rows inside ``` or ~~~ fences
-#                              read, so an example row satisfies R1
-#   fence-heading-ignored    — a `#` line inside a fence read as a heading, which
-#                              resets the closed-section state
-#   comment-row-ignored      — rows inside a multi-line <!-- --> comment read
-#   comment-heading-ignored  — a heading inside a multi-line comment read
+#   fence-refused / tilde-fence-refused / comment-refused — a code fence or an
+#                              HTML comment read instead of refused (exit 2, naming
+#                              the line): the checker does not emulate either
+#   inline-code-and-fence-word-pass — the refusal widened to inline code, to ```
+#                              inside a row, or to the word "fence" (partner of
+#                              the three above)
+#   ledger-line-separator-keeps-line-numbers — the ledger split with
+#                              str.splitlines(), which also breaks on U+2028
 #   other-repo-ref-ignored   — `other/repo#7` in a first cell read as this repo's #7
 #   r1-says-what-to-change   — R1 without the fix, or without the issue's title
 #   r2-says-what-to-change   — R2 without the fix, or without GitHub's closing date
 #   r3-says-what-to-change   — R3 without the fix
-#   unclosed-fence-is-error / unclosed-comment-is-error — a fence or comment left
-#                              open at the end hiding the rest of the ledger,
-#                              which then passes on what is left
-#   longer-fence-not-closed-by-shorter — a ```` fence closed by a ``` line
 #   title-with-line-separator — gh's output split on more than "\n" (U+2028 in a
 #                              title then breaks the line), or titles not JSON
 #   repeated-number-is-error — a later line for the same number silently winning
+#   title-not-json-is-error / title-not-string-is-error — a title that is not a
+#                              JSON string accepted
+#   short-gh-line-is-error   — the date and title fields made optional again
 
 set -euo pipefail
 
@@ -124,13 +125,13 @@ CLEAN="# Backlog
 # GitHub's answer for CLEAN: four issues in the right states, plus an open and a
 # closed pull request that no row names.
 CLEAN_GH="1 open false
-2 closed false
-3 closed false
-4 closed false
-5 open false
-6 open false
-10 open true
-11 closed true"
+2 closed false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\"
+10 open true - \"t\"
+11 closed true - \"t\""
 
 _run() {
   # _run <ledger text> <gh output text> [gh exit code] [gh stderr]
@@ -172,28 +173,28 @@ _expect clean-ledger-counts-rows 0 'rows: 3 in open tables, 2 in closed sections
 
 # --- R1 ----------------------------------------------------------------------
 _run "$CLEAN" "${CLEAN_GH}
-7 open false"
+7 open false - \"t\""
 _expect r1-missing-row 1 '^R1 #7: '
 
 _run "$CLEAN" "1 open false
-2 open false
-3 closed false
-4 closed false
-5 open false
-6 open false"
+2 open false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r1-only-struck-row 1 '^R1 #2: '
 
 _run "$CLEAN" "${CLEAN_GH}
-12 open true"
+12 open true - \"t\""
 _expect r1-ignores-open-prs 0 '^ledger_check: 0 violations' '#12'
 
 # --- R2 ----------------------------------------------------------------------
 _run "$CLEAN" "1 closed false
-2 closed false
-3 closed false
-4 closed false
-5 open false
-6 open false"
+2 closed false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r2-closed-issue-unstruck 1 '^R2 #1: .*closed'
 
 _run "${CLEAN}
@@ -216,27 +217,27 @@ _expect r2-pull-request 1 '^R2 #10: .*pull request'
 
 # --- R3 ----------------------------------------------------------------------
 _run "$CLEAN" "1 open false
-2 open false
-3 closed false
-4 closed false
-5 open false
-6 open false"
+2 open false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r3-struck-but-open 1 '^R3 #2: .*open'
 
 _run "$CLEAN" "1 open false
-2 closed false
-3 open false
-4 closed false
-5 open false
-6 open false"
+2 closed false - \"t\"
+3 open false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r3-closed-section-open 1 '^R3 #3: .*open'
 
 _run "$CLEAN" "1 open false
-2 closed false
-3 closed false
-4 open false
-5 open false
-6 open false"
+2 closed false - \"t\"
+3 closed false - \"t\"
+4 open false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r3-child-of-closed 1 '^R3 #4: .*open'
 
 _run "${CLEAN}
@@ -252,7 +253,7 @@ _run "${CLEAN}
 |---|---|
 | [#7](${U}/7) | Open, after the closed sections |
 " "${CLEAN_GH}
-7 open false"
+7 open false - \"t\""
 _expect section-reopens 0 '^ledger_check: 0 violations' '^R[123] '
 
 # #5/#6's title has "~~one old note~~" mid-cell; both are open. Read as struck,
@@ -262,12 +263,12 @@ _expect mid-cell-strike-is-unstruck 0 '^ledger_check: 0 violations' '#[56]'
 
 # --- the partner: a violation is really counted -------------------------------
 _run "$CLEAN" "1 closed false
-2 closed false
-3 closed false
-4 closed false
-5 open false
-6 open false
-7 open false"
+2 closed false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\"
+7 open false - \"t\""
 _expect violations-are-counted 1 '^ledger_check: 2 violations'
 n="$(printf '%s\n' "$OUT" | grep -Ec '^R[123] #' || true)"
 if [ "$n" = "2" ]; then _ok violations-are-counted-lines; else _bad violations-are-counted-lines "wanted 2 violation lines, got $n"; fi
@@ -276,11 +277,11 @@ if [ "$n" = "2" ]; then _ok violations-are-counted-lines; else _bad violations-a
 # On a pull request the ledger is written in its final state: the row of an
 # issue the pull request closes is already struck while GitHub still says open.
 OPEN2="1 open false
-2 open false
-3 closed false
-4 closed false
-5 open false
-6 open false"
+2 open false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 EXTRA_ARGS="--will-close 2"
 _run "$CLEAN" "$OPEN2"
 _expect will-close-struck-row-passes 0 '^ledger_check: 0 violations' '^R[123] '
@@ -295,75 +296,65 @@ _run "$CLEAN" "$OPEN2"
 _expect will-close-only-named-issues 1 '^R3 #2: '
 EXTRA_ARGS=""
 
-# --- text a reader never sees: fences and comments ---------------------------
-_run "${CLEAN}
+# --- code fences and HTML comments are refused, not emulated --------------------
+# Emulating them produced three false passes in review, and the ledger has never
+# held either, so the check refuses them and names the line.
+_line_of() { printf '%s\n' "$1" | grep -n -F -- "$2" | head -1 | cut -d: -f1; }
+
+L="${CLEAN}
 ## Examples
 
-\`\`\`
+\`\`\`text
 | [#7](${U}/7) | An example row inside a fence |
 \`\`\`
-" "${CLEAN_GH}
-7 open false"
-_expect fence-row-ignored 1 '^R1 #7: '
+"
+_run "$L" "${CLEAN_GH}
+7 open false - \"t\""
+_expect fence-refused 2 "ERROR: .*line $(_line_of "$L" '```text'): the ledger check does not read code fences or HTML comments" '0 violations|^R[123] '
 
-_run "${CLEAN}
+L="${CLEAN}
 ## Examples
 
-~~~markdown
+  ~~~
 | [#7](${U}/7) | An example row inside a tilde fence |
-~~~
-" "${CLEAN_GH}
-7 open false"
-_expect tilde-fence-row-ignored 1 '^R1 #7: '
+  ~~~
+"
+_run "$L" "${CLEAN_GH}
+7 open false - \"t\""
+_expect tilde-fence-refused 2 "ERROR: .*line $(_line_of "$L" '  ~~~'): the ledger check does not read code fences" '0 violations|^R[123] '
 
-_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
-
-\`\`\`
-# not a heading
-\`\`\`}" "$CLEAN_GH"
-_expect fence-heading-ignored 0 '^ledger_check: 0 violations' '^R[123] '
+L="${CLEAN}
+| [#8](${U}/8) | A row with a comment <!-- hidden --> in it |
+"
+_run "$L" "${CLEAN_GH}
+8 closed false 2026-09-07 \"t\""
+_expect comment-refused 2 "ERROR: .*line $(_line_of "$L" '<!--'): the ledger check does not read code fences or HTML comments" '0 violations|^R[123] '
 
 _run "${CLEAN}
 ## Notes
 
-<!--
-still inside the comment
-| [#7](${U}/7) | A row inside a comment |
--->
+| Issue | Title |
+|---|---|
+| [#7](${U}/7) | Uses \`inline code\`, a \`\`\`triple\`\`\` span and the word fence |
 " "${CLEAN_GH}
-7 open false"
-_expect comment-row-ignored 1 '^R1 #7: '
+7 open false - \"t\""
+_expect inline-code-and-fence-word-pass 0 '^ledger_check: 0 violations' '^R[123] |ERROR'
 
-_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
+# U+2028 is a line break to str.splitlines(); in the ledger it must not shift
+# the line numbers reported after it.
+LS="$(printf '\342\200\250')"
+L="${CLEAN}
+## More
 
-<!-- a comment that spans lines
-still inside the comment
-# not a heading
--->}" "$CLEAN_GH"
-_expect comment-heading-ignored 0 '^ledger_check: 0 violations' '^R[123] '
-
-# A fence or comment left open hides everything after it. Opened just below the
-# closed heading, it hides that section's rows, and what is left would pass.
-_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
-
-\`\`\`}" "$CLEAN_GH"
-_expect unclosed-fence-is-error 2 'ERROR: .*fence.*line [0-9]+' '0 violations|^R[123] '
-
-_run "${CLEAN/Closed — kept for the record/Closed — kept for the record
-
-<!-- never closed}" "$CLEAN_GH"
-_expect unclosed-comment-is-error 2 'ERROR: .*comment.*line [0-9]+' '0 violations|^R[123] '
-
-_run "${CLEAN}
-## Examples
-
-\`\`\`\`
-\`\`\`
-| [#7](${U}/7) | Inside a four-backtick fence |
-\`\`\`\`
-" "${CLEAN_GH}
-7 open false"
-_expect longer-fence-not-closed-by-shorter 1 '^R1 #7: '
+| Issue | Title |
+|---|---|
+| [#7](${U}/7) | Open, with a${LS}line separator in its title |
+| [#9](${U}/9) | Closed but not struck |
+"
+_run "$L" "${CLEAN_GH}
+7 open false - \"t\"
+9 closed false 2026-09-07 \"t\""
+_expect ledger-line-separator-keeps-line-numbers 1 "^R2 #9: .*\\(line $(_line_of "$L" '[#9]')\\)"
 
 # --- references to another repository ------------------------------------------
 _run "${CLEAN}
@@ -381,11 +372,11 @@ _run "$CLEAN" "${CLEAN_GH}
 _expect r1-says-what-to-change 1 '^R1 #7: .*add a row for #7 "Seventh thing" to an open table'
 
 _run "$CLEAN" "1 closed false 2026-09-07 \"Open thing\"
-2 closed false
-3 closed false
-4 closed false
-5 open false
-6 open false"
+2 closed false - \"t\"
+3 closed false - \"t\"
+4 closed false - \"t\"
+5 open false - \"t\"
+6 open false - \"t\""
 _expect r2-says-what-to-change 1 '^R2 #1: .*strike the title with ~~ and add \*\*CLOSED on GitHub 2026-09-07\.\*\*, or move the row to a closed section'
 
 _run "$CLEAN" "$OPEN2"
@@ -416,7 +407,6 @@ _expect gh-garbage-is-error 2 'ERROR: .*unexpected' '0 violations|^R[123] '
 
 # U+2028 is a line separator to str.splitlines(); in a title it must not split
 # the line. gh's jq writes it raw inside the JSON string, as here.
-LS="$(printf '\342\200\250')"
 _run "$CLEAN" "${CLEAN_GH}
 7 open false - \"Seventh${LS}thing\""
 _expect title-with-line-separator 1 '^R1 #7: .*add a row for #7 "Seventh' 'ERROR'
@@ -424,6 +414,18 @@ _expect title-with-line-separator 1 '^R1 #7: .*add a row for #7 "Seventh' 'ERROR
 _run "$CLEAN" "${CLEAN_GH}
 1 closed false 2026-09-07 \"A second line for #1\""
 _expect repeated-number-is-error 2 'ERROR: .*#1.*more than once' '0 violations|^R[123] '
+
+_run "$CLEAN" "${CLEAN_GH}
+7 open false - not-json"
+_expect title-not-json-is-error 2 'ERROR: .*title.*#7' '0 violations|^R[123] '
+
+_run "$CLEAN" "${CLEAN_GH}
+7 open false - 5"
+_expect title-not-string-is-error 2 'ERROR: .*title.*#7' '0 violations|^R[123] '
+
+_run "$CLEAN" "${CLEAN_GH}
+7 open false"
+_expect short-gh-line-is-error 2 'ERROR: .*unexpected line' '0 violations|^R[123] '
 
 printf '%s' "$CLEAN" > "${WORK}/BACKLOG.md"
 set +e
