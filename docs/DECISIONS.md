@@ -18,6 +18,24 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — The guard is switched on before every repository is clean
+The public-content guard is switched on before every repository is clean. An
+existing finding blocks a change only when that change edits the file that
+holds it; new findings, commit messages and pull request text are always
+checked. Existing findings are cleaned in their own approved work. This
+repository's pull request check uses the guard.
+
+### 2026-10-30 — Archives the guard cannot open are blocked; other binaries are read by their text
+zip, tar, gzip, bzip2 and xz files are read to their last byte, or the check
+blocks. Archives the guard cannot open (7z, rar, zstd, lz4, lzip, Unix
+compress, cabinet, xar) block, so their contents are never published unread. A
+block names the file and says what to do: remove it, commit its contents
+unpacked, repack it as zip, tar.gz or tar.xz, or keep it in a private
+repository. Every other binary file (images, PDFs, videos) is checked through
+its plain text, in runs of 12 or more characters: shorter runs gave false
+blocks on ordinary photos, and text inside a binary's compressed parts is not
+read. Both gaps are written down in the guard's documentation.
+
 ### 2026-10-30 — Text that is already public is no reason to pass the guard
 The public-content guard checks every file a change adds or changes whole, and
 every commit message, name and pull request title and body, with no exemption
