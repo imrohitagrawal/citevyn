@@ -94,6 +94,9 @@ def test_index_reports_a_refused_query_embedder_without_detail(
     since = "2026-10-30T12:00:00+00:00"
 
     class _RefusedTracker:
+        async def claim_self_check(self, interval_seconds: int) -> bool:
+            return False  # no self-check in this test
+
         async def status(self) -> dict[str, str | None]:
             return {"state": "refused", "refused_since": since}
 
