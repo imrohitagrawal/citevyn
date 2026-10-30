@@ -35,11 +35,17 @@ from app.embeddings.errors import EmbedderUnavailable
 
 _logger = logging.getLogger("citevyn.embeddings")
 
-#: The longest one tracker call may wait on Redis. A safety ceiling, not a
-#: tuning knob: every successful query now makes a call, and the client's own
-#: socket timeout (5 s) would otherwise be added to every answer while Redis is
-#: stalled. Tested to stay well below that timeout.
+#: The longest one tracker call on the ANSWER path may wait on Redis. A safety
+#: ceiling, not a tuning knob: every successful query now makes a call, and the
+#: client's own socket timeout (5 s) would otherwise be added to every answer
+#: while Redis is stalled. Tested to stay well below that timeout.
 REDIS_CALL_CEILING_SECONDS = 0.5
+
+#: The same ceiling for the health route's read. Longer, because the uptime
+#: probe usually wakes a stopped machine whose first Redis call also opens the
+#: connection (TLS included), and a slow handshake must not page as "Redis
+#: unreadable". Still well inside the client's 5 s timeout and the probe's 45 s.
+STATUS_CEILING_SECONDS = 2.0
 
 _UNAVAILABLE: dict[str, str | None] = {"state": "unavailable", "refused_since": None}
 _UNCONFIGURED: dict[str, str | None] = {"state": "unconfigured", "refused_since": None}
@@ -74,7 +80,7 @@ class QueryEmbedderHealth:
         """``ok``, ``refused`` (with when it started) or ``unavailable``."""
         try:
             since = await asyncio.wait_for(
-                self._client.get(self.key), timeout=REDIS_CALL_CEILING_SECONDS
+                self._client.get(self.key), timeout=STATUS_CEILING_SECONDS
             )
         except Exception as exc:  # noqa: BLE001 — telemetry never fails the health route
             _log_unavailable(exc)
@@ -93,18 +99,18 @@ class QueryEmbedderHealth:
 
 
 def _valid_time(value: Any) -> str | None:
-    """``value`` if it is an ISO timestamp, else None.
+    """``value`` if it is exactly a timestamp this module writes, else None.
 
     Only this module writes the key, but the value is printed into the uptime
     probe's GitHub Actions log, where a line starting ``::`` is a workflow
-    command; anything that is not a timestamp is not passed on."""
-    if not isinstance(value, str):
-        return None
+    command. ``fromisoformat`` alone is not enough: it accepts any character
+    between date and time, a newline included, so the value must also read
+    back unchanged."""
     try:
-        datetime.fromisoformat(value)
-    except ValueError:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
         return None
-    return value
+    return value if parsed.isoformat() == value else None
 
 
 def _log_unavailable(exc: Exception) -> None:

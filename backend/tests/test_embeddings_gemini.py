@@ -460,6 +460,7 @@ def _google_error(code: int, status: str, reason: str | None) -> str:
         (400, json.dumps({"error": "a string, not an object"}), False),
         (429, _google_error(429, "RESOURCE_EXHAUSTED", None), False),
         (503, "x", False),
+        (404, "not found", False),
     ],
 )
 async def test_gemini_marks_account_refusals(status: int, body: str, refused: bool) -> None:
@@ -479,3 +480,34 @@ async def test_gemini_marks_account_refusals(status: int, body: str, refused: bo
 
     assert info.value.account_refused is refused
     assert info.value.status_code == status
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A reason that is not text: `in` on a set would raise TypeError.
+        json.dumps({"error": {"details": [{"reason": ["API_KEY_INVALID"]}]}}),
+        json.dumps({"error": {"details": [{"reason": {}}]}}),
+        # Nesting deep enough to exhaust the JSON parser's recursion.
+        "[" * 100_000,
+        # An integer longer than Python's int-parsing limit.
+        '{"error": ' + "9" * 5000 + "}",
+    ],
+    ids=["list-reason", "dict-reason", "deep-nesting", "huge-int"],
+)
+async def test_an_unreadable_400_body_is_still_a_plain_embedder_failure(body: str) -> None:
+    """Red when: reading the 400 body can raise anything but EmbedderUnavailable.
+    The retriever catches only that, so any other error would fail the question
+    instead of degrading it to keyword search."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text=body)
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.account_refused is False

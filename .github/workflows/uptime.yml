@@ -67,7 +67,8 @@ jobs:
           code=$(curl -sS -o /tmp/index.json -w '%{http_code}' --max-time 45 "$BASE_URL/health/index")
           echo "GET /health/index -> $code"
           python3 - <<'PY'
-          import json, re, sys
+          import json, sys
+          from datetime import datetime
 
           with open("/tmp/index.json") as fh:
               body = json.load(fh)
@@ -78,7 +79,9 @@ jobs:
           ratio = arm.get("embedded_ratio")
           match = arm.get("embedder_match")
 
-          print(f"status={status} vector_arm={arm_status} embedded_ratio={ratio} embedder_match={match}")
+          # !r throughout: a value printed raw that starts a line with "::" is a
+          # workflow command in this log.
+          print(f"status={status!r} vector_arm={arm_status!r} embedded_ratio={ratio!r} embedder_match={match!r}")
 
           problems = []
           if status != "ready":
@@ -98,7 +101,7 @@ jobs:
               # of to `promote_version`.
               count = arm.get("active_index_count")
               problems.append(
-                  f"vector_arm is AMBIGUOUS — {count} index versions are marked "
+                  f"vector_arm is AMBIGUOUS — {count!r} index versions are marked "
                   "active; promote a version that is NOT currently active "
                   "(?force=true if it has no passing eval run) to converge"
               )
@@ -138,8 +141,14 @@ jobs:
               if state == "refused":
                   since = embedder.get("refused_since")
                   # Printed into this log, where a line starting "::" is a
-                  # workflow command: only a plain timestamp is passed through.
-                  if not (isinstance(since, str) and re.fullmatch(r"[0-9T:.+\-]{10,40}", since)):
+                  # workflow command: only a timestamp that reads back
+                  # unchanged is passed through (fromisoformat alone accepts
+                  # any separator, a newline included).
+                  try:
+                      ok = datetime.fromisoformat(since).isoformat() == since
+                  except (TypeError, ValueError):
+                      ok = False
+                  if not ok:
                       since = "<invalid>"
                   reason = (
                       f"query embedder: the provider has refused this account since {since}. "
@@ -158,8 +167,8 @@ jobs:
                   )
               elif state == "unavailable":
                   problems.append(
-                      "query embedder: the app could not read Redis, so refusals are not "
-                      "tracked (and the rate limiter is likely refusing requests)"
+                      "query embedder: the app could not read Redis in time, so refusals "
+                      "are not tracked (check Redis; the rate limiter depends on it too)"
                   )
               elif state != "ok":
                   problems.append(f"query embedder: unrecognised state {state!r}")

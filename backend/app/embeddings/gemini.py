@@ -55,23 +55,38 @@ _KEY_REFUSAL_REASONS: frozenset[str] = frozenset({"API_KEY_INVALID", "API_KEY_EX
 
 
 def _is_account_refusal(response: httpx.Response) -> bool:
-    """Whether this error response means Gemini refuses the account."""
+    """Whether this error response means Gemini refuses the account.
+
+    Never raises: it runs inside the error path, where anything but
+    EmbedderUnavailable would turn a degraded answer into a failed one, so an
+    unreadable body (bad JSON, deep nesting, an over-long number) is simply
+    not a refusal."""
     if response.status_code in _ACCOUNT_REFUSAL_STATUSES:
         return True
     if response.status_code != 400:
         return False
     try:
-        body: Any = json.loads(response.content)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _names_a_bad_key(json.loads(response.content))
+    except (ValueError, TypeError, RecursionError):
         return False
-    error = body.get("error") if isinstance(body, dict) else None
-    details = error.get("details") if isinstance(error, dict) else None
+
+
+def _names_a_bad_key(body: object) -> bool:
+    """Whether a google.rpc.Status body carries an ErrorInfo naming the key."""
+    if not isinstance(body, dict):
+        return False
+    error = cast(dict[str, object], body).get("error")
+    if not isinstance(error, dict):
+        return False
+    details = cast(dict[str, object], error).get("details")
     if not isinstance(details, list):
         return False
-    return any(
-        isinstance(detail, dict) and detail.get("reason") in _KEY_REFUSAL_REASONS
-        for detail in details
-    )
+    for detail in cast(list[object], details):
+        if isinstance(detail, dict):
+            reason = cast(dict[str, object], detail).get("reason")
+            if isinstance(reason, str) and reason in _KEY_REFUSAL_REASONS:
+                return True
+    return False
 
 
 # Cap the upstream body kept in the SERVER log — enough to debug, never unbounded,

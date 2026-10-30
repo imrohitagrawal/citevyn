@@ -236,3 +236,21 @@ def test_a_forged_refusal_time_cannot_write_a_workflow_command(tmp_path: Path) -
     out = result.stdout + result.stderr
     assert "::warning::forged" not in out
     assert "<invalid>" in out
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _with_embedder("refused", "2026-10-30\n::warning::forged"),
+        # fromisoformat accepts any separator; the probe must not.
+        _with_embedder("refused", "2026-10-30\n12:00:00"),
+        {**_arm(), "status": "ready\n::warning title=x::injected"},
+    ],
+    ids=["refused-since", "iso-separator", "status-field"],
+)
+def test_no_body_field_starts_a_workflow_command(tmp_path: Path, body: dict[str, Any]) -> None:
+    """Red when: a field from the response body is printed raw. A line in a
+    GitHub Actions log that starts with ``::`` is a workflow command."""
+    result = _run(body, tmp_path)
+    lines = (result.stdout + result.stderr).splitlines()
+    assert not any(line.startswith("::warning") for line in lines), lines

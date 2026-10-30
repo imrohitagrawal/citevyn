@@ -170,6 +170,7 @@ async def test_a_stalled_redis_costs_at_most_the_call_ceiling(monkeypatch) -> No
     successful query now touches Redis, so a stalled Redis would otherwise add
     the client's 5 s socket timeout to every answer."""
     monkeypatch.setattr(query_health, "REDIS_CALL_CEILING_SECONDS", 0.05)
+    monkeypatch.setattr(query_health, "STATUS_CEILING_SECONDS", 0.05)
     health = query_health.QueryEmbedderHealth(_SlowRedis(), KEY)
 
     started = asyncio.get_running_loop().time()
@@ -181,19 +182,73 @@ async def test_a_stalled_redis_costs_at_most_the_call_ceiling(monkeypatch) -> No
     assert elapsed < 1.0
 
 
-def test_the_call_ceiling_is_short() -> None:
-    """Red when: the ceiling is raised toward the client's own 5 s timeout,
-    which would make the ceiling pointless on the answer path."""
+def test_the_call_ceilings_are_short() -> None:
+    """Red when: a ceiling is raised toward the client's own 5 s timeout, which
+    would make it pointless: on the answer path every query pays it; on the
+    health route the probe's machine is usually cold, so it gets more, but
+    still well inside 5 s."""
     assert 0 < query_health.REDIS_CALL_CEILING_SECONDS <= 0.5
+    assert query_health.REDIS_CALL_CEILING_SECONDS < query_health.STATUS_CEILING_SECONDS <= 3
 
 
+async def test_the_health_read_uses_its_own_longer_ceiling(monkeypatch) -> None:
+    """Red when: status() uses the answer-path ceiling. A cold machine's first
+    Redis read opens the connection; a slow handshake must not page."""
+
+    class _SlowRead:
+        async def get(self, key: str) -> None:
+            await asyncio.sleep(0.2)
+
+    monkeypatch.setattr(query_health, "REDIS_CALL_CEILING_SECONDS", 0.05)
+    monkeypatch.setattr(query_health, "STATUS_CEILING_SECONDS", 1.0)
+    health = query_health.QueryEmbedderHealth(_SlowRead(), KEY)
+
+    assert (await health.status())["state"] == "ok"
+
+
+async def test_cancellation_is_never_swallowed() -> None:
+    """Red when: the telemetry catch swallows cancellation (a request whose
+    client went away must stop, not carry on past the tracker)."""
+    health = query_health.QueryEmbedderHealth(_BrokenRedis(asyncio.CancelledError()), KEY)
+
+    with pytest.raises(asyncio.CancelledError):
+        await health.record_success()
+    with pytest.raises(asyncio.CancelledError):
+        await health.status()
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "::error::forged",
+        # fromisoformat accepts ANY character between date and time.
+        "2026-10-30\n12:00:00+00:00",
+        "2026-10-30 12:00:00+00:00",
+    ],
+)
 async def test_a_malformed_refusal_time_is_not_passed_on(
-    health: query_health.QueryEmbedderHealth, redis_client: Any
+    health: query_health.QueryEmbedderHealth, redis_client: Any, stored: str
 ) -> None:
-    """Red when: status() passes on whatever string sits under the key. The
-    uptime probe prints refused_since into a GitHub Actions log, where a line
-    starting ``::`` is a workflow command."""
-    await redis_client.set(KEY, "::error::forged")
+    """Red when: status() passes on a stored value that is not exactly a time
+    this module writes. The uptime probe prints refused_since into a GitHub
+    Actions log, where a line starting ``::`` is a workflow command."""
+    await redis_client.set(KEY, stored)
+
+    assert await health.status() == {"state": "refused", "refused_since": None}
+    # Partner: a value this module writes is passed on unchanged.
+    await redis_client.set(KEY, NOW.isoformat())
+    assert (await health.status())["refused_since"] == NOW.isoformat()
+
+
+async def test_a_non_text_refusal_value_is_not_passed_on() -> None:
+    """Red when: a value that is not text (a client without decode_responses
+    returns bytes) reaches the response or raises."""
+
+    class _BytesRedis:
+        async def get(self, key: str) -> bytes:
+            return b"2026-10-30T12:00:00+00:00"
+
+    health = query_health.QueryEmbedderHealth(_BytesRedis(), KEY)
 
     assert await health.status() == {"state": "refused", "refused_since": None}
 
