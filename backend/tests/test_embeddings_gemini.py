@@ -456,6 +456,8 @@ def _google_error(code: int, status: str, reason: str | None) -> str:
         (400, _google_error(400, "INVALID_ARGUMENT", "API_KEY_EXPIRED"), True),
         # An ordinary bad request (one odd input) is not the account's fault.
         (400, _google_error(400, "INVALID_ARGUMENT", None), False),
+        # An ErrorInfo naming something other than the key.
+        (400, _google_error(400, "INVALID_ARGUMENT", "FIELD_INVALID"), False),
         (400, "not json", False),
         (400, json.dumps({"error": "a string, not an object"}), False),
         (400, json.dumps(["API_KEY_INVALID"]), False),

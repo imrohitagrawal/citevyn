@@ -192,6 +192,15 @@ def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
         ("embedder unavailable", _with_embedder("unavailable"), 1, "could not read Redis"),
         # Decided on the known-good value (#460): anything else pages.
         ("embedder unrecognised state", _with_embedder("degraded"), 1, "unrecognised"),
+        # The state an earlier build reported for "not tracked"; it must not
+        # creep back in as a pass.
+        ("embedder old unknown state", _with_embedder("unknown"), 1, "unrecognised"),
+        (
+            "embedder refused, bad time",
+            _with_embedder("refused", "not-a-timestamp"),
+            1,
+            "<invalid>",
+        ),
     ],
     ids=lambda v: v if isinstance(v, str) and " " in v else "",
 )
