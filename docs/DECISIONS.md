@@ -18,9 +18,17 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-10-30 — Paid model calls are for final validation only
+Code changes are built and tested without paid model calls: stub providers,
+the free retrieval eval, and recorded evidence. Paid calls are kept for the
+final validation of a finished, reviewed change (one judged eval run) and the
+production check after a deploy, with at most one live question per issue to
+reproduce a bug that free evidence cannot show. Rules: the delivery skill's
+Build section.
+
 ### 2026-10-30 — A review seat that returned nothing is open, and blocks
 A reviewer that was stopped, failed, timed out, was refused or returned nothing
-leaves its seat open. Each package keeps a seat list (every required reviewer,
+leaves its seat open. Each package keeps a seat list (every required review,
 with its result or "OPEN" and why); an open seat blocks the merge and "done"
 and is named in the closing status block. It is filled by the same role
 another way, or taken to the owner, who may decide to go ahead with it open.
