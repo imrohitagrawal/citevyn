@@ -34,6 +34,8 @@
 #   fetch-asks-for-all-states — the fetch dropping state=all or --paginate (closed
 #                              issues, or every page after the first, go missing)
 #   gh-fails-is-error        — a gh failure reported as a pass or as violations
+#   gh-partial-page-is-error — gh's exit code ignored: valid lines from the first
+#                              page, then an HTTP error and exit 1, read as a pass
 #   gh-empty-is-error        — an empty answer from GitHub treated as "no issues"
 #   gh-garbage-is-error      — an unreadable line skipped instead of failing
 #   gh-missing-is-error      — gh not installed reported as a pass
@@ -286,6 +288,11 @@ fi
 
 _run "$CLEAN" "" 1 "error connecting to api.github.com"
 _expect gh-fails-is-error 2 'ERROR: .*GitHub' '0 violations|^R[123] '
+
+# A partial answer: the first page arrives, then a later page fails. The lines
+# alone would pass, so only the exit code can catch it.
+_run "$CLEAN" "$CLEAN_GH" 1 "HTTP 502: Bad Gateway (https://api.github.com/repositories/1/issues?page=2)"
+_expect gh-partial-page-is-error 2 'ERROR: .*gh exit 1.*HTTP 502' '0 violations|^R[123] '
 
 _run "$CLEAN" ""
 _expect gh-empty-is-error 2 'ERROR: .*no issues' '0 violations|^R[123] '
