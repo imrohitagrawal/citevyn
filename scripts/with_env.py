@@ -79,8 +79,8 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
     else:
-        if not os.path.isfile(path):
-            return _fail(f"{path} exists but is not a regular file (a broken link or a folder?)")
+        # It exists (as a name at least), so failing to read it is an error, never
+        # "not found": a broken link, a folder, no permission.
         try:
             with open(path, "rb") as stream:
                 raw = stream.read()
