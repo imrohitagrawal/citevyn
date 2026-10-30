@@ -24,15 +24,9 @@ in `[1, 2, 3]`, the answer shows them as separate clickable markers
 (`[1][2][3]`), each with its source card, so every source the model named can
 still be checked. A source number that appears only inside a group never
 counts toward the answer's confidence, the check that refuses an answer citing
-nothing, the exact-lookup retry, or a comparison answer's "the documentation I
-have does not cover X" note; only markers written one per bracket count. The
-rule that a sentence saying the evidence does not contain the answer carries
-no citation is enforced by the system prompt only; no code checks it.
-
-One behaviour changes as a result: an answer whose group names a source
-number that does not exist, such as `[1, 9]` with two sources, now fails
-citation validation and is refused. Before, the group was not read as a
-citation at all and was shown as literal text.
+nothing, whether the exact-lookup retry runs, or a comparison answer's "the
+documentation I have does not cover X" note; only markers written one per
+bracket count, so grounding is judged as before.
 
 ### 2026-10-30 — The query embedder is checked every 3 hours, riding the uptime probe
 `/health/index` makes one tiny embedding call at most once every 3 hours for the
