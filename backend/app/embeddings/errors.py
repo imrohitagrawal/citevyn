@@ -17,9 +17,14 @@ class EmbedderUnavailable(RuntimeError):
     ``cause`` retains the originating exception for server-side logging without
     putting it in the user-visible message. ``status_code`` is the provider's
     HTTP status when it answered with an error, and ``None`` for a timeout, a
-    transport error or an unusable body: the query embedder's health tracker
-    (:mod:`app.embeddings.query_health`) tells an account refusal (401-403, or
-    402 for an empty prepaid balance) from a transient failure by it.
+    transport error or an unusable body (server-side logging only).
+
+    ``account_refused`` is the provider client's verdict that the provider
+    refuses THIS ACCOUNT rather than one request: an empty prepaid balance, a
+    bad or revoked key. Only the client can tell, because the statuses differ by
+    provider (Gemini names a bad key in a 400; OpenRouter's 403 can be one
+    flagged input). The query embedder's health tracker
+    (:mod:`app.embeddings.query_health`) pages on this flag alone.
     """
 
     def __init__(
@@ -28,7 +33,9 @@ class EmbedderUnavailable(RuntimeError):
         *,
         cause: Exception | None = None,
         status_code: int | None = None,
+        account_refused: bool = False,
     ) -> None:
         super().__init__(message)
         self.cause = cause
         self.status_code = status_code
+        self.account_refused = account_refused

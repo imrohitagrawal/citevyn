@@ -126,14 +126,26 @@ OWN_WORDS = {
     "no-training": "to find wrong or missing answers",
 }
 
-#: The SHA-256 of each published file on the date ``LAST_UPDATED`` in legal.py
-#: gives it. Change a published page's text -> update its hash here and its
-#: date there together.
+#: Each published page's "Last updated" date and the SHA-256 of its file on that
+#: date. Change a published page's text -> update its date and hash here AND its
+#: date in ``LAST_UPDATED`` in legal.py, together.
 TEXT_AS_OF_DATE = {
-    "terms": "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
-    "privacy": "45f939bc79ff12313927ac9e1ef2f0564ca0f07d073f14b5e78e6cfda7b70125",
-    "refunds": "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
-    "no-training": "361af95ce1dfaa75a1b41860301d543811278b1f07cf531255cea10702f256a1",
+    "terms": (
+        "28 October 2026",
+        "62d0e71baf9a97bb1df2c64218d294a6e4f87e65ee1efb14a19fbf2806bcb2f2",
+    ),
+    "privacy": (
+        "28 October 2026",
+        "45f939bc79ff12313927ac9e1ef2f0564ca0f07d073f14b5e78e6cfda7b70125",
+    ),
+    "refunds": (
+        "28 October 2026",
+        "c5578a53fea801a06cd7c6ce82b11a140485cf019a487022729eaeb4f71a763e",
+    ),
+    "no-training": (
+        "30 October 2026",
+        "361af95ce1dfaa75a1b41860301d543811278b1f07cf531255cea10702f256a1",
+    ),
 }
 
 
@@ -155,9 +167,13 @@ def test_the_last_updated_date_moves_with_the_text(slug: str) -> None:
     import hashlib
 
     text = (_LEGAL_DIR / LEGAL_PAGES[slug][1]).read_bytes()
-    assert hashlib.sha256(text).hexdigest() == TEXT_AS_OF_DATE[slug], (
-        f"{slug} changed: set its LAST_UPDATED date in legal.py to today and update this hash"
+    date, digest = TEXT_AS_OF_DATE[slug]
+    assert hashlib.sha256(text).hexdigest() == digest, (
+        f"{slug} changed: set its date here and in legal.py's LAST_UPDATED to today, "
+        "and update this hash"
     )
+    # The date the page shows is the date recorded beside the hash.
+    assert LAST_UPDATED[slug] == date
 
 
 def test_every_published_page_has_its_own_date() -> None:

@@ -68,7 +68,7 @@ def test_index_reports_pre_index_status(app_with_session) -> None:
 def test_index_reports_the_query_embedder_with_no_tracker(app_with_session, monkeypatch) -> None:
     """Red when: the ``query_embedder`` block is dropped from the pre_index
     shape, or reports "ok" when nothing is tracked (no Redis), which would hide
-    a refusal from the uptime probe."""
+    a refusal from the uptime probe; it pages on "unconfigured"."""
     from app.embeddings import query_health
 
     monkeypatch.setattr(query_health, "current", lambda: None)
@@ -76,7 +76,7 @@ def test_index_reports_the_query_embedder_with_no_tracker(app_with_session, monk
         body = client.get("/health/index").json()
 
     assert body["status"] == "pre_index"
-    assert body["query_embedder"] == {"state": "unknown", "refused_since": None}
+    assert body["query_embedder"] == {"state": "unconfigured", "refused_since": None}
 
 
 def test_index_reports_a_refused_query_embedder_without_detail(

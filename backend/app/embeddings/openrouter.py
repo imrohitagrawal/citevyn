@@ -282,6 +282,10 @@ class OpenRouterEmbedder:
                 raise EmbedderUnavailable(
                     f"OpenRouter embeddings returned {response.status_code}",
                     status_code=response.status_code,
+                    # 401: bad key; 402: no credit. NOT 403: OpenRouter answers
+                    # 403 when moderation flags one input, which a question
+                    # could trigger on purpose.
+                    account_refused=response.status_code in (401, 402),
                 )
 
             try:

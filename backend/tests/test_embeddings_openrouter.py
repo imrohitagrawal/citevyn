@@ -436,3 +436,44 @@ async def test_error_carries_its_http_status_code(status: int) -> None:
         await client.aclose()
 
     assert info.value.status_code == status
+
+
+@pytest.mark.parametrize(
+    ("status", "refused"),
+    # 403 is NOT an account refusal on OpenRouter: it answers 403 when
+    # moderation flags one input, so a crafted question could otherwise page.
+    [(401, True), (402, True), (403, False), (400, False), (429, False), (503, False)],
+)
+async def test_openrouter_marks_account_refusals(status: int, refused: bool) -> None:
+    """Red when: 401/402 stop being marked ``account_refused``, or a per-request
+    error (a moderation 403, a 400) starts being marked."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="body")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.account_refused is refused
+
+
+async def test_openrouter_timeout_has_no_status_and_is_not_a_refusal() -> None:
+    """Red when: a timeout is given an HTTP status or marked as an account
+    refusal (it would page on a slow provider)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow")
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.status_code is None
+    assert info.value.account_refused is False

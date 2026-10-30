@@ -119,7 +119,7 @@ export default function AccessPricing({
         </div>
       </div>
       <p className="legal-links">
-        {/* Terms, Privacy and Refunds are published; No training is still a draft. */}
+        {/* All four legal pages are published. */}
         <a href="/legal/terms">Terms</a> · <a href="/legal/privacy">Privacy</a> ·{" "}
         <a href="/legal/refunds">Refunds</a> · <a href="/legal/no-training">No training</a>
       </p>

@@ -67,7 +67,7 @@ jobs:
           code=$(curl -sS -o /tmp/index.json -w '%{http_code}' --max-time 45 "$BASE_URL/health/index")
           echo "GET /health/index -> $code"
           python3 - <<'PY'
-          import json, sys
+          import json, re, sys
 
           with open("/tmp/index.json") as fh:
               body = json.load(fh)
@@ -118,23 +118,50 @@ jobs:
 
           # The query embedder (the provider that turns each question into a
           # search vector) refusing this account: an empty prepaid balance or a
-          # revoked key. Search then silently drops to keyword-only while every
+          # bad key. Search then silently drops to keyword-only while every
           # answer still returns 200, so nothing else here notices. Decided on
-          # the known-good value (#460): "ok" passes, and so does "unknown"
-          # (Redis unreadable or not configured: nothing to say, and Redis has
-          # its own symptoms). A backend from before this block has no key and
-          # is not paged on. Detail (which status) is in the app's log.
+          # the known-good value (#460): only "ok" passes. "unconfigured" (no
+          # Redis set) and "unavailable" (Redis unreadable) page too: production
+          # always sets Redis, and without it this check is switched off. A body
+          # without the block (a build from before it, or a rollback to one)
+          # pages for the same reason. Which status it was is in the app's log.
           embedder = body.get("query_embedder")
-          if embedder is not None:
+          if not isinstance(embedder, dict):
+              problems.append(
+                  "query_embedder block is missing: this build predates the "
+                  "query-embedder check (rolled back?), so a refused embedding "
+                  "provider would go unnoticed"
+              )
+          else:
               state = embedder.get("state")
-              print(f"query_embedder={state}")
+              print(f"query_embedder={state!r}")
               if state == "refused":
-                  problems.append(
-                      "query embedder: the provider has refused this account since "
-                      f"{embedder.get('refused_since')} — search is keyword-only; "
-                      "check the embedding key and the provider account (docs/RUNBOOK.md)"
+                  since = embedder.get("refused_since")
+                  # Printed into this log, where a line starting "::" is a
+                  # workflow command: only a plain timestamp is passed through.
+                  if not (isinstance(since, str) and re.fullmatch(r"[0-9T:.+\-]{10,40}", since)):
+                      since = "<invalid>"
+                  reason = (
+                      f"query embedder: the provider has refused this account since {since}. "
+                      "Search is keyword-only. Most often the provider account's prepaid "
+                      "credit is used up (add credit in its billing console); otherwise the "
+                      "embedding key is wrong or revoked. After fixing, ask the site one NEW "
+                      "question (a repeated one is answered from cache and clears nothing). "
+                      "docs/RUNBOOK.md §3.4a"
                   )
-              elif state not in ("ok", "unknown"):
+                  print(f"::error title=Query embedder refused::{reason}")
+                  problems.append(reason)
+              elif state == "unconfigured":
+                  problems.append(
+                      "query embedder: no Redis is configured, so refusals are not tracked "
+                      "(set CITEVYN_REDIS_URL)"
+                  )
+              elif state == "unavailable":
+                  problems.append(
+                      "query embedder: the app could not read Redis, so refusals are not "
+                      "tracked (and the rate limiter is likely refusing requests)"
+                  )
+              elif state != "ok":
                   problems.append(f"query embedder: unrecognised state {state!r}")
 
           if problems:

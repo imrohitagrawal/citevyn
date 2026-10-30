@@ -491,7 +491,7 @@ class HybridRetriever:
             # An account refusal (an empty prepaid balance, a revoked key) fails
             # every query until someone acts, so it is recorded for the uptime
             # probe; a transient failure is not (query_health decides which).
-            await query_health.record_failure(exc.status_code)
+            await query_health.record_failure(exc)
             return [], VectorDegrade.unavailable
         # A clean return means a vector came back: the retriever's only early
         # returns (no embedder, not Postgres) are local and test setups, which

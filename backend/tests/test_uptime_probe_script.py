@@ -63,6 +63,9 @@ def _run(body: dict[str, Any], tmp_path: Path) -> subprocess.CompletedProcess[st
     )
 
 
+_OK_EMBEDDER: dict[str, Any] = {"state": "ok", "refused_since": None}
+
+
 def _arm(**over: Any) -> dict[str, Any]:
     arm = {
         "status": "healthy",
@@ -72,7 +75,7 @@ def _arm(**over: Any) -> dict[str, Any]:
         "active_index_count": 1,
     }
     arm.update(over)
-    return {"status": "ready", "vector_arm": arm}
+    return {"status": "ready", "vector_arm": arm, "query_embedder": _OK_EMBEDDER}
 
 
 @pytest.mark.parametrize(
@@ -111,6 +114,7 @@ def _arm(**over: Any) -> dict[str, Any]:
                     "embedded_ratio": 1.0,
                     "embedder_match": True,
                 },
+                "query_embedder": _OK_EMBEDDER,
             },
             0,
             "",
@@ -174,38 +178,61 @@ def _with_embedder(state: Any, since: str | None = None) -> dict[str, Any]:
     [
         ("embedder ok", _with_embedder("ok"), 0, ""),
         # The empty-prepaid-balance case: search has silently dropped to
-        # keyword-only while answers keep coming. This is the page.
+        # keyword-only while answers keep coming. This is the page, and it says
+        # what to do and how to clear it.
         (
             "embedder refused",
             _with_embedder("refused", "2026-10-30T12:00:00+00:00"),
             1,
-            "query embedder: the provider has refused this account since 2026-10-30T12:00:00+00:00",
+            "the provider has refused this account since 2026-10-30T12:00:00+00:00",
         ),
-        # A value this probe does not know is a failure, not a pass (#460: decide
-        # on what is known to be good, not on a list of known-bad values).
+        ("embedder refused, clearing step", _with_embedder("refused"), 1, "ask the site one NEW"),
+        # Production always sets Redis: without it this alert is off, so say so.
+        ("embedder unconfigured", _with_embedder("unconfigured"), 1, "no Redis"),
+        ("embedder unavailable", _with_embedder("unavailable"), 1, "could not read Redis"),
+        # Decided on the known-good value (#460): anything else pages.
         ("embedder unrecognised state", _with_embedder("degraded"), 1, "unrecognised"),
-        # Redis could not be read, or none is configured: nothing to say about the
-        # embedder, and Redis has its own symptoms. Not a page.
-        ("embedder unknown", _with_embedder("unknown"), 0, ""),
     ],
     ids=lambda v: v if isinstance(v, str) and " " in v else "",
 )
 def test_query_embedder_state(
     tmp_path: Path, name: str, body: dict[str, Any], expected_exit: int, expected_reason: str
 ) -> None:
-    """Red when: the probe stops reading ``query_embedder``, pages on "unknown",
-    or passes a state it does not recognise."""
+    """Red when: the probe stops reading ``query_embedder``, passes anything but
+    "ok", or loses the reason text the owner acts on."""
     result = _run(body, tmp_path)
     assert result.returncode == expected_exit, (name, result.stdout, result.stderr)
     if expected_reason:
         assert expected_reason in result.stderr
 
 
-def test_a_backend_without_the_block_does_not_page(tmp_path: Path) -> None:
-    """Red when: a body from a backend that predates the block fails the probe.
-    The workflow merges before the deploy that adds the field, and a probe in
-    between must not page for that."""
+def test_a_refusal_is_annotated_on_the_run_page(tmp_path: Path) -> None:
+    """Red when: the refusal is only in the job log. GitHub's failure email
+    names the step; an ``::error`` line puts the reason on the run page."""
+    result = _run(_with_embedder("refused", "2026-10-30T12:00:00+00:00"), tmp_path)
+    assert any(line.startswith("::error ") for line in result.stdout.splitlines()), result.stdout
+
+
+@pytest.mark.parametrize("missing", ["absent", "null"])
+def test_a_body_without_the_block_pages(tmp_path: Path, missing: str) -> None:
+    """Red when: a body without ``query_embedder`` passes. A rollback to a build
+    that predates the block would otherwise switch this alert off silently."""
     body = _arm()
-    assert "query_embedder" not in body
+    if missing == "absent":
+        del body["query_embedder"]
+    else:
+        body["query_embedder"] = None
     result = _run(body, tmp_path)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert "query_embedder block is missing" in result.stderr
+
+
+def test_a_forged_refusal_time_cannot_write_a_workflow_command(tmp_path: Path) -> None:
+    """Red when: the probe prints a refusal time it did not validate. A line in
+    a GitHub Actions log that starts with ``::`` is a workflow command."""
+    body = _with_embedder("refused", "x\n::warning::forged")
+    result = _run(body, tmp_path)
+    assert result.returncode == 1
+    out = result.stdout + result.stderr
+    assert "::warning::forged" not in out
+    assert "<invalid>" in out

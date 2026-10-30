@@ -15,6 +15,8 @@ Mirrors ``tests/test_llm_gemini_openrouter.py``: the provider HTTP is mocked wit
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -430,3 +432,50 @@ async def test_timeout_error_has_no_status_code() -> None:
         await client.aclose()
 
     assert info.value.status_code is None
+
+
+def _google_error(code: int, status: str, reason: str | None) -> str:
+    """The error body Google's APIs send (google.rpc.Status with an ErrorInfo)."""
+    details = (
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason}] if reason else []
+    )
+    return json.dumps(
+        {"error": {"code": code, "message": "m", "status": status, "details": details}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "refused"),
+    [
+        (402, "x", True),
+        (401, "x", True),
+        (403, _google_error(403, "PERMISSION_DENIED", None), True),
+        # Measured 2026-10-30: an invalid key is a 400 INVALID_ARGUMENT naming
+        # the key, not a 401. Without this case a revoked key stays silent.
+        (400, _google_error(400, "INVALID_ARGUMENT", "API_KEY_INVALID"), True),
+        (400, _google_error(400, "INVALID_ARGUMENT", "API_KEY_EXPIRED"), True),
+        # An ordinary bad request (one odd input) is not the account's fault.
+        (400, _google_error(400, "INVALID_ARGUMENT", None), False),
+        (400, "not json", False),
+        (400, json.dumps({"error": "a string, not an object"}), False),
+        (429, _google_error(429, "RESOURCE_EXHAUSTED", None), False),
+        (503, "x", False),
+    ],
+)
+async def test_gemini_marks_account_refusals(status: int, body: str, refused: bool) -> None:
+    """Red when: an account refusal (401/402/403, or a 400 that names the API
+    key) is not marked ``account_refused``, or any other error is. The query
+    embedder's health tracker pages on this flag alone."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body)
+
+    client = _client(handler, dim=4, max_retries=0)
+    try:
+        with pytest.raises(EmbedderUnavailable) as info:
+            await client.embed("q")
+    finally:
+        await client.aclose()
+
+    assert info.value.account_refused is refused
+    assert info.value.status_code == status

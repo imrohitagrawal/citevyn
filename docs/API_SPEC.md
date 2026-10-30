@@ -1163,13 +1163,22 @@ the shape previously documented (bare index-name strings, `status: "healthy"`,
 
 `query_embedder` is in every shape, `pre_index` and ambiguous included: it is
 about the provider that turns each question into a search vector, not about the
-index. `state` is `ok`, `refused` (the provider has refused this account since
-`refused_since`: an HTTP 401, 402 or 403 on a live query, such as a revoked key
-or exhausted prepaid credit) or `unknown` (Redis is not configured or could not
-be read). A refusal is cleared by the next query that gets a vector back; while
-it lasts, search is keyword-only and every answer still returns 200. The route is
-public, so the block never names the status code or the provider; the app logs
-`query_embedder_account_refused` with the status code.
+index. `state` is one of:
+
+- `ok`: no refusal is recorded.
+- `refused`: the provider has refused this account since `refused_since` (an ISO
+  timestamp, or `null` if the stored value was not one). The provider client
+  decides what counts: exhausted prepaid credit (402), a bad, revoked or expired
+  key (401, 403, or on Gemini a 400 naming the key). A per-request error never
+  counts.
+- `unavailable`: Redis could not be read within its ceiling.
+- `unconfigured`: no Redis is configured, so nothing is tracked.
+
+A refusal is cleared by the next query that gets a vector back; while it lasts,
+search is keyword-only and every answer still returns 200. The route is public,
+so the block never names the status code or the provider; the app logs
+`query_embedder_account_refused` with the status code. The uptime probe pages on
+anything but `ok`.
 
 `status` is `pre_index` (nothing promoted yet), `ready` (an active index exists) or
 `degraded` (only a previous-good index remains). `vector_arm` is additive and does
