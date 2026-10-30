@@ -10,18 +10,21 @@ review additions to this page by eye too.
 
 ## Which file each command reads
 
-The backend's `Settings` reads `.env` from **the folder the command runs in**
-(`env_file=".env"` in `backend/app/core/config.py`). `uv run --project backend`
-does not change that folder. So which backend file is read depends on the
-command, not on where the code lives.
+The backend's `Settings` reads **no file**: only the process environment
+(`env_file=None` in `backend/app/core/config.py`), as on Fly. The Makefile
+hands `backend/.env` to the development commands through
+`scripts/with_env.py`, whichever folder they run in. Choose another file with
+`DEV_ENV_FILE=path` (it must exist). If `backend/.env` is missing (CI, a fresh
+clone), one line says so and the command runs on the process environment. A
+bare `uvicorn` or `alembic` reads no file; use the `make` targets.
 
 | File | In git? | Read by | How |
 |---|---|---|---|
-| `backend/.env` | No (ignored) | `make test`, `make eval`, `uvicorn` started from `backend/`; the server that `make smoke` / `make e2e` start; `make budget` when the key is not in `infra/docker/.env` | `Settings` (these commands `cd backend` first); `scripts/check_budget.sh` sources it for the OpenRouter key |
-| `.env` (repo root) | No (ignored) | `make migrate`, `make seed`, `make demo`, `make ci-smoke`; the migrate and seed steps of `make smoke` / `make e2e` | `Settings`, because these run `uv run --project backend ...` from the repo root, so they do not read `backend/.env`. `make smoke` mixes the two: it seeds with the root file and serves with `backend/.env`, so keep their embedder settings the same. If the root file is absent, `Settings` defaults apply (stub providers) |
+| `backend/.env` | No (ignored) | `make api`, `make worker`, `make migrate`, `make seed`, `make demo`, `make ci-smoke` (when present), `make eval`, `make golden`, `make golden-smoke`, `make test-pg`; every backend step of `make smoke` / `make e2e` (migrate, seed, server); `make budget` when the key is not in `infra/docker/.env`. **Not** `make test` or `make coverage`, which load no file, as in CI | `scripts/with_env.py` loads it into the command's environment (the Makefile's `DEV_ENV_FILE`); `scripts/check_budget.sh` sources it for the OpenRouter key |
+| `.env` (repo root) | No (ignored) | Nobody. Retired: `make migrate`/`seed`/`demo` used to read it, because `Settings` read `.env` from the folder a command ran in | If you still have one, move what you need into `backend/.env`, then delete it after the four checks below |
 | `infra/docker/.env` | No (ignored) | Everything through Docker Compose (`make db-up`, `make deploy`, `make refresh`, the `db`/`api`/`worker`/`backup`/`caddy` containers); `_env_guard.sh` (deploy, refresh, backup, restore, rollback); `deploy_verify.sh`; `make budget`; `make demo-frontend` (the client token it bakes into the bundle) | Compose `env_file:` passes it to each container and fills the `${VAR}` slots in `docker-compose.yml`; the scripts source it |
 | `frontend/.env.local` | No (ignored) | `npm run dev` (also the dev server Playwright starts), and every `vite build`: `npm run build`, `make demo-frontend` | Vite loads it. Only `VITE_*` names reach the browser bundle, and **whatever it sets is baked into `frontend/dist`** unless the command sets the same name itself |
-| `.env.example` | Yes | Nobody at run time | Template for `backend/.env` (and a root `.env`) |
+| `.env.example` | Yes | Nobody at run time | Template for `backend/.env` |
 | `infra/docker/prod.env.example` | Yes | `make env-bootstrap` copies it when `infra/docker/.env` is missing | Template for `infra/docker/.env` |
 | `frontend/.env.example` | Yes | Nobody at run time | Template for `frontend/.env.local` |
 
@@ -37,13 +40,33 @@ Outside your machine:
 
 ## Which value wins
 
-For `Settings` (any command that runs the backend directly):
+For a command the Makefile runs through `scripts/with_env.py`:
 
-1. A variable set in the shell beats the file.
+1. A variable set in the shell beats the file, compared ignoring case (as
+   `Settings` reads names), so `citevyn_llm_provider=router` in the file does
+   not beat `CITEVYN_LLM_PROVIDER=stub` in the shell.
    `CITEVYN_LLM_PROVIDER=router make eval` uses `router` even if `backend/.env`
-   says `stub`.
+   says `stub`. The same goes for what a recipe sets itself: `make migrate` and
+   `make seed` set `CITEVYN_DATABASE_URL` from `DB_URL`, so a database URL in
+   `backend/.env` does not change which database they write to.
 2. The file beats the default in `Settings`.
 3. The default applies when neither sets it.
+
+The file is parsed by python-dotenv, as `Settings` parsed it before (quotes,
+`export`, `${NAME}` expansion, the last of two equal names wins). These stop the
+command and name the line number, with nothing from the file printed: a line it
+cannot parse, a name with no `=`, a name a shell could not hold, and a name that
+repeats an earlier one in another case. A file that is not UTF-8 text stops it
+too; a leading byte-order mark is ignored.
+
+Every name in the file reaches the command's environment, not only the
+`CITEVYN_` settings. Tools that read a variable themselves now see it: for
+example `CITEVYN_EVAL_JUDGE_PANEL` in `backend/.env` now takes effect for
+`make eval`. The file is read once, when the command starts: after editing
+`backend/.env`, restart `make api` (its reload watches code, not the file).
+
+`DEV_ENV_FILE` empty counts as unset. A file named in it that does not exist
+stops make before any target runs, including `make help` and `make test`.
 
 Inside a compose container, a value in the service's `environment:` block beats
 `env_file:`. `docker-compose.yml` pins `CITEVYN_ENVIRONMENT` that way, and fills
@@ -57,13 +80,13 @@ explains this trap.
 
 ## Why there is more than one backend file
 
-- `backend/.env` is for development and tests. Keep `CITEVYN_LLM_PROVIDER=stub`
+- `backend/.env` is for development. Keep `CITEVYN_LLM_PROVIDER=stub`
   and `CITEVYN_EMBEDDING_PROVIDER=stub` there, so routine runs cost nothing.
-  Paid runs are opted into per command, with a shell override.
+  Paid runs are opted into per command, with a shell override. `make seed`,
+  `make demo` and `make smoke` ingest the corpus with the embedder this file
+  names (the seed prints it first), so a real provider here makes them spend
+  money.
 - `infra/docker/.env` runs the full stack with real providers.
-- A root `.env` is optional. Create one only if `make migrate`/`seed`/`demo`
-  need settings beyond the database URL; a real provider there makes
-  `make seed` (an ingest) spend money.
 
 The price of several files is drift. Nothing checks one against another, so when
 you rotate a key, change it in **every** file that holds it, then confirm with
@@ -125,7 +148,7 @@ all four checks hold:
 
 1. **No reader.** No command in the table above reads it, and
    `git grep -F '<file name>'` finds no script or doc that names it. The loaders
-   match exact names: `Settings` reads `.env` in the folder a command runs in;
+   match exact names: the Makefile loads `DEV_ENV_FILE` (default `backend/.env`);
    Compose reads its `env_file:` paths and `infra/docker/.env`; Vite reads
    `.env`, `.env.local`, `.env.[mode]` and `.env.[mode].local` in `frontend/`.
 2. **Nothing unique.** Every value in it either exists in a file that is in use

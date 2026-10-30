@@ -2,6 +2,8 @@
 #
 # Developer workflow:
 #   make demo        — bring up the local stack (db + migrations + seed)
+#   make api         — run the API locally (uvicorn --reload, with backend/.env)
+#   make worker      — run the ingestion worker CLI (ARGS=run, list-sources, ...)
 #   make lint        — ruff on backend/app + tests
 #   make typecheck   — pyright on backend/app (strict)
 #   make test        — pytest (excludes the ``postgres`` marker)
@@ -20,6 +22,7 @@
 #   DB_URL     — SQLAlchemy URL for local alembic (default: docker-compose db)
 #   VERSION    — image tag (default: dev); set from CI via git tag
 #   PROFILE    — docker compose profile (default: prod)
+#   DEV_ENV_FILE — env file the development commands load (default: backend/.env)
 #
 # Heavy lifting lives in backend/, db/, infra/docker/, and scripts/.
 
@@ -37,7 +40,41 @@ PROFILE ?= prod
 export VERSION
 export PROFILE
 
-.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend stop smoke clean lint typecheck test test-shell prompt-check public-prompt-guard coverage coverage-gate ci \
+# The backend reads no env file itself (`env_file=None` in Settings). The
+# development commands below load one through scripts/with_env.py: python-dotenv
+# parsing, a variable already set in the shell wins, a malformed line stops the
+# run by line number, and no value is ever printed. Which commands load it:
+# docs/ENVIRONMENT_FILES.md. `make test` and coverage load none, as in CI.
+#
+# The default file may be missing (CI and a fresh clone have none; `ci-smoke`
+# runs `migrate` in CI): one line says so and the command runs on the process
+# environment. An empty DEV_ENV_FILE means the default (smoke.sh agrees). A file
+# named explicitly (`make seed DEV_ENV_FILE=path`, or in the environment) must
+# exist: checked here, when the Makefile is read, so make stops before ANY
+# target runs (`demo` and `ci-smoke` would otherwise start docker first). Paths
+# are passed absolute, because several recipes `cd backend` first.
+DEV_ENV_FILE_DEFAULT := backend/.env
+DEV_ENV_FILE ?= $(DEV_ENV_FILE_DEFAULT)
+ifeq ($(origin DEV_ENV_FILE),file)
+_DEV_ENV_EXPLICIT :=
+else
+_DEV_ENV_EXPLICIT := $(strip $(DEV_ENV_FILE))
+endif
+ifeq ($(_DEV_ENV_EXPLICIT),)
+_DEV_ENV_ARGS = --optional '$(abspath $(DEV_ENV_FILE_DEFAULT))'
+_SMOKE_ENV = DEV_ENV_FILE=''
+else
+ifeq ($(wildcard $(_DEV_ENV_EXPLICIT)),)
+$(error DEV_ENV_FILE=$(_DEV_ENV_EXPLICIT) does not exist; unset it to use backend/.env when present)
+endif
+_DEV_ENV_ARGS = '$(abspath $(_DEV_ENV_EXPLICIT))'
+_SMOKE_ENV = DEV_ENV_FILE='$(abspath $(_DEV_ENV_EXPLICIT))'
+endif
+# Runs inside `uv run --no-env-file`, so `python` is the backend's interpreter
+# (it has python-dotenv) and uv itself loads nothing.
+WITH_ENV = python '$(CURDIR)/scripts/with_env.py' $(_DEV_ENV_ARGS) --
+
+.PHONY: help env-bootstrap db-up db-verify ci-smoke db-down migrate seed demo demo-frontend api worker stop smoke clean lint typecheck test test-shell prompt-check public-prompt-guard coverage coverage-gate ci \
         build push image-smoke deploy refresh logs backup restore golden golden-smoke eval e2e install-hooks
 
 help: ## Show this help
@@ -66,7 +103,7 @@ install-hooks: ## Install the git pre-commit hook (ruff format+check gate; see s
 
 test: ## Run the pytest suite (excludes the postgres marker; uses in-memory SQLite)
 	cd backend && uv sync --group dev
-	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q
+	cd backend && env -u CITEVYN_DATABASE_URL uv run --no-env-file pytest -m "not postgres" -q
 
 coverage: ## Measure backend line coverage (report; `make coverage-gate` compares it)
 	@# Deliberately mirrors `make test` so the number describes the suite people
@@ -78,7 +115,7 @@ coverage: ## Measure backend line coverage (report; `make coverage-gate` compare
 	@# "no measurement" always surfaces as "no report".
 	rm -f backend/artifacts/coverage.xml
 	cd backend && uv sync --group dev
-	cd backend && env -u CITEVYN_DATABASE_URL uv run pytest -m "not postgres" -q \
+	cd backend && env -u CITEVYN_DATABASE_URL uv run --no-env-file pytest -m "not postgres" -q \
 		--cov=app --cov-report=term-missing:skip-covered --cov-report=xml:artifacts/coverage.xml
 	@echo
 	@echo "Coverage is NOT assertion. It shows which lines were EXECUTED, not which"
@@ -88,12 +125,11 @@ coverage: ## Measure backend line coverage (report; `make coverage-gate` compare
 
 coverage-gate: coverage ## Fail if uncovered lines went UP vs backend/coverage-baseline.json (#321)
 	@# The same comparison CI runs, on the same script and the same artifact.
-	@# Kept a SEPARATE target rather than folded into `coverage`: a local checkout
-	@# holding a `backend/.env` has several tests fail for an environment reason
-	@# unrelated to any change, which leaves lines unreached and would red this
-	@# gate for nobody's mistake. `coverage` therefore stays the plain report and
-	@# this is the opt-in parity check.
-	cd backend && uv run python scripts/coverage_baseline.py
+	@# Kept a SEPARATE target rather than folded into `coverage`, so `coverage`
+	@# stays the plain report and this is the opt-in parity check. (The suite no
+	@# longer reads `backend/.env`, which used to fail several tests on a local
+	@# checkout that had one and leave lines unreached for nobody's mistake.)
+	cd backend && uv run --no-env-file python scripts/coverage_baseline.py
 
 test-shell: ## Run every tests/shell/*.sh suite (bash assertions for the ops scripts)
 	@# Globs deliberately — a hardcoded list is how the suites drifted in the first
@@ -121,24 +157,31 @@ prompt-check: ## Check the private next-session prompt (needs PRIVATE_NOTES_DIR,
 public-prompt-guard: ## Fail if any prompt file sits at the root of this public repo
 	python3 scripts/check_next_prompt.py --root .
 
-test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL)
-	cd backend && uv run pytest -m postgres -q
+test-pg: ## Run the postgres-marked tests (requires CITEVYN_PG_TEST_URL; loads DEV_ENV_FILE)
+	cd backend && uv run --no-env-file $(WITH_ENV) pytest -m postgres -q
 
 golden: ## Run the golden-case test suite (see tests/golden/README.md)
 	cd backend && uv sync --group dev
-	cd backend && uv run python -m tests.golden.runner --report artifacts/golden_report.json
+	cd backend && uv run --no-env-file $(WITH_ENV) python -m tests.golden.runner --report artifacts/golden_report.json
 
 golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 	cd backend && uv sync --group dev
-	cd backend && uv run python -m tests.golden.runner --ids claude_api_001,claude_api_004,cross_005 --report artifacts/golden_report_smoke.json
+	cd backend && uv run --no-env-file $(WITH_ENV) python -m tests.golden.runner --ids claude_api_001,claude_api_004,cross_005 --report artifacts/golden_report_smoke.json
 
 eval: ## Run the RAG eval harness (retrieval hit-rate + LLM judge if a key is set; see tests/eval/README.md)
 	cd backend && uv sync --group dev
-	cd backend && env -u CITEVYN_DATABASE_URL uv run python -m tests.eval.runner --report artifacts/eval_report.json
+	cd backend && env -u CITEVYN_DATABASE_URL uv run --no-env-file $(WITH_ENV) python -m tests.eval.runner --report artifacts/eval_report.json
 
 # ─────────────────────────── Local development ───────────────────────────
+api: ## Run the API on localhost:8000 with reload (loads DEV_ENV_FILE)
+	cd backend && uv run --no-env-file $(WITH_ENV) uvicorn app.main:app --reload --port 8000
 
-# ─────────────────────────── Local development ───────────────────────────
+worker: ## Run the worker CLI (loads DEV_ENV_FILE); e.g. make worker ARGS=list-sources
+	@# `python -m`, not the `citevyn-worker` script: uv installs no console scripts
+	@# for this project (it is not packaged), the same reason as Dockerfile.worker.
+	@# With no ARGS the CLI prints its commands and exits 1.
+	cd backend && uv run --no-env-file $(WITH_ENV) python -m app.worker.cli $(ARGS)
+
 env-bootstrap: ## Create infra/docker/.env from prod.env.example if absent (DEV-ONLY stub secrets)
 	@# Compose env_file: refs on every service require the file to
 	# exist on disk, even for services behind other profiles — so ANY
@@ -249,7 +292,7 @@ db-reset: ## Destroy and recreate the database volume (DESTRUCTIVE; requires CON
 # Keep the ``@`` and print a redacted line instead.
 migrate: ## Apply Alembic migrations to head against DB_URL
 	@echo "==> alembic upgrade head (DB_URL redacted)"
-	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend alembic -c db/alembic.ini upgrade head
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) alembic -c db/alembic.ini upgrade head
 
 # ``seed_catalog`` INGESTS backend/app/worker/sources/*.md (the authoritative
 # corpus) into index v1 rather than inserting a hand-written copy — that copy
@@ -258,9 +301,9 @@ migrate: ## Apply Alembic migrations to head against DB_URL
 # files) and free (stub embedder by default).
 seed: ## Seed demo users + ingest the shipped corpus into index v1 (idempotent)
 	@echo "==> seeding demo users (DB_URL redacted)"
-	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_users
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_users
 	@echo "==> seeding catalog (DB_URL redacted)"
-	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend python -m db.seed.seed_catalog
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_catalog
 
 demo: db-up migrate seed ## Bring up db, migrate, seed + ingest the corpus (one-shot)
 	@echo "Demo stack is up. Run 'make stop' to tear down."
@@ -310,13 +353,13 @@ demo-frontend: ## Build the optional React/Vite frontend into frontend/dist
 stop: db-down ## Tear the demo stack down
 
 smoke: ## End-to-end smoke (db-up + migrate + seed + uvicorn + curl + stop)
-	bash scripts/smoke.sh
+	$(_SMOKE_ENV) bash scripts/smoke.sh
 
 e2e: ## End-to-end test (chat UI happy-path: render + ask + citation)
 	@echo "e2e: this is the curl-based chat-UI smoke: API healthy + 1 grounded ask."
 	@echo "e2e: The Playwright suites are SEPARATE and run in CI (see .github/workflows/"
 	@echo "e2e: frontend.yml and frontend-live-e2e.yml); locally: cd frontend && npm run test:ui."
-	bash scripts/smoke.sh
+	$(_SMOKE_ENV) bash scripts/smoke.sh
 
 clean: ## Remove __pycache__ + .pytest_cache + .ruff_cache + coverage + smoke artefacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
