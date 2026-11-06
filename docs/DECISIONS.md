@@ -28,6 +28,13 @@ following verb is changed only when it is on a fixed list (for example
 "mentions" becomes "mention", "is" becomes "are"); any other phrase is left as
 the model wrote it and counted in the logs, so the leak stays measurable.
 
+### 2026-10-31 — No session links in this repository's commits or pull requests
+Claude Code adds a link to its session to commits and pull requests made from
+web or remote sessions. Those sessions are private, and this repository is
+public, so the committed `.claude/settings.json` sets `attribution.sessionUrl`
+to `false`. That makes it the one shared setting the file holds besides the
+hooks; permissions and plugins stay personal in `.claude/settings.local.json`.
+
 ### 2026-10-31 — Grouped citation markers are shown, but never counted
 Applies to how answers are cited (#554). When the model groups citations, as
 in `[1, 2, 3]`, the answer shows them as separate clickable markers
@@ -153,7 +160,7 @@ repository, not in this one. This repository carries the delivery process, the
 checks, and this decision log.
 
 ### 2026-10-29 — Claude Code hooks are committed; permissions stay personal
-`.claude/settings.json` is committed and holds hooks only. Each developer's
+`.claude/settings.json` is committed and holds the hooks (and, since 2026-10-31, the shared attribution setting). Each developer's
 permissions and plugins live in the gitignored `.claude/settings.local.json`.
 
 ### 2026-10-29 — One delivery process, carried into every next-session prompt

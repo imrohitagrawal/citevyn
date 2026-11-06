@@ -25,7 +25,7 @@ venv/
 # Claude Code agent state (per-machine; not part of the project)
 # Local Claude Code config stays out of git (settings.local.json with your
 # permissions and plugins, local skills) — EXCEPT the shared, committed
-# `.claude/settings.json` (hooks only) and the `rag-eval` and
+# `.claude/settings.json` (hooks and the shared attribution setting) and the `rag-eval` and
 # `citevyn-delivery` project skills.
 .claude/*
 !.claude/settings.json
