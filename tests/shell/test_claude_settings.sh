@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Suite for the committed .claude/settings.json: it holds hooks ONLY (permissions
-# and plugins are personal and live in the gitignored settings.local.json), and
+# Suite for the committed .claude/settings.json: it holds hooks and the shared
+# attribution setting ONLY (permissions and plugins are personal and live in the gitignored settings.local.json), and
 # every hook it runs points at a script that exists, so a rename cannot silently
 # turn a guard into a no-op (each command skips when its script is missing).
 #
 # Which change turns each case red:
-#   hooks-only      — any key besides "hooks" added (permissions, enabledPlugins)
+#   hooks-only      — any key besides "hooks" and "attribution" added (permissions,
+#                     enabledPlugins)
+#   session-url-off — attribution.sessionUrl removed or set to anything but false
 #   scripts-exist   — a hooked script renamed or deleted without updating the hook
 #   guard-wired     — the SubagentStart, SubagentStop or (alert delivery) PreToolUse /
 #                     UserPromptSubmit entry
@@ -32,7 +34,9 @@ _check() {
 
 echo "test_claude_settings.sh"
 
-_check "hooks-only" "hooks" "$(python3 -c 'import json,sys; print(",".join(sorted(json.load(open(sys.argv[1])))))' "$SETTINGS")"
+_check "hooks-only" "attribution,hooks" "$(python3 -c 'import json,sys; print(",".join(sorted(json.load(open(sys.argv[1])))))' "$SETTINGS")"
+# Red when: attribution.sessionUrl is removed or not false (session links would reach public commits).
+_check "session-url-off" "False" "$(python3 -c 'import json,sys; print(repr(json.load(open(sys.argv[1])).get("attribution", {}).get("sessionUrl")))' "$SETTINGS")"
 
 # Every script a hook names, and how many of them are missing. The count of
 # named scripts is checked too, so an empty or unparsed file cannot pass.

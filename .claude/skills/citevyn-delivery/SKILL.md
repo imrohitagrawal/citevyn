@@ -241,7 +241,7 @@ rely on that: in a live test (2026-10-29) an agent ignored the instruction. Stop
 changed it before anything else. So do not touch the main checkout yourself while agents run:
 the guard cannot tell your change from theirs.
 
-The hooks are committed in `.claude/settings.json` (hooks only), so every clone and worktree has
+The hooks are committed in `.claude/settings.json` (hooks, plus the shared `attribution` setting), so every clone and worktree has
 them. Permissions and plugins are personal and live in the gitignored
 `.claude/settings.local.json`. **On a clone from before this change, move `permissions` and
 `enabledPlugins` out of `.claude/settings.json` into `settings.local.json` BEFORE pulling:** the

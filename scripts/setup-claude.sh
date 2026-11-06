@@ -42,7 +42,8 @@ for skill_dir in "$SKILLS_SRC"/*/; do
 done
 echo -e "${GREEN}✓ Linked $linked skill(s).${NC}"
 
-# HOOKS are committed in .claude/settings.json (hooks only), so a clone or a
+# HOOKS are committed in .claude/settings.json (hooks, plus the shared
+# attribution setting that keeps session links out of commits), so a clone or a
 # worktree has them with no setup. They are how this repository enforces things a
 # written rule already failed to enforce: the discard guard (a written rule failed
 # twice in one session), the edit checkpoint, and the sub-agent tree guard (a
@@ -58,9 +59,9 @@ if [ ! -f "$PROJECT_ROOT/.claude/settings.local.json" ]; then
     echo -e "  come from your backup (it is gitignored).${NC}"
 fi
 if [ -f "$PROJECT_ROOT/.claude/settings.json" ] && \
-   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if set(d) - {"hooks"} else 1)' \
+   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if set(d) - {"hooks", "attribution"} else 1)' \
        "$PROJECT_ROOT/.claude/settings.json" 2>/dev/null; then
-    echo -e "${YELLOW}! .claude/settings.json holds more than hooks. It is committed: move"
+    echo -e "${YELLOW}! .claude/settings.json holds more than hooks and attribution. It is committed: move"
     echo -e "  permissions and plugins into .claude/settings.local.json.${NC}"
 fi
 
