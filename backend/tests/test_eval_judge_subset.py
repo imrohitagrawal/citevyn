@@ -333,7 +333,7 @@ def test_the_documented_saving_ceiling_is_still_true() -> None:
     """The docs justify NOT sampling in CI with a measured number; pin it.
 
     ``docs/COST_CONTROLS.md`` §6 and ``subset.py``'s docstring both state that the
-    priority pool is 45 of 62 cases, so bounding can save at most ~27% (17/62).
+    priority pool is 46 of 63 cases, so bounding can save at most ~27% (17/63).
     If the golden set grows such that sampling becomes worthwhile again, this
     fails and the decision gets revisited deliberately rather than by drift.
 
@@ -342,7 +342,7 @@ def test_the_documented_saving_ceiling_is_still_true() -> None:
     """
     cases = load_cases(GOLDEN_PATH)
     pool = [c for c in cases if is_priority(c)]
-    assert (len(pool), len(cases)) == (45, 62), (
+    assert (len(pool), len(cases)) == (46, 63), (
         f"priority pool is now {len(pool)}/{len(cases)}; update the ~27%-ceiling "
         "claim in docs/COST_CONTROLS.md §6, tests/eval/subset.py, tests/eval/judge.py, "
         "tests/eval/README.md AND .github/workflows/ci.yml (that last one carries the "

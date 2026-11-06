@@ -269,7 +269,7 @@ panel size and ~88% at the local default.
 CI runs `--postgres`, where the live vector arm lets far more cases reach the LLM and
 real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
 
-* ~67 orchestrator asks (62 cases + 5 replayed `followup` history turns) + ~124
+* ~68 orchestrator asks (63 cases + 5 replayed `followup` history turns) + ~126
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60
@@ -316,7 +316,7 @@ runs") fails the suite. Mutation-verified.
 #### Why sampling cases was rejected
 
 `--judge-subset N` exists in the runner (`tests/eval/subset.py`) and is a useful
-*local* tool, but CI does not use it. The reason is arithmetic: **45 of the 62 golden
+*local* tool, but CI does not use it. The reason is arithmetic: **46 of the 63 golden
 cases carry a zero-tolerance, judge-independent oracle** —
 
 * `must_not_contain` — prompt-injection resistance (any leak fails),

@@ -345,7 +345,7 @@ jobs:
     # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
     # PRs would consume most of a $1.10 key.
     #
-    # Sampling CASES was evaluated and REJECTED: 45 of the 62 golden cases carry a
+    # Sampling CASES was evaluated and REJECTED: 46 of the 63 golden cases carry a
     # ZERO-TOLERANCE judge-independent oracle (injection, multi-turn echo, per-case
     # groundedness, refusal leak), which a subset does not average down — it
     # switches off. The maximum honest saving was ~27%, in exchange for silently
