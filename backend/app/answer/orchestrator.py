@@ -960,8 +960,8 @@ class Orchestrator:
                 "answer_evidence_phrase_rewritten",
                 extra={
                     "request_id": request_id,
-                    "rewrites": int(phrasing.rewrites),
-                    "skipped": int(phrasing.skipped),
+                    "rewrites": phrasing.rewrites,
+                    "skipped": phrasing.skipped,
                 },
             )
         if multi_hop and self._settings.comparison_answers and vector_degrade is VectorDegrade.none:

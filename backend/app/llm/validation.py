@@ -418,6 +418,16 @@ _PLURAL_VERBS = frozenset(_EVIDENCE_VERBS.values())
 
 _SOURCES_I_FOUND = "the sources I found"
 
+# A closed list of prepositions. When one is the word right before "the" on the
+# same line, the phrase is a prepositional object ("Nothing in the evidence
+# mentions ..."), not the subject of the next verb, so that verb is left as
+# written: only the noun phrase is rewritten.
+_PREPOSITION_BEFORE_RE = re.compile(
+    r"\b(?:in|of|from|within|across|on|at|by|for|with|throughout|among|about|under"
+    r"|inside|through|into|over)[ \t]+\Z",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class EvidencePhraseRewrite:
@@ -455,11 +465,15 @@ def _plural_verb(verb: str) -> str | None:
     return _match_case(plural, verb)
 
 
-def _follower_edit(masked: str, pos: int, *, plural_head: bool) -> tuple[int, int, str] | None:
+def _follower_edit(
+    masked: str, pos: int, *, plural_head: bool, after_preposition: bool
+) -> tuple[int, int, str] | None:
     """The edit the allowlist makes after a phrase ending at ``pos``, or None if off it.
 
     An empty edit ``(pos, pos, "")`` means the follower is allowed and needs no
-    change: punctuation, markers, the end, or a plural verb after a plural head.
+    change: punctuation, markers, the end, a plural verb after a plural head, or
+    any mapped verb (singular or plural) after a preposition, whose subject is
+    another noun.
     """
     if _EVIDENCE_END_RE.match(masked, pos) is not None:
         return pos, pos, ""
@@ -467,6 +481,9 @@ def _follower_edit(masked: str, pos: int, *, plural_head: bool) -> tuple[int, in
     if follow is None:
         return None
     verb = follow.group("verb")
+    if after_preposition:
+        key = _verb_key(verb)
+        return (pos, pos, "") if key in _EVIDENCE_VERBS or key in _PLURAL_VERBS else None
     if plural_head:
         return (pos, pos, "") if _verb_key(verb) in _PLURAL_VERBS else None
     plural = _plural_verb(verb)
@@ -476,9 +493,10 @@ def _follower_edit(masked: str, pos: int, *, plural_head: bool) -> tuple[int, in
 def rewrite_evidence_references(text: str) -> EvidencePhraseRewrite:
     """Rewrite "the provided evidence" as "the sources I found", with counts (#554 item 3).
 
-    The text is :func:`neutralise_evidence_references`; this companion also
-    reports how many phrases were rewritten and how many were left as written,
-    so the orchestrator can log both.
+    This is the function production calls. It returns the rewritten text with
+    how many phrases were rewritten and how many were left as written, so the
+    orchestrator can log both. The rules are documented on
+    :func:`neutralise_evidence_references`, a text-only wrapper around it.
     """
     masked = _strip_code(text, keep_offsets=True)
     pieces: list[str] = []
@@ -488,10 +506,18 @@ def rewrite_evidence_references(text: str) -> EvidencePhraseRewrite:
         line_start = text.rfind("\n", 0, match.start()) + 1
         line_end = text.find("\n", match.end())
         on_fence_line = _fence_run(text[line_start : line_end if line_end != -1 else len(text)])
+        after_preposition = (
+            _PREPOSITION_BEFORE_RE.search(masked, line_start, match.start()) is not None
+        )
         edit = (
             None
             if on_fence_line
-            else _follower_edit(masked, match.end(), plural_head=match.group("head") is not None)
+            else _follower_edit(
+                masked,
+                match.end(),
+                plural_head=match.group("head") is not None,
+                after_preposition=after_preposition,
+            )
         )
         if edit is None:
             skipped += 1
@@ -536,7 +562,11 @@ def neutralise_evidence_references(text: str) -> str:
     ``[n]`` markers), or at most one adverb from a closed list and then a verb
     from a closed singular-to-plural map, which is made plural in its own case.
     After a plural head the verb is already plural and must be in that map's
-    plural forms; only the noun is rewritten. Anything else ("the evidence for
+    plural forms; only the noun is rewritten. After a preposition from a closed
+    list (in, of, from, ...), written as the word right before ``the`` on the
+    same line, the phrase is not the verb's subject ("Nothing in the evidence
+    mentions ..."), so a mapped verb in either form is left as written and only
+    the noun is rewritten. Anything else ("the evidence for
     this is thin", "the evidence provided to me") is left exactly as written,
     because a guessed inflection would make the sentence ungrammatical; it is
     counted as skipped (see :func:`rewrite_evidence_references`).
