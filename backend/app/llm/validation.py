@@ -61,6 +61,7 @@ Contract (matches ``docs/API_SPEC.md`` §5 + the LLM client prompt):
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -360,6 +361,193 @@ def expand_grouped_markers(text: str) -> str:
         last = match.end()
     pieces.append(text[last:])
     return "".join(pieces)
+
+
+# "The provided evidence" and its kin (#554 item 3). Word-bounded, one line
+# (spaces and tabs only, never a newline), case-insensitive, and headed by
+# "evidence" only. A closed list of pre-modifiers and plural heads: nothing
+# open-ended.
+_EVIDENCE_PHRASE_RE = re.compile(
+    r"\bthe[ \t]+"
+    r"(?:(?:provided|supplied|given|available|retrieved|above|listed)[ \t]+)?"
+    r"evidence\b"
+    r"(?:[ \t]+(?P<head>bullets|items|snippets|excerpts)\b)?",
+    re.IGNORECASE,
+)
+
+# Allowlist (a): optional markers, then punctuation or the end of the text.
+_EVIDENCE_END_RE = re.compile(
+    r"(?:[ \t]*\[[0-9]+(?:[ \t]*,[ \t]*[0-9]+)*\])*[ \t]*(?:[,.;:)!?]|\Z)"
+)
+
+# Allowlist (b): at most one adverb from a closed list, then one word that
+# must be a key (or, after a plural head, a value) of _EVIDENCE_VERBS.
+_EVIDENCE_VERB_RE = re.compile(
+    r"[ \t]+(?:(?:clearly|only|also|explicitly|specifically|directly|not)[ \t]+)?"
+    r"(?P<verb>[A-Za-z]+(?:['\u2019][A-Za-z]+)?)(?![A-Za-z'\u2019])",
+    re.IGNORECASE,
+)
+
+_EVIDENCE_VERBS: dict[str, str] = {
+    "mentions": "mention",
+    "says": "say",
+    "states": "state",
+    "shows": "show",
+    "lists": "list",
+    "contains": "contain",
+    "describes": "describe",
+    "indicates": "indicate",
+    "suggests": "suggest",
+    "notes": "note",
+    "includes": "include",
+    "covers": "cover",
+    "explains": "explain",
+    "specifies": "specify",
+    "confirms": "confirm",
+    "provides": "provide",
+    "does": "do",
+    "doesn't": "don't",
+    "is": "are",
+    "isn't": "aren't",
+    "has": "have",
+    "hasn't": "haven't",
+    "was": "were",
+    "wasn't": "weren't",
+}
+_PLURAL_VERBS = frozenset(_EVIDENCE_VERBS.values())
+
+_SOURCES_I_FOUND = "the sources I found"
+
+
+@dataclass(frozen=True, slots=True)
+class EvidencePhraseRewrite:
+    """Outcome of :func:`rewrite_evidence_references`.
+
+    ``rewrites`` counts the phrases replaced; ``skipped`` counts the phrases
+    left as written because what follows them is not on the allowlist.
+    """
+
+    text: str
+    rewrites: int
+    skipped: int
+
+
+def _match_case(word: str, like: str) -> str:
+    """Spell ``word`` in the case ``like`` was written in (all caps, capital, lower)."""
+    if len(like) > 1 and like.isupper():
+        return word.upper()
+    if like[:1].isupper():
+        return word[:1].upper() + word[1:]
+    return word
+
+
+def _verb_key(verb: str) -> str:
+    return verb.lower().replace("\u2019", "'")
+
+
+def _plural_verb(verb: str) -> str | None:
+    """The plural of a mapped singular verb, in its case and apostrophe, or None."""
+    plural = _EVIDENCE_VERBS.get(_verb_key(verb))
+    if plural is None:
+        return None
+    if "\u2019" in verb:
+        plural = plural.replace("'", "\u2019")
+    return _match_case(plural, verb)
+
+
+def _follower_edit(masked: str, pos: int, *, plural_head: bool) -> tuple[int, int, str] | None:
+    """The edit the allowlist makes after a phrase ending at ``pos``, or None if off it.
+
+    An empty edit ``(pos, pos, "")`` means the follower is allowed and needs no
+    change: punctuation, markers, the end, or a plural verb after a plural head.
+    """
+    if _EVIDENCE_END_RE.match(masked, pos) is not None:
+        return pos, pos, ""
+    follow = _EVIDENCE_VERB_RE.match(masked, pos)
+    if follow is None:
+        return None
+    verb = follow.group("verb")
+    if plural_head:
+        return (pos, pos, "") if _verb_key(verb) in _PLURAL_VERBS else None
+    plural = _plural_verb(verb)
+    return None if plural is None else (follow.start("verb"), follow.end("verb"), plural)
+
+
+def rewrite_evidence_references(text: str) -> EvidencePhraseRewrite:
+    """Rewrite "the provided evidence" as "the sources I found", with counts (#554 item 3).
+
+    The text is :func:`neutralise_evidence_references`; this companion also
+    reports how many phrases were rewritten and how many were left as written,
+    so the orchestrator can log both.
+    """
+    masked = _strip_code(text, keep_offsets=True)
+    pieces: list[str] = []
+    last = 0
+    rewrites = skipped = 0
+    for match in _EVIDENCE_PHRASE_RE.finditer(masked):
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        on_fence_line = _fence_run(text[line_start : line_end if line_end != -1 else len(text)])
+        edit = (
+            None
+            if on_fence_line
+            else _follower_edit(masked, match.end(), plural_head=match.group("head") is not None)
+        )
+        if edit is None:
+            skipped += 1
+            continue
+        start, end, verb = edit
+        pieces += [
+            text[last : match.start()],
+            _match_case(_SOURCES_I_FOUND, text[match.start()]),
+            text[match.end() : start],
+            verb,
+        ]
+        last = end
+        rewrites += 1
+    pieces.append(text[last:])
+    return EvidencePhraseRewrite(text="".join(pieces), rewrites=rewrites, skipped=skipped)
+
+
+def neutralise_evidence_references(text: str) -> str:
+    """Rewrite "the provided evidence" as "the sources I found" (#554 item 3).
+
+    The system prompt bans the phrasing and production still served an answer
+    opening "The provided evidence mentions ...". To the reader "evidence" is
+    our word for the retrieved context, not theirs, so the served text is
+    rewritten in code.
+
+    What matches: case-insensitively, word-bounded and on one line, ``the``,
+    an optional pre-modifier (provided, supplied, given, available, retrieved,
+    above, listed), ``evidence`` and an optional plural head (bullets, items,
+    snippets, excerpts).
+
+    Why only "evidence" heads: Claude's own docs say "the provided documents"
+    and "the provided context" in their own meaning, so widening the noun
+    would rewrite real documentation content. The shipped corpus never says
+    "evidence", so a match is always the model talking about its context.
+
+    Why "the sources I found": it is scoped to what search returned. It never
+    claims the whole documentation lacks something, only that the sources
+    found do. That wording was the owner's decision on 2026-11-06.
+
+    The replacement is plural, so a match is rewritten ONLY when what follows
+    is on an allowlist: punctuation or the end of the text (optionally after
+    ``[n]`` markers), or at most one adverb from a closed list and then a verb
+    from a closed singular-to-plural map, which is made plural in its own case.
+    After a plural head the verb is already plural and must be in that map's
+    plural forms; only the noun is rewritten. Anything else ("the evidence for
+    this is thin", "the evidence provided to me") is left exactly as written,
+    because a guessed inflection would make the sentence ungrammatical; it is
+    counted as skipped (see :func:`rewrite_evidence_references`).
+
+    Markdown code (as :func:`_strip_code` defines it) and lines that start
+    with a fence run are left alone, every byte outside a rewrite is returned
+    as it was, line endings included, and a second pass changes nothing.
+    Markers are never touched, so validation and citations read the same
+    indices either way.
+    """
+    return rewrite_evidence_references(text).text
 
 
 # Substring of the refusal the model is contractually required to emit
