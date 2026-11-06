@@ -53,8 +53,10 @@ def test_default_retrieval_and_cache_settings() -> None:
     # v9 (#554): the system prompt now asks for one marker per bracket and bans
     # citing a "not in the evidence" sentence, and grouped markers are expanded
     # before validation, so the same question can again get a different answer.
-    # Red when: answer_policy_version is not bumped from v8 to v9.
-    assert settings.answer_policy_version == "v9"
+    # v10 (#554 item 3): the served text is rewritten so it never says "the provided
+    # evidence", so a v9 cached row can still hold the phrase for its TTL.
+    # Red when: answer_policy_version is not bumped from v9 to v10.
+    assert settings.answer_policy_version == "v10"
     assert settings.cache_ttl_seconds == 86_400
     assert settings.cache_enabled is True
 

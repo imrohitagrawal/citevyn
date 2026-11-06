@@ -20,7 +20,13 @@ Citation contract:
 * A sentence saying the evidence does not contain the answer carries no
   marker (#554). This rule is enforced by THIS PROMPT ONLY; no code can tell
   such a sentence from any other. The answer also never says "based on the
-  provided evidence", which a judged-eval case checks.
+  provided evidence", which a judged-eval case checks. That phrase is now
+  also enforced in code (#554 item 3):
+  :func:`app.llm.validation.rewrite_evidence_references` (which the
+  orchestrator calls; ``neutralise_evidence_references`` is its text-only
+  wrapper) rewrites "the provided evidence" and its kin as "the sources I
+  found" in the served text, and leaves (and logs as skipped) any it cannot
+  rewrite grammatically.
 
 Formatting contract (#303):
 

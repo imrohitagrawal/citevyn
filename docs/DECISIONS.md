@@ -18,6 +18,16 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-06 — Answers say "the sources I found", never "the provided evidence"
+Applies to how answers describe what they were built from (#554). When an
+answer calls the retrieved material "the provided evidence", or a close
+variant headed by "evidence", the served text replaces it with "the sources I
+found". That wording is scoped to what search returned, so it never claims
+the whole documentation lacks something. Because the new phrase is plural, a
+following verb is changed only when it is on a fixed list (for example
+"mentions" becomes "mention", "is" becomes "are"); any other phrase is left as
+the model wrote it and counted in the logs, so the leak stays measurable.
+
 ### 2026-10-31 — Grouped citation markers are shown, but never counted
 Applies to how answers are cited (#554). When the model groups citations, as
 in `[1, 2, 3]`, the answer shows them as separate clickable markers

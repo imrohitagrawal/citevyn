@@ -69,6 +69,7 @@ from app.llm.types import LLMResult
 from app.llm.validation import (
     CitationValidationResult,
     expand_grouped_markers,
+    rewrite_evidence_references,
     validate_citations,
 )
 from app.models import (
@@ -948,8 +949,21 @@ class Orchestrator:
         # rejected gaps outright; now that gaps are legitimate (#215), the wire
         # has to carry the number rather than let the client guess it.
         used_indices = sorted(set(validation.cited_indices))
-        # The served, stored and cached text has its groups split (#554).
-        answer_text = expand_grouped_markers(llm_result.text)
+        # The served, stored and cached text has its groups split (#554) and
+        # never calls the context "the provided evidence" (#554 item 3).
+        # Validation, citations and confidence above and below read
+        # ``llm_result.text`` / ``validation``, so neither rewrite changes them.
+        phrasing = rewrite_evidence_references(expand_grouped_markers(llm_result.text))
+        answer_text = phrasing.text
+        if phrasing.rewrites or phrasing.skipped:
+            _logger.info(
+                "answer_evidence_phrase_rewritten",
+                extra={
+                    "request_id": request_id,
+                    "rewrites": phrasing.rewrites,
+                    "skipped": phrasing.skipped,
+                },
+            )
         if multi_hop and self._settings.comparison_answers and vector_degrade is VectorDegrade.none:
             # Phase 6E: a named product the answer cites nothing for is said out
             # loud, never left as a silently half-answered comparison. Only the

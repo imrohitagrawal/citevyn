@@ -559,7 +559,12 @@ class Settings(BaseSettings):
     # display (shown with cards, never counted). The same question can produce
     # a DIFFERENT answer, and a v8 row can hold a grouped marker the client
     # shows as literal text.
-    answer_policy_version: str = "v9"
+    #
+    # v9 -> v10 (#554 item 3): the served text is rewritten so it never calls
+    # the context "the provided evidence" ("the sources I found" instead). A
+    # v9 row can still hold the phrase, and must not be served for its
+    # remaining TTL.
+    answer_policy_version: str = "v10"
     cache_enabled: bool = True
     cache_ttl_seconds: int = Field(default=86_400, ge=1)
 
