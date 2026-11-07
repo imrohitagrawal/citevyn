@@ -594,6 +594,15 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
         view = {**summary, **{key: fallback[key] for key in ANSWER_SECTIONS}}
         prefix = f"fallback answer model {fallback['model']}: "
         failures += [prefix + f for f in _gate(view, retrieval=False, answers=True)]
+        # Both passes drive the same cases. A fallback pass that judged fewer (or
+        # none) would otherwise pass every gate on an empty or partial population.
+        main_judged = summary["judge"].get("judged", 0)
+        fallback_judged = fallback["judge"].get("judged", 0)
+        if fallback_judged != main_judged:
+            failures.append(
+                f"{prefix}judged {fallback_judged} case(s) but the main pass judged "
+                f"{main_judged}; both passes must drive the same cases"
+            )
     return failures
 
 

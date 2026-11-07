@@ -56,25 +56,39 @@ class _Forbidden(_Recording):
         raise AssertionError("the process-wide client was called")
 
 
-def _two_cases() -> list[Any]:
-    cases = [c for c in load_cases(GOLDEN_PATH) if c.kind == "literal" and not c.postgres_only]
-    assert len(cases) >= 2  # partner: the golden set really has hermetic literal cases
-    return cases[:2]
+def _cases() -> list[Any]:
+    """Two single-turn cases and one multi-turn case, all hermetic."""
+    golden = [c for c in load_cases(GOLDEN_PATH) if not c.postgres_only]
+    literal = [c for c in golden if c.kind == "literal"]
+    followup = [c for c in golden if c.kind == "followup" and c.history]
+    # Partner: the golden set really has hermetic cases of both shapes.
+    assert len(literal) >= 2
+    assert followup
+    return [*literal[:2], followup[0]]
 
 
 def test_the_real_judge_cases_answers_with_answer_llm_and_grades_with_judge_llm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red when: ``_judge_cases`` drops ``llm=answer_llm`` (the fallback pass would
-    answer with the main model) or ``client=judge_llm`` (the grader would be the
-    answer model), while the report still names the intended models."""
+    """Red when: ``_judge_cases`` drops ``llm=answer_llm`` on the final turn or on a
+    history turn (the fallback pass would answer with the main model) or
+    ``client=judge_llm`` (the grader would be the answer model), while the report
+    still names the intended models."""
     monkeypatch.delenv("CITEVYN_EVAL_JUDGE_PANEL", raising=False)
     forbidden = _Forbidden("")
     # Not the stub, so the judged path runs; and any use of it fails the test.
     monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: forbidden)
+    # The orchestrator and the judge fall back to the shared client when no client
+    # is passed; make that fallback fail loudly too, so a dropped hand-off on ANY
+    # turn (history turns included) or on the grader is caught.
+    from app.answer import orchestrator as orchestrator_mod
+    from tests.eval import judge as judge_mod
+
+    monkeypatch.setattr(orchestrator_mod, "get_llm_client", lambda settings=None: forbidden)
+    monkeypatch.setattr(judge_mod, "get_llm_client", lambda settings=None: forbidden)
     answer = _Recording("Use the --model flag to choose a model.")
     judge = _Recording(json.dumps({"score": 4, "rationale": "fake"}))
-    cases = _two_cases()
+    cases = _cases()
 
     judged = asyncio.run(
         runner_mod._judge_cases(
@@ -313,3 +327,16 @@ def test_the_log_prints_the_fallback_oracle_counts() -> None:
     assert "over 2 fact-bearing case(s)" in joined
     assert "0 leak(s) over 2 injection case(s)" in joined
     assert runner_mod.fallback_oracle_lines({"judge": {"available": True}}) == []
+
+
+@pytest.mark.parametrize("judged", [0, 9])
+def test_a_fallback_pass_that_judged_fewer_cases_fails(judged: int) -> None:
+    """Red when: an empty or partial fallback pass (0 or 9 of the main pass's 10
+    cases) passes the gate on the population it happened to judge."""
+    fallback = _healthy()
+    fallback["judge"]["judged"] = judged
+    fallback["judge"]["scored"] = judged
+    if judged == 0:
+        fallback["judge"]["mean_score"] = None
+    failures = runner_mod.gate_failures(_summary(fallback))
+    assert any("both passes must drive the same cases" in f for f in failures), failures

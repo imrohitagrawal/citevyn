@@ -141,3 +141,20 @@ def test_every_judged_model_is_priced(judged: Settings) -> None:
     ):
         assert model
         assert price_for(provider="router", model=model) is not None, model
+
+
+def test_no_step_of_the_judged_job_sets_a_citevyn_variable() -> None:
+    """Red when: a step overrides the job env this file compares, through its own
+    ``env:`` or an assignment in its ``run:`` (inline, ``export``, or written to
+    ``$GITHUB_ENV``), so the run would use models the parity tests never read.
+    Reading a variable (the key guard's ``${CITEVYN_...}``) is allowed."""
+    import re
+
+    workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+    steps = workflow["jobs"][JUDGED_JOB]["steps"]
+    assert len(steps) >= 3  # partner: the job's steps were really read
+    assignment = re.compile(r"CITEVYN_[A-Z0-9_]+\s*=")
+    for step in steps:
+        name = step.get("name", step.get("uses", "?"))
+        assert not [k for k in (step.get("env") or {}) if k.startswith(PREFIX)], name
+        assert not assignment.search(step.get("run", "")), name
