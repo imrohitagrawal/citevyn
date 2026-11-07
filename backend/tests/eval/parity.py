@@ -16,7 +16,12 @@ credentials (they cannot change an answer) and the ``MAPPED`` fields, each
 compared by its own rule. So a setting added later is compared by default.
 
 Production's configuration is ``fly.toml``'s ``[env]`` plus the Settings
-defaults; the Fly secrets hold only keys. Production calls Google directly; the
+defaults. The Fly secrets hold the keys and connection settings (Redis, OAuth);
+none of those feeds an answer today, but a setting moved into a secret is
+invisible here. ``environment`` is not compared: production runs as
+"production", whose startup guards demand the secrets; no answer path reads it.
+
+Production calls Google directly; the
 judged run reaches the same models through OpenRouter, whose ids are the Google
 ids under ``google/``.
 """
@@ -148,6 +153,15 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
     need(
         production.gemini_thinking_level != "use_budget",
         "production uses a thinking budget, not a level",
+    )
+    # One judged field, ``openrouter_timeout_seconds``, serves the judged MAIN pass
+    # (production's Gemini timeout) and the fallback pass (production's OpenRouter
+    # timeout, compared by equality above). Production must use one value for both,
+    # or the judged run cannot reproduce when production falls back.
+    need(
+        judged.openrouter_timeout_seconds == production.gemini_timeout_seconds,
+        f"answer timeout {judged.openrouter_timeout_seconds!r} is not production's Gemini "
+        f"timeout {production.gemini_timeout_seconds!r}",
     )
     need(
         judged.openrouter_reasoning_effort == production.gemini_thinking_level,

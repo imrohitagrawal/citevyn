@@ -157,11 +157,36 @@ def test_the_allowlist_is_exactly_what_differs_today(
     allowlist is a field that could not differ. Red when: a field is added to the
     allowlist (or the mapped set) that does not differ, which would let a future
     difference through unexamined, or the job starts differing on a new field."""
-    from tests.eval.parity import FREE_TO_DIFFER, MAPPED
+    from tests.eval.parity import _CREDENTIAL, FREE_TO_DIFFER, MAPPED
 
     differing = {n for n in Settings.model_fields if getattr(judged, n) != getattr(production, n)}
-    credentials = {n for n in differing if n.endswith("_api_key")}
+    credentials = {n for n in differing if _CREDENTIAL.search(n)}
     assert differing - credentials == set(FREE_TO_DIFFER) | set(MAPPED)
+
+
+@pytest.mark.parametrize(
+    "update",
+    [{"retrieval_top_k": 1}, {"openrouter_api_base": "https://other.example/api/v1"}],
+)
+def test_drift_on_productions_side_fires(
+    production: Settings, judged: Settings, update: dict[str, Any]
+) -> None:
+    """Red when: the comparison reads only fields the judged side set, so a
+    setting added later to fly.toml (production only) passes."""
+    failures = parity_failures(judged, production.model_copy(update=update))
+    (name,) = update
+    assert any(f"'{name}'" in f for f in failures), failures
+
+
+def test_productions_gemini_timeout_must_match_the_judged_answer_timeout(
+    production: Settings, judged: Settings
+) -> None:
+    """Red when: production's main-model timeout changes and the judged run keeps
+    its own (equal fields on different paths)."""
+    failures = parity_failures(
+        judged, production.model_copy(update={"gemini_timeout_seconds": 30.0})
+    )
+    assert any("answer timeout" in f for f in failures), failures
 
 
 def test_case_colliding_names_are_refused() -> None:
@@ -295,3 +320,10 @@ def test_the_ci_job_runs_the_runtime_check() -> None:
     ]
     assert "continue-on-error" not in steps[0]
     assert "continue-on-error" not in _judged_job()
+    # A custom shell (``shell: true {0}`` exits 0 without running the script) or a
+    # changed condition would skip the check as surely as ``|| true``.
+    assert "shell" not in steps[0]
+    assert steps[0].get("if") == "steps.guard.outputs.run == 'true'"
+    workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+    assert "defaults" not in workflow
+    assert "defaults" not in _judged_job()
