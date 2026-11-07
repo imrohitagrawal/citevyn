@@ -79,19 +79,39 @@ def test_the_judged_job_tests_productions_models(production: Settings, judged: S
 
 
 DRIFTS: list[tuple[str, dict[str, Any], str]] = [
-    ("answer model", {"openrouter_model": "openai/gpt-4o-mini"}, "answer model"),
-    ("embedding model", {"embedding_model": "openai/text-embedding-3-small"}, "embedding model"),
-    ("embedding size", {"embedding_dim": 768}, "embedding size"),
-    ("thinking level", {"openrouter_reasoning_effort": "low"}, "reasoning effort"),
+    ("answer model, other family", {"openrouter_model": "openai/gpt-4o-mini"}, "answer model"),
+    ("answer model, same family", {"openrouter_model": "google/gemini-2.5-flash"}, "answer model"),
+    (
+        "embedding model, other",
+        {"embedding_model": "openai/text-embedding-3-small"},
+        "embedding model",
+    ),
+    (
+        "embedding model, same family",
+        {"embedding_model": "google/text-embedding-004"},
+        "embedding model",
+    ),
+    ("judged embeds with gemini", {"embedding_provider": "gemini"}, "embed through OpenRouter"),
+    ("embedding size", {"embedding_dim": 768}, "'embedding_dim'"),
+    ("thinking level low", {"openrouter_reasoning_effort": "low"}, "reasoning effort"),
+    ("thinking level medium", {"openrouter_reasoning_effort": "medium"}, "reasoning effort"),
     ("no thinking level", {"openrouter_reasoning_effort": None}, "reasoning effort"),
-    ("temperature", {"llm_temperature": 0.9}, "temperature"),
-    ("output cap", {"llm_max_tokens": 64}, "output cap"),
-    ("thinking allowance", {"gemini_thinking_headroom_tokens": 1}, "thinking allowance"),
+    ("temperature", {"llm_temperature": 0.9}, "'llm_temperature'"),
+    ("output cap", {"llm_max_tokens": 64}, "'llm_max_tokens'"),
+    (
+        "thinking allowance",
+        {"gemini_thinking_headroom_tokens": 1},
+        "'gemini_thinking_headroom_tokens'",
+    ),
+    ("endpoint", {"openrouter_api_base": "https://other.example/api/v1"}, "'openrouter_api_base'"),
+    ("retrieval depth", {"retrieval_top_k": 1}, "'retrieval_top_k'"),
+    ("answer policy", {"answer_when_grounded": False}, "'answer_when_grounded'"),
+    ("timeout", {"openrouter_timeout_seconds": 300.0}, "'openrouter_timeout_seconds'"),
     ("fallback model", {"eval_fallback_model": "openai/gpt-4o"}, "fallback pass model"),
     ("no grader", {"eval_judge_model": None}, "grader"),
     ("grader shares a family", {"eval_judge_model": "openai/gpt-4o"}, "grader"),
     ("grader in the answer family", {"eval_judge_model": "google/gemini-2.5-flash"}, "grader"),
-    ("unpriced grader", {"eval_judge_model": "mistralai/not-priced"}, "price book"),
+    ("unpriced grader", {"eval_judge_model": "mistralai/not-priced"}, "grader model"),
     ("provider", {"llm_provider": "gemini"}, "judged provider"),
 ]
 
@@ -106,9 +126,62 @@ def test_each_rule_fires(
     assert any(expect in f for f in failures), (label, failures)
 
 
+@pytest.mark.parametrize("role", ["answer", "fallback", "embedding"])
+def test_an_unpriced_model_in_any_role_fires(
+    production: Settings, judged: Settings, role: str
+) -> None:
+    """Red when: the price check skips the answer, fallback or embedding model.
+    Production is moved too, so only the price rule can object."""
+    field = {
+        "answer": "gemini_model",
+        "fallback": "openrouter_model",
+        "embedding": "embedding_model",
+    }[role]
+    judged_field = {
+        "answer": "openrouter_model",
+        "fallback": "eval_fallback_model",
+        "embedding": "embedding_model",
+    }[role]
+    unpriced = "unpriced-model-x"
+    prod = production.model_copy(update={field: unpriced})
+    mine = f"google/{unpriced}" if role != "fallback" else unpriced
+    failures = parity_failures(judged.model_copy(update={judged_field: mine}), prod)
+    assert any(f"{role} model" in f and "price book" in f for f in failures), failures
+
+
+def test_the_allowlist_is_exactly_what_differs_today(
+    production: Settings, judged: Settings
+) -> None:
+    """Partner of the equal-by-default rule: every field that differs between
+    production and the judged job today is allowed by name, and nothing on the
+    allowlist is a field that could not differ. Red when: a field is added to the
+    allowlist (or the mapped set) that does not differ, which would let a future
+    difference through unexamined, or the job starts differing on a new field."""
+    from tests.eval.parity import FREE_TO_DIFFER, MAPPED
+
+    differing = {n for n in Settings.model_fields if getattr(judged, n) != getattr(production, n)}
+    credentials = {n for n in differing if n.endswith("_api_key")}
+    assert differing - credentials == set(FREE_TO_DIFFER) | set(MAPPED)
+
+
+def test_case_colliding_names_are_refused() -> None:
+    """Red when: two names differing only in case are both accepted, although which
+    one the app reads depends on environment order."""
+    with pytest.raises(ValueError, match="different letter case"):
+        settings_fields({"CITEVYN_GEMINI_MODEL": "a", "citevyn_gemini_model": "b"})
+
+
 def test_production_side_rules_fire(production: Settings, judged: Settings) -> None:
-    """Red when: production's fallback sending a reasoning effort, or production
-    leaving the gemini provider, goes unnoticed."""
+    """Red when: production's fallback sending a reasoning effort, production
+    leaving the gemini provider or embedder, production using a thinking budget,
+    or production setting an eval-only field goes unnoticed."""
+    for update, expect in (
+        ({"embedding_provider": "openrouter"}, "production embeds"),
+        ({"gemini_thinking_level": "use_budget"}, "thinking budget"),
+        ({"eval_judge_model": "anthropic/claude-haiku-5.5"}, "eval-only"),
+    ):
+        failures = parity_failures(judged, production.model_copy(update=update))
+        assert any(expect in f for f in failures), (update, failures)
     failures = parity_failures(
         judged, production.model_copy(update={"openrouter_reasoning_effort": "minimal"})
     )
@@ -169,6 +242,11 @@ def no_run(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Any]]:
         {"citevyn_eval_judge_model": "google/gemini-2.5-flash"},
         {"CITEVYN_OPENROUTER_REASONING_EFFORT": "high"},
         {"CITEVYN_LLM_MAX_TOKENS": "64"},
+        # Settings that change answers without naming a model.
+        {"CITEVYN_OPENROUTER_API_BASE": "https://other.example/api/v1"},
+        {"citevyn_retrieval_top_k": "1"},
+        {"CITEVYN_ANSWER_WHEN_GROUNDED": "false"},
+        {"CITEVYN_CONVERSATION_MEMORY": "false"},
     ],
 )
 def test_the_runtime_check_refuses_drift_before_running(
@@ -198,9 +276,22 @@ def test_the_runtime_check_passes_the_real_ci_env(
 
 
 def test_the_ci_job_runs_the_runtime_check() -> None:
-    """Red when: the judged step stops passing ``--production-parity``, so drift
-    from a step-level or ``$GITHUB_ENV`` override would go unchecked."""
-    runs = [s.get("run", "") for s in _judged_job()["steps"]]
-    eval_runs = [r for r in runs if "tests.eval.runner" in r]
-    assert len(eval_runs) == 1
-    assert "--production-parity" in eval_runs[0].split()
+    """Red when: the judged step stops passing ``--production-parity``, or its exit
+    code stops failing the step, so drift from any override would go unchecked."""
+    steps = [s for s in _judged_job()["steps"] if "tests.eval.runner" in s.get("run", "")]
+    assert len(steps) == 1
+    # The whole command, exactly: anything appended (``|| true``, ``; ...``) or a
+    # step-level ``continue-on-error`` would turn the check's exit 2 into a pass.
+    assert steps[0]["run"].split() == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "tests.eval.runner",
+        "--postgres",
+        "--production-parity",
+        "--report",
+        "../artifacts/eval_report.json",
+    ]
+    assert "continue-on-error" not in steps[0]
+    assert "continue-on-error" not in _judged_job()

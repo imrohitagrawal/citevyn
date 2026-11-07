@@ -808,8 +808,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "#596: before anything runs, compare this process's EFFECTIVE settings "
-            "with production's (fly.toml + defaults) and exit 2 on any difference "
-            "in the models, thinking level or limits. The CI judged job passes it."
+            "with production's (fly.toml + defaults) and exit 2 on any difference: "
+            "every setting must be equal except a named few that cannot change an "
+            "answer, and the models must map to production's. The CI judged job "
+            "passes it."
         ),
     )
     args = parser.parse_args(argv)

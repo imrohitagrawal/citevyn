@@ -11,7 +11,11 @@ One set of rules, used twice:
   override can get past it. A text check over the workflow could only list
   spellings, and each list had a hole.
 
-Production's models come from ``fly.toml``'s ``[env]`` plus the Settings
+Every Settings field must be equal, except the few in ``FREE_TO_DIFFER`` and
+credentials (they cannot change an answer) and the ``MAPPED`` fields, each
+compared by its own rule. So a setting added later is compared by default.
+
+Production's configuration is ``fly.toml``'s ``[env]`` plus the Settings
 defaults; the Fly secrets hold only keys. Production calls Google directly; the
 judged run reaches the same models through OpenRouter, whose ids are the Google
 ids under ``google/``.
@@ -20,6 +24,7 @@ ids under ``google/``.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -42,6 +47,10 @@ def settings_fields(env: dict[str, Any]) -> dict[str, Any]:
             continue
         field = upper[len(PREFIX) :].lower()
         if field in Settings.model_fields:
+            if field in out:
+                # Two names differing only in case: which one the app reads depends
+                # on environment order, so neither side can be known. Refuse it.
+                raise ValueError(f"{PREFIX}{field.upper()} is set twice, in different letter case")
             out[field] = value
     return out
 
@@ -68,14 +77,55 @@ def _family(model: str) -> str:
     return model.split("/", 1)[0]
 
 
+# Fields that may differ between production and the judged run because they do
+# not change an answer: where the data lives, who may call, how much may be spent,
+# and credentials. Measured 2026-11-07: these and the mapped fields below were the
+# only fields that differed. Every other Settings field must be EQUAL, so a new
+# setting is compared by default, not forgotten.
+FREE_TO_DIFFER = frozenset(
+    {
+        "database_url",
+        "database_pool_size",
+        "cors_allowed_origins",
+        "cost_soft_daily_usd",
+        "cost_hard_daily_usd",
+    }
+)
+# Credentials are free to differ: a key selects an account, not a model.
+_CREDENTIAL = re.compile(r"(_api_key|_secret|_token|_password)$")
+# Fields compared by an explicit rule below instead of by equality.
+MAPPED = frozenset(
+    {
+        "llm_provider",
+        "embedding_provider",
+        "openrouter_model",
+        "embedding_model",
+        "openrouter_reasoning_effort",
+        "eval_fallback_model",
+        "eval_judge_model",
+    }
+)
+
+
+def _equal_by_default(name: str) -> bool:
+    return name not in FREE_TO_DIFFER and name not in MAPPED and not _CREDENTIAL.search(name)
+
+
 def parity_failures(judged: Settings, production: Settings) -> list[str]:
-    """Every way ``judged`` would not test production's models. Empty = parity."""
+    """Every way ``judged`` would not test production's configuration. Empty = parity."""
     failures: list[str] = []
 
     def need(ok: bool, message: str) -> None:
         if not ok:
             failures.append(message)
 
+    for name in sorted(Settings.model_fields):
+        if _equal_by_default(name):
+            mine, theirs = getattr(judged, name), getattr(production, name)
+            need(mine == theirs, f"setting {name!r} is {mine!r}, production's is {theirs!r}")
+
+    # The mapped fields: production calls Google directly; the judged run reaches
+    # the same models through OpenRouter, whose ids are Google's under ``google/``.
     need(
         production.llm_provider == "gemini",
         f"production provider is {production.llm_provider!r}, not 'gemini'",
@@ -96,9 +146,6 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
         f"'google/{production.embedding_model}'",
     )
     need(
-        judged.embedding_dim == production.embedding_dim, "embedding size differs from production's"
-    )
-    need(
         production.gemini_thinking_level != "use_budget",
         "production uses a thinking budget, not a level",
     )
@@ -106,15 +153,6 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
         judged.openrouter_reasoning_effort == production.gemini_thinking_level,
         f"reasoning effort {judged.openrouter_reasoning_effort!r} is not production's "
         f"thinking level {production.gemini_thinking_level!r}",
-    )
-    need(
-        judged.llm_temperature == production.llm_temperature,
-        "temperature differs from production's",
-    )
-    need(judged.llm_max_tokens == production.llm_max_tokens, "output cap differs from production's")
-    need(
-        judged.gemini_thinking_headroom_tokens == production.gemini_thinking_headroom_tokens,
-        "thinking allowance differs from production's",
     )
     need(
         judged.eval_fallback_model == production.openrouter_model,
@@ -125,6 +163,10 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
         production.openrouter_reasoning_effort is None,
         "production's fallback would send a reasoning effort",
     )
+    need(
+        production.eval_fallback_model is None and production.eval_judge_model is None,
+        "production sets an eval-only setting",
+    )
     judge = judged.eval_judge_model
     answer_families = {_family(judged.openrouter_model)}
     if judged.eval_fallback_model:
@@ -133,14 +175,14 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
         judge is not None and _family(judge) not in answer_families,
         f"grader {judge!r} is unset or shares a family with an answer model",
     )
-    for model in (
-        judged.openrouter_model,
-        judged.eval_fallback_model,
-        judge,
-        judged.embedding_model,
+    for role, model in (
+        ("answer", judged.openrouter_model),
+        ("fallback", judged.eval_fallback_model),
+        ("grader", judge),
+        ("embedding", judged.embedding_model),
     ):
         need(
             model is not None and price_for(provider="router", model=model) is not None,
-            f"model {model!r} is not in the price book",
+            f"{role} model {model!r} is not in the price book",
         )
     return failures
