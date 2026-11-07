@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from app.core.config import Settings
+from app.core.logging import build_log_formatter
 from app.llm import factory as llm_factory
 from app.llm.openrouter import OpenRouterLLMClient
 
@@ -51,12 +52,20 @@ async def test_reasoning_effort_is_sent_with_headroom() -> None:
     assert seen["max_tokens"] == 64 + 256
 
 
+async def test_reasoning_effort_is_required_not_best_effort() -> None:
+    """Red when: OpenRouter may silently drop the effort (no ``require_parameters``),
+    or the privacy routing is lost while adding it."""
+    seen = await _payload(reasoning_effort="minimal", reasoning_headroom_tokens=256)
+    assert seen["provider"] == {"zdr": True, "data_collection": "deny", "require_parameters": True}
+
+
 async def test_no_reasoning_by_default() -> None:
     """Red when: a client built without an effort (production's fallback) sends a
-    reasoning field or a raised output cap."""
+    reasoning field, a raised output cap, or any provider routing but the privacy one."""
     seen = await _payload()
     assert "reasoning" not in seen
     assert seen["max_tokens"] == 64
+    assert seen["provider"] == {"zdr": True, "data_collection": "deny"}
 
 
 async def test_headroom_alone_changes_nothing() -> None:
@@ -121,3 +130,9 @@ def test_startup_log_names_the_models_in_use(
     assert len(records) == 1
     assert records[0].model == model  # type: ignore[attr-defined]
     assert records[0].fallback_model == fallback  # type: ignore[attr-defined]
+    # The line production writes, through production's own formatter: a field the
+    # redactor does not allow prints as ``<str len=N>``, which a raw-record check
+    # cannot see. Red when: ``fallback_model`` or ``model`` leaves the allowlist.
+    line = build_log_formatter().format(records[0])
+    assert f"model={model!r}" in line
+    assert f"fallback_model={fallback!r}" in line

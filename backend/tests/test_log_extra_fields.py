@@ -2042,6 +2042,8 @@ _OVER_BLANKED_SLUGS = [
 # selection until this list was written out by hand.
 _MODEL_KEYS_UNDER_TEST = [
     "model",
+    # The startup log's fallback model (#596).
+    "fallback_model",
     "index_embedding_model",
     "configured_embedding_model",
 ]

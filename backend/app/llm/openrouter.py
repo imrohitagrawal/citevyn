@@ -103,6 +103,11 @@ class OpenRouterLLMClient:
             # client, so ask for the same allowance on top of the answer budget.
             payload["reasoning"] = {"effort": self._reasoning_effort}
             payload["max_tokens"] = max_tokens + self._reasoning_headroom_tokens
+            # OpenRouter DROPS a parameter the routed provider does not support
+            # unless asked not to. A dropped effort would let Gemini think at its
+            # default level while the eval claims production's (#596), so require
+            # it: an endpoint that cannot honour it is refused, loudly.
+            payload["provider"] = {**_PRIVACY, "require_parameters": True}
         headers = {
             "authorization": f"Bearer {self._api_key}",
             "content-type": "application/json",

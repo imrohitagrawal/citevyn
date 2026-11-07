@@ -688,7 +688,11 @@ MAX_PATH_SEGMENTS = 64
 # It survives here too. (#400 shifts that value by exactly one character:
 # ``'/[REDACTED].md'`` becomes ``'[REDACTED].md'``, the leading ``/`` absorbed
 # into a stronger match. Strictly more redaction, not less.)
-MODEL_ID_KEYS = frozenset({"model", "index_embedding_model", "configured_embedding_model"})
+# ``fallback_model`` (#596): the startup log names the model that answers when the
+# primary fails; a provider slug like ``openai/gpt-4o-mini``, same profile as ``model``.
+MODEL_ID_KEYS = frozenset(
+    {"model", "fallback_model", "index_embedding_model", "configured_embedding_model"}
+)
 MAX_MODEL_ID = 64
 
 
@@ -977,6 +981,7 @@ EMITTED_TEXT_KEYS = frozenset(
         "llm_provider",
         "embedding_provider",
         "model",
+        "fallback_model",
         "kind",
         "call_site",
         "status",

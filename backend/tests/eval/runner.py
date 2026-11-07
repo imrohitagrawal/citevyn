@@ -381,6 +381,32 @@ def injection_summary_line(summary: dict[str, Any]) -> str | None:
     )
 
 
+def fallback_oracle_lines(summary: dict[str, Any]) -> list[str]:
+    """The fallback pass's oracle counts for the CI log, as the main pass prints them.
+
+    A silent oracle and a vacuous one look the same in a log; each count is shown
+    beside how many cases it compared (#596). Empty when the run had no fallback pass.
+    """
+    fallback = summary.get("fallback")
+    if not fallback:
+        return []
+    fj = fallback["judge"]
+    mt = fallback["multi_turn"]
+    g = fallback["groundedness"]
+    view = {**summary, **{key: fallback[key] for key in ANSWER_SECTIONS}}
+    lines = [
+        f"refusal leaks (judged): {fj.get('refusal_leaks_judged', 0)}/{fj.get('refusal_total', 0)}",
+        f"Multi-turn echo: {len(mt.get('echoes', []))} echo(es) over "
+        f"{mt.get('cases', 0)} multi-turn case(s)",
+        f"Groundedness: under-grounded {[u['case_id'] for u in g.get('under_grounded', [])]} "
+        f"over {g.get('cases_with_facts', 0)} fact-bearing case(s)",
+    ]
+    injection = injection_summary_line(view)
+    if injection is not None:
+        lines.append(injection)
+    return lines
+
+
 def _gate(summary: dict[str, Any], *, retrieval: bool, answers: bool) -> list[str]:
     """Return human-readable reasons the run should fail the build (empty = pass).
 
@@ -641,18 +667,19 @@ async def run_eval_async(
     judged: list[JudgedCase] = []
     fallback_judged: list[JudgedCase] | None = None
     if judge_available:
-        built: list[LLMClient] = []
-        try:
+        # One exit stack closes every client built here, each in its own step, so a
+        # failing close neither skips the next one nor replaces the run's own error.
+        async with contextlib.AsyncExitStack() as stack:
             judge_llm = None
             if judge_model is not None:
                 judge_llm = build_metered_llm_client(_router_settings(settings, judge_model))
-                built.append(judge_llm)
+                stack.push_async_callback(judge_llm.aclose)
             judged = await _judge_cases(
                 judge_cases, settings=settings, postgres=postgres, judge_llm=judge_llm
             )
             if fallback_model is not None:
                 fallback_llm = build_metered_llm_client(_router_settings(settings, fallback_model))
-                built.append(fallback_llm)
+                stack.push_async_callback(fallback_llm.aclose)
                 fallback_judged = await _judge_cases(
                     judge_cases,
                     settings=settings,
@@ -660,9 +687,6 @@ async def run_eval_async(
                     answer_llm=fallback_llm,
                     judge_llm=judge_llm,
                 )
-        finally:
-            for client in built:
-                await client.aclose()
     summary = _summarize(
         cases,
         retrieval_report.as_dict(),
@@ -841,6 +865,8 @@ def main(argv: list[str] | None = None) -> int:
                     if fmean is not None
                     else f"Fallback pass ({fallback['model']}): no scores"
                 )
+                for line in fallback_oracle_lines(summary):
+                    print(f"  {line}")
         else:
             print("Judge: unavailable (stub provider) — set CITEVYN_LLM_PROVIDER + key to run")
         g = summary.get("groundedness", {})
