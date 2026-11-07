@@ -222,3 +222,5 @@ def test_the_log_names_the_models_and_the_fallback_pass(
     out = capsys.readouterr().out
     assert f"Models: answer {ANSWER}, fallback {FALLBACK}, judge {JUDGE}" in out
     assert f"Fallback pass ({FALLBACK})" in out
+    # The fallback pass's oracle counts reach the log too, beside the main pass's.
+    assert out.count("Multi-turn echo:") == 2

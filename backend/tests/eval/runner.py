@@ -803,10 +803,30 @@ def main(argv: list[str] | None = None) -> int:
             "printed and recorded in the report — this REDUCES judged coverage."
         ),
     )
+    parser.add_argument(
+        "--production-parity",
+        action="store_true",
+        help=(
+            "#596: before anything runs, compare this process's EFFECTIVE settings "
+            "with production's (fly.toml + defaults) and exit 2 on any difference "
+            "in the models, thinking level or limits. The CI judged job passes it."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.judge_subset is not None and args.judge_subset < 1:
         parser.error("--judge-subset must be >= 1")
+
+    if args.production_parity:
+        from .parity import parity_failures, production_settings
+
+        drift = parity_failures(get_settings(), production_settings())
+        if drift:
+            print("PRODUCTION PARITY FAILED (nothing was run, nothing was spent):")
+            for line in drift:
+                print(f"  - {line}")
+            return 2
+        print("Production parity: the judged run uses production's models.")
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     summary = asyncio.run(

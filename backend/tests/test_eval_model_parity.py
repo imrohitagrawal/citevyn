@@ -1,82 +1,68 @@
 """The judged eval in CI must test the models production uses (#596).
 
-Production's models come from ``fly.toml``'s ``[env]`` plus the Settings defaults
-(the Fly secrets hold only keys). The judged eval's come from the
-``answer-quality-eval`` job's ``env`` in ``ci.yml``. Production calls Google
-directly; CI reaches the same models through OpenRouter, whose ids are the Google
-ids under ``google/``.
+The rules live in ``tests/eval/parity.py``. Here they are applied to the judged
+job's ``env:`` block (a free early warning), each rule is shown to fire, and the
+runtime check (``--production-parity``, run by the CI job before any paid call
+on the runner's EFFECTIVE settings) is shown to catch overrides of any spelling.
 
-Each test names the drift that turns it red.
+Each test names the change that turns it red.
 """
 
 from __future__ import annotations
 
-import tomllib
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+from app.core import config as config_mod
 from app.core.config import Settings
-from app.cost.pricing import price_for
+from tests.eval import runner as runner_mod
+from tests.eval.parity import (
+    PREFIX,
+    parity_failures,
+    production_settings,
+    settings_fields,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FLY_TOML = REPO_ROOT / "fly.toml"
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 JUDGED_JOB = "answer-quality-eval"
-PREFIX = "CITEVYN_"
 
 
-def _fields(env: dict[str, Any]) -> dict[str, Any]:
-    """Map ``CITEVYN_X`` env names to Settings field names; drop non-Settings names."""
-    out: dict[str, Any] = {}
-    for name, value in env.items():
-        if not name.startswith(PREFIX):
-            continue
-        field = name[len(PREFIX) :].lower()
-        if field in Settings.model_fields:
-            out[field] = value
-    return out
+def _judged_job() -> dict[str, Any]:
+    return yaml.safe_load(CI_YML.read_text(encoding="utf-8"))["jobs"][JUDGED_JOB]
 
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No CITEVYN_* variable from the test process may leak into either side."""
-    import os
-
+    """No CITEVYN_* variable (any case) from the test process may leak in."""
     for name in list(os.environ):
-        if name.startswith(PREFIX):
+        if name.upper().startswith(PREFIX):
             monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
 def production(clean_env: None) -> Settings:
-    with FLY_TOML.open("rb") as handle:
-        env = tomllib.load(handle)["env"]
-    fields = _fields(env)
-    # The production validators demand the secrets, which live in Fly, not here.
-    # No model field depends on the environment name, so building it as
-    # "development" reads the same model choices.
-    fields.pop("environment", None)
-    return Settings(_env_file=None, **fields)  # type: ignore[call-arg]
+    return production_settings()
 
 
 @pytest.fixture
 def judged(clean_env: None) -> Settings:
-    workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    env = workflow["jobs"][JUDGED_JOB]["env"]
-    fields = _fields(env)
+    fields = settings_fields(_judged_job()["env"])
     # The key is a secret expression in the workflow; any non-empty value parses.
     fields["openrouter_api_key"] = "placeholder-not-a-key"
     return Settings(_env_file=None, **fields)  # type: ignore[call-arg]
 
 
 def test_both_sides_were_read(production: Settings, judged: Settings) -> None:
-    """Partner check: the files really set the providers this file compares.
+    """Partner check: the files really set the providers the rules compare.
 
     Red when: fly.toml stops naming the gemini provider, or the judged job stops
-    naming the router provider (every other test here would compare defaults).
+    naming the router provider (every other rule would compare defaults).
     """
     assert production.llm_provider == "gemini"
     assert production.embedding_provider == "gemini"
@@ -84,82 +70,137 @@ def test_both_sides_were_read(production: Settings, judged: Settings) -> None:
     assert judged.embedding_provider == "openrouter"
 
 
-def test_judged_answer_model_is_productions(production: Settings, judged: Settings) -> None:
-    """Red when: CI answers with any model other than production's Gemini model."""
-    assert judged.openrouter_model == f"google/{production.gemini_model}"
+def test_the_judged_job_tests_productions_models(production: Settings, judged: Settings) -> None:
+    """Red when: the judged job's env drifts from production on any rule in
+    ``tests/eval/parity.py`` (answer or embedding model, vector size, thinking
+    level, temperature, output cap, thinking allowance, fallback model, grader
+    family, prices)."""
+    assert parity_failures(judged, production) == []
 
 
-def test_judged_embedding_model_is_productions(production: Settings, judged: Settings) -> None:
-    """Red when: CI embeds with another model or another vector size than production."""
-    assert judged.embedding_model == f"google/{production.embedding_model}"
-    assert judged.embedding_dim == production.embedding_dim
+DRIFTS: list[tuple[str, dict[str, Any], str]] = [
+    ("answer model", {"openrouter_model": "openai/gpt-4o-mini"}, "answer model"),
+    ("embedding model", {"embedding_model": "openai/text-embedding-3-small"}, "embedding model"),
+    ("embedding size", {"embedding_dim": 768}, "embedding size"),
+    ("thinking level", {"openrouter_reasoning_effort": "low"}, "reasoning effort"),
+    ("no thinking level", {"openrouter_reasoning_effort": None}, "reasoning effort"),
+    ("temperature", {"llm_temperature": 0.9}, "temperature"),
+    ("output cap", {"llm_max_tokens": 64}, "output cap"),
+    ("thinking allowance", {"gemini_thinking_headroom_tokens": 1}, "thinking allowance"),
+    ("fallback model", {"eval_fallback_model": "openai/gpt-4o"}, "fallback pass model"),
+    ("no grader", {"eval_judge_model": None}, "grader"),
+    ("grader shares a family", {"eval_judge_model": "openai/gpt-4o"}, "grader"),
+    ("grader in the answer family", {"eval_judge_model": "google/gemini-2.5-flash"}, "grader"),
+    ("unpriced grader", {"eval_judge_model": "mistralai/not-priced"}, "price book"),
+    ("provider", {"llm_provider": "gemini"}, "judged provider"),
+]
 
 
-def test_judged_thinking_matches_production(production: Settings, judged: Settings) -> None:
-    """Red when: CI lets Gemini think at a different level than production does.
-
-    Production sends Gemini a thinking level; through OpenRouter the same control is
-    the reasoning effort, and the extra output allowance for thinking is shared.
-    """
-    assert production.gemini_thinking_level != "use_budget"
-    assert judged.openrouter_reasoning_effort == production.gemini_thinking_level
-
-
-def test_judged_generation_limits_match_production(production: Settings, judged: Settings) -> None:
-    """Red when: CI answers with a different temperature or output cap."""
-    assert judged.llm_temperature == production.llm_temperature
-    assert judged.llm_max_tokens == production.llm_max_tokens
-    assert judged.gemini_thinking_headroom_tokens == production.gemini_thinking_headroom_tokens
-
-
-def test_judged_fallback_pass_uses_productions_fallback(
-    production: Settings, judged: Settings
+@pytest.mark.parametrize(("label", "update", "expect"), DRIFTS, ids=[d[0] for d in DRIFTS])
+def test_each_rule_fires(
+    production: Settings, judged: Settings, label: str, update: dict[str, Any], expect: str
 ) -> None:
-    """Red when: CI's second pass tests another model than production's backup, or
-    production's backup starts receiving a reasoning setting the pass does not send."""
-    assert judged.eval_fallback_model == production.openrouter_model
-    assert production.openrouter_reasoning_effort is None
+    """Red when: any one rule stops comparing what it names (each drift alone
+    must produce a failure that names it)."""
+    failures = parity_failures(judged.model_copy(update=update), production)
+    assert any(expect in f for f in failures), (label, failures)
 
 
-def test_judge_is_a_third_family(judged: Settings) -> None:
-    """Red when: the grader is unset, or shares a model family with an answer model,
-    so a model would grade its own answers."""
-    assert judged.eval_judge_model
-    assert judged.eval_fallback_model
-    family = {m.split("/", 1)[0] for m in (judged.openrouter_model, judged.eval_fallback_model)}
-    assert judged.eval_judge_model.split("/", 1)[0] not in family
+def test_production_side_rules_fire(production: Settings, judged: Settings) -> None:
+    """Red when: production's fallback sending a reasoning effort, or production
+    leaving the gemini provider, goes unnoticed."""
+    failures = parity_failures(
+        judged, production.model_copy(update={"openrouter_reasoning_effort": "minimal"})
+    )
+    assert any("production's fallback" in f for f in failures)
+    failures = parity_failures(judged, production.model_copy(update={"llm_provider": "router"}))
+    assert any("production provider" in f for f in failures)
 
 
-def test_every_judged_model_is_priced(judged: Settings) -> None:
-    """Red when: a model the judged run calls is missing from the price book, so its
-    spend would be recorded as unpriced."""
-    for model in (
-        judged.openrouter_model,
-        judged.eval_fallback_model,
-        judged.eval_judge_model,
-        judged.embedding_model,
-    ):
-        assert model
-        assert price_for(provider="router", model=model) is not None, model
+def test_lower_case_names_are_read_like_the_app_reads_them() -> None:
+    """Red when: a lower-case ``citevyn_`` name in fly.toml or the job env is
+    skipped by the comparison although pydantic-settings applies it."""
+    assert settings_fields({"citevyn_openrouter_model": "x/y"}) == {"openrouter_model": "x/y"}
+    assert settings_fields({"OTHER_NAME": "1", "CITEVYN_NOT_A_FIELD": "1"}) == {}
 
 
-def test_no_step_of_the_judged_job_sets_a_citevyn_variable() -> None:
-    """Red when: a step overrides the job env this file compares, through its own
-    ``env:`` or an assignment in its ``run:`` (inline, ``export``, or written to
-    ``$GITHUB_ENV`` in any spelling), so the run would use models the parity tests
-    never read.
-    Reading a variable (the key guard's ``${CITEVYN_...}``) is allowed."""
-    import re
+def test_production_is_not_read_from_the_checking_machine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: a variable on the machine running the check changes what
+    "production" means (it must come from fly.toml and the defaults only)."""
+    monkeypatch.setenv("citevyn_gemini_model", "gemini-9-local")
+    assert production_settings().gemini_model != "gemini-9-local"
+    assert os.environ["citevyn_gemini_model"] == "gemini-9-local"  # noqa: SIM112 - lower case on purpose
 
-    workflow = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
-    steps = workflow["jobs"][JUDGED_JOB]["steps"]
-    assert len(steps) >= 3  # partner: the job's steps were really read
-    assignment = re.compile(r"CITEVYN_[A-Z0-9_]+\s*=")
-    for step in steps:
-        name = step.get("name", step.get("uses", "?"))
-        assert not [k for k in (step.get("env") or {}) if k.startswith(PREFIX)], name
-        run = step.get("run", "")
-        assert not assignment.search(run), name
-        # Any write to the job's env file can set a variable for later steps under
-        # a spelling the assignment pattern does not list; refuse the file itself.
-        assert "GITHUB_ENV" not in run, name
+
+# --- the runtime check: the runner's effective settings -------------------------
+
+
+def _ci_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> None:
+    for name, value in _judged_job()["env"].items():
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.setenv("CITEVYN_OPENROUTER_API_KEY", "placeholder-not-a-key")
+    for name, value in extra.items():
+        monkeypatch.setenv(name, value)
+    config_mod.get_settings.cache_clear()
+
+
+@pytest.fixture
+def no_run(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Any]]:
+    """Records whether the eval itself started (it must not, on drift)."""
+    started: list[Any] = []
+
+    async def _never(**kwargs: Any) -> dict[str, Any]:
+        started.append(kwargs)
+        raise AssertionError("the eval ran")
+
+    monkeypatch.setattr(runner_mod, "run_eval_async", _never)
+    yield started
+    config_mod.get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"CITEVYN_OPENROUTER_MODEL": "openai/gpt-4o"},
+        # Any letter case reaches the app, so it must reach the check.
+        {"citevyn_openrouter_model": "openai/gpt-4o"},
+        {"citevyn_eval_judge_model": "google/gemini-2.5-flash"},
+        {"CITEVYN_OPENROUTER_REASONING_EFFORT": "high"},
+        {"CITEVYN_LLM_MAX_TOKENS": "64"},
+    ],
+)
+def test_the_runtime_check_refuses_drift_before_running(
+    clean_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    no_run: list[Any],
+    capsys: pytest.CaptureFixture[str],
+    override: dict[str, str],
+) -> None:
+    """Red when: an override set by any means a step can use (it ends up in the
+    process environment, in any letter case) passes the runtime check, or the
+    eval starts before the check."""
+    _ci_env(monkeypatch, **override)
+    assert runner_mod.main(["--production-parity", "--quiet"]) == 2
+    assert no_run == []
+    assert "PRODUCTION PARITY FAILED" in capsys.readouterr().out
+
+
+def test_the_runtime_check_passes_the_real_ci_env(
+    clean_env: None, monkeypatch: pytest.MonkeyPatch, no_run: list[Any]
+) -> None:
+    """Partner of the above: the job's own env passes, and the eval then starts."""
+    _ci_env(monkeypatch)
+    with pytest.raises(AssertionError, match="the eval ran"):
+        runner_mod.main(["--production-parity", "--quiet"])
+    assert len(no_run) == 1
+
+
+def test_the_ci_job_runs_the_runtime_check() -> None:
+    """Red when: the judged step stops passing ``--production-parity``, so drift
+    from a step-level or ``$GITHUB_ENV`` override would go unchecked."""
+    runs = [s.get("run", "") for s in _judged_job()["steps"]]
+    eval_runs = [r for r in runs if "tests.eval.runner" in r]
+    assert len(eval_runs) == 1
+    assert "--production-parity" in eval_runs[0].split()

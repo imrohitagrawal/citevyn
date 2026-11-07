@@ -385,10 +385,10 @@ class Settings(BaseSettings):
     # --- Judged eval only (#596) ---
     # Production's fallback model. When set, the judged eval answers every case a
     # second time with it, under the same answer gates. Unset: one pass.
-    eval_fallback_model: str | None = Field(default=None, min_length=1)
+    eval_fallback_model: str | None = Field(default=None, pattern=r"^\S+$")
     # The grader's own OpenRouter model, so no answer model grades its own answers.
     # Unset: the grader uses the answer client (local runs).
-    eval_judge_model: str | None = Field(default=None, min_length=1)
+    eval_judge_model: str | None = Field(default=None, pattern=r"^\S+$")
 
     # --- Retrieval / embeddings (Slice 4+ / #51) ---
     # Provider seam mirroring the LLM factory. "stub" is the deterministic,

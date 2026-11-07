@@ -444,7 +444,9 @@ jobs:
       # PRODUCTION'S MODELS (#596). Production calls Google directly (fly.toml +
       # the Settings defaults); this job reaches the same models through OpenRouter,
       # whose ids are the Google ids under `google/`, with the same thinking level.
-      # backend/tests/test_eval_model_parity.py fails if these drift from production.
+      # The runner's --production-parity flag (the step below) compares its EFFECTIVE
+      # settings with production's before any paid call and stops on drift;
+      # backend/tests/test_eval_model_parity.py applies the same rules to this block.
       # Known gap: production's embedder tags each request as a query or a document;
       # this route does not, so the vectors are close, not identical.
       CITEVYN_EMBEDDING_PROVIDER: openrouter
@@ -496,7 +498,7 @@ jobs:
         # Always the FULL golden set. Cost is bounded by RUN FREQUENCY (the job's
         # `if:` above), not by sampling cases — see the rationale there.
         run: >-
-          uv run python -m tests.eval.runner --postgres
+          uv run python -m tests.eval.runner --postgres --production-parity
           --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()

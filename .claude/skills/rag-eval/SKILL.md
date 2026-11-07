@@ -61,8 +61,10 @@ Production answers with `gemini-3.6-flash` (pinned, #492) and falls back to Open
 `google/gemini-3.6-flash` and embeds with `google/gemini-embedding-001` through OpenRouter, answers
 every case a second time with the fallback (`CITEVYN_EVAL_FALLBACK_MODEL`, same answer gates,
 failures prefixed `fallback answer model ...`), and grades both passes with a third family
-(`CITEVYN_EVAL_JUDGE_MODEL`, `anthropic/claude-haiku-5.5`). `backend/tests/test_eval_model_parity.py`
-fails when the CI job's models drift from production's; change both together. The report's
+(`CITEVYN_EVAL_JUDGE_MODEL`, `anthropic/claude-haiku-5.5`). The runner's `--production-parity` flag (passed
+by the CI step) refuses to start when its effective settings drift from production's, and
+`backend/tests/test_eval_model_parity.py` applies the same rules (`tests/eval/parity.py`) to the
+job's `env:` block; change production and CI together. The report's
 `models` block names what answered and graded. A local `make eval` is not comparable with CI: it
 runs hermetic (no `--postgres`, so the `postgres_only` cases, injection included, are dropped), with the
 default 3-framing judge panel, ONE answer pass graded by its own answer client. To match CI, run

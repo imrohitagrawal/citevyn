@@ -252,10 +252,23 @@ def test_fallback_and_judge_are_router_clients_without_reasoning_from_a_gemini_r
 
 
 @pytest.mark.parametrize("model_field", ["eval_fallback_model", "eval_judge_model"])
-def test_an_empty_eval_model_is_refused_at_config_time(model_field: str) -> None:
-    """Red when: an empty id parses and builds a client on model ``""``."""
+@pytest.mark.parametrize("value", ["", " ", "\t", "openai/gpt-4o mini"])
+def test_a_blank_or_spaced_eval_model_is_refused_at_config_time(
+    model_field: str, value: str
+) -> None:
+    """Red when: an empty, blank or spaced id parses and builds a client on it."""
     with pytest.raises(ValueError):
-        Settings(_env_file=None, **{model_field: ""})  # type: ignore[call-arg,arg-type]
+        Settings(_env_file=None, **{model_field: value})  # type: ignore[call-arg,arg-type]
+
+
+def test_a_real_eval_model_id_is_accepted() -> None:
+    """Partner: the id pattern accepts the ids the CI job uses."""
+    s = Settings(
+        _env_file=None,
+        eval_fallback_model="openai/gpt-4o-mini",
+        eval_judge_model="anthropic/claude-haiku-5.5",
+    )  # type: ignore[call-arg]
+    assert s.eval_judge_model == "anthropic/claude-haiku-5.5"
 
 
 # --- every answer gate applies to the fallback pass ------------------------------
@@ -358,8 +371,16 @@ def test_a_retrieval_gate_is_reported_once_not_per_pass() -> None:
 
 def test_the_log_prints_the_fallback_oracle_counts() -> None:
     """Red when: the CI log shows the fallback pass's mean but hides whether its
-    oracles compared anything."""
-    lines = runner_mod.fallback_oracle_lines(_summary(_healthy()))
+    oracles compared anything, or prints the MAIN pass's counts under it."""
+    fallback = _healthy()
+    summary = _summary(fallback)
+    # Make every main-pass count differ from the fallback's, so lines read from
+    # the wrong pass cannot match.
+    summary["judge"].update(refusal_total=7, refusal_leaks_judged=0)
+    summary["multi_turn"] = {"cases": 4, "echoes": []}
+    summary["groundedness"] = {"cases_with_facts": 9, "under_grounded": []}
+    summary["injection"] = {"declared": 5, "cases": 5, "leaks": []}
+    lines = runner_mod.fallback_oracle_lines(summary)
     joined = "\n".join(lines)
     assert "refusal leaks (judged): 0/3" in joined
     assert "0 echo(es) over 1 multi-turn case(s)" in joined
@@ -368,10 +389,10 @@ def test_the_log_prints_the_fallback_oracle_counts() -> None:
     assert runner_mod.fallback_oracle_lines({"judge": {"available": True}}) == []
 
 
-@pytest.mark.parametrize("judged", [0, 9])
+@pytest.mark.parametrize("judged", [0, 9, 11])
 def test_a_fallback_pass_that_judged_fewer_cases_fails(judged: int) -> None:
-    """Red when: an empty or partial fallback pass (0 or 9 of the main pass's 10
-    cases) passes the gate on the population it happened to judge."""
+    """Red when: a fallback pass that judged a different count (0, 9 or 11 against
+    the main pass's 10) passes the gate on the population it happened to judge."""
     fallback = _healthy()
     fallback["judge"]["judged"] = judged
     fallback["judge"]["scored"] = judged
