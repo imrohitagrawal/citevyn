@@ -18,6 +18,16 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-07 — The judged eval tests the models production uses
+Applies to the paid answer-quality eval in CI (#596). It answers with
+production's answer model and embeds with production's embedding model, both
+reached through OpenRouter on the CI key. It then answers every case a second
+time with production's fallback model, and both passes face the same gates. A
+fixed grader from a third model family scores both passes, so no model grades
+its own answers. A test compares production's settings with the CI job's and
+fails when they differ. One gap is accepted: production's embedder tags each
+request as a query or a document, and the OpenRouter route does not.
+
 ### 2026-11-06 — Answers say "the sources I found", never "the provided evidence"
 Applies to how answers describe what they were built from (#554). When an
 answer calls the retrieved material "the provided evidence", or a close
