@@ -144,8 +144,8 @@ def test_the_fallback_report_holds_the_fallback_pass_results(
 def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red when: a failing pass leaves a built client open, or a close replaces the
-    pass's own error."""
+    """Red when: a failing pass leaves a built client open, or the pass's error is
+    lost (the run must fail with it)."""
     built: list[_Recording] = []
 
     def _build(settings: Settings) -> _Recording:
@@ -172,6 +172,45 @@ def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
         eval_judge_model=JUDGE,
     )
     with pytest.raises(RuntimeError, match="fallback pass failed"):
+        asyncio.run(runner_mod.run_eval_async(settings=settings))
+    assert len(built) == 2
+    assert all(c.closed for c in built)
+
+
+class _FailsToClose(_Recording):
+    async def aclose(self) -> None:
+        self.closed = True
+        raise RuntimeError("close failed")
+
+
+def test_a_failing_close_does_not_skip_closing_the_other_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: a failing ``aclose`` leaves another client open (the loop this
+    replaced stopped at the first failing close)."""
+    built: list[_Recording] = []
+
+    def _build(settings: Settings) -> _Recording:
+        # Every close fails, so whichever order the closes run in, a loop that
+        # stops at the first failure leaves the other client open.
+        client = _FailsToClose("")
+        built.append(client)
+        return client
+
+    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(runner_mod, "_judge_cases", _spy)
+    monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: object())
+    monkeypatch.setattr(runner_mod, "build_metered_llm_client", _build)
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_provider="router",
+        openrouter_api_key="or-test",
+        eval_fallback_model=FALLBACK,
+        eval_judge_model=JUDGE,
+    )
+    with pytest.raises(RuntimeError, match="close failed"):
         asyncio.run(runner_mod.run_eval_async(settings=settings))
     assert len(built) == 2
     assert all(c.closed for c in built)

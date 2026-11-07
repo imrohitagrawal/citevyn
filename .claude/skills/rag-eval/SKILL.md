@@ -63,8 +63,10 @@ every case a second time with the fallback (`CITEVYN_EVAL_FALLBACK_MODEL`, same 
 failures prefixed `fallback answer model ...`), and grades both passes with a third family
 (`CITEVYN_EVAL_JUDGE_MODEL`, `anthropic/claude-haiku-5.5`). `backend/tests/test_eval_model_parity.py`
 fails when the CI job's models drift from production's; change both together. The report's
-`models` block names what answered and graded. A local `make eval` is ONE pass graded by its own
-answer client unless you set the same variables as the CI job's `env:` block (`CITEVYN_LLM_PROVIDER`,
-`CITEVYN_OPENROUTER_MODEL`, `CITEVYN_OPENROUTER_REASONING_EFFORT`, `CITEVYN_EMBEDDING_PROVIDER`,
-`CITEVYN_EMBEDDING_MODEL`, `CITEVYN_EVAL_FALLBACK_MODEL`, `CITEVYN_EVAL_JUDGE_MODEL`); never compare a
-local score with a CI score without them. Keep judge runs bounded (one call per case; ~20 cases).
+`models` block names what answered and graded. A local `make eval` is not comparable with CI: it
+runs hermetic (no `--postgres`, so the `postgres_only` cases, injection included, are dropped), with the
+default 3-framing judge panel, ONE answer pass graded by its own answer client. To match CI, run
+`python -m tests.eval.runner --postgres` against a migrated, empty database as the CI step does, with
+every variable in the CI job's `env:` block (including `CITEVYN_EVAL_JUDGE_PANEL=1`,
+`CITEVYN_EVAL_FALLBACK_MODEL` and `CITEVYN_EVAL_JUDGE_MODEL`). Never compare a local score with a CI
+score otherwise. Keep judge runs bounded (one call per case; ~20 cases).

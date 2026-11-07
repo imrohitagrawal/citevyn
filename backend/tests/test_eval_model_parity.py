@@ -146,7 +146,8 @@ def test_every_judged_model_is_priced(judged: Settings) -> None:
 def test_no_step_of_the_judged_job_sets_a_citevyn_variable() -> None:
     """Red when: a step overrides the job env this file compares, through its own
     ``env:`` or an assignment in its ``run:`` (inline, ``export``, or written to
-    ``$GITHUB_ENV``), so the run would use models the parity tests never read.
+    ``$GITHUB_ENV`` in any spelling), so the run would use models the parity tests
+    never read.
     Reading a variable (the key guard's ``${CITEVYN_...}``) is allowed."""
     import re
 
@@ -157,4 +158,8 @@ def test_no_step_of_the_judged_job_sets_a_citevyn_variable() -> None:
     for step in steps:
         name = step.get("name", step.get("uses", "?"))
         assert not [k for k in (step.get("env") or {}) if k.startswith(PREFIX)], name
-        assert not assignment.search(step.get("run", "")), name
+        run = step.get("run", "")
+        assert not assignment.search(run), name
+        # Any write to the job's env file can set a variable for later steps under
+        # a spelling the assignment pattern does not list; refuse the file itself.
+        assert "GITHUB_ENV" not in run, name

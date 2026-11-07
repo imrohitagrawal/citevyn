@@ -677,7 +677,9 @@ async def run_eval_async(
     fallback_judged: list[JudgedCase] | None = None
     if judge_available:
         # One exit stack closes every client built here, each in its own step, so a
-        # failing close neither skips the next one nor replaces the run's own error.
+        # failing close does not skip the next one. If a close fails while a pass's
+        # error is already propagating, the close error is raised with the pass's
+        # error chained as its ``__context__``.
         async with contextlib.AsyncExitStack() as stack:
             judge_llm = None
             if judge_model is not None:
