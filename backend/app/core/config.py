@@ -375,6 +375,20 @@ class Settings(BaseSettings):
     # retirement with the primary).
     openrouter_model: str = "openai/gpt-4o-mini"
     openrouter_timeout_seconds: float = Field(default=15.0, gt=0.0)
+    # OpenRouter's thinking control (``reasoning.effort``). Unset sends none, which
+    # is what production's fallback gets. The judged eval sets it to
+    # ``gemini_thinking_level`` so Gemini reached through OpenRouter thinks as it
+    # does in production (#596); the output allowance for thinking is
+    # ``gemini_thinking_headroom_tokens``, as on the direct Gemini client.
+    openrouter_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
+
+    # --- Judged eval only (#596) ---
+    # Production's fallback model. When set, the judged eval answers every case a
+    # second time with it, under the same answer gates. Unset: one pass.
+    eval_fallback_model: str | None = None
+    # The grader's own OpenRouter model, so no answer model grades its own answers.
+    # Unset: the grader uses the answer client (local runs).
+    eval_judge_model: str | None = None
 
     # --- Retrieval / embeddings (Slice 4+ / #51) ---
     # Provider seam mirroring the LLM factory. "stub" is the deterministic,

@@ -69,6 +69,11 @@ _PRICE_BOOK: dict[tuple[str, str], TokenPrice] = {
     ("router", "openai/gpt-4o-mini"): TokenPrice(Decimal("0.15"), Decimal("0.60")),
     ("router", "openai/gpt-4o"): TokenPrice(Decimal("2.50"), Decimal("10.00")),
     ("router", "google/gemini-2.5-flash"): TokenPrice(Decimal("0.30"), Decimal("2.50")),
+    # The judged eval's models (#596): production's Gemini model reached through
+    # OpenRouter (priced at the same 2027 rate as the direct row below), and the
+    # grader, which must be a third family.
+    ("router", "google/gemini-3.6-flash"): TokenPrice(Decimal("1.50"), Decimal("7.50")),
+    ("router", "anthropic/claude-haiku-5.5"): TokenPrice(Decimal("0.10"), Decimal("0.50")),
     # Gemini direct. The configured default (Settings.gemini_model), pinned (#492).
     # Google lists 3.6 Flash at $0.75/$3.75 until 2026-12-31 and $1.50/$7.50 from
     # 2027-01-01. Priced at the 2027 rate on purpose: over-counting until then only
@@ -109,6 +114,8 @@ _PRICE_BOOK: dict[tuple[str, str], TokenPrice] = {
     # the PAID tier: the free tier is a quota, not a discount, and a budget built
     # on "it might be free today" under-counts the moment the quota is raised.
     ("gemini", "gemini-embedding-001"): TokenPrice(Decimal("0.15"), Decimal(0)),
+    # The same model through OpenRouter: the judged eval's embedder (#596).
+    ("router", "google/gemini-embedding-001"): TokenPrice(Decimal("0.15"), Decimal(0)),
 }
 
 # ``CITEVYN_EMBEDDING_PROVIDER`` spells OpenRouter "openrouter" while

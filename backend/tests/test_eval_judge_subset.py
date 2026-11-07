@@ -256,7 +256,7 @@ def test_report_records_the_requested_limit_not_the_resulting_size() -> None:
 
     from tests.eval import runner as runner_mod
 
-    async def _spy(cases, *, settings, postgres=False):  # type: ignore[no-untyped-def]
+    async def _spy(cases, *, settings, postgres=False, **_clients):  # type: ignore[no-untyped-def]
         return []
 
     summary = None
@@ -489,7 +489,7 @@ def test_the_subset_actually_reaches_the_judged_half(
 
     seen: list[list[str]] = []
 
-    async def _spy(cases, *, settings, postgres=False):  # type: ignore[no-untyped-def]
+    async def _spy(cases, *, settings, postgres=False, **_clients):  # type: ignore[no-untyped-def]
         seen.append([c.id for c in cases])
         return []
 
@@ -517,7 +517,7 @@ def test_full_run_judges_every_case(monkeypatch: pytest.MonkeyPatch) -> None:
 
     seen: list[list[str]] = []
 
-    async def _spy(cases, *, settings, postgres=False):  # type: ignore[no-untyped-def]
+    async def _spy(cases, *, settings, postgres=False, **_clients):  # type: ignore[no-untyped-def]
         seen.append([c.id for c in cases])
         return []
 

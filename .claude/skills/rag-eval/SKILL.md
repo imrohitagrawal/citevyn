@@ -56,5 +56,11 @@ in `backend/tests/eval/thresholds.py`.
 
 ## Provider / cost
 
-Gemini free tier for dev/eval — primary `gemini-3.6-flash` (pinned, #492); OpenRouter `openai/gpt-4o-mini`
-is the paid fallback (#99). Keep judge runs bounded (one call per case; ~20 cases).
+Production answers with `gemini-3.6-flash` (pinned, #492) and falls back to OpenRouter
+`openai/gpt-4o-mini` (#99). The CI judged run tests exactly those (#596): it answers with
+`google/gemini-3.6-flash` and embeds with `google/gemini-embedding-001` through OpenRouter, answers
+every case a second time with the fallback (`CITEVYN_EVAL_FALLBACK_MODEL`, same answer gates,
+failures prefixed `fallback answer model ...`), and grades both passes with a third family
+(`CITEVYN_EVAL_JUDGE_MODEL`, `anthropic/claude-haiku-5.5`). `backend/tests/test_eval_model_parity.py`
+fails when the CI job's models drift from production's; change both together. The report's
+`models` block names what answered and graded. Keep judge runs bounded (one call per case; ~20 cases).

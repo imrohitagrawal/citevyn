@@ -328,7 +328,7 @@ jobs:
     needs: test
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
-    timeout-minutes: 20
+    timeout-minutes: 40  # two answer passes since #596
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
@@ -340,8 +340,11 @@ jobs:
     #
     # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
     #
-    # This job is the project's largest recurring spend: ~67 orchestrator answers +
-    # ~124 judge calls, ≈$0.026 a run (extrapolated from a measured local run — docs/COST_CONTROLS.md §6).
+    # This job is the project's largest recurring spend. Before #596 it made ~67
+    # orchestrator answers + ~124 judge calls, ≈$0.026 a run (extrapolated from a
+    # measured local run — docs/COST_CONTROLS.md §6). Since #596 it answers twice
+    # (production's model, then its fallback) on a dearer answer model, so a run
+    # costs more; the next run's report is the measurement.
     # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
     # PRs would consume most of a $1.10 key.
     #
@@ -438,11 +441,24 @@ jobs:
       # The secret is owner-only; when unset this is empty and the guard skips.
       CITEVYN_OPENROUTER_API_KEY: ${{ secrets.CITEVYN_OPENROUTER_API_KEY }}
       CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_eval
+      # PRODUCTION'S MODELS (#596). Production calls Google directly (fly.toml +
+      # the Settings defaults); this job reaches the same models through OpenRouter,
+      # whose ids are the Google ids under `google/`, with the same thinking level.
+      # backend/tests/test_eval_model_parity.py fails if these drift from production.
+      # Known gap: production's embedder tags each request as a query or a document;
+      # this route does not, so the vectors are close, not identical.
       CITEVYN_EMBEDDING_PROVIDER: openrouter
-      CITEVYN_EMBEDDING_MODEL: openai/text-embedding-3-small
+      CITEVYN_EMBEDDING_MODEL: google/gemini-embedding-001
       CITEVYN_LLM_PROVIDER: router
+      CITEVYN_OPENROUTER_MODEL: google/gemini-3.6-flash
+      CITEVYN_OPENROUTER_REASONING_EFFORT: minimal
+      # Production's fallback model: every case is answered a second time with it,
+      # under the same answer gates.
+      CITEVYN_EVAL_FALLBACK_MODEL: openai/gpt-4o-mini
+      # The grader: a third model family, so no answer model grades its own answers.
+      CITEVYN_EVAL_JUDGE_MODEL: anthropic/claude-haiku-5.5
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
-      # calls/case over the 62-case golden set on a small model.
+      # calls per case per pass.
       CITEVYN_EVAL_JUDGE_PANEL: "1"
     steps:
       - uses: actions/checkout@v7

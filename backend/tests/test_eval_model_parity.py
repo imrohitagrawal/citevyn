@@ -105,9 +105,7 @@ def test_judged_thinking_matches_production(production: Settings, judged: Settin
     assert judged.openrouter_reasoning_effort == production.gemini_thinking_level
 
 
-def test_judged_generation_limits_match_production(
-    production: Settings, judged: Settings
-) -> None:
+def test_judged_generation_limits_match_production(production: Settings, judged: Settings) -> None:
     """Red when: CI answers with a different temperature or output cap."""
     assert judged.llm_temperature == production.llm_temperature
     assert judged.llm_max_tokens == production.llm_max_tokens

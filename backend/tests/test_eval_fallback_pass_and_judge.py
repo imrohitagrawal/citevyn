@@ -101,9 +101,13 @@ def test_built_clients_are_closed(recorded: dict[str, Any]) -> None:
 def test_no_fallback_no_judge_model_keeps_one_pass(recorded: dict[str, Any]) -> None:
     """Red when: a run without the two settings changes behaviour (local runs)."""
     asyncio.run(
-        runner_mod.run_eval_async(settings=_settings(eval_fallback_model=None, eval_judge_model=None))
+        runner_mod.run_eval_async(
+            settings=_settings(eval_fallback_model=None, eval_judge_model=None)
+        )
     )
-    assert recorded["calls"] == [{"answer_llm": None, "judge_llm": None, "n": recorded["calls"][0]["n"]}]
+    assert recorded["calls"] == [
+        {"answer_llm": None, "judge_llm": None, "n": recorded["calls"][0]["n"]}
+    ]
     assert recorded["built"] == []
 
 
@@ -117,9 +121,7 @@ def test_report_names_every_model(recorded: dict[str, Any]) -> None:
 
 
 @pytest.mark.parametrize("judge", [ANSWER, FALLBACK])
-def test_a_judge_that_is_an_answer_model_is_refused(
-    recorded: dict[str, Any], judge: str
-) -> None:
+def test_a_judge_that_is_an_answer_model_is_refused(recorded: dict[str, Any], judge: str) -> None:
     """Red when: the run lets a model grade its own answers."""
     with pytest.raises(SystemExit, match="grade"):
         asyncio.run(runner_mod.run_eval_async(settings=_settings(eval_judge_model=judge)))
@@ -145,7 +147,9 @@ def _answer_sections(*, mean: float, leaks: list[str] | None = None) -> dict[str
     }
 
 
-def _summary(*, main_mean: float, fallback: dict[str, Any] | None, hit_rate: float = 1.0) -> dict[str, Any]:
+def _summary(
+    *, main_mean: float, fallback: dict[str, Any] | None, hit_rate: float = 1.0
+) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "retrieval": {
             "answerable_total": 5,
@@ -177,7 +181,9 @@ def test_zero_tolerance_gates_apply_to_the_fallback_pass() -> None:
     failures = runner_mod.gate_failures(
         _summary(main_mean=4.5, fallback=_answer_sections(mean=4.5, leaks=["fu_1"]))
     )
-    assert any(f.startswith(f"fallback answer model {FALLBACK}: ") and "fu_1" in f for f in failures)
+    assert any(
+        f.startswith(f"fallback answer model {FALLBACK}: ") and "fu_1" in f for f in failures
+    )
 
 
 def test_identical_answer_failures_are_reported_for_each_pass() -> None:
@@ -199,4 +205,20 @@ def test_retrieval_failures_are_reported_once() -> None:
 
 def test_a_passing_run_with_a_fallback_pass_has_no_failures() -> None:
     """Partner of the above: both passes healthy means a clean gate."""
-    assert runner_mod.gate_failures(_summary(main_mean=4.5, fallback=_answer_sections(mean=4.5))) == []
+    assert (
+        runner_mod.gate_failures(_summary(main_mean=4.5, fallback=_answer_sections(mean=4.5))) == []
+    )
+
+
+def test_the_log_names_the_models_and_the_fallback_pass(
+    recorded: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Any,
+) -> None:
+    """Red when: the CI log hides which models ran, or omits the fallback pass."""
+    monkeypatch.setattr(runner_mod, "get_settings", _settings)
+    runner_mod.main(["--report", str(tmp_path / "r.json")])
+    out = capsys.readouterr().out
+    assert f"Models: answer {ANSWER}, fallback {FALLBACK}, judge {JUDGE}" in out
+    assert f"Fallback pass ({FALLBACK})" in out
