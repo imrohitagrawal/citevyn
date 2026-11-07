@@ -136,3 +136,29 @@ def test_startup_log_names_the_models_in_use(
     line = build_log_formatter().format(records[0])
     assert f"model={model!r}" in line
     assert f"fallback_model={fallback!r}" in line
+
+
+def test_build_metered_llm_client_meters_a_new_client_and_leaves_the_stub_bare() -> None:
+    """Red when: the fallback pass's or grader's client is built unmetered (their
+    spend would not be recorded), or it reuses the process-wide client, or the
+    stub gets wrapped (which hides the identity the judged half's self-skip reads)."""
+    from app.cost.metered import MeteredLLMClient
+    from app.llm.stub import StubLLMClient
+
+    llm_factory.reset_llm_client()
+    try:
+        router = Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            llm_provider="router",
+            openrouter_api_key="or-test",
+            openrouter_model="openai/gpt-4o-mini",
+        )
+        first = llm_factory.build_metered_llm_client(router)
+        second = llm_factory.build_metered_llm_client(router)
+        assert isinstance(first, MeteredLLMClient)
+        assert first is not second
+        assert first is not llm_factory.get_llm_client(router)
+        stub = llm_factory.build_metered_llm_client(Settings(_env_file=None))  # type: ignore[call-arg]
+        assert isinstance(stub, StubLLMClient)
+    finally:
+        llm_factory.reset_llm_client()
