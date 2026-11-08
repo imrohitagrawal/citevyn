@@ -27,6 +27,7 @@ import contextlib
 import dataclasses
 import json
 import pathlib
+import re
 import uuid
 from typing import Any
 
@@ -149,9 +150,12 @@ def _wrong_answerers(
     calls: list[tuple[str, str]], expect: tuple[str, str]
 ) -> list[tuple[str, str]]:
     """Calls not made by the expected provider and model. OpenRouter reports the
-    model it routed to, which may carry a dated suffix, so models match by prefix."""
+    model it routed to, which may be the id with a date suffix
+    (``openai/gpt-4o-mini-2024-07-18``); anything longer is another model
+    (``openai/gpt-4o-mini-search-preview``)."""
     provider, model = expect
-    return [c for c in calls if c[0] != provider or not c[1].startswith(model)]
+    same = re.compile(rf"^{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?$")
+    return [c for c in calls if c[0] != provider or not same.match(c[1])]
 
 
 async def _judge_cases(
@@ -229,6 +233,11 @@ async def _judge_cases(
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
             if expect_answerer is not None and isinstance(answer_llm, AttributingLLM):
                 wrong = _wrong_answerers(answer_llm.calls, expect_answerer)
+                if response.get("cache_hit"):
+                    # A cached answer makes no model call, so who wrote it is unknown:
+                    # it may be a fallback answer cached by an earlier case. Production
+                    # keeps the cache on, so the eval does too, and refuses to grade it.
+                    wrong = [*wrong, ("cache", "unknown writer")]
                 if wrong:
                     judged.append(
                         JudgedCase(

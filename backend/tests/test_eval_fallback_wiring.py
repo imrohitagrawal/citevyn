@@ -437,7 +437,7 @@ class _Answers:
     ) -> LLMResult:  # noqa: ARG002
         self.calls += 1
         return LLMResult(
-            text="Use the --model flag.",
+            text="Use the --model flag [1].",  # cited, so the answer is cached
             input_tokens=1,
             output_tokens=1,
             model=self.model,
@@ -498,12 +498,17 @@ def test_a_main_pass_answer_written_by_gemini_is_graded(monkeypatch: pytest.Monk
 
 def test_a_dated_model_id_from_openrouter_matches_its_model() -> None:
     """Red when: OpenRouter's dated id for the expected model counts as another
-    model (every fallback-pass answer would be refused), or a different model
-    with a shared prefix-free name passes."""
+    model (every fallback-pass answer would be refused), or another model passes:
+    a different provider, a shorter id, or a longer id that only starts the same."""
     expect = ("router", "openai/gpt-4o-mini")
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-2024-07-18")], expect) == []
     assert runner_mod._wrong_answerers([("gemini", "openai/gpt-4o-mini")], expect)
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o")], expect)
+    # A LONGER id is another model, not a dated snapshot of this one.
+    assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-search-preview")], expect)
+    assert runner_mod._wrong_answerers(
+        [("gemini", "gemini-3.6-flash-lite")], ("gemini", "gemini-3.6-flash")
+    )
 
 
 class _DownFor(_Answers):
@@ -532,3 +537,56 @@ def test_each_case_is_attributed_on_its_own(monkeypatch: pytest.MonkeyPatch) -> 
     judged = _run_main_pass(monkeypatch, _DownFor("gemini", "gemini-3.6-flash", first.question))
     assert judged[0].score is None and judged[0].error and "answered by" in judged[0].error
     assert judged[1].score == 5 and judged[1].error is None
+
+
+def _run_cases(
+    monkeypatch: pytest.MonkeyPatch, cases: list[Any], primary: _Answers
+) -> list[JudgedCase]:
+    from app.llm.fallback import FallbackLLMClient
+
+    monkeypatch.delenv("CITEVYN_EVAL_JUDGE_PANEL", raising=False)
+    monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: _Forbidden(""))
+    main = runner_mod.AttributingLLM(
+        FallbackLLMClient(primary=primary, secondary=_Answers("router", FALLBACK))  # type: ignore[arg-type]
+    )
+    judge = _Recording(json.dumps({"score": 5, "rationale": "fake"}))
+    return asyncio.run(
+        runner_mod._judge_cases(
+            cases,
+            settings=Settings(_env_file=None),  # type: ignore[call-arg]
+            answer_llm=main,
+            judge_llm=judge,  # type: ignore[arg-type]
+            expect_answerer=("gemini", "gemini-3.6-flash"),
+        )
+    )
+
+
+def test_a_cached_answer_is_not_graded_as_the_expected_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: an answer the fallback model wrote is cached by one case and then
+    served, with no model call, to a later case with the same question, which is
+    graded as Gemini's (the cache key does not hold the answering model)."""
+    import dataclasses
+
+    first = _cases()[0]
+    twin = dataclasses.replace(first, id=f"{first.id}_twin")
+    judged = _run_cases(
+        monkeypatch, [first, twin], _DownFor("gemini", "gemini-3.6-flash", first.question)
+    )
+    assert judged[0].error and "answered by" in judged[0].error
+    assert judged[1].score is None
+    assert judged[1].error and "cache" in judged[1].error
+
+
+def test_a_history_turn_answered_by_the_fallback_errors_the_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: attribution starts after the history replay, so a follow-up whose
+    earlier turn the fallback model answered is graded as Gemini's conversation."""
+    followup = next(c for c in _cases() if c.kind == "followup")
+    judged = _run_cases(
+        monkeypatch, [followup], _DownFor("gemini", "gemini-3.6-flash", followup.history[0])
+    )
+    assert judged[0].score is None
+    assert judged[0].error and "answered by" in judged[0].error
