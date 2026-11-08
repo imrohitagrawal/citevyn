@@ -57,8 +57,6 @@ class OpenRouterLLMClient:
         api_base: str,
         timeout_seconds: float,
         http_client: httpx.AsyncClient | None = None,
-        reasoning_effort: str | None = None,
-        reasoning_headroom_tokens: int = 0,
     ) -> None:
         if not api_key:
             raise RuntimeError(
@@ -69,8 +67,6 @@ class OpenRouterLLMClient:
         self._api_key = api_key
         self._api_base = api_base.rstrip("/")
         self._timeout_seconds = timeout_seconds
-        self._reasoning_effort = reasoning_effort
-        self._reasoning_headroom_tokens = reasoning_headroom_tokens
         self._owns_client = http_client is None
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -98,16 +94,6 @@ class OpenRouterLLMClient:
                 {"role": "user", "content": user},
             ],
         }
-        if self._reasoning_effort is not None:
-            # Thinking tokens count against max_tokens, as on the direct Gemini
-            # client, so ask for the same allowance on top of the answer budget.
-            payload["reasoning"] = {"effort": self._reasoning_effort}
-            payload["max_tokens"] = max_tokens + self._reasoning_headroom_tokens
-            # OpenRouter DROPS a parameter the routed provider does not support
-            # unless asked not to. A dropped effort would let Gemini think at its
-            # default level while the eval claims production's (#596), so require
-            # it: an endpoint that cannot honour it is refused, loudly.
-            payload["provider"] = {**_PRIVACY, "require_parameters": True}
         headers = {
             "authorization": f"Bearer {self._api_key}",
             "content-type": "application/json",

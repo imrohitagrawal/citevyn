@@ -18,17 +18,18 @@ import pytest
 from app.core.config import Settings
 from tests.eval import runner as runner_mod
 
-ANSWER = "google/gemini-3.6-flash"
+ANSWER = "gemini-3.6-flash"
 FALLBACK = "openai/gpt-4o-mini"
 JUDGE = "anthropic/claude-haiku-5.5"
 
 
 def _settings(**overrides: Any) -> Settings:
+    # The CI judged job's shape: production's Gemini client, both keys.
     base: dict[str, Any] = {
-        "llm_provider": "router",
+        "llm_provider": "gemini",
+        "gemini_api_key": "g-test",
         "openrouter_api_key": "or-test",
-        "openrouter_model": ANSWER,
-        "openrouter_reasoning_effort": "minimal",
+        "gemini_model": ANSWER,
         "eval_fallback_model": FALLBACK,
         "eval_judge_model": JUDGE,
     }
@@ -82,13 +83,13 @@ def test_two_passes_run_and_share_one_grader(recorded: dict[str, Any]) -> None:
     assert main_pass["n"] == fallback_pass["n"] > 0
 
 
-def test_fallback_and_judge_send_no_reasoning(recorded: dict[str, Any]) -> None:
-    """Red when: the fallback pass or the grader inherits the main model's reasoning
-    effort. Production's fallback client is built with none."""
+def test_fallback_and_judge_are_openrouter_clients(recorded: dict[str, Any]) -> None:
+    """Red when: the fallback pass or the grader keeps the run's ``gemini`` provider,
+    which would build Gemini-with-fallback and ignore the model it was given."""
     asyncio.run(runner_mod.run_eval_async(settings=_settings()))
+    assert len(recorded["built"]) == 2
     for client in recorded["built"]:
         assert client.settings.llm_provider == "router"
-        assert client.settings.openrouter_reasoning_effort is None
 
 
 def test_built_clients_are_closed(recorded: dict[str, Any]) -> None:

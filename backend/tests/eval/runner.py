@@ -753,16 +753,10 @@ def _answer_model(settings: Settings) -> str:
 def _router_settings(settings: Settings, model: str) -> Settings:
     """Settings for one more OpenRouter client on ``model`` (the fallback, the grader).
 
-    No reasoning effort: production's fallback client is built without one, and the
-    grader has no production counterpart to match.
+    Built the way production builds its fallback client (``_build_openrouter``):
+    the run's OpenRouter settings with only the model replaced.
     """
-    return settings.model_copy(
-        update={
-            "llm_provider": "router",
-            "openrouter_model": model,
-            "openrouter_reasoning_effort": None,
-        }
-    )
+    return settings.model_copy(update={"llm_provider": "router", "openrouter_model": model})
 
 
 def main(argv: list[str] | None = None) -> int:

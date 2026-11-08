@@ -1,99 +1,19 @@
-"""OpenRouter reasoning effort, and a startup log that names the models in use (#596).
-
-The judged eval reaches production's Gemini model through OpenRouter. Production
-sends Gemini a thinking level; OpenRouter's equivalent is ``reasoning.effort``.
-Production's own OpenRouter client (the fallback, ``gpt-4o-mini``) sends none.
+"""The startup log names the models that answer, and the judged eval's extra
+clients are metered (#596).
 
 Each test names the change that turns it red.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
-import httpx
 import pytest
 
 from app.core.config import Settings
 from app.core.logging import build_log_formatter
 from app.llm import factory as llm_factory
 from app.llm.openrouter import OpenRouterLLMClient
-
-_OK = {"choices": [{"message": {"content": "x"}}], "usage": {}}
-
-
-async def _payload(**client_kwargs: object) -> dict[str, object]:
-    seen: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.update(json.loads(request.content))
-        return httpx.Response(200, json=_OK)
-
-    client = OpenRouterLLMClient(
-        model="google/gemini-3.6-flash",
-        api_key="or-test",
-        api_base="https://openrouter.ai/api/v1",
-        timeout_seconds=5.0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        **client_kwargs,  # type: ignore[arg-type]
-    )
-    try:
-        await client.complete(system="s", user="q", max_tokens=64, temperature=0.0)
-    finally:
-        await client.aclose()
-    return seen
-
-
-async def test_reasoning_effort_is_sent_with_headroom() -> None:
-    """Red when: the effort is not sent, or the thinking allowance is not added."""
-    seen = await _payload(reasoning_effort="minimal", reasoning_headroom_tokens=256)
-    assert seen["reasoning"] == {"effort": "minimal"}
-    assert seen["max_tokens"] == 64 + 256
-
-
-async def test_reasoning_effort_is_required_not_best_effort() -> None:
-    """Red when: OpenRouter may silently drop the effort (no ``require_parameters``),
-    or the privacy routing is lost while adding it."""
-    seen = await _payload(reasoning_effort="minimal", reasoning_headroom_tokens=256)
-    assert seen["provider"] == {"zdr": True, "data_collection": "deny", "require_parameters": True}
-
-
-async def test_no_reasoning_by_default() -> None:
-    """Red when: a client built without an effort (production's fallback) sends a
-    reasoning field, a raised output cap, or any provider routing but the privacy one."""
-    seen = await _payload()
-    assert "reasoning" not in seen
-    assert seen["max_tokens"] == 64
-    assert seen["provider"] == {"zdr": True, "data_collection": "deny"}
-
-
-async def test_headroom_alone_changes_nothing() -> None:
-    """Red when: the allowance is added although no reasoning was asked for."""
-    seen = await _payload(reasoning_headroom_tokens=256)
-    assert "reasoning" not in seen
-    assert seen["max_tokens"] == 64
-
-
-def test_factory_passes_the_effort_from_settings() -> None:
-    """Red when: ``CITEVYN_OPENROUTER_REASONING_EFFORT`` does not reach the client."""
-    settings = Settings(
-        _env_file=None,  # type: ignore[call-arg]
-        llm_provider="router",
-        openrouter_api_key="or-test",
-        openrouter_reasoning_effort="minimal",
-        gemini_thinking_headroom_tokens=128,
-    )
-    client = llm_factory.build_llm_client(settings)
-    assert isinstance(client, OpenRouterLLMClient)
-    assert client._reasoning_effort == "minimal"
-    assert client._reasoning_headroom_tokens == 128
-
-
-def test_reasoning_effort_rejects_an_unknown_value() -> None:
-    """Red when: the setting accepts a value OpenRouter does not define."""
-    with pytest.raises(ValueError):
-        Settings(_env_file=None, openrouter_reasoning_effort="extreme")  # type: ignore[call-arg,arg-type]
 
 
 @pytest.mark.parametrize(
@@ -156,6 +76,11 @@ def test_build_metered_llm_client_meters_a_new_client_and_leaves_the_stub_bare()
         first = llm_factory.build_metered_llm_client(router)
         second = llm_factory.build_metered_llm_client(router)
         assert isinstance(first, MeteredLLMClient)
+        # Built from the settings it was given, as its own client, not a second
+        # wrapper around the shared one's inner client.
+        assert isinstance(first.inner, OpenRouterLLMClient)
+        assert first.inner._model == "openai/gpt-4o-mini"
+        assert first.inner is not llm_factory.get_llm_client(router).inner  # type: ignore[attr-defined]
         assert first is not second
         assert first is not llm_factory.get_llm_client(router)
         stub = llm_factory.build_metered_llm_client(Settings(_env_file=None))  # type: ignore[call-arg]

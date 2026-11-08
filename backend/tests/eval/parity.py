@@ -11,9 +11,10 @@ One set of rules, used twice:
   override can get past it. A text check over the workflow could only list
   spellings, and each list had a hole.
 
-Every Settings field must be equal, except the few in ``FREE_TO_DIFFER`` and
-credentials (they cannot change an answer) and the ``MAPPED`` fields, each
-compared by its own rule. So a setting added later is compared by default.
+Every Settings field must be equal, except the few in ``FREE_TO_DIFFER``,
+credentials (they cannot change an answer; which ones are PRESENT has its own
+rule) and the eval-only ``MAPPED`` fields, each with its own rule. So a setting
+added later is compared by default.
 
 Production's configuration is ``fly.toml``'s ``[env]`` plus the Settings
 defaults. The Fly secrets hold the keys and connection settings (Redis, OAuth);
@@ -21,9 +22,8 @@ none of those feeds an answer today, but a setting moved into a secret is
 invisible here. ``environment`` is not compared: production runs as
 "production", whose startup guards demand the secrets; no answer path reads it.
 
-Production calls Google directly; the
-judged run reaches the same models through OpenRouter, whose ids are the Google
-ids under ``google/``.
+The judged run calls Google directly with its own Gemini key, as production
+does; only its fallback pass and its grader go through OpenRouter.
 """
 
 from __future__ import annotations
@@ -83,8 +83,8 @@ def _family(model: str) -> str:
 
 
 # Fields that may differ between production and the judged run because they do
-# not change an answer: where the data lives, who may call, how much may be spent,
-# and credentials. Measured 2026-11-07: these and the mapped fields below were the
+# not change an answer: where the data lives, who may call, and how much may be
+# spent. Measured 2026-11-07: these, credentials and the eval-only fields were the
 # only fields that differed. Every other Settings field must be EQUAL, so a new
 # setting is compared by default, not forgotten.
 FREE_TO_DIFFER = frozenset(
@@ -96,20 +96,14 @@ FREE_TO_DIFFER = frozenset(
         "cost_hard_daily_usd",
     }
 )
-# Credentials are free to differ: a key selects an account, not a model.
+# Credentials are free to differ: a key selects an account, not a model. Which
+# keys are PRESENT does change the model (the factory falls back to OpenRouter
+# alone without a Gemini key), so presence has its own rule below.
 _CREDENTIAL = re.compile(r"(_api_key|_secret|_token|_password)$")
-# Fields compared by an explicit rule below instead of by equality.
-MAPPED = frozenset(
-    {
-        "llm_provider",
-        "embedding_provider",
-        "openrouter_model",
-        "embedding_model",
-        "openrouter_reasoning_effort",
-        "eval_fallback_model",
-        "eval_judge_model",
-    }
-)
+# Eval-only fields, unset in production, each with its own rule below.
+MAPPED = frozenset({"eval_fallback_model", "eval_judge_model"})
+# The family of production's answer model, called directly through Google.
+_ANSWER_FAMILY = "google"
 
 
 def _equal_by_default(name: str) -> bool:
@@ -117,84 +111,49 @@ def _equal_by_default(name: str) -> bool:
 
 
 def parity_failures(judged: Settings, production: Settings) -> list[str]:
-    """Every way ``judged`` would not test production's configuration. Empty = parity."""
+    """Every way ``judged`` would not run production's configuration. Empty = parity."""
     failures: list[str] = []
 
     def need(ok: bool, message: str) -> None:
         if not ok:
             failures.append(message)
 
+    # The judged run calls Google directly, as production does, so every setting
+    # that reaches a model call (provider, model, temperature, thinking level,
+    # limits, timeouts, endpoints, embedder) is compared as it is.
     for name in sorted(Settings.model_fields):
         if _equal_by_default(name):
             mine, theirs = getattr(judged, name), getattr(production, name)
             need(mine == theirs, f"setting {name!r} is {mine!r}, production's is {theirs!r}")
 
-    # The mapped fields: production calls Google directly; the judged run reaches
-    # the same models through OpenRouter, whose ids are Google's under ``google/``.
     need(
         production.llm_provider == "gemini",
         f"production provider is {production.llm_provider!r}, not 'gemini'",
     )
-    need(production.embedding_provider == "gemini", "production embeds without the gemini provider")
+    # Production holds both keys, so its client is Gemini with the OpenRouter
+    # fallback. Without the Gemini key the factory answers with the OpenRouter
+    # model alone; without the OpenRouter key there is no fallback. Either way the
+    # judged run would test another client.
+    need(bool(judged.gemini_api_key), "the judged run has no Gemini key")
+    need(bool(judged.openrouter_api_key), "the judged run has no OpenRouter key")
     need(
-        judged.llm_provider == "router", f"judged provider is {judged.llm_provider!r}, not 'router'"
-    )
-    need(judged.embedding_provider == "openrouter", "judged run does not embed through OpenRouter")
-    need(
-        judged.openrouter_model == f"google/{production.gemini_model}",
-        f"answer model {judged.openrouter_model!r} is not production's "
-        f"'google/{production.gemini_model}'",
-    )
-    need(
-        judged.embedding_model == f"google/{production.embedding_model}",
-        f"embedding model {judged.embedding_model!r} is not production's "
-        f"'google/{production.embedding_model}'",
-    )
-    need(
-        production.gemini_thinking_level != "use_budget",
-        "production uses a thinking budget, not a level",
-    )
-    # One judged field, ``openrouter_timeout_seconds``, serves the judged MAIN pass
-    # (production's Gemini timeout) and the fallback pass (production's OpenRouter
-    # timeout, compared by equality above). Production must use one value for both,
-    # or the judged run cannot reproduce when production falls back.
-    need(
-        judged.openrouter_timeout_seconds == production.gemini_timeout_seconds,
-        f"answer timeout {judged.openrouter_timeout_seconds!r} is not production's Gemini "
-        f"timeout {production.gemini_timeout_seconds!r}",
-    )
-    need(
-        judged.openrouter_reasoning_effort == production.gemini_thinking_level,
-        f"reasoning effort {judged.openrouter_reasoning_effort!r} is not production's "
-        f"thinking level {production.gemini_thinking_level!r}",
+        production.eval_fallback_model is None and production.eval_judge_model is None,
+        "production sets an eval-only setting",
     )
     need(
         judged.eval_fallback_model == production.openrouter_model,
         f"fallback pass model {judged.eval_fallback_model!r} is not production's "
         f"fallback {production.openrouter_model!r}",
     )
-    need(
-        production.openrouter_reasoning_effort is None,
-        "production's fallback would send a reasoning effort",
-    )
-    need(
-        production.eval_fallback_model is None and production.eval_judge_model is None,
-        "production sets an eval-only setting",
-    )
     judge = judged.eval_judge_model
-    answer_families = {_family(judged.openrouter_model)}
+    answer_families = {_ANSWER_FAMILY}
     if judged.eval_fallback_model:
         answer_families.add(_family(judged.eval_fallback_model))
     need(
         judge is not None and _family(judge) not in answer_families,
         f"grader {judge!r} is unset or shares a family with an answer model",
     )
-    for role, model in (
-        ("answer", judged.openrouter_model),
-        ("fallback", judged.eval_fallback_model),
-        ("grader", judge),
-        ("embedding", judged.embedding_model),
-    ):
+    for role, model in (("fallback", judged.eval_fallback_model), ("grader", judge)):
         need(
             model is not None and price_for(provider="router", model=model) is not None,
             f"{role} model {model!r} is not in the price book",

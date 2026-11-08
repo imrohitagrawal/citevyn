@@ -122,8 +122,6 @@ def _build_openrouter(settings: Settings) -> OpenRouterLLMClient:
         api_key=settings.openrouter_api_key,
         api_base=settings.openrouter_api_base,
         timeout_seconds=settings.openrouter_timeout_seconds,
-        reasoning_effort=settings.openrouter_reasoning_effort,
-        reasoning_headroom_tokens=settings.gemini_thinking_headroom_tokens,
     )
 
 
@@ -276,6 +274,7 @@ __all__ = [
     "ALLOWED_LLM_PROVIDERS",
     "LLMProviderNotConfigured",
     "build_llm_client",
+    "build_metered_llm_client",
     "get_llm_client",
     "reset_llm_client",
     "shutdown_llm_client",

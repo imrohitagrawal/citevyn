@@ -216,12 +216,11 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
     assert all(c.closed for c in built)
 
 
-def test_fallback_and_judge_are_router_clients_without_reasoning_from_a_gemini_run(
+def test_fallback_and_judge_are_router_clients_from_a_gemini_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red when: the extra clients keep the run's provider (with ``gemini`` that
-    builds Gemini-with-fallback and ignores the fallback model), or inherit its
-    reasoning effort."""
+    builds Gemini-with-fallback and ignores the fallback model), or keep its model."""
     built: list[Settings] = []
 
     def _build(settings: Settings) -> _Recording:
@@ -239,7 +238,6 @@ def test_fallback_and_judge_are_router_clients_without_reasoning_from_a_gemini_r
         llm_provider="gemini",
         gemini_api_key="g-test",
         openrouter_api_key="or-test",
-        openrouter_reasoning_effort="minimal",
         eval_fallback_model=FALLBACK,
         eval_judge_model=JUDGE,
     )
@@ -248,7 +246,6 @@ def test_fallback_and_judge_are_router_clients_without_reasoning_from_a_gemini_r
     assert sorted(s.openrouter_model for s in built) == sorted([FALLBACK, JUDGE])
     for s in built:
         assert s.llm_provider == "router"
-        assert s.openrouter_reasoning_effort is None
 
 
 @pytest.mark.parametrize("model_field", ["eval_fallback_model", "eval_judge_model"])

@@ -441,19 +441,17 @@ jobs:
       # The secret is owner-only; when unset this is empty and the guard skips.
       CITEVYN_OPENROUTER_API_KEY: ${{ secrets.CITEVYN_OPENROUTER_API_KEY }}
       CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_eval
-      # PRODUCTION'S MODELS (#596). Production calls Google directly (fly.toml +
-      # the Settings defaults); this job reaches the same models through OpenRouter,
-      # whose ids are the Google ids under `google/`, with the same thinking level.
-      # The runner's --production-parity flag (the step below) compares its EFFECTIVE
-      # settings with production's before any paid call and stops on drift;
-      # backend/tests/test_eval_model_parity.py applies the same rules to this block.
-      # Known gap: production's embedder tags each request as a query or a document;
-      # this route does not, so the vectors are close, not identical.
-      CITEVYN_EMBEDDING_PROVIDER: openrouter
-      CITEVYN_EMBEDDING_MODEL: google/gemini-embedding-001
-      CITEVYN_LLM_PROVIDER: router
-      CITEVYN_OPENROUTER_MODEL: google/gemini-3.6-flash
-      CITEVYN_OPENROUTER_REASONING_EFFORT: minimal
+      # PRODUCTION'S CONFIGURATION (#596). This job calls Google directly with its
+      # own Gemini key, exactly as production does (fly.toml + the Settings
+      # defaults): same model, temperature, thinking level, limits and embedder.
+      # With both keys set, its client is production's Gemini client with the
+      # OpenRouter fallback. The runner's --production-parity flag (the step below)
+      # compares its EFFECTIVE settings with production's before any paid call and
+      # stops on any difference; backend/tests/test_eval_model_parity.py applies
+      # the same rules to this block.
+      CITEVYN_GEMINI_API_KEY: ${{ secrets.CITEVYN_GEMINI_API_KEY }}
+      CITEVYN_LLM_PROVIDER: gemini
+      CITEVYN_EMBEDDING_PROVIDER: gemini
       # Production's fallback model: every case is answered a second time with it,
       # under the same answer gates.
       CITEVYN_EVAL_FALLBACK_MODEL: openai/gpt-4o-mini
