@@ -118,7 +118,10 @@ DRIFTS: list[tuple[str, dict[str, Any], str]] = [
     ("retrieval depth", {"retrieval_top_k": 1}, "'retrieval_top_k'"),
     ("answer policy", {"answer_when_grounded": False}, "'answer_when_grounded'"),
     ("no Gemini key", {"gemini_api_key": None}, "no Gemini key"),
+    # A missing GitHub secret arrives as an EMPTY string, not as unset.
+    ("empty Gemini key", {"gemini_api_key": ""}, "no Gemini key"),
     ("no OpenRouter key", {"openrouter_api_key": None}, "no OpenRouter key"),
+    ("empty OpenRouter key", {"openrouter_api_key": ""}, "no OpenRouter key"),
     ("fallback pass model", {"eval_fallback_model": "openai/gpt-4o"}, "fallback pass model"),
     ("no grader", {"eval_judge_model": None}, "grader"),
     ("grader in the fallback's family", {"eval_judge_model": "openai/gpt-4o"}, "grader"),
@@ -184,6 +187,7 @@ def test_production_side_rules_fire(production: Settings, judged: Settings) -> N
     for update, expect in (
         ({"llm_provider": "router"}, "production provider"),
         ({"eval_judge_model": "anthropic/claude-haiku-5.5"}, "eval-only"),
+        ({"eval_fallback_model": "openai/gpt-4o-mini"}, "eval-only"),
     ):
         failures = parity_failures(judged, production.model_copy(update=update))
         assert any(expect in f for f in failures), (update, failures)
@@ -284,6 +288,15 @@ def test_the_runtime_check_passes_the_real_ci_env(
     with pytest.raises(AssertionError, match="the eval ran"):
         runner_mod.main(["--production-parity", "--quiet"])
     assert len(no_run) == 1
+
+
+def test_the_guard_skips_only_without_the_openrouter_key() -> None:
+    """Red when: the guard also skips when the Gemini secret is missing. Today a
+    missing Gemini secret makes the parity check fail the job (the safe outcome); a
+    skip would turn the release gate green without running."""
+    guard = next(s for s in _judged_job()["steps"] if s.get("id") == "guard")
+    assert "CITEVYN_OPENROUTER_API_KEY" in guard["run"]
+    assert "GEMINI" not in guard["run"].upper()
 
 
 def test_the_ci_job_runs_the_runtime_check() -> None:

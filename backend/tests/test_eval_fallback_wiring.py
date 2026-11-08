@@ -118,7 +118,9 @@ def test_the_fallback_report_holds_the_fallback_pass_results(
     failing fallback model would be reported, gated and printed as the main one."""
     passes = iter([_judged(5), _judged(1)])
 
-    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
+    async def _spy(
+        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+    ):  # type: ignore[no-untyped-def]
         return next(passes)
 
     monkeypatch.setattr(runner_mod, "_judge_cases", _spy)
@@ -155,7 +157,9 @@ def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
 
     calls = {"n": 0}
 
-    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
+    async def _spy(
+        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+    ):  # type: ignore[no-untyped-def]
         calls["n"] += 1
         if calls["n"] == 2:
             raise RuntimeError("fallback pass failed")
@@ -173,7 +177,7 @@ def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
     )
     with pytest.raises(RuntimeError, match="fallback pass failed"):
         asyncio.run(runner_mod.run_eval_async(settings=settings))
-    assert len(built) == 2
+    assert len(built) == 3  # main, fallback, grader
     assert all(c.closed for c in built)
 
 
@@ -197,7 +201,9 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
         built.append(client)
         return client
 
-    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
+    async def _spy(
+        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+    ):  # type: ignore[no-untyped-def]
         return []
 
     monkeypatch.setattr(runner_mod, "_judge_cases", _spy)
@@ -212,7 +218,7 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
     )
     with pytest.raises(RuntimeError, match="close failed"):
         asyncio.run(runner_mod.run_eval_async(settings=settings))
-    assert len(built) == 2
+    assert len(built) == 3  # main, fallback, grader
     assert all(c.closed for c in built)
 
 
@@ -227,7 +233,9 @@ def test_fallback_and_judge_are_router_clients_from_a_gemini_run(
         built.append(settings)
         return _Recording("")
 
-    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
+    async def _spy(
+        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+    ):  # type: ignore[no-untyped-def]
         return []
 
     monkeypatch.setattr(runner_mod, "_judge_cases", _spy)
@@ -242,10 +250,29 @@ def test_fallback_and_judge_are_router_clients_from_a_gemini_run(
         eval_judge_model=JUDGE,
     )
     asyncio.run(runner_mod.run_eval_async(settings=settings))
-    assert len(built) == 2
-    assert sorted(s.openrouter_model for s in built) == sorted([FALLBACK, JUDGE])
-    for s in built:
-        assert s.llm_provider == "router"
+    assert len(built) == 3  # main, fallback, grader
+    extra = [s for s in built if s.llm_provider == "router"]
+    assert sorted(s.openrouter_model for s in extra) == sorted([FALLBACK, JUDGE])
+    # The main pass is built from the run's own settings, unchanged.
+    assert [s for s in built if s.llm_provider == "gemini"] == [settings]
+
+
+def test_extra_clients_change_only_the_provider_and_model() -> None:
+    """Red when: the fallback pass's or grader's settings differ from the run's in
+    anything but the provider and model (a timeout or endpoint, say), so they would
+    not be built as production builds its fallback client."""
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_provider="gemini",
+        gemini_api_key="g-test",
+        openrouter_api_key="or-test",
+    )
+    # The grader's model: unlike the fallback model it is not the default, so the
+    # model really changes and the comparison below sees it.
+    copy = runner_mod._router_settings(settings, JUDGE)
+    changed = {n for n in Settings.model_fields if getattr(copy, n) != getattr(settings, n)}
+    assert changed == {"llm_provider", "openrouter_model"}
+    assert (copy.llm_provider, copy.openrouter_model) == ("router", JUDGE)
 
 
 @pytest.mark.parametrize("model_field", ["eval_fallback_model", "eval_judge_model"])
@@ -397,3 +424,83 @@ def test_a_fallback_pass_that_judged_fewer_cases_fails(judged: int) -> None:
         fallback["judge"]["mean_score"] = None
     failures = runner_mod.gate_failures(_summary(fallback))
     assert any("both passes must drive the same cases" in f for f in failures), failures
+
+
+class _Answers:
+    """A fake model client that answers as a named provider and model."""
+
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider, self.model, self.calls = provider, model, 0
+
+    async def complete(
+        self, *, system: str, user: str, max_tokens: int, temperature: float
+    ) -> LLMResult:  # noqa: ARG002
+        self.calls += 1
+        return LLMResult(
+            text="Use the --model flag.",
+            input_tokens=1,
+            output_tokens=1,
+            model=self.model,
+            provider=self.provider,  # type: ignore[arg-type]
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _Down(_Answers):
+    async def complete(self, **_: Any) -> LLMResult:
+        from app.llm.errors import LLMUnavailable
+
+        self.calls += 1
+        raise LLMUnavailable("primary down")
+
+
+def _run_main_pass(monkeypatch: pytest.MonkeyPatch, primary: _Answers) -> list[JudgedCase]:
+    from app.llm.fallback import FallbackLLMClient
+
+    monkeypatch.delenv("CITEVYN_EVAL_JUDGE_PANEL", raising=False)
+    monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: _Forbidden(""))
+    main = runner_mod.AttributingLLM(
+        FallbackLLMClient(primary=primary, secondary=_Answers("router", FALLBACK))  # type: ignore[arg-type]
+    )
+    judge = _Recording(json.dumps({"score": 5, "rationale": "fake"}))
+    return asyncio.run(
+        runner_mod._judge_cases(
+            _cases()[:2],
+            settings=Settings(_env_file=None),  # type: ignore[call-arg]
+            answer_llm=main,
+            judge_llm=judge,  # type: ignore[arg-type]
+            expect_answerer=("gemini", "gemini-3.6-flash"),
+        )
+    )
+
+
+def test_a_main_pass_answer_written_by_the_fallback_model_is_not_graded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: Gemini fails, production's fallback chain answers with the fallback
+    model, and the run grades that answer as Gemini's (#596's failure, returning
+    through the fallback client)."""
+    primary = _Down("gemini", "gemini-3.6-flash")
+    judged = _run_main_pass(monkeypatch, primary)
+    assert primary.calls > 0  # partner: Gemini really was asked first
+    assert all(j.score is None for j in judged)
+    assert all(j.error and "answered by" in j.error and FALLBACK in j.error for j in judged)
+
+
+def test_a_main_pass_answer_written_by_gemini_is_graded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partner: when Gemini answers, the case is graded as usual."""
+    judged = _run_main_pass(monkeypatch, _Answers("gemini", "gemini-3.6-flash"))
+    assert [j.score for j in judged] == [5, 5]
+    assert all(j.error is None for j in judged)
+
+
+def test_a_dated_model_id_from_openrouter_matches_its_model() -> None:
+    """Red when: OpenRouter's dated id for the expected model counts as another
+    model (every fallback-pass answer would be refused), or a different model
+    with a shared prefix-free name passes."""
+    expect = ("router", "openai/gpt-4o-mini")
+    assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-2024-07-18")], expect) == []
+    assert runner_mod._wrong_answerers([("gemini", "openai/gpt-4o-mini")], expect)
+    assert runner_mod._wrong_answerers([("router", "openai/gpt-4o")], expect)

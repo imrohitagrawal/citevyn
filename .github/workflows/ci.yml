@@ -323,7 +323,7 @@ jobs:
         run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
 
   answer-quality-eval:
-    name: judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)
+    name: judged answer-quality eval (needs the OpenRouter and Gemini key secrets)
     runs-on: ubuntu-latest
     needs: test
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
@@ -332,11 +332,13 @@ jobs:
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
-    # resistance. It requires the OpenRouter key as a repo Actions SECRET, which only
-    # the repo OWNER can add. Until it is present, every meaningful step is SKIPPED (a
-    # loud ``::notice::``) so the job is green and the branch protection is unblocked —
-    # never hardcoded, never faked. Adding the secret flips the gate on with no further
-    # change. Forks never receive secrets, so this job is scoped to same-repo events.
+    # resistance. It requires two repo Actions SECRETS, which only the repo OWNER can
+    # add: CITEVYN_OPENROUTER_API_KEY and, since #596, CITEVYN_GEMINI_API_KEY. Without
+    # the OpenRouter key every meaningful step is SKIPPED (a loud ``::notice::``), so
+    # the job is green and the branch protection is unblocked — never hardcoded, never
+    # faked. Without only the Gemini key the job FAILS at the parity check, before any
+    # paid call: it cannot run production's configuration. Forks never receive
+    # secrets, so this job is scoped to same-repo events.
     #
     # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
     #
@@ -438,7 +440,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # The secret is owner-only; when unset this is empty and the guard skips.
+      # Owner-only secrets. An unset OpenRouter key makes the guard skip the job; an
+      # unset Gemini key makes the parity check fail it (see the header above).
       CITEVYN_OPENROUTER_API_KEY: ${{ secrets.CITEVYN_OPENROUTER_API_KEY }}
       CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_eval
       # PRODUCTION'S CONFIGURATION (#596). This job calls Google directly with its

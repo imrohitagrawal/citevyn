@@ -36,6 +36,7 @@ from app.llm.errors import LLMUnavailable
 from app.llm.factory import build_metered_llm_client, get_llm_client
 from app.llm.protocol import LLMClient
 from app.llm.stub import StubLLMClient
+from app.llm.types import LLMResult
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
@@ -118,6 +119,41 @@ async def _judge_session(settings: Settings, *, postgres: bool):
             yield session
 
 
+class AttributingLLM:
+    """An answer client that records which provider and model produced each call.
+
+    The judged run's main client is production's Gemini client with its OpenRouter
+    fallback, so a Gemini failure is answered, silently, by the fallback model.
+    Without this record such an answer would be graded and reported as Gemini's
+    (#596). ``_judge_cases`` reads ``calls`` per case.
+    """
+
+    def __init__(self, inner: LLMClient) -> None:
+        self._inner = inner
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(
+        self, *, system: str, user: str, max_tokens: int, temperature: float
+    ) -> LLMResult:
+        result = await self._inner.complete(
+            system=system, user=user, max_tokens=max_tokens, temperature=temperature
+        )
+        self.calls.append((result.provider, result.model))
+        return result
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def _wrong_answerers(
+    calls: list[tuple[str, str]], expect: tuple[str, str]
+) -> list[tuple[str, str]]:
+    """Calls not made by the expected provider and model. OpenRouter reports the
+    model it routed to, which may carry a dated suffix, so models match by prefix."""
+    provider, model = expect
+    return [c for c in calls if c[0] != provider or not c[1].startswith(model)]
+
+
 async def _judge_cases(
     cases: list[EvalCase],
     *,
@@ -125,6 +161,7 @@ async def _judge_cases(
     postgres: bool = False,
     answer_llm: LLMClient | None = None,
     judge_llm: LLMClient | None = None,
+    expect_answerer: tuple[str, str] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -135,7 +172,9 @@ async def _judge_cases(
 
     ``answer_llm`` answers instead of the process-wide client (the fallback pass,
     #596); ``judge_llm`` grades instead of it (the separate grader). ``None`` keeps
-    the process-wide client for that role.
+    the process-wide client for that role. ``expect_answerer`` (provider, model):
+    when ``answer_llm`` is an :class:`AttributingLLM`, a case any of whose calls
+    came from another model is recorded as an error, not graded (#596).
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -156,6 +195,8 @@ async def _judge_cases(
             # as it would in production. Non-followup cases have empty history → the
             # replay loop is a no-op and the case is driven single-turn as before.
             session_id = uuid.uuid4()
+            if isinstance(answer_llm, AttributingLLM):
+                answer_llm.calls.clear()
             # Keep the LAST history turn's answer so the echo oracle below can compare
             # against it. Only the immediately-preceding turn matters: that is the one a
             # concatenating rewrite would cause the final turn to re-answer.
@@ -186,6 +227,22 @@ async def _judge_cases(
                 continue
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
+            if expect_answerer is not None and isinstance(answer_llm, AttributingLLM):
+                wrong = _wrong_answerers(answer_llm.calls, expect_answerer)
+                if wrong:
+                    judged.append(
+                        JudgedCase(
+                            case_id=case.id,
+                            kind=case.kind,
+                            answer=answer,
+                            no_answer=True,
+                            error=(
+                                f"answer: answered by {sorted(set(wrong))}, not "
+                                f"{expect_answerer}; not graded as that model's answer"
+                            ),
+                        )
+                    )
+                    continue
             entry = JudgedCase(case_id=case.id, kind=case.kind, answer=answer, no_answer=no_answer)
             # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
             # that catches this whole bug class. The existing followup metrics measure
@@ -685,11 +742,22 @@ async def run_eval_async(
             if judge_model is not None:
                 judge_llm = build_metered_llm_client(_router_settings(settings, judge_model))
                 stack.push_async_callback(judge_llm.aclose)
+            # The main pass answers through a client built like the process-wide
+            # one, wrapped so every answer is attributed to the model that wrote it.
+            main_llm = AttributingLLM(build_metered_llm_client(settings))
+            stack.push_async_callback(main_llm.aclose)
             judged = await _judge_cases(
-                judge_cases, settings=settings, postgres=postgres, judge_llm=judge_llm
+                judge_cases,
+                settings=settings,
+                postgres=postgres,
+                answer_llm=main_llm,
+                judge_llm=judge_llm,
+                expect_answerer=(settings.llm_provider, answer_model),
             )
             if fallback_model is not None:
-                fallback_llm = build_metered_llm_client(_router_settings(settings, fallback_model))
+                fallback_llm = AttributingLLM(
+                    build_metered_llm_client(_router_settings(settings, fallback_model))
+                )
                 stack.push_async_callback(fallback_llm.aclose)
                 fallback_judged = await _judge_cases(
                     judge_cases,
@@ -697,6 +765,7 @@ async def run_eval_async(
                     postgres=postgres,
                     answer_llm=fallback_llm,
                     judge_llm=judge_llm,
+                    expect_answerer=("router", fallback_model),
                 )
     summary = _summarize(
         cases,

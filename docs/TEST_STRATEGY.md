@@ -463,7 +463,7 @@ share alone; the directory total is 20.) The #356 coverage that
 #379 row calls gap 2. The multi-line-rendering test above was missing from the
 list entirely.
 
-`judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)` is also
+`judged answer-quality eval (needs the OpenRouter and Gemini key secrets)` is also
 advisory and deliberately so: it is the paid job, gated behind a label.
 
 `Visual snapshots (Linux baselines, advisory)` (`frontend.yml`) is advisory too,

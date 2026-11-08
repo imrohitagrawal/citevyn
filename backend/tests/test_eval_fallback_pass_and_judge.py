@@ -57,8 +57,17 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         state["built"].append(client)
         return client
 
-    async def _spy(cases, *, settings, postgres=False, answer_llm=None, judge_llm=None):  # type: ignore[no-untyped-def]
-        state["calls"].append({"answer_llm": answer_llm, "judge_llm": judge_llm, "n": len(cases)})
+    async def _spy(
+        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+    ):  # type: ignore[no-untyped-def]
+        state["calls"].append(
+            {
+                "answer_llm": answer_llm,
+                "judge_llm": judge_llm,
+                "n": len(cases),
+                "expect": expect_answerer,
+            }
+        )
         return []
 
     monkeypatch.setattr(runner_mod, "build_metered_llm_client", _build)
@@ -75,9 +84,14 @@ def test_two_passes_run_and_share_one_grader(recorded: dict[str, Any]) -> None:
     calls = recorded["calls"]
     assert len(calls) == 2
     main_pass, fallback_pass = calls
-    assert main_pass["answer_llm"] is None  # the process-wide client: CI's main model
-    assert fallback_pass["answer_llm"] is not None
-    assert fallback_pass["answer_llm"].settings.openrouter_model == FALLBACK
+    # Each pass answers through its own attributing client, and says which model
+    # must have written every answer it grades.
+    assert isinstance(main_pass["answer_llm"], runner_mod.AttributingLLM)
+    assert isinstance(fallback_pass["answer_llm"], runner_mod.AttributingLLM)
+    assert main_pass["expect"] == ("gemini", ANSWER)
+    assert fallback_pass["expect"] == ("router", FALLBACK)
+    assert main_pass["answer_llm"]._inner.settings.llm_provider == "gemini"
+    assert fallback_pass["answer_llm"]._inner.settings.openrouter_model == FALLBACK
     assert main_pass["judge_llm"] is fallback_pass["judge_llm"]
     assert main_pass["judge_llm"].settings.openrouter_model == JUDGE
     assert main_pass["n"] == fallback_pass["n"] > 0
@@ -87,29 +101,28 @@ def test_fallback_and_judge_are_openrouter_clients(recorded: dict[str, Any]) -> 
     """Red when: the fallback pass or the grader keeps the run's ``gemini`` provider,
     which would build Gemini-with-fallback and ignore the model it was given."""
     asyncio.run(runner_mod.run_eval_async(settings=_settings()))
-    assert len(recorded["built"]) == 2
-    for client in recorded["built"]:
-        assert client.settings.llm_provider == "router"
+    extra = [c for c in recorded["built"] if c.settings.llm_provider == "router"]
+    assert sorted(c.settings.openrouter_model for c in extra) == sorted([FALLBACK, JUDGE])
 
 
 def test_built_clients_are_closed(recorded: dict[str, Any]) -> None:
     """Red when: the run leaks the extra clients' connection pools."""
     asyncio.run(runner_mod.run_eval_async(settings=_settings()))
-    assert len(recorded["built"]) == 2
+    assert len(recorded["built"]) == 3  # main, fallback, grader
     assert all(c.closed for c in recorded["built"])
 
 
 def test_no_fallback_no_judge_model_keeps_one_pass(recorded: dict[str, Any]) -> None:
-    """Red when: a run without the two settings changes behaviour (local runs)."""
+    """Red when: a run without the two settings grows a second pass or a separate
+    grader (local runs keep one pass, graded by the answer client)."""
     asyncio.run(
         runner_mod.run_eval_async(
             settings=_settings(eval_fallback_model=None, eval_judge_model=None)
         )
     )
-    assert recorded["calls"] == [
-        {"answer_llm": None, "judge_llm": None, "n": recorded["calls"][0]["n"]}
-    ]
-    assert recorded["built"] == []
+    assert len(recorded["calls"]) == 1
+    assert recorded["calls"][0]["judge_llm"] is None
+    assert len(recorded["built"]) == 1  # the main pass's attributing client only
 
 
 def test_report_names_every_model(recorded: dict[str, Any]) -> None:
