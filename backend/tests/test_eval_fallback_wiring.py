@@ -504,7 +504,9 @@ def test_a_dated_model_id_from_openrouter_matches_its_model() -> None:
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-2024-07-18")], expect) == []
     assert runner_mod._wrong_answerers([("gemini", "openai/gpt-4o-mini")], expect)
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o")], expect)
-    # A LONGER id is another model, not a dated snapshot of this one.
+    # A LONGER id is another model, not a dated snapshot of this one; nor is an id
+    # with a trailing newline.
+    assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini\n")], expect)
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-search-preview")], expect)
     assert runner_mod._wrong_answerers(
         [("gemini", "gemini-3.6-flash-lite")], ("gemini", "gemini-3.6-flash")
@@ -512,7 +514,9 @@ def test_a_dated_model_id_from_openrouter_matches_its_model() -> None:
 
 
 class _DownFor(_Answers):
-    """Gemini that fails only for one question, and answers every other."""
+    """Gemini that fails only on the turn that ASKS one question (the generation
+    prompt's ``Question: ...`` line), and answers every other turn, including a
+    rewritten follow-up that merely mentions it."""
 
     def __init__(self, provider: str, model: str, question: str) -> None:
         super().__init__(provider, model)
@@ -521,7 +525,7 @@ class _DownFor(_Answers):
     async def complete(
         self, *, system: str, user: str, max_tokens: int, temperature: float
     ) -> LLMResult:
-        if self.question in user:
+        if f"Question: {self.question}\n" in user:
             from app.llm.errors import LLMUnavailable
 
             raise LLMUnavailable("primary down for this question")
@@ -585,8 +589,23 @@ def test_a_history_turn_answered_by_the_fallback_errors_the_case(
     """Red when: attribution starts after the history replay, so a follow-up whose
     earlier turn the fallback model answered is graded as Gemini's conversation."""
     followup = next(c for c in _cases() if c.kind == "followup")
-    judged = _run_cases(
-        monkeypatch, [followup], _DownFor("gemini", "gemini-3.6-flash", followup.history[0])
-    )
+    primary = _DownFor("gemini", "gemini-3.6-flash", followup.history[0])
+    judged = _run_cases(monkeypatch, [followup], primary)
+    # Partner: Gemini answered the final turn, so only the HISTORY turn's fallback
+    # answer can be the reason the case is not graded.
+    assert primary.calls >= 1
     assert judged[0].score is None
     assert judged[0].error and "answered by" in judged[0].error
+
+
+def test_a_cache_hit_written_by_the_expected_model_is_graded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: every cache hit is refused although its writer is known. The alias
+    case's question is rewritten to the earlier case's ("sitewin" -> "CiteVyn"), so
+    it is served from the cache on every healthy run and must still be graded."""
+    golden = {c.id: c for c in load_cases(GOLDEN_PATH)}
+    pair = [golden["citevyn_lit_free"], golden["citevyn_lit_alias_sitewin"]]
+    judged = _run_cases(monkeypatch, pair, _Answers("gemini", "gemini-3.6-flash"))
+    assert [j.error for j in judged] == [None, None]
+    assert [j.score for j in judged] == [5, 5]

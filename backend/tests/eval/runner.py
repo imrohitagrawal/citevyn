@@ -154,8 +154,8 @@ def _wrong_answerers(
     (``openai/gpt-4o-mini-2024-07-18``); anything longer is another model
     (``openai/gpt-4o-mini-search-preview``)."""
     provider, model = expect
-    same = re.compile(rf"^{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?$")
-    return [c for c in calls if c[0] != provider or not same.match(c[1])]
+    same = re.compile(rf"{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?")
+    return [c for c in calls if c[0] != provider or not same.fullmatch(c[1])]
 
 
 async def _judge_cases(
@@ -186,6 +186,36 @@ async def _judge_cases(
     # live vector arm; on SQLite they would misfire and pollute the judged metrics.
     cases = [c for c in cases if postgres or not c.postgres_only]
     judged: list[JudgedCase] = []
+    attributing = expect_answerer is not None and isinstance(answer_llm, AttributingLLM)
+    # Who wrote each answer this pass has served: answer text -> written by the
+    # expected model. Each pass starts with an empty cache (a fresh catalog or index
+    # version), so every cache hit was written by an earlier turn of THIS pass, and
+    # that turn's verdict carries over to the hit.
+    writers: dict[str, bool] = {}
+
+    async def _ask_attributed(
+        question: str, request_id: str, session_id: uuid.UUID, faults: list[tuple[str, str]]
+    ) -> Any:
+        """Ask one turn; add to ``faults`` every way it was not the expected model's."""
+        start = len(answer_llm.calls) if isinstance(answer_llm, AttributingLLM) else 0
+        response = await Orchestrator(settings, session, llm=answer_llm).ask(
+            question=question, request_id=request_id, session_id=session_id
+        )
+        if not attributing:
+            return response
+        assert isinstance(answer_llm, AttributingLLM) and expect_answerer is not None
+        wrong = _wrong_answerers(answer_llm.calls[start:], expect_answerer)
+        text = str(response.get("answer", ""))
+        if response.get("cache_hit"):
+            # No model call was made for this turn; the answer is whatever an earlier
+            # turn wrote. Graded only if that turn was the expected model's.
+            if not writers.get(text, False):
+                wrong = [*wrong, ("cache", "written by another model, or unknown")]
+        else:
+            writers[text] = not wrong
+        faults.extend(wrong)
+        return response
+
     async with _judge_session(settings, postgres=postgres) as session:
         for case in cases:
             # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
@@ -205,18 +235,15 @@ async def _judge_cases(
             # against it. Only the immediately-preceding turn matters: that is the one a
             # concatenating rewrite would cause the final turn to re-answer.
             prior_answer = ""
+            faults: list[tuple[str, str]] = []
             try:
                 for prior in case.history:
-                    prior_response = await Orchestrator(settings, session, llm=answer_llm).ask(
-                        question=prior,
-                        request_id=f"eval-{case.id}-history",
-                        session_id=session_id,
+                    prior_response = await _ask_attributed(
+                        prior, f"eval-{case.id}-history", session_id, faults
                     )
                     prior_answer = str(prior_response.get("answer", ""))
-                response = await Orchestrator(settings, session, llm=answer_llm).ask(
-                    question=case.question,
-                    request_id=f"eval-{case.id}",
-                    session_id=session_id,
+                response = await _ask_attributed(
+                    case.question, f"eval-{case.id}", session_id, faults
                 )
             except (OrchestratorError, LLMUnavailable) as exc:
                 judged.append(
@@ -231,27 +258,20 @@ async def _judge_cases(
                 continue
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
-            if expect_answerer is not None and isinstance(answer_llm, AttributingLLM):
-                wrong = _wrong_answerers(answer_llm.calls, expect_answerer)
-                if response.get("cache_hit"):
-                    # A cached answer makes no model call, so who wrote it is unknown:
-                    # it may be a fallback answer cached by an earlier case. Production
-                    # keeps the cache on, so the eval does too, and refuses to grade it.
-                    wrong = [*wrong, ("cache", "unknown writer")]
-                if wrong:
-                    judged.append(
-                        JudgedCase(
-                            case_id=case.id,
-                            kind=case.kind,
-                            answer=answer,
-                            no_answer=True,
-                            error=(
-                                f"answer: answered by {sorted(set(wrong))}, not "
-                                f"{expect_answerer}; not graded as that model's answer"
-                            ),
-                        )
+            if faults:
+                judged.append(
+                    JudgedCase(
+                        case_id=case.id,
+                        kind=case.kind,
+                        answer=answer,
+                        no_answer=True,
+                        error=(
+                            f"answer: answered by {sorted(set(faults))}, not "
+                            f"{expect_answerer}; not graded as that model's answer"
+                        ),
                     )
-                    continue
+                )
+                continue
             entry = JudgedCase(case_id=case.id, kind=case.kind, answer=answer, no_answer=no_answer)
             # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
             # that catches this whole bug class. The existing followup metrics measure
