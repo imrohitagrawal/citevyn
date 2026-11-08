@@ -212,7 +212,10 @@ async def _judge_cases(
             if not writers.get(text, False):
                 wrong = [*wrong, ("cache", "written by another model, or unknown")]
         else:
-            writers[text] = not wrong
+            # Once ANY turn wrote this text with another model, it stays marked: a later
+            # turn of the expected model writing the same text must not clear it, or a
+            # cache hit on the earlier turn's key would be graded as the expected one's.
+            writers[text] = writers.get(text, True) and not wrong
         faults.extend(wrong)
         return response
 

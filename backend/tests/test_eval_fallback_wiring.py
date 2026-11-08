@@ -609,3 +609,19 @@ def test_a_cache_hit_written_by_the_expected_model_is_graded(
     judged = _run_cases(monkeypatch, pair, _Answers("gemini", "gemini-3.6-flash"))
     assert [j.error for j in judged] == [None, None]
     assert [j.score for j in judged] == [5, 5]
+
+
+def test_a_later_expected_answer_with_the_same_text_does_not_clear_a_fallback_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: the record of who wrote an answer is overwritten by a later turn
+    with the same text, so a cache hit on the fallback-written answer is graded as
+    Gemini's (the fakes give every case the same text, as real models rarely do)."""
+    golden = {c.id: c for c in load_cases(GOLDEN_PATH)}
+    first = golden["citevyn_lit_free"]
+    order = [first, golden["claude_api_lit_ratelimit"], golden["citevyn_lit_alias_sitewin"]]
+    judged = _run_cases(monkeypatch, order, _DownFor("gemini", "gemini-3.6-flash", first.question))
+    assert judged[0].error and "answered by" in judged[0].error
+    assert judged[1].score == 5  # partner: Gemini really wrote the same text later
+    assert judged[2].score is None
+    assert judged[2].error and "cache" in judged[2].error
