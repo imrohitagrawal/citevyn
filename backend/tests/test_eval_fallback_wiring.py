@@ -504,3 +504,31 @@ def test_a_dated_model_id_from_openrouter_matches_its_model() -> None:
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o-mini-2024-07-18")], expect) == []
     assert runner_mod._wrong_answerers([("gemini", "openai/gpt-4o-mini")], expect)
     assert runner_mod._wrong_answerers([("router", "openai/gpt-4o")], expect)
+
+
+class _DownFor(_Answers):
+    """Gemini that fails only for one question, and answers every other."""
+
+    def __init__(self, provider: str, model: str, question: str) -> None:
+        super().__init__(provider, model)
+        self.question = question
+
+    async def complete(
+        self, *, system: str, user: str, max_tokens: int, temperature: float
+    ) -> LLMResult:
+        if self.question in user:
+            from app.llm.errors import LLMUnavailable
+
+            raise LLMUnavailable("primary down for this question")
+        return await super().complete(
+            system=system, user=user, max_tokens=max_tokens, temperature=temperature
+        )
+
+
+def test_each_case_is_attributed_on_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red when: who answered is not reset per case, so one case answered by the
+    fallback model marks every later case too (or an earlier one leaks forward)."""
+    first, second = _cases()[:2]
+    judged = _run_main_pass(monkeypatch, _DownFor("gemini", "gemini-3.6-flash", first.question))
+    assert judged[0].score is None and judged[0].error and "answered by" in judged[0].error
+    assert judged[1].score == 5 and judged[1].error is None
