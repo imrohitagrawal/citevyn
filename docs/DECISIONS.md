@@ -18,6 +18,13 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-09 — The precision@1 floor is production's measured baseline
+Applies to the judged eval's retrieval gate (#596). The first judged run on
+production's own configuration ranked 31 of 32 single-relevant cases first
+(0.969). The floor is 0.96, just under that measurement; the earlier 1.0 was
+measured on a different embedder. Raising it again is the job of the keyword
+search and fusion work (#370).
+
 ### 2026-11-07 — The judged eval runs production's configuration
 Applies to the paid answer-quality eval in CI (#596). It calls Google directly
 with its own Gemini key, held as a repository secret, exactly as production
