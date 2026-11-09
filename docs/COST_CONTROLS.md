@@ -273,7 +273,9 @@ real answers run ~300 output tokens rather than the fake's stub. Extrapolating:
   judge calls
 * ~88k input / ~21k output tokens
 * **≈ $0.026 per judged CI run** at `openai/gpt-4o-mini` list price ($0.15 / $0.60
-  per 1M tokens)
+  per 1M tokens). This describes the run BEFORE #596. Since #596 the run answers twice
+  (production's Gemini model, then its fallback) and grades with a third model, so it
+  costs more; no new figure is recorded until a run measures it.
 
 The **call counts are measured; the dollar figure is an extrapolation** — a fake
 provider cannot produce real answer lengths. Token counts use the repo's own

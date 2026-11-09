@@ -204,12 +204,39 @@ def get_llm_client(settings: Settings | None = None) -> LLMClient:
             from app.core.config import get_settings
 
             settings = get_settings()
-        _client = _metered(build_llm_client(settings))
+        built = build_llm_client(settings)
+        model, fallback_model = _models_of(built)
+        _client = _metered(built)
+        # Read from the built client, not from settings: ``llm_model`` is read only
+        # by the anthropic provider, and logging it named a model that never ran
+        # (#596). Which model answers depends on the provider AND on which keys are
+        # set, and only the built client knows both.
         _logger.info(
             "llm_client_initialized",
-            extra={"provider": settings.llm_provider, "model": settings.llm_model},
+            extra={
+                "provider": settings.llm_provider,
+                "model": model,
+                "fallback_model": fallback_model,
+            },
         )
     return _client
+
+
+def build_metered_llm_client(settings: Settings) -> LLMClient:
+    """Build a NEW metered client from ``settings``, outside the singleton.
+
+    For a caller that needs a second model in the same process (the judged eval's
+    fallback pass and its grader, #596). The caller owns it and must ``aclose`` it.
+    """
+    return _metered(build_llm_client(settings))
+
+
+def _models_of(client: LLMClient) -> tuple[str | None, str | None]:
+    """The model a built client answers with, and its fallback's, if it has one."""
+    if isinstance(client, FallbackLLMClient):
+        return _models_of(client.primary)[0], _models_of(client.secondary)[0]
+    model = getattr(client, "_model", None)
+    return (model if isinstance(model, str) else None), None
 
 
 async def shutdown_llm_client() -> None:
@@ -247,6 +274,7 @@ __all__ = [
     "ALLOWED_LLM_PROVIDERS",
     "LLMProviderNotConfigured",
     "build_llm_client",
+    "build_metered_llm_client",
     "get_llm_client",
     "reset_llm_client",
     "shutdown_llm_client",

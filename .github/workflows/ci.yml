@@ -323,25 +323,30 @@ jobs:
         run: docker compose -f infra/docker/docker-compose.yml down -v --remove-orphans
 
   answer-quality-eval:
-    name: judged answer-quality eval (needs CITEVYN_OPENROUTER_API_KEY secret)
+    name: judged answer-quality eval (needs the OpenRouter and Gemini key secrets)
     runs-on: ubuntu-latest
     needs: test
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
-    timeout-minutes: 20
+    timeout-minutes: 40  # two answer passes since #596
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
-    # resistance. It requires the OpenRouter key as a repo Actions SECRET, which only
-    # the repo OWNER can add. Until it is present, every meaningful step is SKIPPED (a
-    # loud ``::notice::``) so the job is green and the branch protection is unblocked —
-    # never hardcoded, never faked. Adding the secret flips the gate on with no further
-    # change. Forks never receive secrets, so this job is scoped to same-repo events.
+    # resistance. It requires two repo Actions SECRETS, which only the repo OWNER can
+    # add: CITEVYN_OPENROUTER_API_KEY and, since #596, CITEVYN_GEMINI_API_KEY. Without
+    # the OpenRouter key every meaningful step is SKIPPED (a loud ``::notice::``), so
+    # the job is green and the branch protection is unblocked — never hardcoded, never
+    # faked. Without only the Gemini key the job FAILS at the parity check, before any
+    # paid call: it cannot run production's configuration. Forks never receive
+    # secrets, so this job is scoped to same-repo events.
     #
     # COST CONTROL (#153 Layer 6) — bound by FREQUENCY, at full coverage.
     #
-    # This job is the project's largest recurring spend: ~67 orchestrator answers +
-    # ~124 judge calls, ≈$0.026 a run (extrapolated from a measured local run — docs/COST_CONTROLS.md §6).
+    # This job is the project's largest recurring spend. Before #596 it made ~67
+    # orchestrator answers + ~124 judge calls, ≈$0.026 a run (extrapolated from a
+    # measured local run — docs/COST_CONTROLS.md §6). Since #596 it answers twice
+    # (production's model, then its fallback) on a dearer answer model, so a run
+    # costs more; the next run's report is the measurement.
     # It previously ran on every PR *push*, so a 5-push PR cost ~$0.13 and ten such
     # PRs would consume most of a $1.10 key.
     #
@@ -435,14 +440,28 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # The secret is owner-only; when unset this is empty and the guard skips.
+      # Owner-only secrets. An unset OpenRouter key makes the guard skip the job; an
+      # unset Gemini key makes the parity check fail it (see the header above).
       CITEVYN_OPENROUTER_API_KEY: ${{ secrets.CITEVYN_OPENROUTER_API_KEY }}
       CITEVYN_DATABASE_URL: postgresql+psycopg://citevyn:citevyn@localhost:5432/citevyn_eval
-      CITEVYN_EMBEDDING_PROVIDER: openrouter
-      CITEVYN_EMBEDDING_MODEL: openai/text-embedding-3-small
-      CITEVYN_LLM_PROVIDER: router
+      # PRODUCTION'S CONFIGURATION (#596). This job calls Google directly with its
+      # own Gemini key, exactly as production does (fly.toml + the Settings
+      # defaults): same model, temperature, thinking level, limits and embedder.
+      # With both keys set, its client is production's Gemini client with the
+      # OpenRouter fallback. The runner's --production-parity flag (the step below)
+      # compares its EFFECTIVE settings with production's before any paid call and
+      # stops on any difference; backend/tests/test_eval_model_parity.py applies
+      # the same rules to this block.
+      CITEVYN_GEMINI_API_KEY: ${{ secrets.CITEVYN_GEMINI_API_KEY }}
+      CITEVYN_LLM_PROVIDER: gemini
+      CITEVYN_EMBEDDING_PROVIDER: gemini
+      # Production's fallback model: every case is answered a second time with it,
+      # under the same answer gates.
+      CITEVYN_EVAL_FALLBACK_MODEL: openai/gpt-4o-mini
+      # The grader: a third model family, so no answer model grades its own answers.
+      CITEVYN_EVAL_JUDGE_MODEL: anthropic/claude-haiku-5.5
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
-      # calls/case over the 62-case golden set on a small model.
+      # calls per case per pass.
       CITEVYN_EVAL_JUDGE_PANEL: "1"
     steps:
       - uses: actions/checkout@v7
@@ -480,7 +499,7 @@ jobs:
         # Always the FULL golden set. Cost is bounded by RUN FREQUENCY (the job's
         # `if:` above), not by sampling cases — see the rationale there.
         run: >-
-          uv run python -m tests.eval.runner --postgres
+          uv run python -m tests.eval.runner --postgres --production-parity
           --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()

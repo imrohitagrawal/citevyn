@@ -27,14 +27,17 @@ import contextlib
 import dataclasses
 import json
 import pathlib
+import re
 import uuid
 from typing import Any
 
 from app.answer.orchestrator import OrchestratorError
 from app.core.config import Settings, get_settings
 from app.llm.errors import LLMUnavailable
-from app.llm.factory import get_llm_client
+from app.llm.factory import build_metered_llm_client, get_llm_client
+from app.llm.protocol import LLMClient
 from app.llm.stub import StubLLMClient
+from app.llm.types import LLMResult
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
@@ -117,8 +120,52 @@ async def _judge_session(settings: Settings, *, postgres: bool):
             yield session
 
 
+class AttributingLLM:
+    """An answer client that records which provider and model produced each call.
+
+    The judged run's main client is production's Gemini client with its OpenRouter
+    fallback, so a Gemini failure is answered, silently, by the fallback model.
+    Without this record such an answer would be graded and reported as Gemini's
+    (#596). ``_judge_cases`` reads ``calls`` per case.
+    """
+
+    def __init__(self, inner: LLMClient) -> None:
+        self._inner = inner
+        self.calls: list[tuple[str, str]] = []
+
+    async def complete(
+        self, *, system: str, user: str, max_tokens: int, temperature: float
+    ) -> LLMResult:
+        result = await self._inner.complete(
+            system=system, user=user, max_tokens=max_tokens, temperature=temperature
+        )
+        self.calls.append((result.provider, result.model))
+        return result
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def _wrong_answerers(
+    calls: list[tuple[str, str]], expect: tuple[str, str]
+) -> list[tuple[str, str]]:
+    """Calls not made by the expected provider and model. OpenRouter reports the
+    model it routed to, which may be the id with a date suffix
+    (``openai/gpt-4o-mini-2024-07-18``); anything longer is another model
+    (``openai/gpt-4o-mini-search-preview``)."""
+    provider, model = expect
+    same = re.compile(rf"{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?")
+    return [c for c in calls if c[0] != provider or not same.fullmatch(c[1])]
+
+
 async def _judge_cases(
-    cases: list[EvalCase], *, settings: Settings, postgres: bool = False
+    cases: list[EvalCase],
+    *,
+    settings: Settings,
+    postgres: bool = False,
+    answer_llm: LLMClient | None = None,
+    judge_llm: LLMClient | None = None,
+    expect_answerer: tuple[str, str] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -126,6 +173,12 @@ async def _judge_cases(
     outage, unparseable judge output) is captured in ``error`` and never
     silently dropped — the case simply contributes no numeric score to the
     mean. Returns an empty list when no real provider is configured.
+
+    ``answer_llm`` answers instead of the process-wide client (the fallback pass,
+    #596); ``judge_llm`` grades instead of it (the separate grader). ``None`` keeps
+    the process-wide client for that role. ``expect_answerer`` (provider, model):
+    when ``answer_llm`` is an :class:`AttributingLLM`, a case any of whose calls
+    came from another model is recorded as an error, not graded (#596).
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -133,6 +186,39 @@ async def _judge_cases(
     # live vector arm; on SQLite they would misfire and pollute the judged metrics.
     cases = [c for c in cases if postgres or not c.postgres_only]
     judged: list[JudgedCase] = []
+    attributing = expect_answerer is not None and isinstance(answer_llm, AttributingLLM)
+    # Who wrote each answer this pass has served: answer text -> written by the
+    # expected model. Each pass starts with an empty cache (a fresh catalog or index
+    # version), so every cache hit was written by an earlier turn of THIS pass, and
+    # that turn's verdict carries over to the hit.
+    writers: dict[str, bool] = {}
+
+    async def _ask_attributed(
+        question: str, request_id: str, session_id: uuid.UUID, faults: list[tuple[str, str]]
+    ) -> Any:
+        """Ask one turn; add to ``faults`` every way it was not the expected model's."""
+        start = len(answer_llm.calls) if isinstance(answer_llm, AttributingLLM) else 0
+        response = await Orchestrator(settings, session, llm=answer_llm).ask(
+            question=question, request_id=request_id, session_id=session_id
+        )
+        if not attributing:
+            return response
+        assert isinstance(answer_llm, AttributingLLM) and expect_answerer is not None
+        wrong = _wrong_answerers(answer_llm.calls[start:], expect_answerer)
+        text = str(response.get("answer", ""))
+        if response.get("cache_hit"):
+            # No model call was made for this turn; the answer is whatever an earlier
+            # turn wrote. Graded only if that turn was the expected model's.
+            if not writers.get(text, False):
+                wrong = [*wrong, ("cache", "written by another model, or unknown")]
+        else:
+            # Once ANY turn wrote this text with another model, it stays marked: a later
+            # turn of the expected model writing the same text must not clear it, or a
+            # cache hit on the earlier turn's key would be graded as the expected one's.
+            writers[text] = writers.get(text, True) and not wrong
+        faults.extend(wrong)
+        return response
+
     async with _judge_session(settings, postgres=postgres) as session:
         for case in cases:
             # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
@@ -146,22 +232,21 @@ async def _judge_cases(
             # as it would in production. Non-followup cases have empty history → the
             # replay loop is a no-op and the case is driven single-turn as before.
             session_id = uuid.uuid4()
+            if isinstance(answer_llm, AttributingLLM):
+                answer_llm.calls.clear()
             # Keep the LAST history turn's answer so the echo oracle below can compare
             # against it. Only the immediately-preceding turn matters: that is the one a
             # concatenating rewrite would cause the final turn to re-answer.
             prior_answer = ""
+            faults: list[tuple[str, str]] = []
             try:
                 for prior in case.history:
-                    prior_response = await Orchestrator(settings, session).ask(
-                        question=prior,
-                        request_id=f"eval-{case.id}-history",
-                        session_id=session_id,
+                    prior_response = await _ask_attributed(
+                        prior, f"eval-{case.id}-history", session_id, faults
                     )
                     prior_answer = str(prior_response.get("answer", ""))
-                response = await Orchestrator(settings, session).ask(
-                    question=case.question,
-                    request_id=f"eval-{case.id}",
-                    session_id=session_id,
+                response = await _ask_attributed(
+                    case.question, f"eval-{case.id}", session_id, faults
                 )
             except (OrchestratorError, LLMUnavailable) as exc:
                 judged.append(
@@ -176,6 +261,20 @@ async def _judge_cases(
                 continue
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
+            if faults:
+                judged.append(
+                    JudgedCase(
+                        case_id=case.id,
+                        kind=case.kind,
+                        answer=answer,
+                        no_answer=True,
+                        error=(
+                            f"answer: answered by {sorted(set(faults))}, not "
+                            f"{expect_answerer}; not graded as that model's answer"
+                        ),
+                    )
+                )
+                continue
             entry = JudgedCase(case_id=case.id, kind=case.kind, answer=answer, no_answer=no_answer)
             # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
             # that catches this whole bug class. The existing followup metrics measure
@@ -208,6 +307,7 @@ async def _judge_cases(
                     answer=answer,
                     expected_gist=case.expected_gist,
                     settings=settings,
+                    client=judge_llm,
                 )
             except JudgeParseError as exc:
                 entry.error = f"judge_parse: {exc}"
@@ -370,7 +470,33 @@ def injection_summary_line(summary: dict[str, Any]) -> str | None:
     )
 
 
-def gate_failures(summary: dict[str, Any]) -> list[str]:
+def fallback_oracle_lines(summary: dict[str, Any]) -> list[str]:
+    """The fallback pass's oracle counts for the CI log, as the main pass prints them.
+
+    A silent oracle and a vacuous one look the same in a log; each count is shown
+    beside how many cases it compared (#596). Empty when the run had no fallback pass.
+    """
+    fallback = summary.get("fallback")
+    if not fallback:
+        return []
+    fj = fallback["judge"]
+    mt = fallback["multi_turn"]
+    g = fallback["groundedness"]
+    view = {**summary, **{key: fallback[key] for key in ANSWER_SECTIONS}}
+    lines = [
+        f"refusal leaks (judged): {fj.get('refusal_leaks_judged', 0)}/{fj.get('refusal_total', 0)}",
+        f"Multi-turn echo: {len(mt.get('echoes', []))} echo(es) over "
+        f"{mt.get('cases', 0)} multi-turn case(s)",
+        f"Groundedness: under-grounded {[u['case_id'] for u in g.get('under_grounded', [])]} "
+        f"over {g.get('cases_with_facts', 0)} fact-bearing case(s)",
+    ]
+    injection = injection_summary_line(view)
+    if injection is not None:
+        lines.append(injection)
+    return lines
+
+
+def _gate(summary: dict[str, Any], *, retrieval: bool, answers: bool) -> list[str]:
     """Return human-readable reasons the run should fail the build (empty = pass).
 
     Guards against *degenerate* inputs, not just low numbers: a golden file with
@@ -381,154 +507,191 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     r = summary["retrieval"]
     by_kind = r["hit_rate_by_kind"]
-    if r["answerable_total"] == 0:
-        failures.append("no answerable cases in the golden set (zero coverage)")
-    if "literal" not in by_kind:
-        failures.append("no literal cases in the golden set (cannot enforce literal gate)")
-    else:
-        literal_rate = by_kind["literal"]
-        if literal_rate < MIN_LITERAL_HIT_RATE:
-            failures.append(f"literal hit-rate {literal_rate:.3f} < {MIN_LITERAL_HIT_RATE}")
-    if r["overall_hit_rate"] < MIN_OVERALL_HIT_RATE:
-        failures.append(f"overall hit-rate {r['overall_hit_rate']:.3f} < {MIN_OVERALL_HIT_RATE}")
-    j = summary["judge"]
-    # Refusal-safety gate. When the LLM ran (judged), the authoritative measure is
-    # whether the orchestrator DECLINED — under "answer when grounded" a refusal can
-    # retrieve a nearest chunk (a retrieval "leak") that the LLM correctly refuses,
-    # so the retrieval-only count over-counts. Fall back to the retrieval metric only
-    # when no LLM ran: on hermetic SQLite the dead vector arm keeps refusals empty,
-    # so the retrieval count is exact there (and is the CI gate).
-    #
-    # NB this is an ``elif``: on a judged run the JUDGED count is the only refusal
-    # gate that runs. That is sound only while the judged run covers every refusal
-    # case — which is why ``tests.eval.subset.is_priority`` retains all of them, and
-    # why the assertion below fails loudly rather than quietly narrowing the gate if
-    # that ever stops being true. Without it, a bounded run would check the dropped
-    # refusal cases in NEITHER branch.
-    if j["available"] and j.get("judged", 0) > 0:
-        sub = j.get("subset") or {}
-        for oracle, ids in (sub.get("dropped_zero_tolerance") or {}).items():
-            if ids:
-                failures.append(
-                    f"{len(ids)} case(s) carrying the ZERO-TOLERANCE '{oracle}' oracle "
-                    f"were excluded from the judged run, so that gate did not cover "
-                    f"them: {ids}. Such cases must stay in the subset priority pool "
-                    "(tests/eval/subset.py:is_priority)."
-                )
-        judged_leaks = j.get("refusal_leaks_judged", 0)
-        if judged_leaks > MAX_REFUSAL_LEAKS:
+    if retrieval:
+        if r["answerable_total"] == 0:
+            failures.append("no answerable cases in the golden set (zero coverage)")
+        if "literal" not in by_kind:
+            failures.append("no literal cases in the golden set (cannot enforce literal gate)")
+        else:
+            literal_rate = by_kind["literal"]
+            if literal_rate < MIN_LITERAL_HIT_RATE:
+                failures.append(f"literal hit-rate {literal_rate:.3f} < {MIN_LITERAL_HIT_RATE}")
+        if r["overall_hit_rate"] < MIN_OVERALL_HIT_RATE:
             failures.append(
-                f"{judged_leaks} refusal leak(s) — orchestrator answered a refusal "
-                f"(judged) > {MAX_REFUSAL_LEAKS}"
+                f"overall hit-rate {r['overall_hit_rate']:.3f} < {MIN_OVERALL_HIT_RATE}"
             )
-    elif r["refusal_leaks"] > MAX_REFUSAL_LEAKS:
-        failures.append(f"{r['refusal_leaks']} refusal leak(s) (retrieval) > {MAX_REFUSAL_LEAKS}")
-    # Multi-hop is Postgres-only-provable (needs the live vector arm to hit both
-    # areas); gate it ONLY on the --postgres run. On hermetic SQLite it is reported
-    # but not gated, so it never drags the standard CI gate.
-    if summary.get("embedder", {}).get("mode") == "postgres":
-        mh_total = r.get("multihop_total", 0)
-        if mh_total and r.get("multihop_hit_rate", 0.0) < MIN_MULTIHOP_HIT_RATE:
-            failures.append(
-                f"multihop hit-rate {r['multihop_hit_rate']:.3f} < {MIN_MULTIHOP_HIT_RATE}"
-            )
-        # Chunk-level rank-sensitive metric (#125), Postgres-only (live vector arm). Guarded
-        # on a non-empty single-relevant pool so a golden set without gold_chunks (or an
-        # older summary lacking the keys) never KeyErrors or fails vacuously.
-        ranked_total = r.get("ranked_total", 0)
-        if ranked_total:
-            if r.get("precision_at_1", 0.0) < MIN_PRECISION_AT_1:
+    if answers:
+        j = summary["judge"]
+        # Refusal-safety gate. When the LLM ran (judged), the authoritative measure is
+        # whether the orchestrator DECLINED — under "answer when grounded" a refusal can
+        # retrieve a nearest chunk (a retrieval "leak") that the LLM correctly refuses,
+        # so the retrieval-only count over-counts. Fall back to the retrieval metric only
+        # when no LLM ran: on hermetic SQLite the dead vector arm keeps refusals empty,
+        # so the retrieval count is exact there (and is the CI gate).
+        #
+        # NB this is an ``elif``: on a judged run the JUDGED count is the only refusal
+        # gate that runs. That is sound only while the judged run covers every refusal
+        # case — which is why ``tests.eval.subset.is_priority`` retains all of them, and
+        # why the assertion below fails loudly rather than quietly narrowing the gate if
+        # that ever stops being true. Without it, a bounded run would check the dropped
+        # refusal cases in NEITHER branch.
+        if j["available"] and j.get("judged", 0) > 0:
+            sub = j.get("subset") or {}
+            for oracle, ids in (sub.get("dropped_zero_tolerance") or {}).items():
+                if ids:
+                    failures.append(
+                        f"{len(ids)} case(s) carrying the ZERO-TOLERANCE '{oracle}' oracle "
+                        f"were excluded from the judged run, so that gate did not cover "
+                        f"them: {ids}. Such cases must stay in the subset priority pool "
+                        "(tests/eval/subset.py:is_priority)."
+                    )
+            judged_leaks = j.get("refusal_leaks_judged", 0)
+            if judged_leaks > MAX_REFUSAL_LEAKS:
                 failures.append(
-                    f"precision@1 {r['precision_at_1']:.3f} < {MIN_PRECISION_AT_1} "
-                    f"(over {ranked_total} single-relevant case(s))"
+                    f"{judged_leaks} refusal leak(s) — orchestrator answered a refusal "
+                    f"(judged) > {MAX_REFUSAL_LEAKS}"
                 )
-            if r.get("mrr", 0.0) < MIN_MRR:
-                failures.append(
-                    f"MRR {r['mrr']:.3f} < {MIN_MRR} (over {ranked_total} single-relevant case(s))"
-                )
-    # Conversation memory (Phase 3b): the followup rewrite resolves deterministically
-    # (domain routing + keyword), so gate it on EVERY run — hermetic included. A broken
-    # rewrite (or memory disabled) drops the hit-rate and fails CI.
-    fu_total = r.get("followup_total", 0)
-    if fu_total and r.get("followup_hit_rate", 0.0) < MIN_FOLLOWUP_HIT_RATE:
-        failures.append(f"followup hit-rate {r['followup_hit_rate']:.3f} < {MIN_FOLLOWUP_HIT_RATE}")
-    # Deterministic groundedness (Item 1c): judge-independent, gated PER CASE on the
-    # --postgres run ONLY (the mode where fact-bearing answerable cases can actually
-    # retrieve; the hermetic dead-vector-arm path would structurally zero the paraphrase
-    # fact-cases, so it is excluded exactly like the multihop gate). Every fact-bearing
-    # case must be FULLY grounded there — a single wrong/absent hard fact (which an
-    # aggregate mean over binary single-fact cases would leak) fails the run.
-    # Prompt-injection resistance (Item 2): judge-independent, gated on any judged run
-    # that included injection cases. A single obeyed injection fails (no tolerance).
-    # Multi-turn echo oracle (#169): judge-independent, ZERO tolerance, gated on any
-    # judged run that produced multi-turn cases. A follow-up answer that is byte-identical
-    # to the turn before it was not answered at all — no threshold makes that acceptable.
-    # Deliberately NOT gated when ``cases`` is 0: a hermetic/stub run produces no judged
-    # answers, and failing on an oracle that could not run would be noise, not a signal.
-    mt = summary.get("multi_turn", {})
-    if mt.get("echoes"):
-        failures.append(
-            f"{len(mt['echoes'])} multi-turn case(s) echoed the PREVIOUS turn's answer "
-            f"verbatim (the follow-up was never answered): {mt['echoes']}"
-        )
-    inj = summary.get("injection", {})
-    # #450: an oracle that compared FEWER cases than it declared is not a pass.
-    # `leaks` alone cannot tell "no answer obeyed an injection" from "the cases
-    # were never compared", so `declared` (cases carrying a sentinel that this run
-    # could drive) is reported beside `cases` (cases it actually drove) and any
-    # SHORTFALL fails.
-    #
-    # `cases != declared`, not `cases == 0`: a partial shortfall is the likelier
-    # and nastier half. One injection case lost to a provider 429 or an unparseable
-    # verdict leaves `declared=2, cases=1`, i.e. half a ZERO-TOLERANCE oracle
-    # missing on the release run — and a gate that only fires at 0 reports that as
-    # a pass. Found by an adversarial review of #450.
-    #
-    # NOT the defect of deleting `must_not_contain` from the golden rows: `declared`
-    # is derived from that field, so removing it moves both numbers to 0 together.
-    # `test_the_golden_set_still_carries_every_zero_tolerance_oracle` is what
-    # catches that, hermetically.
-    #
-    # Scoped to a judged run: on a stub run nothing is judged, and failing on an
-    # oracle that could not run would be noise (the multi-turn echo gate above is
-    # scoped the same way, for the same reason).
-    if j["available"] and inj.get("declared", 0) > 0 and inj.get("cases", 0) != inj["declared"]:
-        failures.append(
-            f"the prompt-injection oracle compared {inj.get('cases', 0)} of the "
-            f"{inj['declared']} case(s) this run declares — a ZERO-TOLERANCE gate that "
-            "did not cover its own population. Check the per-case `judge.errors` for a "
-            "dropped injection case, and that `must_not_contain` is still set on the "
-            "golden rows that carry the sentinels."
-        )
-    if inj.get("leaks"):
-        leaked = [f"{lk['case_id']}({lk['hits']})" for lk in inj["leaks"]]
-        failures.append(f"{len(inj['leaks'])} prompt-injection leak(s): {leaked}")
-    g = summary.get("groundedness", {})
-    if (
-        summary.get("embedder", {}).get("mode") == "postgres"
-        and g.get("cases_with_facts", 0) > 0
-        and g.get("under_grounded")
-    ):
-        under = [f"{u['case_id']}(missing {u.get('missing', [])})" for u in g["under_grounded"]]
-        failures.append(
-            f"{len(g['under_grounded'])} fact-bearing case(s) NOT fully grounded on the "
-            f"live-retrieval run: {under}"
-        )
-    if j["available"]:
-        judged = j.get("judged", 0)
-        scored = j.get("scored", 0)
-        # A total outage (nothing scored) or a material partial outage (a low
-        # score-coverage ratio) must FAIL, not pass on the mean of the lucky
-        # survivors — an inflated mean over a biased subset is a silent success.
-        if judged > 0 and scored == 0:
-            failures.append("judge ran but produced no usable scores (total judge outage)")
-        elif judged > 0 and (scored / judged) < MIN_JUDGE_COVERAGE:
+        elif r["refusal_leaks"] > MAX_REFUSAL_LEAKS:
             failures.append(
-                f"judge scored only {scored}/{judged} cases "
-                f"(coverage {scored / judged:.2f} < {MIN_JUDGE_COVERAGE}); mean not trustworthy"
+                f"{r['refusal_leaks']} refusal leak(s) (retrieval) > {MAX_REFUSAL_LEAKS}"
             )
-        elif j["mean_score"] is not None and j["mean_score"] < MIN_MEAN_JUDGE:
-            failures.append(f"mean judge score {j['mean_score']:.2f} < {MIN_MEAN_JUDGE}")
+    if retrieval:
+        # Multi-hop is Postgres-only-provable (needs the live vector arm to hit both
+        # areas); gate it ONLY on the --postgres run. On hermetic SQLite it is reported
+        # but not gated, so it never drags the standard CI gate.
+        if summary.get("embedder", {}).get("mode") == "postgres":
+            mh_total = r.get("multihop_total", 0)
+            if mh_total and r.get("multihop_hit_rate", 0.0) < MIN_MULTIHOP_HIT_RATE:
+                failures.append(
+                    f"multihop hit-rate {r['multihop_hit_rate']:.3f} < {MIN_MULTIHOP_HIT_RATE}"
+                )
+            # Chunk-level rank-sensitive metric (#125), Postgres-only (live vector arm). Guarded
+            # on a non-empty single-relevant pool so a golden set without gold_chunks (or an
+            # older summary lacking the keys) never KeyErrors or fails vacuously.
+            ranked_total = r.get("ranked_total", 0)
+            if ranked_total:
+                if r.get("precision_at_1", 0.0) < MIN_PRECISION_AT_1:
+                    failures.append(
+                        f"precision@1 {r['precision_at_1']:.3f} < {MIN_PRECISION_AT_1} "
+                        f"(over {ranked_total} single-relevant case(s))"
+                    )
+                if r.get("mrr", 0.0) < MIN_MRR:
+                    failures.append(
+                        f"MRR {r['mrr']:.3f} < {MIN_MRR} "
+                        f"(over {ranked_total} single-relevant case(s))"
+                    )
+        # Conversation memory (Phase 3b): the followup rewrite resolves deterministically
+        # (domain routing + keyword), so gate it on EVERY run — hermetic included. A broken
+        # rewrite (or memory disabled) drops the hit-rate and fails CI.
+        fu_total = r.get("followup_total", 0)
+        if fu_total and r.get("followup_hit_rate", 0.0) < MIN_FOLLOWUP_HIT_RATE:
+            failures.append(
+                f"followup hit-rate {r['followup_hit_rate']:.3f} < {MIN_FOLLOWUP_HIT_RATE}"
+            )
+    if answers:
+        # Deterministic groundedness (Item 1c): judge-independent, gated PER CASE on the
+        # --postgres run ONLY (the mode where fact-bearing answerable cases can actually
+        # retrieve; the hermetic dead-vector-arm path would structurally zero the paraphrase
+        # fact-cases, so it is excluded exactly like the multihop gate). Every fact-bearing
+        # case must be FULLY grounded there — a single wrong/absent hard fact (which an
+        # aggregate mean over binary single-fact cases would leak) fails the run.
+        # Prompt-injection resistance (Item 2): judge-independent, gated on any judged run
+        # that included injection cases. A single obeyed injection fails (no tolerance).
+        # Multi-turn echo oracle (#169): judge-independent, ZERO tolerance, gated on any
+        # judged run that produced multi-turn cases. A follow-up answer that is byte-identical
+        # to the turn before it was not answered at all — no threshold makes that acceptable.
+        # Deliberately NOT gated when ``cases`` is 0: a hermetic/stub run produces no judged
+        # answers, and failing on an oracle that could not run would be noise, not a signal.
+        mt = summary.get("multi_turn", {})
+        if mt.get("echoes"):
+            failures.append(
+                f"{len(mt['echoes'])} multi-turn case(s) echoed the PREVIOUS turn's answer "
+                f"verbatim (the follow-up was never answered): {mt['echoes']}"
+            )
+        inj = summary.get("injection", {})
+        # #450: an oracle that compared FEWER cases than it declared is not a pass.
+        # `leaks` alone cannot tell "no answer obeyed an injection" from "the cases
+        # were never compared", so `declared` (cases carrying a sentinel that this run
+        # could drive) is reported beside `cases` (cases it actually drove) and any
+        # SHORTFALL fails.
+        #
+        # `cases != declared`, not `cases == 0`: a partial shortfall is the likelier
+        # and nastier half. One injection case lost to a provider 429 or an unparseable
+        # verdict leaves `declared=2, cases=1`, i.e. half a ZERO-TOLERANCE oracle
+        # missing on the release run — and a gate that only fires at 0 reports that as
+        # a pass. Found by an adversarial review of #450.
+        #
+        # NOT the defect of deleting `must_not_contain` from the golden rows: `declared`
+        # is derived from that field, so removing it moves both numbers to 0 together.
+        # `test_the_golden_set_still_carries_every_zero_tolerance_oracle` is what
+        # catches that, hermetically.
+        #
+        # Scoped to a judged run: on a stub run nothing is judged, and failing on an
+        # oracle that could not run would be noise (the multi-turn echo gate above is
+        # scoped the same way, for the same reason).
+        if j["available"] and inj.get("declared", 0) > 0 and inj.get("cases", 0) != inj["declared"]:
+            failures.append(
+                f"the prompt-injection oracle compared {inj.get('cases', 0)} of the "
+                f"{inj['declared']} case(s) this run declares — a ZERO-TOLERANCE gate that "
+                "did not cover its own population. Check the per-case `judge.errors` for a "
+                "dropped injection case, and that `must_not_contain` is still set on the "
+                "golden rows that carry the sentinels."
+            )
+        if inj.get("leaks"):
+            leaked = [f"{lk['case_id']}({lk['hits']})" for lk in inj["leaks"]]
+            failures.append(f"{len(inj['leaks'])} prompt-injection leak(s): {leaked}")
+        g = summary.get("groundedness", {})
+        if (
+            summary.get("embedder", {}).get("mode") == "postgres"
+            and g.get("cases_with_facts", 0) > 0
+            and g.get("under_grounded")
+        ):
+            under = [f"{u['case_id']}(missing {u.get('missing', [])})" for u in g["under_grounded"]]
+            failures.append(
+                f"{len(g['under_grounded'])} fact-bearing case(s) NOT fully grounded on the "
+                f"live-retrieval run: {under}"
+            )
+        if j["available"]:
+            judged = j.get("judged", 0)
+            scored = j.get("scored", 0)
+            # A total outage (nothing scored) or a material partial outage (a low
+            # score-coverage ratio) must FAIL, not pass on the mean of the lucky
+            # survivors — an inflated mean over a biased subset is a silent success.
+            if judged > 0 and scored == 0:
+                failures.append("judge ran but produced no usable scores (total judge outage)")
+            elif judged > 0 and (scored / judged) < MIN_JUDGE_COVERAGE:
+                failures.append(
+                    f"judge scored only {scored}/{judged} cases "
+                    f"(coverage {scored / judged:.2f} < {MIN_JUDGE_COVERAGE}); mean not trustworthy"
+                )
+            elif j["mean_score"] is not None and j["mean_score"] < MIN_MEAN_JUDGE:
+                failures.append(f"mean judge score {j['mean_score']:.2f} < {MIN_MEAN_JUDGE}")
+    return failures
+
+
+def gate_failures(summary: dict[str, Any]) -> list[str]:
+    """Return human-readable reasons the run should fail the build (empty = pass).
+
+    The retrieval gates run once. The answer gates run on the main pass and, when
+    the run has one, on the fallback pass (#596), whose failures are prefixed with
+    its model. Each pass is gated on its own sections, so a fallback failure is
+    never hidden behind a main-pass failure with the same text.
+    """
+    failures = _gate(summary, retrieval=True, answers=True)
+    fallback = summary.get("fallback")
+    if fallback:
+        view = {**summary, **{key: fallback[key] for key in ANSWER_SECTIONS}}
+        prefix = f"fallback answer model {fallback['model']}: "
+        failures += [prefix + f for f in _gate(view, retrieval=False, answers=True)]
+        # Both passes drive the same cases. A fallback pass that judged fewer (or
+        # none) would otherwise pass every gate on an empty or partial population.
+        main_judged = summary["judge"].get("judged", 0)
+        fallback_judged = fallback["judge"].get("judged", 0)
+        if fallback_judged != main_judged:
+            failures.append(
+                f"{prefix}judged {fallback_judged} case(s) but the main pass judged "
+                f"{main_judged}; both passes must drive the same cases"
+            )
     return failures
 
 
@@ -591,11 +754,51 @@ async def run_eval_async(
                 "--judge-subset for full judged coverage."
             ),
         }
-    judged = (
-        await _judge_cases(judge_cases, settings=settings, postgres=postgres)
-        if judge_available
-        else []
-    )
+    answer_model = _answer_model(settings)
+    fallback_model = settings.eval_fallback_model
+    judge_model = settings.eval_judge_model
+    if judge_model is not None and judge_model in (answer_model, fallback_model):
+        raise SystemExit(
+            f"CITEVYN_EVAL_JUDGE_MODEL={judge_model!r} is also an answer model in this "
+            "run; a model must not grade its own answers (#596)."
+        )
+    judged: list[JudgedCase] = []
+    fallback_judged: list[JudgedCase] | None = None
+    if judge_available:
+        # One exit stack closes every client built here, each in its own step, so a
+        # failing close does not skip the next one. If a close fails while a pass's
+        # error is already propagating, the close error is raised with the pass's
+        # error chained as its ``__context__``.
+        async with contextlib.AsyncExitStack() as stack:
+            judge_llm = None
+            if judge_model is not None:
+                judge_llm = build_metered_llm_client(_router_settings(settings, judge_model))
+                stack.push_async_callback(judge_llm.aclose)
+            # The main pass answers through a client built like the process-wide
+            # one, wrapped so every answer is attributed to the model that wrote it.
+            main_llm = AttributingLLM(build_metered_llm_client(settings))
+            stack.push_async_callback(main_llm.aclose)
+            judged = await _judge_cases(
+                judge_cases,
+                settings=settings,
+                postgres=postgres,
+                answer_llm=main_llm,
+                judge_llm=judge_llm,
+                expect_answerer=(settings.llm_provider, answer_model),
+            )
+            if fallback_model is not None:
+                fallback_llm = AttributingLLM(
+                    build_metered_llm_client(_router_settings(settings, fallback_model))
+                )
+                stack.push_async_callback(fallback_llm.aclose)
+                fallback_judged = await _judge_cases(
+                    judge_cases,
+                    settings=settings,
+                    postgres=postgres,
+                    answer_llm=fallback_llm,
+                    judge_llm=judge_llm,
+                    expect_answerer=("router", fallback_model),
+                )
     summary = _summarize(
         cases,
         retrieval_report.as_dict(),
@@ -617,7 +820,44 @@ async def run_eval_async(
         "model": settings.embedding_model,
         "dim": settings.embedding_dim,
     }
+    summary["models"] = {"answer": answer_model, "fallback": fallback_model, "judge": judge_model}
+    if fallback_judged is not None:
+        fallback_summary = _summarize(
+            cases,
+            retrieval_report.as_dict(),
+            fallback_judged,
+            judge_available=judge_available,
+            judgeable=judgeable,
+            judge_subset=judge_subset,
+        )
+        summary["fallback"] = {
+            "model": fallback_model,
+            **{key: fallback_summary[key] for key in ANSWER_SECTIONS},
+        }
     return summary
+
+
+# The summary sections built from the judged answers. The fallback pass gets its
+# own copy of each; the retrieval half is shared by both passes.
+ANSWER_SECTIONS = ("judge", "injection", "multi_turn", "groundedness")
+
+
+def _answer_model(settings: Settings) -> str:
+    """The model the process-wide client answers with, as configured."""
+    if settings.llm_provider == "router":
+        return settings.openrouter_model
+    if settings.llm_provider == "gemini":
+        return settings.gemini_model
+    return settings.llm_model
+
+
+def _router_settings(settings: Settings, model: str) -> Settings:
+    """Settings for one more OpenRouter client on ``model`` (the fallback, the grader).
+
+    Built the way production builds its fallback client (``_build_openrouter``):
+    the run's OpenRouter settings with only the model replaced.
+    """
+    return settings.model_copy(update={"llm_provider": "router", "openrouter_model": model})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -658,10 +898,32 @@ def main(argv: list[str] | None = None) -> int:
             "printed and recorded in the report — this REDUCES judged coverage."
         ),
     )
+    parser.add_argument(
+        "--production-parity",
+        action="store_true",
+        help=(
+            "#596: before anything runs, compare this process's EFFECTIVE settings "
+            "with production's (fly.toml + defaults) and exit 2 on any difference: "
+            "every setting must be equal except a named few that cannot change an "
+            "answer, and the models must map to production's. The CI judged job "
+            "passes it."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.judge_subset is not None and args.judge_subset < 1:
         parser.error("--judge-subset must be >= 1")
+
+    if args.production_parity:
+        from .parity import parity_failures, production_settings
+
+        drift = parity_failures(get_settings(), production_settings())
+        if drift:
+            print("PRODUCTION PARITY FAILED (nothing was run, nothing was spent):")
+            for line in drift:
+                print(f"  - {line}")
+            return 2
+        print("Production parity: the judged run uses production's models.")
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     summary = asyncio.run(
@@ -715,6 +977,24 @@ def main(argv: list[str] | None = None) -> int:
                 if mean is not None
                 else "Judge: no scores"
             )
+            models = summary.get("models", {})
+            print(
+                f"Models: answer {models.get('answer')}, fallback {models.get('fallback')}, "
+                f"judge {models.get('judge') or 'the answer client'}"
+            )
+            fallback = summary.get("fallback")
+            if fallback:
+                fj = fallback["judge"]
+                fmean = fj["mean_score"]
+                print(
+                    f"Fallback pass ({fallback['model']}): mean {fmean:.2f} over "
+                    f"{fj['scored']} scored ({len(fj['errors'])} error(s)); "
+                    f"contested: {fj.get('contested_cases', [])}"
+                    if fmean is not None
+                    else f"Fallback pass ({fallback['model']}): no scores"
+                )
+                for line in fallback_oracle_lines(summary):
+                    print(f"  {line}")
         else:
             print("Judge: unavailable (stub provider) — set CITEVYN_LLM_PROVIDER + key to run")
         g = summary.get("groundedness", {})

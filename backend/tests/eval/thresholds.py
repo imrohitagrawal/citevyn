@@ -71,6 +71,7 @@ MIN_FOLLOWUP_HIT_RATE = 1.0
 # and a fully-dead vector arm drops it below 1.0 (the globals return []). PR B's within-area
 # distractors make the scoped cases informative too.
 #
+# HISTORY (before #596; the current floor and its reason are below MIN_MRR).
 # Baseline MEASURED 2026-07-17 on real Postgres + openai/text-embedding-3-small, verified
 # STABLE across 5 consecutive runs (byte-identical rank order every run): MRR 1.000,
 # precision@1 1.000 over n=18 (recorded in docs/RAG_QUALITY_PLAN.md §8a-7). precision@1 is
@@ -81,7 +82,14 @@ MIN_FOLLOWUP_HIT_RATE = 1.0
 # hard within-area distractor that legitimately outranks a gold, lowering precision@1 to the
 # new measured baseline WITH justification is the correct move.
 MIN_MRR = 0.95
-MIN_PRECISION_AT_1 = 1.0
+# 0.96 since #596 (owner decision 2026-11-09). The 1.0 above was measured on the
+# OLD CI embedder (openai/text-embedding-3-small). The first judged run on
+# production's own configuration (gemini-embedding-001 with query/document task
+# types, run 42460602450) measured 0.969: 31 of 32 single-relevant cases ranked
+# first. The floor sits just under that, so the run before it (0.938 on the
+# OpenRouter route, run 42427303061) would still fail. Raising it back to 1.0 is
+# #370's job (BM25 keyword arm + RRF fusion).
+MIN_PRECISION_AT_1 = 0.96
 # Distractor-corpus context precision/recall (#125, PR B). Measured by the OPT-IN, Postgres-
 # only distractor eval (tests.eval.distractors) over 18 competing chunks (2 gold + 16
 # distractors, incl. 2 LEXICAL HARD NEGATIVES that share the gold vocabulary) with VECTOR-ONLY

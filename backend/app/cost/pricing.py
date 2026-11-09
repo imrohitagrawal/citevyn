@@ -69,6 +69,8 @@ _PRICE_BOOK: dict[tuple[str, str], TokenPrice] = {
     ("router", "openai/gpt-4o-mini"): TokenPrice(Decimal("0.15"), Decimal("0.60")),
     ("router", "openai/gpt-4o"): TokenPrice(Decimal("2.50"), Decimal("10.00")),
     ("router", "google/gemini-2.5-flash"): TokenPrice(Decimal("0.30"), Decimal("2.50")),
+    # The judged eval's grader (#596), which must be a third model family.
+    ("router", "anthropic/claude-haiku-5.5"): TokenPrice(Decimal("0.10"), Decimal("0.50")),
     # Gemini direct. The configured default (Settings.gemini_model), pinned (#492).
     # Google lists 3.6 Flash at $0.75/$3.75 until 2026-12-31 and $1.50/$7.50 from
     # 2027-01-01. Priced at the 2027 rate on purpose: over-counting until then only

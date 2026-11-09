@@ -31,6 +31,16 @@ class FallbackLLMClient:
         self._primary = primary
         self._secondary = secondary
 
+    @property
+    def primary(self) -> LLMClient:
+        """The client tried first (read by the startup log, #596)."""
+        return self._primary
+
+    @property
+    def secondary(self) -> LLMClient:
+        """The client used when the primary is unavailable."""
+        return self._secondary
+
     async def complete(
         self,
         *,

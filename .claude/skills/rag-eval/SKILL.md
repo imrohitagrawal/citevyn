@@ -56,5 +56,21 @@ in `backend/tests/eval/thresholds.py`.
 
 ## Provider / cost
 
-Gemini free tier for dev/eval — primary `gemini-3.6-flash` (pinned, #492); OpenRouter `openai/gpt-4o-mini`
-is the paid fallback (#99). Keep judge runs bounded (one call per case; ~20 cases).
+Production answers with `gemini-3.6-flash` (pinned, #492) and falls back to OpenRouter
+`openai/gpt-4o-mini` (#99). The CI judged run tests exactly those (#596): it calls Google directly with its
+own Gemini key (`CITEVYN_GEMINI_API_KEY` secret), so it answers and embeds exactly as production does,
+with production's OpenRouter fallback behind it; it then answers every case a second time with the fallback (`CITEVYN_EVAL_FALLBACK_MODEL`, same answer gates,
+failures prefixed `fallback answer model ...`), and grades both passes with a third family
+(`CITEVYN_EVAL_JUDGE_MODEL`, `anthropic/claude-haiku-5.5`). The runner's `--production-parity` flag (passed
+by the CI step) refuses to start when its effective settings drift from production's (every setting must be
+equal except the database, CORS, pool size, cost caps, credentials and the two eval-only fields;
+both keys must be present), and
+`backend/tests/test_eval_model_parity.py` applies the same rules (`tests/eval/parity.py`) to the
+job's `env:` block; change production and CI together. The report's
+`models` block names what answered and graded. A local `make eval` is not comparable with CI: it
+runs hermetic (no `--postgres`, so the `postgres_only` cases, injection included, are dropped), with the
+default 3-framing judge panel, ONE answer pass graded by its own answer client. To match CI, run
+`python -m tests.eval.runner --postgres` against a migrated, empty database as the CI step does, with
+every variable in the CI job's `env:` block (including `CITEVYN_EVAL_JUDGE_PANEL=1`,
+`CITEVYN_EVAL_FALLBACK_MODEL` and `CITEVYN_EVAL_JUDGE_MODEL`). Never compare a local score with a CI
+score otherwise. Keep judge runs bounded (one call per case; ~20 cases).
