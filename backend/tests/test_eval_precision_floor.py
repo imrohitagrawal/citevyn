@@ -38,6 +38,12 @@ def test_productions_measured_precision_passes() -> None:
     assert _p1_failures(31 / 32) == []
 
 
+def test_exactly_the_floor_passes() -> None:
+    """Red when: the gate compares with ``<=`` instead of ``<``, failing a run
+    that sits exactly on the decided floor."""
+    assert _p1_failures(0.96) == []
+
+
 def test_the_earlier_regression_still_fails() -> None:
     """Red when: the floor is lowered so far that the 0.938 measured on the
     OpenRouter route (30/32) passes."""

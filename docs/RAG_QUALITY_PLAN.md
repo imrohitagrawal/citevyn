@@ -477,7 +477,7 @@ byte-identical rank order every run):**
 | Judge mean (panel min-vetoed) | 4.55, 0 errors |
 | DB residue | zero |
 
-Gates (`thresholds.py`): `MIN_PRECISION_AT_1 = 1.0` (pinned exact — embeddings are effectively
+(Since #596 the precision@1 floor is 0.96, measured on production's embedder; see `docs/DECISIONS.md`, 2026-11-09. What follows is the 2026-07-17 record.) Gates (`thresholds.py`): `MIN_PRECISION_AT_1 = 1.0` (pinned exact — embeddings are effectively
 deterministic run-to-run here, so a wrong-area chunk outranking a gold on a global case is a
 real regression, not jitter; only the 2 global cases can move it), `MIN_MRR = 0.95` (tolerant
 companion margin). Both `--postgres`-only + non-empty-pool-guarded. The 1.0 pin is an

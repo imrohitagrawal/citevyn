@@ -71,6 +71,7 @@ MIN_FOLLOWUP_HIT_RATE = 1.0
 # and a fully-dead vector arm drops it below 1.0 (the globals return []). PR B's within-area
 # distractors make the scoped cases informative too.
 #
+# HISTORY (before #596; the current floor and its reason are below MIN_MRR).
 # Baseline MEASURED 2026-07-17 on real Postgres + openai/text-embedding-3-small, verified
 # STABLE across 5 consecutive runs (byte-identical rank order every run): MRR 1.000,
 # precision@1 1.000 over n=18 (recorded in docs/RAG_QUALITY_PLAN.md §8a-7). precision@1 is
