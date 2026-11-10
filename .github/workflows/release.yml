@@ -1,8 +1,9 @@
 # Release pipeline.
 #
-# Triggers on a version tag (vX.Y.Z). Builds the api and worker
-# images, pushes them to the registry with both the tag and a
-# floating `latest` alias, then drafts a GitHub Release.
+# Triggers on a version tag (vX.Y.Z). Waits for the judged eval to
+# pass on the tagged commit, builds the api and worker images, pushes
+# them to the registry with both the tag and a floating `latest`
+# alias, then drafts a GitHub Release.
 #
 # Versioning follows SemVer. Tags must start with `v`. Pre-release
 # tags (e.g. v0.2.0-rc1) are marked as pre-release automatically.
@@ -70,11 +71,33 @@ jobs:
           echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
           echo "Building release: ${VERSION} (prerelease=${IS_PRERELEASE})"
 
-  # ──────────────── 2. Build the docker images ────────────────
+  # ──────────────── 2. Wait for the judged eval ────────────────
+  # Nothing is built or published until the judged answer-quality eval has passed
+  # on this exact commit. The tag push starts that eval in ci.yml; this job waits
+  # for its result. There is no skip input and no override: if no judged job runs
+  # on the commit, the script fails and says how to run one (#457).
+  judged-eval-gate:
+    name: wait for the judged eval
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 90  # above the script's own 75-minute limit
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.sha }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Wait for the judged eval on this commit
+        run: bash scripts/wait_for_judged_eval.sh
+
+  # ──────────────── 3. Build the docker images ────────────────
   build:
     name: build images
     runs-on: ubuntu-latest
-    needs: validate
+    needs: [validate, judged-eval-gate]
     strategy:
       # One matrix entry per image. ``fail-fast: false`` so a
       # single image failure doesn't skip the other.
@@ -165,11 +188,11 @@ jobs:
             docker push "${tag}"
           done
 
-  # ──────────────── 3. Draft the GitHub release ────────────────
+  # ──────────────── 4. Draft the GitHub release ────────────────
   release:
     name: cut release
     runs-on: ubuntu-latest
-    needs: [validate, build]
+    needs: [validate, judged-eval-gate, build]
     steps:
       - uses: actions/checkout@v7
         with:
