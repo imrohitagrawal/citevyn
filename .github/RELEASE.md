@@ -43,9 +43,16 @@ This document describes the CiteVyn release process for
 
 5. **CI kicks off the release workflow**:
    - Validates the tag.
+   - Waits for the judged eval to pass on the tagged commit, which
+     takes up to about 75 minutes longer. There is no override.
    - Builds `citevyn/api:v0.2.0` and `citevyn/worker:v0.2.0`.
    - Pushes them to `ghcr.io/imrohitagrawal/citevyn-{api,worker}`.
    - Drafts a GitHub Release (kept as a draft until you publish).
+
+   The Fly deploy path ([`docs/DEPLOY_FLY.md`](../docs/DEPLOY_FLY.md))
+   is separate and does not wait for this. A tag on an older commit
+   runs that commit's own `release.yml`, so a tag on a commit from
+   before the gate was added (#457) has no gate.
 
 6. **Publish the release** — review the auto-generated changelog
    body, edit if needed, and click "Publish release". This
@@ -100,7 +107,10 @@ For a critical fix that can't wait for a normal release:
 4. Merge `hotfix/…` back into `main` so the fix isn't lost.
 
 The release workflow will build and publish `v0.1.1` the same
-way it does for any other tag.
+way it does for any other tag. That includes waiting for the judged
+eval, up to about 75 minutes longer, and there is no override, so an
+urgent image fix is refused while the eval is failing. The Fly deploy
+path ([`docs/DEPLOY_FLY.md`](../docs/DEPLOY_FLY.md)) is separate.
 
 ## Post-release
 

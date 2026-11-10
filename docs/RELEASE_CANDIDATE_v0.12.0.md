@@ -55,7 +55,7 @@ make eval          # RAG eval harness (judge self-skips without a real key — e
 git add CHANGELOG.md
 git commit -m "chore: release v0.12.0"
 git tag -s v0.12.0 -m "v0.12.0"
-git push origin main --tags   # fires release.yml: build -> boot-smoke -> push :latest + :v0.12.0
+git push origin main --tags   # fires release.yml: wait for the judged eval -> build -> boot-smoke -> push :latest + :v0.12.0
 
 # 3. Confirm the images actually published and boot
 gh run watch --exit-status $(gh run list --workflow=release.yml -L1 --json databaseId -q '.[0].databaseId')
@@ -64,6 +64,11 @@ gh run watch --exit-status $(gh run list --workflow=release.yml -L1 --json datab
 #    STOP HERE. Open docs/DEPLOY_FLY.md §4.1 and run it verbatim.
 #    Then come back and continue with the block below.
 ```
+
+The publish in step 2 now waits for the judged eval to pass on the tagged commit
+(#457; `docs/COST_CONTROLS.md`, "What the release gate covers"). That run is known to
+fail until the answer work under #602 lands, so a tag will not publish until then.
+Fly deploys are separate and are not gated by this.
 
 Step 4 is deliberately not written out here. The copy that used to sit on that
 line went stale twice, independently: it never learned `VITE_API_DEMO_KEY`
