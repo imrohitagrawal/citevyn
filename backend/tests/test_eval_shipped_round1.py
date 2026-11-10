@@ -60,6 +60,20 @@ def test_the_committed_recording_is_in_productions_vector_space() -> None:
     )
 
 
+def test_a_lowercase_fly_setting_is_read_as_settings_reads_it(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red when: a lowercase ``fly.toml`` key, which Settings honours, slips past the pin."""
+    (tmp_path / "fly.toml").write_text(
+        '[env]\n  CITEVYN_EMBEDDING_PROVIDER = "gemini"\n'
+        '  citevyn_embedding_model = "other-model"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shipped, "REPO_ROOT", tmp_path)
+    identity = shipped.production_embedder_identity()
+    assert (identity.provider, identity.model) == ("gemini", "other-model")
+
+
 def test_a_recording_from_another_model_is_refused() -> None:
     """Red when: a recording made with a model production does not use can pass."""
     production = shipped.production_embedder_identity()

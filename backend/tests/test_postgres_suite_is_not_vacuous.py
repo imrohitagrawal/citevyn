@@ -104,7 +104,7 @@ PG_SUITE = "tests.test_pg_integration"
 # comes from the ``postgres`` job, so a skip there would report green having measured
 # nothing. Each is listed with the test functions it declares, a baseline that must not
 # shrink; removing one is a one-line update here in the same change.
-SHIPPED_PG_SUITES = {"tests.test_eval_shipped_pg": 9, "tests.test_eval_shipped_report": 5}
+SHIPPED_PG_SUITES = {"tests.test_eval_shipped_pg": 9, "tests.test_eval_shipped_report": 7}
 
 # That population AS MEASURED: 15 test functions at ``d4763d6``, and
 # ``pytest -m postgres`` reports exactly 15 skipped with the URL unset. Raised

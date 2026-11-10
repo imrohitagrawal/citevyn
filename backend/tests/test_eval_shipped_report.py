@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.config import get_settings
 from app.embeddings.factory import EmbedderIdentity
 from app.embeddings.stub import StubEmbedder
-from app.models import Chunk
+from app.models import Chunk, Document, ExactTerm
 from tests.conftest import seed_catalog
 from tests.eval import record_vectors, shipped
 from tests.eval.paths import RECORDED_CHUNKS_PATH, RECORDED_QUESTIONS_PATH, SHIPPED_REPORT_PATH
@@ -174,3 +174,92 @@ async def test_the_export_refuses_an_index_from_another_space(settings: Any) -> 
             settings.database_url,
             identity=EmbedderIdentity("gemini", "gemini-embedding-001", 1536),
         )
+
+
+async def test_the_arm_switches_really_remove_arms(settings: Any) -> None:  # noqa: F811
+    """Red when: switching the keyword or exact arm off does nothing, or the keyword-only
+    rank is not computed from the keyword-only run.
+    """
+    embedder = _recorded()
+    cases = shipped.all_shipped_cases()
+    identity = embedder.query_identity
+    async with shipped.shipped_corpus_session(settings, embedder, identity) as (session, _):
+        outcomes = {
+            o.case_id: o
+            for o in await shipped.evaluate_cases(session, embedder, identity, cases, settings)
+        }
+
+        async def keys(routed: Any, off: set[str]) -> tuple[str, ...]:
+            result = await shipped.retrieve_routed(
+                session,
+                routed,
+                embedder=embedder,
+                identity=identity,
+                settings=settings,
+                arms_off=frozenset(off),
+            )
+            return tuple(f"{hit.source_name}#{hit.heading}" for hit in result.hits)
+
+        scoped = with_hits = differs = keyword_vs_vector = 0
+        for case in cases:
+            routed = shipped.route_case(case, settings)
+            keyword_only = await keys(routed, {"vector", "exact"})
+            # (b) Every arm off finds nothing, whatever the route.
+            assert await keys(routed, {"vector", "keyword", "exact"}) == (), case.id
+            # (c) The reported keyword-only rank is this run's rank.
+            outcome = outcomes[case.id]
+            gold = set(case.shipped_gold)
+            expected = next((i for i, k in enumerate(keyword_only, 1) if k in gold), None)
+            assert outcome.rank_keyword_only == expected, case.id
+            keyword_vs_vector += outcome.rank_keyword_only != outcome.rank_vector_only
+            if routed.route == "scoped":
+                scoped += 1
+                with_hits += bool(keyword_only)
+                differs += keyword_only[:1] != outcome.retrieved[:1]
+    # (a) The keyword arm alone serves scoped questions, and is not the full result.
+    assert scoped > 50
+    assert with_hits >= 0.8 * scoped, (with_hits, scoped)
+    assert differs >= 1
+    # Partner to (c): the two single-arm ranks really differ somewhere.
+    assert keyword_vs_vector >= 1
+
+
+RATE_LIMIT_QUESTION = "What is the rate limit for the Claude API?"
+
+
+async def test_the_exact_arm_takes_part_in_the_removal(settings: Any) -> None:  # noqa: F811
+    """Red when: the removal loop leaves the exact arm out.
+
+    A full question never equals an extracted term on this corpus, so the exact arm finds
+    nothing for any recorded question. A synthetic term equal to one question, pointing at
+    another passage, gives it something to decide.
+    """
+    embedder = _recorded()
+    case = next(c for c in shipped.all_shipped_cases() if c.question == RATE_LIMIT_QUESTION)
+    identity = embedder.query_identity
+    async with shipped.shipped_corpus_session(settings, embedder, identity) as (session, _):
+        (clean,) = await shipped.evaluate_cases(session, embedder, identity, [case], settings)
+        # Partner: without the synthetic term, removing the exact arm changes nothing.
+        assert "exact" not in clean.rank1_changed_by
+        streaming = (
+            await session.execute(
+                select(Chunk)
+                .join(Document)
+                .where(Document.source_name == "claude_api", Chunk.heading == "Streaming")
+            )
+        ).scalar_one()
+        term_type = (await session.scalars(select(ExactTerm.term_type).limit(1))).one()
+        session.add(
+            ExactTerm(
+                term_text=RATE_LIMIT_QUESTION,
+                term_type=term_type,
+                product_area="claude_api",
+                document_id=streaming.document_id,
+                chunk_id=streaming.chunk_id,
+            )
+        )
+        await session.flush()
+        (seeded,) = await shipped.evaluate_cases(session, embedder, identity, [case], settings)
+    assert seeded.retrieved[0] == "claude_api#Streaming"
+    assert "exact" in seeded.rank1_changed_by
+    assert seeded.winning_arm in {"exact", "both"}

@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.answer.memory import build_contextual_query
+from app.answer.orchestrator import _retrieve_active_index  # pyright: ignore[reportPrivateUsage]
 from app.core.config import Settings, get_settings
 from app.embeddings.factory import EmbedderIdentity
 from app.embeddings.protocol import Embedder
@@ -133,10 +134,12 @@ def shipped_heading_keys() -> dict[str, str]:
 
 def production_embedder_identity() -> EmbedderIdentity:
     """Production's query embedder: ``fly.toml``'s environment over the Settings defaults."""
-    env = tomllib.loads((REPO_ROOT / "fly.toml").read_text(encoding="utf-8")).get("env", {})
+    raw = tomllib.loads((REPO_ROOT / "fly.toml").read_text(encoding="utf-8")).get("env", {})
+    # Settings matches variable names ignoring case, so this does too.
+    env = {str(key).lower(): value for key, value in raw.items()}
 
     def value(field: str) -> Any:
-        return env.get(f"CITEVYN_{field.upper()}", Settings.model_fields[field].default)
+        return env.get(f"citevyn_{field}", Settings.model_fields[field].default)
 
     return EmbedderIdentity(
         provider=value("embedding_provider"),
@@ -349,9 +352,14 @@ async def retrieve_routed(
     settings: Settings,
     arms_off: frozenset[str] = frozenset(),
 ) -> RetrievalResult:
-    """The real retriever over the routed question, optionally with arms switched off."""
+    """The real retriever over the routed question, optionally with arms switched off.
+
+    Scoped to the active index version exactly as ``Orchestrator.ask`` scopes it.
+    """
+    active_index_version, _ = await _retrieve_active_index(session)
     retriever = HybridRetriever(
         session,
+        active_index_version=active_index_version or None,
         embedder=None if "vector" in arms_off else embedder,
         embedder_identity=identity,
         global_confidence=(

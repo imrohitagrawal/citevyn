@@ -9,6 +9,7 @@ global confidence gate. A question production does not retrieve for must be labe
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -16,8 +17,11 @@ import pytest
 from app.answer import orchestrator as orchestrator_module
 from app.answer.orchestrator import Orchestrator
 from app.core.config import Settings, get_settings
+from app.embeddings.factory import configured_embedder_identity
 from app.embeddings.protocol import Embedder
 from app.guardrails.domain import Domain
+from app.models import IndexVersion
+from app.models.enums import IndexStatus
 from app.retrieval.types import RetrievalResult, VectorDegrade
 from app.routing.intent import Intent, classify_intent
 from tests.eval import shipped
@@ -29,7 +33,10 @@ class _Spy:
     calls: list[dict[str, Any]] = []
 
     def __init__(self, _session: object, **kwargs: Any) -> None:
-        self._built = {"global_confidence": kwargs.get("global_confidence")}
+        self._built = {
+            key: kwargs.get(key)
+            for key in ("global_confidence", "embedder_identity", "active_index_version")
+        }
 
     async def retrieve(self, question: str, **kwargs: Any) -> RetrievalResult:
         _Spy.calls.append({**self._built, "method": "retrieve", "question": question, **kwargs})
@@ -76,6 +83,18 @@ async def test_the_eval_calls_the_retriever_exactly_as_production_does(
     monkeypatch.setattr(shipped, "HybridRetriever", _Spy)
     cases = [case for case in shipped.all_shipped_cases() if not case.follow_up]
     assert len(cases) > 100
+    # An active index, so production pins its version and the eval must too.
+    now = datetime.now(UTC)
+    session.add(
+        IndexVersion(
+            index_version="index_v1",
+            status=IndexStatus.active,
+            source_version_hash="sha256:index-v1",
+            created_at=now,
+            promoted_at=now,
+        )
+    )
+    await session.flush()
     served = 0
     for case in cases:
         _Spy.calls = []
@@ -89,9 +108,14 @@ async def test_the_eval_calls_the_retriever_exactly_as_production_does(
             continue
         _Spy.calls = []
         await shipped.retrieve_routed(
-            session, routed, embedder=cast("Embedder", None), identity=None, settings=settings
+            session,
+            routed,
+            embedder=cast("Embedder", None),
+            identity=configured_embedder_identity(settings),
+            settings=settings,
         )
         assert _Spy.calls == production, case.id
+        assert production[0]["active_index_version"] == "index_v1"
         served += 1
     # Partner: most questions really reached the retriever on both sides.
     assert served > len(cases) // 2
