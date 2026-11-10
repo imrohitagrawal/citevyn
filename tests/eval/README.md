@@ -202,3 +202,32 @@ without re-recording, because a recorded vector depends only on the question tex
 
 `model_name` and `command` are term types with no extracted term in the shipped corpus, so
 they have no case. `en_outside_model` asks for a model id the corpus does not hold.
+
+## Shipped-corpus search report (#601)
+
+`backend/tests/test_eval_shipped_report.py` runs in the `postgres` job and appends the report
+to the job summary: recall@1/3/6, MRR and precision@1, by kind and coverage kind, with each
+question's route and winning arm. No model is called, and there are no floors yet.
+
+**Decision A** is precision@1 over answerable, single-relevant, non-follow-up golden
+questions. The report prints the pool size and every excluded count. Coverage questions
+report separately, and a scoped refusal retrieving something is informational, because only
+the global path has a confidence gate.
+
+The vectors live in `tests/eval/recorded/`: one per shipped chunk, keyed `source#heading` with
+its content checksum, and one per exact question text, keyed by `text_sha256`. Each file's
+first line states the vector space. A chunk whose text changed fails the fixture test and the
+`postgres` job, naming that chunk and the command. Labels can be edited without re-recording.
+
+To record, from `backend/`, with the embedding provider's key in the environment:
+
+```bash
+python -m tests.eval.record_vectors --dry-run                                # free: lists every text
+python -m tests.eval.record_vectors --export-chunks-from <local postgres URL> # embeds missing questions
+python -m tests.eval.record_vectors --embed-changed-chunks                    # also embeds changed chunks
+```
+
+`--dry-run` needs no key or database. Embedding goes through the metered embedder, so
+`CITEVYN_DATABASE_URL` must name a migrated local database. Files are rewritten after every
+embedded text with sorted lines, so a re-run resumes, and the first failure stops the run.
+Embedding changed chunks is a provider call and needs its own approval.

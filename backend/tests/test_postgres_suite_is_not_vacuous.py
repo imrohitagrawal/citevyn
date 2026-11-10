@@ -100,6 +100,12 @@ PG_URL_ENV = "CITEVYN_PG_TEST_URL"
 # The module whose entire test population the skip above governs.
 PG_SUITE = "tests.test_pg_integration"
 
+# The shipped-corpus eval's Postgres suites (#601), held to the same rule: their number
+# comes from the ``postgres`` job, so a skip there would report green having measured
+# nothing. Each is listed with the test functions it declares, a baseline that must not
+# shrink; removing one is a one-line update here in the same change.
+SHIPPED_PG_SUITES = {"tests.test_eval_shipped_pg": 9, "tests.test_eval_shipped_report": 3}
+
 # That population AS MEASURED: 15 test functions at ``d4763d6``, and
 # ``pytest -m postgres`` reports exactly 15 skipped with the URL unset. Raised
 # to 17 by #511, which added
@@ -299,8 +305,10 @@ def test_the_postgres_job_is_not_running_zero_tests() -> None:
     )
 
 
-def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, object]]:
-    """What the INTERPRETER resolved for ``test_pg_integration``'s marks.
+def _resolved_module_marks(
+    *, with_url: bool, cwd: Path, module: str = PG_SUITE
+) -> list[dict[str, object]]:
+    """What the INTERPRETER resolved for a Postgres suite's marks.
 
     Imports the module in a SUBPROCESS and prints the evaluated ``skipif``
     conditions. A subprocess, not ``importlib.reload``, for three reasons: the
@@ -321,7 +329,7 @@ def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, objec
     """
     probe = (
         "import importlib, json\n"
-        f"m = importlib.import_module({PG_SUITE!r})\n"
+        f"m = importlib.import_module({module!r})\n"
         "print(json.dumps([\n"
         "    {'name': mk.name,\n"
         "     'condition': bool(mk.args[0]) if mk.args else None}\n"
@@ -350,7 +358,7 @@ def _resolved_module_marks(*, with_url: bool, cwd: Path) -> list[dict[str, objec
     )
     marks: list[dict[str, object]] = json.loads(result.stdout.strip().splitlines()[-1])
     assert any(m["name"] == "postgres" for m in marks), (
-        f"{PG_SUITE} no longer carries `pytest.mark.postgres`, so `pytest -m "
+        f"{module} no longer carries `pytest.mark.postgres`, so `pytest -m "
         f"postgres` selects none of it: {marks}"
     )
     return marks
@@ -410,6 +418,38 @@ def test_the_postgres_suite_skips_for_the_env_and_for_nothing_else(tmp_path: Pat
         "skips all of the suite while the job looks correctly provisioned — the "
         "#449 hole one level deeper."
     )
+
+
+@pytest.mark.parametrize("module", sorted(SHIPPED_PG_SUITES))
+def test_the_shipped_suites_skip_for_the_env_and_for_nothing_else(
+    module: str, tmp_path: Path
+) -> None:
+    """The same rule as above, over the shipped-corpus eval's Postgres suites (#601).
+
+    Turns red if: ``test_eval_shipped_pg`` or ``test_eval_shipped_report`` gains a
+    module-level mark beyond ``postgres`` and one ``skipif``, loses the ``postgres`` mark,
+    or its ``skipif`` stops turning off when a database URL is configured.
+    """
+    without = _resolved_module_marks(with_url=False, cwd=tmp_path, module=module)
+    with_url = _resolved_module_marks(with_url=True, cwd=tmp_path, module=module)
+    assert {str(m["name"]) for m in without} == _ALLOWED_MODULE_MARKS
+    assert {str(m["name"]) for m in with_url} == _ALLOWED_MODULE_MARKS
+    assert [m["condition"] for m in without if m["name"] == "skipif"] == [True]
+    assert [m["condition"] for m in with_url if m["name"] == "skipif"] == [False]
+
+
+@pytest.mark.parametrize(("module", "measured"), sorted(SHIPPED_PG_SUITES.items()))
+def test_the_shipped_suites_have_tests_to_skip(module: str, measured: int) -> None:
+    """Partner: the rule above is about a population, so it must exist.
+
+    Turns red if: a shipped-corpus Postgres suite declares fewer test functions than its
+    recorded baseline.
+    """
+    source = (BACKEND / Path(*module.split(".")).with_suffix(".py")).read_text(encoding="utf-8")
+    declared = [
+        line for line in source.splitlines() if line.startswith(("def test_", "async def test_"))
+    ]
+    assert len(declared) >= measured, f"{module} declares {len(declared)}, measured {measured}"
 
 
 def test_the_postgres_suite_has_tests_to_skip_in_the_first_place() -> None:
