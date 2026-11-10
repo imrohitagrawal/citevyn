@@ -42,6 +42,7 @@ JUDGED_JOB_NAME='judged answer-quality eval (needs the OpenRouter and Gemini key
 # Must equal the `name:` of the step in that job that runs the eval (same test).
 JUDGED_STEP_NAME='Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)'
 MAX_CONSECUTIVE_GH_FAILURES=5
+NEXT_STEP="Next step: read that run's report, fix the cause on main, then cut a new tag. If the failure was an outage, re-run the eval, then re-run this release."
 
 log() { echo "wait_for_judged_eval: $*"; }
 die() { echo "wait_for_judged_eval: ERROR: $*" >&2; exit 1; }
@@ -115,6 +116,9 @@ poll_once() {
 }
 
 start="$(date +%s)" || die "could not read the clock"
+NO_JOB_HELP="The judged job is skipped when the test job (pytest + lint) fails, so look at the ci run for this commit first. If that job passed: Run the ci workflow manually on a branch or tag that points at commit ${SHA}, then re-run this release."
+last_status=""
+last_run_url=""
 consecutive_failures=0
 log "waiting for '${JUDGED_JOB_NAME}' on ${SHA}"
 
@@ -130,7 +134,7 @@ while :; do
             if [ "${job_status}" = completed ]; then
                 # Allowlists of one: anything GitHub adds later fails closed.
                 [ "${conclusion}" = success ] ||
-                    die "judged eval concluded '${conclusion}': ${run_url}"
+                    die "judged eval concluded '${conclusion}': ${run_url}. ${NEXT_STEP}"
                 if [ "${step_result}" = success ]; then
                     log "judged eval passed: job ${job_id}, ${run_url}"
                     exit 0
@@ -138,9 +142,11 @@ while :; do
                 if [ "${step_result}" = skipped ]; then
                     die "the judged eval did not run: its step was skipped, so the job's success judged nothing. The repository secret CITEVYN_OPENROUTER_API_KEY is missing. Add it under Settings > Secrets and variables > Actions, run the ci workflow on this commit, then re-run this release: ${run_url}"
                 fi
-                die "the judged eval did not run to a pass: step '${JUDGED_STEP_NAME}' is '${step_result}': ${run_url}"
+                die "the judged eval did not run to a pass: step '${JUDGED_STEP_NAME}' is '${step_result}': ${run_url}. ${NEXT_STEP}"
             fi
             state=running
+            last_status="${job_status}"
+            last_run_url="${run_url}"
             log "job ${job_id} is ${job_status}: ${run_url}"
         fi
     else
@@ -153,10 +159,13 @@ while :; do
     now="$(date +%s)" || die "could not read the clock"
     elapsed=$((now - start))
     if [ "${elapsed}" -ge "${TOTAL_TIMEOUT_SECONDS}" ]; then
-        die "timed out after ${elapsed}s waiting for the judged eval on ${SHA}"
+        if [ -n "${last_run_url}" ]; then
+            die "timed out after ${elapsed}s waiting for the judged eval on ${SHA}: job is '${last_status}', no conclusion: ${last_run_url}. ${NEXT_STEP}"
+        fi
+        die "timed out after ${elapsed}s: no judged job appeared on ${SHA}. ${NO_JOB_HELP}"
     fi
     if [ "${state}" = no-job ] && [ "${elapsed}" -ge "${START_GRACE_SECONDS}" ]; then
-        die "no judged job ran on ${SHA} within ${START_GRACE_SECONDS}s. Run the ci workflow manually on this commit (gh workflow run ci.yml --ref <this tag>), then re-run this release."
+        die "no judged job ran on ${SHA} within ${START_GRACE_SECONDS}s. ${NO_JOB_HELP}"
     fi
     sleep "${POLL_SECONDS}"
 done
