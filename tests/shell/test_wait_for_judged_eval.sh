@@ -488,6 +488,8 @@ put runs 6 "$(runs_json "$(run_obj 201)")"
 put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
 run_gate
 check "five gh errors in a row fail closed" 1 "5 consecutive"
+# Red when: the five-errors refusal stops telling the reader what to do next.
+check "the five-errors refusal names the next step" 1 "re-run this workflow"
 check_eq "the fifth error ends it" "$(gh_calls)" 5
 
 # Red when: the limit is lowered below five.

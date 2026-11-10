@@ -152,7 +152,7 @@ while :; do
     else
         consecutive_failures=$((consecutive_failures + 1))
         if [ "${consecutive_failures}" -ge "${MAX_CONSECUTIVE_GH_FAILURES}" ]; then
-            die "gh failed ${consecutive_failures} consecutive times; failing closed"
+            die "gh failed ${consecutive_failures} consecutive times; failing closed. Nothing was published. Next step: GitHub's API did not answer, so re-run this workflow once it is answering again."
         fi
     fi
 
