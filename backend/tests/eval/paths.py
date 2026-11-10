@@ -20,3 +20,10 @@ GOLDEN_PATH = EVAL_DIR / "golden.jsonl"
 # locked hermetic/judged run's case list nor the main-golden coverage assertions.
 DISTRACTOR_GOLDEN_PATH = EVAL_DIR / "golden_distractors.jsonl"
 DEFAULT_REPORT_PATH = pathlib.Path("artifacts/eval_report.json")
+# Shipped-corpus eval (#601): questions labelled against the 44 shipped passages, and the
+# embedding vectors recorded for them, so CI measures real search with no provider call.
+SHIPPED_QUESTIONS_PATH = EVAL_DIR / "shipped_questions.jsonl"
+RECORDED_DIR = EVAL_DIR / "recorded"
+RECORDED_CHUNKS_PATH = RECORDED_DIR / "shipped_chunk_vectors.jsonl"
+RECORDED_QUESTIONS_PATH = RECORDED_DIR / "question_vectors.jsonl"
+SHIPPED_REPORT_PATH = pathlib.Path("artifacts/shipped_eval_report.json")
