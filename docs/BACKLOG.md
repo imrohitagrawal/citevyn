@@ -35,6 +35,12 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 - **[V2](https://github.com/imrohitagrawal/citevyn/milestone/2)** — breadth + heavier
   surfaces, deferred until V1 depth is proven.
 
+### Roadmap tracker
+
+| Issue | Title | Area | Notes |
+|---|---|---|---|
+| [#611](https://github.com/imrohitagrawal/citevyn/issues/611) | Roadmap tracker: every item in the product plan and where it stands | product | Lists every planned item, including Enterprise items that have no issue yet. Keep it current with this file. |
+
 ### V1 milestone
 
 | Issue | Title | Area | Notes |
@@ -46,6 +52,11 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 | [#155](https://github.com/imrohitagrawal/citevyn/issues/155) | Evaluation + live-ops dashboard | frontend / observability | Surfaces existing eval metrics + live cost/latency/refusal; pairs with #154 |
 | [#156](https://github.com/imrohitagrawal/citevyn/issues/156) | Better re-ranking of retrieved chunks | backend / RAG | Feature-flagged, cost-aware, proven on golden + distractor eval sets |
 | [#62](https://github.com/imrohitagrawal/citevyn/issues/62) | ~~Composer gating while a live answer is in flight~~ **FIXED IN PR #357.** | frontend | Closed WITHOUT #61 — the two were only ever scheduled together, they do not depend on each other. The issue body was REWRITTEN first: it blamed a shared `chatTimer` and last-message targeting, both removed by PR #88, so the next reader is not sent after code that no longer exists. What actually survived is attribution — a bot bubble is appended when its request resolves, so two questions back to back render `[Q1][Q2][A1][A2]`. Gating the composer makes that unreachable from the composer, and the in-flight signal became a COUNT so the loader survives the overlap still reachable via `send`. |
+| [#601](https://github.com/imrohitagrawal/citevyn/issues/601) | Search coverage: free CI proves every kind of retrieval | tests / RAG | Tests and recorded vectors only; lands before #370. |
+| [#602](https://github.com/imrohitagrawal/citevyn/issues/602) | Answers: full, partial, or an honest decline with the true reason | backend / RAG | Needs #598 first; must not reintroduce #174. |
+| [#603](https://github.com/imrohitagrawal/citevyn/issues/603) | Corpus: dated, original-wording model facts | backend / corpus | Within ADR-0003; stopgap until #606. |
+| [#604](https://github.com/imrohitagrawal/citevyn/issues/604) | Entity retrieval: typed entities and aliases linked to passages | backend / RAG | Starts from the failures #601 finds. |
+| [#605](https://github.com/imrohitagrawal/citevyn/issues/605) | Agentic retrieval: a bounded extra search | backend / RAG | Off by default; switched on only if the eval shows a gain. |
 
 ### V2 milestone
 
@@ -53,6 +64,11 @@ Post-MVP work is organized under two GitHub milestones (see `RELEASE_PLAN.md` §
 |---|---|---|---|
 | [#157](https://github.com/imrohitagrawal/citevyn/issues/157) | ChatGPT (OpenAI) official docs — 5th domain | backend / corpus | Deferred: breadth-not-depth **and** licensing-gated (ADR-0003). Not deferred for UI risk |
 | [#158](https://github.com/imrohitagrawal/citevyn/issues/158) | Voice output (TTS) for answers | frontend / API | Large surface, off-core; explicit MVP non-goal |
+| [#606](https://github.com/imrohitagrawal/citevyn/issues/606) | Scheduled refresh from official documentation and help pages (FR-014) | backend / corpus | Licence decision first (ADR-0003). |
+| [#607](https://github.com/imrohitagrawal/citevyn/issues/607) | Voice input for questions | frontend / API | Companion to #158. |
+| [#608](https://github.com/imrohitagrawal/citevyn/issues/608) | Cursor official documentation as a product domain | backend / corpus | Same licence gate as #157. |
+| [#609](https://github.com/imrohitagrawal/citevyn/issues/609) | Reviewer-agent workflow for answers | backend / RAG | Scope to be written when scheduled. |
+| [#610](https://github.com/imrohitagrawal/citevyn/issues/610) | Browser extension | frontend | Scope to be written when scheduled. |
 
 ## Open follow-ups (unmilestoned)
 
