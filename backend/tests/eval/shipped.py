@@ -20,8 +20,9 @@ import contextlib
 import dataclasses
 import json
 import pathlib
+import tomllib
 import uuid
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Generator, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -39,11 +40,12 @@ from app.guardrails.domain import (
     classify_domains,
     is_unsupported,
 )
-from app.models import Chunk, IndexVersion
-from app.models.enums import IndexStatus, JobStatus, RetrievalType
+from app.models import Chunk, Document, IndexVersion
+from app.models.enums import DocumentStatus, IndexStatus, JobStatus
+from app.retrieval import hybrid as hybrid_module
 from app.retrieval.hybrid import HybridRetriever
-from app.retrieval.types import EvidenceHit, RetrievalResult, VectorDegrade
-from app.routing.intent import Intent, classify_intent
+from app.retrieval.types import RetrievalResult, VectorDegrade
+from app.routing.intent import Intent, classify_intent, should_skip_retrieval
 from app.worker.allowlist import MVP_SOURCES
 from app.worker.chunker import chunk_document
 from app.worker.cli import content_version_hash
@@ -52,7 +54,7 @@ from app.worker.parser import parse_markdown
 from app.worker.runner import IngestionRunner, ensure_index_version
 
 from .cases import load_cases
-from .paths import GOLDEN_PATH, SHIPPED_QUESTIONS_PATH
+from .paths import GOLDEN_PATH, REPO_ROOT, SHIPPED_QUESTIONS_PATH
 from .recorded import (
     RECORD_COMMAND,
     MissingRecordedVector,
@@ -76,7 +78,9 @@ __all__ = [
     "ShippedLabelError",
     "ShippedOutcome",
     "all_shipped_cases",
+    "arm_label",
     "build_report",
+    "check_production_identity",
     "check_chunk_vectors",
     "evaluate_cases",
     "identity_from_header",
@@ -85,6 +89,7 @@ __all__ = [
     "load_golden_labels",
     "load_question_vectors",
     "load_shipped_questions",
+    "production_embedder_identity",
     "render_summary",
     "retrieve_routed",
     "route_case",
@@ -124,6 +129,32 @@ def shipped_chunk_texts() -> dict[str, str]:
 def shipped_heading_keys() -> dict[str, str]:
     """``source#heading`` to content checksum, the identity a recorded chunk is held to."""
     return {key: sha256_text(text) for key, text in shipped_chunk_texts().items()}
+
+
+def production_embedder_identity() -> EmbedderIdentity:
+    """Production's query embedder: ``fly.toml``'s environment over the Settings defaults."""
+    env = tomllib.loads((REPO_ROOT / "fly.toml").read_text(encoding="utf-8")).get("env", {})
+
+    def value(field: str) -> Any:
+        return env.get(f"CITEVYN_{field.upper()}", Settings.model_fields[field].default)
+
+    return EmbedderIdentity(
+        provider=value("embedding_provider"),
+        model=value("embedding_model"),
+        dim=int(value("embedding_dim")),
+    )
+
+
+def check_production_identity(*headers: Mapping[str, Any]) -> None:
+    """Every recording header must name production's provider, model and dimension."""
+    production = production_embedder_identity()
+    for header in headers:
+        recorded = identity_from_header(header)
+        if recorded != production:
+            raise ShippedEvalError(
+                f"a recording was made with {tuple(recorded)}; production embeds with "
+                f"{tuple(production)}. Re-record with: {RECORD_COMMAND}"
+            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,6 +277,8 @@ class RoutedQuestion:
     routed_domain: str
     intent: Intent
     areas: tuple[str, ...]
+    # ``clarify`` or ``refused`` when production answers without retrieving at all.
+    production_skip: str | None = None
 
 
 def route_case(case: ShippedCase, settings: Settings) -> RoutedQuestion:
@@ -260,16 +293,51 @@ def route_case(case: ShippedCase, settings: Settings) -> RoutedQuestion:
     intent = classify_intent(query, domain)
     if is_unsupported(domain):
         intent = Intent.unsupported
+    answer_globally = settings.answer_when_grounded and intent is Intent.unsupported
     named = [d.value for d in classify_domains(query)]
     if len(named) >= 2:
         route, areas = ROUTE_MULTI, tuple(named)
-    elif settings.answer_when_grounded and intent is Intent.unsupported:
+    elif answer_globally:
         route, areas = ROUTE_GLOBAL, ()
     else:
         route, areas = ROUTE_SCOPED, (domain.value,)
+    skip = None
+    if intent is Intent.unsupported and not answer_globally:
+        skip = "refused"
+    elif should_skip_retrieval(intent) and not answer_globally:
+        skip = "clarify"
     return RoutedQuestion(
-        query=query, route=route, routed_domain=domain.value, intent=intent, areas=areas
+        query=query,
+        route=route,
+        routed_domain=domain.value,
+        intent=intent,
+        areas=areas,
+        production_skip=skip,
     )
+
+
+class _NoHits:
+    """An arm switched off: built like a retriever, it finds nothing."""
+
+    def __init__(self, *_: object, **__: object) -> None:
+        pass
+
+    async def retrieve(self, *_: object, **__: object) -> list[Any]:
+        return []
+
+
+@contextlib.contextmanager
+def _arms_off(arms: frozenset[str]) -> Generator[None]:
+    """Switch the exact or keyword arm off for one retrieval, then restore it."""
+    names = {"exact": "ExactRetriever", "keyword": "KeywordRetriever"}
+    saved = {arm: getattr(hybrid_module, names[arm]) for arm in arms if arm in names}
+    try:
+        for arm in saved:
+            setattr(hybrid_module, names[arm], _NoHits)
+        yield
+    finally:
+        for arm, original in saved.items():
+            setattr(hybrid_module, names[arm], original)
 
 
 async def retrieve_routed(
@@ -279,32 +347,34 @@ async def retrieve_routed(
     embedder: Embedder,
     identity: EmbedderIdentity | None,
     settings: Settings,
+    arms_off: frozenset[str] = frozenset(),
 ) -> RetrievalResult:
-    """The real retriever over the routed question."""
+    """The real retriever over the routed question, optionally with arms switched off."""
     retriever = HybridRetriever(
         session,
-        embedder=embedder,
+        embedder=None if "vector" in arms_off else embedder,
         embedder_identity=identity,
         global_confidence=(
             settings.retrieval_global_min_top_score,
             settings.retrieval_global_min_margin,
         ),
     )
-    if routed.route == ROUTE_MULTI:
-        return await retriever.retrieve_multi(
+    with _arms_off(arms_off):
+        if routed.route == ROUTE_MULTI:
+            return await retriever.retrieve_multi(
+                routed.query,
+                product_areas=list(routed.areas),
+                intent=routed.intent,
+                limit=settings.retrieval_max_candidates,
+                top_k=settings.retrieval_top_k,
+            )
+        return await retriever.retrieve(
             routed.query,
-            product_areas=list(routed.areas),
+            product_area=routed.areas[0] if routed.areas else None,
             intent=routed.intent,
             limit=settings.retrieval_max_candidates,
             top_k=settings.retrieval_top_k,
         )
-    return await retriever.retrieve(
-        routed.query,
-        product_area=routed.areas[0] if routed.areas else None,
-        intent=routed.intent,
-        limit=settings.retrieval_max_candidates,
-        top_k=settings.retrieval_top_k,
-    )
 
 
 def known_question_texts() -> set[str]:
@@ -414,19 +484,49 @@ class ShippedOutcome:
     routed_domain: str
     degrade: VectorDegrade
     follow_up: bool
+    # Which arms, removed one at a time, change the rank-1 passage, and the gold rank
+    # with only the vector arm or only the keyword arm on.
+    rank1_changed_by: tuple[str, ...] = ()
+    rank_vector_only: int | None = None
+    rank_keyword_only: int | None = None
+    production_skip: str | None = None
 
 
-def _winning_arm(hits: Sequence[EvidenceHit]) -> str | None:
-    """The arm behind rank 1; ``hybrid`` when more than one arm added to its score."""
-    if not hits:
-        return None
-    top = hits[0]
-    single_arm_score = {RetrievalType.exact: 1.0, RetrievalType.keyword: 0.5}.get(
-        top.retrieval_type
+_ARMS = ("vector", "keyword", "exact")
+
+
+def arm_label(changed_by: Iterable[str]) -> str:
+    """``none``, the single arm whose removal changes rank 1, or ``both`` for several."""
+    arms = tuple(changed_by)
+    if not arms:
+        return "none"
+    return arms[0] if len(arms) == 1 else "both"
+
+
+def _keys(result: RetrievalResult) -> tuple[str, ...]:
+    return tuple(f"{hit.source_name}#{hit.heading}" for hit in result.hits)
+
+
+def _gold_rank(gold: Sequence[str], retrieved: Sequence[str]) -> int | None:
+    return next((i for i, key in enumerate(retrieved, start=1) if key in set(gold)), None)
+
+
+async def _check_vector_arm_is_live(session: AsyncSession) -> None:
+    """Every shipped chunk is active and embedded, or no number is honest."""
+    expected = len(shipped_heading_keys())
+    active = (
+        select(func.count())
+        .select_from(Chunk)
+        .join(Document, Chunk.document_id == Document.document_id)
+        .where(Document.status == DocumentStatus.active)
     )
-    if single_arm_score is not None and top.score > single_arm_score + 1e-9:
-        return "hybrid"
-    return top.retrieval_type.value
+    total = int(await session.scalar(active) or 0)
+    embedded = int(await session.scalar(active.where(Chunk.embedding.is_not(None))) or 0)  # type: ignore[attr-defined]
+    if total != expected or embedded != expected:
+        raise ShippedEvalError(
+            f"the vector arm is not fully live: {embedded} of {total} active chunks embedded, "
+            f"expected {expected}"
+        )
 
 
 async def evaluate_cases(
@@ -436,13 +536,35 @@ async def evaluate_cases(
     cases: Sequence[ShippedCase],
     settings: Settings,
 ) -> list[ShippedOutcome]:
-    """Run each case through the real retriever. ``identity`` drives the mismatch gate."""
+    """Run each case through the real retriever. ``identity`` drives the mismatch gate.
+
+    Each case also runs with each arm removed in turn, so the report can say which arm
+    really decided rank 1 rather than which arm happened to tag the hit.
+    """
+    await _check_vector_arm_is_live(session)
     outcomes: list[ShippedOutcome] = []
     for case in cases:
         routed = route_case(case, settings)
-        result = await retrieve_routed(
-            session, routed, embedder=embedder, identity=identity, settings=settings
-        )
+
+        async def run(off: frozenset[str], routed: RoutedQuestion = routed) -> RetrievalResult:
+            return await retrieve_routed(
+                session,
+                routed,
+                embedder=embedder,
+                identity=identity,
+                settings=settings,
+                arms_off=off,
+            )
+
+        result = await run(frozenset())
+        retrieved = _keys(result)
+        top = retrieved[:1]
+        changed_by: list[str] = []
+        for arm in _ARMS:
+            if _keys(await run(frozenset({arm})))[:1] != top:
+                changed_by.append(arm)
+        vector_only = _keys(await run(frozenset({"keyword", "exact"})))
+        keyword_only = _keys(await run(frozenset({"vector", "exact"})))
         outcomes.append(
             ShippedOutcome(
                 case_id=case.id,
@@ -450,12 +572,16 @@ async def evaluate_cases(
                 kind=case.kind,
                 coverage_kind=case.coverage_kind,
                 gold=case.shipped_gold,
-                retrieved=tuple(f"{hit.source_name}#{hit.heading}" for hit in result.hits),
+                retrieved=retrieved,
                 route=routed.route,
-                winning_arm=_winning_arm(result.hits),
+                winning_arm=arm_label(changed_by) if retrieved else None,
                 routed_domain=routed.routed_domain,
                 degrade=result.vector_degrade,
                 follow_up=case.follow_up,
+                rank1_changed_by=tuple(changed_by),
+                rank_vector_only=_gold_rank(case.shipped_gold, vector_only),
+                rank_keyword_only=_gold_rank(case.shipped_gold, keyword_only),
+                production_skip=routed.production_skip,
             )
         )
     return outcomes
@@ -500,7 +626,7 @@ def _exclusion(outcome: ShippedOutcome) -> str | None:
         return "coverage_set"
     if outcome.kind == "refusal":
         return "refusal"
-    if outcome.follow_up or outcome.kind == "followup":
+    if outcome.follow_up:
         return "follow_up"
     if not outcome.gold:
         return "no_single_gold"
@@ -538,10 +664,14 @@ def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
     reasons = {o.case_id: _exclusion(o) for o in outcomes}
     pool = [o for o in outcomes if reasons[o.case_id] is None]
     refusals = [o for o in outcomes if o.kind == "refusal"]
+    passages = collections.Counter(o.gold[0] for o in pool)
+    non_vector = sum(1 for o in outcomes if set(o.rank1_changed_by) & {"keyword", "exact"})
     return {
         "decision_a": {
             **_metrics(pool),
             "pool": len(pool),
+            "distinct_passages": len(passages),
+            "largest_passage_share": (max(passages.values()) / len(pool) if pool else None),
             "total": len(outcomes),
             "excluded": {
                 label: sum(1 for r in reasons.values() if r == label) for label in _EXCLUSIONS
@@ -553,6 +683,14 @@ def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
             "total": len(refusals),
             "retrieved_something": sum(1 for o in refusals if o.retrieved),
         },
+        "arm_attribution": {"non_vector_changed_rank_1": non_vector, "total": len(outcomes)},
+        "skipped_in_production": dict(
+            sorted(
+                collections.Counter(
+                    o.production_skip for o in outcomes if o.production_skip
+                ).items()
+            )
+        ),
         "routes": dict(sorted(collections.Counter(str(o.route) for o in outcomes).items())),
         "winning_arms": dict(
             sorted(collections.Counter(str(o.winning_arm) for o in outcomes).items())
@@ -568,6 +706,10 @@ def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
                 "rank": _rank(o),
                 "route": o.route,
                 "winning_arm": o.winning_arm,
+                "arm": arm_label(o.rank1_changed_by) if o.retrieved else None,
+                "rank_vector_only": o.rank_vector_only,
+                "rank_keyword_only": o.rank_keyword_only,
+                "skipped_in_production": o.production_skip,
                 "routed_domain": o.routed_domain,
                 "follow_up": o.follow_up,
                 "decision_a_exclusion": reasons[o.case_id],
@@ -575,6 +717,10 @@ def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
             for o in outcomes
         ],
     }
+
+
+def _rank_cell(rank: int | None) -> str:
+    return "-" if rank is None else str(rank)
 
 
 def _number(value: float | None) -> str:
@@ -604,6 +750,9 @@ def render_summary(report: Mapping[str, Any]) -> str:
         f"MRR {_number(decision['mrr'])}, recall@1 {_number(decision['recall_at_1'])}, "
         f"over a pool of {decision['pool']} of {decision['total']} questions.",
         "",
+        f"The pool covers {decision['distinct_passages']} distinct passages; the largest "
+        f"passage holds a share of {_number(decision['largest_passage_share'])}.",
+        "",
         "Excluded: "
         + ", ".join(f"{label} {count}" for label, count in decision["excluded"].items())
         + ".",
@@ -614,18 +763,26 @@ def render_summary(report: Mapping[str, Any]) -> str:
         f"Refusals that retrieved something (informational): "
         f"{report['refusals']['retrieved_something']} of {report['refusals']['total']}.",
         "",
+        f"Arms (each removed in turn): a non-vector arm changed rank 1: "
+        f"{report['arm_attribution']['non_vector_changed_rank_1']} of "
+        f"{report['arm_attribution']['total']}.",
+        "Not retrieved for in production (reported, not excluded): "
+        + (", ".join(f"{k} {v}" for k, v in report["skipped_in_production"].items()) or "none")
+        + ".",
+        "",
         "Routes: " + ", ".join(f"{k} {v}" for k, v in report["routes"].items()) + ".",
         "Winning arms: " + ", ".join(f"{k} {v}" for k, v in report["winning_arms"].items()) + ".",
         "",
         "### Per question",
         "",
-        "| id | rank | route | arm | domain | follow-up |",
-        "|---|---|---|---|---|---|",
+        "| id | rank | vector only | keyword only | route | arm | domain | follow-up | skipped |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     lines.extend(
-        f"| {row['id']} | {row['rank'] if row['rank'] is not None else '-'} | {row['route']} "
-        f"| {row['winning_arm'] or '-'} | {row['routed_domain']} "
-        f"| {'yes' if row['follow_up'] else 'no'} |"
+        f"| {row['id']} | {_rank_cell(row['rank'])} | {_rank_cell(row['rank_vector_only'])} "
+        f"| {_rank_cell(row['rank_keyword_only'])} | {row['route']} "
+        f"| {row['arm'] or '-'} | {row['routed_domain']} "
+        f"| {'yes' if row['follow_up'] else 'no'} | {row['skipped_in_production'] or '-'} |"
         for row in report["questions"]
     )
     return "\n".join(lines) + "\n"

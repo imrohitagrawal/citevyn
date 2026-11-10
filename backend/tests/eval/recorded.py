@@ -31,9 +31,11 @@ TASK_TYPE_QUERY = "RETRIEVAL_QUERY"
 _HEADER_FIELDS = ("schema", "provider", "model", "dim", "task_type")
 
 RECORD_COMMAND = (
-    "python -m tests.eval.record_vectors --embed-changed-chunks "
-    "(from backend/, with the embedding provider's key in the environment; "
-    "see tests/eval/README.md)"
+    "python -m tests.eval.record_vectors --export-chunks-from <local Postgres URL> "
+    "--embed-changed-chunks, run from backend/ with CITEVYN_EMBEDDING_PROVIDER, "
+    "CITEVYN_EMBEDDING_MODEL and CITEVYN_GEMINI_API_KEY set for production's embedder and "
+    "CITEVYN_DATABASE_URL naming a migrated local database. A re-record is a paid provider "
+    "call and needs the owner's approval; see tests/eval/README.md"
 )
 
 

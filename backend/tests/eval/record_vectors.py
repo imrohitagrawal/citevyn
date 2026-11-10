@@ -58,6 +58,7 @@ from .recorded import (
 from .shipped import (
     ShippedCase,
     all_shipped_cases,
+    check_production_identity,
     known_question_texts,
     retrieve_routed,
     route_case,
@@ -321,8 +322,9 @@ async def export_chunk_vectors(
     The URL must be given explicitly and must be local. The index's own stamp has to equal
     the configured embedder, or its vectors would be filed under the wrong space.
     """
-    host = make_url(database_url).host
-    if host is not None and host not in _LOCAL_HOSTS:
+    url = make_url(database_url)
+    hidden = {"host", "hostaddr", "service"} & set(url.query)
+    if hidden or (url.host is not None and url.host not in _LOCAL_HOSTS):
         raise ShippedEvalError("--export-chunks-from must name a local database")
     engine = create_async_engine(database_url)
     try:
@@ -398,6 +400,7 @@ async def _run(args: argparse.Namespace) -> int:
     if settings.embedding_provider == "stub":
         raise ShippedEvalError("recording needs a real embedder; the configured one is the stub")
     identity = configured_embedder_identity(settings)
+    check_production_identity(question_header(identity))
     exported: dict[str, ChunkVector] = {}
     if args.export_chunks_from:
         exported = await export_chunk_vectors(args.export_chunks_from, identity=identity)

@@ -227,7 +227,21 @@ python -m tests.eval.record_vectors --export-chunks-from <local postgres URL> # 
 python -m tests.eval.record_vectors --embed-changed-chunks                    # also embeds changed chunks
 ```
 
-`--dry-run` needs no key or database. Embedding goes through the metered embedder, so
-`CITEVYN_DATABASE_URL` must name a migrated local database. Files are rewritten after every
-embedded text with sorted lines, so a re-run resumes, and the first failure stops the run.
-Embedding changed chunks is a provider call and needs its own approval.
+`--dry-run` needs no key or database. A real run needs, in the environment:
+
+- `CITEVYN_EMBEDDING_PROVIDER` and `CITEVYN_EMBEDDING_MODEL` set to production's embedder (the
+  recorder refuses any other; both file headers must match it);
+- `CITEVYN_GEMINI_API_KEY`, the provider key;
+- `CITEVYN_DATABASE_URL` naming a migrated local database, because embedding goes through the
+  metered embedder, which records each call there;
+- `--export-chunks-from` with a local Postgres URL holding the current index, for free chunk
+  vectors.
+
+A re-record is a paid provider call and needs the owner's approval. Files are rewritten after
+every embedded text with sorted lines, so a re-run resumes, and the first failure stops the run.
+
+The report also removes each arm in turn: `arm` names the arm whose removal changes the
+rank-1 passage (`vector`, `keyword`, `exact`, `both` or `none`), beside the gold rank with only
+the vector arm (`rank_vector_only`) or only the keyword arm (`rank_keyword_only`). A vector arm
+with any chunk unembedded stops the report. Questions production answers without retrieving
+(`clarify`, `refused`) are labelled, not excluded.
