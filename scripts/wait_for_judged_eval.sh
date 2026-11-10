@@ -7,12 +7,21 @@
 # Optional env:  POLL_SECONDS (30), START_GRACE_SECONDS (900), TOTAL_TIMEOUT_SECONDS
 #                (4500). Each must be a positive integer; set-but-invalid is refused.
 #
-# Exit 0 only when the newest judged job on this commit concluded `success`.
-# Everything else exits 1: any other conclusion, no judged job within the grace
-# period, the total timeout, or five `gh` failures in a row.
+# Exit 0 only when the newest judged job on this commit concluded `success` AND
+# exactly one step of it named JUDGED_STEP_NAME concluded `success`. Everything else
+# exits 1: any other conclusion, an eval step that is skipped, absent, duplicated or
+# anything but `success`, no judged job within the grace period, the total timeout,
+# or five `gh` failures in a row.
 #
-# What decides. Runs of ci.yml on this commit are read, the latest attempt of each,
-# and the job whose name equals JUDGED_JOB_NAME exactly is kept. Skipped jobs do not
+# Why the step as well as the job. When the OpenRouter secret is absent the job's
+# guard skips every step and the job still concludes `success`, so a green job can
+# mean nothing was judged. A skipped eval stops the release.
+#
+# What decides. Runs of ci.yml on this commit are read, the latest attempt of each.
+# Only the events `push` (the tag) and `workflow_dispatch` (the manual fix) count: a
+# `pull_request` run tests a merge ref, not this commit, and an event GitHub adds
+# later does not count until someone decides it should. The job whose name equals
+# JUDGED_JOB_NAME exactly is kept. Skipped jobs do not
 # count, because an ordinary merge skips this job on the same commit. The highest
 # job id is the newest job, so a re-run inside an older run still counts as newest;
 # comparing run ids would get that wrong.
@@ -30,6 +39,8 @@ set -uo pipefail
 # Must equal the `name:` of the answer-quality-eval job in ci.yml.
 # backend/tests/test_release_waits_for_judged_eval.py fails if the two differ.
 JUDGED_JOB_NAME='judged answer-quality eval (needs the OpenRouter and Gemini key secrets)'
+# Must equal the `name:` of the step in that job that runs the eval (same test).
+JUDGED_STEP_NAME='Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)'
 MAX_CONSECUTIVE_GH_FAILURES=5
 
 log() { echo "wait_for_judged_eval: $*"; }
@@ -68,7 +79,8 @@ gh_get() {
 }
 
 # poll_once: writes one line per counted job to found.tsv (id, status, conclusion,
-# run URL). Returns non-zero if any answer was unusable.
+# eval step result, run URL). The step result is its conclusion, `none` if it has
+# none, or `absent` / `duplicate`. Returns non-zero if any answer was unusable.
 poll_once() {
     local runs_path run_id run_url
     : >"${WORK}/found.tsv"
@@ -77,7 +89,8 @@ poll_once() {
     # head_sha is compared here as well: GitHub ignores a query filter it does not
     # recognise, and the result would be other commits' runs.
     if ! jq -r --arg sha "${SHA}" \
-        '.workflow_runs[] | select(.head_sha == $sha)
+        '.workflow_runs[]
+         | select(.head_sha == $sha and (.event == "push" or .event == "workflow_dispatch"))
          | [(.id | tostring), (.html_url // "(no URL)")] | @tsv' \
         "${WORK}/runs.json" >"${WORK}/runs.tsv" 2>/dev/null; then
         log "unusable answer listing the runs"
@@ -86,9 +99,14 @@ poll_once() {
     while IFS=$'\t' read -r run_id run_url; do
         gh_get "${WORK}/jobs.json" \
             "repos/${REPO}/actions/runs/${run_id}/jobs?filter=latest&per_page=100" || return 1
-        if ! jq -r --arg name "${JUDGED_JOB_NAME}" --arg url "${run_url}" \
+        if ! jq -r --arg name "${JUDGED_JOB_NAME}" --arg step "${JUDGED_STEP_NAME}" \
+            --arg url "${run_url}" \
             '.jobs[] | select(.name == $name and .conclusion != "skipped")
-             | [(.id | tostring), .status, (.conclusion // "none"), $url] | @tsv' \
+             | [(.steps // [])[] | select(.name == $step) | (.conclusion // "none")] as $found
+             | (if ($found | length) == 0 then "absent"
+                elif ($found | length) > 1 then "duplicate"
+                else $found[0] end) as $step_result
+             | [(.id | tostring), .status, (.conclusion // "none"), $step_result, $url] | @tsv' \
             "${WORK}/jobs.json" >>"${WORK}/found.tsv" 2>/dev/null; then
             log "unusable answer listing the jobs of run ${run_id}"
             return 1
@@ -108,14 +126,19 @@ while :; do
         if [ -z "${newest}" ]; then
             state=no-job
         else
-            IFS=$'\t' read -r job_id job_status conclusion run_url <<<"${newest}"
+            IFS=$'\t' read -r job_id job_status conclusion step_result run_url <<<"${newest}"
             if [ "${job_status}" = completed ]; then
-                # An allowlist of one: anything GitHub adds later fails closed.
-                if [ "${conclusion}" = success ]; then
+                # Allowlists of one: anything GitHub adds later fails closed.
+                [ "${conclusion}" = success ] ||
+                    die "judged eval concluded '${conclusion}': ${run_url}"
+                if [ "${step_result}" = success ]; then
                     log "judged eval passed: job ${job_id}, ${run_url}"
                     exit 0
                 fi
-                die "judged eval concluded '${conclusion}': ${run_url}"
+                if [ "${step_result}" = skipped ]; then
+                    die "the judged eval did not run: its step was skipped, so the job's success judged nothing. The repository secret CITEVYN_OPENROUTER_API_KEY is missing. Add it under Settings > Secrets and variables > Actions, run the ci workflow on this commit, then re-run this release: ${run_url}"
+                fi
+                die "the judged eval did not run to a pass: step '${JUDGED_STEP_NAME}' is '${step_result}': ${run_url}"
             fi
             state=running
             log "job ${job_id} is ${job_status}: ${run_url}"

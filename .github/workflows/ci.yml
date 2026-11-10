@@ -369,9 +369,11 @@ jobs:
     # The gate itself is in release.yml, not here: its `judged-eval-gate` job runs
     # scripts/wait_for_judged_eval.sh, and `build` and `release` need that job, so a
     # tag publishes no images unless this job concluded `success` on the tagged
-    # commit (#457). That script matches this job's `name:` exactly; a test fails if
-    # the two differ. If the OpenRouter secret is absent this job self-skips its steps
-    # and still concludes `success`, so the gate depends on that secret being set.
+    # commit (#457) and its judged eval step below also concluded `success`. That
+    # script matches this job's `name:` and that step's `name:` exactly; a test fails
+    # if either differs. This job stays green when the OpenRouter secret is absent, but
+    # a skipped eval step stops the release. Only `push` and `workflow_dispatch` runs
+    # count, so a labelled pull request's run cannot satisfy the gate.
     #
     # Note it is the TRIGGER that controls spend, not the secret. Removing the
     # secret would also stop the spend, but the job then self-skips SILENTLY and

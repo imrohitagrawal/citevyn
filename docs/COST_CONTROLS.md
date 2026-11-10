@@ -294,7 +294,7 @@ CI runs the judged eval **at full coverage, less often**:
 
 * **push of a `v*` tag** → runs (full set). This is the **release gate**: the
   `judged-eval-gate` job in `release.yml` runs `scripts/wait_for_judged_eval.sh`, and
-  no image is built or published until this eval has concluded `success` on the tagged
+  no image is built or published until this eval has run and passed on the tagged
   commit. Limits are stated under "What the release gate covers" below.
 * **`workflow_dispatch`** → runs (full set). Run it on demand from the Actions tab.
 * **pull request labelled `full-eval`** → runs (full set). The `labeled` event is in
@@ -319,9 +319,10 @@ runs") fails the suite. Mutation-verified.
 
 #### What the release gate covers
 
-The wait reads runs of `ci.yml` on the tagged commit and takes the newest judged job
-that was not skipped. Only the conclusion `success` lets the release continue. If no
-judged job appears within 15 minutes, the release fails and says to run the `ci`
+The wait reads runs of `ci.yml` on the tagged commit from `push` and
+`workflow_dispatch` events only; a pull request's run tests a merge ref, so it does not
+count. It takes the newest judged job that was not skipped. The release continues only
+if that job and its eval step both concluded `success`. If no judged job appears within 15 minutes, the release fails and says to run the `ci`
 workflow manually on that commit. There is no skip input and no override.
 
 * The judged run is known to fail until the answer work under
@@ -329,9 +330,9 @@ workflow manually on that commit. There is no skip input and no override.
   not publish until then.
 * Fly deploys are separate and are **not** gated by this. They run from a local build,
   and judged runs are not made per deploy.
-* If the `CITEVYN_OPENROUTER_API_KEY` secret is absent, the judged job skips its steps
-  and still concludes `success`, so the gate passes without a judged run. The gate
-  depends on that secret staying set.
+* A skipped eval stops the release. If the `CITEVYN_OPENROUTER_API_KEY` secret is
+  absent, the judged job stays green but its eval step is skipped, and the wait fails
+  and names the missing secret.
 
 #### Why sampling cases was rejected
 
