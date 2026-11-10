@@ -21,6 +21,7 @@ ok()  { PASS=$((PASS + 1)); echo "  [PASS] $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  [FAIL] $1" >&2; }
 
 JOB='judged answer-quality eval (needs the OpenRouter and Gemini key secrets)'
+EVAL_STEP='Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)'
 SHA_UNDER_TEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 OTHER_SHA='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 TOKEN='ghs_FAKE_TOKEN_VALUE_never_print_me'
@@ -81,19 +82,28 @@ new_case() {
     echo "${CLOCK_START}" >"${FAKE_DIR}/clock"
 }
 
-run_obj() {  # run_obj <id> [sha]
-    printf '{"id":%s,"head_sha":"%s","html_url":"https://example.test/runs/%s"}' \
-        "$1" "${2:-${SHA_UNDER_TEST}}" "$1"
+run_obj() {  # run_obj <id> [sha] [event]
+    printf '{"id":%s,"event":"%s","head_sha":"%s","html_url":"https://example.test/runs/%s"}' \
+        "$1" "${3:-push}" "${2:-${SHA_UNDER_TEST}}" "$1"
 }
 runs_json() {  # runs_json <run-object>...
     local joined
     joined="$(IFS=,; echo "$*")"
     printf '{"total_count":%s,"workflow_runs":[%s]}' "$#" "${joined}"
 }
-job_obj() {  # job_obj <id> <name> <status> <conclusion|null>
+step_obj() {  # step_obj <name> <conclusion|null>
     local conclusion='null'
+    [ "$2" = null ] || conclusion="\"$2\""
+    printf '{"name":"%s","status":"completed","conclusion":%s}' "$1" "${conclusion}"
+}
+job_obj() {  # job_obj <id> <name> <status> <conclusion|null> [steps as a JSON array]
+    # A job marked success gets a passing eval step unless the case says otherwise.
+    local conclusion='null' steps='[]'
     [ "$4" = null ] || conclusion="\"$4\""
-    printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s}' "$1" "$2" "$3" "${conclusion}"
+    if [ "$4" = success ]; then steps="[$(step_obj "${EVAL_STEP}" success)]"; fi
+    if [ -n "${5:-}" ]; then steps="$5"; fi
+    printf '{"id":%s,"name":"%s","status":"%s","conclusion":%s,"steps":%s}' \
+        "$1" "$2" "$3" "${conclusion}" "${steps}"
 }
 jobs_json() {  # jobs_json <job-object>...
     local joined
@@ -296,6 +306,111 @@ put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" in_progress null)")"
 put jobs-202 2 "$(jobs_json "$(job_obj 502 "${JOB}" completed failure)")"
 run_gate
 check "a newer running job is waited for" 1 "https://example.test/runs/202"
+
+# --- The eval step inside a job marked success -------------------------------
+
+job_with_steps() {  # job_with_steps <steps as a JSON array>
+    put runs 1 "$(runs_json "$(run_obj 201)")"
+    put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success "$1")")"
+}
+
+# Red when: the job's conclusion alone is trusted again. This is the job that stayed
+# green while the guard step skipped everything for want of the secret.
+new_case; job_with_steps "[$(step_obj "${EVAL_STEP}" skipped)]"; run_gate
+check "job success with the eval step skipped fails" 1 "did not run" \
+    "CITEVYN_OPENROUTER_API_KEY" "https://example.test/runs/201"
+
+# Red when: a job with no eval step at all is read as having judged anything.
+new_case; job_with_steps "[$(step_obj "Set up job" success)]"; run_gate
+check "eval step absent fails" 1 "did not run" "absent" "https://example.test/runs/201"
+new_case; job_with_steps '[]'; run_gate
+check "no steps at all fails" 1 "did not run" "absent"
+new_case
+put runs 1 "$(runs_json "$(run_obj 201)")"
+put jobs-201 1 "{\"jobs\":[{\"id\":501,\"name\":\"${JOB}\",\"status\":\"completed\",\"conclusion\":\"success\"}]}"
+run_gate
+check "a job with no steps field fails" 1 "did not run" "absent"
+
+# Red when: the eval step's own result is ignored, or any value joins "success".
+for result in failure cancelled neutral a_value_nobody_has_seen; do
+    new_case; job_with_steps "[$(step_obj "${EVAL_STEP}" "${result}")]"; run_gate
+    check "eval step ${result} inside a job marked success fails" 1 "did not run" "${result}"
+done
+new_case; job_with_steps "[$(step_obj "${EVAL_STEP}" null)]"; run_gate
+check "eval step with no conclusion fails" 1 "did not run" "none"
+
+# Red when: two steps of that name are settled by picking one.
+new_case
+job_with_steps "[$(step_obj "${EVAL_STEP}" success),$(step_obj "${EVAL_STEP}" success)]"
+run_gate
+check "two eval steps are ambiguous and fail" 1 "did not run" "duplicate"
+
+# Red when: the step is matched on anything but its exact name.
+new_case
+job_with_steps "[$(step_obj "Judged eval" success),$(step_obj "${EVAL_STEP} (retry)" success)]"
+run_gate
+check "near-identical step names are ignored" 1 "did not run" "absent"
+
+# Red when: the step check rejects the real thing, so nothing could ever publish.
+# Partner of every case above: the same job, with the eval step passing, passes.
+new_case
+job_with_steps "[$(step_obj "Guard" success),$(step_obj "${EVAL_STEP}" success)]"
+run_gate
+check "job and eval step both success passes" 0 "https://example.test/runs/201"
+
+# --- Which runs count ---------------------------------------------------------
+
+# Red when: a pull_request run counts. It tests a merge ref, not this commit.
+new_case
+put runs 1 "$(runs_json "$(run_obj 201 "" pull_request)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+run_gate
+check "a passing pull_request run alone does not pass" 1 "Run the ci workflow manually on this commit"
+
+# Red when: a newer pull_request result hides the tag run, in either direction.
+new_case
+put runs 1 "$(runs_json "$(run_obj 202 "" pull_request)" "$(run_obj 201)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed failure)")"
+put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" completed success)")"
+run_gate
+check "a newer passing pull_request run does not hide a failed tag run" 1 "https://example.test/runs/201"
+new_case
+put runs 1 "$(runs_json "$(run_obj 202 "" pull_request)" "$(run_obj 201)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" completed failure)")"
+run_gate
+check "a newer failed pull_request run does not hide a passing tag run" 0 "https://example.test/runs/201"
+
+# Red when: the event check becomes a denylist, so an unknown event counts.
+for event in schedule workflow_run a_value_nobody_has_seen; do
+    new_case
+    put runs 1 "$(runs_json "$(run_obj 201 "" "${event}")")"
+    put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+    run_gate
+    check "event ${event} does not count" 1 "Run the ci workflow manually on this commit"
+done
+
+# Red when: a run with no event field counts.
+new_case
+put runs 1 "{\"workflow_runs\":[{\"id\":201,\"head_sha\":\"${SHA_UNDER_TEST}\",\"html_url\":\"https://example.test/runs/201\"}]}"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+run_gate
+check "a run with no event does not count" 1 "Run the ci workflow manually on this commit"
+
+# Red when: workflow_dispatch stops counting (it is the documented fix), or the
+# older run decides.
+new_case
+put runs 1 "$(runs_json "$(run_obj 202 "" workflow_dispatch)" "$(run_obj 201)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed failure)")"
+put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" completed success)")"
+run_gate
+check "a newer workflow_dispatch pass decides over an older push failure" 0 "https://example.test/runs/202"
+new_case
+put runs 1 "$(runs_json "$(run_obj 202 "" workflow_dispatch)" "$(run_obj 201)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" completed failure)")"
+run_gate
+check "a newer workflow_dispatch failure decides over an older push pass" 1 "https://example.test/runs/202"
 
 # --- The query --------------------------------------------------------------
 

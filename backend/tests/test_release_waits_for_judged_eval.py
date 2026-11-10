@@ -125,3 +125,20 @@ def test_the_script_waits_for_the_judged_jobs_real_name() -> None:
     assert match.group(1) == job["name"]
     assert "${{" not in job["name"], "an expression in the name cannot be matched exactly"
     assert "strategy" not in job, "a matrix appends values to the job's name"
+
+
+def test_the_script_requires_the_real_eval_steps_name() -> None:
+    """Red when: the eval step's ``name:`` in ci.yml and the script's name differ.
+
+    A job marked success proves nothing on its own, because the job stays green
+    when its guard skips every step. The script therefore reads this one step, and
+    renaming it alone would make every release fail as "the eval did not run".
+    """
+    match = re.search(r"^JUDGED_STEP_NAME='([^']+)'$", _script_text(), re.MULTILINE)
+    assert match, "the script no longer declares JUDGED_STEP_NAME as a plain literal"
+    steps = _load(WORKFLOW_DIR / "ci.yml")["jobs"]["answer-quality-eval"]["steps"]
+    named = [step for step in steps if step.get("name") == match.group(1)]
+    assert len(named) == 1, f"expected one step named {match.group(1)!r}, found {len(named)}"
+    assert "tests.eval.runner" in str(named[0]["run"]), (
+        "the step the gate reads no longer runs the judged eval"
+    )
