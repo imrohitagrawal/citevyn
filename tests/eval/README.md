@@ -173,3 +173,32 @@ Cases are anchored to the **conftest** seed corpus (`backend/tests/conftest.py::
 — the corpus the hermetic harness and CI run against — **not** `db/seed` (whose Gemini chunk
 is about the API key, not streaming). Keep new cases answerable from that 5-chunk corpus, or
 the hit-rate metric loses meaning.
+
+## Shipped-corpus labels (#601)
+
+Two label sets measure search on the 44 shipped passages rather than the 5-chunk seed.
+Labels were written from the shipped text before any vector existed, and can be edited
+without re-recording, because a recorded vector depends only on the question text.
+
+- **`shipped_gold`** in `golden.jsonl` and `shipped_questions.jsonl`: every passage that on
+  its own answers the question, as `source#heading`. `[]` means reviewed, and no passage
+  answers it. Refusals never carry the field. One key is single-relevant; two or more are
+  multi-relevant, and leave the question out of the rank-sensitive decision number.
+- **`shipped_questions.jsonl`** holds the coverage questions, reported separately from the
+  golden set. Optional fields: `facet` (the sub-case), `expected_empty` with
+  `expected_empty_scope` (`exact_arm`, or `all_arms` for a question that should retrieve
+  nothing at all), `expected_area`, `expected_arm`, `expected_outcome` (what the author
+  expected; the measured result may differ), `history`, `planned_for` and `note`.
+
+| Kind | Count | Why |
+|---|---|---|
+| `exact` | 19 | The widest token surface: flags, environment variables, headers, error codes, methods, commands, two case and punctuation variants each, three near-miss tokens that must not match. Carries #370's code tokens. |
+| `entity` | 11 | One per term type the extractor really produces, an alias, two entities at once, a follow-up that keeps its entity, two entities outside the corpus. |
+| `keyword` | 7 | Words present only literally, suffix pairs, and a stop-word-only question. |
+| `vector_scope` | 4 | Two identically worded pairs over headings that exist in two products, so only product scope separates them. |
+| `semantic` | 13 | Five phrasings of meaning, 2-3 each: zero overlap, synonyms, misspellings, long rambling, non-English (Hindi, Spanish, romanized Hindi). |
+| `hybrid` | 6 | Two each: only keyword can solve, only vector can solve, both. |
+| `multi_product` | 6 | Five two-product comparisons, and one naming three products. |
+
+`model_name` and `command` are term types with no extracted term in the shipped corpus, so
+they have no case. `en_outside_model` asks for a model id the corpus does not hold.
