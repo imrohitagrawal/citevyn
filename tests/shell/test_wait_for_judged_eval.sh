@@ -25,6 +25,8 @@ EVAL_STEP='Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--po
 SHA_UNDER_TEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 OTHER_SHA='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 TOKEN='ghs_FAKE_TOKEN_VALUE_never_print_me'
+NO_JOB_TEXT="Run the ci workflow manually on a branch or tag that points at commit ${SHA_UNDER_TEST}"
+NEXT_STEP_TEXT="read that run's report, fix the cause on main, then cut a new tag. If the failure was an outage, re-run the eval, then re-run this release."
 CLOCK_START=1000
 
 WORK="$(mktemp -d)"
@@ -61,6 +63,10 @@ if [ -f "${FAKE_DIR}/${key}.${n}.fail" ]; then
 fi
 [ -f "${FAKE_DIR}/${key}.${n}" ] || { echo "fake gh: no answer for ${key}" >&2; exit 96; }
 cat "${FAKE_DIR}/${key}.${n}"
+# A second page exists only for a caller that asked for every page.
+if [ -f "${FAKE_DIR}/${key}.${n}.page2" ]; then
+    case " $* " in *" --paginate "*) cat "${FAKE_DIR}/${key}.${n}.page2" ;; esac
+fi
 FAKE
 
 cat >"${FAKE_BIN}/date" <<'FAKE'
@@ -172,10 +178,10 @@ check_eq "partner: a pass read the job of the run it reports" \
 check_eq "partner: a finished job needs no waiting" "$(sleeps)" 0
 
 # Red when: any of these conclusions joins the allowlist, or the script stops
-# naming the conclusion and the run.
+# naming the conclusion and the run, or stops saying what to do next.
 for conclusion in failure cancelled timed_out action_required neutral startup_failure stale a_value_nobody_has_seen; do
     new_case; one_job completed "${conclusion}"; run_gate
-    check "conclusion ${conclusion} fails" 1 "${conclusion}" "https://example.test/runs/201"
+    check "conclusion ${conclusion} fails" 1 "${conclusion}" "https://example.test/runs/201" "${NEXT_STEP_TEXT}"
 done
 
 # Red when: a completed job with no conclusion is read as anything but a failure.
@@ -207,7 +213,14 @@ check "in_progress then failure fails" 1 "failure"
 # has already appeared.
 new_case; one_job in_progress null; run_gate TOTAL_TIMEOUT_SECONDS=1000 START_GRACE_SECONDS=60
 check "total timeout fails" 1 "timed out"
+# Red when: the timeout stops naming where the job stands, its run, or the next step.
+check "a timeout names the state, the run and the next step" 1 "in_progress" "no conclusion" \
+    "https://example.test/runs/201" "${NEXT_STEP_TEXT}"
 check_eq "total timeout is measured from the clock" "$(elapsed)" 1020
+
+# Red when: a timeout with no job seen points at a run report that does not exist.
+new_case; put runs 1 "$(runs_json)"; run_gate TOTAL_TIMEOUT_SECONDS=60 START_GRACE_SECONDS=900
+check "a timeout with no job seen says how to get one" 1 "timed out" "${NO_JOB_TEXT}"
 
 # Red when: the defaults change: 30 s poll and 75 minutes in total.
 new_case; one_job in_progress null
@@ -220,18 +233,25 @@ check_eq "defaults: every poll is 30 s" "$(sort -u "${FAKE_DIR}/sleeps.log")" 30
 
 # Red when: having no runs passes, or the failure stops saying how to fix it.
 new_case; put runs 1 "$(runs_json)"; run_gate
-check "no runs fails after the grace period" 1 "Run the ci workflow manually on this commit"
+check "no runs fails after the grace period" 1 "${NO_JOB_TEXT}"
 check_eq "no runs waits the whole grace period" "$(elapsed)" 900
+
+# Red when: the message stops giving the usual cause: the judged job needs the test
+# job, so a failing test job is what skips it.
+check "no job: names the failing test job as the likely cause" 1 \
+    "skipped when the test job" "look at the ci run for this commit first"
+# Red when: an unexpanded placeholder returns in place of the real commit.
+if grep -qF -- "<this tag>" <<<"${OUT}"; then bad "the message holds a placeholder"; else ok "the no-job message has no placeholder"; fi
 
 # Red when: a skipped job counts as a result.
 new_case; one_job completed skipped; run_gate
-check "skipped only fails after the grace period" 1 "Run the ci workflow manually on this commit"
+check "skipped only fails after the grace period" 1 "${NO_JOB_TEXT}"
 check_eq "skipped only waits the whole grace period" "$(elapsed)" 900
 
 # Red when: the default grace period changes from 900 s.
 new_case; one_job completed skipped
 run_bare REPO=owner/repo SHA="${SHA_UNDER_TEST}"
-check "defaults: grace expiry fails" 1 "Run the ci workflow manually on this commit"
+check "defaults: grace expiry fails" 1 "${NO_JOB_TEXT}"
 check_eq "defaults: 900 s of grace" "$(elapsed)" 900
 
 # Red when: the grace period ends a job that shows up just before it runs out.
@@ -251,14 +271,14 @@ put jobs-201 1 "$(jobs_json \
     "$(job_obj 503 "x ${JOB}" completed success)" \
     "$(job_obj 504 "JUDGED ANSWER-QUALITY EVAL (NEEDS THE OPENROUTER AND GEMINI KEY SECRETS)" completed success)")"
 run_gate
-check "near-identical job names are ignored" 1 "Run the ci workflow manually on this commit"
+check "near-identical job names are ignored" 1 "${NO_JOB_TEXT}"
 
 # Red when: a run the API returns for a different commit is trusted.
 new_case
 put runs 1 "$(runs_json "$(run_obj 201 "${OTHER_SHA}")")"
 put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
 run_gate
-check "a run of another commit is ignored" 1 "Run the ci workflow manually on this commit"
+check "a run of another commit is ignored" 1 "${NO_JOB_TEXT}"
 
 # --- Which job decides ------------------------------------------------------
 
@@ -345,6 +365,10 @@ job_with_steps "[$(step_obj "${EVAL_STEP}" success),$(step_obj "${EVAL_STEP}" su
 run_gate
 check "two eval steps are ambiguous and fail" 1 "did not run" "duplicate"
 
+# Red when: the failed-step refusal stops saying what to do next.
+new_case; job_with_steps "[$(step_obj "${EVAL_STEP}" failure)]"; run_gate
+check "a failed eval step says what to do next" 1 "failure" "https://example.test/runs/201" "${NEXT_STEP_TEXT}"
+
 # Red when: the step is matched on anything but its exact name.
 new_case
 job_with_steps "[$(step_obj "Judged eval" success),$(step_obj "${EVAL_STEP} (retry)" success)]"
@@ -365,7 +389,7 @@ new_case
 put runs 1 "$(runs_json "$(run_obj 201 "" pull_request)")"
 put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
 run_gate
-check "a passing pull_request run alone does not pass" 1 "Run the ci workflow manually on this commit"
+check "a passing pull_request run alone does not pass" 1 "${NO_JOB_TEXT}"
 
 # Red when: a newer pull_request result hides the tag run, in either direction.
 new_case
@@ -387,7 +411,7 @@ for event in schedule workflow_run a_value_nobody_has_seen; do
     put runs 1 "$(runs_json "$(run_obj 201 "" "${event}")")"
     put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
     run_gate
-    check "event ${event} does not count" 1 "Run the ci workflow manually on this commit"
+    check "event ${event} does not count" 1 "${NO_JOB_TEXT}"
 done
 
 # Red when: a run with no event field counts.
@@ -395,7 +419,7 @@ new_case
 put runs 1 "{\"workflow_runs\":[{\"id\":201,\"head_sha\":\"${SHA_UNDER_TEST}\",\"html_url\":\"https://example.test/runs/201\"}]}"
 put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
 run_gate
-check "a run with no event does not count" 1 "Run the ci workflow manually on this commit"
+check "a run with no event does not count" 1 "${NO_JOB_TEXT}"
 
 # Red when: workflow_dispatch stops counting (it is the documented fix), or the
 # older run decides.
@@ -426,6 +450,25 @@ if grep -qF "repos/owner/repo/actions/workflows/ci.yml/runs?" <<<"${log}" \
 else
     bad "the query changed: ${log}"
 fi
+
+# Red when: --paginate is dropped from the runs listing, so a run on page two is
+# never read and the older run on page one decides.
+new_case
+put runs 1 "$(runs_json "$(run_obj 201)")"
+put runs 1.page2 "$(runs_json "$(run_obj 202)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 501 "${JOB}" completed failure)")"
+put jobs-202 1 "$(jobs_json "$(job_obj 502 "${JOB}" completed success)")"
+run_gate
+check "a run on page two of the runs listing is read" 0 "https://example.test/runs/202"
+
+# Red when: --paginate is dropped from the jobs listing, so a job on page two is
+# never read.
+new_case
+put runs 1 "$(runs_json "$(run_obj 201)")"
+put jobs-201 1 "$(jobs_json "$(job_obj 500 "pytest + lint" completed success)")"
+put jobs-201 1.page2 "$(jobs_json "$(job_obj 501 "${JOB}" completed success)")"
+run_gate
+check "a job on page two of the jobs listing is read" 0 "https://example.test/runs/201"
 
 # --- gh errors --------------------------------------------------------------
 

@@ -44,6 +44,17 @@ def _needs(job: dict[str, Any]) -> list[str]:
     return [needs] if isinstance(needs, str) else list(needs)
 
 
+def _transitive_needs(jobs: dict[str, Any], job_id: str) -> set[str]:
+    seen: set[str] = set()
+    pending = _needs(jobs[job_id])
+    while pending:
+        current = pending.pop()
+        if current not in seen:
+            seen.add(current)
+            pending.extend(_needs(jobs[current]))
+    return seen
+
+
 def _script_text() -> str:
     assert SCRIPT.exists(), f"{SCRIPT.name} is missing, so the gate has nothing to run"
     return SCRIPT.read_text(encoding="utf-8")
@@ -56,6 +67,19 @@ def test_publishing_jobs_wait_for_the_gate(job_id: str) -> None:
     needs = _needs(_release_jobs()[job_id])
     assert GATE in needs, f"{job_id} does not need {GATE}, so it runs without the judged eval"
     assert "validate" in needs, f"{job_id} lost its need on the tag validation"
+
+
+def test_every_later_job_transitively_needs_the_gate() -> None:
+    """Red when: a job other than ``validate`` and the gate can run without the gate.
+
+    A new publishing job added to release.yml must not be able to skip it.
+    """
+    jobs = _release_jobs()
+    _gate()
+    later = set(jobs) - {"validate", GATE}
+    assert {"build", "release"} <= later, "the jobs this rule protects have gone"
+    for job_id in sorted(later):
+        assert GATE in _transitive_needs(jobs, job_id), f"{job_id} can run without {GATE}"
 
 
 def test_the_gate_runs_after_validation_and_runs_the_script() -> None:
