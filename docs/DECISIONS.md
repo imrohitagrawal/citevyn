@@ -24,10 +24,12 @@ judged run on production's configuration showed low scores from three different
 sources: a grader that cannot see the sources, a six-passage test corpus unlike
 the 44 passages production ships, and an answer rule that discards an honest
 "the sources do not list that". So the order is: search coverage on the shipped
-corpus (#601); eval plumbing; a check of the grader on stored answers; a judged
-run on the shipped corpus; then the answer rules (#602). The rule that fails a
-run on a single case scoring 2 or less switches on in the same change as #602,
-and a low score is graded again by the full panel first. There is no list of
+corpus, `backend/app/worker/sources/` (#601); then three eval changes under #598,
+namely a longer grader timeout with fuller run reports, a test on stored answers
+of letting the grader see the sources, and a judged run on the shipped corpus;
+then the answer rules (#602). The rule that fails a run on a single case scoring
+2 or less switches on in the same change as #602, and a low score is first graded
+again by the same grader using all three of its scoring prompts. There is no list of
 known failures. `codex_par_listflags`, which names no product, moves to #553.
 Whether #370 comes before #602 depends on the measured precision@1 on the
 shipped corpus.
