@@ -302,11 +302,14 @@ def test_the_judged_eval_still_drives_the_whole_golden_set() -> None:
 
 
 def test_judged_eval_remains_the_release_gate() -> None:
-    """The paid eval must still run on a v* tag — that is what gates a release.
+    """The paid eval must still run on a v* tag — release.yml waits for that result.
 
     Deferring the judged eval off ordinary merges is deliberate (see
     _INTENTIONALLY_NOT_ON_PUSH), and it is only defensible because the tag still
-    runs it: a bad release cannot ship unjudged. Losing the tag trigger would turn
+    runs it. This test covers the trigger; the wiring that stops images publishing
+    until the job has passed is pinned in test_release_waits_for_judged_eval.py.
+    Without a judged run on the commit that wait fails, so losing the tag trigger
+    would block every release until one is run by hand. It would also turn
     "deferred to release" into "never runs", which is #182 all over again — and the
     generic reachability check above does NOT catch it, because the `full-eval`
     label alone keeps the job technically reachable.

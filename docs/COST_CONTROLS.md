@@ -292,8 +292,10 @@ and Layers 1–3 remain the controls that actually cap exposure.
 
 CI runs the judged eval **at full coverage, less often**:
 
-* **push of a `v*` tag** → runs (full set). This is the **release gate** — a tag
-  cannot ship without the judged eval passing.
+* **push of a `v*` tag** → runs (full set). This is the **release gate**: the
+  `judged-eval-gate` job in `release.yml` runs `scripts/wait_for_judged_eval.sh`, and
+  no image is built or published until this eval has concluded `success` on the tagged
+  commit. Limits are stated under "What the release gate covers" below.
 * **`workflow_dispatch`** → runs (full set). Run it on demand from the Actions tab.
 * **pull request labelled `full-eval`** → runs (full set). The `labeled` event is in
   the workflow's trigger `types`, so adding the label to an open PR starts a run on
@@ -314,6 +316,22 @@ the secret re-added by hand — a worse failure mode than an explicit trigger.
 `_INTENTIONALLY_NOT_ON_PUSH` with its reason, and a dedicated test asserts the tag
 trigger survives — deleting it (which would turn "deferred to release" into "never
 runs") fails the suite. Mutation-verified.
+
+#### What the release gate covers
+
+The wait reads runs of `ci.yml` on the tagged commit and takes the newest judged job
+that was not skipped. Only the conclusion `success` lets the release continue. If no
+judged job appears within 15 minutes, the release fails and says to run the `ci`
+workflow manually on that commit. There is no skip input and no override.
+
+* The judged run is known to fail until the answer work under
+  [#602](https://github.com/imrohitagrawal/citevyn/issues/602) lands, so a tag will
+  not publish until then.
+* Fly deploys are separate and are **not** gated by this. They run from a local build,
+  and judged runs are not made per deploy.
+* If the `CITEVYN_OPENROUTER_API_KEY` secret is absent, the judged job skips its steps
+  and still concludes `success`, so the gate passes without a judged run. The gate
+  depends on that secret staying set.
 
 #### Why sampling cases was rejected
 
