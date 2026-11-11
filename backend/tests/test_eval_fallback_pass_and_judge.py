@@ -32,6 +32,7 @@ def _settings(**overrides: Any) -> Settings:
         "gemini_model": ANSWER,
         "eval_fallback_model": FALLBACK,
         "eval_judge_model": JUDGE,
+        "eval_judge_timeout_seconds": 60.0,
     }
     base.update(overrides)
     return Settings(_env_file=None, **base)  # type: ignore[call-arg]
@@ -117,7 +118,9 @@ def test_no_fallback_no_judge_model_keeps_one_pass(recorded: dict[str, Any]) -> 
     grader (local runs keep one pass, graded by the answer client)."""
     asyncio.run(
         runner_mod.run_eval_async(
-            settings=_settings(eval_fallback_model=None, eval_judge_model=None)
+            settings=_settings(
+                eval_fallback_model=None, eval_judge_model=None, eval_judge_timeout_seconds=None
+            )
         )
     )
     assert len(recorded["calls"]) == 1
