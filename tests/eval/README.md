@@ -127,6 +127,22 @@ meaningful step (a loud `::notice::`) and stays green — the key is never hardc
 faked. **To enable the gate:** add `CITEVYN_OPENROUTER_API_KEY` under *Settings → Secrets
 and variables → Actions*; the next run flips it on.
 
+### What the judged report records per case (#598)
+
+Each judged case records why it came out as it did: `outcome` and `decline_reason` (from
+the run's own audit row), the answer model's own `raw_reply` (and the #208 `retry_reply`,
+with `retry_kept`), `resolved_query`, `retrieval_global`, the `evidence` the answer was made
+from (text cut as in the prompt, with `truncated`), `answer_errored`, and each grader
+call's score, rationale and duration (`grader_calls`). Each pass's `judge` section counts
+`answer_errors` by kind and `declines_by_reason`, and the log prints each case scoring 2
+or less, not gating until #602. An errored answer fails the refusal, groundedness and
+multi-turn gates. The report is written after each pass, with configured key values
+redacted.
+
+The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
+**only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so
+they stay empty there. `backend/tests/test_eval_report_fields_pg.py` proves they fill.
+
 ### Cost bounding (#153)
 
 The judged half is the harness's only meaningful spend line — ~$0.026 per full run
