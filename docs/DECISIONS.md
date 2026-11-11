@@ -25,13 +25,16 @@ Search on the 44 shipped passages ranks the right passage first for 0.9375 of th
 questions that name no product, which keyword ranking (#370) cannot change, so
 #370 could fix at most the other. So the answer rules (#602) come before #370, and
 the shipped-corpus precision@1 floor is the measured 0.9375, which allows no new
-miss. The #601 foundation lands as one pull request, although it is larger than its
+miss. This floor is for the shipped-corpus report and sits beside, not in place of,
+the judged eval's 0.96 floor from 2026-11-09. The #601 foundation lands as one pull request, although it is larger than its
 plan said, because it is tests and fixtures only and every part was already
 reviewed. `codex_par_listflags` stays in the main golden set, reversing the
 2026-11-10 move to #553, because on the shipped corpus search ranks its passage
-first.
-Editing or adding a shipped passage needs its vector re-recorded in the same pull
-request. The owner gives a standing approval for that call, limited to changed or
+first. It clears the confidence gate's margin only narrowly, so a re-recorded nearby
+passage can turn it into a miss; that is a measured edge, not a new defect.
+Editing or adding a shipped passage, as #603 will, needs its vector re-recorded in
+the same pull request. Re-recording is a paid embedding-provider call. The owner
+gives a standing approval for it, limited to changed or
 new passages and new questions, at most 50 texts per pull request, each use logged
 in the owner's private notes. A CI job that re-records without a local key is a
 later work package with its own approval.
