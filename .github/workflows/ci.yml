@@ -519,6 +519,9 @@ jobs:
       - name: Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)
         if: steps.guard.outputs.run == 'true'
         working-directory: backend
+        # Below the job's 66, so a run cut short still leaves time for the
+        # always() upload step to save the report written after each pass (#598).
+        timeout-minutes: 62
         # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
         # and rolls back (zero residue). Non-zero exit on any gate regression.
         #
