@@ -328,7 +328,19 @@ jobs:
     needs: test
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
-    timeout-minutes: 40  # two answer passes since #596
+    #
+    # 66 minutes is an ESTIMATE of the worst case (#598), not a measurement. On the
+    # measured run (two answer passes) the eval step took 25.0 min, and 22 grader
+    # calls timed out at 15 s. With the grader at 60 s
+    # (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), those 22 calls can each wait
+    # 45 s more (16.5 min), and the 22 adversarial calls they skipped can each take
+    # up to 60 s (22.0 min): 25.0 + 16.5 + 22.0 = 63.5 min, plus about 0.6 min of
+    # job overhead, so 66. Re-set it from the next counted run's durations. It must
+    # stay at least 6 minutes (the `test` job before it) under the release wait in
+    # scripts/wait_for_judged_eval.sh (TOTAL_TIMEOUT_SECONDS, 75 min); raising it
+    # further needs the wait raised too. Double grading (#598 Step 3) needs this
+    # re-sized before its run.
+    timeout-minutes: 66
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
@@ -469,6 +481,11 @@ jobs:
       CITEVYN_EVAL_FALLBACK_MODEL: openai/gpt-4o-mini
       # The grader: a third model family, so no answer model grades its own answers.
       CITEVYN_EVAL_JUDGE_MODEL: anthropic/claude-haiku-5.5
+      # The grader's own timeout, set with the grader model or not at all (#598).
+      # Only the grader's client reads it; the answer clients keep production's
+      # 15 s. 60 s: completed grader calls measured p50 1.4 s, p90 12.0 s, max
+      # 13.5 s; the tail above 15 s is unknown, so re-set it from the next run.
+      CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS: "60"
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
       # calls per case per pass.
       CITEVYN_EVAL_JUDGE_PANEL: "1"

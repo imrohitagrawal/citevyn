@@ -101,7 +101,7 @@ FREE_TO_DIFFER = frozenset(
 # alone without a Gemini key), so presence has its own rule below.
 _CREDENTIAL = re.compile(r"(_api_key|_secret|_token|_password)$")
 # Eval-only fields, unset in production, each with its own rule below.
-MAPPED = frozenset({"eval_fallback_model", "eval_judge_model"})
+MAPPED = frozenset({"eval_fallback_model", "eval_judge_model", "eval_judge_timeout_seconds"})
 # The family of production's answer model, called directly through Google.
 _ANSWER_FAMILY = "google"
 
@@ -137,8 +137,14 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
     need(bool(judged.gemini_api_key), "the judged run has no Gemini key")
     need(bool(judged.openrouter_api_key), "the judged run has no OpenRouter key")
     need(
-        production.eval_fallback_model is None and production.eval_judge_model is None,
+        all(getattr(production, name) is None for name in sorted(MAPPED)),
         "production sets an eval-only setting",
+    )
+    # ``model_copy`` skips the pairing validator, so the grader's timeout has its
+    # own rule here: without it the grader would wait production's 15 s (#598).
+    need(
+        judged.eval_judge_model is None or judged.eval_judge_timeout_seconds is not None,
+        "the judged run has a grader but no CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS timeout",
     )
     need(
         judged.eval_fallback_model == production.openrouter_model,
