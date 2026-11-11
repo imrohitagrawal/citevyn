@@ -103,6 +103,11 @@ class EvalCase:
     # validated SOLELY by the judged run, which drives the real orchestrator. Implies it must
     # also be ``postgres_only`` (the orchestrator + real LLM run on the --postgres judged run).
     judge_only: bool = False
+    # Shipped-corpus labels (#601): every passage that on its own answers the question, as
+    # ``"{source_name}#{heading}"``. Unlike ``gold_chunks`` (keyed to the 5-chunk seed), this
+    # is keyed to the 44 shipped passages. ``None`` means the row was never reviewed, ``()``
+    # means reviewed with no single passage answering it; only the shipped eval requires it.
+    shipped_gold: tuple[str, ...] | None = None
 
     @property
     def is_refusal(self) -> bool:
@@ -176,6 +181,18 @@ class EvalCase:
                 f"{origin}: case {d['id']!r} gold_chunks must be a list of non-empty strings"
             )
         gold_chunks = tuple(raw_gold) if raw_gold else ()
+        raw_shipped = d.get("shipped_gold")
+        if raw_shipped is not None and (
+            not isinstance(raw_shipped, list)
+            or not all(isinstance(g, str) and g.strip() for g in raw_shipped)
+        ):
+            raise ValueError(
+                f"{origin}: case {d['id']!r} shipped_gold must be a list of non-empty strings"
+            )
+        # A refusal has no correct passage, so even an empty label is a mistake.
+        if raw_shipped is not None and kind == "refusal":
+            raise ValueError(f"{origin}: refusal case {d['id']!r} must not set shipped_gold")
+        shipped_gold = tuple(raw_shipped) if raw_shipped is not None else None
         # A refusal has no correct chunk to retrieve, so it cannot declare a gold chunk. A
         # multihop case is multi-relevant (it is scored by ``expected_sources`` hit-rate, not
         # single-chunk rank) — labelling it with a single gold key would wrongly pull it into
@@ -254,6 +271,7 @@ class EvalCase:
             must_not_contain=must_not_contain,
             gold_chunks=gold_chunks,
             judge_only=judge_only,
+            shipped_gold=shipped_gold,
         )
 
 

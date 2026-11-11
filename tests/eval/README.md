@@ -173,3 +173,75 @@ Cases are anchored to the **conftest** seed corpus (`backend/tests/conftest.py::
 — the corpus the hermetic harness and CI run against — **not** `db/seed` (whose Gemini chunk
 is about the API key, not streaming). Keep new cases answerable from that 5-chunk corpus, or
 the hit-rate metric loses meaning.
+
+## Shipped-corpus labels (#601)
+
+Two label sets measure search on the 44 shipped passages rather than the 5-chunk seed.
+Labels were written from the shipped text before any vector existed, and can be edited
+without re-recording, because a recorded vector depends only on the question text.
+
+- **`shipped_gold`** in `golden.jsonl` and `shipped_questions.jsonl`: every passage that on
+  its own answers the question, as `source#heading`. `[]` means reviewed, and no passage
+  answers it. Refusals never carry the field. One key is single-relevant; two or more are
+  multi-relevant, and leave the question out of the rank-sensitive decision number.
+- **`shipped_questions.jsonl`** holds the coverage questions, reported separately from the
+  golden set. Optional fields: `facet` (the sub-case), `expected_empty` with
+  `expected_empty_scope` (`exact_arm`, or `all_arms` for a question that should retrieve
+  nothing at all), `expected_area`, `expected_arm`, `expected_outcome` (what the author
+  expected; the measured result may differ), `history`, `planned_for` and `note`.
+
+| Kind | Count | Why |
+|---|---|---|
+| `exact` | 19 | The widest token surface: flags, environment variables, headers, error codes, methods, commands, two case and punctuation variants each, three near-miss tokens that must not match. Carries #370's code tokens. |
+| `entity` | 11 | One per term type the extractor really produces, an alias, two entities at once, a follow-up that keeps its entity, two entities outside the corpus. |
+| `keyword` | 7 | Words present only literally, suffix pairs, and a stop-word-only question. |
+| `vector_scope` | 4 | Two identically worded pairs over headings that exist in two products, so only product scope separates them. |
+| `semantic` | 13 | Five phrasings of meaning, 2-3 each: zero overlap, synonyms, misspellings, long rambling, non-English (Hindi, Spanish, romanized Hindi). |
+| `hybrid` | 6 | Two each: only keyword can solve, only vector can solve, both. |
+| `multi_product` | 6 | Five two-product comparisons, and one naming three products. |
+
+`model_name` and `command` are term types with no extracted term in the shipped corpus, so
+they have no case. `en_outside_model` asks for a model id the corpus does not hold.
+
+## Shipped-corpus search report (#601)
+
+`backend/tests/test_eval_shipped_report.py` runs in the `postgres` job and appends the report
+to the job summary: recall@1/3/6, MRR and precision@1, by kind and coverage kind, with each
+question's route and winning arm. No model is called, and there are no floors yet.
+
+**Decision A** is precision@1 over answerable, single-relevant, non-follow-up golden
+questions. The report prints the pool size and every excluded count. Coverage questions
+report separately, and a scoped refusal retrieving something is informational, because only
+the global path has a confidence gate.
+
+The vectors live in `tests/eval/recorded/`: one per shipped chunk, keyed `source#heading` with
+its content checksum, and one per exact question text, keyed by `text_sha256`. Each file's
+first line states the vector space. A chunk whose text changed fails the fixture test and the
+`postgres` job, naming that chunk and the command. Labels can be edited without re-recording.
+
+To record, from `backend/`, with the embedding provider's key in the environment:
+
+```bash
+python -m tests.eval.record_vectors --dry-run                                # free: lists every text
+python -m tests.eval.record_vectors --export-chunks-from <local postgres URL> # embeds missing questions
+python -m tests.eval.record_vectors --embed-changed-chunks                    # also embeds changed chunks
+```
+
+`--dry-run` needs no key or database. A real run needs, in the environment:
+
+- `CITEVYN_EMBEDDING_PROVIDER` and `CITEVYN_EMBEDDING_MODEL` set to production's embedder (the
+  recorder refuses any other; both file headers must match it);
+- `CITEVYN_GEMINI_API_KEY`, the provider key;
+- `CITEVYN_DATABASE_URL` naming a migrated local database, because embedding goes through the
+  metered embedder, which records each call there;
+- `--export-chunks-from` with a local Postgres URL holding the current index, for free chunk
+  vectors.
+
+A re-record is a paid provider call and needs the owner's approval. Files are rewritten after
+every embedded text with sorted lines, so a re-run resumes, and the first failure stops the run.
+
+The report also removes each arm in turn: `arm` names the arm whose removal changes the
+rank-1 passage (`vector`, `keyword`, `exact`, `both` or `none`), beside the gold rank with only
+the vector arm (`rank_vector_only`) or only the keyword arm (`rank_keyword_only`). A vector arm
+with any chunk unembedded stops the report. Questions production answers without retrieving
+(`clarify`, `refused`) are labelled, not excluded.

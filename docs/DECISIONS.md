@@ -18,6 +18,27 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-11 — Shipped-corpus search: order, floor and re-recording
+Applies to #601, #602, #370, #603 and the recorded vectors in `tests/eval/recorded/`.
+Search on the 44 shipped passages ranks the right passage first for 0.9375 of the
+32 single-relevant golden questions. One miss comes from the confidence gate on
+questions that name no product, which keyword ranking (#370) cannot change, so
+#370 could fix at most the other. So the answer rules (#602) come before #370, and
+the shipped-corpus precision@1 floor is the measured 0.9375, which allows no new
+miss. It is a floor for the shipped-corpus report only; the judged eval's 0.96
+floor from 2026-11-09 is unchanged. The #601 foundation lands as one pull request,
+although it is larger than its plan said, because it is tests and fixtures only and
+every part was already reviewed. `codex_par_listflags` stays in the main golden set, reversing the
+2026-11-10 move to #553, because on the shipped corpus search ranks its passage
+first. It clears the confidence gate's margin only narrowly, so a re-recorded nearby
+passage can turn it into a miss; that is a measured edge, not a new defect.
+Editing or adding a shipped passage, as #603 will, needs its vector re-recorded in
+the same pull request. Re-recording is a paid embedding-provider call. The owner
+gives a standing approval for it, limited to changed or new passages and new
+questions, at most 50 texts per pull request, each use logged in the owner's
+private notes. A CI job that re-records without a local key is a
+later work package with its own approval.
+
 ### 2026-11-10 — Weak answers: make the eval truthful, then fix once
 Applies to the judged eval and to #598, #601, #602, #553 and #370. The first
 judged run on production's configuration showed low scores from three different
