@@ -505,9 +505,10 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
   and NodeSource package hosts at loopback (`--add-host`, IPv4 and IPv6) and
   proves right after checkout that every listed host and every host in the
   image's apt sources resolves only to loopback; after the suite it re-checks
-  one of them, `security.ubuntu.com`. So a green run is a run in which no
-  listed Ubuntu or NodeSource host was resolvable at the start, and
-  `security.ubuntu.com` still was not at the end. That proof step also prints
+  one of them, `security.ubuntu.com`. So a green run is a run in which every
+  listed Ubuntu and NodeSource host, and every host in apt's sources, resolved
+  only to loopback at the start, and `security.ubuntu.com` still did at the
+  end. That proof step also prints
   `python3 --version`: the execution assertion needs `python3`, which the image
   ships but does not promise, so it is now a dependency of two required checks.
   That was accepted in #617's review and is recorded in its pull request; it

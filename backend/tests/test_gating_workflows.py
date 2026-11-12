@@ -2856,31 +2856,46 @@ def _frontend_scripts() -> dict[str, str]:
     return {str(name): str(command) for name, command in scripts.items()}
 
 
-def _runs_playwright_tests(line: str, scripts: dict[str, str], depth: int = 0) -> bool:
-    """Does this shell line run the Playwright suite, directly or through npm scripts?"""
-    if _RUNS_PLAYWRIGHT_TESTS.search(line):
-        return True
-    # A cycle or a very deep chain stops here rather than recursing forever.
+def _expanded_commands(line: str, scripts: dict[str, str], depth: int = 0) -> list[str]:
+    """``line`` plus the text of every npm script it reaches, continuations joined.
+
+    One expansion, shared by the population scan and the install detector, so
+    a command behind `npm run <name>` (or `npm test`) counts the same as the
+    command written in the step. Script bodies get the same backslash joining
+    as step bodies. Depth is capped at 5, which also stops a script cycle.
+    """
+    commands = [line]
     if depth >= 5:
-        return False
+        return commands
     for call in _NPM_SCRIPT_CALL.finditer(line):
-        command = scripts.get(call.group("name") or "test", "")
-        if command and _runs_playwright_tests(command, scripts, depth + 1):
-            return True
-    return False
+        body = scripts.get(call.group("name") or "test", "")
+        if body:
+            commands.extend(_expanded_commands(_join_continuations(body), scripts, depth + 1))
+    return commands
 
 
-def _install_lines(body: str) -> list[str]:
+def _runs_playwright_tests(line: str, scripts: dict[str, str]) -> bool:
+    """Does this shell line run the Playwright suite, directly or through npm scripts?"""
+    return any(
+        _RUNS_PLAYWRIGHT_TESTS.search(command) for command in _expanded_commands(line, scripts)
+    )
+
+
+def _install_lines(body: str, scripts: dict[str, str] | None = None) -> list[str]:
     """The lines of a ``run:`` body that would fetch browsers or OS packages.
 
     Backslash continuations are joined and comments dropped first
     (``_scannable_run_lines``): a comment that says "no `playwright install`
-    here" cannot install anything.
+    here" cannot install anything. Each remaining line is expanded through
+    ``frontend/package.json``'s scripts (or ``scripts``), so `npm run <name>`
+    whose script installs is flagged as the line that runs it.
     """
+    if scripts is None:
+        scripts = _frontend_scripts()
     return [
         line
         for line in _scannable_run_lines(_join_continuations(body))
-        if _OS_PACKAGE_INSTALL.search(line)
+        if any(_OS_PACKAGE_INSTALL.search(command) for command in _expanded_commands(line, scripts))
     ]
 
 
@@ -2928,6 +2943,12 @@ _PLANTED_PLAYWRIGHT_FORMS: list[tuple[str, str, str, dict[str, str] | None]] = [
     ("versioned npx", "zz-planted.yml", "npx playwright@1.63.0 test", None),
     ("backslash-continued", "zz-planted.yml", "npx playwright \\\n  test -c x.ts", None),
     ("a .yaml workflow", "zz-planted.yaml", "npx playwright test", None),
+    (
+        "a script whose body is backslash-continued",
+        "zz-planted.yml",
+        "npm run e2e",
+        {"e2e": "playwright \\\n  test -c playwright.demo-ci.config.ts"},
+    ),
 ]
 
 
@@ -3021,8 +3042,10 @@ def test_the_install_detector_sees_every_form_it_claims_to() -> None:
     show the detector still matches. These lines can.
 
     It matches TEXT, not behaviour, so it fails closed: an `echo` that merely
-    mentions `apt-get` is flagged too (accepted; reword the echo), and an
-    install hidden inside a script, an action or a variable is not seen.
+    mentions `apt-get` is flagged too (accepted; reword the echo). It follows
+    `npm run`/`npm test` into frontend/package.json's scripts
+    (test_the_install_detector_follows_npm_scripts), but an install hidden in
+    an action, a shell script file or a variable is not seen.
 
     Turns red if: the detector stops matching any install form below, or starts
     matching a line the real jobs legitimately run.
@@ -3056,6 +3079,37 @@ def test_the_install_detector_sees_every_form_it_claims_to() -> None:
     )
     flagged = [line for line in benign if _install_lines(line)]
     assert not flagged, f"the install detector flags lines that install nothing: {flagged}"
+
+
+@pytest.mark.parametrize(
+    ("run_line", "scripts"),
+    [
+        pytest.param(
+            "npm run install:browsers",
+            {"install:browsers": "playwright install --with-deps chromium"},
+            id="npm run into an install script",
+        ),
+        pytest.param(
+            "npm run setup",
+            {"setup": "npm run deps", "deps": "sudo apt-get install -y libnss3"},
+            id="nested scripts ending in apt-get",
+        ),
+        pytest.param(
+            "npm run browsers",
+            {"browsers": "playwright \\\n  install chromium"},
+            id="a backslash-continued install script",
+        ),
+    ],
+)
+def test_the_install_detector_follows_npm_scripts(run_line: str, scripts: dict[str, str]) -> None:
+    """An install behind `npm run` is still an install.
+
+    Turns red if: ``_install_lines`` stops expanding npm scripts (one level or
+    nested), or stops joining backslash continuations inside a script.
+    """
+    assert _install_lines(run_line, scripts) == [run_line], (
+        f"{run_line!r} runs {scripts} and was not flagged as an install"
+    )
 
 
 def test_no_playwright_job_installs_browsers_or_os_packages() -> None:

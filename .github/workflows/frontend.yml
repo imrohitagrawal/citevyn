@@ -193,7 +193,7 @@ jobs:
             for addr in $v4 $v6; do
               case "$addr" in
                 127.0.0.1|::1) ;;
-                *) echo "::error::$host resolves to $addr, so this run could reach it. A host apt newly uses must be added in all four places: the blocked=(...) list here and in the other Playwright workflow, both jobs' --add-host sets, and _BLOCKED_MIRROR_HOSTS in backend/tests/test_gating_workflows.py"; exit 1 ;;
+                *) echo "::error::$host resolves to $addr, so this run could reach it. A host apt newly uses must be added to the blocked=(...) list in frontend.yml and in frontend-live-e2e.yml, to the --add-host set of demo-e2e and of live-e2e, and to _BLOCKED_MIRROR_HOSTS in backend/tests/test_gating_workflows.py"; exit 1 ;;
               esac
             done
             echo "$host -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
