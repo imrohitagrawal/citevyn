@@ -2731,8 +2731,10 @@ def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
     the browser into ``$PLAYWRIGHT_BROWSERS_PATH`` and Playwright then uses THAT.
     The container tag would still read v1.63.0, this file would still be green,
     and the browser drawing the comparison would be whichever one the install
-    step fetched. The demo and live jobs legitimately run that step — they have
-    no container — so the rule is scoped to this job.
+    step fetched. Since #617 the demo and live jobs run in the same image and
+    are held to the same rule by
+    ``test_no_playwright_job_installs_browsers_or_os_packages``; this test stays
+    as the visual job's own, named copy of it.
 
     Turns red if: a ``playwright install`` step is added to ``visual-e2e``.
     """
@@ -2741,32 +2743,20 @@ def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
         return [
             str(step.get("name") or step.get("run") or "")
             for step in _steps(job)
-            if "playwright install" in str(step.get("run") or "")
+            if _install_lines(str(step.get("run") or ""))
         ]
 
     # THE PARTNER. `assert not offenders` is satisfied by a job with no steps at
-    # all, and by a detector that has stopped matching anything. `demo-e2e`
-    # legitimately runs `npx playwright install --with-deps chromium` — it has no
-    # container — so it is the positive control: if this scan cannot see it
-    # there, it cannot see it here either and the rule below is decorative.
-    demo_job = (_load_workflow(DEMO_WORKFLOW.name).get("jobs") or {}).get("demo-e2e")
-    # `.get`, not `[...]`. A bare subscript raises a bare `KeyError: 'demo-e2e'`
-    # from inside a test about the VISUAL job, naming the wrong culprit for a
-    # rename whose real consequence is elsewhere: that job's `name:` is a
-    # required status check.
-    assert demo_job is not None, (
-        f"{DEMO_WORKFLOW.name} no longer defines a `demo-e2e` job, so this rule "
-        "has no positive control to calibrate its detector against."
-    )
-    # `>= 1`, not `== 1`. The control's job is to prove the detector can SEE a
-    # real `playwright install` step. demo-e2e legitimately adding a second one
-    # (a browser beyond chromium) is not a defect in the VISUAL job and must not
-    # redden a rule about it.
-    demo_installs = install_steps(demo_job)
-    assert len(demo_installs) >= 1, (
-        "the `playwright install` scan found no such step in "
-        "frontend.yml:demo-e2e, which runs one. The detector has stopped "
-        "matching, so the rule below would pass over nothing."
+    # all, and by a detector that has stopped matching anything. Until #617 the
+    # positive control was demo-e2e's real `npx playwright install --with-deps
+    # chromium` step. That step is gone (the job now runs in the image too), so
+    # the control is a synthetic job carrying the exact line it used to run: if
+    # this scan cannot see it there, it cannot see it here either and the rule
+    # below is decorative.
+    control = {"steps": [{"name": "control", "run": "npx playwright install --with-deps chromium"}]}
+    assert install_steps(control) == ["control"], (
+        "the `playwright install` scan did not see the synthetic install step. "
+        "The detector has stopped matching, so the rule below would pass over nothing."
     )
     offenders = install_steps(_visual_job())
     assert not offenders, (
@@ -2775,6 +2765,525 @@ def test_the_visual_job_does_not_replace_the_browser_the_image_ships() -> None:
         "silently replaces the pinned one — which defeats "
         "test_the_visual_job_runs_the_browser_that_drew_its_baselines without "
         "changing anything it reads."
+    )
+
+
+# ──────────── every Playwright job runs in the image, offline from apt (#617) ────────────
+#
+# On 2026-11-11 the two REQUIRED Playwright jobs failed for hours in their
+# `npx playwright install --with-deps chromium` step: apt could not resolve
+# `security.ubuntu.com`, every merge was blocked, and `visual-e2e` — already in
+# the pinned image, with no install step — passed through the same outage. The
+# fix runs all three jobs in that image and makes the mirrors unreachable on
+# every run, so "passes without the mirrors" is shown each time rather than
+# assumed.
+
+#: Every job that runs a Playwright suite, as ``(workflow file, job id)``. The
+#: tests below DISCOVER this population from the workflow files and compare it
+#: here, so a fourth Playwright job cannot join without being held to the rules.
+_PLAYWRIGHT_JOBS: frozenset[tuple[str, str]] = frozenset(
+    {
+        (DEMO_WORKFLOW.name, "demo-e2e"),
+        (DEMO_WORKFLOW.name, "visual-e2e"),
+        (LIVE_WORKFLOW.name, "live-e2e"),
+    }
+)
+
+#: The two REQUIRED Playwright jobs, which are the ones a mirror outage blocked.
+#: `visual-e2e` is advisory and its container options are pinned equal to the
+#: documented baseline-regeneration command, so it is left as it is.
+_MIRROR_BLOCKED_JOBS: tuple[tuple[str, str], ...] = (
+    (DEMO_WORKFLOW.name, "demo-e2e"),
+    (LIVE_WORKFLOW.name, "live-e2e"),
+)
+
+#: The package hosts both jobs point at loopback, in one list. The Ubuntu
+#: archive under all the names it goes by, and Nodesource. Read out of the
+#: image (`/etc/apt/sources.list.d/` in `mcr.microsoft.com/playwright:
+#: v1.63.0-noble`, 2026-11-12): `azure.archive.ubuntu.com`, `security.ubuntu.com`
+#: and `deb.nodesource.com` are the three apt actually uses; the step also
+#: re-reads those files at run time, so a host a future image adds is checked
+#: even before it is added here.
+_BLOCKED_MIRROR_HOSTS: tuple[str, ...] = (
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "azure.archive.ubuntu.com",
+    "ports.ubuntu.com",
+    "esm.ubuntu.com",
+    "deb.nodesource.com",
+)
+
+_MIRROR_CHECK_STEP = "Prove the package mirrors are unreachable"
+_MIRROR_RECHECK_STEP = "Prove the package mirrors were still unreachable"
+
+#: What downloads browsers or OS packages at run time. `playwright install`
+#: also covers `playwright install-deps`; the rest is apt and dpkg by name.
+_OS_PACKAGE_INSTALL = re.compile(
+    r"\bplaywright\s+install\b|\binstall-deps\b|\bapt-get\b"
+    r"|\bapt\s+(?:install|update|upgrade)\b|\bdpkg\b"
+)
+_RUNS_PLAYWRIGHT_TESTS = re.compile(r"\bplaywright\s+test\b")
+
+
+def _install_lines(body: str) -> list[str]:
+    """The lines of a ``run:`` body that would fetch browsers or OS packages.
+
+    Comments are dropped first (``_scannable_run_lines``): a comment that says
+    "no `playwright install` here" cannot install anything.
+    """
+    return [line for line in _scannable_run_lines(body) if _OS_PACKAGE_INSTALL.search(line)]
+
+
+def _discovered_playwright_jobs() -> dict[tuple[str, str], dict[str, Any]]:
+    """Every job, in every workflow, with a step that runs ``playwright test``."""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for job_id, job in (_load_workflow(path.name).get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            bodies = [str(step.get("run") or "") for step in _steps(job)]
+            if any(
+                _RUNS_PLAYWRIGHT_TESTS.search(line)
+                for body in bodies
+                for line in _scannable_run_lines(body)
+            ):
+                found[(path.name, job_id)] = job
+    return found
+
+
+def test_the_playwright_job_population_is_the_three_expected_jobs() -> None:
+    """Population partner for every rule in this section.
+
+    The rules below iterate over whichever jobs run ``playwright test``. Over
+    an empty population they would all pass; over a population missing one job
+    they would pass while that job downloaded whatever it liked.
+
+    Turns red if: a job stops running ``playwright test`` (or the detector stops
+    seeing it), or a new job starts running it without joining ``_PLAYWRIGHT_JOBS``.
+    """
+    discovered = set(_discovered_playwright_jobs())
+    assert discovered == set(_PLAYWRIGHT_JOBS), (
+        "the jobs that run `playwright test` are not the recorded three. "
+        f"missing: {sorted(set(_PLAYWRIGHT_JOBS) - discovered)}; "
+        f"new: {sorted(discovered - set(_PLAYWRIGHT_JOBS))}. A new Playwright "
+        "job must run in the pinned image like the others (#617) and be added "
+        "to _PLAYWRIGHT_JOBS."
+    )
+
+
+def test_the_install_detector_sees_every_form_it_claims_to() -> None:
+    """Synthetic positive and negative controls for ``_OS_PACKAGE_INSTALL``.
+
+    The real jobs no longer carry an install step, so nothing in the tree can
+    show the detector still matches. These lines can.
+
+    Turns red if: the detector stops matching any install form below, or starts
+    matching a line the real jobs legitimately run.
+    """
+    installs = (
+        "npx playwright install --with-deps chromium",
+        "npx playwright install chromium",
+        "npx  playwright   install",
+        "npx playwright install-deps",
+        "sudo apt-get update",
+        "apt-get install -y libnss3",
+        "apt install fonts-noto",
+        "apt update",
+        "dpkg -i ./chrome.deb",
+    )
+    missed = [line for line in installs if not _install_lines(line)]
+    assert not missed, f"the install detector does not see: {missed}"
+    # The lines the mirror check itself runs read apt's configuration but
+    # install nothing; flagging them would put the check and this rule at odds.
+    benign = (
+        "npx playwright test -c playwright.demo-ci.config.ts --reporter=list,json,html",
+        "npx playwright --version",
+        "awk '!/^[[:space:]]*#/' /etc/apt/sources.list /etc/apt/sources.list.d/*",
+        "v4=$(getent ahosts \"$host\" | awk '{print $1}')",
+        "# no `playwright install` step: the image carries the browsers",
+    )
+    flagged = [line for line in benign if _install_lines(line)]
+    assert not flagged, f"the install detector flags lines that install nothing: {flagged}"
+
+
+def test_no_playwright_job_installs_browsers_or_os_packages() -> None:
+    """A Playwright job must need no download from a package mirror at run time.
+
+    This is #617's defect. `npx playwright install --with-deps chromium` runs
+    apt on every run, so when the runner could not resolve
+    `security.ubuntu.com` both required Playwright jobs failed before one test
+    ran, and every merge waited on Ubuntu's mirrors. The image carries the
+    browsers and their system libraries; nothing should fetch them again.
+
+    Turns red if: any job that runs ``playwright test`` gains a step that runs
+    ``playwright install``, ``install-deps``, ``apt-get``, ``apt install`` or
+    ``dpkg``.
+    """
+    jobs = _discovered_playwright_jobs()
+    assert set(jobs) == set(_PLAYWRIGHT_JOBS), (
+        f"population drifted: {sorted(jobs)}; see "
+        "test_the_playwright_job_population_is_the_three_expected_jobs"
+    )
+    offenders: list[str] = []
+    scanned = 0
+    for (workflow, job_id), job in sorted(jobs.items()):
+        for step in _steps(job):
+            body = str(step.get("run") or "")
+            scanned += len(_scannable_run_lines(body))
+            offenders.extend(
+                f"{workflow}:{job_id} step {step.get('name', '(unnamed)')!r}: {line}"
+                for line in _install_lines(body)
+            )
+    assert scanned > 0, "the scan read no `run:` lines at all, so it proved nothing"
+    assert not offenders, (
+        "a Playwright job downloads browsers or OS packages at run time, so a "
+        "package-mirror outage fails it before any test runs (#617):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_every_playwright_job_runs_the_locked_playwright_image() -> None:
+    """All three Playwright jobs run one image, and its tag follows the lockfile.
+
+    The required jobs used to take their browser from `playwright install` on
+    the day. In the image the browser is the one the tag names, so the tag has
+    to equal the `playwright-core` version `npm ci` installs — the same rule
+    `test_the_visual_job_runs_the_browser_that_drew_its_baselines` holds the
+    visual job to, now over all three, and the three image strings must be
+    identical so a bump cannot move one job and leave another behind.
+
+    Turns red if: a Playwright job loses its `container:`, runs a different
+    image string from the others, runs a tag that is not the locked
+    `playwright-core` version, or drops `--ipc=host` from its options.
+    """
+    installed = _installed_playwright_version()
+    images: dict[str, str] = {}
+    problems: list[str] = []
+    for (workflow, job_id), job in sorted(_discovered_playwright_jobs().items()):
+        label = f"{workflow}:{job_id}"
+        container = job.get("container")
+        if not isinstance(container, dict) or not isinstance(container.get("image"), str):
+            problems.append(f"{label} has no `container:` mapping with an `image:` ({container!r})")
+            continue
+        image = container["image"].strip()
+        images[label] = image
+        match = re.fullmatch(
+            r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+"
+            r"(?:@sha256:[0-9a-f]{64})?",
+            image,
+        )
+        if not match:
+            problems.append(f"{label} runs {image!r}, not a pinned Playwright image")
+        elif match.group("version") != installed:
+            problems.append(
+                f"{label} runs Playwright v{match.group('version')} but "
+                f"frontend/package-lock.json installs playwright-core {installed}"
+            )
+        if "--ipc=host" not in shlex.split(str(container.get("options") or "")):
+            problems.append(f"{label} does not pass `--ipc=host` in `container.options`")
+    assert set(_discovered_playwright_jobs()) == set(_PLAYWRIGHT_JOBS), (
+        "population drifted; see test_the_playwright_job_population_is_the_three_expected_jobs"
+    )
+    if len(set(images.values())) > 1:
+        problems.append(f"the Playwright jobs run different images: {images}")
+    assert not problems, (
+        "every Playwright job must run the same pinned image as the lockfile "
+        "(#617). A @playwright/test bump moves all three tags together:\n  " + "\n  ".join(problems)
+    )
+
+
+def _mirror_job(workflow: str, job_id: str) -> dict[str, Any]:
+    jobs = _load_workflow(workflow).get("jobs") or {}
+    assert job_id in jobs, f"{workflow} no longer defines `{job_id}`"
+    return jobs[job_id]
+
+
+@pytest.mark.parametrize(("workflow", "job_id"), _MIRROR_BLOCKED_JOBS, ids=lambda v: str(v))
+def test_the_required_playwright_jobs_point_the_mirrors_at_loopback(
+    workflow: str, job_id: str
+) -> None:
+    """Docker writes the block into /etc/hosts before any step runs.
+
+    ``--add-host`` entries exist from the first step, and nothing edits
+    ``/etc/hosts`` in place (it is a bind mount: ``sed -i`` fails on it and
+    ``>`` drops ``localhost``). BOTH addresses per host: with only the IPv4
+    entry, ``getent hosts`` asks for IPv6 first and falls through to DNS —
+    measured in the image, it returned twelve real addresses for
+    ``security.ubuntu.com``.
+
+    Turns red if: any host in ``_BLOCKED_MIRROR_HOSTS`` loses either of its two
+    ``--add-host`` entries in the job's ``container.options``.
+    """
+    container = _mirror_job(workflow, job_id).get("container")
+    options = (
+        shlex.split(str((container or {}).get("options") or ""))
+        if isinstance(container, dict)
+        else []
+    )
+    missing = [
+        flag
+        for host in _BLOCKED_MIRROR_HOSTS
+        for flag in (f"--add-host={host}:127.0.0.1", f"--add-host={host}:::1")
+        if flag not in options
+    ]
+    assert not missing, (
+        f"{workflow}:{job_id}'s container can reach a package mirror: "
+        f"`container.options` lacks {missing}"
+    )
+
+
+@pytest.mark.parametrize(("workflow", "job_id"), _MIRROR_BLOCKED_JOBS, ids=lambda v: str(v))
+def test_the_required_playwright_jobs_prove_the_block_before_and_after(
+    workflow: str, job_id: str
+) -> None:
+    """The block is checked right after checkout, and again after the suite ran.
+
+    The first check runs before anything else can depend on the network, so a
+    run that passes is a run that passed without the mirrors. The second runs
+    after the suite, so the proof covers the whole run and not only its start.
+
+    Turns red if: the check step is not the step straight after checkout, its
+    host list differs from ``_BLOCKED_MIRROR_HOSTS``, it stops reading apt's own
+    source files or printing ``python3 --version``, or the re-check after the
+    suite is gone or no longer asks both lookups.
+    """
+    steps = _steps(_mirror_job(workflow, job_id))
+    names = [str(step.get("name") or step.get("uses") or "") for step in steps]
+    assert names[:2] == ["actions/checkout@v7", _MIRROR_CHECK_STEP], (
+        f"{workflow}:{job_id} must run {_MIRROR_CHECK_STEP!r} straight after "
+        f"checkout; its first steps are {names[:3]}"
+    )
+    body = str(steps[1].get("run") or "")
+    listed = re.findall(r"^\s*blocked=\(([^)]*)\)\s*$", body, flags=re.MULTILINE)
+    assert len(listed) == 1, f"expected one `blocked=(...)` line in the check, found {listed}"
+    assert tuple(listed[0].split()) == _BLOCKED_MIRROR_HOSTS, (
+        f"the check's host list {listed[0].split()} is not _BLOCKED_MIRROR_HOSTS "
+        f"{list(_BLOCKED_MIRROR_HOSTS)}"
+    )
+    for needle in (
+        "set -euo pipefail",
+        "python3 --version",
+        "/etc/apt/sources.list /etc/apt/sources.list.d/*",
+        "getent ahosts",
+        "getent hosts",
+        "localhost",
+    ):
+        assert needle in body, f"{workflow}:{job_id}'s mirror check no longer runs {needle!r}"
+
+    # The suite's own run: a `playwright test` line that is not a `--list`.
+    runs_suite = [
+        index
+        for index, step in enumerate(steps)
+        for line in _scannable_run_lines(str(step.get("run") or ""))
+        if _RUNS_PLAYWRIGHT_TESTS.search(line) and "--list" not in line
+    ]
+    assert len(runs_suite) == 1, (
+        f"{workflow}:{job_id} should have one step that runs the suite, found {runs_suite}"
+    )
+    after = [str(step.get("name") or "") for step in steps[runs_suite[0] + 1 :]]
+    assert _MIRROR_RECHECK_STEP in after, (
+        f"{workflow}:{job_id} does not re-check the block after the suite ran; "
+        f"steps after it: {after}"
+    )
+    recheck = _step_body(WORKFLOW_DIR / workflow, job_id, _MIRROR_RECHECK_STEP)
+    for needle in ("set -euo pipefail", "getent ahosts", "getent hosts", "security.ubuntu.com"):
+        assert needle in recheck, f"{workflow}:{job_id}'s re-check no longer runs {needle!r}"
+
+
+def _fake_getent(tmp_path: Path, answers: dict[str, list[str]]) -> dict[str, str]:
+    """A `getent` on PATH that answers from ``answers`` and fails for anything else.
+
+    Keys are ``"<database> <host>"``; a missing key exits 2, which is what the
+    real `getent` does for a name it cannot resolve.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    db = tmp_path / "getent-db"
+    db.mkdir()
+    for key, addrs in answers.items():
+        (db / key.replace(" ", "__")).write_text(
+            "".join(f"{addr}\tSTREAM {key.split()[1]}\n" for addr in addrs), encoding="utf-8"
+        )
+    stub = bin_dir / "getent"
+    stub.write_text(
+        '#!/bin/bash\nf="$GETENT_DB/$1__$2"\n[ -f "$f" ] || exit 2\ncat "$f"\n', encoding="utf-8"
+    )
+    stub.chmod(0o755)
+    return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "GETENT_DB": str(db)}
+
+
+def _loopback_answers(hosts: list[str]) -> dict[str, list[str]]:
+    answers: dict[str, list[str]] = {}
+    for host in hosts:
+        answers[f"ahosts {host}"] = ["127.0.0.1"]
+        answers[f"hosts {host}"] = ["::1"]
+    return answers
+
+
+# The image's real apt sources (2026-11-12), plus a commented-out line naming a
+# host nothing blocks: a comment is not a source, so it must not be checked.
+_IMAGE_SOURCES = {
+    "sources.list": "# deb http://archive.example.invalid/ubuntu noble main\n",
+    "sources.list.d/ubuntu.sources": (
+        "Types: deb\nURIs: http://azure.archive.ubuntu.com/ubuntu/\nSuites: noble\n\n"
+        "Types: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\n"
+    ),
+    "sources.list.d/nodesource.list": (
+        "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x "
+        "nodistro main\n"
+    ),
+}
+
+
+def _run_mirror_check(
+    tmp_path: Path, answers: dict[str, list[str]], sources: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    body = _step_body(DEMO_WORKFLOW, "demo-e2e", _MIRROR_CHECK_STEP)
+    apt = tmp_path / "apt"
+    (apt / "sources.list.d").mkdir(parents=True)
+    for name, text in sources.items():
+        (apt / name).write_text(text, encoding="utf-8")
+    assert "/etc/apt/" in body, "the check no longer reads /etc/apt/, so this would test nothing"
+    script = body.replace("/etc/apt/", f"{apt}/")
+    env = {**os.environ, **_fake_getent(tmp_path, answers)}
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=False
+    )
+
+
+def test_the_two_mirror_checks_are_the_same_script() -> None:
+    """The executable tests below run demo-e2e's copy; live-e2e's must be identical.
+
+    Turns red if: the two jobs' mirror checks (or re-checks) diverge.
+    """
+    for step in (_MIRROR_CHECK_STEP, _MIRROR_RECHECK_STEP):
+        assert _step_body(DEMO_WORKFLOW, "demo-e2e", step) == _step_body(
+            LIVE_WORKFLOW, "live-e2e", step
+        ), f"{step!r} differs between demo-e2e and live-e2e"
+
+
+_ALL_CHECKED = [*_BLOCKED_MIRROR_HOSTS, "localhost"]
+
+
+_MIRROR_CHECK_CASES: list[tuple[str, dict[str, list[str]], dict[str, str], bool]] = [
+    # The partner: a healthy block passes, so the failures below are not a
+    # script that rejects everything.
+    ("every host on loopback", _loopback_answers(_ALL_CHECKED), _IMAGE_SOURCES, True),
+    # The IPv6 fall-through measured in the image: only the IPv4 entry
+    # present, so `getent hosts` reaches DNS.
+    (
+        "a blocked host leaks over IPv6",
+        {
+            **_loopback_answers(_ALL_CHECKED),
+            "hosts security.ubuntu.com": ["2620:2d:4000:1::103"],
+        },
+        _IMAGE_SOURCES,
+        False,
+    ),
+    (
+        "a blocked host resolves to a real address",
+        {**_loopback_answers(_ALL_CHECKED), "ahosts deb.nodesource.com": ["104.20.45.190"]},
+        _IMAGE_SOURCES,
+        False,
+    ),
+    # A host the image's apt uses that the list does not name: the run-time
+    # read of apt's sources is what catches it.
+    (
+        "apt uses a host nobody blocked",
+        {
+            **_loopback_answers(_ALL_CHECKED),
+            "ahosts mirror.example.com": ["203.0.113.7"],
+            "hosts mirror.example.com": ["203.0.113.7"],
+        },
+        {
+            **_IMAGE_SOURCES,
+            "sources.list.d/extra.list": "deb http://mirror.example.com/x y z\n",
+        },
+        False,
+    ),
+    # Unresolvable is not blocked: an outage looks like this too.
+    (
+        "a blocked host does not resolve at all",
+        {k: v for k, v in _loopback_answers(_ALL_CHECKED).items() if k != "ahosts esm.ubuntu.com"},
+        _IMAGE_SOURCES,
+        False,
+    ),
+    (
+        "localhost no longer loopback",
+        {**_loopback_answers(_ALL_CHECKED), "ahosts localhost": ["10.0.0.5"]},
+        _IMAGE_SOURCES,
+        False,
+    ),
+    # apt's sources were read and named nothing: the read is broken, so the
+    # check must not pass on the fixed list alone.
+    (
+        "apt sources name no host",
+        _loopback_answers(_ALL_CHECKED),
+        {"sources.list": "# nothing\n"},
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "answers", "sources", "should_pass"),
+    [pytest.param(*case, id=case[0]) for case in _MIRROR_CHECK_CASES],
+)
+def test_the_mirror_check_actually_fires(
+    label: str,
+    answers: dict[str, list[str]],
+    sources: dict[str, str],
+    should_pass: bool,
+    tmp_path: Path,
+) -> None:
+    """Run the real check against a fake `getent` and fake apt sources.
+
+    Turns red if: the check passes with a mirror reachable (over IPv4 or IPv6),
+    with a host apt uses left unblocked, with a host that does not resolve, with
+    `localhost` broken or with apt's sources unreadable — or fails a healthy block.
+    """
+    result = _run_mirror_check(tmp_path, answers, sources)
+    assert (result.returncode == 0) is should_pass, (
+        f"{label}: exit {result.returncode}, expected "
+        f"{'success' if should_pass else 'failure'}\n{result.stdout}\n{result.stderr}"
+    )
+
+
+_MIRROR_RECHECK_CASES: list[tuple[str, dict[str, list[str]], bool]] = [
+    ("still on loopback", _loopback_answers(["security.ubuntu.com"]), True),
+    (
+        "the block was lost during the run",
+        {
+            "ahosts security.ubuntu.com": ["185.125.190.81"],
+            "hosts security.ubuntu.com": ["::1"],
+        },
+        False,
+    ),
+    (
+        "the IPv6 entry was lost during the run",
+        {
+            "ahosts security.ubuntu.com": ["127.0.0.1"],
+            "hosts security.ubuntu.com": ["2620:2d:4000:1::103"],
+        },
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "answers", "should_pass"),
+    [pytest.param(*case, id=case[0]) for case in _MIRROR_RECHECK_CASES],
+)
+def test_the_mirror_recheck_actually_fires(
+    label: str, answers: dict[str, list[str]], should_pass: bool, tmp_path: Path
+) -> None:
+    """Turns red if: the re-check passes with the mirror reachable again, or fails a held block."""
+    body = _step_body(DEMO_WORKFLOW, "demo-e2e", _MIRROR_RECHECK_STEP)
+    env = {**os.environ, **_fake_getent(tmp_path, answers)}
+    result = subprocess.run(
+        ["bash", "-c", body], capture_output=True, text=True, env=env, check=False
+    )
+    assert (result.returncode == 0) is should_pass, (
+        f"{label}: exit {result.returncode}\n{result.stdout}\n{result.stderr}"
     )
 
 
