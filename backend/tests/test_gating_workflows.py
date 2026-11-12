@@ -3451,6 +3451,21 @@ def test_the_mirror_check_actually_fires(
     )
 
 
+def test_the_mirror_check_names_a_missing_source_file(tmp_path: Path) -> None:
+    """No apt source file at all fails with its own message, not by accident.
+
+    Without the guard, `awk` given no file reads standard input instead, and the
+    step fails (or hangs) for an unrelated reason further down.
+
+    Turns red if: the "no apt source file" guard is removed.
+    """
+    result = _run_mirror_check(tmp_path, _loopback_answers(_ALL_CHECKED), {})
+    assert result.returncode != 0
+    assert "::error::no apt source file to read" in result.stdout, (
+        f"the check did not name the missing source file:\n{result.stdout}\n{result.stderr}"
+    )
+
+
 _MIRROR_RECHECK_CASES: list[tuple[str, dict[str, list[str]], bool]] = [
     ("still on loopback", _loopback_answers(["security.ubuntu.com"]), True),
     (
