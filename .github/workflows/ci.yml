@@ -329,18 +329,19 @@ jobs:
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
     #
-    # 66 minutes is an ESTIMATE of the worst case (#598), not a measurement. On the
+    # 68 minutes is an ESTIMATE of the worst case (#598), not a measurement. On the
     # measured run (two answer passes) the eval step took 25.0 min, and 22 grader
     # calls timed out at 15 s. With the grader at 60 s
     # (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), those 22 calls can each wait
     # 45 s more (16.5 min), and the 22 adversarial calls they skipped can each take
-    # up to 60 s (22.0 min): 25.0 + 16.5 + 22.0 = 63.5 min, plus about 0.6 min of
-    # job overhead, so 66. Re-set it from the next counted run's durations. It must
+    # up to 60 s (22.0 min): 25.0 + 16.5 + 22.0 = 63.5 min for the eval step,
+    # whose own limit is 64. The job gets 4 minutes more for setup and the report
+    # upload, so 68. Re-set both from the next counted run's durations. The job must
     # stay at least 6 minutes (the `test` job before it) under the release wait in
     # scripts/wait_for_judged_eval.sh (TOTAL_TIMEOUT_SECONDS, 75 min); raising it
     # further needs the wait raised too. Double grading (#598 Step 3) needs this
     # re-sized before its run.
-    timeout-minutes: 66
+    timeout-minutes: 68
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
@@ -519,9 +520,10 @@ jobs:
       - name: Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)
         if: steps.guard.outputs.run == 'true'
         working-directory: backend
-        # Below the job's 66, so a run cut short still leaves time for the
-        # always() upload step to save the report written after each pass (#598).
-        timeout-minutes: 62
+        # Above the 63.5 min worst-case estimate in the job's comment, and below the
+        # job's 68, so a run cut short still leaves time for the always() upload
+        # step to save the report written after each pass (#598).
+        timeout-minutes: 64
         # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
         # and rolls back (zero residue). Non-zero exit on any gate regression.
         #

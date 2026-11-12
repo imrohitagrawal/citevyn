@@ -1418,6 +1418,8 @@ def main(argv: list[str] | None = None) -> int:
 
     r = summary["retrieval"]
     j = summary["judge"]
+    # Every printed line that can carry model or exception text is redacted.
+    secrets = secret_values(get_settings())
     if not args.quiet:
         print("Retrieval hit-rate:")
         print(
@@ -1460,7 +1462,6 @@ def main(argv: list[str] | None = None) -> int:
             grader = summary.get("grader", {})
             if grader.get("timeout_seconds") is not None:
                 print(f"Grader timeout: {grader['timeout_seconds']} s")
-            secrets = secret_values(get_settings())
             for line in pass_report_lines(j):
                 print(redact(f"  main pass {line}", secrets))
             fallback = summary.get("fallback")
@@ -1517,7 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         print("\nEVAL GATE FAILED:")
         for f in failures:
-            print(f"  - {f}")
+            print(redact(f"  - {f}", secrets))
         return 1
     if not args.quiet:
         print(f"\nEval gate passed. Report: {args.report}")
