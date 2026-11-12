@@ -488,6 +488,22 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
   package that owns `browsers.json`, with `@playwright/test` and `playwright`
   asserted equal to it rather than trusted. A dependabot bump of one without the
   other would silently swap the renderer under 22 committed images.
+
+  Since #617 the two required Playwright jobs, `Demo-mode Playwright (no visual
+  snapshots)` and `Live-mode Playwright (stub backend)`, run in the same image,
+  and the test requires all three image strings to be identical. They used to
+  run `npx playwright install --with-deps chromium` on the bare runner, which
+  installs system packages with apt on every run; on 2026-11-11 the runner
+  could not resolve Ubuntu's mirrors and both failed before any test ran,
+  blocking every merge, while this job passed. Neither required job downloads
+  OS packages now. Each points the Ubuntu and Nodesource package hosts at
+  loopback (`--add-host`, IPv4 and IPv6), proves right after checkout that
+  every listed host and every host in the image's apt sources resolves only to
+  loopback, and checks again after the suite, so every green run is a run with
+  no mirror reachable. That proof step also prints `python3 --version`: the
+  execution assertion needs `python3`, which the image ships but does not
+  promise, so it is now a dependency of two required checks — accepted, and it
+  fails loudly at the first step if it ever goes.
 - **It is the exact complement of `Demo-mode Playwright (no visual snapshots)`.**
   The demo job asserts it selects the default suite *minus* its visual tests; this
   one asserts it selects *exactly* those visual tests. Measured with `--list` on

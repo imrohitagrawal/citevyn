@@ -263,6 +263,16 @@ updates:
           - "typescript"
           - "postcss"
           - "stylelint"
+      # A ``@playwright/test`` bump in this group goes RED on purpose:
+      # all three Playwright jobs (``frontend.yml``'s ``demo-e2e`` and
+      # ``visual-e2e``, ``frontend-live-e2e.yml``'s ``live-e2e``) run
+      # in ``mcr.microsoft.com/playwright:v<version>-noble``, and
+      # ``backend/tests/test_gating_workflows.py`` requires that tag to
+      # equal the ``playwright-core`` version the lockfile resolves, in
+      # all three jobs at once (#325, #617). The bump PR has to move the
+      # three tags itself, in the same change as the lockfile, and
+      # regenerate the visual baselines in the new image; the failing
+      # assertion spells out the steps.
       frontend-test:
         applies-to: version-updates
         update-types:
