@@ -2818,39 +2818,173 @@ _BLOCKED_MIRROR_HOSTS: tuple[str, ...] = (
 _MIRROR_CHECK_STEP = "Prove the package mirrors are unreachable"
 _MIRROR_RECHECK_STEP = "Prove the package mirrors were still unreachable"
 
-#: What downloads browsers or OS packages at run time. `playwright install`
-#: also covers `playwright install-deps`; the rest is apt and dpkg by name.
+#: What downloads browsers or OS packages at run time, as written in a step:
+#: `playwright install` (also `playwright@<version> install`, `install-deps`,
+#: and the CLI called by path, `playwright-core/cli.js install`), and apt,
+#: aptitude and dpkg by name. It reads text, not behaviour: a package install
+#: hidden behind a script or an action it cannot see is out of its reach.
 _OS_PACKAGE_INSTALL = re.compile(
-    r"\bplaywright\s+install\b|\binstall-deps\b|\bapt-get\b"
+    r"\bplaywright(?:@\S+)?\s+install\b|playwright(?:-core)?/cli\.js\s+install\b"
+    r"|\binstall-deps\b|\bapt-get\b|\baptitude\b"
     r"|\bapt\s+(?:install|update|upgrade)\b|\bdpkg\b"
 )
-_RUNS_PLAYWRIGHT_TESTS = re.compile(r"\bplaywright\s+test\b")
+#: `playwright test`, also through a pinned `playwright@<version>`.
+_RUNS_PLAYWRIGHT_TESTS = re.compile(r"\bplaywright(?:@\S+)?\s+test\b")
+#: `npm run <name>`, `npm run-script <name>`, `npm test` and `npm t`.
+_NPM_SCRIPT_CALL = re.compile(
+    r"\bnpm\s+(?:run(?:-script)?\s+(?P<name>[\w:.-]+)|(?P<test>test|t)(?=\s|$))"
+)
+
+
+def _join_continuations(body: str) -> str:
+    """Join shell lines ended by a backslash, so `npx playwright \\` / `install` is one line."""
+    return re.sub(r"\\\n[ \t]*", " ", body)
+
+
+def _frontend_scripts() -> dict[str, str]:
+    """``frontend/package.json``'s ``scripts``: what `npm run <name>` actually runs."""
+    package = json.loads((FRONTEND / "package.json").read_text(encoding="utf-8"))
+    scripts = package.get("scripts") or {}
+    assert scripts, "frontend/package.json has no scripts, so `npm run` cannot be followed"
+    return {str(name): str(command) for name, command in scripts.items()}
+
+
+def _runs_playwright_tests(line: str, scripts: dict[str, str], depth: int = 0) -> bool:
+    """Does this shell line run the Playwright suite, directly or through npm scripts?"""
+    if _RUNS_PLAYWRIGHT_TESTS.search(line):
+        return True
+    # A cycle or a very deep chain stops here rather than recursing forever.
+    if depth >= 5:
+        return False
+    for call in _NPM_SCRIPT_CALL.finditer(line):
+        command = scripts.get(call.group("name") or "test", "")
+        if command and _runs_playwright_tests(command, scripts, depth + 1):
+            return True
+    return False
 
 
 def _install_lines(body: str) -> list[str]:
     """The lines of a ``run:`` body that would fetch browsers or OS packages.
 
-    Comments are dropped first (``_scannable_run_lines``): a comment that says
-    "no `playwright install` here" cannot install anything.
+    Backslash continuations are joined and comments dropped first
+    (``_scannable_run_lines``): a comment that says "no `playwright install`
+    here" cannot install anything.
     """
-    return [line for line in _scannable_run_lines(body) if _OS_PACKAGE_INSTALL.search(line)]
+    return [
+        line
+        for line in _scannable_run_lines(_join_continuations(body))
+        if _OS_PACKAGE_INSTALL.search(line)
+    ]
 
 
-def _discovered_playwright_jobs() -> dict[tuple[str, str], dict[str, Any]]:
-    """Every job, in every workflow, with a step that runs ``playwright test``."""
+def _discovered_playwright_jobs(
+    directory: Path = WORKFLOW_DIR, scripts: dict[str, str] | None = None
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Every job, in every workflow, with a step that runs ``playwright test``.
+
+    Takes ``directory`` and ``scripts`` so a test can drive the REAL scan over a
+    copy of the workflow directory with a planted job in it.
+    """
+    if scripts is None:
+        scripts = _frontend_scripts()
     found: dict[tuple[str, str], dict[str, Any]] = {}
-    for path in sorted(WORKFLOW_DIR.glob("*.yml")):
-        for job_id, job in (_load_workflow(path.name).get("jobs") or {}).items():
+    # Both extensions: GitHub runs `.yaml` workflows too.
+    paths = sorted([*directory.glob("*.yml"), *directory.glob("*.yaml")])
+    for path in paths:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_id, job in (data.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
-            bodies = [str(step.get("run") or "") for step in _steps(job)]
+            bodies = [_join_continuations(str(step.get("run") or "")) for step in _steps(job)]
             if any(
-                _RUNS_PLAYWRIGHT_TESTS.search(line)
+                _runs_playwright_tests(line, scripts)
                 for body in bodies
                 for line in _scannable_run_lines(body)
             ):
                 found[(path.name, job_id)] = job
     return found
+
+
+# Planted fourth jobs, one per way a job can run the suite without the literal
+# `playwright test` on its own line. Each must join the discovered population;
+# before #620's round-1 fix every one of them was missed (reviewer mutants).
+_PLANTED_PLAYWRIGHT_FORMS: list[tuple[str, str, str, dict[str, str] | None]] = [
+    # (id, planted file name, run line, scripts override or None for the real package.json)
+    ("npm run script from the real package.json", "zz-planted.yml", "npm run test:e2e", None),
+    ("npm run-script", "zz-planted.yml", "npm run-script test:ui", None),
+    (
+        "a script that calls another script",
+        "zz-planted.yml",
+        "npm run outer",
+        {"outer": "npm run inner -- --x", "inner": "playwright test"},
+    ),
+    ("versioned npx", "zz-planted.yml", "npx playwright@1.63.0 test", None),
+    ("backslash-continued", "zz-planted.yml", "npx playwright \\\n  test -c x.ts", None),
+    ("a .yaml workflow", "zz-planted.yaml", "npx playwright test", None),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "filename", "run_line", "scripts"),
+    [pytest.param(*form, id=form[0]) for form in _PLANTED_PLAYWRIGHT_FORMS],
+)
+def test_the_population_scan_finds_a_planted_playwright_job(
+    label: str, filename: str, run_line: str, scripts: dict[str, str] | None, tmp_path: Path
+) -> None:
+    """Positive controls for ``_discovered_playwright_jobs``.
+
+    Turns red if: the scan stops reading ``*.yaml`` workflows, stops following
+    ``npm run``/``npm test`` into package.json scripts (one level or nested),
+    stops accepting ``playwright@<version>``, or stops joining ``\\`` continuations.
+    """
+    for path in sorted(WORKFLOW_DIR.glob("*.y*ml")):
+        (tmp_path / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    job = {"runs-on": "ubuntu-latest", "steps": [{"name": "planted", "run": run_line}]}
+    (tmp_path / filename).write_text(
+        yaml.safe_dump({"name": "planted", "on": "push", "jobs": {"planted-e2e": job}}),
+        encoding="utf-8",
+    )
+    found = set(_discovered_playwright_jobs(tmp_path, scripts))
+    assert found == set(_PLAYWRIGHT_JOBS) | {(filename, "planted-e2e")}, (
+        f"{label}: the scan found {sorted(found)}; the planted job "
+        f"({filename}: {run_line!r}) runs the Playwright suite and must be in it"
+    )
+
+
+def test_npm_test_is_followed_into_its_script() -> None:
+    """`npm test` and `npm t` run the `test` script; here that is vitest, elsewhere it may not be.
+
+    A unit check rather than a planted job: with `test` mapped to Playwright,
+    the real `build` job's `npm test` would join the population too.
+
+    Turns red if: ``_runs_playwright_tests`` stops following `npm test`/`npm t`,
+    or follows them into a script that is not Playwright.
+    """
+    playwright = {"test": "playwright test"}
+    vitest = {"test": "vitest run"}
+    assert _runs_playwright_tests("npm test", playwright)
+    assert _runs_playwright_tests("npm t -- --grep x", playwright)
+    assert not _runs_playwright_tests("npm test", vitest)
+    assert not _runs_playwright_tests("npm test", _frontend_scripts()), (
+        "frontend/package.json's `test` script now runs Playwright, so `build` is a Playwright job"
+    )
+
+
+def test_the_population_scan_does_not_follow_a_script_that_is_not_playwright(
+    tmp_path: Path,
+) -> None:
+    """Negative partner: ``npm test`` runs vitest here, so it must not join.
+
+    Turns red if: following npm scripts starts flagging every ``npm run``.
+    """
+    job = {
+        "runs-on": "ubuntu-latest",
+        "steps": [{"name": "unit", "run": "npm test\nnpm run build"}],
+    }
+    (tmp_path / "unit.yml").write_text(
+        yaml.safe_dump({"name": "unit", "on": "push", "jobs": {"unit": job}}), encoding="utf-8"
+    )
+    assert _discovered_playwright_jobs(tmp_path) == {}, "a vitest/build job was read as Playwright"
 
 
 def test_the_playwright_job_population_is_the_three_expected_jobs() -> None:
@@ -2879,6 +3013,10 @@ def test_the_install_detector_sees_every_form_it_claims_to() -> None:
     The real jobs no longer carry an install step, so nothing in the tree can
     show the detector still matches. These lines can.
 
+    It matches TEXT, not behaviour, so it fails closed: an `echo` that merely
+    mentions `apt-get` is flagged too (accepted; reword the echo), and an
+    install hidden inside a script, an action or a variable is not seen.
+
     Turns red if: the detector stops matching any install form below, or starts
     matching a line the real jobs legitimately run.
     """
@@ -2892,6 +3030,11 @@ def test_the_install_detector_sees_every_form_it_claims_to() -> None:
         "apt install fonts-noto",
         "apt update",
         "dpkg -i ./chrome.deb",
+        "npx playwright@1.63.0 install chromium",
+        "node node_modules/playwright-core/cli.js install chromium",
+        "node node_modules/playwright/cli.js install --with-deps",
+        "aptitude install -y fonts-noto",
+        "npx playwright \\\n  install --with-deps chromium",
     )
     missed = [line for line in installs if not _install_lines(line)]
     assert not missed, f"the install detector does not see: {missed}"
