@@ -2581,13 +2581,12 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
         "`playwright install` fetches on the day, and the committed -linux "
         "baselines stop being reproducible."
     )
-    # The digest form is ACCEPTED (#325, item 8). `...-noble@sha256:<digest>` is
-    # strictly stronger than the tag: it is immutable, and the tag is not —
-    # Microsoft republishes these tags when the base image is patched, and the
-    # base's font packages are a render input for a screenshot suite. Refusing
-    # the digest would have put this required test between the repo and the best
-    # available pin, which is not a guard's job. The version is still read from
-    # the tag part, so the lockstep comparison works either way.
+    # The digest form was ACCEPTED here in #325 (item 8) and is REQUIRED since
+    # #617, by test_every_playwright_job_runs_the_locked_playwright_image over
+    # all three Playwright jobs: a tag is not immutable (Microsoft republishes
+    # it when the base image is patched), and a republish could change the
+    # fonts here or the apt sources the required jobs check. This test still
+    # reads the version from the tag part, so it stays optional in this regex.
     match = re.fullmatch(
         r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+"
         r"(?:@sha256:[0-9a-f]{64})?",
@@ -2612,17 +2611,25 @@ def test_the_visual_job_runs_the_browser_that_drew_its_baselines() -> None:
         "IF YOU GOT HERE FROM A DEPENDABOT PR, this is not a one-line fix and "
         "bumping the tag alone is the wrong move — it would leave 22 baselines "
         "drawn by the old browser. The sequence is:\n"
-        "  1. edit the `image:` tag to match the new version in all three "
-        "Playwright jobs — frontend.yml's `visual-e2e` and `demo-e2e`, and "
-        "frontend-live-e2e.yml's `live-e2e` (#617; "
+        "  1. read the new image's digest with `docker buildx imagetools inspect "
+        "mcr.microsoft.com/playwright:v<version>-noble` (or the `Digest:` line of a "
+        'CI run\'s "Initialize containers" step), and set the `image:` tag AND '
+        "`@sha256:` digest in all three Playwright jobs — frontend.yml's "
+        "`visual-e2e` and `demo-e2e`, and frontend-live-e2e.yml's `live-e2e` (#617; "
         "test_every_playwright_job_runs_the_locked_playwright_image holds them equal);\n"
-        "  2. regenerate every baseline in the NEW image, on amd64 — the command "
-        "is in the header of frontend/playwright.visual-ci.config.ts, and "
-        "`--platform linux/amd64` is not optional (arm64 renders differ for 12 "
-        "of the 22);\n"
+        "  2. set the same tag and digest in the `docker run ... "
+        "mcr.microsoft.com/playwright:v<version>-noble@sha256:<digest>` "
+        "regeneration command in the header of "
+        "frontend/playwright.visual-ci.config.ts "
+        "(test_the_regeneration_command_and_the_ci_container_agree requires it to "
+        "name the job's image), then run that command to regenerate every baseline "
+        "in the NEW image, on amd64 — `--platform linux/amd64` is not optional "
+        "(arm64 renders differ for 12 of the 22); also update the image quoted in "
+        "docs/TEST_STRATEGY.md §12.2;\n"
         "  3. have the owner look at the regenerated images before they are "
         "committed, the same gate #325 used for the first set;\n"
-        "  4. commit the tag and the PNGs together.\n"
+        "  4. commit the tags and digests, the regeneration command and the PNGs "
+        "together.\n"
         "If that is more than the bump is worth today, close the dependabot PR "
         "rather than editing this test."
     )
@@ -3086,24 +3093,74 @@ def test_no_playwright_job_installs_browsers_or_os_packages() -> None:
     )
 
 
+#: A Playwright image pinned by tag AND digest. The tag carries the version
+#: the lockstep rule reads; the digest is what makes the pin immutable (#617).
+_DIGEST_PINNED_PLAYWRIGHT_IMAGE = re.compile(
+    r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+@sha256:[0-9a-f]{64}"
+)
+
+
+def _image_problem(label: str, image: str, installed: str) -> str | None:
+    """Why ``image`` is not an acceptable Playwright job image, or None."""
+    match = _DIGEST_PINNED_PLAYWRIGHT_IMAGE.fullmatch(image)
+    if not match:
+        return (
+            f"{label} runs {image!r}, which is not `mcr.microsoft.com/playwright:"
+            "v<version>-<distro>@sha256:<64 hex>`. A tag alone is not a pin: "
+            "Microsoft republishes the same tag when the base image is patched"
+        )
+    if match.group("version") != installed:
+        return (
+            f"{label} runs Playwright v{match.group('version')} but "
+            f"frontend/package-lock.json installs playwright-core {installed}"
+        )
+    return None
+
+
+def test_the_image_rule_refuses_a_tag_without_a_digest() -> None:
+    """Positive and negative controls for ``_image_problem``.
+
+    Turns red if: a tag-only, `latest`, short-digest or wrong-version image is
+    accepted, or a correct tag-plus-digest image is refused.
+    """
+    digest = "@sha256:" + "a" * 64
+    good = f"mcr.microsoft.com/playwright:v1.63.0-noble{digest}"
+    assert _image_problem("control", good, "1.63.0") is None
+    for bad in (
+        "mcr.microsoft.com/playwright:v1.63.0-noble",
+        "mcr.microsoft.com/playwright:latest",
+        "mcr.microsoft.com/playwright:v1.63.0-noble@sha256:abc",
+        f"mcr.microsoft.com/playwright:v1.62.0-noble{digest}",
+    ):
+        assert _image_problem("control", bad, "1.63.0"), f"{bad!r} was accepted"
+
+
 def test_every_playwright_job_runs_the_locked_playwright_image() -> None:
-    """All three Playwright jobs run one image, and its tag follows the lockfile.
+    """All three Playwright jobs run one digest-pinned image whose tag follows the lockfile.
 
     The required jobs used to take their browser from `playwright install` on
     the day. In the image the browser is the one the tag names, so the tag has
     to equal the `playwright-core` version `npm ci` installs — the same rule
     `test_the_visual_job_runs_the_browser_that_drew_its_baselines` holds the
-    visual job to, now over all three, and the three image strings must be
-    identical so a bump cannot move one job and leave another behind.
+    visual job to, now over all three. The image must ALSO carry its digest: a
+    same-tag republish could change apt's sources (which the required jobs'
+    first step checks), the fonts or the browser build with no change here.
+    And the three image strings must be identical, so a bump cannot move one
+    job and leave another behind.
 
-    Turns red if: a Playwright job loses its `container:`, runs a different
-    image string from the others, runs a tag that is not the locked
-    `playwright-core` version, or drops `--ipc=host` from its options.
+    Turns red if: a Playwright job loses its `container:`, runs an image
+    without an `@sha256:` digest, runs a different image string (tag or digest)
+    from the others, runs a tag that is not the locked `playwright-core`
+    version, or drops `--ipc=host` from its options.
     """
     installed = _installed_playwright_version()
     images: dict[str, str] = {}
     problems: list[str] = []
-    for (workflow, job_id), job in sorted(_discovered_playwright_jobs().items()):
+    jobs = _discovered_playwright_jobs()
+    assert set(jobs) == set(_PLAYWRIGHT_JOBS), (
+        "population drifted; see test_the_playwright_job_population_is_the_three_expected_jobs"
+    )
+    for (workflow, job_id), job in sorted(jobs.items()):
         label = f"{workflow}:{job_id}"
         container = job.get("container")
         if not isinstance(container, dict) or not isinstance(container.get("image"), str):
@@ -3111,28 +3168,20 @@ def test_every_playwright_job_runs_the_locked_playwright_image() -> None:
             continue
         image = container["image"].strip()
         images[label] = image
-        match = re.fullmatch(
-            r"mcr\.microsoft\.com/playwright:v(?P<version>[0-9.]+)-\w+"
-            r"(?:@sha256:[0-9a-f]{64})?",
-            image,
-        )
-        if not match:
-            problems.append(f"{label} runs {image!r}, not a pinned Playwright image")
-        elif match.group("version") != installed:
-            problems.append(
-                f"{label} runs Playwright v{match.group('version')} but "
-                f"frontend/package-lock.json installs playwright-core {installed}"
-            )
+        problem = _image_problem(label, image, installed)
+        if problem:
+            problems.append(problem)
         if "--ipc=host" not in shlex.split(str(container.get("options") or "")):
             problems.append(f"{label} does not pass `--ipc=host` in `container.options`")
-    assert set(_discovered_playwright_jobs()) == set(_PLAYWRIGHT_JOBS), (
-        "population drifted; see test_the_playwright_job_population_is_the_three_expected_jobs"
-    )
     if len(set(images.values())) > 1:
         problems.append(f"the Playwright jobs run different images: {images}")
     assert not problems, (
-        "every Playwright job must run the same pinned image as the lockfile "
-        "(#617). A @playwright/test bump moves all three tags together:\n  " + "\n  ".join(problems)
+        "every Playwright job must run the same digest-pinned image as the "
+        "lockfile (#617). A @playwright/test bump moves the tag AND the digest in "
+        "all four places (the three jobs and the regeneration command in "
+        "frontend/playwright.visual-ci.config.ts) and regenerates the visual "
+        "baselines; the full steps are in the failure message of "
+        "test_the_visual_job_runs_the_browser_that_drew_its_baselines:\n  " + "\n  ".join(problems)
     )
 
 
@@ -3366,6 +3415,15 @@ _MIRROR_CHECK_CASES: list[tuple[str, dict[str, list[str]], dict[str, str], bool]
         {"sources.list": "# nothing\n"},
         False,
     ),
+    # Newer images keep every source under sources.list.d and ship no
+    # sources.list at all; that is not a broken read.
+    (
+        "no sources.list, sources in sources.list.d",
+        _loopback_answers(_ALL_CHECKED),
+        {k: v for k, v in _IMAGE_SOURCES.items() if k != "sources.list"},
+        True,
+    ),
+    ("no apt source file at all", _loopback_answers(_ALL_CHECKED), {}, False),
 ]
 
 

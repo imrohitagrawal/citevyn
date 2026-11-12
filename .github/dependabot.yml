@@ -269,10 +269,18 @@ updates:
       # in ``mcr.microsoft.com/playwright:v<version>-noble``, and
       # ``backend/tests/test_gating_workflows.py`` requires that tag to
       # equal the ``playwright-core`` version the lockfile resolves, in
-      # all three jobs at once (#325, #617). The bump PR has to move the
-      # three tags itself, in the same change as the lockfile, and
-      # regenerate the visual baselines in the new image; the failing
-      # assertion spells out the steps.
+      # all three jobs at once (#325, #617), and pins the image by
+      # ``@sha256:`` digest too. The bump PR has to move the tag AND the
+      # digest, in the same change as the lockfile, in all four places:
+      # the three jobs and the ``docker run`` regeneration command in
+      # ``frontend/playwright.visual-ci.config.ts`` (a test requires it
+      # to name the job's image), plus the image quoted in
+      # ``docs/TEST_STRATEGY.md``. Read the new digest with ``docker
+      # buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble``
+      # or from a CI run's ``Digest:`` line. Then regenerate the visual
+      # baselines in the new image with that command. The failing assertion in
+      # ``test_the_visual_job_runs_the_browser_that_drew_its_baselines``
+      # spells out the steps.
       frontend-test:
         applies-to: version-updates
         update-types:

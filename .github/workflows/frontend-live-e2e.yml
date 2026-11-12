@@ -93,15 +93,17 @@ jobs:
     # installs system packages with apt on every run; on 2026-11-11 the runner
     # could not resolve `security.ubuntu.com` and this required job failed in
     # that step, before any test ran, blocking every merge. The image carries
-    # Chromium and its system libraries. The tag must equal the
-    # `playwright-core` version frontend/package-lock.json resolves;
-    # `backend/tests/test_gating_workflows.py` pins that and the three-way
-    # identity.
+    # Chromium and its system libraries, so a run needs no OS-package download
+    # (`npm ci` still fetches npm packages). The tag must equal the
+    # `playwright-core` version frontend/package-lock.json resolves, and the
+    # image is pinned by `@sha256:` digest because the tag is republished in
+    # place; `backend/tests/test_gating_workflows.py` pins both and the
+    # three-way identity.
     #
     # No Python backend runs here: the stub is a Vite plugin
     # (`VITE_LIVE_STUB=1`). The only Python is the stdlib assertion step.
     container:
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
       # `--ipc=host`: Playwright's documented setting for Chromium in Docker.
       # The `--add-host` entries point every Ubuntu and Nodesource package host
       # at loopback, IPv4 and IPv6, so each run proves it needs no mirror. The
@@ -114,7 +116,8 @@ jobs:
         --add-host=ports.ubuntu.com:127.0.0.1 --add-host=ports.ubuntu.com:::1
         --add-host=esm.ubuntu.com:127.0.0.1 --add-host=esm.ubuntu.com:::1
         --add-host=deb.nodesource.com:127.0.0.1 --add-host=deb.nodesource.com:::1
-    # The whole job has measured at 97 s max over its last 15 runs, so 15
+    # The whole job measured 92 s in the Playwright container on #617's pull
+    # request, and 97 s max over 15 bare-runner runs before it, so 15
     # minutes is ~9x headroom — a runner would have to be an order of magnitude
     # slower than anything observed here to trip it, which is not a guarantee,
     # just a wide margin against the measurements we have. It caps a dev server
@@ -122,9 +125,9 @@ jobs:
     # wait does not cover once it has started; without a cap that burns the
     # 360-minute default. (It also capped `playwright install --with-deps`,
     # whose apt retries were the other unbounded wait, until #617 removed that
-    # step. `frontend.yml`'s demo job uses 20 for a job measured at 11.5 to 12.7
-    # minutes over its last five passing runs on `main`, 2026-11-10 to
-    # 2026-11-12; this comment said ~8.8 before.)
+    # step. `frontend.yml`'s demo job uses 20 for a job measured at 12.8
+    # minutes in the container on #617's pull request; this comment said ~8.8
+    # before.)
     timeout-minutes: 15
     defaults:
       run:
@@ -140,15 +143,30 @@ jobs:
       # and every host apt's own sources name, must resolve only to loopback,
       # and `python3`, which the assertion step below needs and the image does
       # not promise, must be present. This makes python3 a dependency of this
-      # required job, which was accepted (#617).
+      # required job, accepted in #617's review and recorded in its pull request.
       - name: Prove the package mirrors are unreachable
         run: |
           set -euo pipefail
           python3 --version
           blocked=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com esm.ubuntu.com deb.nodesource.com)
-          # Every host apt is configured to fetch from. Comment lines are not
-          # sources; a read that finds no host at all fails here (grep exits 1).
-          apt_hosts=$(awk '!/^[[:space:]]*#/' /etc/apt/sources.list /etc/apt/sources.list.d/* | grep -oE '[a-z]+://[^/[:space:]]+' | sed -E 's#^[a-z]+://##' | sort -u)
+          # Every host apt is configured to fetch from. A missing sources.list
+          # is fine when sources.list.d has sources (newer images keep them
+          # there); no readable source file at all fails. Comment lines are not
+          # sources; a read that finds no host fails too (grep exits 1).
+          # Shapes this read gets wrong, accepted because each FAILS the step
+          # rather than passing it: a URL in a trailing comment and a deb822
+          # stanza with `Enabled: no` are still checked (an unblocked host
+          # there fails), and `host:port` is looked up with its port and does
+          # not resolve. One shape is not caught: a `mirror+file:` source names
+          # no host itself, so the hosts in its mirror list go unchecked (if it
+          # is the only source, "no host" fails the step).
+          shopt -s nullglob
+          sources=()
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            if [ -f "$f" ]; then sources+=("$f"); fi
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then echo "::error::no apt source file to read"; exit 1; fi
+          apt_hosts=$(awk '!/^[[:space:]]*#/' "${sources[@]}" | grep -oE '[a-z]+://[^/[:space:]]+' | sed -E 's#^[a-z]+://##' | sort -u)
           echo "apt fetches from: ${apt_hosts//$'\n'/ }"
           for host in "${blocked[@]}" $apt_hosts localhost; do
             # A name getent cannot resolve fails the step here, under pipefail:
@@ -158,7 +176,7 @@ jobs:
             for addr in $v4 $v6; do
               case "$addr" in
                 127.0.0.1|::1) ;;
-                *) echo "::error::$host resolves to $addr, so this run could reach it"; exit 1 ;;
+                *) echo "::error::$host resolves to $addr, so this run could reach it. A host apt newly uses must be added in all four places: the blocked=(...) list here and in the other Playwright workflow, both jobs' --add-host sets, and _BLOCKED_MIRROR_HOSTS in backend/tests/test_gating_workflows.py"; exit 1 ;;
               esac
             done
             echo "$host -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
@@ -266,7 +284,8 @@ jobs:
           VITE_LIVE_STUB: '1'
           PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/live-results.json
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report-live
-      # The block held for the whole run, not only at the start. Identical to
+      # Re-checks ONE listed host, `security.ubuntu.com`, after the suite, so a
+      # step that undid the block during the run would show here. Identical to
       # `demo-e2e`'s step of the same name in frontend.yml.
       - name: Prove the package mirrors were still unreachable
         run: |
