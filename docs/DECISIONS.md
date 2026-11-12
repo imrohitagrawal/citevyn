@@ -19,10 +19,14 @@ asking the owner anything; the answer may already be here.
 ---
 
 ### 2026-11-11 — Judged eval: an answer error fails the run, and passages are stored
-Applies to the judged eval (#598). A case whose answer errors, or is answered by a
-model other than the one expected, now fails the refusal-leak, groundedness and
-multi-turn checks instead of counting as a correct decline or dropping out of the
-count. Each case's report stores the passages the answer was given, so the grader
+Applies to the judged eval (#598). A case whose answer errors, or whose answer was
+written by a model other than the one expected (on the final turn or on an earlier
+turn of a follow-up), now fails whichever of the refusal-leak, groundedness and
+multi-turn checks applies to it, instead of counting as a correct decline or
+dropping out of the count. When another model served only a helper step, such as
+rewriting a follow-up question or checking a product alias, while the expected
+model wrote the answer, the case is graded normally and the helper step is listed
+in the report as information (decided 2026-11-12). Each case's report stores the passages the answer was given, so the grader
 check (Step 3 of #598) runs one fresh judged run and grades the same answers twice,
 without and with those passages, rather than re-grading an older report that holds
 no passages. The eval report keeps the default 90-day retention, because the
