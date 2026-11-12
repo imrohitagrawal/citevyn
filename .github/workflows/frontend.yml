@@ -12,7 +12,9 @@ name: frontend
 # inverse filter (which double-reports when a PR touches both sides), or
 # job-level `if:` guards relying on skipped-counts-as-success. Both work; both
 # are subtle enough to get wrong in a way that blocks every PR. This repo is
-# PUBLIC, so Actions minutes are free, and the whole workflow is ~6 minutes.
+# PUBLIC, so Actions minutes are free; its longest job, `demo-e2e`, took 11.5
+# to 12.7 minutes over its last five passing runs on `main` (2026-11-10 to
+# 2026-11-12; this said "~6 minutes" before).
 # Always running it is the version nobody can get wrong.
 #
 # This also subsumes what the old filter existed for: ``knowledgeBase.corpus
@@ -91,14 +93,89 @@ jobs:
     # `backend/tests/test_gating_workflows.py` pins it.
     name: Demo-mode Playwright (no visual snapshots)
     runs-on: ubuntu-latest
+    # IN THE PINNED PLAYWRIGHT IMAGE, like `visual-e2e` below (#617). This job
+    # used to run `npx playwright install --with-deps chromium` on the bare
+    # runner, which installs system packages with apt on every run. On
+    # 2026-11-11 the runner could not resolve `security.ubuntu.com` for hours:
+    # this job and `Live-mode Playwright` failed in that step after about ten
+    # minutes of apt retries, before any test ran, and every merge was blocked.
+    # `visual-e2e`, already in this image, passed through the same outage. The
+    # image carries Chromium and its system libraries, so a run needs no
+    # package download at all.
+    #
+    # The image string must stay identical in all three Playwright jobs, and
+    # its tag equal to the `playwright-core` version frontend/package-lock.json
+    # resolves. `backend/tests/test_gating_workflows.py` pins both.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # `--ipc=host`: Playwright's documented setting for Chromium in Docker
+      # (the default 64 MB /dev/shm can crash a tab), the same as `visual-e2e`.
+      #
+      # The `--add-host` entries point every Ubuntu and Nodesource package host
+      # at loopback, so each run PROVES it needs no mirror instead of assuming
+      # it. Docker writes them into /etc/hosts before the first step. Both
+      # addresses per host: with only the IPv4 one, `getent hosts` asks for
+      # IPv6 first and falls through to real DNS (measured in this image). The
+      # list is pinned by the test file; the step after checkout checks it.
+      options: >-
+        --ipc=host
+        --add-host=archive.ubuntu.com:127.0.0.1 --add-host=archive.ubuntu.com:::1
+        --add-host=security.ubuntu.com:127.0.0.1 --add-host=security.ubuntu.com:::1
+        --add-host=azure.archive.ubuntu.com:127.0.0.1 --add-host=azure.archive.ubuntu.com:::1
+        --add-host=ports.ubuntu.com:127.0.0.1 --add-host=ports.ubuntu.com:::1
+        --add-host=esm.ubuntu.com:127.0.0.1 --add-host=esm.ubuntu.com:::1
+        --add-host=deb.nodesource.com:127.0.0.1 --add-host=deb.nodesource.com:::1
     # The base config's webServer waits up to 120s and the suite runs serially;
     # without a cap a hung dev server burns the 360-minute default.
     timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
+        # A `container:` job defaults to `sh` (dash), which rejects the
+        # `set -euo pipefail` and arrays every step here uses. See the
+        # longer note on `visual-e2e`'s copy of this line below.
+        shell: bash
     steps:
       - uses: actions/checkout@v7
+      # Right after checkout (so `frontend`, the working directory, exists) and
+      # before anything that could use the network. A mirror reachable here
+      # fails the job in seconds, where the real outage hung for about ten
+      # minutes inside apt. `getent ahosts` and `getent hosts` together cover
+      # IPv4 and IPv6. Beyond the fixed list it reads apt's own source files,
+      # so a host a future image adds is checked before anyone lists it.
+      #
+      # `python3 --version` is here because the assertion step below runs
+      # `python3 -`, and this image does not promise a Python: it ships
+      # /usr/bin/python3 (3.12.3, measured) but Microsoft documents only a
+      # browser and Node environment. That makes python3 a dependency of this
+      # REQUIRED job, which is accepted (#617): if a rebuilt image drops it,
+      # this line fails the first step, loudly, and the fix is to rewrite the
+      # assertion in Node rather than to install a Python at run time.
+      #
+      # This body is identical in frontend-live-e2e.yml, and the test file runs
+      # it against a fake `getent`.
+      - name: Prove the package mirrors are unreachable
+        run: |
+          set -euo pipefail
+          python3 --version
+          blocked=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com esm.ubuntu.com deb.nodesource.com)
+          # Every host apt is configured to fetch from. Comment lines are not
+          # sources; a read that finds no host at all fails here (grep exits 1).
+          apt_hosts=$(awk '!/^[[:space:]]*#/' /etc/apt/sources.list /etc/apt/sources.list.d/* | grep -oE '[a-z]+://[^/[:space:]]+' | sed -E 's#^[a-z]+://##' | sort -u)
+          echo "apt fetches from: ${apt_hosts//$'\n'/ }"
+          for host in "${blocked[@]}" $apt_hosts localhost; do
+            # A name getent cannot resolve fails the step here, under pipefail:
+            # unresolvable is what an outage looks like, not proof of a block.
+            v4=$(getent ahosts "$host" | awk '{print $1}' | sort -u)
+            v6=$(getent hosts "$host" | awk '{print $1}')
+            for addr in $v4 $v6; do
+              case "$addr" in
+                127.0.0.1|::1) ;;
+                *) echo "::error::$host resolves to $addr, so this run could reach it"; exit 1 ;;
+              esac
+            done
+            echo "$host -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
+          done
       - uses: actions/setup-node@v7
         with:
           # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
@@ -109,8 +186,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      # NO `playwright install` step (#617): the image already carries the
+      # browser this Playwright version expects, at $PLAYWRIGHT_BROWSERS_PATH.
+      #
       # A job that runs ZERO tests passes, and there are two distinct ways for that
       # to happen, so there are two guards.
       #
@@ -177,6 +255,23 @@ jobs:
         run: npx playwright test -c playwright.demo-ci.config.ts --reporter=list,json,html
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/demo-results.json
+      # The first check proved the block at the start; this proves it held for
+      # the whole run, so "the suite passed with no mirror reachable" covers the
+      # suite and not only the steps before it. `security.ubuntu.com` is the
+      # host the 2026-11-11 outage could not resolve. Identical in
+      # frontend-live-e2e.yml.
+      - name: Prove the package mirrors were still unreachable
+        run: |
+          set -euo pipefail
+          v4=$(getent ahosts security.ubuntu.com | awk '{print $1}' | sort -u)
+          v6=$(getent hosts security.ubuntu.com | awk '{print $1}')
+          for addr in $v4 $v6; do
+            case "$addr" in
+              127.0.0.1|::1) ;;
+              *) echo "::error::security.ubuntu.com resolves to $addr after the suite ran; the block did not hold"; exit 1 ;;
+            esac
+          done
+          echo "security.ubuntu.com -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
       # The selection guard above is NOT enough, and the gap is the exact failure
       # mode this whole issue is about. `--list` counts SKIPPED tests, and
       # Playwright exits 0 when every test skips -- so a `test.skip(true, ...)` at
@@ -382,6 +477,10 @@ jobs:
   # would let the baselines silently stop matching the browser, which is the
   # defect #325 exists to close.
   #
+  # Since #617 the same tag drives THREE jobs: this one, `demo-e2e` above and
+  # `live-e2e` in frontend-live-e2e.yml. The test requires the three image
+  # strings to be identical, so the bump moves all three in one change.
+  #
   # The image tag must stay equal to the `playwright-core` version
   # frontend/package-lock.json RESOLVES. `playwright-core`, not
   # `@playwright/test`, because it is the package that owns `browsers.json` —
@@ -397,7 +496,8 @@ jobs:
     runs-on: ubuntu-latest
     container:
       # Keep in lockstep with the `playwright-core` version
-      # frontend/package-lock.json resolves. Pinned by
+      # frontend/package-lock.json resolves, and identical to `demo-e2e`'s and
+      # `live-e2e`'s image (#617). Pinned by
       # backend/tests/test_gating_workflows.py.
       image: mcr.microsoft.com/playwright:v1.63.0-noble
       # Same flag the regeneration command in `playwright.visual-ci.config.ts`
@@ -440,7 +540,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
-      # NO `playwright install` step, unlike the two jobs above. The image already
+      # NO `playwright install` step, like the two jobs above since #617. The image already
       # carries the browsers at $PLAYWRIGHT_BROWSERS_PATH, and downloading a
       # second copy would be the one thing that could make this job's browser
       # differ from the one that drew the baselines.
@@ -549,13 +649,13 @@ jobs:
       # `python3` IS PRESENT BUT NOT PROMISED (#325, item 9). Measured in the
       # image: `/usr/bin/python3`, Python 3.12.3. But Microsoft documents this
       # image as a browser/Node environment and gives no contract for a Python
-      # interpreter, so a future rebuild could drop it — unlike the two jobs
-      # above, which run on `ubuntu-latest`, where GitHub does promise one.
-      # Recorded rather than rewritten in Node because the failure is LOUD and
-      # instant: under `set -euo pipefail` a missing `python3` kills this step
-      # before a single pixel is compared, on an ADVISORY job. It goes on the
-      # short list of things only the first real CI run can settle, next to
-      # whether an amd64 render under emulation matches a native runner.
+      # interpreter, so a future rebuild could drop it. Recorded rather than
+      # rewritten in Node because the failure is LOUD and instant: under
+      # `set -euo pipefail` a missing `python3` kills this step before a single
+      # pixel is compared. Since #617 the two REQUIRED jobs above run in this
+      # image too, so the same dependency now sits on two required checks; that
+      # was accepted, and their first step prints `python3 --version` so a
+      # missing interpreter fails them at the start rather than after the suite.
       - name: Assert the suite actually executed
         run: |
           set -euo pipefail

@@ -87,22 +87,82 @@ jobs:
     # `backend/tests/test_gating_workflows.py` pins both copies together.
     name: Live-mode Playwright (stub backend)
     runs-on: ubuntu-latest
+    # IN THE PINNED PLAYWRIGHT IMAGE, the same image string as `frontend.yml`'s
+    # `demo-e2e` and `visual-e2e` (#617). This job used to run
+    # `npx playwright install --with-deps chromium` on the bare runner, which
+    # installs system packages with apt on every run; on 2026-11-11 the runner
+    # could not resolve `security.ubuntu.com` and this required job failed in
+    # that step, before any test ran, blocking every merge. The image carries
+    # Chromium and its system libraries. The tag must equal the
+    # `playwright-core` version frontend/package-lock.json resolves;
+    # `backend/tests/test_gating_workflows.py` pins that and the three-way
+    # identity.
+    #
+    # No Python backend runs here: the stub is a Vite plugin
+    # (`VITE_LIVE_STUB=1`). The only Python is the stdlib assertion step.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      # `--ipc=host`: Playwright's documented setting for Chromium in Docker.
+      # The `--add-host` entries point every Ubuntu and Nodesource package host
+      # at loopback, IPv4 and IPv6, so each run proves it needs no mirror. The
+      # reasons are spelled out on `demo-e2e`'s identical block in frontend.yml.
+      options: >-
+        --ipc=host
+        --add-host=archive.ubuntu.com:127.0.0.1 --add-host=archive.ubuntu.com:::1
+        --add-host=security.ubuntu.com:127.0.0.1 --add-host=security.ubuntu.com:::1
+        --add-host=azure.archive.ubuntu.com:127.0.0.1 --add-host=azure.archive.ubuntu.com:::1
+        --add-host=ports.ubuntu.com:127.0.0.1 --add-host=ports.ubuntu.com:::1
+        --add-host=esm.ubuntu.com:127.0.0.1 --add-host=esm.ubuntu.com:::1
+        --add-host=deb.nodesource.com:127.0.0.1 --add-host=deb.nodesource.com:::1
     # The whole job has measured at 97 s max over its last 15 runs, so 15
     # minutes is ~9x headroom — a runner would have to be an order of magnitude
     # slower than anything observed here to trip it, which is not a guarantee,
-    # just a wide margin against the measurements we have. It caps
-    # the two things that CAN hang unboundedly: `playwright install --with-deps`
-    # (apt) and a dev server that accepts the port but never serves, which the
-    # webServer's own 120 s wait does not cover once it has started. Without a
-    # cap those burn the 360-minute default. (`frontend.yml`'s demo job uses 20
-    # for a ~8.8-minute job; the same generosity here is far smaller in
-    # absolute terms.)
+    # just a wide margin against the measurements we have. It caps a dev server
+    # that accepts the port but never serves, which the webServer's own 120 s
+    # wait does not cover once it has started; without a cap that burns the
+    # 360-minute default. (It also capped `playwright install --with-deps`,
+    # whose apt retries were the other unbounded wait, until #617 removed that
+    # step. `frontend.yml`'s demo job uses 20 for a job measured at 11.5 to 12.7
+    # minutes over its last five passing runs on `main`, 2026-11-10 to
+    # 2026-11-12; this comment said ~8.8 before.)
     timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
+        # A `container:` job defaults to `sh` (dash), which rejects
+        # `set -euo pipefail` and arrays. See `visual-e2e` in frontend.yml.
+        shell: bash
     steps:
       - uses: actions/checkout@v7
+      # Identical to `demo-e2e`'s step of the same name in frontend.yml, where
+      # the comment explains each line; the test file holds the two equal and
+      # runs this body against a fake `getent`. In short: every listed host,
+      # and every host apt's own sources name, must resolve only to loopback,
+      # and `python3`, which the assertion step below needs and the image does
+      # not promise, must be present. This makes python3 a dependency of this
+      # required job, which was accepted (#617).
+      - name: Prove the package mirrors are unreachable
+        run: |
+          set -euo pipefail
+          python3 --version
+          blocked=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com esm.ubuntu.com deb.nodesource.com)
+          # Every host apt is configured to fetch from. Comment lines are not
+          # sources; a read that finds no host at all fails here (grep exits 1).
+          apt_hosts=$(awk '!/^[[:space:]]*#/' /etc/apt/sources.list /etc/apt/sources.list.d/* | grep -oE '[a-z]+://[^/[:space:]]+' | sed -E 's#^[a-z]+://##' | sort -u)
+          echo "apt fetches from: ${apt_hosts//$'\n'/ }"
+          for host in "${blocked[@]}" $apt_hosts localhost; do
+            # A name getent cannot resolve fails the step here, under pipefail:
+            # unresolvable is what an outage looks like, not proof of a block.
+            v4=$(getent ahosts "$host" | awk '{print $1}' | sort -u)
+            v6=$(getent hosts "$host" | awk '{print $1}')
+            for addr in $v4 $v6; do
+              case "$addr" in
+                127.0.0.1|::1) ;;
+                *) echo "::error::$host resolves to $addr, so this run could reach it"; exit 1 ;;
+              esac
+            done
+            echo "$host -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
+          done
       - uses: actions/setup-node@v7
         with:
           # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
@@ -113,8 +173,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      # NO `playwright install` step (#617): the image already carries the
+      # browser this Playwright version expects.
+      #
       # A job that runs ZERO tests passes. `playwright.live.config.ts` selects by
       # `grep: /live only/i` over the joined title path, which makes two distinct
       # ways to empty this run:
@@ -205,6 +266,20 @@ jobs:
           VITE_LIVE_STUB: '1'
           PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/live-results.json
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report-live
+      # The block held for the whole run, not only at the start. Identical to
+      # `demo-e2e`'s step of the same name in frontend.yml.
+      - name: Prove the package mirrors were still unreachable
+        run: |
+          set -euo pipefail
+          v4=$(getent ahosts security.ubuntu.com | awk '{print $1}' | sort -u)
+          v6=$(getent hosts security.ubuntu.com | awk '{print $1}')
+          for addr in $v4 $v6; do
+            case "$addr" in
+              127.0.0.1|::1) ;;
+              *) echo "::error::security.ubuntu.com resolves to $addr after the suite ran; the block did not hold"; exit 1 ;;
+            esac
+          done
+          echo "security.ubuntu.com -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
       # The selection guard above is NOT enough. `--list` COUNTS SKIPPED TESTS,
       # and Playwright exits 0 when every selected test skips — so selection can
       # read 5 while the run executes nothing and reports green.
