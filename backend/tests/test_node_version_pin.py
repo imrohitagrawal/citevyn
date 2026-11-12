@@ -115,15 +115,17 @@ _UNGUARDABLE: tuple[str, ...] = (
     "image's preinstalled Node. Nothing in the YAML says 'node', so no static "
     "scan can find it. Every job that sets Node up TODAY is `ubuntu-latest` "
     "(frontend.yml:build, frontend.yml:demo-e2e, frontend.yml:visual-e2e, "
-    "frontend-live-e2e.yml:live-e2e — enumerated, not assumed; since #617 all "
-    "but `build` run inside the Playwright image, whose own Node is 24.20.0, so "
-    "for those three the unpinned Node would be the image's rather than the "
-    "runner's), and ubuntu-latest MEASURED as ubuntu-24.04 "
-    "(image 20260907.300.1, run 34449722396). NOT every job in the repo: "
+    "frontend-live-e2e.yml:live-e2e — enumerated, not assumed; all but `build` "
+    "run inside the Playwright image (visual-e2e since #325, the other two since "
+    "#617), whose own Node is 24.20.0, so for those three the unpinned Node would "
+    "be the image's rather than the runner's). ubuntu-latest MEASURED as "
+    "ubuntu-24.04 (image 20260907.300.1, run 34449722396) and, on #617's runs of "
+    "2026-11-12, as ubuntu-26.04 (provisioner 20261028.624). NOT every job in the repo: "
     "ci.yml:shell-tests is a matrix over ubuntu-latest AND macos-latest, and "
     "pr-quality.yml:quality-gate declares no runs-on here at all. This entry's "
-    "own earlier text put that image's preinstalled Node at 22.23.2, which is "
-    "INHERITED, not re-measured. On those facts the mismatch is live TODAY — "
+    "own earlier text put the ubuntu-24.04 image's preinstalled Node at 22.23.2, "
+    "which is INHERITED, not re-measured, and ubuntu-26.04's is not measured "
+    "here at all. On those facts the mismatch is live TODAY — "
     "the entry used to say it arrived only when ubuntu-latest rolled, which was "
     "true while .nvmrc said 22 and stopped being true at 26.",
     "A Dockerfile that resolves its base through ARG indirection "
@@ -852,14 +854,15 @@ def test_the_guards_own_blind_spots_are_written_down() -> None:
     static scan here can catch. The dangerous one is dated, not hypothetical: a
     job that runs ``npm run build`` with NO ``setup-node`` step uses the runner
     image's preinstalled Node. Every job that sets Node up today runs on
-    ``ubuntu-latest``, measured as ubuntu-24.04, whose preinstalled Node this
-    register records as 22.x — so such a job would build on the wrong major
-    immediately. It does not have to wait for the image to roll, which is what
-    this said while .nvmrc still held 22. (Not every job in the repo is
+    ``ubuntu-latest``, measured as ubuntu-24.04 (whose preinstalled Node this
+    register records as 22.x) and since as ubuntu-26.04 — so such a job would
+    build on the wrong major immediately. It does not have to wait for the
+    image to roll, which is what this said while .nvmrc still held 22. (Not every job in the repo is
     ubuntu-latest — ``ci.yml``'s ``shell-tests`` is a matrix that includes
-    macos-latest — but none of those build the SPA. And since #617 three
-    ubuntu-latest jobs run inside the Playwright image, where the unpinned Node
-    would be the image's 24.20.0 instead: the wrong major either way.)
+    macos-latest — but none of those build the SPA. And three ubuntu-latest
+    jobs run inside the Playwright image — ``visual-e2e`` since #325,
+    ``demo-e2e`` and ``live-e2e`` since #617 — where the unpinned Node would be
+    the image's 24.20.0 instead: the wrong major either way.)
 
     This test asserts nothing about the workflows. It exists so the limitation
     is in the file a maintainer reads, rather than discovered the hard way.

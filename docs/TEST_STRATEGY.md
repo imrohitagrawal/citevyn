@@ -483,7 +483,9 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
 `pytest + lint` job:
 
 - **It runs the browser that drew its baselines.** The job declares
-  `container: mcr.microsoft.com/playwright:v1.63.0-noble`, and that tag is pinned
+  `container: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27`
+  (pinned by digest since #617, because Microsoft republishes the same tag when
+  the base image is patched), and that tag is pinned
   equal to `frontend/package-lock.json`'s resolved **`playwright-core`** — the
   package that owns `browsers.json`, with `@playwright/test` and `playwright`
   asserted equal to it rather than trusted. A dependabot bump of one without the
@@ -491,19 +493,25 @@ described — by `backend/tests/test_gating_workflows.py`, inside the required
 
   Since #617 the two required Playwright jobs, `Demo-mode Playwright (no visual
   snapshots)` and `Live-mode Playwright (stub backend)`, run in the same image,
-  and the test requires all three image strings to be identical. They used to
+  and the test requires all three image strings, tag and digest, to be
+  identical. A bump moves the tag and the digest in the three jobs and in the
+  regeneration command in `frontend/playwright.visual-ci.config.ts`, and the
+  image quoted above. They used to
   run `npx playwright install --with-deps chromium` on the bare runner, which
   installs system packages with apt on every run; on 2026-11-11 the runner
   could not resolve Ubuntu's mirrors and both failed before any test ran,
   blocking every merge, while this job passed. Neither required job downloads
-  OS packages now. Each points the Ubuntu and Nodesource package hosts at
-  loopback (`--add-host`, IPv4 and IPv6), proves right after checkout that
-  every listed host and every host in the image's apt sources resolves only to
-  loopback, and checks again after the suite, so every green run is a run with
-  no mirror reachable. That proof step also prints `python3 --version`: the
-  execution assertion needs `python3`, which the image ships but does not
-  promise, so it is now a dependency of two required checks — accepted, and it
-  fails loudly at the first step if it ever goes.
+  OS packages now (`npm ci` still fetches npm packages). Each points the Ubuntu
+  and NodeSource package hosts at loopback (`--add-host`, IPv4 and IPv6) and
+  proves right after checkout that every listed host and every host in the
+  image's apt sources resolves only to loopback; after the suite it re-checks
+  one of them, `security.ubuntu.com`. So a green run is a run in which no
+  listed Ubuntu or NodeSource host was resolvable at the start, and
+  `security.ubuntu.com` still was not at the end. That proof step also prints
+  `python3 --version`: the execution assertion needs `python3`, which the image
+  ships but does not promise, so it is now a dependency of two required checks.
+  That was accepted in #617's review and is recorded in its pull request; it
+  fails loudly at the first step if the interpreter ever goes.
 - **It is the exact complement of `Demo-mode Playwright (no visual snapshots)`.**
   The demo job asserts it selects the default suite *minus* its visual tests; this
   one asserts it selects *exactly* those visual tests. Measured with `--list` on
