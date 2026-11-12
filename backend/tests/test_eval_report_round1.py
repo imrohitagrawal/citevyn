@@ -113,27 +113,8 @@ def test_a_fact_case_answered_by_the_wrong_model_fails_on_its_errored_line_with_
     assert not any("NOT fully grounded" in f for f in failures), failures
 
 
-def test_a_condense_only_fallback_shows_true_coverage_and_names_condense(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Red when: a follow-up whose answer was the expected model's, but whose
-    condense call fell back, is reported as ungrounded (coverage 0.0), or its
-    error and model_calls do not say it was the condense call."""
-    case = _golden()["followup_claude_api_raise"]
-    model = _CondenseBy(
-        "Set CLAUDE_API_RATE_LIMIT to raise it [1].",
-        "How can I raise the Claude API rate limit?",
-        provider="router",
-        model=FALLBACK,
-    )
-    (judged,) = _judge_with(monkeypatch, [case], model)
-    assert judged.answer_errored is True
-    assert judged.fact_coverage == 1.0
-    assert "condense by router" in (judged.error or "")
-    wrong = [c for c in judged.model_calls if not c["expected"]]
-    assert [(c["site"], c["turn"]) for c in wrong] == [("condense", "final")]
-    failures = _gate([judged], [case])
-    assert any(f"errored: {case.id}" in f and "condense" in f for f in failures), failures
+# The condense-only fallback is graded normally since the owner decision of
+# 2026-11-12: see ``test_eval_helper_fallbacks.py``.
 
 
 # --- 2. a report read that fails marks the case; the pass goes on --------------------

@@ -140,11 +140,14 @@ URL are not stored), `model_calls` (which model made each call, by call site and
 Each pass's `judge` section counts `answer_errors` by kind and `declines_by_reason`, and
 the log prints each case scoring 2 or less, not gating until #602.
 
-An errored case (the provider failed, another model made one of its calls, or its report
-could not be read) fails the gate that applies to it: a refusal case fails the refusal
-gate, a fact-bearing case fails groundedness, and a follow-up fails the multi-turn gate,
-each on its own `errored: <id> (<reason>)` line. When an answer exists its fact coverage
-is still the true one.
+An errored case (the provider failed, another model wrote one of its answers, on the
+final turn or on a history turn, or its report could not be read) fails the gate that
+applies to it: a refusal case fails the refusal gate, a fact-bearing case fails
+groundedness, and a follow-up fails the multi-turn gate, each on its own
+`errored: <id> (<reason>)` line. When an answer exists its fact coverage
+is still the true one. A helper call (condense, alias check) by another model does not
+error the case: it is graded normally, the call is in `model_calls`, and each pass lists it
+in `helper_fallbacks` and prints it as "helper calls by another model", without gating.
 
 The report is written after each pass, with configured secrets redacted from its string
 values; `passes_completed` says which passes it holds (`["main"]` if the run was cut short

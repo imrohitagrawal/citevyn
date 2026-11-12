@@ -143,7 +143,8 @@ class JudgedCase:
     # One entry per grader call: score, rationale, duration_seconds.
     grader_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     # One entry per answer-client call of every turn: turn (history or final),
-    # call site, provider, model, and whether it was the expected model.
+    # call site, provider, model, and whether it was the expected model. A helper
+    # call (not ``answer``) by another model is listed, never gated.
     model_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -361,6 +362,11 @@ def _errored_case(
     return entry
 
 
+def _helper_fallbacks(case: JudgedCase) -> list[dict[str, Any]]:
+    """The case's non-answer calls made by another model."""
+    return [c for c in case.model_calls if not c["expected"] and c["site"] != CallSite.answer.value]
+
+
 def _describe(call: dict[str, Any]) -> str:
     return f"{call['site']} by {call['provider']} {call['model']} ({call['turn']} turn)"
 
@@ -432,7 +438,11 @@ async def _judge_cases(
                 }
             )
         model_calls.extend(calls)
-        wrong = [c for c in calls if not c["expected"]]
+        # Owner decision (2026-11-12): only an ANSWER call by another model, on any
+        # turn, makes the case errored. A history turn's answer shapes the follow-up's
+        # context, so it counts too. Helper calls (condense, alias check) by another
+        # model are reported in ``model_calls`` and ``helper_fallbacks``, not gated.
+        wrong = [c for c in calls if not c["expected"] and c["site"] == CallSite.answer.value]
         text = str(response.get("answer", ""))
         if response.get("cache_hit"):
             # No model call was made for this turn; the answer is whatever an earlier
@@ -656,6 +666,12 @@ def _summarize(
     errored = [j for j in judged if j.answer_errored]
     fact_bearing = {c.id for c in cases if c.expected_facts}
 
+    helper_fallbacks = [
+        {"case_id": j.case_id, "calls": "; ".join(_describe(c) for c in helpers)}
+        for j in judged
+        if (helpers := _helper_fallbacks(j))
+    ]
+
     def _errored_entries(pool: list[JudgedCase]) -> list[dict[str, Any]]:
         return [{"case_id": j.case_id, "reason": j.error or ""} for j in pool if j.answer_errored]
 
@@ -696,6 +712,9 @@ def _summarize(
                 "total": len(errored),
                 "by_kind": dict(sorted(Counter(j.kind for j in errored).items())),
             },
+            # Helper calls (condense, alias check) by another model: printed, never
+            # gated (owner decision 2026-11-12).
+            "helper_fallbacks": helper_fallbacks,
             "declines_by_reason": dict(
                 sorted(Counter(j.decline_reason for j in judged if j.decline_reason).items())
             ),
@@ -1286,7 +1305,8 @@ def write_report(path: pathlib.Path, summary: dict[str, Any], settings: Settings
 
 
 def pass_report_lines(judge: dict[str, Any]) -> list[str]:
-    """One pass's answer errors, declines and low scores, for the CI log (#598).
+    """One pass's answer errors, declines, helper fallbacks and low scores, for the
+    CI log (#598).
 
     Not gated here: the answer errors fail their gates through D1, and the low
     scores are printed only until #602 decides how they gate.
@@ -1296,6 +1316,11 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
         f"answer errors: {errors['total']} by kind {errors['by_kind']}",
         f"declines by reason: {judge.get('declines_by_reason', {})}",
     ]
+    for helper in judge.get("helper_fallbacks", []):
+        lines.append(
+            f"helper calls by another model: {helper['case_id']} ({helper['calls']}) "
+            "(reported, not gating)"
+        )
     for case in judge.get("cases", []):
         if case.get("score") is not None and case["score"] <= 2:
             lines.append(
