@@ -383,6 +383,22 @@ class Settings(BaseSettings):
     # The grader's own OpenRouter model, so no answer model grades its own answers.
     # Unset: the grader uses the answer client (local runs).
     eval_judge_model: str | None = Field(default=None, pattern=r"^\S+$")
+    # The grader's own OpenRouter timeout (#598). Only the grader's client reads it;
+    # every answer client keeps ``openrouter_timeout_seconds``. No default: it is
+    # set together with ``eval_judge_model`` or not at all (validator below). The
+    # upper bound also refuses inf, nan and 1e309.
+    eval_judge_timeout_seconds: float | None = Field(default=None, gt=0.0, le=300.0)
+
+    @model_validator(mode="after")
+    def _pair_the_grader_model_with_its_timeout(self) -> "Settings":
+        # A grader without its own timeout would silently inherit the answer
+        # clients' 15 s; a timeout without a grader is never used.
+        if (self.eval_judge_model is None) != (self.eval_judge_timeout_seconds is None):
+            raise ValueError(
+                "CITEVYN_EVAL_JUDGE_MODEL and CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS must be "
+                "set together or not at all."
+            )
+        return self
 
     # --- Retrieval / embeddings (Slice 4+ / #51) ---
     # Provider seam mirroring the LLM factory. "stub" is the deterministic,

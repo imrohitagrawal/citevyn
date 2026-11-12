@@ -127,12 +127,41 @@ meaningful step (a loud `::notice::`) and stays green — the key is never hardc
 faked. **To enable the gate:** add `CITEVYN_OPENROUTER_API_KEY` under *Settings → Secrets
 and variables → Actions*; the next run flips it on.
 
+### What the judged report records per case (#598)
+
+Each judged case records why it came out as it did: the `question`, `outcome` and
+`decline_reason` (from the run's own audit row; a final turn served from the answer cache
+has outcome `cache_hit` and no reply, evidence or query), the answer model's own
+`raw_reply` (and the #208 `retry_reply`, with `retry_kept`), `resolved_query`,
+`retrieval_global`, the `evidence` the answer was made from (source, heading, rank, score,
+type and text; the text is cut exactly as the prompt cuts it, with `truncated`; title and
+URL are not stored), `model_calls` (which model made each call, by call site and turn),
+`answer_errored`, and each grader call's score, rationale and duration (`grader_calls`).
+Each pass's `judge` section counts `answer_errors` by kind and `declines_by_reason`, and
+the log prints each case scoring 2 or less, not gating until #602.
+
+An errored case (the provider failed, another model wrote one of its answers, on the
+final turn or on a history turn, or its report could not be read) fails the gate that
+applies to it: a refusal case fails the refusal gate, a fact-bearing case fails
+groundedness, and a follow-up fails the multi-turn gate, each on its own
+`errored: <id> (<reason>)` line. When an answer exists its fact coverage
+is still the true one. A helper call (condense, alias check) by another model does not
+error the case: it is graded normally, the call is in `model_calls`, and each pass lists it
+in `helper_fallbacks` and prints it as "helper calls by another model", without gating.
+
+The report is written after each pass, with configured secrets redacted from its string
+values; `passes_completed` says which passes it holds (`["main"]` if the run was cut short
+during the fallback pass).
+
+The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
+**only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so
+they stay empty there. `backend/tests/test_eval_report_fields_pg.py` proves they fill.
+
 ### Cost bounding (#153)
 
-The judged half is the harness's only meaningful spend line — ~$0.026 per full run
-(call volume counted by `scripts/measure_eval_spend.py`; the dollar figure is an
-extrapolation — see `docs/COST_CONTROLS.md` §6). CI bounds it by **frequency, at full
-coverage**:
+The judged half is the harness's only meaningful spend line (call volume counted by
+`scripts/measure_eval_spend.py`; see `docs/COST_CONTROLS.md` §6). CI bounds it by
+**frequency, at full coverage**:
 
 * **push to `main`** → runs.
 * **PR labelled `full-eval`** → runs (the `labeled` event triggers the workflow).

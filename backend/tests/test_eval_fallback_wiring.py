@@ -133,6 +133,7 @@ def test_the_fallback_report_holds_the_fallback_pass_results(
         openrouter_model=ANSWER,
         eval_fallback_model=FALLBACK,
         eval_judge_model=JUDGE,
+        eval_judge_timeout_seconds=60.0,
     )
     summary = asyncio.run(runner_mod.run_eval_async(settings=settings))
     assert summary["judge"]["mean_score"] == 5
@@ -174,6 +175,7 @@ def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
         openrouter_api_key="or-test",
         eval_fallback_model=FALLBACK,
         eval_judge_model=JUDGE,
+        eval_judge_timeout_seconds=60.0,
     )
     with pytest.raises(RuntimeError, match="fallback pass failed"):
         asyncio.run(runner_mod.run_eval_async(settings=settings))
@@ -215,6 +217,7 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
         openrouter_api_key="or-test",
         eval_fallback_model=FALLBACK,
         eval_judge_model=JUDGE,
+        eval_judge_timeout_seconds=60.0,
     )
     with pytest.raises(RuntimeError, match="close failed"):
         asyncio.run(runner_mod.run_eval_async(settings=settings))
@@ -248,6 +251,7 @@ def test_fallback_and_judge_are_router_clients_from_a_gemini_run(
         openrouter_api_key="or-test",
         eval_fallback_model=FALLBACK,
         eval_judge_model=JUDGE,
+        eval_judge_timeout_seconds=60.0,
     )
     asyncio.run(runner_mod.run_eval_async(settings=settings))
     assert len(built) == 3  # main, fallback, grader
@@ -280,9 +284,13 @@ def test_extra_clients_change_only_the_provider_and_model() -> None:
 def test_a_blank_or_spaced_eval_model_is_refused_at_config_time(
     model_field: str, value: str
 ) -> None:
-    """Red when: an empty, blank or spaced id parses and builds a client on it."""
+    """Red when: an empty, blank or spaced id parses and builds a client on it.
+
+    A grader model is given its valid timeout, so only the id pattern can refuse
+    it (a grader model alone is refused for its missing timeout, #598)."""
+    timeout = {"eval_judge_timeout_seconds": 60.0} if model_field == "eval_judge_model" else {}
     with pytest.raises(ValueError):
-        Settings(_env_file=None, **{model_field: value})  # type: ignore[call-arg,arg-type]
+        Settings(_env_file=None, **{model_field: value}, **timeout)  # type: ignore[call-arg,arg-type]
 
 
 def test_a_real_eval_model_id_is_accepted() -> None:
@@ -291,6 +299,7 @@ def test_a_real_eval_model_id_is_accepted() -> None:
         _env_file=None,
         eval_fallback_model="openai/gpt-4o-mini",
         eval_judge_model="anthropic/claude-haiku-5.5",
+        eval_judge_timeout_seconds=60.0,
     )  # type: ignore[call-arg]
     assert s.eval_judge_model == "anthropic/claude-haiku-5.5"
 
