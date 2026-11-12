@@ -12,7 +12,10 @@ name: frontend
 # inverse filter (which double-reports when a PR touches both sides), or
 # job-level `if:` guards relying on skipped-counts-as-success. Both work; both
 # are subtle enough to get wrong in a way that blocks every PR. This repo is
-# PUBLIC, so Actions minutes are free, and the whole workflow is ~6 minutes.
+# PUBLIC, so Actions minutes are free; its longest job, `demo-e2e`, took 12.8
+# minutes in the Playwright container on #617's pull request (11.5 to 12.7 on
+# the bare runner over its last five passing runs on `main`, 2026-11-10 to
+# 2026-11-12; this said "~6 minutes" before).
 # Always running it is the version nobody can get wrong.
 #
 # This also subsumes what the old filter existed for: ``knowledgeBase.corpus
@@ -91,14 +94,110 @@ jobs:
     # `backend/tests/test_gating_workflows.py` pins it.
     name: Demo-mode Playwright (no visual snapshots)
     runs-on: ubuntu-latest
+    # IN THE PINNED PLAYWRIGHT IMAGE, like `visual-e2e` below (#617). This job
+    # used to run `npx playwright install --with-deps chromium` on the bare
+    # runner, which installs system packages with apt on every run. On
+    # 2026-11-11 the runner could not resolve `security.ubuntu.com` for hours:
+    # this job and `Live-mode Playwright` failed in that step after about ten
+    # minutes of apt retries, before any test ran, and every merge was blocked.
+    # `visual-e2e`, already in this image, passed through the same outage. The
+    # image carries Chromium and its system libraries, so a run needs no
+    # OS-package download (`npm ci` still fetches npm packages).
+    #
+    # The image string must stay identical in all three Playwright jobs, its
+    # tag equal to the `playwright-core` version frontend/package-lock.json
+    # resolves, and it must carry its `@sha256:` digest: the tag alone is
+    # republished in place (see the note above `visual-e2e`).
+    # `backend/tests/test_gating_workflows.py` pins all three.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      # `--ipc=host`: Playwright's documented setting for Chromium in Docker
+      # (the default 64 MB /dev/shm can crash a tab), the same as `visual-e2e`.
+      #
+      # The `--add-host` entries point every Ubuntu and Nodesource package host
+      # at loopback, so each run PROVES it needs no mirror instead of assuming
+      # it. Docker writes them into /etc/hosts before the first step. Both
+      # addresses per host: with only the IPv4 one, `getent hosts` asks for
+      # IPv6 first and falls through to real DNS (measured in this image). The
+      # list is pinned by the test file; the step after checkout checks it.
+      options: >-
+        --ipc=host
+        --add-host=archive.ubuntu.com:127.0.0.1 --add-host=archive.ubuntu.com:::1
+        --add-host=security.ubuntu.com:127.0.0.1 --add-host=security.ubuntu.com:::1
+        --add-host=azure.archive.ubuntu.com:127.0.0.1 --add-host=azure.archive.ubuntu.com:::1
+        --add-host=ports.ubuntu.com:127.0.0.1 --add-host=ports.ubuntu.com:::1
+        --add-host=esm.ubuntu.com:127.0.0.1 --add-host=esm.ubuntu.com:::1
+        --add-host=deb.nodesource.com:127.0.0.1 --add-host=deb.nodesource.com:::1
     # The base config's webServer waits up to 120s and the suite runs serially;
     # without a cap a hung dev server burns the 360-minute default.
     timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
+        # A `container:` job defaults to `sh` (dash), which rejects the
+        # `set -euo pipefail` and arrays every step here uses. See the
+        # longer note on `visual-e2e`'s copy of this line below.
+        shell: bash
     steps:
       - uses: actions/checkout@v7
+      # Right after checkout (so `frontend`, the working directory, exists) and
+      # before anything that could use the network. A mirror reachable here
+      # fails the job in seconds, where the real outage hung for about ten
+      # minutes inside apt. `getent ahosts` and `getent hosts` together cover
+      # IPv4 and IPv6. Beyond the fixed list it reads apt's own source files
+      # and fails closed on any host it does not see blocked. With the image
+      # pinned by digest those files can only change through an edit to this
+      # repository (a new digest), so a red here is never caused by Microsoft
+      # alone.
+      #
+      # `python3 --version` is here because the assertion step below runs
+      # `python3 -`, and this image does not promise a Python: it ships
+      # /usr/bin/python3 (3.12.3, measured) but Microsoft documents only a
+      # browser and Node environment. That makes python3 a dependency of this
+      # REQUIRED job, accepted in #617's review and recorded in its pull
+      # request: if a rebuilt image drops it,
+      # this line fails the first step, loudly, and the fix is to rewrite the
+      # assertion in Node rather than to install a Python at run time.
+      #
+      # This body is identical in frontend-live-e2e.yml, and the test file runs
+      # it against a fake `getent`.
+      - name: Prove the package mirrors are unreachable
+        run: |
+          set -euo pipefail
+          python3 --version
+          blocked=(archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com esm.ubuntu.com deb.nodesource.com)
+          # Every host apt is configured to fetch from. A missing sources.list
+          # is fine when sources.list.d has sources (newer images keep them
+          # there); no readable source file at all fails. Comment lines are not
+          # sources; a read that finds no host fails too (grep exits 1).
+          # Shapes this read gets wrong, accepted because each FAILS the step
+          # rather than passing it: a URL in a trailing comment and a deb822
+          # stanza with `Enabled: no` are still checked (an unblocked host
+          # there fails), and `host:port` is looked up with its port and does
+          # not resolve. One shape is not caught: a `mirror+file:` source names
+          # no host itself, so the hosts in its mirror list go unchecked (if it
+          # is the only source, "no host" fails the step).
+          shopt -s nullglob
+          sources=()
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            if [ -f "$f" ]; then sources+=("$f"); fi
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then echo "::error::no apt source file to read"; exit 1; fi
+          apt_hosts=$(awk '!/^[[:space:]]*#/' "${sources[@]}" | grep -oE '[a-z]+://[^/[:space:]]+' | sed -E 's#^[a-z]+://##' | sort -u)
+          echo "apt fetches from: ${apt_hosts//$'\n'/ }"
+          for host in "${blocked[@]}" $apt_hosts localhost; do
+            # A name getent cannot resolve fails the step here, under pipefail:
+            # unresolvable is what an outage looks like, not proof of a block.
+            v4=$(getent ahosts "$host" | awk '{print $1}' | sort -u)
+            v6=$(getent hosts "$host" | awk '{print $1}')
+            for addr in $v4 $v6; do
+              case "$addr" in
+                127.0.0.1|::1) ;;
+                *) echo "::error::$host resolves to $addr, so this run could reach it. A host apt newly uses must be added to the blocked=(...) list in frontend.yml and in frontend-live-e2e.yml, to the --add-host set of demo-e2e and of live-e2e, and to _BLOCKED_MIRROR_HOSTS in backend/tests/test_gating_workflows.py"; exit 1 ;;
+              esac
+            done
+            echo "$host -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
+          done
       - uses: actions/setup-node@v7
         with:
           # Single source of truth: frontend/.nvmrc. Do NOT add a `node-version:`
@@ -109,8 +208,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
+      # NO `playwright install` step (#617): the image already carries the
+      # browser this Playwright version expects, at $PLAYWRIGHT_BROWSERS_PATH.
+      #
       # A job that runs ZERO tests passes, and there are two distinct ways for that
       # to happen, so there are two guards.
       #
@@ -177,6 +277,23 @@ jobs:
         run: npx playwright test -c playwright.demo-ci.config.ts --reporter=list,json,html
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: /tmp/demo-results.json
+      # The first check proved every listed host blocked at the start; this
+      # re-checks ONE of them, `security.ubuntu.com` (the host the 2026-11-11
+      # outage could not resolve), after the suite, so a step that undid the
+      # block during the run would show here. It does not re-check the others.
+      # Identical in frontend-live-e2e.yml.
+      - name: Prove the package mirrors were still unreachable
+        run: |
+          set -euo pipefail
+          v4=$(getent ahosts security.ubuntu.com | awk '{print $1}' | sort -u)
+          v6=$(getent hosts security.ubuntu.com | awk '{print $1}')
+          for addr in $v4 $v6; do
+            case "$addr" in
+              127.0.0.1|::1) ;;
+              *) echo "::error::security.ubuntu.com resolves to $addr after the suite ran; the block did not hold"; exit 1 ;;
+            esac
+          done
+          echo "security.ubuntu.com -> ${v4//$'\n'/ } ${v6//$'\n'/ }"
       # The selection guard above is NOT enough, and the gap is the exact failure
       # mode this whole issue is about. `--list` counts SKIPPED tests, and
       # Playwright exits 0 when every test skips -- so a `test.skip(true, ...)` at
@@ -354,15 +471,21 @@ jobs:
   # the tag actually buys is that the PLAYWRIGHT and BROWSER versions are fixed,
   # which is the input that moves often and breaks loudly.
   #
-  # The stronger form is available and this repo's guard ACCEPTS it:
-  # `mcr.microsoft.com/playwright:v1.63.0-noble@sha256:<digest>` is immutable, and
-  # `test_the_visual_job_runs_the_browser_that_drew_its_baselines` reads the
-  # version out of the tag part either way (#325, item 8). It is not adopted here
-  # because a digest has to be re-pinned by hand on every base patch and nothing
-  # in this repo automates that, so it would rot into a stale pin nobody rotates
-  # — a worse failure than the one it prevents. If the baselines ever start
-  # drifting without a Playwright bump, the base image is the first suspect and
-  # the digest is the fix.
+  # So the image is pinned BY DIGEST as well, in all three Playwright jobs
+  # (#617): `mcr.microsoft.com/playwright:v1.63.0-noble@sha256:<digest>` is
+  # immutable. #325 accepted the digest form but did not adopt it, because a
+  # digest has to be re-pinned by hand and would rot into a stale pin nobody
+  # rotates. #617 changed the balance: two REQUIRED jobs now run in this image,
+  # and their first step fails if apt's sources name a host they do not block,
+  # so a same-tag republish that changed the apt sources, the fonts or the
+  # browser build would turn required checks red (or move pixels) with no
+  # change in this repo. A digest means the image only changes by an edit
+  # here, reviewed like any other. The cost is real and stated: a Playwright
+  # bump must move the tag AND the digest in every place they appear, and the
+  # test refuses a tag without a digest. Read the new digest with
+  # `docker buildx imagetools inspect mcr.microsoft.com/playwright:v<version>-noble`
+  # (the index digest, so it resolves on amd64 and arm64 alike) or from the
+  # `Digest:` line of a CI run's "Initialize containers" step.
   #
   # Measured while generating the first linux set:
   #   - two full runs in one amd64 container → byte-identical PNGs, all 22;
@@ -376,11 +499,18 @@ jobs:
   # bump turns a required check RED until this tag moves with it — and moving the
   # tag alone is the WRONG fix, because it leaves 22 baselines drawn by the old
   # browser. The full sequence is in the failing assertion's own message, in
-  # backend/tests/test_gating_workflows.py; short version: bump the tag,
-  # regenerate all 22 baselines on amd64 in the new image, have the owner look at
-  # them, commit tag and PNGs together. This is deliberate — an advisory pin
+  # backend/tests/test_gating_workflows.py; short version: bump the tag and the
+  # digest (in all three jobs and in the `docker run` regeneration command in
+  # frontend/playwright.visual-ci.config.ts), regenerate all 22 baselines on
+  # amd64 in the new image, have the owner look at them, commit tags, command and
+  # PNGs together. This is deliberate — an advisory pin
   # would let the baselines silently stop matching the browser, which is the
   # defect #325 exists to close.
+  #
+  # Since #617 the same image drives THREE jobs: this one, `demo-e2e` above and
+  # `live-e2e` in frontend-live-e2e.yml. The test requires the three image
+  # strings, tag and digest, to be identical, so the bump moves all three in
+  # one change.
   #
   # The image tag must stay equal to the `playwright-core` version
   # frontend/package-lock.json RESOLVES. `playwright-core`, not
@@ -397,9 +527,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       # Keep in lockstep with the `playwright-core` version
-      # frontend/package-lock.json resolves. Pinned by
+      # frontend/package-lock.json resolves, and identical to `demo-e2e`'s and
+      # `live-e2e`'s image (#617). Pinned by
       # backend/tests/test_gating_workflows.py.
-      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
       # Same flag the regeneration command in `playwright.visual-ci.config.ts`
       # uses, so the container that DRAWS a baseline and the container that
       # COMPARES it are configured identically. It is Playwright's documented
@@ -440,7 +571,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
-      # NO `playwright install` step, unlike the two jobs above. The image already
+      # NO `playwright install` step, like `demo-e2e` above and
+      # frontend-live-e2e.yml's `live-e2e` since #617. The image already
       # carries the browsers at $PLAYWRIGHT_BROWSERS_PATH, and downloading a
       # second copy would be the one thing that could make this job's browser
       # differ from the one that drew the baselines.
@@ -549,13 +681,14 @@ jobs:
       # `python3` IS PRESENT BUT NOT PROMISED (#325, item 9). Measured in the
       # image: `/usr/bin/python3`, Python 3.12.3. But Microsoft documents this
       # image as a browser/Node environment and gives no contract for a Python
-      # interpreter, so a future rebuild could drop it — unlike the two jobs
-      # above, which run on `ubuntu-latest`, where GitHub does promise one.
-      # Recorded rather than rewritten in Node because the failure is LOUD and
-      # instant: under `set -euo pipefail` a missing `python3` kills this step
-      # before a single pixel is compared, on an ADVISORY job. It goes on the
-      # short list of things only the first real CI run can settle, next to
-      # whether an amd64 render under emulation matches a native runner.
+      # interpreter, so a future rebuild could drop it. Recorded rather than
+      # rewritten in Node because the failure is LOUD and instant: under
+      # `set -euo pipefail` a missing `python3` kills this step before a single
+      # pixel is compared. Since #617 `demo-e2e` above and
+      # frontend-live-e2e.yml's `live-e2e`, both REQUIRED, run in this image
+      # too, so the same dependency now sits on two required checks; that was
+      # accepted in #617's review, and their first step prints `python3 --version` so a
+      # missing interpreter fails them at the start rather than after the suite.
       - name: Assert the suite actually executed
         run: |
           set -euo pipefail

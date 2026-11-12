@@ -114,13 +114,18 @@ _UNGUARDABLE: tuple[str, ...] = (
     "A job that runs `npm run build` with NO setup-node step: it uses the runner "
     "image's preinstalled Node. Nothing in the YAML says 'node', so no static "
     "scan can find it. Every job that sets Node up TODAY is `ubuntu-latest` "
-    "(frontend.yml:build, frontend.yml:demo-e2e, frontend-live-e2e.yml:live-e2e "
-    "— enumerated, not assumed), and ubuntu-latest MEASURED as ubuntu-24.04 "
-    "(image 20260907.300.1, run 34449722396). NOT every job in the repo: "
+    "(frontend.yml:build, frontend.yml:demo-e2e, frontend.yml:visual-e2e, "
+    "frontend-live-e2e.yml:live-e2e — enumerated, not assumed; all but `build` "
+    "run inside the Playwright image (visual-e2e since #325, the other two since "
+    "#617), whose own Node is 24.20.0, so for those three the unpinned Node would "
+    "be the image's rather than the runner's). ubuntu-latest MEASURED as "
+    "ubuntu-24.04 (image 20260907.300.1, run 34449722396) and, on #617's runs of "
+    "2026-11-12, as ubuntu-26.04 (provisioner 20261028.624). NOT every job in the repo: "
     "ci.yml:shell-tests is a matrix over ubuntu-latest AND macos-latest, and "
     "pr-quality.yml:quality-gate declares no runs-on here at all. This entry's "
-    "own earlier text put that image's preinstalled Node at 22.23.2, which is "
-    "INHERITED, not re-measured. On those facts the mismatch is live TODAY — "
+    "own earlier text put the ubuntu-24.04 image's preinstalled Node at 22.23.2, "
+    "which is INHERITED, not re-measured, and ubuntu-26.04's is not measured "
+    "here at all. On those facts the mismatch is live TODAY — "
     "the entry used to say it arrived only when ubuntu-latest rolled, which was "
     "true while .nvmrc said 22 and stopped being true at 26.",
     "A Dockerfile that resolves its base through ARG indirection "
@@ -129,8 +134,9 @@ _UNGUARDABLE: tuple[str, ...] = (
     "Node inside the external reusable workflow's own repository, and any Node a "
     "third-party action installs internally.",
     "Whether _container_node_images() reads the REAL workflow directory. The "
-    "repo has exactly one `container:` job — frontend.yml:visual-e2e, added in "
-    "#325 on `mcr.microsoft.com/playwright`, which is not a node image — so its "
+    "repo has three `container:` jobs — frontend.yml:visual-e2e (#325), and "
+    "frontend.yml:demo-e2e and frontend-live-e2e.yml:live-e2e (#617), all on "
+    "`mcr.microsoft.com/playwright`, which is not a node image — so its "
     "only observation over the real tree is still an empty `found`, and a mutant "
     "keyed on `directory == WORKFLOW_DIR` that "
     "returns no images AND fabricates the right `examined` list is behaviourally "
@@ -138,7 +144,7 @@ _UNGUARDABLE: tuple[str, ...] = (
     "the join DOES pin the zero-arg call to whatever `_workflow_files()` returns "
     "— what neither can rule out is a mutant that also FABRICATES `examined` to "
     "match. The day a real `container: node:` job lands, that mutant dies — "
-    "until then there is no positive observation to make. (visual-e2e narrows "
+    "until then there is no positive observation to make. (The Playwright jobs narrow "
     "this by one step only: the real tree now exercises the `container:` branch "
     "and the node-image regex REJECTING a non-node image. It still produces no "
     "entry in `found`, which is the observation this blind spot is about.)",
@@ -157,7 +163,9 @@ _UNGUARDABLE: tuple[str, ...] = (
     "naming a version outside the range: covered MECHANICALLY — `npm ci` refuses "
     "such a lockfile (`npm error Invalid: lock file's @types/node@20.19.43 does "
     "not satisfy @types/node@26.5.1`), and every job that installs runs `npm ci`: "
-    "frontend.yml:47, frontend.yml:101, frontend-live-e2e.yml:108, plus the "
+    "frontend.yml's build, demo-e2e and visual-e2e jobs and "
+    "frontend-live-e2e.yml's live-e2e (named by job, not by line number: the line "
+    "numbers this entry used to quote had drifted), plus the "
     "external quality-gate (enumerated, not counted). (c) THE REAL RESIDUE: a "
     "local `npm install --force`, which overrides both refusals and is reachable "
     "by no check in this repo.",
@@ -204,8 +212,9 @@ def _workflow_files(directory: Path = WORKFLOW_DIR) -> list[Path]:
     Takes a ``directory`` for the same reason
     ``test_deploy_fly_build_args_are_documented._scanned_files`` takes a ``root``:
     so a test can drive the REAL scan over a copy of the real tree that has a
-    planted offender in it. The repo has exactly one job with a ``container:``
-    image (``frontend.yml:visual-e2e``, #325) and it is not a node image, so the
+    planted offender in it. The repo has three jobs with a ``container:``
+    image (``frontend.yml:visual-e2e``, #325; ``frontend.yml:demo-e2e`` and
+    ``frontend-live-e2e.yml:live-e2e``, #617) and none is a node image, so the
     real tree still yields an empty ``found`` and nothing else can tell a working
     scan from a dead one.
     """
@@ -263,8 +272,8 @@ def _container_node_images(
 
     ``found`` is ``(workflow, job, tag)`` per node image. ``examined`` is every
     ``(workflow name, job name)`` this call actually VISITED, appended inside the
-    same loop — the repo has one ``container:`` job and it is not a node image
-    (``frontend.yml:visual-e2e`` runs ``mcr.microsoft.com/playwright``), so
+    same loop — the repo has three ``container:`` jobs and none is a node image
+    (all three Playwright jobs run ``mcr.microsoft.com/playwright``), so
     ``found == []`` is the only thing the real tree can observe and it is exactly
     what a dead scan returns.
     ``examined`` is what a dead scan cannot fake: a separate enumerator would
@@ -598,7 +607,8 @@ def test_job_container_node_images_match_the_pin(path: Path, job_name: str, tag:
 # #381: `test_job_container_node_images_match_the_pin` SKIPS with "got empty
 # parameter set" because no job in this repo runs in a NODE container. Since
 # #325 one job does carry a `container:` — `frontend.yml:visual-e2e`, on
-# `mcr.microsoft.com/playwright` — so the real tree now exercises the
+# `mcr.microsoft.com/playwright` — and since #617 so do `frontend.yml:demo-e2e`
+# and `frontend-live-e2e.yml:live-e2e`, on the same image. So the real tree exercises the
 # `container:` branch and the node-image regex REJECTING an image, but it still
 # contributes no parameter. That is honest today, but nothing proved
 # `_container_node_images()` still WORKS — a dead
@@ -694,7 +704,9 @@ _PLANTED_NON_NODE_JOBS = (
 # `frontend/package.json` declares `engines: node >= 26` — so the step is there
 # to keep the install inside the range the project supports, and it reads the
 # pin from `.nvmrc` like every other one (which is what
-# `test_setup_node_reads_the_pin_from_the_nvmrc` holds it to).
+# `test_setup_node_reads_the_pin_from_the_nvmrc` holds it to). Since #617
+# `demo-e2e` and `live-e2e` run in that image as well, and keep their
+# setup-node step for the same reason.
 _REAL_SETUP_NODE_STEPS = [
     ("frontend-live-e2e.yml", "live-e2e"),
     ("frontend.yml", "build"),
@@ -842,12 +854,15 @@ def test_the_guards_own_blind_spots_are_written_down() -> None:
     static scan here can catch. The dangerous one is dated, not hypothetical: a
     job that runs ``npm run build`` with NO ``setup-node`` step uses the runner
     image's preinstalled Node. Every job that sets Node up today runs on
-    ``ubuntu-latest``, measured as ubuntu-24.04, whose preinstalled Node this
-    register records as 22.x — so such a job would build on the wrong major
-    immediately. It does not have to wait for the image to roll, which is what
-    this said while .nvmrc still held 22. (Not every job in the repo is
+    ``ubuntu-latest``, measured as ubuntu-24.04 (whose preinstalled Node this
+    register records as 22.x) and since as ubuntu-26.04 — so such a job would
+    build on the wrong major immediately. It does not have to wait for the
+    image to roll, which is what this said while .nvmrc still held 22. (Not every job in the repo is
     ubuntu-latest — ``ci.yml``'s ``shell-tests`` is a matrix that includes
-    macos-latest — but none of those build the SPA.)
+    macos-latest — but none of those build the SPA. And three ubuntu-latest
+    jobs run inside the Playwright image — ``visual-e2e`` since #325,
+    ``demo-e2e`` and ``live-e2e`` since #617 — where the unpinned Node would be
+    the image's 24.20.0 instead: the wrong major either way.)
 
     This test asserts nothing about the workflows. It exists so the limitation
     is in the file a maintainer reads, rather than discovered the hard way.

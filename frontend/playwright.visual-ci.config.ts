@@ -61,7 +61,8 @@
  *   docker run --rm --platform linux/amd64 --ipc=host \
  *     -v "$PWD/frontend":/host:ro \
  *     -v "$PWD/frontend/tests/visual.spec.ts-snapshots":/out \
- *     mcr.microsoft.com/playwright:v1.63.0-noble bash -c '
+ *     mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27 \
+ *     bash -c '
  *       mkdir /work && cd /work &&
  *       tar -C /host --exclude=node_modules --exclude=dist --exclude=test-results \
  *           --exclude=playwright-report -cf - . | tar -xf - &&
