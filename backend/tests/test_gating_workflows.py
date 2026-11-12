@@ -2837,15 +2837,63 @@ _OS_PACKAGE_INSTALL = re.compile(
 )
 #: `playwright test`, also through a pinned `playwright@<version>`.
 _RUNS_PLAYWRIGHT_TESTS = re.compile(r"\bplaywright(?:@\S+)?\s+test\b")
-#: `npm run <name>`, `npm run-script <name>`, `npm test` and `npm t`.
-_NPM_SCRIPT_CALL = re.compile(
-    r"\bnpm\s+(?:run(?:-script)?\s+(?P<name>[\w:.-]+)|(?P<test>test|t)(?=\s|$))"
-)
+#: npm options that take a separate value (`--prefix frontend`, `-w frontend`).
+#: Any other `-x`/`--x` token is skipped as a flag; `--x=value` is one token.
+_NPM_VALUE_OPTIONS = frozenset({"--prefix", "-C", "-w", "--workspace"})
+
+
+def _npm_script_names(line: str) -> list[str]:
+    """The package.json scripts an npm command on this line runs.
+
+    Reads `npm [global options] run|run-script [run options] <name>` and
+    `npm [global options] test|t`, the latter as the `test` script.
+    """
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        tokens = line.split()
+
+    def skip_options(index: int) -> int:
+        while index < len(tokens) and tokens[index].startswith("-") and tokens[index] != "--":
+            index += 2 if tokens[index] in _NPM_VALUE_OPTIONS else 1
+        return index
+
+    names: list[str] = []
+    index = 0
+    while index < len(tokens):
+        if tokens[index] != "npm" and not tokens[index].endswith("/npm"):
+            index += 1
+            continue
+        index = skip_options(index + 1)
+        command = tokens[index] if index < len(tokens) else ""
+        if command in ("test", "t"):
+            names.append("test")
+        elif command in ("run", "run-script"):
+            index = skip_options(index + 1)
+            if index < len(tokens):
+                names.append(tokens[index])
+        index += 1
+    return names
 
 
 def _join_continuations(body: str) -> str:
     """Join shell lines ended by a backslash, so `npx playwright \\` / `install` is one line."""
     return re.sub(r"\\\n[ \t]*", " ", body)
+
+
+def _shell_lines(body: str) -> list[str]:
+    """A ``run:`` body as the commands bash would see, one per entry.
+
+    Whole-line comments go FIRST: in bash a comment does not continue onto the
+    next line even when it ends in `\\`, so joining before dropping it would
+    swallow the real command after it (round-2 review of #620). Then backslash
+    continuations are joined, then ``_scannable_run_lines`` joins `||`/`&&`
+    continuations and drops what is left of comments. A trailing `# ...` after
+    a command is not stripped: telling it from a `#` inside quotes needs a
+    shell parser, and keeping it only makes the scans see more text.
+    """
+    kept = "\n".join(line for line in body.split("\n") if not line.lstrip().startswith("#"))
+    return _scannable_run_lines(_join_continuations(kept))
 
 
 def _frontend_scripts() -> dict[str, str]:
@@ -2867,8 +2915,8 @@ def _expanded_commands(line: str, scripts: dict[str, str], depth: int = 0) -> li
     commands = [line]
     if depth >= 5:
         return commands
-    for call in _NPM_SCRIPT_CALL.finditer(line):
-        body = scripts.get(call.group("name") or "test", "")
+    for name in _npm_script_names(line):
+        body = scripts.get(name, "")
         if body:
             commands.extend(_expanded_commands(_join_continuations(body), scripts, depth + 1))
     return commands
@@ -2894,7 +2942,7 @@ def _install_lines(body: str, scripts: dict[str, str] | None = None) -> list[str
         scripts = _frontend_scripts()
     return [
         line
-        for line in _scannable_run_lines(_join_continuations(body))
+        for line in _shell_lines(body)
         if any(_OS_PACKAGE_INSTALL.search(command) for command in _expanded_commands(line, scripts))
     ]
 
@@ -2917,11 +2965,11 @@ def _discovered_playwright_jobs(
         for job_id, job in (data.get("jobs") or {}).items():
             if not isinstance(job, dict):
                 continue
-            bodies = [_join_continuations(str(step.get("run") or "")) for step in _steps(job)]
+            bodies = [str(step.get("run") or "") for step in _steps(job)]
             if any(
                 _runs_playwright_tests(line, scripts)
                 for body in bodies
-                for line in _scannable_run_lines(body)
+                for line in _shell_lines(body)
             ):
                 found[(path.name, job_id)] = job
     return found
@@ -2943,6 +2991,18 @@ _PLANTED_PLAYWRIGHT_FORMS: list[tuple[str, str, str, dict[str, str] | None]] = [
     ("versioned npx", "zz-planted.yml", "npx playwright@1.63.0 test", None),
     ("backslash-continued", "zz-planted.yml", "npx playwright \\\n  test -c x.ts", None),
     ("a .yaml workflow", "zz-planted.yaml", "npx playwright test", None),
+    ("npm with a global --prefix", "zz-planted.yml", "npm --prefix frontend run test:e2e", None),
+    ("npm run with --silent", "zz-planted.yml", "npm run --silent test:e2e", None),
+    ("npm -w workspace run", "zz-planted.yml", "npm -w frontend run test:e2e", None),
+    ("npm run --if-present", "zz-planted.yml", "npm run --if-present test:ui", None),
+    # A comment ending in `\` does not continue in bash, so the next line runs
+    # on its own and must be seen.
+    (
+        "after a comment ending in a backslash",
+        "zz-planted.yml",
+        "# note \\\nnpx playwright test",
+        None,
+    ),
     (
         "a script whose body is backslash-continued",
         "zz-planted.yml",
@@ -2992,6 +3052,8 @@ def test_npm_test_is_followed_into_its_script() -> None:
     vitest = {"test": "vitest run"}
     assert _runs_playwright_tests("npm test", playwright)
     assert _runs_playwright_tests("npm t -- --grep x", playwright)
+    assert _runs_playwright_tests("npm -w frontend test", playwright)
+    assert _runs_playwright_tests("npm --workspace=frontend --silent test", playwright)
     assert not _runs_playwright_tests("npm test", vitest)
     assert not _runs_playwright_tests("npm test", _frontend_scripts()), (
         "frontend/package.json's `test` script now runs Playwright, so `build` is a Playwright job"
@@ -3095,6 +3157,11 @@ def test_the_install_detector_sees_every_form_it_claims_to() -> None:
             id="nested scripts ending in apt-get",
         ),
         pytest.param(
+            "npm --prefix frontend run --silent install:browsers",
+            {"install:browsers": "playwright install chromium"},
+            id="npm with global and run options",
+        ),
+        pytest.param(
             "npm run browsers",
             {"browsers": "playwright \\\n  install chromium"},
             id="a backslash-continued install script",
@@ -3110,6 +3177,22 @@ def test_the_install_detector_follows_npm_scripts(run_line: str, scripts: dict[s
     assert _install_lines(run_line, scripts) == [run_line], (
         f"{run_line!r} runs {scripts} and was not flagged as an install"
     )
+
+
+def test_a_comment_ending_in_a_backslash_does_not_hide_the_next_line() -> None:
+    """In bash a comment does not continue onto the next line, even ending in `\\`.
+
+    Joining continuations before dropping comments swallowed the install line
+    into the comment (round-2 review of #620).
+
+    Turns red if: comment lines are dropped after continuations are joined, or
+    a comment line on its own is read as a command.
+    """
+    body = "# note \\\nnpx playwright install --with-deps chromium"
+    assert _install_lines(body) == ["npx playwright install --with-deps chromium"]
+    # The docstring's other half: a whole-line comment that names apt-get is
+    # not a command, and is not flagged.
+    assert _install_lines("# apt-get is not needed here") == []
 
 
 def test_no_playwright_job_installs_browsers_or_os_packages() -> None:
