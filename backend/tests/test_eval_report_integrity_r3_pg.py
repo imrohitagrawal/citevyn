@@ -172,3 +172,25 @@ async def test_a_failed_case_keeps_an_earlier_cases_cache_row(
     assert [h["stage"] for h in _harness(b)] == ["answer"]
     assert c.outcome == "cache_hit" and c.cache_origin and c.cache_origin["case_id"] == first.id
     assert c.score == 4 and not _harness(c)
+
+
+async def test_a_final_turn_crash_keeps_the_global_gate_fields(
+    settings: Any,  # noqa: F811 - the fixture imported above
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: the global confidence gate's numbers (they fill only on Postgres) are
+    copied only after ``ask`` returns, so a crash after the paid answer call (the
+    audit write) loses them."""
+    _shipped_corpus(monkeypatch, settings, tmp_path)
+
+    async def _audit_fails(self: Any, **_: Any) -> Any:
+        raise KeyError("audit write failed")
+
+    monkeypatch.setattr(orchestrator_mod.Orchestrator, "_persist_audit", _audit_fails)
+    global_case = _cases()[1]
+    (judged,) = await _judge(settings, [global_case])
+    assert [h["stage"] for h in _harness(judged)] == ["answer"]  # partner: it crashed
+    assert judged.raw_reply == ANSWERED
+    assert judged.retrieval_global is True
+    assert judged.gate_top_score is not None and judged.gate_passed is not None
