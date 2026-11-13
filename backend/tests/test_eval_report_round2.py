@@ -81,10 +81,12 @@ def test_an_errored_followup_without_facts_fails_on_the_multi_turn_line() -> Non
     assert len(named) == 1 and "multi-turn" in named[0], failures
 
 
-def test_an_errored_case_is_recorded_as_not_answered(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_errored_case_keeps_its_real_no_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Red when: an errored case that did get an answer (written by another model)
-    is recorded with ``no_answer`` False, so an errored refusal would count as a
-    refusal leak and the answer would look like the product's own."""
+    is recorded with ``no_answer`` True, so an errored refusal that answered hides
+    from the refusal-leak figures. Reversed by #598 Step 2b (REVISION 2, D): the
+    errored case keeps the response's real ``no_answer``; it fails the gates
+    through its errored lines, and a refusal also counts as the leak it was."""
     (case,) = _run(
         monkeypatch,
         [_golden()["claude_api_lit_ratelimit"]],
@@ -92,4 +94,4 @@ def test_an_errored_case_is_recorded_as_not_answered(monkeypatch: pytest.MonkeyP
     )
     assert case.outcome == "answer"  # partner: the product did answer
     assert case.answer_errored is True
-    assert case.no_answer is True
+    assert case.no_answer is False
