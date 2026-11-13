@@ -136,7 +136,8 @@ has outcome `cache_hit` and no reply, evidence or query), the answer model's own
 `retrieval_global`, the `evidence` the answer was made from (source, heading, rank, score,
 type and text; the text is cut exactly as the prompt cuts it, with `truncated`; title and
 URL are not stored), `model_calls` (which model made each call, by call site and turn,
-and whether it `failed`, with its `error_type`), `answer_errored`, `harness_error`,
+and whether it `failed`, with its `error_type` and redacted `error_message`), the
+history turns' replies (`history_replies`), `answer_errored`, `harness_error`,
 `cache_origin`, and each grader call's score, rationale, duration and the provider and
 model that served it (`grader_calls`). Each pass's `judge` section counts `answer_errors`
 by kind and `declines_by_reason`, and the log prints each case scoring 2 or less, not
