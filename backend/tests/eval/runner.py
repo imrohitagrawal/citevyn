@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import glob
 import json
 import os
 import pathlib
@@ -449,13 +450,16 @@ def _wrong_answerers(
     return [c for c in calls if c[0] != provider or not same.fullmatch(c[1])]
 
 
-_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+# A trailing date, dashed or compact (``-2024-07-18``, ``-20241022``). Not ``-latest``
+# or ``-preview``: those can name a different model, so they are not matched.
+_DATE_SUFFIX = re.compile(r"-(\d{4}-\d{2}-\d{2}|\d{8})$")
 _VERSION_SUFFIX = re.compile(r"^(?P<base>.+)-(?P<version>\d{3})$")
 
 
 def _model_key(model: str) -> tuple[str, str | None]:
     """A model id without what does not change the model: the ``vendor/`` prefix,
-    an OpenRouter ``:<tag>`` (``:free``) and a trailing ``-YYYY-MM-DD`` date. A
+    an OpenRouter ``:<tag>`` (``:free``) and a trailing date (``-YYYY-MM-DD`` or
+    ``-YYYYMMDD``). A
     trailing ``-NNN`` version is split off and returned on its own."""
     name = model.split("/", 1)[1] if "/" in model else model
     name = name.split(":", 1)[0]
@@ -507,15 +511,17 @@ def _add_error(entry: JudgedCase, text: str) -> None:
 
 
 def _explained_by(exc: BaseException, causes: list[BaseException]) -> bool:
-    """Whether ``exc`` is one of ``causes`` or was raised from one (its cause or
-    context chain): a failed answer call's own error escaping ``ask``."""
+    """Whether ``exc`` is one of ``causes`` or was raised ``from`` one (its
+    ``__cause__`` chain): a failed answer call's own error escaping ``ask``. The
+    ``__context__`` chain is not followed: an unrelated error raised while a failed
+    call's error was being handled is a harness error, not that call's failure."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         if any(current is cause for cause in causes):
             return True
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return False
 
 
@@ -892,7 +898,7 @@ async def _judge_cases(
             # per-case (never a fabricated score, never a crash) and counted by the
             # judge-coverage floor. Any other grader failure is a ``grade`` harness error.
             state.stage = "grade"
-            observed: int | None = None
+            verdict = None
             try:
                 verdict = await score_answer_panel_async(
                     question=case.question,
@@ -909,22 +915,15 @@ async def _judge_cases(
                 state.harness.append(_harness_entry("grade", exc, secrets))
                 _add_error(entry, f"grade: {type(exc).__name__}")
             else:
-                if verdict is not None:
-                    observed = verdict.score
-                    entry.rationale = verdict.rationale
-                    entry.standard_scores = verdict.standard_scores
-                    entry.standard_median = verdict.standard_median
-                    entry.adversarial_score = verdict.adversarial_score
-                    entry.spread = verdict.spread
-                    entry.contested = verdict.contested
-                else:
+                if verdict is None:
                     # ``None`` only if the provider went stub mid-run (guarded
                     # against above). Record it as an error rather than letting
                     # the case vanish from ``scored`` without a trace.
                     _add_error(entry, "judge_unavailable: verdict was None (stub mid-run)")
             # A model must not grade its own answers (#596): a grader call that
             # OpenRouter served with one of this run's answer models voids the grade,
-            # so the usable score is set only after this check.
+            # so the verdict (score, rationale, panel scores, contested) is applied only
+            # after this check. A discarded verdict stays in ``grader_calls`` as observed.
             grader_calls = recording_grader.calls if recording_grader is not None else []
             own = [
                 c
@@ -941,8 +940,14 @@ async def _judge_cases(
                     }
                 )
                 _add_error(entry, "grade: self-grading; grade discarded")
-            elif observed is not None:
-                entry.score = observed
+            elif verdict is not None:
+                entry.score = verdict.score
+                entry.rationale = verdict.rationale
+                entry.standard_scores = verdict.standard_scores
+                entry.standard_median = verdict.standard_median
+                entry.adversarial_score = verdict.adversarial_score
+                entry.spread = verdict.spread
+                entry.contested = verdict.contested
 
         for case in cases:
             # The case's one record, created before its savepoint and only ever added to.
@@ -957,14 +962,15 @@ async def _judge_cases(
             )
             state = _CaseState()
             writers_before = dict(ledger.writers)
+            unusable = False
             try:
                 async with session.begin_nested():
                     await _drive(case, entry, state)
                     # Anything raised from here on is the savepoint's. A statement that
-                    # failed and was swallowed leaves the transaction aborted, and the
-                    # RELEASE would then fail in a way that leaves the session unusable
-                    # for every later case. One cheap statement finds that while the
-                    # savepoint can still be rolled back, so the next case is healthy.
+                    # failed and was swallowed leaves the transaction aborted; one cheap
+                    # statement finds that while the savepoint can still be rolled back,
+                    # so the finished case keeps a clean record. Either way a failure
+                    # here stops the pass (below): the session may be unusable.
                     state.stage = "savepoint"
                     await session.execute(text("SELECT 1"))
             except Exception as exc:
@@ -972,6 +978,7 @@ async def _judge_cases(
                 # entries it wrote are gone too: forget who wrote them. What the case
                 # itself recorded (its provenance included) stays.
                 ledger.writers = writers_before
+                unusable = state.stage == "savepoint"
                 # A failed answer call's own error escaping ``ask`` is that call's
                 # failure, already an answer error; anything else is the harness's.
                 if not _explained_by(exc, state.failed_causes):
@@ -990,7 +997,24 @@ async def _judge_cases(
                     answer_llm.records.clear()
             entry.harness_error = state.harness or None
             judged.append(entry)
+            if unusable:
+                # The case's savepoint could not be checked or released, so the session
+                # may be unusable: stop before any further paid call, as a failed save
+                # does, with one run-level harness error. The finished case keeps its
+                # record (#598 Step 2b).
+                stop = {
+                    "stage": "session",
+                    "type": "SessionUnusable",
+                    "message": f"session unusable after case {case.id}; "
+                    f"{len(cases) - len(judged)} case(s) not run",
+                }
+                if run_errors is None:
+                    state.harness.append(stop)
+                else:
+                    run_errors.append(stop)
             if on_case is not None and on_case(list(judged)) is False:
+                break
+            if unusable:
                 break
     finally:
         # Every result is already collected (and saved through ``on_case``); a
@@ -1635,6 +1659,9 @@ async def run_eval_async(
                 )
             )
 
+    def _session_stopped() -> bool:
+        return any(e.get("stage") == "session" for e in run_errors)
+
     judged: list[JudgedCase] = []
     fallback_judged: list[JudgedCase] | None = None
     passes: list[str] = []
@@ -1672,6 +1699,8 @@ async def run_eval_async(
                 on_case=_main_saved,
                 run_errors=run_errors,
             )
+            if saved and _session_stopped():
+                saved = False
             if saved:
                 passes.append("main")
                 # And after the pass, so a fallback pass that fails as a whole keeps
@@ -1705,7 +1734,7 @@ async def run_eval_async(
                     on_case=_fallback_saved,
                     run_errors=run_errors,
                 )
-                if saved:
+                if saved and not _session_stopped():
                     passes.append("fallback")
     summary = _assemble(judged, fallback_judged, passes)
     # The final write takes the same path; if it fails, the returned summary says
@@ -1853,14 +1882,17 @@ def write_report(
     text = json.dumps(redact(plain, secret_values(settings)), indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
     if stale_before is not None:
-        for stale in path.parent.glob(f".{path.name}.*.tmp"):
+        for stale in path.parent.glob(f".{glob.escape(path.name)}.*.tmp"):
             with contextlib.suppress(OSError):
                 if stale.stat().st_mtime < stale_before:
                     stale.unlink()
     fd, temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        # ``mkstemp`` makes the file 0600; the report was always 0644.
-        os.fchmod(fd, 0o644)
+        # ``mkstemp`` makes the file 0600; the report was always written with the
+        # default mode (0644 under the process umask).
+        umask = os.umask(0)
+        os.umask(umask)
+        os.fchmod(fd, 0o644 & ~umask)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
