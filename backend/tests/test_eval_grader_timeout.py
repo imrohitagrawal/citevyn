@@ -146,7 +146,14 @@ def built(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     real_build = runner_mod.build_metered_llm_client
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         state["calls"].append({"answer_llm": answer_llm, "judge_llm": judge_llm})
         return []

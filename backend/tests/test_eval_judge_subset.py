@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from typing import Any
 
 import pytest
 
@@ -472,6 +473,25 @@ def test_bounded_run_records_reduced_coverage_in_the_report(tmp_path: pathlib.Pa
     assert "REDUCED COVERAGE" in subset["note"]
 
 
+def _judged_settings(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Settings for a judged run: since #598 Step 2b (REVISION 2, F) a judged run is
+    refused without a separate grader model. Every client the run builds is a
+    closable stand-in; ``_judge_cases`` is a spy, so none is ever called."""
+    from app.core.config import Settings
+    from tests.eval import runner as runner_mod
+
+    class _Closable:
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(runner_mod, "build_metered_llm_client", lambda _settings: _Closable())
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        eval_judge_model="anthropic/claude-haiku-5.5",
+        eval_judge_timeout_seconds=60.0,
+    )
+
+
 def test_the_subset_actually_reaches_the_judged_half(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -503,7 +523,9 @@ def test_the_subset_actually_reaches_the_judged_half(
         [c for c in all_cases if not c.postgres_only], limit=20
     )
 
-    asyncio.run(runner_mod.run_eval_async(judge_subset_limit=20))
+    asyncio.run(
+        runner_mod.run_eval_async(judge_subset_limit=20, settings=_judged_settings(monkeypatch))
+    )
     assert seen, "_judge_cases was never called — the judged branch did not run"
     assert seen[0] == [c.id for c in expected]
     assert len(seen[0]) < len(all_cases), "the judged half received the FULL case list"
@@ -525,7 +547,7 @@ def test_full_run_judges_every_case(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: object())
 
     all_cases = load_cases(GOLDEN_PATH)
-    asyncio.run(runner_mod.run_eval_async())
+    asyncio.run(runner_mod.run_eval_async(settings=_judged_settings(monkeypatch)))
     assert seen[0] == [c.id for c in all_cases if not c.postgres_only]
 
 

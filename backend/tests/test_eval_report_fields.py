@@ -69,6 +69,7 @@ from tests.orchestrator_double import Orchestrator
 ANSWER_MODEL = "gemini-3.6-flash"
 FALLBACK = "openai/gpt-4o-mini"
 EXPECT = ("gemini", ANSWER_MODEL)
+GRADER = "anthropic/claude-haiku-5.5"
 EVIDENCE_KEYS = {"source", "heading", "rank", "score", "type", "text", "truncated"}
 LOW_SCORE_MARK = "not gating until #602"
 _PROMPT_EVIDENCE = re.compile(
@@ -456,12 +457,15 @@ _ONE_PER_KIND = [
 ]
 
 
-def test_an_answer_error_on_every_kind_is_marked_and_counted_by_kind(
+def test_an_orchestrator_error_without_an_answer_call_is_a_harness_error_on_every_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red when: an answer error is not marked ``answer_errored`` for some case kind
-    (the refusal and paraphrase kinds make no model call on SQLite, so the error is
-    raised by the orchestrator itself), or the summary does not count it by kind."""
+    """Red when: an ``OrchestratorError`` raised before any answer call is marked
+    ``answer_errored`` for some case kind, or leaves no ``answer`` harness error
+    (#598 Step 2b, B: a case errors only when an answer call failed or another model
+    wrote an answer; everything else is a harness error). Was the answer-error
+    test of Step 2; REVISION 2 reverses it. Answer-call failures are counted by
+    kind in ``test_eval_report_integrity.py``."""
 
     class _Down(Orchestrator):
         async def ask(self, **_: Any) -> Any:
@@ -472,12 +476,13 @@ def test_an_answer_error_on_every_kind_is_marked_and_counted_by_kind(
     cases = [golden[i] for i in _ONE_PER_KIND]
     assert {c.kind for c in cases} == {"literal", "paraphrase", "refusal", "multihop", "followup"}
     judged = _run(monkeypatch, cases, _Model("unused"))
-    assert [j.answer_errored for j in judged] == [True] * 5  # type: ignore[attr-defined]
+    assert len(judged) == 5  # partner: every kind came back
+    assert [j.answer_errored for j in judged] == [False] * 5  # type: ignore[attr-defined]
+    errors = [getattr(j, "harness_error", None) for j in judged]
+    firsts = [e[0] if isinstance(e, list) and e else e for e in errors]
+    assert [e.get("stage") if isinstance(e, dict) else None for e in firsts] == ["answer"] * 5
     summary = runner_mod._summarize(cases, {}, judged, judge_available=True, judgeable=cases)
-    assert summary["judge"]["answer_errors"] == {
-        "total": 5,
-        "by_kind": {"literal": 1, "paraphrase": 1, "refusal": 1, "multihop": 1, "followup": 1},
-    }
+    assert summary["judge"]["answer_errors"] == {"total": 0, "by_kind": {}}
 
 
 def test_a_healthy_run_has_no_answer_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -759,6 +764,9 @@ def _two_pass_settings(**overrides: Any) -> Settings:
         "openrouter_api_key": "or-test",
         "gemini_model": ANSWER_MODEL,
         "eval_fallback_model": FALLBACK,
+        # A judged run is refused without a separate grader (#598 Step 2b, F).
+        "eval_judge_model": GRADER,
+        "eval_judge_timeout_seconds": 60.0,
     }
     base.update(overrides)
     return Settings(_env_file=None, **base)  # type: ignore[call-arg]
@@ -768,7 +776,9 @@ def test_both_passes_carry_the_new_fields(monkeypatch: pytest.MonkeyPatch) -> No
     """Red when: only the main pass fills the new per-case fields or summary counts
     (the fallback pass is gated and read the same way)."""
 
-    def _build(settings: Settings) -> _Model:
+    def _build(settings: Settings) -> Any:
+        if settings.openrouter_model == GRADER:
+            return _Judge()
         if settings.llm_provider == "router":
             return _Model(_ANSWERED, provider="router", model=settings.openrouter_model)
         return _Model(_ANSWERED)
@@ -796,7 +806,14 @@ def _spy_passes(monkeypatch: pytest.MonkeyPatch, passes: list[Any], settings: Se
     it = iter(passes)
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         result = next(it)
         if isinstance(result, BaseException):
