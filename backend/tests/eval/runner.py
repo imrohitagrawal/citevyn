@@ -26,19 +26,23 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import os
 import pathlib
 import re
+import tempfile
 import time
 import uuid
 from collections import Counter
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import _truncate_snippet
-from app.answer.orchestrator import OrchestratorError
+from app.cache.answer_cache import CachedAnswer
+from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings, get_settings
 from app.cost.call_site import CallSite, get_call_site
 from app.llm.errors import LLMUnavailable
@@ -115,11 +119,22 @@ class JudgedCase:
     echoed_prior: bool | None = None
     # Why the case came out as it did (#598 Step 2). All describe the FINAL turn.
     question: str = ""
-    # The answer could not be graded as the expected model's: the provider failed,
-    # another model made one of its calls, or its report could not be read. It
-    # fails the refusal, groundedness or multi-turn gate that applies to it (D1),
-    # through that gate's own "errored" line, instead of dropping out of it.
+    # The answer could not be graded as the expected model's: an answer call failed,
+    # or another model wrote an answer (an answer call, or the cache entry served),
+    # on any turn (owner rule, 2026-11-12). It fails the refusal, groundedness or
+    # multi-turn gate that applies to it (D1), through that gate's own "errored"
+    # line, instead of dropping out of it. Nothing else sets it (#598 Step 2b, B).
     answer_errored: bool = False
+    # Everything else that went wrong for this case: ``None``, or a list of
+    # ``{"stage", "type", "message"}`` with ``stage`` ``answer``, ``report`` or
+    # ``grade`` (#598 Step 2b, B). The case is still graded when its answer exists
+    # and its writer is known; every entry fails the separate harness-integrity
+    # check, never an answer gate.
+    harness_error: list[dict[str, Any]] | None = None
+    # On a final-turn cache hit: the case and turn that wrote the cached answer and
+    # the passages that turn answered from (#598 Step 2b, G). The hit's own
+    # retrieval fields stay empty: no retrieval ran for it.
+    cache_origin: dict[str, Any] | None = None
     # The run's own audit row: ``outcome`` (answer, no_answer, unsupported,
     # citation_validation_failed, cache_hit) and its ``reason`` for a decline.
     outcome: str | None = None
@@ -140,11 +155,14 @@ class JudgedCase:
     gate_passed: bool | None = None
     # The passages the answer was made from, in rank order, as the model saw them.
     evidence: list[dict[str, Any]] = dataclasses.field(default_factory=list)
-    # One entry per grader call: score, rationale, duration_seconds.
+    # One entry per grader call: score, rationale, duration_seconds, and the
+    # provider and model that served it (kept for a malformed verdict too).
     grader_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     # One entry per answer-client call of every turn: turn (history or final),
-    # call site, provider, model, and whether it was the expected model. A helper
-    # call (not ``answer``) by another model is listed, never gated.
+    # call site, provider, model, whether it was the expected model, and whether
+    # it ``failed`` (with its ``error_type``). A failed answer call errors the
+    # case; a helper call (not ``answer``) that failed or was made by another
+    # model is listed, never gated.
     model_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -179,33 +197,65 @@ class AttributingLLM:
     The judged run's main client is production's Gemini client with its OpenRouter
     fallback, so a Gemini failure is answered, silently, by the fallback model.
     Without this record such an answer would be graded and reported as Gemini's
-    (#596). ``_judge_cases`` reads ``calls`` per case.
+    (#596). ``_judge_cases`` reads ``records`` per case.
+
+    A call that raises is recorded too, as failed, and the error re-raised
+    (#598 Step 2b, C): the orchestrator swallows some failures (the #208 retry,
+    condense, the alias check), and without this record they would vanish.
     """
 
     def __init__(self, inner: LLMClient) -> None:
         self._inner = inner
-        self.calls: list[tuple[str, str]] = []
-        # Each call's site and text, so the report can keep the answer model's
-        # own reply (#598). Kept apart so ``calls`` keeps its shape.
-        self.replies: list[tuple[CallSite, str]] = []
+        # One record per call, in call order: a call that returned and one that
+        # raised alike, so no pairing between two lists can drift.
+        self.records: list[_CallRecord] = []
 
     async def complete(
         self, *, system: str, user: str, max_tokens: int, temperature: float
     ) -> LLMResult:
-        result = await self._inner.complete(
-            system=system, user=user, max_tokens=max_tokens, temperature=temperature
-        )
-        self.calls.append((result.provider, result.model))
-        self.replies.append((get_call_site(), result.text))
+        site = get_call_site()
+        try:
+            result = await self._inner.complete(
+                system=system, user=user, max_tokens=max_tokens, temperature=temperature
+            )
+            record = _CallRecord(site, result.provider, result.model, text=result.text)
+        except BaseException as exc:
+            # Who served a failed call is unknown; the client may name its own.
+            self.records.append(
+                _CallRecord(
+                    site,
+                    getattr(self._inner, "provider", None),
+                    getattr(self._inner, "model", None),
+                    error_type=type(exc).__name__,
+                )
+            )
+            raise
+        self.records.append(record)
         return result
 
     async def aclose(self) -> None:
         await self._inner.aclose()
 
 
+@dataclasses.dataclass(frozen=True)
+class _CallRecord:
+    """One answer-client call: its site, who served it, and its text or failure."""
+
+    site: CallSite
+    provider: str | None
+    model: str | None
+    text: str | None = None
+    error_type: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error_type is not None
+
+
 class _RecordingGrader:
-    """A grader client that keeps each call's score, rationale and duration (#598),
-    so a stalled or disagreeing grader call can be found in the report."""
+    """A grader client that keeps each call's score, rationale, duration and the
+    provider and model that served it (#598), so a stalled, disagreeing or
+    self-graded call can be found in the report."""
 
     def __init__(self, inner: LLMClient) -> None:
         self._inner = inner
@@ -215,7 +265,13 @@ class _RecordingGrader:
         self, *, system: str, user: str, max_tokens: int, temperature: float
     ) -> LLMResult:
         start = time.perf_counter()
-        entry: dict[str, Any] = {"score": None, "rationale": "", "duration_seconds": 0.0}
+        entry: dict[str, Any] = {
+            "score": None,
+            "rationale": "",
+            "duration_seconds": 0.0,
+            "provider": None,
+            "model": None,
+        }
         self.calls.append(entry)
         try:
             result = await self._inner.complete(
@@ -226,10 +282,16 @@ class _RecordingGrader:
             raise
         finally:
             entry["duration_seconds"] = time.perf_counter() - start
+        # Stored before the verdict is read, so a malformed verdict keeps them.
+        entry["provider"], entry["model"] = result.provider, result.model
         try:
             verdict = parse_verdict(result.text)
         except JudgeParseError as exc:
             entry["rationale"] = f"judge_parse: {exc}"
+        except Exception as exc:
+            # Recorded only; the panel parses again and its error is the case's
+            # ``grade`` harness error (e.g. a score too large for a float).
+            entry["rationale"] = f"parse failed: {type(exc).__name__}: {exc}"
         else:
             entry["score"], entry["rationale"] = verdict.score, verdict.rationale
         return result
@@ -283,6 +345,13 @@ async def _final_turn(
         fields["gate_top_score"] = gate.top_score
         fields["gate_margin"] = gate.margin
         fields["gate_passed"] = gate.passed
+    fields["evidence"] = await _turn_evidence(session, session_id)
+    return fields
+
+
+async def _turn_evidence(session: AsyncSession, session_id: uuid.UUID) -> list[dict[str, Any]]:
+    """The passages the session's latest turn answered from, in rank order, as
+    the model saw them: the rows persisted for that turn's USER message."""
     user_message = (
         await session.execute(
             select(Message.message_id)
@@ -315,8 +384,13 @@ async def _final_turn(
                 "truncated": text != chunk.chunk_text,
             }
         )
-    fields["evidence"] = evidence
-    return fields
+    return evidence
+
+
+def _dated(model: str) -> re.Pattern[str]:
+    """``model``, or the id with a date suffix OpenRouter reports for it
+    (``openai/gpt-4o-mini-2024-07-18``, ``gemini-3.6-flash-2026-09-30``)."""
+    return re.compile(rf"{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?")
 
 
 def _wrong_answerers(
@@ -327,8 +401,42 @@ def _wrong_answerers(
     (``openai/gpt-4o-mini-2024-07-18``); anything longer is another model
     (``openai/gpt-4o-mini-search-preview``)."""
     provider, model = expect
-    same = re.compile(rf"{re.escape(model)}(-\d{{4}}-\d{{2}}-\d{{2}})?")
+    same = _dated(model)
     return [c for c in calls if c[0] != provider or not same.fullmatch(c[1])]
+
+
+def _without_vendor(model: str) -> str:
+    return model.split("/", 1)[1] if "/" in model else model
+
+
+def _same_model(served: str, model: str) -> bool:
+    """Whether ``served`` is ``model`` whatever the provider: the vendor prefix
+    stripped from both (``google/gemini-3.6-flash`` is ``gemini-3.6-flash``) and a
+    date suffix matched as :func:`_wrong_answerers` matches it (#598 Step 2b, F)."""
+    return _dated(_without_vendor(model)).fullmatch(_without_vendor(served)) is not None
+
+
+# A harness error's message is cut here: a database error can carry a whole statement.
+_MESSAGE_LIMIT = 2000
+
+
+def _harness_entry(
+    stage: str, exc: BaseException, secrets: list[str], *, where: str | None = None
+) -> dict[str, Any]:
+    """One harness error: its stage, the exception's type, and its redacted message."""
+    message = f"{where}: {exc}" if where else str(exc)
+    return {
+        "stage": stage,
+        "type": type(exc).__name__,
+        "message": redact(message, secrets)[:_MESSAGE_LIMIT],
+    }
+
+
+def _harness_entries(value: Any) -> list[dict[str, Any]]:
+    """A case's harness errors as a list: ``None``, one entry, or a list of them."""
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]  # type: ignore[arg-type]
 
 
 def _errored_case(
@@ -336,6 +444,7 @@ def _errored_case(
     *,
     error: str,
     answer: str | None,
+    no_answer: bool,
     model_calls: list[dict[str, Any]],
     details: dict[str, Any] | None = None,
 ) -> JudgedCase:
@@ -343,13 +452,14 @@ def _errored_case(
 
     When an answer exists its fact coverage is computed as usual, so the report
     shows the truth; the case fails its gates through their "errored" lines, never
-    through an invented coverage. Not graded.
+    through an invented coverage. ``no_answer`` is the response's own (D, #598
+    Step 2b): a refusal another model answered counts as the leak it was. Not graded.
     """
     entry = JudgedCase(
         case_id=case.id,
         kind=case.kind,
         answer=answer or "",
-        no_answer=True,
+        no_answer=no_answer,
         error=error,
         question=case.question,
         answer_errored=True,
@@ -364,11 +474,90 @@ def _errored_case(
 
 def _helper_fallbacks(case: JudgedCase) -> list[dict[str, Any]]:
     """The case's non-answer calls made by another model."""
-    return [c for c in case.model_calls if not c["expected"] and c["site"] != CallSite.answer.value]
+    return [
+        c
+        for c in case.model_calls
+        if not c["expected"] and not c.get("failed") and c["site"] != CallSite.answer.value
+    ]
+
+
+def _helper_failures(case: JudgedCase) -> list[dict[str, Any]]:
+    """The case's non-answer calls that failed (the orchestrator swallowed them)."""
+    return [c for c in case.model_calls if c.get("failed") and c["site"] != CallSite.answer.value]
 
 
 def _describe(call: dict[str, Any]) -> str:
+    if call.get("failed"):
+        return f"{call['site']} failed with {call['error_type']} ({call['turn']} turn)"
     return f"{call['site']} by {call['provider']} {call['model']} ({call['turn']} turn)"
+
+
+class _CacheLedger:
+    """The pass's answer cache, recording who wrote each key (#598 Step 2b, G).
+
+    One per pass, handed to every orchestrator with ``cache=``. Each pass starts
+    with an empty cache (a fresh catalog or index version), so every hit was
+    written by an earlier turn of THIS pass. ``writers`` maps a key to the turn
+    that last wrote it (last write wins): whether the expected model wrote the
+    answer, its case and turn, and the passages it answered from. A hit is
+    attributed by its own key, never by its text.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.hits: list[str] = []
+        self.puts: list[str] = []
+        self.writers: dict[str, dict[str, Any]] = {}
+
+    async def get(self, *, cache_key: str) -> CachedAnswer | None:
+        value = await self._inner.get(cache_key=cache_key)
+        if value is not None:
+            self.hits.append(cache_key)
+        return value
+
+    async def put(self, *, cache_key: str, value: CachedAnswer) -> None:
+        await self._inner.put(cache_key=cache_key, value=value)
+        self.puts.append(cache_key)
+
+
+@dataclasses.dataclass
+class _CaseState:
+    """What one case has collected so far, kept whatever fails after it."""
+
+    stage: str = "answer"
+    model_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Answer calls another model made, and cache hits another model wrote.
+    faults: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Answer calls that raised, on any turn.
+    failed: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    harness: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # A cache hit whose writer is unknown: the answer cannot be graded as anyone's.
+    unattributed: bool = False
+    cache_origin: dict[str, Any] | None = None
+    final_replies: list[tuple[CallSite, str]] = dataclasses.field(default_factory=list)
+    final_puts: list[str] = dataclasses.field(default_factory=list)
+    details: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def _answer_error(state: _CaseState, expect_answerer: tuple[str, str] | None) -> str:
+    """Why an errored case is not graded: its failed answer calls, then the
+    answers another model wrote."""
+    parts: list[str] = []
+    if state.failed:
+        parts.append(
+            "answer call failed ("
+            + "; ".join(f"{c['turn']}, {c['site']}: {c['error_type']}" for c in state.failed)
+            + ")"
+        )
+    if state.faults:
+        parts.append(
+            f"answered by [{'; '.join(_describe(f) for f in state.faults)}], "
+            f"not {expect_answerer}; not graded as that model's answer"
+        )
+    return "answer: " + "; ".join(parts)
+
+
+_T = TypeVar("_T")
 
 
 async def _judge_cases(
@@ -379,19 +568,31 @@ async def _judge_cases(
     answer_llm: LLMClient | None = None,
     judge_llm: LLMClient | None = None,
     expect_answerer: tuple[str, str] | None = None,
+    answer_models: tuple[str, ...] = (),
+    on_case: Callable[[list[JudgedCase]], None] | None = None,
+    run_errors: list[dict[str, Any]] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
-    Returns one :class:`JudgedCase` per input case. A per-case failure (LLM
-    outage, unparseable judge output) is captured in ``error`` and never
-    silently dropped — the case simply contributes no numeric score to the
-    mean. Returns an empty list when no real provider is configured.
+    Returns one :class:`JudgedCase` per input case. Each case runs inside its own
+    savepoint (``session.begin_nested()``) and its own ``except Exception``, so a
+    failure records what happened on that case, rolls back only that case's rows,
+    and the pass goes on (#598 Step 2b, A). Returns an empty list when no real
+    provider is configured.
 
     ``answer_llm`` answers instead of the process-wide client (the fallback pass,
     #596); ``judge_llm`` grades instead of it (the separate grader). ``None`` keeps
     the process-wide client for that role. ``expect_answerer`` (provider, model):
-    when ``answer_llm`` is an :class:`AttributingLLM`, a case any of whose calls
-    came from another model is recorded as an error, not graded (#596).
+    when ``answer_llm`` is an :class:`AttributingLLM`, a case in which an answer
+    call failed, or another model wrote an answer, on any turn, is recorded as an
+    answer error, not graded (#596; owner rule 2026-11-12).
+
+    ``answer_models``: every answer model of the run; a grader call served by one
+    of them (or by ``expect_answerer``'s model) is a ``grade`` harness error.
+    ``on_case`` is called with the cases finished so far after each one, so the
+    caller can save them before anything is torn down. A failure closing the
+    pass's session or probe is appended to ``run_errors`` (raised when it is
+    ``None``), so it cannot drop the pass's results.
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -400,86 +601,149 @@ async def _judge_cases(
     cases = [c for c in cases if postgres or not c.postgres_only]
     judged: list[JudgedCase] = []
     attributing = expect_answerer is not None and isinstance(answer_llm, AttributingLLM)
-    # Who wrote each answer this pass has served: answer text -> written by the
-    # expected model. Each pass starts with an empty cache (a fresh catalog or index
-    # version), so every cache hit was written by an earlier turn of THIS pass, and
-    # that turn's verdict carries over to the hit.
-    writers: dict[str, bool] = {}
-
-    async def _ask_attributed(
-        question: str,
-        request_id: str,
-        session_id: uuid.UUID,
-        faults: list[dict[str, Any]],
-        model_calls: list[dict[str, Any]],
-        turn: str,
-    ) -> Any:
-        """Ask one turn; add to ``faults`` every way it was not the expected model's,
-        and to ``model_calls`` which model made each of its calls, by call site."""
-        start = len(answer_llm.calls) if isinstance(answer_llm, AttributingLLM) else 0
-        response = await Orchestrator(settings, session, llm=answer_llm).ask(
-            question=question, request_id=request_id, session_id=session_id
-        )
-        if not attributing:
-            return response
-        assert isinstance(answer_llm, AttributingLLM) and expect_answerer is not None
-        calls = []
-        for (provider, model), (site, _text) in zip(
-            answer_llm.calls[start:], answer_llm.replies[start:], strict=True
-        ):
-            expected = not _wrong_answerers([(provider, model)], expect_answerer)
-            calls.append(
-                {
-                    "turn": turn,
-                    "site": site.value,
-                    "provider": provider,
-                    "model": model,
-                    "expected": expected,
-                }
-            )
-        model_calls.extend(calls)
-        # Owner decision (2026-11-12): only an ANSWER call by another model, on any
-        # turn, makes the case errored. A history turn's answer shapes the follow-up's
-        # context, so it counts too. Helper calls (condense, alias check) by another
-        # model are reported in ``model_calls`` and ``helper_fallbacks``, not gated.
-        wrong = [c for c in calls if not c["expected"] and c["site"] == CallSite.answer.value]
-        text = str(response.get("answer", ""))
-        if response.get("cache_hit"):
-            # No model call was made for this turn; the answer is whatever an earlier
-            # turn wrote. Graded only if that turn was the expected model's.
-            if not writers.get(text, False):
-                wrong = [
-                    *wrong,
-                    {
-                        "turn": turn,
-                        "site": "cache",
-                        "provider": "an earlier turn",
-                        "model": "written by another model, or unknown",
-                        "expected": False,
-                    },
-                ]
-        else:
-            # Once ANY turn wrote this text with another model, it stays marked: a later
-            # turn of the expected model writing the same text must not clear it, or a
-            # cache hit on the earlier turn's key would be graded as the expected one's.
-            writers[text] = writers.get(text, True) and not wrong
-        faults.extend(wrong)
-        return response
+    secrets = secret_values(settings)
+    # The models whose grading of this run's answers would be self-grading.
+    own_models = {*answer_models, *([expect_answerer[1]] if expect_answerer else [])}
 
     # The grader, recorded per call, resolved exactly as the panel resolves it. A
     # stub is never wrapped: the panel's own stub check must still see it.
     grader = judge_llm or judge_module.get_llm_client(settings)
     recording_grader = None if isinstance(grader, StubLLMClient) else _RecordingGrader(grader)
 
-    # The probe is open only while this pass runs (#598).
-    async with contextlib.AsyncExitStack() as stack:
+    stack = contextlib.AsyncExitStack()
+    try:
+        # The probe is open only while this pass runs (#598).
         probe = stack.enter_context(probe_retrieval())
         session = await stack.enter_async_context(_judge_session(settings, postgres=postgres))
-        for case in cases:
-            # Step 1: produce the answer. A provider outage (429/5xx) surfaces as
-            # OrchestratorError; ``LLMUnavailable`` can also escape the generate
-            # path in some arms. Either way the case records a loud error and the
-            # batch keeps going — one flaky call must not abort the whole run.
+        ledger = _CacheLedger(build_answer_cache_store(settings, session))
+
+        async def _guarded(
+            state: _CaseState, stage: str, read: Callable[[], Awaitable[_T]]
+        ) -> _T | None:
+            """Run one report read in its own savepoint. A failure is a harness
+            error on the case, and the case's transaction stays usable: on
+            Postgres a failed statement would otherwise abort every later one."""
+            try:
+                async with session.begin_nested():
+                    return await read()
+            except Exception as exc:
+                state.harness.append(_harness_entry(stage, exc, secrets))
+                return None
+
+        async def _ask_attributed(
+            case: EvalCase,
+            question: str,
+            request_id: str,
+            session_id: uuid.UUID,
+            state: _CaseState,
+            turn: str,
+        ) -> Any:
+            """Ask one turn; record which model made each of its calls (by call
+            site), every answer call that failed, and every answer another model
+            wrote. The calls are harvested in a ``finally``, so a turn that raises
+            keeps every call it made."""
+            start = len(answer_llm.records) if isinstance(answer_llm, AttributingLLM) else 0
+            hits_from, puts_from = len(ledger.hits), len(ledger.puts)
+            calls: list[dict[str, Any]] = []
+            try:
+                response = await Orchestrator(settings, session, llm=answer_llm, cache=ledger).ask(
+                    question=question, request_id=request_id, session_id=session_id
+                )
+            finally:
+                if attributing:
+                    assert isinstance(answer_llm, AttributingLLM) and expect_answerer is not None
+                    records = answer_llm.records[start:]
+                    for record in records:
+                        served = (record.provider or "", record.model or "")
+                        calls.append(
+                            {
+                                "turn": turn,
+                                "site": record.site.value,
+                                "provider": record.provider,
+                                "model": record.model,
+                                "expected": not record.failed
+                                and not _wrong_answerers([served], expect_answerer),
+                                "failed": record.failed,
+                                "error_type": record.error_type,
+                            }
+                        )
+                    state.model_calls.extend(calls)
+                    state.failed.extend(
+                        c for c in calls if c["failed"] and c["site"] == CallSite.answer.value
+                    )
+                    if turn == "final":
+                        # Only calls that returned: a failed retry is not a retry reply.
+                        state.final_replies = [
+                            (r.site, r.text or "") for r in records if not r.failed
+                        ]
+            if not attributing:
+                return response
+            # Owner decision (2026-11-12): only an ANSWER call by another model, on any
+            # turn, makes the case errored. A history turn's answer shapes the follow-up's
+            # context, so it counts too. Helper calls (condense, alias check) by another
+            # model, or that failed, are reported in ``model_calls``, not gated.
+            wrong = [
+                c
+                for c in calls
+                if not c["expected"] and not c["failed"] and c["site"] == CallSite.answer.value
+            ]
+            if response.get("cache_hit"):
+                # No model call was made for this turn; the answer is whatever an earlier
+                # turn wrote under this key. Graded only if that turn was the expected
+                # model's; a key no turn of this pass wrote is a harness error.
+                hit = ledger.hits[hits_from:]
+                writer = ledger.writers.get(hit[-1]) if hit else None
+                if writer is None:
+                    state.unattributed = True
+                    state.harness.append(
+                        {
+                            "stage": "answer",
+                            "type": "UnknownCacheWriter",
+                            "message": f"the {turn} turn was served a cache entry no turn "
+                            "of this pass wrote, so who wrote it is unknown; not graded",
+                        }
+                    )
+                else:
+                    if turn == "final":
+                        state.cache_origin = {
+                            "case_id": writer["case_id"],
+                            "turn": writer["turn"],
+                            "evidence": writer["evidence"],
+                        }
+                    if not writer["expected"]:
+                        wrong.append(
+                            {
+                                "turn": turn,
+                                "site": "cache",
+                                "provider": "an earlier turn",
+                                "model": f"written by another model ({writer['case_id']}, "
+                                f"{writer['turn']} turn)",
+                                "expected": False,
+                            }
+                        )
+            puts = ledger.puts[puts_from:]
+            for key in puts:
+                ledger.writers[key] = {
+                    "expected": not wrong,
+                    "case_id": case.id,
+                    "turn": turn,
+                    "evidence": None,
+                }
+            if puts and turn == "history":
+                evidence = await _guarded(
+                    state, "report", lambda: _turn_evidence(session, session_id)
+                )
+                for key in puts:
+                    ledger.writers[key]["evidence"] = evidence
+            elif turn == "final":
+                state.final_puts = puts
+            state.faults.extend(wrong)
+            return response
+
+        async def _drive(case: EvalCase, state: _CaseState) -> JudgedCase:
+            # Step 1: produce the answer. A failed answer call is recorded by the
+            # attributing client; whatever escapes ``ask`` is caught per case by the
+            # caller, so one failure never aborts the pass.
             #
             # A ``followup`` case is MULTI-TURN: replay its ``history`` through the
             # orchestrator on ONE session first, so the orchestrator's DB-backed
@@ -487,89 +751,59 @@ async def _judge_cases(
             # as it would in production. Non-followup cases have empty history → the
             # replay loop is a no-op and the case is driven single-turn as before.
             session_id = uuid.uuid4()
-            replies: list[tuple[CallSite, str]] = []
-            if isinstance(answer_llm, AttributingLLM):
-                answer_llm.calls.clear()
-                answer_llm.replies.clear()
-                replies = answer_llm.replies
-            if recording_grader is not None:
-                recording_grader.calls.clear()
             # Keep the LAST history turn's answer so the echo oracle below can compare
             # against it. Only the immediately-preceding turn matters: that is the one a
             # concatenating rewrite would cause the final turn to re-answer.
             prior_answer = ""
-            faults: list[dict[str, Any]] = []
-            model_calls: list[dict[str, Any]] = []
-            # Where the final turn's records start, so a history turn's reply,
-            # retrieval or gate call is never reported as the final turn's.
-            marks = (0, 0, 0)
-            try:
-                for prior in case.history:
-                    prior_response = await _ask_attributed(
-                        prior, f"eval-{case.id}-history", session_id, faults, model_calls, "history"
-                    )
-                    prior_answer = str(prior_response.get("answer", ""))
-                marks = (len(replies), len(probe.retrievals), len(probe.gates))
-                response = await _ask_attributed(
-                    case.question, f"eval-{case.id}", session_id, faults, model_calls, "final"
+            for prior in case.history:
+                prior_response = await _ask_attributed(
+                    case, prior, f"eval-{case.id}-history", session_id, state, "history"
                 )
-            except (OrchestratorError, LLMUnavailable) as exc:
-                judged.append(
-                    _errored_case(
-                        case,
-                        error=f"answer: {type(exc).__name__}: {exc}",
-                        answer=None,
-                        model_calls=model_calls,
-                    )
-                )
-                continue
+                prior_answer = str(prior_response.get("answer", ""))
+            # Where the final turn's records start, so a history turn's retrieval or
+            # gate call is never reported as the final turn's.
+            marks = (len(probe.retrievals), len(probe.gates))
+            response = await _ask_attributed(
+                case, case.question, f"eval-{case.id}", session_id, state, "final"
+            )
             answer = str(response.get("answer", ""))
             no_answer = bool(response.get("no_answer") or response.get("unsupported"))
-            try:
-                details = await _final_turn(
+            state.stage = "report"
+            # The answer is paid for; a failed read of its report fields is a harness
+            # error on the case, which is still graded (#598 Step 2b, B).
+            details = await _guarded(
+                state,
+                "report",
+                lambda: _final_turn(
                     session,
                     response,
                     session_id,
-                    replies[marks[0] :],
+                    state.final_replies,
                     probe,
-                    retrievals_from=marks[1],
-                    gates_from=marks[2],
+                    retrievals_from=marks[0],
+                    gates_from=marks[1],
+                ),
+            )
+            state.details = details or {}
+            for key in state.final_puts:
+                ledger.writers[key]["evidence"] = state.details.get("evidence")
+            if state.failed or state.faults:
+                return _errored_case(
+                    case,
+                    error=_answer_error(state, expect_answerer),
+                    answer=answer,
+                    no_answer=no_answer,
+                    model_calls=state.model_calls,
+                    details=state.details,
                 )
-            except Exception as exc:
-                # The answer is paid for; a failed read of its report fields must not
-                # abort the pass and lose every answer after it. The case is marked
-                # and gated as errored.
-                judged.append(
-                    _errored_case(
-                        case,
-                        error=f"report: {type(exc).__name__}: {exc}",
-                        answer=answer,
-                        model_calls=model_calls,
-                    )
-                )
-                continue
-            if faults:
-                judged.append(
-                    _errored_case(
-                        case,
-                        error=(
-                            f"answer: answered by [{'; '.join(_describe(f) for f in faults)}], "
-                            f"not {expect_answerer}; not graded as that model's answer"
-                        ),
-                        answer=answer,
-                        model_calls=model_calls,
-                        details=details,
-                    )
-                )
-                continue
             entry = JudgedCase(
                 case_id=case.id,
                 kind=case.kind,
                 answer=answer,
                 no_answer=no_answer,
                 question=case.question,
-                model_calls=model_calls,
-                **details,
+                model_calls=state.model_calls,
+                **state.details,
             )
             # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
             # that catches this whole bug class. The existing followup metrics measure
@@ -592,10 +826,14 @@ async def _judge_cases(
             # sentinel present in the answer means the model obeyed an injection.
             if case.must_not_contain:
                 entry.injection_hits = tuple(forbidden_present(answer, case.must_not_contain))
+            if state.unattributed:
+                entry.error = "answer: a cache entry no turn of this pass wrote; not graded"
+                return entry
             # Step 2: judge it with the robust panel (N framings + adversarial veto).
             # An unparseable verdict or a provider outage on any judge call is recorded
-            # per-case (never a fabricated score, never a crash) so the run still emits
-            # a report and the retrieval gate holds.
+            # per-case (never a fabricated score, never a crash) and counted by the
+            # judge-coverage floor. Any other grader failure is a ``grade`` harness error.
+            state.stage = "grade"
             try:
                 verdict = await score_answer_panel_async(
                     question=case.question,
@@ -608,6 +846,9 @@ async def _judge_cases(
                 entry.error = f"judge_parse: {exc}"
             except LLMUnavailable as exc:
                 entry.error = f"judge_unavailable: {exc}"
+            except Exception as exc:
+                state.harness.append(_harness_entry("grade", exc, secrets))
+                entry.error = f"grade: {type(exc).__name__}"
             else:
                 if verdict is not None:
                     entry.score = verdict.score
@@ -624,7 +865,85 @@ async def _judge_cases(
                     entry.error = "judge_unavailable: verdict was None (stub mid-run)"
             if recording_grader is not None:
                 entry.grader_calls = list(recording_grader.calls)
+            # A model must not grade its own answers (#596): a grader call that
+            # OpenRouter served with one of this run's answer models voids the grade.
+            own = [
+                c
+                for c in entry.grader_calls
+                if c.get("model") and any(_same_model(c["model"], m) for m in own_models)
+            ]
+            if own:
+                state.harness.append(
+                    {
+                        "stage": "grade",
+                        "type": "SelfGrading",
+                        "message": f"{len(own)} grader call(s) served by an answer model of "
+                        f"this run ({sorted({c['model'] for c in own})}); grade discarded",
+                    }
+                )
+                entry.score = None
+                entry.error = "grade: self-grading"
+            return entry
+
+        for case in cases:
+            state = _CaseState()
+            if isinstance(answer_llm, AttributingLLM):
+                answer_llm.records.clear()
+            if recording_grader is not None:
+                recording_grader.calls.clear()
+            writers_before = dict(ledger.writers)
+            try:
+                async with session.begin_nested():
+                    entry = await _drive(case, state)
+            except Exception as exc:
+                # The case's rows are rolled back with its savepoint, so the cache
+                # entries it wrote are gone too: forget who wrote them.
+                ledger.writers = writers_before
+                # A failed answer call explains the failure; anything else that
+                # escaped is the harness's.
+                if not (state.stage == "answer" and state.failed):
+                    state.harness.append(_harness_entry(state.stage, exc, secrets))
+                if state.failed or state.faults:
+                    entry = _errored_case(
+                        case,
+                        error=f"{_answer_error(state, expect_answerer)}; "
+                        f"{state.stage}: {type(exc).__name__}: {redact(str(exc), secrets)}",
+                        answer=None,
+                        no_answer=True,
+                        model_calls=state.model_calls,
+                        details=state.details,
+                    )
+                else:
+                    entry = JudgedCase(
+                        case_id=case.id,
+                        kind=case.kind,
+                        answer="",
+                        no_answer=True,
+                        error=f"{state.stage}: {type(exc).__name__}",
+                        question=case.question,
+                        model_calls=state.model_calls,
+                        **state.details,
+                    )
+                if recording_grader is not None:
+                    entry.grader_calls = list(recording_grader.calls)
+            entry.harness_error = state.harness or None
+            entry.cache_origin = state.cache_origin
             judged.append(entry)
+            if on_case is not None:
+                on_case(list(judged))
+    finally:
+        # Every result is already collected (and saved through ``on_case``); a
+        # failing teardown is recorded, never allowed to drop them (#598 Step 2b, E).
+        try:
+            await stack.aclose()
+        except Exception as exc:
+            if run_errors is None:
+                raise
+            run_errors.append(
+                _harness_entry(
+                    "cleanup", exc, secrets, where="closing the pass's DB session and probe"
+                )
+            )
     return judged
 
 
@@ -671,6 +990,18 @@ def _summarize(
         for j in judged
         if (helpers := _helper_fallbacks(j))
     ]
+    # Helper calls that raised (the orchestrator went on without them): printed,
+    # never gated (#598 Step 2b, C).
+    helper_failures = [
+        {"case_id": j.case_id, "calls": "; ".join(_describe(c) for c in failures)}
+        for j in judged
+        if (failures := _helper_failures(j))
+    ]
+    # Every harness error of the pass, by case: they fail the separate
+    # harness-integrity check, never an answer gate (#598 Step 2b, B).
+    harness_errors = [
+        {"case_id": j.case_id, **h} for j in judged for h in _harness_entries(j.harness_error)
+    ]
 
     def _errored_entries(pool: list[JudgedCase]) -> list[dict[str, Any]]:
         return [{"case_id": j.case_id, "reason": j.error or ""} for j in pool if j.answer_errored]
@@ -715,6 +1046,8 @@ def _summarize(
             # Helper calls (condense, alias check) by another model: printed, never
             # gated (owner decision 2026-11-12).
             "helper_fallbacks": helper_fallbacks,
+            "helper_failures": helper_failures,
+            "harness_errors": harness_errors,
             "declines_by_reason": dict(
                 sorted(Counter(j.decline_reason for j in judged if j.decline_reason).items())
             ),
@@ -999,6 +1332,20 @@ def _gate(summary: dict[str, Any], *, retrieval: bool, answers: bool) -> list[st
                 f"{len(g['under_grounded'])} fact-bearing case(s) NOT fully grounded on the "
                 f"live-retrieval run: {under}"
             )
+        # Harness integrity (#598 Step 2b, B): a case the harness could not record or
+        # grade completely fails the run on its own line, never through an answer
+        # gate, so a broken record is never silent. Its results are already saved.
+        harness: list[dict[str, Any]] = j.get("harness_errors") or []
+        if harness:
+            failures.append(
+                f"harness integrity: {len(harness)} harness error(s), so this pass's record "
+                "is incomplete (the results are saved): "
+                + "; ".join(
+                    f"harness {h.get('stage')} error on {h.get('case_id')} "
+                    f"({h.get('type')}: {h.get('message')})"
+                    for h in harness
+                )
+            )
         if j["available"]:
             judged = j.get("judged", 0)
             scored = j.get("scored", 0)
@@ -1026,6 +1373,15 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     never hidden behind a main-pass failure with the same text.
     """
     failures = _gate(summary, retrieval=True, answers=True)
+    # Run-level harness errors: a client or session that failed to close, a
+    # per-case report write that failed (#598 Step 2b, E). Recorded, not raised,
+    # so they cannot drop results; they still fail the run.
+    run_errors: list[dict[str, Any]] = summary.get("harness_errors") or []
+    if run_errors:
+        failures.append(
+            f"harness integrity: {len(run_errors)} run-level harness error(s): "
+            + "; ".join(f"{h.get('stage')} {h.get('type')}: {h.get('message')}" for h in run_errors)
+        )
     fallback = summary.get("fallback")
     if fallback:
         view = {**summary, **{key: fallback[key] for key in ANSWER_SECTIONS}}
@@ -1070,8 +1426,32 @@ async def run_eval_async(
     cases = filter_cases(load_cases(golden_path), ids=ids)
     if not cases:
         raise SystemExit(f"no eval cases found in {golden_path}")
-    retrieval_report = await evaluate_retrieval(cases, settings=settings, postgres=postgres)
     judge_available = with_judge and not isinstance(get_llm_client(settings), StubLLMClient)
+    answer_model = _answer_model(settings)
+    fallback_model = settings.eval_fallback_model
+    judge_model = settings.eval_judge_model
+    answer_models = tuple(m for m in (answer_model, fallback_model) if m)
+    # Every refusal comes before any paid call, the retrieval half's embeddings on
+    # Postgres included (#598 Step 2b, F).
+    if judge_available:
+        if judge_model is None:
+            # Owner decision 2026-11-13: without a separate grader, the answer
+            # client would grade its own answers.
+            raise SystemExit(
+                "A judged run needs a separate grader: set CITEVYN_EVAL_JUDGE_MODEL "
+                "(and CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS), or pass --no-judge. Nothing "
+                "was run and nothing was spent."
+            )
+        try:
+            judge_module.panel_size()
+        except ValueError as exc:
+            raise SystemExit(f"{exc}. Nothing was run and nothing was spent.") from exc
+    if judge_model is not None and any(_same_model(judge_model, m) for m in answer_models):
+        raise SystemExit(
+            f"CITEVYN_EVAL_JUDGE_MODEL={judge_model!r} is also an answer model in this "
+            "run; a model must not grade its own answers (#596)."
+        )
+    retrieval_report = await evaluate_retrieval(cases, settings=settings, postgres=postgres)
     # Select from the cases the judged run would ACTUALLY drive. ``_judge_cases``
     # drops ``postgres_only`` cases on a hermetic run; selecting before that filter
     # made ``selected`` overstate the count (20 reported, 17 judged) — a subset
@@ -1106,17 +1486,15 @@ async def run_eval_async(
                 "--judge-subset for full judged coverage."
             ),
         }
-    answer_model = _answer_model(settings)
-    fallback_model = settings.eval_fallback_model
-    judge_model = settings.eval_judge_model
-    if judge_model is not None and judge_model in (answer_model, fallback_model):
-        raise SystemExit(
-            f"CITEVYN_EVAL_JUDGE_MODEL={judge_model!r} is also an answer model in this "
-            "run; a model must not grade its own answers (#596)."
-        )
+    # Run-level harness errors: a client or session that failed to close, a
+    # per-case report write that failed (#598 Step 2b, E).
+    run_errors: list[dict[str, Any]] = []
 
     def _assemble(
-        judged: list[JudgedCase], fallback_judged: list[JudgedCase] | None, passes: list[str]
+        judged: list[JudgedCase],
+        fallback_judged: list[JudgedCase] | None,
+        passes: list[str],
+        in_progress: str | None = None,
     ) -> dict[str, Any]:
         summary = _summarize(
             cases,
@@ -1142,6 +1520,10 @@ async def run_eval_async(
         # Which answer passes this report holds; a report written after the main
         # pass, by a run later cut short, says so (#598).
         summary["passes_completed"] = passes
+        # The pass being run when this report was written mid-pass; ``None`` once
+        # the run has finished (#598 Step 2b, E).
+        summary["in_progress"] = in_progress
+        summary["harness_errors"] = list(run_errors)
         summary["models"] = {
             "answer": answer_model,
             "fallback": fallback_model,
@@ -1168,22 +1550,50 @@ async def run_eval_async(
             }
         return summary
 
+    def _save(build: Callable[[], dict[str, Any]]) -> None:
+        """Build and write the report mid-run. A failure is a run-level harness
+        error, not a lost pass: the next case's write may still succeed."""
+        if report_path is None:
+            return
+        try:
+            write_report(report_path, build(), settings)
+        except Exception as exc:
+            run_errors.append(
+                _harness_entry(
+                    "report_write",
+                    exc,
+                    secret_values(settings),
+                    where=f"writing {report_path.name} mid-run",
+                )
+            )
+
+    async def _close(client: LLMClient, role: str) -> None:
+        """Close one client; a failure is recorded, never raised, so it cannot drop
+        a pass's results, and every other close still runs (#598 Step 2b, E)."""
+        try:
+            await client.aclose()
+        except Exception as exc:
+            run_errors.append(
+                _harness_entry(
+                    "cleanup", exc, secret_values(settings), where=f"closing the {role} client"
+                )
+            )
+
     judged: list[JudgedCase] = []
     fallback_judged: list[JudgedCase] | None = None
     if judge_available:
-        # One exit stack closes every client built here, each in its own step, so a
-        # failing close does not skip the next one. If a close fails while a pass's
-        # error is already propagating, the close error is raised with the pass's
-        # error chained as its ``__context__``.
+        assert judge_model is not None  # refused above
+        # One exit stack closes every client built here, each in its own step.
         async with contextlib.AsyncExitStack() as stack:
-            judge_llm = None
-            if judge_model is not None:
-                judge_llm = build_metered_llm_client(_grader_settings(settings, judge_model))
-                stack.push_async_callback(judge_llm.aclose)
+            judge_llm = build_metered_llm_client(_grader_settings(settings, judge_model))
+            stack.push_async_callback(_close, judge_llm, "grader")
             # The main pass answers through a client built like the process-wide
             # one, wrapped so every answer is attributed to the model that wrote it.
             main_llm = AttributingLLM(build_metered_llm_client(settings))
-            stack.push_async_callback(main_llm.aclose)
+            stack.push_async_callback(_close, main_llm, "main answer")
+            # Saved after EVERY case, atomically, so a run cut off (Ctrl-C, a
+            # cancelled task, a step timeout) keeps everything up to its last
+            # finished case (#598 Step 2b, E).
             judged = await _judge_cases(
                 judge_cases,
                 settings=settings,
@@ -1191,16 +1601,19 @@ async def run_eval_async(
                 answer_llm=main_llm,
                 judge_llm=judge_llm,
                 expect_answerer=(settings.llm_provider, answer_model),
+                answer_models=answer_models,
+                on_case=lambda done: _save(lambda: _assemble(done, None, [], "main")),
+                run_errors=run_errors,
             )
-            # Written after each pass, so a job cut by its time limit during the
-            # fallback pass keeps the main pass's paid answers (#598).
-            if report_path is not None:
-                write_report(report_path, _assemble(judged, None, ["main"]), settings)
+            # And after the pass, so a fallback pass that fails as a whole keeps
+            # the main pass's paid answers (#598).
+            _save(lambda: _assemble(judged, None, ["main"]))
             if fallback_model is not None:
+                main_done = judged
                 fallback_llm = AttributingLLM(
                     build_metered_llm_client(_router_settings(settings, fallback_model))
                 )
-                stack.push_async_callback(fallback_llm.aclose)
+                stack.push_async_callback(_close, fallback_llm, "fallback answer")
                 fallback_judged = await _judge_cases(
                     judge_cases,
                     settings=settings,
@@ -1208,6 +1621,11 @@ async def run_eval_async(
                     answer_llm=fallback_llm,
                     judge_llm=judge_llm,
                     expect_answerer=("router", fallback_model),
+                    answer_models=answer_models,
+                    on_case=lambda done: _save(
+                        lambda: _assemble(main_done, done, ["main"], "fallback")
+                    ),
+                    run_errors=run_errors,
                 )
     passes = (["main"] if judge_available else []) + (
         ["fallback"] if fallback_judged is not None else []
@@ -1297,11 +1715,25 @@ def write_report(path: pathlib.Path, summary: dict[str, Any], settings: Settings
 
     The whole report is walked, so a key a model echoed, or an error message
     carried, is caught wherever it sits. CI uploads this file.
+
+    Atomic (#598 Step 2b, E): the text goes to a temp file in the same folder,
+    is synced, and is moved over the report with ``os.replace``, so a write cut
+    short leaves the previous report whole instead of a truncated one.
     """
     plain = json.loads(json.dumps(summary, default=str))
     text = json.dumps(redact(plain, secret_values(settings)), indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    fd, temp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
 
 
 def pass_report_lines(judge: dict[str, Any]) -> list[str]:
@@ -1314,11 +1746,17 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
     errors = judge.get("answer_errors") or {"total": 0, "by_kind": {}}
     lines = [
         f"answer errors: {errors['total']} by kind {errors['by_kind']}",
+        f"harness errors: {len(judge.get('harness_errors') or [])}",
         f"declines by reason: {judge.get('declines_by_reason', {})}",
     ]
     for helper in judge.get("helper_fallbacks", []):
         lines.append(
             f"helper calls by another model: {helper['case_id']} ({helper['calls']}) "
+            "(reported, not gating)"
+        )
+    for helper in judge.get("helper_failures", []):
+        lines.append(
+            f"helper calls that failed: {helper['case_id']} ({helper['calls']}) "
             "(reported, not gating)"
         )
     for case in judge.get("cases", []):
