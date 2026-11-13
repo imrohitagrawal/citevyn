@@ -140,6 +140,11 @@ class JudgedCase:
     # the passages that turn answered from (#598 Step 2b). The hit's own
     # retrieval fields stay empty: no retrieval ran for it.
     cache_origin: dict[str, Any] | None = None
+    # The answer model's replies on the HISTORY turns, in order: ``{"question",
+    # "text"}`` per answer call that returned. Kept even when a later turn crashes,
+    # so no paid reply is lost (#598 Step 2b). ``raw_reply`` and ``retry_reply``
+    # stay the final turn's.
+    history_replies: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     # The run's own audit row: ``outcome`` (answer, no_answer, unsupported,
     # citation_validation_failed, cache_hit) and its ``reason`` for a decline.
     outcome: str | None = None
@@ -587,6 +592,7 @@ class _CaseState:
     unattributed: bool = False
     final_puts: list[str] = dataclasses.field(default_factory=list)
     final_replies: list[tuple[CallSite, str]] = dataclasses.field(default_factory=list)
+    final_marks: tuple[int, int] = (0, 0)
 
 
 _T = TypeVar("_T")
@@ -684,6 +690,11 @@ async def _judge_cases(
             answer error is decided here, from the calls, whatever happens after."""
             start = len(answer_llm.records) if isinstance(answer_llm, AttributingLLM) else 0
             hits_from, puts_from = len(ledger.hits), len(ledger.puts)
+            # Where this turn's probe records start, so a history turn's retrieval or
+            # gate call is never reported as the final turn's.
+            marks = (len(probe.retrievals), len(probe.gates))
+            if turn == "final":
+                state.final_marks = marks
             calls: list[dict[str, Any]] = []
             try:
                 response = await Orchestrator(settings, session, llm=answer_llm, cache=ledger).ask(
@@ -698,6 +709,15 @@ async def _judge_cases(
                     state.final_replies = [(r.site, r.text or "") for r in records if not r.failed]
                     for key, value in _reply_fields(state.final_replies).items():
                         setattr(entry, key, value)
+                    # The probe's facts too, before any later step can fail.
+                    for key, value in _probe_fields(probe, *marks).items():
+                        setattr(entry, key, value)
+                else:
+                    entry.history_replies.extend(
+                        {"question": question, "text": r.text or ""}
+                        for r in records
+                        if not r.failed and r.site is CallSite.answer
+                    )
                 if attributing:
                     assert expect_answerer is not None
                     for record in records:
@@ -712,6 +732,11 @@ async def _judge_cases(
                                 and not _wrong_answerers([served], expect_answerer),
                                 "failed": record.failed,
                                 "error_type": record.error_type,
+                                "error_message": redact(record.error_message or "", secrets)[
+                                    :_MESSAGE_LIMIT
+                                ]
+                                if record.failed
+                                else None,
                             }
                         )
                     entry.model_calls.extend(calls)
@@ -831,16 +856,11 @@ async def _judge_cases(
                     case, entry, state, prior, f"eval-{case.id}-history", session_id, "history"
                 )
                 prior_answer = str(prior_response.get("answer", ""))
-            # Where the final turn's records start, so a history turn's retrieval or
-            # gate call is never reported as the final turn's.
-            marks = (len(probe.retrievals), len(probe.gates))
             response = await _ask_attributed(
                 case, entry, state, case.question, f"eval-{case.id}", session_id, "final"
             )
             answer = entry.answer
-            # The probe's facts are copied before any database read.
-            for key, value in _probe_fields(probe, *marks).items():
-                setattr(entry, key, value)
+            marks = state.final_marks
             state.stage = "report"
             # The answer is paid for; a failed read of its report fields is a harness
             # error on the case, which is still graded (#598 Step 2b). Each field is
