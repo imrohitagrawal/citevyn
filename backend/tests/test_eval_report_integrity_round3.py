@@ -98,3 +98,20 @@ def test_a_failed_answer_call_keeps_its_message_in_model_calls(
     (judged,) = _run(monkeypatch, [_golden()["claude_api_lit_ratelimit"]], _Model(down))
     (call,) = judged.model_calls
     assert call["failed"] is True and call["error_message"] == "provider down: 503"
+
+
+def test_a_failed_history_answer_call_is_not_a_history_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: a history answer call that raised is kept as a reply (with empty
+    text), as if the model had answered that turn."""
+    case = _golden()["followup_claude_api_raise"]
+    model = _SiteFails(
+        ANSWERED,
+        site=CallSite.answer,
+        exc=LLMUnavailable("provider down on the history turn"),
+        when=lambda user: f"Question: {case.history[0]}\n" in user,
+    )
+    (judged,) = _run(monkeypatch, [case], model)
+    assert [(c["turn"], c["failed"]) for c in judged.model_calls] == [("history", True)]
+    assert judged.history_replies == []
