@@ -135,23 +135,51 @@ has outcome `cache_hit` and no reply, evidence or query), the answer model's own
 `raw_reply` (and the #208 `retry_reply`, with `retry_kept`), `resolved_query`,
 `retrieval_global`, the `evidence` the answer was made from (source, heading, rank, score,
 type and text; the text is cut exactly as the prompt cuts it, with `truncated`; title and
-URL are not stored), `model_calls` (which model made each call, by call site and turn),
-`answer_errored`, and each grader call's score, rationale and duration (`grader_calls`).
-Each pass's `judge` section counts `answer_errors` by kind and `declines_by_reason`, and
-the log prints each case scoring 2 or less, not gating until #602.
+URL are not stored), `model_calls` (which model made each call, by call site and turn,
+and whether it `failed`, with its `error_type`), `answer_errored`, `harness_error`,
+`cache_origin`, and each grader call's score, rationale, duration and the provider and
+model that served it (`grader_calls`). Each pass's `judge` section counts `answer_errors`
+by kind and `declines_by_reason`, and the log prints each case scoring 2 or less, not
+gating until #602.
 
-An errored case (the provider failed, another model wrote one of its answers, on the
-final turn or on a history turn, or its report could not be read) fails the gate that
-applies to it: a refusal case fails the refusal gate, a fact-bearing case fails
-groundedness, and a follow-up fails the multi-turn gate, each on its own
-`errored: <id> (<reason>)` line. When an answer exists its fact coverage
-is still the true one. A helper call (condense, alias check) by another model does not
-error the case: it is graded normally, the call is in `model_calls`, and each pass lists it
-in `helper_fallbacks` and prints it as "helper calls by another model", without gating.
+An errored case is one where an answer call failed or another model wrote an answer, on
+the final turn or on a history turn (a cache hit counts as written by whoever last wrote
+its key). Nothing else errors a case. It fails the gate that applies to it: a refusal case
+fails the refusal gate, a fact-bearing case fails groundedness, and a follow-up fails the
+multi-turn gate, each on its own `errored: <id> (<reason>)` line. It keeps the response's
+real `no_answer`, so a refusal another model answered also counts as a refusal leak. When
+an answer exists its fact coverage is still the true one. A helper call (condense, alias
+check) by another model, or one that failed, does not error the case: it is graded
+normally, the call is in `model_calls`, and each pass lists it in `helper_fallbacks` or
+`helper_failures` and prints it, without gating.
 
-The report is written after each pass, with configured secrets redacted from its string
-values; `passes_completed` says which passes it holds (`["main"]` if the run was cut short
-during the fallback pass).
+Everything else that goes wrong for a case is a **harness error** (`harness_error`: a list
+of `stage` (`answer`, `report` or `grade`), `type` and redacted `message`): an exception
+from `ask()` with no failed answer call (an embedding outage, a database error), a failed
+report read, a cache hit on a key no turn of the pass wrote, an unexpected grader failure,
+or a grader call served by one of the run's answer models (self-grading; vendor prefix
+stripped, date suffix matched). A case with a harness error is still graded when its answer
+exists and its writer is known. Each pass's `judge.harness_errors` lists them, and any one
+fails a separate `harness integrity` gate line in either pass, never an answer gate. A grader
+reply that cannot be parsed stays a `judge_parse` error under the judge-coverage floor.
+
+Each case runs in its own savepoint (`session.begin_nested()`) and its own `except
+Exception`: a failure rolls back only that case's rows and the pass goes on. Each report
+read has its own savepoint too, so a failed statement on Postgres cannot poison the next
+case. The answer cache is wrapped for the whole pass and records who wrote each key (last
+write wins); a hit records `cache_origin` (the case and turn that wrote it, and that turn's
+passages) while its own retrieval fields stay empty.
+
+The report is written after every case and after each pass, atomically (a temp file in the
+same folder, synced, then `os.replace`), with configured secrets redacted from its string
+values. `passes_completed` says which passes it holds and `in_progress` which pass was
+running (`null` once the run finished), so a run cut off keeps everything up to its last
+finished case. A client or session that fails to close, or a mid-run write that fails, is a
+run-level `harness_errors` entry that fails the run without dropping results.
+
+A judged run needs a separate grader: it is refused before any paid call (the retrieval
+half's embeddings included) unless `CITEVYN_EVAL_JUDGE_MODEL` is set, and
+`CITEVYN_EVAL_JUDGE_PANEL` is checked before then too. `--no-judge` runs without one.
 
 The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
 **only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so

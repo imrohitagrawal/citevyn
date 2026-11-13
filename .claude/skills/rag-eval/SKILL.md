@@ -69,9 +69,14 @@ equal except the database, CORS, pool size, cost caps, credentials and the three
 both keys must be present), and
 `backend/tests/test_eval_model_parity.py` applies the same rules (`tests/eval/parity.py`) to the
 job's `env:` block; change production and CI together. The report's
-`models` block names what answered and graded. A local `make eval` is not comparable with CI: it
-runs hermetic (no `--postgres`, so the `postgres_only` cases, injection included, are dropped), with the
-default 3-framing judge panel, ONE answer pass graded by its own answer client. To match CI, run
+`models` block names what answered and graded. A judged run is refused before any paid call unless
+`CITEVYN_EVAL_JUDGE_MODEL` is set (a separate grader is required; `--no-judge` runs without one), and a
+grader call served by one of the run's answer models is a harness error (#598 Step 2b). Each case runs
+in its own savepoint, the report is saved atomically after every case (`in_progress`,
+`passes_completed`), and anything that is not a failed answer call or another model's answer is a
+`harness_error` that fails a separate `harness integrity` gate line: see `tests/eval/README.md`. A local
+`make eval` is not comparable with CI: it runs hermetic (no `--postgres`, so the `postgres_only` cases,
+injection included, are dropped), with the default 3-framing judge panel and ONE answer pass. To match CI, run
 `python -m tests.eval.runner --postgres` against a migrated, empty database as the CI step does, with
 every variable in the CI job's `env:` block (including `CITEVYN_EVAL_JUDGE_PANEL=1`,
 `CITEVYN_EVAL_FALLBACK_MODEL`, `CITEVYN_EVAL_JUDGE_MODEL` and `CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS`). Never compare a local score with a CI
