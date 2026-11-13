@@ -20,12 +20,15 @@ This is CiteVyn-specific (project-scoped skill).
 ## Run it
 
 - Full local run: `make eval` → writes `artifacts/eval_report.json`. Includes the judge only
-  when a working provider key is configured.
+  when a working provider key is configured, and then needs a separate grader (below); without
+  one the run is refused before any paid call (`--no-judge` skips the judge).
 - CI gate (hermetic, already auto-runs in the `pytest + lint` job):
   `cd backend && env -u CITEVYN_DATABASE_URL uv run pytest tests/test_eval_harness.py -q`
-- With the judge locally:
-  `CITEVYN_LLM_PROVIDER=gemini CITEVYN_GEMINI_API_KEY=… CITEVYN_EVAL_LLM=1 make eval`
-  (`CITEVYN_EVAL_LLM=1` also enables the opt-in judge pytest).
+- With the judge locally (the grader is a separate OpenRouter model, so the OpenRouter key is needed):
+  `CITEVYN_LLM_PROVIDER=gemini CITEVYN_GEMINI_API_KEY=… CITEVYN_OPENROUTER_API_KEY=… CITEVYN_EVAL_JUDGE_MODEL=anthropic/claude-haiku-5.5 CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS=60 CITEVYN_EVAL_LLM=1 make eval`
+  (`CITEVYN_EVAL_LLM=1` also enables the opt-in judge pytest). A grader reply that cannot be
+  parsed (`JudgeParseError`) is a `judge_parse` error counted by the judge-coverage floor, not a
+  harness error.
 
 ## Add a golden case
 

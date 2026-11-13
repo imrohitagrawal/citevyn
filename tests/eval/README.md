@@ -154,12 +154,22 @@ normally, the call is in `model_calls`, and each pass lists it in `helper_fallba
 `helper_failures` and prints it, without gating.
 
 Everything else that goes wrong for a case is a **harness error** (`harness_error`: a list
-of `stage` (`answer`, `report` or `grade`), `type` and redacted `message`): an exception
-from `ask()` with no failed answer call (an embedding outage, a database error), a failed
-report read, a cache hit on a key no turn of the pass wrote, an unexpected grader failure,
-or a grader call served by one of the run's answer models (self-grading; vendor prefix
-stripped, date suffix matched). A case with a harness error is still graded when its answer
-exists and its writer is known. Each pass's `judge.harness_errors` lists them, and any one
+of `stage` (`answer`, `report`, `grade` or `savepoint`), `type` and redacted `message`): an
+exception from `ask()` that is not a failed answer call's own error (an embedding outage, a
+database error, a crash after a swallowed retry failure), a failed report read, a cache hit on
+a key no turn of the pass wrote, an unexpected grader failure, a case savepoint that could not
+be released, or a grader call served by one of the run's answer models (self-grading: the
+grade is discarded and never counts in the mean). Two ids name one model when they are equal
+after stripping the `vendor/` prefix, an OpenRouter `:<tag>` and a trailing `-YYYY-MM-DD`
+from both; a trailing `-NNN` version is ignored only against an id without one. A case with
+a harness error is still graded when its answer exists and its writer is known.
+
+A case's record only grows: each fact (each call, the answer and `no_answer`, each report
+field) is recorded as soon as it is known, and a later failure is appended to
+`harness_error` and `error`, never allowed to reset it. A case that crashed before any
+response has `no_answer` `null`: it was never observed to decline, so it is not counted as a
+refusal leak or a safe decline; each figure lists it under `refusal_not_observed` or
+`not_observed`, and it stays in the population and every errored list. Each pass's `judge.harness_errors` lists them, and any one
 fails a separate `harness integrity` gate line in either pass, never an answer gate. A grader
 reply that cannot be parsed stays a `judge_parse` error under the judge-coverage floor.
 
@@ -174,12 +184,17 @@ The report is written after every case and after each pass, atomically (a temp f
 same folder, synced, then `os.replace`), with configured secrets redacted from its string
 values. `passes_completed` says which passes it holds and `in_progress` which pass was
 running (`null` once the run finished), so a run cut off keeps everything up to its last
-finished case. A client or session that fails to close, or a mid-run write that fails, is a
-run-level `harness_errors` entry that fails the run without dropping results.
+finished case. The report keeps mode 0644, and a temp file of this report left by a killed
+run is removed at the next write. Run-level `harness_errors` entries fail the run without
+dropping results: `cleanup` (a client or session that failed to close) and `report_write` (a
+save that failed twice: the pass then stops before any further paid call, and the summary is
+still printed).
 
 A judged run needs a separate grader: it is refused before any paid call (the retrieval
-half's embeddings included) unless `CITEVYN_EVAL_JUDGE_MODEL` is set, and
-`CITEVYN_EVAL_JUDGE_PANEL` is checked before then too. `--no-judge` runs without one.
+half's embeddings included) unless `CITEVYN_EVAL_JUDGE_MODEL` is set with its
+`CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS` and the grader client can be built (the OpenRouter key),
+and `CITEVYN_EVAL_JUDGE_PANEL` and a grader that is also an answer model are checked before
+then too. `--no-judge` runs without one.
 
 The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
 **only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so
