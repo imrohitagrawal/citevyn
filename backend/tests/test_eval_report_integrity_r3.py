@@ -330,7 +330,8 @@ def test_a_self_graded_score_never_counts(
     monkeypatch: pytest.MonkeyPatch, text: str | None
 ) -> None:
     """Red when: a grade served by the answer model keeps its score, so it enters the
-    mean (M20), or a malformed self-graded verdict hides the self-grading."""
+    mean (M20), or its rationale, panel scores or ``contested`` still feed the
+    report, or a malformed self-graded verdict hides the self-grading."""
     case = _golden()["claude_api_lit_ratelimit"]
     (judged,) = _run(
         monkeypatch,
@@ -343,7 +344,12 @@ def test_a_self_graded_score_never_counts(
     summary = runner_mod._summarize([case], {}, [judged], judge_available=True, judgeable=[case])
     assert summary["judge"]["mean_score"] is None and summary["judge"]["scored"] == 0
     if text is None:
-        assert judged.standard_scores  # the observed verdict is kept for the record
+        # The discarded verdict feeds nothing printed or gated; the grader calls
+        # still hold what was observed.
+        assert judged.standard_scores == () and judged.rationale == ""
+        assert judged.standard_median is None and judged.adversarial_score is None
+        assert judged.contested is False and judged.spread is None
+        assert [c["score"] for c in judged.grader_calls] == [4, 4, 4, 4]
 
 
 # --- 7. every refusal a judged run can hit comes before the retrieval half ------------

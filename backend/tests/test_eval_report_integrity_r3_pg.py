@@ -1,8 +1,9 @@
 """#598 Step 2b, review round 1, on real Postgres (``postgres`` job).
 
-A case whose savepoint cannot be released keeps its finished record, and the case
-after it runs on a healthy transaction. Also the cache rows a failed case wrote,
-and a database error swallowed inside ``ask``. The REAL ``_judge_cases`` runs over
+A case whose savepoint cannot be checked or released keeps its finished record,
+and the pass stops there (the session may be unusable) with one run-level harness
+error. Also the cache rows a failed case wrote, and a database error swallowed
+inside ``ask``. The REAL ``_judge_cases`` runs over
 the shipped corpus with recorded vectors, as in ``test_eval_report_integrity_pg.py``.
 
 Each test names the change that turns it red.
@@ -60,48 +61,65 @@ def _capture_session(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 class _PoisonsOnce(_Judge):
-    """A grader whose first call runs a failing statement on the pass's session and
-    swallows the error: the transaction is left aborted after the case's last
-    database read, so only the case savepoint's RELEASE meets it."""
+    """A grader whose first call runs ``sql`` on the pass's session and swallows any
+    error, after the case's last database read. A failing statement leaves the
+    transaction aborted, so the ``SELECT 1`` check before the savepoint's release
+    meets it; a ``COMMIT`` ends the transaction, so the savepoint is gone and its
+    RELEASE fails; killing the connection fails both."""
 
-    def __init__(self, captured: dict[str, Any]) -> None:
+    def __init__(self, captured: dict[str, Any], sql: str = _BAD_SQL) -> None:
         super().__init__()
-        self.captured, self.poisoned = captured, False
+        self.captured, self.sql, self.poisoned = captured, sql, False
 
     async def complete(self, **kwargs: Any) -> Any:
         if not self.poisoned:
             self.poisoned = True
             with contextlib.suppress(Exception):
-                await self.captured["session"].execute(text(_BAD_SQL))
+                await self.captured["session"].execute(text(self.sql))
         return await super().complete(**kwargs)
 
 
-async def test_a_savepoint_that_cannot_be_released_keeps_the_finished_case(
+@pytest.mark.parametrize(
+    "sql",
+    [_BAD_SQL, "COMMIT", "SELECT pg_terminate_backend(pg_backend_pid())"],
+    ids=["aborted-transaction", "savepoint-gone", "connection-killed"],
+)
+async def test_a_savepoint_that_cannot_be_released_keeps_the_case_and_stops_the_pass(
     settings: Any,  # noqa: F811 - the fixture imported above
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
+    sql: str,
 ) -> None:
-    """Red when: a failure releasing the case savepoint rebuilds the case from
-    scratch (its answer, ``no_answer`` and score are lost), or is not a harness
-    error, or the next case inherits the aborted transaction."""
+    """Red when: a case whose savepoint check or release fails is rebuilt from
+    scratch (its answer, ``no_answer`` and score lost), or is not a harness error,
+    or the pass keeps paying for answers on a session that may be unusable, without
+    one run-level error saying how many cases did not run."""
     _shipped_corpus(monkeypatch, settings, tmp_path)
     captured = _capture_session(monkeypatch)
-    judge = _PoisonsOnce(captured)
-    broken, healthy = await runner_mod._judge_cases(
-        _cases(),
+    judge = _PoisonsOnce(captured, sql)
+    model = _Model(ANSWERED)
+    run_errors: list[dict[str, Any]] = []
+    cases = _cases()
+    judged = await runner_mod._judge_cases(
+        [*cases, dataclasses.replace(cases[0], id="pg_third")],
         settings=settings,
         postgres=True,
-        answer_llm=runner_mod.AttributingLLM(_Model(ANSWERED)),  # type: ignore[arg-type]
+        answer_llm=runner_mod.AttributingLLM(model),  # type: ignore[arg-type]
         judge_llm=judge,  # type: ignore[arg-type]
         expect_answerer=EXPECT,
+        run_errors=run_errors,
     )
-    assert judge.poisoned  # partner: the transaction really was poisoned
+    assert judge.poisoned  # partner: the session really was broken
+    (broken,) = judged
     assert broken.answer == ANSWERED and broken.no_answer is False
     assert broken.outcome == "answer" and broken.evidence
     assert broken.score == 4 and broken.answer_errored is False
     assert [h["stage"] for h in _harness(broken)] == ["savepoint"]
-    assert not _harness(healthy) and healthy.outcome == "answer" and healthy.evidence
-    assert healthy.score == 4
+    assert len(model.answer_prompts) == 1  # no further paid call
+    stops = [e for e in run_errors if e["stage"] == "session"]
+    assert [e["message"] for e in stops] == [
+        f"session unusable after case {cases[0].id}; 2 case(s) not run"
+    ]
 
 
 async def test_a_cache_row_written_by_a_failed_case_is_rolled_back(
