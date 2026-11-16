@@ -548,9 +548,10 @@ jobs:
         # The grader check's two settings are exported here, and only when the
         # input is true, never through `env:`: an expression there renders empty
         # on push and tag runs, and an empty value makes Settings refuse to load.
-        # The cap is the existing per-call daily guard, set to the amount approved
-        # for the run in price-book dollars (a best-effort backstop: see
-        # docs/COST_CONTROLS.md §6 for what it cannot see). The runner refuses a
+        # The cap is the existing per-call daily guard, in price-book dollars, set
+        # to the approved amount less one answer call's worst case; it is approved
+        # for one run, so each dispatch needs a fresh approval (a best-effort
+        # backstop: see tests/eval/README.md for what it cannot see). The runner refuses a
         # grader check on main or a v* tag, or with under 250 minutes left before
         # 00:00 UTC, before any paid call.
         env:
