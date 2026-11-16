@@ -23,6 +23,7 @@ table, the printed lines and the start refusals). The runner calls them.
 
 from __future__ import annotations
 
+import os
 import statistics
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -146,12 +147,23 @@ def _counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _expected_sources(case: Any) -> tuple[str, ...]:
+    """The sources a case's answer should come from: several for a multi-hop case,
+    one for most, none for a refusal."""
+    many = getattr(case, "expected_sources", None)
+    if many:
+        return tuple(many)
+    one = getattr(case, "expected_source", None)
+    return (one,) if one else ()
+
+
 def paired_table(judged: list[Any], cases: list[Any]) -> dict[str, Any]:
     """One pass's blind-versus-passages table. Only cases with a blind score are
     rows; a row without a passage score is ``missing`` with its reason, never
-    ``same``. The counts are split by whether the case's expected source was among
-    the passages it was graded with."""
-    expected = {c.id: getattr(c, "expected_source", None) for c in cases}
+    ``same``. The counts are split by whether the case's expected sources (its
+    ``expected_sources`` when set, else its ``expected_source``) were ALL among the
+    passages it was graded with; a case with none (a refusal) has its own bucket."""
+    expected = {c.id: _expected_sources(c) for c in cases}
     rows: list[dict[str, Any]] = []
     for case in judged:
         if case.score is None:
@@ -172,8 +184,10 @@ def paired_table(judged: list[Any], cases: list[Any]) -> dict[str, Any]:
             row["status"] = (
                 "raised" if row["delta"] > 0 else "lowered" if row["delta"] < 0 else "same"
             )
-        sources = {p.get("source") for p in graded_passages(case) or []}
-        row["source_in_passages"] = expected.get(case.case_id) in sources
+        # An entry with no source matches nothing.
+        sources = {p.get("source") for p in graded_passages(case) or [] if p.get("source")}
+        wanted = expected.get(case.case_id) or ()
+        row["source_in_passages"] = set(wanted) <= sources if wanted else None
         rows.append(row)
     paired = sum(1 for r in rows if r["status"] != "missing")
     coverage = paired / len(rows) if rows else None
@@ -187,8 +201,11 @@ def paired_table(judged: list[Any], cases: list[Any]) -> dict[str, Any]:
         "rows": rows,
         "counts": _counts(rows),
         "split": {
-            "source_in_passages": _counts([r for r in rows if r["source_in_passages"]]),
-            "source_not_in_passages": _counts([r for r in rows if not r["source_in_passages"]]),
+            "source_in_passages": _counts([r for r in rows if r["source_in_passages"] is True]),
+            "source_not_in_passages": _counts(
+                [r for r in rows if r["source_in_passages"] is False]
+            ),
+            "no_expected_source": _counts([r for r in rows if r["source_in_passages"] is None]),
         },
         "coverage": coverage,
         "coverage_label": label,
@@ -222,10 +239,11 @@ def _low(case: dict[str, Any]) -> bool:
     )
 
 
-def report_lines(summary: dict[str, Any]) -> list[str]:
-    """The grader check's lines for the job summary: the decision and its reasons,
-    the probe table, each pass's paired counts, and every case at or below 2 on
-    either score with both rationales."""
+def report_lines(summary: dict[str, Any], *, probe_only: bool = False) -> list[str]:
+    """The grader check's lines for the log and the job summary: the decision and
+    its reasons, the probe's errors, the stop line and the probe table; then (not
+    with ``probe_only``) each pass's paired counts, the cases not reached, and
+    every case at or below 2 on either score with both rationales."""
     check = summary.get("grader_check") or {}
     reasons = check.get("reasons") or []
     lines = [
@@ -233,15 +251,26 @@ def report_lines(summary: dict[str, Any]) -> list[str]:
         + (f" ({'; '.join(reasons)})" if reasons else "")
         + " (reported only; no gate reads it)"
     ]
+    probe = check.get("probe") or {}
+    for error in probe.get("errors") or []:
+        lines.append(
+            f"GRADER CHECK probe error: {error.get('answer')} {error.get('mode')} repeat "
+            f"{error.get('repeat')}: {error.get('type')}: {error.get('message')}"
+        )
     if check.get("stopped"):
         lines.append(f"GRADER CHECK: {check['stopped']}")
-    cells = (check.get("probe") or {}).get("cells") or {}
+    cells = probe.get("cells") or {}
     medians = decide(cells)["medians"]
     lines.append("GRADER PROBE (scores of the three repeats, then their median):")
     for answer in ANSWERS:
         for mode in MODES:
             scores = (cells.get(answer) or {}).get(mode, [])
             lines.append(f"  {answer:7s} {mode:8s} {scores} median {medians[answer][mode]}")
+    if probe_only:
+        return lines
+    for name, ids in (check.get("not_reached") or {}).items():
+        if ids:
+            lines.append(f"{name} pass not reached: {', '.join(ids)}")
     for name, table in (check.get("paired") or {}).items():
         coverage = table.get("coverage")
         lines.append(
@@ -251,8 +280,9 @@ def report_lines(summary: dict[str, Any]) -> list[str]:
         )
         split = table.get("split") or {}
         lines.append(
-            f"  expected source among the passages: {split.get('source_in_passages')}; "
-            f"not among them: {split.get('source_not_in_passages')}"
+            f"  expected sources among the passages: {split.get('source_in_passages')}; "
+            f"not among them: {split.get('source_not_in_passages')}; "
+            f"no expected source: {split.get('no_expected_source')}"
         )
     passes = [("main", (summary.get("judge") or {}).get("cases") or [])]
     fallback = summary.get("fallback")
@@ -273,6 +303,24 @@ def report_lines(summary: dict[str, Any]) -> list[str]:
     if check.get("commit"):
         lines.append(f"measured commit: {check['commit']}")
     return lines
+
+
+_FENCE = "`" * 3
+
+
+def write_step_summary(lines: list[str]) -> None:
+    """Append ``lines`` to the GitHub job summary (``GITHUB_STEP_SUMMARY``) when it
+    is set, as one preformatted block. A failed write is printed, never raised:
+    the report holds the same."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path or not lines:
+        return
+    body = "\n".join(line.replace(_FENCE, "'" * 3) for line in lines)
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(f"{_FENCE}\n{body}\n{_FENCE}\n")
+    except OSError as exc:
+        print(f"GRADER CHECK: the job summary could not be written ({type(exc).__name__})")
 
 
 def start_refusal(*, ref: str | None, now: datetime) -> str | None:
