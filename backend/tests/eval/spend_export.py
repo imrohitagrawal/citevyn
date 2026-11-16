@@ -67,39 +67,57 @@ def _add(total: dict[str, Any], row: ProviderCall) -> None:
     total["tokens_estimated_rows"] += 1 if row.tokens_estimated else 0
 
 
-def _failed_grader_call(call: dict[str, Any]) -> bool:
-    return call.get("score") is None and str(call.get("rationale", "")).startswith("call failed:")
+_REFUSED = "CostLimitReached"
+ATTRIBUTION = (
+    "A failed grader call records no model, so it is counted under the configured grader model."
+)
 
 
-def observed_failures(report: dict[str, Any] | None) -> dict[str, int]:
-    """The failed calls the eval recorded, by model, in both passes: answer-client
-    calls marked ``failed`` and grader calls that raised (blind, passage and
-    probe), the latter under the report's grader model."""
+def _grader_call_outcome(call: dict[str, Any]) -> str | None:
+    """``"refused"`` (the spend cap stopped it before it was sent), ``"failed"``,
+    or ``None`` for a call that returned."""
+    rationale = str(call.get("rationale", ""))
+    if call.get("score") is not None or not rationale.startswith("call failed:"):
+        return None
+    return "refused" if rationale.startswith(f"call failed: {_REFUSED}:") else "failed"
+
+
+def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[str, int]]:
+    """The failed calls the eval recorded, by model, in both passes, and apart from
+    them the calls the spend cap refused (never sent, so never billed): answer
+    client calls marked ``failed``, and grader calls that raised (blind, passage
+    and probe), the latter under the report's grader model (see ``ATTRIBUTION``)."""
     if not report:
-        return {}
+        return {}, {}
     grader = (report.get("grader") or {}).get("model") or (report.get("models") or {}).get("judge")
-    counts: Counter[str] = Counter()
+    counts: dict[str, Counter[str]] = {"failed": Counter(), "refused": Counter()}
+    grader_calls: list[dict[str, Any]] = []
     sections = [report.get("judge") or {}, ((report.get("fallback") or {}).get("judge")) or {}]
     for section in sections:
         for case in section.get("cases") or []:
             for call in case.get("model_calls") or []:
                 if call.get("failed"):
-                    counts[str(call.get("model") or "unknown")] += 1
-            for call in [
-                *(case.get("grader_calls") or []),
-                *(case.get("passage_grader_calls") or []),
-            ]:
-                if _failed_grader_call(call):
-                    counts[str(grader or "unknown")] += 1
+                    outcome = "refused" if call.get("error_type") == _REFUSED else "failed"
+                    counts[outcome][str(call.get("model") or "unknown")] += 1
+            grader_calls += case.get("grader_calls") or []
+            grader_calls += case.get("passage_grader_calls") or []
     probe = (report.get("grader_check") or {}).get("probe") or {}
-    for call in probe.get("calls") or []:
-        if _failed_grader_call(call):
-            counts[str(grader or "unknown")] += 1
-    return dict(sorted(counts.items()))
+    grader_calls += probe.get("calls") or []
+    for call in grader_calls:
+        outcome = _grader_call_outcome(call)
+        if outcome is not None:
+            counts[outcome][str(grader or "unknown")] += 1
+    return dict(sorted(counts["failed"].items())), dict(sorted(counts["refused"].items()))
+
+
+def observed_failures(report: dict[str, Any] | None) -> dict[str, int]:
+    """The failed calls the eval recorded, by model (cap refusals excluded)."""
+    return failed_calls(report)[0]
 
 
 def summarize(rows: list[ProviderCall], report: dict[str, Any] | None = None) -> dict[str, Any]:
     """The export from rows already read and the eval report (or ``None``)."""
+    failures, refused = failed_calls(report)
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     totals = _empty()
     for row in rows:
@@ -123,10 +141,14 @@ def summarize(rows: list[ProviderCall], report: dict[str, Any] | None = None) ->
             "input_tokens": totals["input_tokens"],
             "output_tokens": totals["output_tokens"],
             "book_cost_usd": _money(totals["book_cost_usd"]),
+            "priced_rows": totals["priced_rows"],
             "unpriced_rows": totals["unpriced_rows"],
             "tokens_estimated_rows": totals["tokens_estimated_rows"],
         },
-        "observed_failures": observed_failures(report),
+        "observed_failures": failures,
+        # Calls the spend cap stopped before they were sent: not spend, not failures.
+        "refused_by_cap": refused,
+        "attribution": ATTRIBUTION,
         "gaps": list(GAPS),
     }
 
@@ -149,13 +171,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=pathlib.Path, required=True)
     parser.add_argument("--report", type=pathlib.Path, default=None)
     args = parser.parse_args(argv)
+    # The rows first: they are the spend, and a bad report must not cost them.
+    rows = asyncio.run(read_rows(get_settings().database_url))
     report: dict[str, Any] | None = None
     if args.report is not None:
-        if args.report.exists():
+        try:
             report = json.loads(args.report.read_text(encoding="utf-8"))
-        else:
-            print(f"spend export: no eval report at {args.report}; failures not counted")
-    rows = asyncio.run(read_rows(get_settings().database_url))
+        except (OSError, ValueError) as exc:
+            print(
+                f"spend export: the eval report at {args.report} could not be read "
+                f"({type(exc).__name__}); failures are not counted"
+            )
     export = summarize(rows, report)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(export, indent=2), encoding="utf-8")
@@ -164,8 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         f"Spend ({LABEL}): {totals['rows']} row(s), {totals['input_tokens']} input and "
         f"{totals['output_tokens']} output token(s), ${totals['book_cost_usd']}; "
         f"unpriced rows {totals['unpriced_rows']}, estimated-token rows "
-        f"{totals['tokens_estimated_rows']}; observed failures {export['observed_failures']}"
+        f"{totals['tokens_estimated_rows']}; observed failures {export['observed_failures']}; "
+        f"refused by the cap {export['refused_by_cap']}"
     )
+    print(f"  note: {ATTRIBUTION}")
     for gap in GAPS:
         print(f"  gap: {gap}")
     print(f"Written to {args.out}")
