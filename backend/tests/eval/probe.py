@@ -38,11 +38,14 @@ class Retrieval:
 @dataclasses.dataclass(frozen=True)
 class Gate:
     """One call of the global confidence gate. ``margin`` is top minus the
-    runner-up (``None`` for a lone hit); ``top_score`` is ``None`` for no hits."""
+    runner-up (``None`` for a lone hit); ``top_score`` is ``None`` for no hits.
+    ``min_top_score`` and ``min_margin`` are the thresholds the gate was called with."""
 
     top_score: float | None
     margin: float | None
     passed: bool
+    min_top_score: float
+    min_margin: float
 
 
 @dataclasses.dataclass
@@ -85,7 +88,15 @@ def probe_retrieval() -> Iterator[Probe]:
         passed = real_gate(scores, min_top_score=min_top_score, min_margin=min_margin)
         top = float(scores[0]) if scores else None
         margin = float(scores[0]) - float(scores[1]) if len(scores) > 1 else None
-        probe.gates.append(Gate(top_score=top, margin=margin, passed=passed))
+        probe.gates.append(
+            Gate(
+                top_score=top,
+                margin=margin,
+                passed=passed,
+                min_top_score=min_top_score,
+                min_margin=min_margin,
+            )
+        )
         return passed
 
     orchestrator_mod._default_retriever = _retriever  # type: ignore[assignment]

@@ -827,3 +827,290 @@ def test_the_postgres_vacuity_guard_watches_the_new_file() -> None:
         encoding="utf-8"
     )
     assert "test_eval_shipped_pg" in guard
+
+
+# --- Near the gate (#601) -------------------------------------------------------------
+#
+# The global gate passes a question when its top score reaches ``min_top_score`` and its
+# gap to the runner-up reaches ``min_margin``. A question within a fixed window of either
+# threshold, on either side, is printed as near the gate. Each global outcome carries the
+# thresholds its gate used; these tests set them to 0.30 and 0.04 on the outcome, so they
+# do not move with a tuned default.
+
+
+def _global(
+    case_id: str,
+    *,
+    top: float | None,
+    margin: float | None,
+    passed: bool | None = True,
+    min_top_score: float | None = 0.30,
+    min_margin: float | None = 0.04,
+    **rest: Any,
+) -> Any:
+    return _outcome(
+        case_id,
+        route="global_vector_only",
+        winning_arm="vector",
+        gate_top_score=top,
+        gate_margin=margin,
+        gate_passed=passed,
+        gate_min_top_score=min_top_score,
+        gate_min_margin=min_margin,
+        **rest,
+    )
+
+
+def _near_ids(outcomes: list[Any]) -> list[str]:
+    report = _shipped().build_report(outcomes)
+    return [row["id"] for row in report["near_the_gate"]["questions"]]
+
+
+def test_a_gap_on_either_edge_of_the_margin_window_is_near() -> None:
+    """Red when: the margin window is not inclusive on both sides, or not 0.01 wide."""
+    outcomes = [
+        _global("gap_050", top=0.80, margin=0.05),
+        _global("gap_030", top=0.80, margin=0.03, passed=False),
+        _global("gap_0501", top=0.80, margin=0.0501),
+        _global("gap_0299", top=0.80, margin=0.0299, passed=False),
+    ]
+    assert _near_ids(outcomes) == ["gap_050", "gap_030"]
+
+
+def test_a_top_score_within_the_top_window_is_near() -> None:
+    """Red when: the top-score window is not inclusive on both sides, or not 0.05 wide."""
+    outcomes = [
+        _global("top_035", top=0.35, margin=0.50),
+        _global("top_03501", top=0.3501, margin=0.50),
+        _global("top_025", top=0.25, margin=0.50, passed=False),
+        _global("top_0249", top=0.249, margin=0.50, passed=False),
+    ]
+    assert _near_ids(outcomes) == ["top_035", "top_025"]
+
+
+def test_a_scoped_question_with_a_near_gap_is_not_listed() -> None:
+    """Red when: the near-the-gate list stops checking the route is the global one."""
+    outcomes = [
+        _outcome("scoped_near", gate_top_score=0.31, gate_margin=0.04, gate_passed=True),
+        _outcome(
+            "multi_near",
+            route="multi_product",
+            gate_top_score=0.31,
+            gate_margin=0.04,
+            gate_passed=True,
+        ),
+        _global("global_near", top=0.80, margin=0.04),
+    ]
+    assert _near_ids(outcomes) == ["global_near"]
+
+
+def test_a_lone_hit_is_judged_on_its_top_score_alone() -> None:
+    """Red when: a lone hit (no runner-up, so no margin) is dropped or crashes the report."""
+    outcomes = [
+        _global("lone_near", top=0.33, margin=None, retrieved=("codex#CLI flags",)),
+        _global("lone_far", top=0.90, margin=None, retrieved=("codex#CLI flags",)),
+        _global("no_hits", top=None, margin=None, passed=False, retrieved=()),
+    ]
+    assert _near_ids(outcomes) == ["lone_near"]
+
+
+def test_the_near_the_gate_section_records_thresholds_windows_and_each_question() -> None:
+    """Red when: a near row loses a field, or the thresholds are not the outcomes' values."""
+    report = _shipped().build_report(
+        [_global("near", top=0.62, margin=0.045, passed=True), _global("far", top=0.9, margin=0.5)],
+    )
+    assert report["near_the_gate"] == {
+        "min_top_score": 0.30,
+        "min_margin": 0.04,
+        "top_score_window": 0.05,
+        "margin_window": 0.01,
+        "checked": 2,
+        "questions": [{"id": "near", "top_score": 0.62, "margin": 0.045, "passed": True}],
+    }
+
+
+def test_the_thresholds_come_from_the_outcomes() -> None:
+    """Red when: build_report judges against thresholds read from anywhere but the outcomes
+    (a literal, or the app's settings, whose defaults are 0.30 and 0.04).
+    """
+    shipped = _shipped()
+    custom = {"min_top_score": 0.50, "min_margin": 0.10}
+    outcomes = [
+        _global("gap_010", top=0.80, margin=0.10, **custom),
+        _global("gap_004", top=0.80, margin=0.04, **custom),
+        _global("top_052", top=0.52, margin=0.50, **custom),
+    ]
+    near = shipped.build_report(outcomes)["near_the_gate"]
+    assert [row["id"] for row in near["questions"]] == ["gap_010", "top_052"]
+    assert (near["min_top_score"], near["min_margin"]) == (0.50, 0.10)
+    # Partner: the same gaps judged at 0.30 and 0.04 list the other one.
+    default = [_global("gap_010", top=0.80, margin=0.10), _global("gap_004", top=0.80, margin=0.04)]
+    assert _near_ids(default) == ["gap_004"]
+
+
+def test_outcomes_with_different_gate_thresholds_are_refused() -> None:
+    """Red when: a report is built over outcomes whose gates used different thresholds."""
+    shipped = _shipped()
+    for other in ({"min_margin": 0.05}, {"min_top_score": 0.31}):
+        mixed = [_global("a", top=0.80, margin=0.04), _global("b", top=0.80, margin=0.04, **other)]
+        with pytest.raises(shipped.ShippedEvalError, match="thresholds"):
+            shipped.build_report(mixed)
+    # Partner: matching thresholds build.
+    same = [_global("a", top=0.80, margin=0.04), _global("b", top=0.80, margin=0.04)]
+    assert shipped.build_report(same)["near_the_gate"]["min_margin"] == 0.04
+
+
+NEAR_RULE = "gap within 0.01 of 0.040, or top within 0.05 of 0.300"
+
+
+def _summary_lines(outcomes: list[Any]) -> list[str]:
+    shipped = _shipped()
+    return shipped.render_summary(shipped.build_report(outcomes)).splitlines()
+
+
+def test_the_summary_names_each_question_near_the_gate_with_its_verdict() -> None:
+    """Red when: the summary drops a near question, its gap, top score or verdict, the rule
+    it applied, or how many questions it checked.
+    """
+    lines = _summary_lines(
+        [
+            _global("codex_par_listflags", top=0.71234, margin=0.04025),
+            _global("lone", top=0.33, margin=None, retrieved=("codex#CLI flags",)),
+            _global("low", top=0.28, margin=0.5, passed=False),
+            _global("far", top=0.9, margin=0.5),
+        ]
+    )
+    assert (
+        f"Near the gate ({NEAR_RULE}; 4 checked): codex_par_listflags (gap 0.040, top 0.712, "
+        "passed), lone (gap n/a, top 0.330, passed), low (gap 0.500, top 0.280, failed)."
+    ) in lines
+
+
+def test_the_summary_says_none_of_n_when_checked_questions_are_all_far() -> None:
+    """Red when: a run whose gate was recorded but found nothing near prints no line, or
+    hides how many questions were checked.
+    """
+    lines = _summary_lines(
+        [_global("far", top=0.9, margin=0.5), _global("far2", top=0.8, margin=0.3)]
+    )
+    assert f"Near the gate ({NEAR_RULE}; 2 checked): none of 2 checked." in lines
+
+
+def test_the_summary_says_not_recorded_when_no_global_question_was_checked() -> None:
+    """Red when: a run with no gate reading prints "none", which reads as a measurement."""
+    expected = "Near the gate: not recorded (no global question was checked)."
+    assert expected in _summary_lines(_decision_outcomes())
+    # A global question whose gate was never called is not a reading either.
+    unread = _global(
+        "unread", top=None, margin=None, passed=None, min_top_score=None, min_margin=None
+    )
+    lines = _summary_lines([unread])
+    assert expected in lines
+    assert not any(line.startswith("Near the gate:") and "none" in line for line in lines)
+
+
+def test_a_global_outcome_without_a_gate_verdict_is_not_counted_as_checked() -> None:
+    """Red when: ``checked`` counts a global question whose gate gave no verdict."""
+    report = _shipped().build_report(
+        [
+            _global("read", top=0.9, margin=0.5),
+            _global("unread", top=None, margin=None, passed=None),
+        ]
+    )
+    assert report["near_the_gate"]["checked"] == 1
+
+
+def test_an_outcome_with_a_partial_or_missing_threshold_is_refused() -> None:
+    """Red when: an outcome carrying one threshold, or a reading with none, still reports."""
+    shipped = _shipped()
+    for broken in (
+        _global("half_top", top=0.8, margin=0.04, min_top_score=None),
+        _global("half_margin", top=0.8, margin=0.04, min_margin=None),
+        _global("no_thresholds", top=0.8, margin=0.04, min_top_score=None, min_margin=None),
+    ):
+        with pytest.raises(shipped.ShippedEvalError, match="threshold"):
+            shipped.build_report([_global("ok", top=0.8, margin=0.5), broken])
+    # Partner: the complete outcome alone builds.
+    assert (
+        shipped.build_report([_global("ok", top=0.8, margin=0.5)])["near_the_gate"]["checked"] == 1
+    )
+
+
+async def test_evaluate_cases_records_only_the_unaltered_global_retrieval(monkeypatch) -> None:
+    """Red when: an arms-off re-run's gate call reaches the outcome, a non-global route is
+    recorded, or the recorded thresholds are not the ones the gate was called with.
+
+    No database: the retriever is replaced by one that calls the real gate through its
+    module global, with scores that differ between the unaltered run and every arms-off
+    run, and with thresholds that differ from the settings'.
+    """
+    from app.core.config import get_settings
+    from app.retrieval import vector as vector_mod
+
+    shipped = _shipped()
+    settings = get_settings()
+
+    async def fake_retrieve(_session, routed, *, embedder, identity, settings, arms_off):
+        scores = [0.71, 0.665] if not arms_off else [0.95, 0.10]
+        vector_mod.is_confident_global_result(scores, min_top_score=0.25, min_margin=0.03)
+        return SimpleNamespace(hits=[], vector_degrade=VectorDegrade.none)
+
+    async def live(_session):
+        return None
+
+    monkeypatch.setattr(shipped, "retrieve_routed", fake_retrieve)
+    monkeypatch.setattr(shipped, "_check_vector_arm_is_live", live)
+    cases = [
+        shipped.ShippedCase(
+            id="global_q",
+            question="Please explain that three letter acronym for text systems",
+            origin="coverage",
+            kind=None,
+            coverage_kind="semantic",
+            shipped_gold=(),
+            expected_empty=True,
+        ),
+        shipped.ShippedCase(
+            id="scoped_q",
+            question="How does the Codex sandbox work?",
+            origin="coverage",
+            kind=None,
+            coverage_kind="semantic",
+            shipped_gold=(),
+            expected_empty=True,
+        ),
+    ]
+    outcomes = {
+        o.case_id: o for o in await shipped.evaluate_cases(None, None, None, cases, settings)
+    }
+    glob, scoped = outcomes["global_q"], outcomes["scoped_q"]
+    # Partner: the two cases really take the two routes.
+    assert (glob.route, scoped.route) == ("global_vector_only", "scoped")
+    assert glob.gate_top_score == pytest.approx(0.71)
+    assert glob.gate_margin == pytest.approx(0.045)
+    assert glob.gate_passed is True
+    assert (glob.gate_min_top_score, glob.gate_min_margin) == (0.25, 0.03)
+    assert (settings.retrieval_global_min_top_score, settings.retrieval_global_min_margin) != (
+        0.25,
+        0.03,
+    )
+    assert (
+        scoped.gate_top_score,
+        scoped.gate_margin,
+        scoped.gate_passed,
+        scoped.gate_min_top_score,
+        scoped.gate_min_margin,
+    ) == (None, None, None, None, None)
+
+
+def test_a_global_retrieval_that_calls_the_gate_twice_fails_loudly() -> None:
+    """Red when: several gate calls in one retrieval are silently reduced to one."""
+    from tests.eval.probe import Gate
+
+    shipped = _shipped()
+    first = Gate(top_score=0.7, margin=0.05, passed=True, min_top_score=0.3, min_margin=0.04)
+    assert shipped.single_gate("one", [first]) == first
+    assert shipped.single_gate("none", []) is None
+    with pytest.raises(shipped.ShippedEvalError, match="2 times"):
+        second = Gate(top_score=0.6, margin=0.01, passed=False, min_top_score=0.3, min_margin=0.04)
+        shipped.single_gate("two", [first, second])
