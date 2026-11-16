@@ -290,6 +290,19 @@ def report_lines(summary: dict[str, Any], *, probe_only: bool = False) -> list[s
             f"not among them: {split.get('source_not_in_passages')}; "
             f"no expected source: {split.get('no_expected_source')}"
         )
+    for name, table in (check.get("paired") or {}).items():
+        for row in table.get("rows") or []:
+            if row.get("status") == "missing":
+                passages = f"missing: {row.get('reason')}"
+            else:
+                passages = f"{row.get('passages')}, delta {row.get('delta'):+d}"
+            lines.append(
+                f"  {name} pass case {row.get('case_id')}: blind {row.get('blind')}, "
+                f"passages {passages}"
+            )
+    recorded = check.get("recorded_spend")
+    if recorded:
+        lines.extend(_spend_lines(recorded))
     passes = [("main", (summary.get("judge") or {}).get("cases") or [])]
     fallback = summary.get("fallback")
     if fallback:
@@ -308,6 +321,30 @@ def report_lines(summary: dict[str, Any], *, probe_only: bool = False) -> list[s
         lines.append(f"grader calls and tokens by role: {spend}")
     if check.get("commit"):
         lines.append(f"measured commit: {check['commit']}")
+    return lines
+
+
+def _spend_lines(recorded: dict[str, Any]) -> list[str]:
+    """The recorded spend so far, as the spend export reports it."""
+    totals = recorded.get("totals") or {}
+    lines = [
+        f"{recorded.get('label')} so far: ${totals.get('book_cost_usd')} over "
+        f"{totals.get('rows')} row(s); priced {totals.get('priced_rows')}, unpriced "
+        f"{totals.get('unpriced_rows')}, estimated tokens {totals.get('tokens_estimated_rows')}"
+    ]
+    if recorded.get("unavailable"):
+        lines.append(f"  the rows could not be read: {recorded['unavailable']}")
+    for group in recorded.get("groups") or []:
+        lines.append(
+            f"  {group.get('provider')} {group.get('model')} {group.get('kind')}: "
+            f"{group.get('rows')} row(s), ${group.get('book_cost_usd')}"
+        )
+    lines.append(
+        f"  observed failures: {recorded.get('observed_failures')} "
+        f"({recorded.get('observed_failure_seconds')} s); "
+        f"refused by the cap: {recorded.get('refused_by_cap')}"
+    )
+    lines.extend(f"  gap: {gap}" for gap in recorded.get("gaps") or [])
     return lines
 
 

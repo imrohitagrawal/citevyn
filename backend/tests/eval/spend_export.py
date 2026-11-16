@@ -88,10 +88,29 @@ def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[st
     them the calls the spend cap refused (never sent, so never billed): answer
     client calls marked ``failed``, and grader calls that raised (blind, passage
     and probe), the latter under the report's grader model (see ``ATTRIBUTION``)."""
+    failed, refused, _seconds = _tally(report)
+    return failed, refused
+
+
+def failure_seconds(report: dict[str, Any] | None) -> dict[str, float]:
+    """The total duration of the observed failures, by model (as recorded)."""
+    return _tally(report)[2]
+
+
+def _tally(
+    report: dict[str, Any] | None,
+) -> tuple[dict[str, int], dict[str, int], dict[str, float]]:
     if not report:
-        return {}, {}
+        return {}, {}, {}
     grader = (report.get("grader") or {}).get("model") or (report.get("models") or {}).get("judge")
     counts: dict[str, Counter[str]] = {"failed": Counter(), "refused": Counter()}
+    seconds: dict[str, float] = {}
+
+    def note(outcome: str, model: str, call: dict[str, Any]) -> None:
+        counts[outcome][model] += 1
+        if outcome == "failed":
+            seconds[model] = seconds.get(model, 0.0) + float(call.get("duration_seconds") or 0.0)
+
     grader_calls: list[dict[str, Any]] = []
     sections = [report.get("judge") or {}, ((report.get("fallback") or {}).get("judge")) or {}]
     for section in sections:
@@ -100,7 +119,7 @@ def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[st
                 if call.get("failed"):
                     refused = call.get("refused_by_cap") or call.get("error_type") == _REFUSED
                     outcome = "refused" if refused else "failed"
-                    counts[outcome][str(call.get("model") or "unknown")] += 1
+                    note(outcome, str(call.get("model") or "unknown"), call)
             grader_calls += case.get("grader_calls") or []
             grader_calls += case.get("passage_grader_calls") or []
     probe = (report.get("grader_check") or {}).get("probe") or {}
@@ -108,8 +127,12 @@ def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[st
     for call in grader_calls:
         outcome = _grader_call_outcome(call)
         if outcome is not None:
-            counts[outcome][str(grader or "unknown")] += 1
-    return dict(sorted(counts["failed"].items())), dict(sorted(counts["refused"].items()))
+            note(outcome, str(grader or "unknown"), call)
+    return (
+        dict(sorted(counts["failed"].items())),
+        dict(sorted(counts["refused"].items())),
+        dict(sorted(seconds.items())),
+    )
 
 
 def observed_failures(report: dict[str, Any] | None) -> dict[str, int]:
@@ -148,6 +171,9 @@ def summarize(rows: list[ProviderCall], report: dict[str, Any] | None = None) ->
             "tokens_estimated_rows": totals["tokens_estimated_rows"],
         },
         "observed_failures": failures,
+        # How long the observed failures took, by model (failed answer calls carry
+        # a duration only with the grader check on).
+        "observed_failure_seconds": failure_seconds(report),
         # Calls the spend cap stopped before they were sent: not spend, not failures.
         "refused_by_cap": refused,
         "attribution": ATTRIBUTION,

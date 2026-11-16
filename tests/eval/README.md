@@ -254,12 +254,15 @@ is saved when it is done; it is not a golden case and enters no answer figure.
 **Where to read it.** The `GRADER CHECK` line (the decision and its reasons, the probe's errors,
 any stop line) and the `GRADER PROBE` table are printed in the log and written to the job summary,
 once after the probe and again at the end; the end block adds each pass's blind-versus-passages
-counts, the cases not reached and every case at or below 2 on either score with both rationales.
+counts and its per-case table (case, blind score, passage score, delta, or the reason a score is
+missing), the recorded spend so far, the cases not reached and every case at or below 2 on either score with both rationales.
 The report artifact's `grader_check` section holds all of it: the probe (cells, calls, errors),
 the decision, reasons and medians, a paired table per pass (split by whether all of the case's
 expected sources were among its passages, with refusals in their own bucket; "too thin to read"
 below 90% coverage), the grader calls and tokens by role (blind, passages, probe), `not_reached`
-(the case ids of each pass not run yet), the measured commit, and `stopped` ("stopped by the
+(the case ids of each pass not run yet), `recorded_spend` (the spend export's summary of the
+run's `provider_calls` rows read before each save, with `unavailable` when they could not be
+read; a failed read never fails a save), the measured commit, and `stopped` ("stopped by the
 spend cap", or "stopped: the spend meter could not be read"). One run makes up to 528 grader
 calls instead of 252; this run measures the time it takes.
 
@@ -269,7 +272,7 @@ calls instead of 252; this run measures the time it takes.
 with the report. It only reads `provider_calls` (the eval database is fresh, so its rows are this
 run's) and groups them by provider, model and kind with tokens and the **recorded book cost** (the
 cost the meter stored, at the price book's rates), counting priced, unpriced and estimated-token
-rows. From the report it adds the **observed failures** per model, and apart from them the calls
+rows. From the report it adds the **observed failures** per model, with their total duration, and apart from them the calls
 the cap refused (never sent); a failed grader call records no model, so it is counted under the
 configured grader model. A report that cannot be read is noted and skipped. It is a measurement,
 not a guarantee. Its stated gaps: failed attempts that were never recorded (a primary failure the

@@ -956,3 +956,142 @@ def test_a_summary_line_that_cannot_be_encoded_is_not_raised(
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
     gc.write_step_summary(["low score: \ud800"])
     assert "could not be written" in capsys.readouterr().out
+
+
+# --- the completeness critic --------------------------------------------------------
+
+
+def test_the_job_summary_has_every_cases_blind_and_passage_scores(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: the job summary lists only the low cases, not each pass's
+    per-case table (case, blind, passages, delta, or the reason a score is
+    missing)."""
+    first, second = (_golden()[i].question for i in _IDS)
+
+    def rule(user: str, mode: str, probe: bool) -> Any:
+        if probe or mode == "blind":
+            return 4
+        return 5 if first in user else "not a verdict"
+
+    _code, summary_file = _main_run(monkeypatch, tmp_path, _Grader(rule))
+    text = summary_file.read_text(encoding="utf-8")
+    assert second  # partner: two cases
+    for name in ("main", "fallback"):
+        assert f"{name} pass case {_IDS[0]}: blind 4, passages 5, delta +1" in text, text
+        assert f"{name} pass case {_IDS[1]}: blind 4, passages missing: judge_parse" in text
+
+
+_SPEND_ROWS = [
+    build_call(kind="llm", provider="gemini", model="m", input_tokens=5, output_tokens=1),
+    build_call(kind="embedding", provider="gemini", model="e", input_tokens=7, output_tokens=0),
+]
+
+
+def test_every_save_and_the_job_summary_carry_the_recorded_spend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: a save (from the first probe cell on) or the job summary lacks
+    the recorded book cost, its row counts, the observed failures and the gaps."""
+    writes: list[dict[str, Any]] = []
+    real = runner_mod.write_report
+
+    def capture(path: Any, summary: dict[str, Any], settings: Any, **kwargs: Any) -> None:
+        writes.append(json.loads(json.dumps(summary, default=str)))
+        real(path, summary, settings, **kwargs)
+
+    async def rows(_settings: Any) -> list[Any]:
+        return list(_SPEND_ROWS)
+
+    monkeypatch.setattr(runner_mod, "write_report", capture)
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", rows)
+    _code, summary_file = _main_run(monkeypatch, tmp_path, _Scripted())
+    assert len(writes) >= 6  # partner: probe cells and cases were saved
+    for write in writes:
+        spend = write["grader_check"]["recorded_spend"]
+        assert spend["label"] == "recorded book cost"
+        assert spend["totals"]["rows"] == 2
+        assert "observed_failures" in spend and "refused_by_cap" in spend and spend["gaps"]
+    text = summary_file.read_text(encoding="utf-8")
+    assert "recorded book cost" in text and "observed failures" in text
+    assert "gap:" in text
+
+
+def test_unreadable_spend_rows_are_noted_once_and_never_fail_a_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Red when: a failed read of the spend rows fails the save (the run would
+    stop paying for nothing), goes unrecorded, or is printed at every save."""
+
+    async def broken(_settings: Any) -> list[Any]:
+        raise OSError("meter store down")
+
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", broken)
+    summary = _run(monkeypatch, _Scripted(), report=tmp_path / "r.json")
+    assert summary["harness_errors"] == []  # partner: every save went through
+    assert summary["judge"]["scored"] == 2
+    spend = summary["grader_check"]["recorded_spend"]
+    assert spend["label"] == "recorded book cost" and "OSError" in spend["unavailable"]
+    assert capsys.readouterr().out.count("recorded spend could not be read") == 1
+
+
+def test_observed_failures_carry_their_total_duration() -> None:
+    """Red when: the export counts failed calls but not how long they took."""
+    report = _report(
+        grader_calls=[{**_failed(), "duration_seconds": 2.0}],
+        model_calls=[
+            {
+                "model": "gemini-3.6-flash",
+                "failed": True,
+                "error_type": "LLMUnavailable",
+                "duration_seconds": 1.5,
+            }
+        ],
+    )
+    export = spend_export.summarize([], report)
+    assert export["observed_failures"] == {GRADER: 1, "gemini-3.6-flash": 1}
+    assert export["observed_failure_seconds"] == {GRADER: 2.0, "gemini-3.6-flash": 1.5}
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["switch-on", "switch-off"])
+def test_a_failed_answer_call_records_its_duration_with_the_switch_on_only(
+    monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    """Red when: a failed answer-client call has no duration with the grader
+    check on, or gains the key with it off (the off run's keys stay as today)."""
+
+    def reply(_prompt: str) -> str:
+        raise LLMUnavailable("answer model down")
+
+    case = _golden()["claude_api_lit_ratelimit"]
+    monkeypatch.setenv("CITEVYN_EVAL_JUDGE_PANEL", "1")
+    monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: _Judge())
+    monkeypatch.setattr(judge_mod, "get_llm_client", lambda settings=None: _Judge())
+    (judged,) = asyncio.run(
+        runner_mod._judge_cases(
+            [case],
+            settings=_switch(on),
+            answer_llm=runner_mod.AttributingLLM(_Model(reply)),  # type: ignore[arg-type]
+            judge_llm=_Scripted(),
+            expect_answerer=EXPECT,
+        )
+    )
+    failed = [c for c in judged.model_calls if c["failed"]]
+    assert failed  # partner: the call failed and was recorded
+    for call in failed:
+        if on:
+            assert isinstance(call["duration_seconds"], float) and call["duration_seconds"] >= 0
+        else:
+            assert "duration_seconds" not in call
+
+
+def test_a_probe_cell_stopped_by_the_cap_is_labelled_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: a probe panel the cap stopped (however wrapped) is recorded as
+    an ordinary error, without the ``budget`` label answer and passage errors get."""
+    wrapped = LLMUnavailable("grader failed", cause=CostLimitReached(_CAP))
+    grader = _Grader(lambda _u, m, p: wrapped if p and m == "blind" else 4)
+    errors = _run(monkeypatch, grader)["grader_check"]["probe"]["errors"]
+    assert len(errors) == 6
+    assert all(e["message"].startswith("budget: ") for e in errors), errors

@@ -66,7 +66,7 @@ from app.models import (
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
-from . import grader_check
+from . import grader_check, spend_export
 from . import judge as judge_module
 from .cases import EvalCase, filter_cases, load_cases
 from .groundedness import fact_coverage, forbidden_present, missing_facts
@@ -251,6 +251,7 @@ class AttributingLLM:
         self, *, system: str, user: str, max_tokens: int, temperature: float
     ) -> LLMResult:
         site = get_call_site()
+        start = time.perf_counter()
         try:
             result = await self._inner.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
@@ -266,6 +267,7 @@ class AttributingLLM:
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                     cause=exc,
+                    duration_seconds=time.perf_counter() - start,
                 )
             )
             raise
@@ -289,6 +291,8 @@ class _CallRecord:
     # The failed call's own exception, so the runner can tell it escaping ``ask``
     # from an unrelated failure later in the turn. Not part of the report.
     cause: BaseException | None = dataclasses.field(default=None, compare=False, repr=False)
+    # How long a failed call took (reported with the grader check on only).
+    duration_seconds: float | None = dataclasses.field(default=None, compare=False)
 
     @property
     def failed(self) -> bool:
@@ -657,6 +661,7 @@ async def _judge_cases(
     on_case: Callable[[list[JudgedCase]], bool] | None = None,
     run_errors: list[dict[str, Any]] | None = None,
     budget_stops: list[BaseException] | None = None,
+    before_save: Callable[[], Awaitable[None]] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -885,6 +890,7 @@ async def _judge_cases(
                             calls[-1]["refused_by_cap"] = (
                                 grader_check.budget_stop(record.cause) is not None
                             )
+                            calls[-1]["duration_seconds"] = record.duration_seconds
                     entry.model_calls.extend(calls)
                     failed = [r for r in records if r.failed and r.site is CallSite.answer]
                     state.failed_causes.extend(r.cause for r in failed if r.cause is not None)
@@ -1198,6 +1204,9 @@ async def _judge_cases(
                     state.harness.append(stop)
                 else:
                     run_errors.append(stop)
+            if before_save is not None:
+                # The grader check's recorded spend, read before each save.
+                await before_save()
             if on_case is not None and on_case(list(judged)) is False:
                 break
             if unusable:
@@ -1225,7 +1234,7 @@ async def _run_probe(
     answer_models: tuple[str, ...],
     stops: list[BaseException],
     into: dict[str, Any],
-    on_cell: Callable[[], bool],
+    on_cell: Callable[[], Awaitable[bool]],
 ) -> bool:
     """The grader check's probe (#598 Step 3): the two fixed answers, each graded
     blind and with the fixture's Codex passages, three times each. A panel that
@@ -1274,13 +1283,14 @@ async def _run_probe(
                     stop = grader_check.budget_stop(exc)
                     if stop is not None:
                         stops.append(stop)
+                    label = "budget: " if stop is not None else ""
                     errors.append(
                         {
                             "answer": answer_name,
                             "mode": mode,
                             "repeat": repeat,
                             "type": type(exc).__name__,
-                            "message": redact(str(exc), secrets)[:_MESSAGE_LIMIT],
+                            "message": label + redact(str(exc), secrets)[:_MESSAGE_LIMIT],
                         }
                     )
                 served = [
@@ -1299,9 +1309,14 @@ async def _run_probe(
                         }
                     )
                 cells[answer_name][mode].append(None if served else score)
-            if not on_cell():
+            if not await on_cell():
                 return False
     return True
+
+
+async def _read_spend_rows(settings: Settings) -> list[Any]:
+    """This run's ``provider_calls`` rows, read only (no model call)."""
+    return await spend_export.read_rows(settings.database_url)
 
 
 def _not_reached(cases: list[EvalCase], done: list[JudgedCase] | None) -> list[str]:
@@ -1877,6 +1892,8 @@ async def run_eval_async(
     checking = judge_available and settings.eval_passage_grading
     probe: dict[str, Any] | None = None
     budget_stops: list[BaseException] = []
+    # The run's recorded spend, read before each save (``_refresh_spend``).
+    spend: dict[str, Any] = {"rows": [], "unavailable": None, "noted": False}
 
     def _assemble(
         judged: list[JudgedCase],
@@ -1959,7 +1976,38 @@ async def run_eval_async(
                 "model": fallback_model,
                 **{key: fallback_summary[key] for key in ANSWER_SECTIONS},
             }
+        if checking:
+            # Last, so the observed failures are counted over both passes.
+            summary["grader_check"]["recorded_spend"] = _recorded_spend(summary)
         return summary
+
+    def _recorded_spend(summary: dict[str, Any]) -> dict[str, Any]:
+        """The spend export's summary of the rows read so far, with the eval's own
+        failures; ``unavailable`` says why the rows could not be read."""
+        recorded = spend_export.summarize(spend["rows"], summary)
+        if spend["unavailable"] is not None:
+            recorded["unavailable"] = spend["unavailable"]
+        return recorded
+
+    async def _refresh_spend() -> None:
+        """Read this run's ``provider_calls`` rows for the next save. A failed read
+        is printed once and recorded, never raised: a save never fails for it."""
+        try:
+            spend["rows"] = await _read_spend_rows(settings)
+            spend["unavailable"] = None
+        except Exception as exc:
+            message = redact(str(exc), secret_values(settings))[:_MESSAGE_LIMIT]
+            spend["unavailable"] = f"{type(exc).__name__}: {message}"
+            if not spend["noted"]:
+                spend["noted"] = True
+                print(
+                    "GRADER CHECK: the recorded spend could not be read "
+                    f"({spend['unavailable']}); the saves go on without it"
+                )
+
+    async def _probe_cell_saved() -> bool:
+        await _refresh_spend()
+        return _write(lambda: _assemble([], None, [], "main"), where="after a probe cell")
 
     def _write(build: Callable[[], dict[str, Any]], *, where: str) -> bool:
         """Build and write the report, retrying once. A write that still fails is a
@@ -2026,9 +2074,7 @@ async def run_eval_async(
                     answer_models=answer_models,
                     stops=budget_stops,
                     into=probe,
-                    on_cell=lambda: _write(
-                        lambda: _assemble([], None, [], "main"), where="after a probe cell"
-                    ),
+                    on_cell=_probe_cell_saved,
                 )
                 probe_lines = [
                     redact(line, secret_values(settings))
@@ -2063,6 +2109,7 @@ async def run_eval_async(
                     on_case=_main_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
+                    before_save=_refresh_spend if checking else None,
                 )
             if saved and _session_stopped():
                 saved = False
@@ -2099,9 +2146,12 @@ async def run_eval_async(
                     on_case=_fallback_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
+                    before_save=_refresh_spend if checking else None,
                 )
                 if saved and not _session_stopped():
                     passes.append("fallback")
+    if checking:
+        await _refresh_spend()
     summary = _assemble(judged, fallback_judged, passes)
     # The final write takes the same path; if it fails, the returned summary says
     # so (it is printed), and the run fails on its ``report_write`` line.
