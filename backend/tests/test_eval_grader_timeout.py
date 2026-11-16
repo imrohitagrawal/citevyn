@@ -276,8 +276,9 @@ def test_the_real_ci_env_passes_parity_with_the_grader_timeout(
 
 
 def test_the_judged_jobs_limit_fits_inside_the_release_wait() -> None:
-    """Red when: ``timeout-minutes`` is raised so far that the release wait gives
-    up first (it would report "no result" for a run that is still going).
+    """Red when: the release-path ``timeout-minutes`` is raised so far that the
+    release wait gives up first (it would report "no result" for a run that is
+    still going), or the limit stops depending on the ``grader_check`` input.
 
     The 6 is the ``test`` job that runs before this one (5.2 min measured), rounded
     up. Lower bound, kept as an estimate and not pinned (REVISION 3): on the
@@ -287,11 +288,19 @@ def test_the_judged_jobs_limit_fits_inside_the_release_wait() -> None:
     about 0.6 min overhead: ``timeout-minutes: 66``. Raising either again needs
     the wait script's ``TOTAL_TIMEOUT_SECONDS`` raised too.
     """
-    limit = _judged_job()["timeout-minutes"]
+    # Since #598 Step 3 the limit depends on the ``grader_check`` input
+    # (``${{ inputs.grader_check && ON || OFF }}``). Release runs never set the
+    # input, so the OFF value is the one the release wait must cover.
+    raw = str(_judged_job()["timeout-minutes"])
+    conditional = re.fullmatch(
+        r"\$\{\{\s*inputs\.grader_check\s*&&\s*(\d+)\s*\|\|\s*(\d+)\s*\}\}", raw.strip()
+    )
+    assert conditional, f"the job limit is not set on the grader_check input: {raw!r}"
+    limit = int(conditional.group(2))
     match = re.search(r"TOTAL_TIMEOUT_SECONDS-(\d+)", WAIT_SCRIPT.read_text(encoding="utf-8"))
     assert match, "the wait script no longer defaults TOTAL_TIMEOUT_SECONDS"
     wait_minutes = int(match.group(1)) / 60
-    assert isinstance(limit, int) and limit > 0  # partner: the limit was really read
+    assert limit > 0  # partner: the limit was really read
     assert limit + 6 <= wait_minutes, (limit, wait_minutes)
 
 

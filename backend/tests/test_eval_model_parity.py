@@ -304,9 +304,15 @@ def test_the_ci_job_runs_the_runtime_check() -> None:
     code stops failing the step, so drift from any override would go unchecked."""
     steps = [s for s in _judged_job()["steps"] if "tests.eval.runner" in s.get("run", "")]
     assert len(steps) == 1
-    # The whole command, exactly: anything appended (``|| true``, ``; ...``) or a
-    # step-level ``continue-on-error`` would turn the check's exit 2 into a pass.
-    assert steps[0]["run"].split() == [
+    # The whole command, exactly, as the script's LAST line: anything appended
+    # (``|| true``, ``; ...``) or a step-level ``continue-on-error`` would turn the
+    # check's exit 2 into a pass. The lines before it may only export the grader
+    # check's settings when its input is set (#598 Step 3), and may not chain,
+    # trap or turn off ``-e``.
+    lines = [ln.strip() for ln in str(steps[0]["run"]).strip().splitlines() if ln.strip()]
+    for banned in ("||", "exit 0", "trap", "set +e"):
+        assert banned not in "\n".join(lines[:-1]), banned
+    assert lines[-1].split() == [
         "uv",
         "run",
         "python",
