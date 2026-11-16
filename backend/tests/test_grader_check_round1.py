@@ -823,3 +823,47 @@ def test_a_grader_check_runner_test_never_writes_to_the_real_job_summary(
     assert done.returncode == 0, done.stdout + done.stderr
     assert "1 passed" in done.stdout  # partner: the runner test really ran
     assert not target.exists() or target.read_text(encoding="utf-8") == ""
+
+
+# --- round-2 survivors --------------------------------------------------------------
+
+
+def test_the_probe_lines_in_the_job_summary_are_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: the probe-only lines written to the job summary after the probe
+    are not redacted. Only that write happens here (no ``main()``), and the secret
+    rides in an error type name, which nothing redacts before the summary."""
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    leaky = type(f"Err{SECRET}", (RuntimeError,), {})
+    _run(monkeypatch, _Grader(lambda _u, _m, p: leaky("probe down") if p else 4))
+    text = summary_file.read_text(encoding="utf-8")
+    assert "GRADER PROBE" in text and "probe error" in text  # partner: the lines are there
+    assert SECRET not in text
+    assert "[REDACTED]" in text
+
+
+def test_a_cell_with_two_of_three_scores_is_not_finished() -> None:
+    """Red when: a cell counts as finished with fewer than all three repeats (the
+    rule is fewer than ``REPEATS``), so a cut-off probe reads as a missing median."""
+    cells = {
+        "wrong": {"blind": [1, 1, 1], "passages": [1, 1, 1]},
+        "correct": {"blind": [5, 5, 5], "passages": [5, 5]},
+    }
+    result = gc.decide(cells)
+    assert result["decision"] == "inconclusive"
+    assert any("probe not finished" in r and "2 of 3" in r for r in result["reasons"])
+
+
+def test_three_backticks_cannot_close_the_job_summary_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: a rationale or error holding three backticks is written as is, so
+    it closes the summary's preformatted block and the rest renders as markdown."""
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    gc.write_step_summary(["low score: rationale ``` # heading", "GRADER PROBE"])
+    text = summary_file.read_text(encoding="utf-8")
+    assert text.count("`" * 3) == 2, text  # the block's own opening and closing only
+    assert "rationale" in text and "GRADER PROBE" in text
