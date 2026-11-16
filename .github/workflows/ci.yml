@@ -566,6 +566,10 @@ jobs:
         # still keeps its measured spend. Reads provider_calls; makes no model call.
         if: always() && inputs.grader_check && steps.guard.outputs.run == 'true'
         working-directory: backend
+        # It reads the database only, so the provider keys are blanked here.
+        env:
+          CITEVYN_OPENROUTER_API_KEY: ""
+          CITEVYN_GEMINI_API_KEY: ""
         run: uv run python -m tests.eval.spend_export --out ../artifacts/spend.json --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()

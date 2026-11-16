@@ -67,6 +67,14 @@ def clear_settings_cache() -> Generator[None, None, None]:
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_job_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the eval runner from appending to the CI job summary of the test run
+    itself (it writes there when ``GITHUB_STEP_SUMMARY`` is set). A test that
+    checks the summary sets it to a file of its own."""
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
 @pytest.fixture
 def client() -> Generator[TestClient, None, None]:
     """Yield a :class:`TestClient` whose lifespan has fully started.
