@@ -168,7 +168,7 @@ golden-smoke: ## Run 3 golden cases as a smoke test (answer, search, no_answer)
 	cd backend && uv sync --group dev
 	cd backend && uv run --no-env-file $(WITH_ENV) python -m tests.golden.runner --ids claude_api_001,claude_api_004,cross_005 --report artifacts/golden_report_smoke.json
 
-eval: ## Run the RAG eval harness (retrieval hit-rate + LLM judge if a key is set; see tests/eval/README.md)
+eval: ## Run the RAG eval harness (retrieval hit-rate; the LLM judge runs when a provider key is set and needs CITEVYN_EVAL_JUDGE_MODEL; see tests/eval/README.md)
 	cd backend && uv sync --group dev
 	cd backend && env -u CITEVYN_DATABASE_URL uv run --no-env-file $(WITH_ENV) python -m tests.eval.runner --report artifacts/eval_report.json
 

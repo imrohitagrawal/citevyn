@@ -18,6 +18,14 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-13 — A judged run needs a separate grader model
+Applies to the judged eval (#598). A judged run refuses to start, before any paid
+call, unless `CITEVYN_EVAL_JUDGE_MODEL` (with its timeout) names a grader separate
+from the answer models. Without one, the answer client would grade its own answers.
+A grade served by one of the run's answer models is recorded as a harness error and
+discarded. CI already sets a separate grader, so only local runs change. Grader
+replies that cannot be parsed still count under the existing judge-coverage floor.
+
 ### 2026-11-11 — Judged eval: an answer error fails the run, and passages are stored
 Applies to the judged eval (#598). A case whose answer errors, or whose answer was
 written by a model other than the one expected (on the final turn or on an earlier
