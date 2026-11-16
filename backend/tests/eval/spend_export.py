@@ -92,24 +92,30 @@ def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[st
     return failed, refused
 
 
-def failure_seconds(report: dict[str, Any] | None) -> dict[str, float]:
+NOT_MEASURED = "not measured"
+
+
+def failure_seconds(report: dict[str, Any] | None) -> dict[str, float | str]:
     """The total duration of the observed failures, by model (as recorded)."""
     return _tally(report)[2]
 
 
 def _tally(
     report: dict[str, Any] | None,
-) -> tuple[dict[str, int], dict[str, int], dict[str, float]]:
+) -> tuple[dict[str, int], dict[str, int], dict[str, float | str]]:
     if not report:
         return {}, {}, {}
     grader = (report.get("grader") or {}).get("model") or (report.get("models") or {}).get("judge")
     counts: dict[str, Counter[str]] = {"failed": Counter(), "refused": Counter()}
     seconds: dict[str, float] = {}
+    failed_models: set[str] = set()
 
     def note(outcome: str, model: str, call: dict[str, Any]) -> None:
         counts[outcome][model] += 1
         if outcome == "failed":
-            seconds[model] = seconds.get(model, 0.0) + float(call.get("duration_seconds") or 0.0)
+            failed_models.add(model)
+            if call.get("duration_seconds") is not None:
+                seconds[model] = seconds.get(model, 0.0) + float(call["duration_seconds"])
 
     grader_calls: list[dict[str, Any]] = []
     sections = [report.get("judge") or {}, ((report.get("fallback") or {}).get("judge")) or {}]
@@ -131,7 +137,9 @@ def _tally(
     return (
         dict(sorted(counts["failed"].items())),
         dict(sorted(counts["refused"].items())),
-        dict(sorted(seconds.items())),
+        # A model whose failed calls carry no duration (a run with the grader
+        # check off) is "not measured", never 0.0 s.
+        {m: seconds.get(m, NOT_MEASURED) for m in sorted(failed_models)},
     )
 
 

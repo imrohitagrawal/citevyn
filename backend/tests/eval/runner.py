@@ -661,7 +661,7 @@ async def _judge_cases(
     on_case: Callable[[list[JudgedCase]], bool] | None = None,
     run_errors: list[dict[str, Any]] | None = None,
     budget_stops: list[BaseException] | None = None,
-    before_save: Callable[[], Awaitable[None]] | None = None,
+    after_save: Callable[[list[JudgedCase]], Awaitable[None]] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -1204,11 +1204,12 @@ async def _judge_cases(
                     state.harness.append(stop)
                 else:
                     run_errors.append(stop)
-            if before_save is not None:
-                # The grader check's recorded spend, read before each save.
-                await before_save()
             if on_case is not None and on_case(list(judged)) is False:
                 break
+            if after_save is not None:
+                # The grader check's recorded spend, read only after the case is
+                # saved, so a slow read never holds a finished case back.
+                await after_save(list(judged))
             if unusable:
                 break
     finally:
@@ -1312,6 +1313,11 @@ async def _run_probe(
             if not await on_cell():
                 return False
     return True
+
+
+# How long a save waits for the recorded spend: a slow database connect must not
+# hold back the run (the case is saved before the read, whatever happens).
+SPEND_READ_TIMEOUT_SECONDS = 10.0
 
 
 async def _read_spend_rows(settings: Settings) -> list[Any]:
@@ -1989,15 +1995,21 @@ async def run_eval_async(
             recorded["unavailable"] = spend["unavailable"]
         return recorded
 
-    async def _refresh_spend() -> None:
-        """Read this run's ``provider_calls`` rows for the next save. A failed read
-        is printed once and recorded, never raised: a save never fails for it."""
+    async def _refresh_spend() -> bool:
+        """Read this run's ``provider_calls`` rows, within
+        ``SPEND_READ_TIMEOUT_SECONDS``. A failed or slow read is printed once and
+        recorded as one line, never raised; ``True`` when the rows were read."""
         try:
-            spend["rows"] = await _read_spend_rows(settings)
+            spend["rows"] = await asyncio.wait_for(
+                _read_spend_rows(settings), timeout=SPEND_READ_TIMEOUT_SECONDS
+            )
             spend["unavailable"] = None
+            return True
         except Exception as exc:
-            message = redact(str(exc), secret_values(settings))[:_MESSAGE_LIMIT]
-            spend["unavailable"] = f"{type(exc).__name__}: {message}"
+            # One line: a database error can carry its whole statement.
+            first = (str(exc).splitlines() or [""])[0]
+            message = redact(first, secret_values(settings))[:_MESSAGE_LIMIT]
+            spend["unavailable"] = f"{type(exc).__name__}: {message}".rstrip(": ")
             if not spend["noted"]:
                 spend["noted"] = True
                 print(
@@ -2005,9 +2017,26 @@ async def run_eval_async(
                     f"({spend['unavailable']}); the saves go on without it"
                 )
 
+    def _spend_resave(
+        build: Callable[[list[JudgedCase]], dict[str, Any]],
+    ) -> Callable[[list[JudgedCase]], Awaitable[None]]:
+        """After a case's save: read the spend and, if it was read, save again."""
+
+        async def after(done: list[JudgedCase]) -> None:
+            if await _refresh_spend():
+                _write(lambda: build(done), where="mid-run, with the spend")
+
+        return after
+
+    def _assemble_probe() -> dict[str, Any]:
+        return _assemble([], None, [], "main")
+
     async def _probe_cell_saved() -> bool:
-        await _refresh_spend()
-        return _write(lambda: _assemble([], None, [], "main"), where="after a probe cell")
+        # The cell is saved first; then the spend is read and, if it was, saved too.
+        saved = _write(_assemble_probe, where="after a probe cell")
+        if saved and await _refresh_spend():
+            saved = _write(_assemble_probe, where="after a probe cell, with the spend")
+        return saved
 
     def _write(build: Callable[[], dict[str, Any]], *, where: str) -> bool:
         """Build and write the report, retrying once. A write that still fails is a
@@ -2109,7 +2138,9 @@ async def run_eval_async(
                     on_case=_main_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
-                    before_save=_refresh_spend if checking else None,
+                    after_save=_spend_resave(lambda done: _assemble(done, None, [], "main"))
+                    if checking
+                    else None,
                 )
             if saved and _session_stopped():
                 saved = False
@@ -2146,17 +2177,24 @@ async def run_eval_async(
                     on_case=_fallback_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
-                    before_save=_refresh_spend if checking else None,
+                    after_save=_spend_resave(
+                        lambda done: _assemble(main_done, done, ["main"], "fallback")
+                    )
+                    if checking
+                    else None,
                 )
                 if saved and not _session_stopped():
                     passes.append("fallback")
-    if checking:
-        await _refresh_spend()
     summary = _assemble(judged, fallback_judged, passes)
     # The final write takes the same path; if it fails, the returned summary says
     # so (it is printed), and the run fails on its ``report_write`` line.
     if not _write(lambda: summary, where="at the end"):
         summary = _assemble(judged, fallback_judged, passes)
+    elif checking and await _refresh_spend():
+        # Saved first; then once more with the final recorded spend.
+        summary = _assemble(judged, fallback_judged, passes)
+        if not _write(lambda: summary, where="at the end, with the spend"):
+            summary = _assemble(judged, fallback_judged, passes)
     return summary
 
 

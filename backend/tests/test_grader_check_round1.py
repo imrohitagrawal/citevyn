@@ -16,6 +16,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
@@ -1008,8 +1009,11 @@ def test_every_save_and_the_job_summary_carry_the_recorded_spend(
     _code, summary_file = _main_run(monkeypatch, tmp_path, _Scripted())
     assert len(writes) >= 6  # partner: probe cells and cases were saved
     for write in writes:
+        assert write["grader_check"]["recorded_spend"]["label"] == "recorded book cost"
+    # The first save comes before any read; every save after it carries the rows.
+    assert writes[0]["grader_check"]["recorded_spend"]["totals"]["rows"] == 0
+    for write in writes[1:]:
         spend = write["grader_check"]["recorded_spend"]
-        assert spend["label"] == "recorded book cost"
         assert spend["totals"]["rows"] == 2
         assert "observed_failures" in spend and "refused_by_cap" in spend and spend["gaps"]
     text = summary_file.read_text(encoding="utf-8")
@@ -1100,8 +1104,9 @@ def test_a_probe_cell_stopped_by_the_cap_is_labelled_budget(
 def test_the_spend_rows_are_read_again_before_each_case_save(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """Red when: the rows are read only at the probe saves, so a per-case save
-    carries a stale recorded spend that misses every answer since the probe."""
+    """Red when: the rows are read only at the probe saves, so the saves after a
+    case carry a stale recorded spend that misses every answer since the probe.
+    Each save is followed by a read and a second save with the fresh rows."""
     writes: list[dict[str, Any]] = []
     real = runner_mod.write_report
     reads: list[int] = []
@@ -1121,7 +1126,86 @@ def test_the_spend_rows_are_read_again_before_each_case_save(
     monkeypatch.setattr(runner_mod, "_read_spend_rows", growing)
     _run(monkeypatch, _Scripted(), report=tmp_path / "r.json")
     rows = [w["grader_check"]["recorded_spend"]["totals"]["rows"] for w in writes]
-    # Four probe-cell saves and one per case in each pass, each after a fresh read;
-    # the save after the main pass (nothing paid since its last case) reuses its
-    # rows, and the final save reads again.
-    assert rows == [1, 2, 3, 4, 5, 6, 6, 7, 8, 9], rows
+    # Each probe cell and each case: a save, a read, a save with the new rows. The
+    # save after the main pass reuses the last rows; the final save reads again.
+    assert rows == [0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 6, 7, 7, 8, 8, 9], rows
+
+
+# --- the narrow re-check -------------------------------------------------------------
+
+
+def test_a_hanging_spend_read_never_delays_the_save_of_a_finished_case(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: the spend is read before a case is saved, or without a time
+    limit, so a slow database connect holds back the save of a paid case (a cut-off
+    then loses it); or a read that times out is not recorded as unavailable."""
+    events: list[str] = []
+    real = runner_mod.write_report
+
+    def capture(path: Any, summary: dict[str, Any], settings: Any, **kwargs: Any) -> None:
+        events.append(f"save:{len(summary['judge']['cases'])}")
+        real(path, summary, settings, **kwargs)
+
+    async def hangs(_settings: Any) -> list[Any]:
+        events.append("read")
+        await asyncio.sleep(5)  # a connect far slower than the time limit
+        return []
+
+    monkeypatch.setattr(runner_mod, "write_report", capture)
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", hangs)
+    monkeypatch.setattr(runner_mod, "SPEND_READ_TIMEOUT_SECONDS", 0.01)
+    started = time.perf_counter()
+    summary = _run(monkeypatch, _Scripted(), report=tmp_path / "r.json")
+    assert time.perf_counter() - started < 4  # no read was waited out
+    # Every read comes after a save, so no finished case or cell waits for one.
+    assert events[0].startswith("save") and events[1] == "read"
+    assert "save:1" in events and "save:2" in events  # partner: both cases saved
+    for n, event in enumerate(events):
+        if event == "read":
+            assert events[n - 1].startswith("save"), events
+    spend = summary["grader_check"]["recorded_spend"]
+    assert spend["unavailable"].startswith("TimeoutError"), spend
+    assert summary["judge"]["scored"] == 2  # partner: the run went on
+
+
+def test_a_switch_off_run_never_reads_the_spend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red when: an ordinary judged run (switch off) opens a database connection
+    for the grader check's spend."""
+    reads: list[int] = []
+
+    async def counting(_settings: Any) -> list[Any]:
+        reads.append(1)
+        return []
+
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", counting)
+    _clients(monkeypatch, grader=_Scripted())
+    monkeypatch.setenv("CITEVYN_EVAL_JUDGE_PANEL", "1")
+    summary = asyncio.run(runner_mod.run_eval_async(ids=_IDS, settings=_run_settings_switch(False)))
+    assert summary["judge"]["scored"] == 2  # partner: the run ran
+    assert reads == []
+
+
+def test_an_unmeasured_failure_duration_says_not_measured() -> None:
+    """Red when: failed calls without a recorded duration (a switch-off run's
+    answer calls) are reported as 0.0 s instead of "not measured"."""
+    report = _report(
+        grader_calls=[{**_failed(), "duration_seconds": 2.0}],
+        model_calls=[{"model": "gemini-3.6-flash", "failed": True, "error_type": "LLMUnavailable"}],
+    )
+    seconds = spend_export.summarize([], report)["observed_failure_seconds"]
+    assert seconds == {GRADER: 2.0, "gemini-3.6-flash": "not measured"}
+
+
+def test_the_unavailable_spend_text_is_one_redacted_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red when: a failed spend read records the whole error (a database error
+    echoes its SQL over many lines) or a configured secret."""
+
+    async def broken(_settings: Any) -> list[Any]:
+        raise OSError(f"connect failed for key {SECRET}\nSELECT * FROM provider_calls")
+
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", broken)
+    spend = _run(monkeypatch, _Scripted())["grader_check"]["recorded_spend"]
+    assert spend["unavailable"] == "OSError: connect failed for key [REDACTED]"
