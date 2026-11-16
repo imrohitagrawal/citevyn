@@ -308,3 +308,15 @@ async def test_the_exact_arm_takes_part_in_the_removal(settings: Any) -> None:  
     assert seeded.retrieved[0] == "claude_api#Streaming"
     assert "exact" in seeded.rank1_changed_by
     assert seeded.winning_arm in {"exact", "both"}
+
+
+def test_this_module_sees_the_real_job_summary_variable() -> None:
+    """Red when: a test-wide shield removes ``GITHUB_STEP_SUMMARY`` here, so the
+    shipped-corpus report silently stops reaching CI's job summary. Run by
+    ``test_grader_check_round1`` in a child pytest with both variables set (and a
+    Postgres URL that is never opened, to pass this module's skip); on its own it
+    has nothing to compare and is skipped."""
+    expected = os.environ.get("CITEVYN_TEST_EXPECTED_JOB_SUMMARY")
+    if expected is None:
+        pytest.skip("run from test_grader_check_round1 with the variable set")
+    assert os.environ.get("GITHUB_STEP_SUMMARY") == expected

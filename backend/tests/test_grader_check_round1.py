@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import json
 import math
+import os
 import pathlib
 import re
 import subprocess
@@ -761,3 +762,64 @@ def test_the_export_step_runs_without_the_provider_keys() -> None:
     env = step.get("env") or {}
     assert env.get("CITEVYN_OPENROUTER_API_KEY") == ""
     assert env.get("CITEVYN_GEMINI_API_KEY") == ""
+
+
+# --- the job summary shield is narrow --------------------------------------------
+
+
+def _child_pytest(
+    node: str, env_extra: dict[str, str], tmp_path: pathlib.Path
+) -> subprocess.CompletedProcess[str]:
+    """Run one test in a child pytest with ``env_extra`` in its environment."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.upper().startswith("CITEVYN_") and k != "GITHUB_STEP_SUMMARY"
+    }
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rs", node],
+        cwd=BACKEND,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+
+def test_the_shipped_report_module_still_sees_the_job_summary_variable(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Red when: the conftest shield removes ``GITHUB_STEP_SUMMARY`` outside the
+    grader-check modules, so the shipped-corpus report stops reaching CI's job
+    summary with every test still green."""
+    target = str(tmp_path / "summary.md")
+    done = _child_pytest(
+        "tests/test_eval_shipped_report.py::test_this_module_sees_the_real_job_summary_variable",
+        {
+            "GITHUB_STEP_SUMMARY": target,
+            "CITEVYN_TEST_EXPECTED_JOB_SUMMARY": target,
+            # Lets the module's Postgres skip pass; this test opens no connection.
+            "CITEVYN_PG_TEST_URL": "postgresql+psycopg://unused:unused@127.0.0.1:9/unused",
+        },
+        tmp_path,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1 passed" in done.stdout and "skipped" not in done.stdout, done.stdout
+
+
+def test_a_grader_check_runner_test_never_writes_to_the_real_job_summary(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Red when: the designer's runner tests are not shielded, so a run of them in
+    CI appends grader-check lines to the test job's own summary."""
+    target = tmp_path / "summary.md"
+    done = _child_pytest(
+        "tests/test_grader_check_runner.py::test_main_prints_the_grader_check_lines",
+        {"GITHUB_STEP_SUMMARY": str(target)},
+        tmp_path,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1 passed" in done.stdout  # partner: the runner test really ran
+    assert not target.exists() or target.read_text(encoding="utf-8") == ""

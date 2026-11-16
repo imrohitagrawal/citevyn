@@ -67,12 +67,26 @@ def clear_settings_cache() -> Generator[None, None, None]:
     get_settings.cache_clear()
 
 
+# The test modules that drive the eval runner with the grader check on. The
+# runner appends its grader-check lines to ``GITHUB_STEP_SUMMARY`` when it is set,
+# so in these modules only the variable is removed and the CI job summary of the
+# test run itself stays clean. Every other module sees the real value (the
+# shipped-corpus report test writes to it on purpose).
+JOB_SUMMARY_SHIELDED_MODULES = frozenset(
+    {"tests.test_grader_check_runner", "tests.test_grader_check_round1"}
+)
+
+
+def shields_job_summary(module_name: str) -> bool:
+    return module_name in JOB_SUMMARY_SHIELDED_MODULES
+
+
 @pytest.fixture(autouse=True)
-def _no_job_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the eval runner from appending to the CI job summary of the test run
-    itself (it writes there when ``GITHUB_STEP_SUMMARY`` is set). A test that
-    checks the summary sets it to a file of its own."""
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+def _no_job_summary(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove ``GITHUB_STEP_SUMMARY`` in the shielded modules only. A test there
+    that checks the summary sets it to a file of its own."""
+    if shields_job_summary(request.node.module.__name__):
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
 
 
 @pytest.fixture
