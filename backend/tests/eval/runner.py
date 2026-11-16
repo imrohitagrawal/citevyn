@@ -1216,15 +1216,25 @@ async def _run_probe(
     settings: Settings,
     answer_models: tuple[str, ...],
     stops: list[BaseException],
-) -> dict[str, Any]:
+    into: dict[str, Any],
+    on_cell: Callable[[], bool],
+) -> bool:
     """The grader check's probe (#598 Step 3): the two fixed answers, each graded
     blind and with the fixture's Codex passages, three times each. A panel that
     fails, or that an answer model served, leaves its score missing (``None``).
-    Its calls are kept, with their tokens, and enter no answer figure."""
+    Its calls are kept, with their tokens, and enter no answer figure.
+
+    Filled into ``into`` (``cells``, ``calls``, ``errors``) as it runs, and
+    ``on_cell`` saves the report after each finished cell, so a run cut off
+    mid-probe keeps the cells already paid for. When a save fails (``on_cell``
+    returns ``False``) the probe stops before any further call and this returns
+    ``False``."""
     probe_case = {c.id: c for c in load_cases(GOLDEN_PATH)}[grader_check.PROBE_CASE_ID]
     recorder = _RecordingGrader(grader, tokens=True, integer_only=True)
-    cells = grader_check.empty_cells()
-    errors: list[dict[str, Any]] = []
+    cells = into.setdefault("cells", grader_check.empty_cells())
+    errors: list[dict[str, Any]] = into.setdefault("errors", [])
+    # The recorder's own list, so every save holds the calls made so far.
+    into["calls"] = recorder.calls
     secrets = secret_values(settings)
     passages = grader_check.probe_passages()
     for answer_name, answer in grader_check.ANSWERS.items():
@@ -1281,7 +1291,9 @@ async def _run_probe(
                         }
                     )
                 cells[answer_name][mode].append(None if served else score)
-    return {"cells": cells, "calls": list(recorder.calls), "errors": errors}
+            if not on_cell():
+                return False
+    return True
 
 
 def _not_reached(cases: list[EvalCase], done: list[JudgedCase] | None) -> list[str]:
@@ -1999,10 +2011,17 @@ async def run_eval_async(
             if checking and judge_llm is not None:
                 # Once, before the first case, and saved at once, so a run cut off
                 # later still holds the probe and its decision.
-                probe = await _run_probe(
-                    judge_llm, settings=settings, answer_models=answer_models, stops=budget_stops
+                probe = {"cells": grader_check.empty_cells(), "calls": [], "errors": []}
+                saved = await _run_probe(
+                    judge_llm,
+                    settings=settings,
+                    answer_models=answer_models,
+                    stops=budget_stops,
+                    into=probe,
+                    on_cell=lambda: _write(
+                        lambda: _assemble([], None, [], "main"), where="after a probe cell"
+                    ),
                 )
-                saved = _write(lambda: _assemble([], None, [], "main"), where="after the probe")
                 grader_check.write_step_summary(
                     [
                         redact(line, secret_values(settings))

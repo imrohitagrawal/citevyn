@@ -281,10 +281,11 @@ def test_every_save_lists_the_cases_not_reached(
     monkeypatch.setattr(runner_mod, "write_report", capture)
     final = _run(monkeypatch, _Scripted(), report=tmp_path / "r.json")
     ordered = [c.id for c in load_cases(GOLDEN_PATH) if c.id in _IDS]
-    assert writes[0]["grader_check"]["not_reached"] == {"main": ordered, "fallback": ordered}
-    assert writes[1]["grader_check"]["not_reached"]["main"] == ordered[1:]
+    # Four probe-cell saves, then one after each case.
+    assert writes[3]["grader_check"]["not_reached"] == {"main": ordered, "fallback": ordered}
+    assert writes[4]["grader_check"]["not_reached"]["main"] == ordered[1:]
     assert final["grader_check"]["not_reached"] == {"main": [], "fallback": []}
-    lines = gc.report_lines(writes[1])
+    lines = gc.report_lines(writes[4])
     assert any("main pass not reached" in ln and ordered[1] in ln for ln in lines)
 
 
@@ -470,8 +471,8 @@ def test_a_probe_panel_served_by_an_answer_model_is_missing(
 def test_a_failed_save_after_the_probe_skips_the_main_pass(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """Red when: the run pays for answers after the probe's save failed (it could
-    not save them either)."""
+    """Red when: the run pays for more probe calls or for answers after a probe
+    save failed (it could not save them either)."""
 
     def broken(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
@@ -481,7 +482,7 @@ def test_a_failed_save_after_the_probe_skips_the_main_pass(
     summary = _run(
         monkeypatch, _Scripted(log=log), main=_LoggedModel(ANSWERED, log), report=tmp_path / "r"
     )
-    assert log.count("probe") == 24  # partner: the probe ran
+    assert log.count("probe") == 6  # the first cell only: 3 repeats x (panel 1 + veto)
     assert "answer" not in log
     assert any(e["stage"] == "report_write" for e in summary["harness_errors"])
 

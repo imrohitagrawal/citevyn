@@ -118,7 +118,13 @@ def decide(cells: dict[str, dict[str, list[int | None]]]) -> dict[str, Any]:
     for answer in ANSWERS:
         for mode in MODES:
             scores = list(cells.get(answer, {}).get(mode, []))
-            if medians[answer][mode] is None:
+            if len(scores) < REPEATS:
+                # A run cut off mid-probe: the cells it saved decide only a drop.
+                unsure.append(
+                    f"probe not finished: the {answer} answer's {mode} cell has "
+                    f"{len(scores)} of {REPEATS} scores"
+                )
+            elif medians[answer][mode] is None:
                 unsure.append(f"the {answer} answer's {mode} median is missing ({scores})")
             scored = [s for s in scores if s is not None]
             if scored and max(scored) - min(scored) >= DISAGREEMENT:
