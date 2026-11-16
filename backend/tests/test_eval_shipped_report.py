@@ -103,8 +103,9 @@ NEAR_GATE_CASE = "codex_par_listflags"
 
 
 async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> None:  # noqa: F811
-    """Red when: the gate is not recorded on the real global path, or the near-the-gate
-    line stops naming a question whose recorded gap sits beside the margin.
+    """Red when: the gate is not recorded on the real global path, the near-the-gate
+    line stops naming a question whose recorded gap sits beside the margin, or the
+    recorded verdict is not the gate's real one (passed, at a gap of about 0.040).
 
     Partner to the synthetic near-the-gate tests: on the recorded vectors this question's
     gap to the runner-up is about 0.040, against a margin of 0.04.
@@ -126,8 +127,11 @@ async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> N
     (row,) = near["questions"]
     assert row["margin"] is not None
     assert abs(row["margin"] - settings.retrieval_global_min_margin) <= 0.01
-    assert outcome.gate_passed is not None
-    assert row["passed"] is outcome.gate_passed
+    # The real verdict: a recorded gap of about 0.040 clears the 0.04 margin.
+    assert row["margin"] >= settings.retrieval_global_min_margin
+    assert row["top_score"] >= settings.retrieval_global_min_top_score
+    assert row["passed"] is True
+    assert outcome.retrieved, "a passed global gate returns hits"
     assert f"Near the gate: {NEAR_GATE_CASE} (gap " in shipped.render_summary(report)
 
 

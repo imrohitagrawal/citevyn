@@ -516,8 +516,8 @@ class ShippedOutcome:
     gate_top_score: float | None = None
     gate_margin: float | None = None
     gate_passed: bool | None = None
-    # The thresholds that retrieval's gate was given, so the report judges "near"
-    # against the same numbers. Set on every global-route outcome, ``None`` otherwise.
+    # The thresholds the gate was called with, so the report judges "near" against the
+    # same numbers. ``None`` exactly when the gate fields above are.
     gate_min_top_score: float | None = None
     gate_min_margin: float | None = None
 
@@ -598,8 +598,7 @@ async def evaluate_cases(
 
         # Only the unaltered retrieval is recorded; the arms-off runs below are not.
         gate: Gate | None = None
-        is_global = routed.route == ROUTE_GLOBAL
-        if is_global:
+        if routed.route == ROUTE_GLOBAL:
             with probe_retrieval() as probe:
                 result = await run(frozenset())
             gate = single_gate(case.id, probe.gates)
@@ -633,8 +632,8 @@ async def evaluate_cases(
                 gate_top_score=gate.top_score if gate else None,
                 gate_margin=gate.margin if gate else None,
                 gate_passed=gate.passed if gate else None,
-                gate_min_top_score=settings.retrieval_global_min_top_score if is_global else None,
-                gate_min_margin=settings.retrieval_global_min_margin if is_global else None,
+                gate_min_top_score=gate.min_top_score if gate else None,
+                gate_min_margin=gate.min_margin if gate else None,
             )
         )
     return outcomes
@@ -738,6 +737,11 @@ def _near_the_gate(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
     """
     thresholds = _gate_thresholds(outcomes)
     checked = [o for o in outcomes if o.route == ROUTE_GLOBAL and o.gate_passed is not None]
+    for o in checked:
+        if o.gate_min_top_score is None or o.gate_min_margin is None:
+            raise ShippedEvalError(
+                f"case {o.case_id!r} has a gate reading but not the threshold it was judged by"
+            )
     near: list[ShippedOutcome] = []
     min_top = min_margin = None
     if thresholds is not None:
@@ -851,6 +855,23 @@ def _table(title: str, groups: Mapping[str, Mapping[str, Any]]) -> list[str]:
     return [*lines, ""]
 
 
+def _near_line(near: Mapping[str, Any]) -> str:
+    """One line: the rule applied, how many were checked, and each near question."""
+    checked = near["checked"]
+    if not checked:
+        return "Near the gate: not recorded (no global question was checked)."
+    rule = (
+        f"gap within {near['margin_window']:g} of {_number(near['min_margin'])}, "
+        f"or top within {near['top_score_window']:g} of {_number(near['min_top_score'])}"
+    )
+    listed = ", ".join(
+        f"{row['id']} (gap {_number(row['margin'])}, top {_number(row['top_score'])}, "
+        f"{'passed' if row['passed'] else 'failed'})"
+        for row in near["questions"]
+    )
+    return f"Near the gate ({rule}; {checked} checked): {listed or f'none of {checked} checked'}."
+
+
 def render_summary(report: Mapping[str, Any]) -> str:
     """The report as Markdown, for the job summary."""
     decision = report["decision_a"]
@@ -883,15 +904,7 @@ def render_summary(report: Mapping[str, Any]) -> str:
         "",
         "Routes: " + ", ".join(f"{k} {v}" for k, v in report["routes"].items()) + ".",
         "Winning arms: " + ", ".join(f"{k} {v}" for k, v in report["winning_arms"].items()) + ".",
-        "Near the gate: "
-        + (
-            ", ".join(
-                f"{row['id']} (gap {_number(row['margin'])}, top {_number(row['top_score'])})"
-                for row in report["near_the_gate"]["questions"]
-            )
-            or "none"
-        )
-        + ".",
+        _near_line(report["near_the_gate"]),
         "",
         "### Per question",
         "",
