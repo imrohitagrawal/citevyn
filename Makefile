@@ -299,11 +299,14 @@ migrate: ## Apply Alembic migrations to head against DB_URL
 # was a fourth place corpus content lived, and it drifted (#178). This is why
 # ``demo`` needs no separate ingest step: seeding IS the ingest, offline (local
 # files) and free (stub embedder by default).
-seed: ## Seed demo users + ingest the shipped corpus into index v1 (idempotent)
+# SEED_CATALOG_ARGS goes to seed_catalog only, e.g. `make seed SEED_CATALOG_ARGS=--discard-vectors`
+# (see db/README.md: under the stub embedder the seed refuses to erase stored vectors).
+SEED_CATALOG_ARGS ?=
+seed: ## Seed demo users + ingest the shipped corpus into index v1 (idempotent; stored-vector refusal: db/README.md)
 	@echo "==> seeding demo users (DB_URL redacted)"
 	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_users
 	@echo "==> seeding catalog (DB_URL redacted)"
-	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_catalog
+	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_catalog $(SEED_CATALOG_ARGS)
 
 demo: db-up migrate seed ## Bring up db, migrate, seed + ingest the corpus (one-shot)
 	@echo "Demo stack is up. Run 'make stop' to tear down."

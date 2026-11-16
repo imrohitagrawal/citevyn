@@ -479,7 +479,8 @@ worse than not ranking at all. They are never *written* — the seeder builds it
 runner with `write_vectors=False`, so there is no moment at which a live reader
 can see them (the seed commits per source, and a re-seed runs against an
 already-active `v1`). Set `CITEVYN_EMBEDDING_PROVIDER=gemini` (plus a key) and
-re-seed to get a live, stamped vector arm.
+re-seed to get a live, stamped vector arm. Going back the other way, a stub re-seed over
+those vectors refuses (exit 3) rather than erase them; see `db/README.md`, "Seed Data".
 
 ### 3.8 Delete an account on request
 

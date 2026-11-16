@@ -1,7 +1,8 @@
 """Seed the demo catalog by INGESTING the shipped corpus.
 
 Idempotent: re-running replaces the chunks of each document rather than
-appending. Run from the repository root with
+appending. One exception: under the stub embedder it refuses to run over a
+``v1`` that holds stored embeddings (see :class:`StoredVectorsError`). Run from the repository root with
 ``uv run python -m db.seed.seed_catalog`` after ``alembic upgrade head``
 and ``uv run python -m db.seed.seed_users``.
 
@@ -78,6 +79,9 @@ INDEX_VERSION: str = "v1"
 
 DISCARD_VECTORS_FLAG: str = "--discard-vectors"
 
+# Exit code for the stored-vector refusal, distinct from every other seed failure (1).
+REFUSAL_EXIT_CODE: int = 3
+
 
 class SeedError(RuntimeError):
     """A source failed to ingest, so the demo catalog is incomplete.
@@ -88,8 +92,11 @@ class SeedError(RuntimeError):
     """
 
 
-class StoredVectorsError(SeedError):
+class StoredVectorsError(RuntimeError):
     """A stub re-seed would replace stored embeddings with NULL (#626).
+
+    Not a :class:`SeedError`: nothing failed and nothing was written; the seed
+    refused before its first write.
 
     The runner replaces each document's chunks, and under the stub embedder the
     new chunks carry no embedding. Over an index that holds real vectors that is
@@ -246,7 +253,8 @@ async def _tally(session: AsyncSession, index_version: str) -> dict[str, int]:
 async def seed(database_url: str, *, discard_vectors: bool = False) -> dict[str, int | str]:
     """Ingest the shipped corpus into ``database_url`` as index ``v1``.
 
-    Returns a summary of what the index holds afterwards. Safe to re-run: the
+    Returns a summary of what the index holds afterwards. Safe to re-run (except
+    for the stored-vector refusal described below): the
     runner replaces a document's chunks instead of appending to them, and the
     ``source_version_hash`` is advanced only after every source ingested
     cleanly (see :func:`app.worker.cli.drive`) so the answer cache invalidates
@@ -328,10 +336,19 @@ async def seed(database_url: str, *, discard_vectors: bool = False) -> dict[str,
             if discarded and not discard_vectors:
                 raise StoredVectorsError(
                     f"refusing to seed: index {INDEX_VERSION} holds {discarded} chunk(s) with a "
-                    f"stored embedding, and the stub embedder writes none, so this seed would "
-                    f"erase all {discarded} of them (the vector arm would then report dead). "
-                    f"Set a real embedding provider to keep vectors, or pass "
-                    f"{DISCARD_VECTORS_FLAG} to erase them on purpose."
+                    f"stored embedding. CITEVYN_EMBEDDING_PROVIDER is stub, which writes no "
+                    f"vectors, so this seed would erase all {discarded} of them and the vector "
+                    f"arm would then report dead. Either set CITEVYN_EMBEDDING_PROVIDER to a "
+                    f"real provider (the seed then re-embeds the whole corpus, a paid step), "
+                    f"or skip this re-seed, or pass {DISCARD_VECTORS_FLAG} to erase them on "
+                    f"purpose."
+                )
+            if discarded:
+                # Said before the first write, so a run that then fails still said so.
+                print(
+                    f"{DISCARD_VECTORS_FLAG}: erasing {discarded} stored vector(s) "
+                    f"in {INDEX_VERSION}",
+                    flush=True,
                 )
         exit_code = await drive(runner, sessionmaker, list(MVP_SOURCES), INDEX_VERSION)
         if exit_code != 0:
@@ -355,8 +372,11 @@ async def seed(database_url: str, *, discard_vectors: bool = False) -> dict[str,
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point: seed and print a one-line summary."""
+    # allow_abbrev=False: a prefix such as ``--disc`` must not mean the erase.
     parser = argparse.ArgumentParser(
-        prog="seed_catalog", description="Ingest the shipped corpus into index v1."
+        prog="seed_catalog",
+        description="Ingest the shipped corpus into index v1.",
+        allow_abbrev=False,
     )
     parser.add_argument(
         DISCARD_VECTORS_FLAG,
@@ -375,7 +395,7 @@ def main(argv: list[str] | None = None) -> None:
         summary = asyncio.run(seed(settings.database_url, discard_vectors=args.discard_vectors))
     except StoredVectorsError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(REFUSAL_EXIT_CODE)
     if summary["discarded_vectors"]:
         print(
             f"{DISCARD_VECTORS_FLAG}: erased {summary['discarded_vectors']} stored vector(s) "
