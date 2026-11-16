@@ -336,7 +336,8 @@ jobs:
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
     #
-    # 68 minutes is an ESTIMATE of the worst case (#598), not a measurement. On the
+    # 68 minutes (every run but the grader check, below) is an ESTIMATE of the
+    # worst case (#598), not a measurement. On the
     # measured run (two answer passes) the eval step took 25.0 min, and 22 grader
     # calls timed out at 15 s. With the grader at 60 s
     # (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), those 22 calls can each wait
