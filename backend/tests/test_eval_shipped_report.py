@@ -65,7 +65,7 @@ async def test_the_report_runs_on_the_real_recording_and_reaches_the_summary(
         outcomes = await shipped.evaluate_cases(
             session, embedder, embedder.query_identity, cases, settings
         )
-    report = shipped.build_report(outcomes)
+    report = shipped.build_report(outcomes, settings)
     # Partners: the report covers every question and the decision pool holds some.
     assert len(report["questions"]) == len(cases) >= 120
     decision = report["decision_a"]
@@ -97,6 +97,34 @@ async def test_the_report_runs_on_the_real_recording_and_reaches_the_summary(
     if real_summary:
         with pathlib.Path(real_summary).open("a", encoding="utf-8") as job_summary:
             job_summary.write(written)
+
+
+NEAR_GATE_CASE = "codex_par_listflags"
+
+
+async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> None:  # noqa: F811
+    """Red when: the gate is not recorded on the real global path, or the near-the-gate
+    line stops naming a question whose recorded gap sits beside the margin.
+
+    Partner to the synthetic near-the-gate tests: on the recorded vectors this question's
+    gap to the runner-up is about 0.040, against a margin of 0.04.
+    """
+    embedder = _recorded()
+    case = next(c for c in shipped.all_shipped_cases() if c.id == NEAR_GATE_CASE)
+    identity = embedder.query_identity
+    async with shipped.shipped_corpus_session(settings, embedder, identity) as (session, _):
+        (outcome,) = await shipped.evaluate_cases(session, embedder, identity, [case], settings)
+    assert outcome.route == shipped.ROUTE_GLOBAL
+    report = shipped.build_report([outcome], settings)
+    near = report["near_the_gate"]
+    assert near["checked"] == 1
+    assert [row["id"] for row in near["questions"]] == [NEAR_GATE_CASE]
+    (row,) = near["questions"]
+    assert row["margin"] is not None
+    assert abs(row["margin"] - settings.retrieval_global_min_margin) <= 0.01
+    assert outcome.gate_passed is not None
+    assert row["passed"] is outcome.gate_passed
+    assert f"Near the gate: {NEAR_GATE_CASE} (gap " in shipped.render_summary(report)
 
 
 async def test_a_dead_vector_arm_fails_the_report(settings: Any) -> None:  # noqa: F811

@@ -56,6 +56,7 @@ from app.worker.runner import IngestionRunner, ensure_index_version
 
 from .cases import load_cases
 from .paths import GOLDEN_PATH, REPO_ROOT, SHIPPED_QUESTIONS_PATH
+from .probe import Gate, probe_retrieval
 from .recorded import (
     RECORD_COMMAND,
     MissingRecordedVector,
@@ -97,6 +98,7 @@ __all__ = [
     "shipped_chunk_texts",
     "shipped_corpus_session",
     "shipped_heading_keys",
+    "single_gate",
     "write_report",
 ]
 
@@ -105,6 +107,16 @@ ROUTE_GLOBAL = "global_vector_only"
 ROUTE_MULTI = "multi_product"
 _RECALL_DEPTHS = (1, 3, 6)
 _EXCLUSIONS = ("follow_up", "multi_relevant", "no_single_gold", "refusal", "coverage_set")
+
+# A global-route question is "near the gate" when its gap to the runner-up is within
+# NEAR_MARGIN_WINDOW of ``retrieval_global_min_margin``, or its top score is within
+# NEAR_TOP_SCORE_WINDOW of ``retrieval_global_min_top_score``, on either side. These are
+# report windows, not product settings: they choose which questions the summary names,
+# so a threshold change can be judged against the questions it would flip.
+NEAR_MARGIN_WINDOW = 0.01
+NEAR_TOP_SCORE_WINDOW = 0.05
+# Absorbs float rounding, so a gap of exactly 0.05 against 0.04 is inside a 0.01 window.
+_NEAR_SLACK = 1e-9
 
 
 class ShippedLabelError(ValueError):
@@ -498,6 +510,12 @@ class ShippedOutcome:
     rank_vector_only: int | None = None
     rank_keyword_only: int | None = None
     production_skip: str | None = None
+    # The global confidence gate on the unaltered retrieval: top score, gap to the
+    # runner-up (``None`` for a lone hit) and verdict. ``None`` when the route is not
+    # global or the gate was not called.
+    gate_top_score: float | None = None
+    gate_margin: float | None = None
+    gate_passed: bool | None = None
 
 
 _ARMS = ("vector", "keyword", "exact")
@@ -537,6 +555,16 @@ async def _check_vector_arm_is_live(session: AsyncSession) -> None:
         )
 
 
+def single_gate(case_id: str, gates: Sequence[Gate]) -> Gate | None:
+    """The one gate call of a retrieval, ``None`` if there was none; several is an error."""
+    if len(gates) > 1:
+        raise ShippedEvalError(
+            f"case {case_id!r} called the global gate {len(gates)} times in one retrieval; "
+            "its near-the-gate numbers would be a guess"
+        )
+    return gates[0] if gates else None
+
+
 async def evaluate_cases(
     session: AsyncSession,
     embedder: Embedder,
@@ -564,7 +592,14 @@ async def evaluate_cases(
                 arms_off=off,
             )
 
-        result = await run(frozenset())
+        # Only the unaltered retrieval is recorded; the arms-off runs below are not.
+        gate: Gate | None = None
+        if routed.route == ROUTE_GLOBAL:
+            with probe_retrieval() as probe:
+                result = await run(frozenset())
+            gate = single_gate(case.id, probe.gates)
+        else:
+            result = await run(frozenset())
         retrieved = _keys(result)
         top = retrieved[:1]
         changed_by: list[str] = []
@@ -590,6 +625,9 @@ async def evaluate_cases(
                 rank_vector_only=_gold_rank(case.shipped_gold, vector_only),
                 rank_keyword_only=_gold_rank(case.shipped_gold, keyword_only),
                 production_skip=routed.production_skip,
+                gate_top_score=gate.top_score if gate else None,
+                gate_margin=gate.margin if gate else None,
+                gate_passed=gate.passed if gate else None,
             )
         )
     return outcomes
@@ -664,7 +702,44 @@ def _group(outcomes: Sequence[ShippedOutcome], field: str) -> dict[str, dict[str
     return {label: _metrics(pool) for label, pool in sorted(groups.items())}
 
 
-def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
+def _within(value: float | None, threshold: float, window: float) -> bool:
+    return value is not None and abs(value - threshold) <= window + _NEAR_SLACK
+
+
+def _near_the_gate(outcomes: Sequence[ShippedOutcome], settings: Settings) -> dict[str, Any]:
+    """Global-route questions whose gap or top score sits close to the gate's threshold."""
+    min_top = settings.retrieval_global_min_top_score
+    min_margin = settings.retrieval_global_min_margin
+    checked = [o for o in outcomes if o.route == ROUTE_GLOBAL and o.gate_passed is not None]
+    near = [
+        o
+        for o in checked
+        if _within(o.gate_margin, min_margin, NEAR_MARGIN_WINDOW)
+        or _within(o.gate_top_score, min_top, NEAR_TOP_SCORE_WINDOW)
+    ]
+    return {
+        "min_top_score": min_top,
+        "min_margin": min_margin,
+        "top_score_window": NEAR_TOP_SCORE_WINDOW,
+        "margin_window": NEAR_MARGIN_WINDOW,
+        "checked": len(checked),
+        "questions": [
+            {
+                "id": o.case_id,
+                "top_score": o.gate_top_score,
+                "margin": o.gate_margin,
+                "passed": o.gate_passed,
+            }
+            for o in near
+        ],
+    }
+
+
+def build_report(
+    outcomes: Sequence[ShippedOutcome], settings: Settings | None = None
+) -> dict[str, Any]:
+    """The report. ``settings`` supplies the gate thresholds; the default is the app's."""
+    settings = settings or get_settings()
     if not outcomes:
         raise ShippedEvalError("no questions were evaluated, so there is no report")
     for outcome in outcomes:
@@ -703,6 +778,7 @@ def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
         "winning_arms": dict(
             sorted(collections.Counter(str(o.winning_arm) for o in outcomes).items())
         ),
+        "near_the_gate": _near_the_gate(outcomes, settings),
         "questions": [
             {
                 "id": o.case_id,
@@ -780,6 +856,15 @@ def render_summary(report: Mapping[str, Any]) -> str:
         "",
         "Routes: " + ", ".join(f"{k} {v}" for k, v in report["routes"].items()) + ".",
         "Winning arms: " + ", ".join(f"{k} {v}" for k, v in report["winning_arms"].items()) + ".",
+        "Near the gate: "
+        + (
+            ", ".join(
+                f"{row['id']} (gap {_number(row['margin'])}, top {_number(row['top_score'])})"
+                for row in report["near_the_gate"]["questions"]
+            )
+            or "none"
+        )
+        + ".",
         "",
         "### Per question",
         "",
