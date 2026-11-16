@@ -516,6 +516,10 @@ class ShippedOutcome:
     gate_top_score: float | None = None
     gate_margin: float | None = None
     gate_passed: bool | None = None
+    # The thresholds that retrieval's gate was given, so the report judges "near"
+    # against the same numbers. Set on every global-route outcome, ``None`` otherwise.
+    gate_min_top_score: float | None = None
+    gate_min_margin: float | None = None
 
 
 _ARMS = ("vector", "keyword", "exact")
@@ -594,7 +598,8 @@ async def evaluate_cases(
 
         # Only the unaltered retrieval is recorded; the arms-off runs below are not.
         gate: Gate | None = None
-        if routed.route == ROUTE_GLOBAL:
+        is_global = routed.route == ROUTE_GLOBAL
+        if is_global:
             with probe_retrieval() as probe:
                 result = await run(frozenset())
             gate = single_gate(case.id, probe.gates)
@@ -628,6 +633,8 @@ async def evaluate_cases(
                 gate_top_score=gate.top_score if gate else None,
                 gate_margin=gate.margin if gate else None,
                 gate_passed=gate.passed if gate else None,
+                gate_min_top_score=settings.retrieval_global_min_top_score if is_global else None,
+                gate_min_margin=settings.retrieval_global_min_margin if is_global else None,
             )
         )
     return outcomes
@@ -706,17 +713,41 @@ def _within(value: float | None, threshold: float, window: float) -> bool:
     return value is not None and abs(value - threshold) <= window + _NEAR_SLACK
 
 
-def _near_the_gate(outcomes: Sequence[ShippedOutcome], settings: Settings) -> dict[str, Any]:
-    """Global-route questions whose gap or top score sits close to the gate's threshold."""
-    min_top = settings.retrieval_global_min_top_score
-    min_margin = settings.retrieval_global_min_margin
+def _gate_thresholds(outcomes: Sequence[ShippedOutcome]) -> tuple[float, float] | None:
+    """The one ``(min_top_score, min_margin)`` the outcomes' gates used, ``None`` if none."""
+    used = {
+        (o.gate_min_top_score, o.gate_min_margin)
+        for o in outcomes
+        if o.gate_min_top_score is not None or o.gate_min_margin is not None
+    }
+    if len(used) > 1:
+        raise ShippedEvalError(
+            f"the outcomes' gates used different thresholds {sorted(used, key=str)}; no report"
+        )
+    if not used:
+        return None
+    ((min_top, min_margin),) = used
+    if min_top is None or min_margin is None:
+        raise ShippedEvalError("an outcome carries only one of the two gate thresholds")
+    return min_top, min_margin
+
+
+def _near_the_gate(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
+    """Global-route questions whose gap or top score sits close to the gate's threshold,
+    judged against the thresholds the gate itself used (carried on each outcome).
+    """
+    thresholds = _gate_thresholds(outcomes)
     checked = [o for o in outcomes if o.route == ROUTE_GLOBAL and o.gate_passed is not None]
-    near = [
-        o
-        for o in checked
-        if _within(o.gate_margin, min_margin, NEAR_MARGIN_WINDOW)
-        or _within(o.gate_top_score, min_top, NEAR_TOP_SCORE_WINDOW)
-    ]
+    near: list[ShippedOutcome] = []
+    min_top = min_margin = None
+    if thresholds is not None:
+        min_top, min_margin = thresholds
+        near = [
+            o
+            for o in checked
+            if _within(o.gate_margin, min_margin, NEAR_MARGIN_WINDOW)
+            or _within(o.gate_top_score, min_top, NEAR_TOP_SCORE_WINDOW)
+        ]
     return {
         "min_top_score": min_top,
         "min_margin": min_margin,
@@ -735,11 +766,7 @@ def _near_the_gate(outcomes: Sequence[ShippedOutcome], settings: Settings) -> di
     }
 
 
-def build_report(
-    outcomes: Sequence[ShippedOutcome], settings: Settings | None = None
-) -> dict[str, Any]:
-    """The report. ``settings`` supplies the gate thresholds; the default is the app's."""
-    settings = settings or get_settings()
+def build_report(outcomes: Sequence[ShippedOutcome]) -> dict[str, Any]:
     if not outcomes:
         raise ShippedEvalError("no questions were evaluated, so there is no report")
     for outcome in outcomes:
@@ -778,7 +805,7 @@ def build_report(
         "winning_arms": dict(
             sorted(collections.Counter(str(o.winning_arm) for o in outcomes).items())
         ),
-        "near_the_gate": _near_the_gate(outcomes, settings),
+        "near_the_gate": _near_the_gate(outcomes),
         "questions": [
             {
                 "id": o.case_id,

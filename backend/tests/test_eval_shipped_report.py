@@ -65,7 +65,7 @@ async def test_the_report_runs_on_the_real_recording_and_reaches_the_summary(
         outcomes = await shipped.evaluate_cases(
             session, embedder, embedder.query_identity, cases, settings
         )
-    report = shipped.build_report(outcomes, settings)
+    report = shipped.build_report(outcomes)
     # Partners: the report covers every question and the decision pool holds some.
     assert len(report["questions"]) == len(cases) >= 120
     decision = report["decision_a"]
@@ -115,7 +115,11 @@ async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> N
     async with shipped.shipped_corpus_session(settings, embedder, identity) as (session, _):
         (outcome,) = await shipped.evaluate_cases(session, embedder, identity, [case], settings)
     assert outcome.route == shipped.ROUTE_GLOBAL
-    report = shipped.build_report([outcome], settings)
+    assert (outcome.gate_min_top_score, outcome.gate_min_margin) == (
+        settings.retrieval_global_min_top_score,
+        settings.retrieval_global_min_margin,
+    )
+    report = shipped.build_report([outcome])
     near = report["near_the_gate"]
     assert near["checked"] == 1
     assert [row["id"] for row in near["questions"]] == [NEAR_GATE_CASE]

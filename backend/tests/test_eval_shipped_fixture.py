@@ -833,20 +833,20 @@ def test_the_postgres_vacuity_guard_watches_the_new_file() -> None:
 #
 # The global gate passes a question when its top score reaches ``min_top_score`` and its
 # gap to the runner-up reaches ``min_margin``. A question within a fixed window of either
-# threshold, on either side, is printed as near the gate. These tests pin the thresholds
-# to 0.30 and 0.04 through Settings, so they do not move with a tuned default.
-
-GATE_SETTINGS_UPDATE = {"retrieval_global_min_top_score": 0.30, "retrieval_global_min_margin": 0.04}
-
-
-def _gate_settings(**update: float) -> Any:
-    from app.core.config import get_settings
-
-    return get_settings().model_copy(update={**GATE_SETTINGS_UPDATE, **update})
+# threshold, on either side, is printed as near the gate. Each global outcome carries the
+# thresholds its gate used; these tests set them to 0.30 and 0.04 on the outcome, so they
+# do not move with a tuned default.
 
 
 def _global(
-    case_id: str, *, top: float | None, margin: float | None, passed: bool = True, **rest: Any
+    case_id: str,
+    *,
+    top: float | None,
+    margin: float | None,
+    passed: bool = True,
+    min_top_score: float = 0.30,
+    min_margin: float = 0.04,
+    **rest: Any,
 ) -> Any:
     return _outcome(
         case_id,
@@ -855,12 +855,14 @@ def _global(
         gate_top_score=top,
         gate_margin=margin,
         gate_passed=passed,
+        gate_min_top_score=min_top_score,
+        gate_min_margin=min_margin,
         **rest,
     )
 
 
-def _near_ids(outcomes: list[Any], settings: Any = None) -> list[str]:
-    report = _shipped().build_report(outcomes, settings or _gate_settings())
+def _near_ids(outcomes: list[Any]) -> list[str]:
+    report = _shipped().build_report(outcomes)
     return [row["id"] for row in report["near_the_gate"]["questions"]]
 
 
@@ -913,10 +915,9 @@ def test_a_lone_hit_is_judged_on_its_top_score_alone() -> None:
 
 
 def test_the_near_the_gate_section_records_thresholds_windows_and_each_question() -> None:
-    """Red when: a near row loses a field, or the thresholds are not the settings' values."""
+    """Red when: a near row loses a field, or the thresholds are not the outcomes' values."""
     report = _shipped().build_report(
         [_global("near", top=0.62, margin=0.045, passed=True), _global("far", top=0.9, margin=0.5)],
-        _gate_settings(),
     )
     assert report["near_the_gate"] == {
         "min_top_score": 0.30,
@@ -928,15 +929,35 @@ def test_the_near_the_gate_section_records_thresholds_windows_and_each_question(
     }
 
 
-def test_the_thresholds_come_from_settings() -> None:
-    """Red when: build_report judges against fixed literals instead of the given settings."""
+def test_the_thresholds_come_from_the_outcomes() -> None:
+    """Red when: build_report judges against thresholds read from anywhere but the outcomes
+    (a literal, or the app's settings, whose defaults are 0.30 and 0.04).
+    """
+    shipped = _shipped()
+    custom = {"min_top_score": 0.50, "min_margin": 0.10}
     outcomes = [
-        _global("gap_010", top=0.80, margin=0.10),
-        _global("gap_004", top=0.80, margin=0.04),
+        _global("gap_010", top=0.80, margin=0.10, **custom),
+        _global("gap_004", top=0.80, margin=0.04, **custom),
+        _global("top_052", top=0.52, margin=0.50, **custom),
     ]
-    assert _near_ids(outcomes, _gate_settings(retrieval_global_min_margin=0.10)) == ["gap_010"]
-    # Partner: the default thresholds list the other one.
-    assert _near_ids(outcomes) == ["gap_004"]
+    near = shipped.build_report(outcomes)["near_the_gate"]
+    assert [row["id"] for row in near["questions"]] == ["gap_010", "top_052"]
+    assert (near["min_top_score"], near["min_margin"]) == (0.50, 0.10)
+    # Partner: the same gaps judged at 0.30 and 0.04 list the other one.
+    default = [_global("gap_010", top=0.80, margin=0.10), _global("gap_004", top=0.80, margin=0.04)]
+    assert _near_ids(default) == ["gap_004"]
+
+
+def test_outcomes_with_different_gate_thresholds_are_refused() -> None:
+    """Red when: a report is built over outcomes whose gates used different thresholds."""
+    shipped = _shipped()
+    for other in ({"min_margin": 0.05}, {"min_top_score": 0.31}):
+        mixed = [_global("a", top=0.80, margin=0.04), _global("b", top=0.80, margin=0.04, **other)]
+        with pytest.raises(shipped.ShippedEvalError, match="thresholds"):
+            shipped.build_report(mixed)
+    # Partner: matching thresholds build.
+    same = [_global("a", top=0.80, margin=0.04), _global("b", top=0.80, margin=0.04)]
+    assert shipped.build_report(same)["near_the_gate"]["min_margin"] == 0.04
 
 
 def test_the_summary_names_each_question_near_the_gate() -> None:
@@ -948,7 +969,6 @@ def test_the_summary_names_each_question_near_the_gate() -> None:
             _global("lone", top=0.33, margin=None, retrieved=("codex#CLI flags",)),
             _global("far", top=0.9, margin=0.5),
         ],
-        _gate_settings(),
     )
     summary = shipped.render_summary(report)
     assert (
@@ -960,7 +980,7 @@ def test_the_summary_names_each_question_near_the_gate() -> None:
 def test_the_summary_says_none_when_no_question_is_near_the_gate() -> None:
     """Red when: an empty near-the-gate list prints nothing, so absence looks like a skip."""
     shipped = _shipped()
-    summary = shipped.render_summary(shipped.build_report(_decision_outcomes(), _gate_settings()))
+    summary = shipped.render_summary(shipped.build_report(_decision_outcomes()))
     assert "Near the gate: none." in summary.splitlines()
 
 
