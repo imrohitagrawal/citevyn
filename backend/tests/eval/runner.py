@@ -331,6 +331,10 @@ class _RecordingGrader:
             )
         except Exception as exc:
             entry["rationale"] = f"call failed: {type(exc).__name__}: {exc}"
+            if self._tokens:
+                # The grader check's export counts a call the cap refused (never
+                # sent) apart from a failure, however it was wrapped.
+                entry["refused_by_cap"] = grader_check.budget_stop(exc) is not None
             raise
         finally:
             entry["duration_seconds"] = time.perf_counter() - start
@@ -877,6 +881,10 @@ async def _judge_cases(
                                 else None,
                             }
                         )
+                        if checking and record.failed:
+                            calls[-1]["refused_by_cap"] = (
+                                grader_check.budget_stop(record.cause) is not None
+                            )
                     entry.model_calls.extend(calls)
                     failed = [r for r in records if r.failed and r.site is CallSite.answer]
                     state.failed_causes.extend(r.cause for r in failed if r.cause is not None)
@@ -2022,14 +2030,17 @@ async def run_eval_async(
                         lambda: _assemble([], None, [], "main"), where="after a probe cell"
                     ),
                 )
-                grader_check.write_step_summary(
-                    [
-                        redact(line, secret_values(settings))
-                        for line in grader_check.report_lines(
-                            _assemble([], None, [], "main"), probe_only=True
-                        )
-                    ]
-                )
+                probe_lines = [
+                    redact(line, secret_values(settings))
+                    for line in grader_check.report_lines(
+                        _assemble([], None, [], "main"), probe_only=True
+                    )
+                ]
+                # In the log and the job summary at once, so a run cut off later
+                # still shows the probe and its decision in both.
+                for line in probe_lines:
+                    print(line)
+                grader_check.write_step_summary(probe_lines)
 
             def _main_saved(done: list[JudgedCase]) -> bool:
                 nonlocal saved

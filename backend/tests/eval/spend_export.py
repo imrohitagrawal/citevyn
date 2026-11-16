@@ -79,7 +79,8 @@ def _grader_call_outcome(call: dict[str, Any]) -> str | None:
     rationale = str(call.get("rationale", ""))
     if call.get("score") is not None or not rationale.startswith("call failed:"):
         return None
-    return "refused" if rationale.startswith(f"call failed: {_REFUSED}:") else "failed"
+    refused = call.get("refused_by_cap") or rationale.startswith(f"call failed: {_REFUSED}:")
+    return "refused" if refused else "failed"
 
 
 def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[str, int]]:
@@ -97,7 +98,8 @@ def failed_calls(report: dict[str, Any] | None) -> tuple[dict[str, int], dict[st
         for case in section.get("cases") or []:
             for call in case.get("model_calls") or []:
                 if call.get("failed"):
-                    outcome = "refused" if call.get("error_type") == _REFUSED else "failed"
+                    refused = call.get("refused_by_cap") or call.get("error_type") == _REFUSED
+                    outcome = "refused" if refused else "failed"
                     counts[outcome][str(call.get("model") or "unknown")] += 1
             grader_calls += case.get("grader_calls") or []
             grader_calls += case.get("passage_grader_calls") or []
@@ -182,7 +184,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"spend export: the eval report at {args.report} could not be read "
                 f"({type(exc).__name__}); failures are not counted"
             )
-    export = summarize(rows, report)
+    try:
+        export = summarize(rows, report)
+    except (AttributeError, TypeError, KeyError, ValueError) as exc:
+        # A report that parses but has another shape: the rows still go out.
+        print(
+            f"spend export: the eval report at {args.report} could not be read "
+            f"({type(exc).__name__}); failures are not counted"
+        )
+        export = summarize(rows, None)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(export, indent=2), encoding="utf-8")
     totals = export["totals"]

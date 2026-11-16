@@ -325,7 +325,7 @@ def write_step_summary(lines: list[str]) -> None:
     try:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(f"{_FENCE}\n{body}\n{_FENCE}\n")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         print(f"GRADER CHECK: the job summary could not be written ({type(exc).__name__})")
 
 

@@ -183,9 +183,22 @@ _LOOKALIKES = str.maketrans(
 )
 
 
+def _fold_char(char: str) -> str:
+    """One character folded: a listed look-alike, or a character whose NFKC form
+    is only angle brackets (the small and full-width forms); else unchanged."""
+    mapped = _LOOKALIKES.get(ord(char))
+    if mapped is not None:
+        return str(mapped)
+    if char.isascii():
+        return char
+    folded = unicodedata.normalize("NFKC", char)
+    return folded if folded and set(folded) <= {"<", ">"} else char
+
+
 def _fold(text: str) -> str:
-    """``text`` with look-alike angle brackets folded to ``<`` and ``>``."""
-    return unicodedata.normalize("NFKC", text).translate(_LOOKALIKES)
+    """``text`` with look-alike angle brackets folded to ``<`` and ``>``. Every
+    other character stays as it is (``10`` to the 6th is not ``106``)."""
+    return "".join(_fold_char(c) for c in text)
 
 
 def _neutralise(text: str) -> str:
