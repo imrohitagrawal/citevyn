@@ -132,7 +132,16 @@ async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> N
     assert row["top_score"] >= settings.retrieval_global_min_top_score
     assert row["passed"] is True
     assert outcome.retrieved, "a passed global gate returns hits"
-    assert f"Near the gate: {NEAR_GATE_CASE} (gap " in shipped.render_summary(report)
+    (line,) = [
+        line
+        for line in shipped.render_summary(report).splitlines()
+        if line.startswith("Near the gate")
+    ]
+    assert line.startswith("Near the gate (gap within "), line
+    assert "; 1 checked): " in line, line
+    assert line.endswith(f"): {NEAR_GATE_CASE} (gap 0.040, top {row['top_score']:.3f}, passed)."), (
+        line
+    )
 
 
 async def test_a_dead_vector_arm_fails_the_report(settings: Any) -> None:  # noqa: F811
