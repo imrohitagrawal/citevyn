@@ -119,7 +119,14 @@ def test_the_fallback_report_holds_the_fallback_pass_results(
     passes = iter([_judged(5), _judged(1)])
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         return next(passes)
 
@@ -159,7 +166,14 @@ def test_clients_are_closed_and_the_error_kept_when_a_pass_fails(
     calls = {"n": 0}
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         calls["n"] += 1
         if calls["n"] == 2:
@@ -193,7 +207,8 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red when: a failing ``aclose`` leaves another client open (the loop this
-    replaced stopped at the first failing close)."""
+    replaced stopped at the first failing close), or the failure is raised or lost
+    instead of being recorded in the report (#598 Step 2b, E)."""
     built: list[_Recording] = []
 
     def _build(settings: Settings) -> _Recording:
@@ -204,7 +219,14 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
         return client
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         return []
 
@@ -219,8 +241,10 @@ def test_a_failing_close_does_not_skip_closing_the_other_client(
         eval_judge_model=JUDGE,
         eval_judge_timeout_seconds=60.0,
     )
-    with pytest.raises(RuntimeError, match="close failed"):
-        asyncio.run(runner_mod.run_eval_async(settings=settings))
+    # #598 Step 2b (REVISION 2, E): a cleanup failure is recorded as a harness
+    # error and no longer raised, so it cannot drop the results.
+    summary = asyncio.run(runner_mod.run_eval_async(settings=settings))
+    assert "close failed" in json.dumps(summary, default=str)
     assert len(built) == 3  # main, fallback, grader
     assert all(c.closed for c in built)
 
@@ -237,7 +261,14 @@ def test_fallback_and_judge_are_router_clients_from_a_gemini_run(
         return _Recording("")
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         return []
 

@@ -59,7 +59,14 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return client
 
     async def _spy(
-        cases, *, settings, postgres=False, answer_llm=None, judge_llm=None, expect_answerer=None
+        cases,
+        *,
+        settings,
+        postgres=False,
+        answer_llm=None,
+        judge_llm=None,
+        expect_answerer=None,
+        **_new,
     ):  # type: ignore[no-untyped-def]
         state["calls"].append(
             {
@@ -113,19 +120,17 @@ def test_built_clients_are_closed(recorded: dict[str, Any]) -> None:
     assert all(c.closed for c in recorded["built"])
 
 
-def test_no_fallback_no_judge_model_keeps_one_pass(recorded: dict[str, Any]) -> None:
-    """Red when: a run without the two settings grows a second pass or a separate
-    grader (local runs keep one pass, graded by the answer client)."""
-    asyncio.run(
-        runner_mod.run_eval_async(
-            settings=_settings(
-                eval_fallback_model=None, eval_judge_model=None, eval_judge_timeout_seconds=None
-            )
-        )
-    )
+def test_no_fallback_model_keeps_one_pass(recorded: dict[str, Any]) -> None:
+    """Red when: a run without a fallback model grows a second pass, or loses its
+    separate grader. Changed by #598 Step 2b (REVISION 2, F; owner decision
+    2026-11-13): a judged run without a grader model is now refused before any
+    paid call (``test_eval_report_integrity.py``), so a local run keeps one pass
+    graded by its own grader, never by the answer client."""
+    asyncio.run(runner_mod.run_eval_async(settings=_settings(eval_fallback_model=None)))
     assert len(recorded["calls"]) == 1
-    assert recorded["calls"][0]["judge_llm"] is None
-    assert len(recorded["built"]) == 1  # the main pass's attributing client only
+    assert recorded["calls"][0]["judge_llm"] is not None
+    assert recorded["calls"][0]["judge_llm"].settings.openrouter_model == JUDGE
+    assert len(recorded["built"]) == 2  # the main pass's attributing client and the grader
 
 
 def test_report_names_every_model(recorded: dict[str, Any]) -> None:

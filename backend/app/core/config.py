@@ -381,7 +381,8 @@ class Settings(BaseSettings):
     # second time with it, under the same answer gates. Unset: one pass.
     eval_fallback_model: str | None = Field(default=None, pattern=r"^\S+$")
     # The grader's own OpenRouter model, so no answer model grades its own answers.
-    # Unset: the grader uses the answer client (local runs).
+    # Required for a judged run: the eval runner refuses to start one without it
+    # (#598 Step 2b). Unset is fine for everything else, including --no-judge.
     eval_judge_model: str | None = Field(default=None, pattern=r"^\S+$")
     # The grader's own OpenRouter timeout (#598). Only the grader's client reads it;
     # every answer client keeps ``openrouter_timeout_seconds``. No default: it is

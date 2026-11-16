@@ -120,11 +120,20 @@ def test_a_fact_case_answered_by_the_wrong_model_fails_on_its_errored_line_with_
 # --- 2. a report read that fails marks the case; the pass goes on --------------------
 
 
+def _harness_first(case: Any) -> dict[str, Any]:
+    """The case's first harness error (#598 Step 2b), or ``{}``."""
+    value = getattr(case, "harness_error", None)
+    value = value[0] if isinstance(value, list) and value else value
+    return value if isinstance(value, dict) else {}
+
+
 def test_a_failed_report_read_marks_its_case_and_the_pass_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red when: an error reading one case's report fields aborts the pass (every
-    answer after it is lost), or the case is not marked and gated as errored."""
+    answer after it is lost), or the case is not marked with a ``report`` harness
+    error, or is not graded. Changed by #598 Step 2b (REVISION 2, B): a report-read
+    failure is a harness error, not an answer error, and the answer is graded."""
     real = runner_mod._final_turn
     calls = {"n": 0}
 
@@ -141,8 +150,10 @@ def test_a_failed_report_read_marks_its_case_and_the_pass_continues(
         [golden["claude_api_lit_ratelimit"], golden["codex_lit_modelflag"]],
         _Model("An answer [1]."),
     )
-    assert first.error == "report: RuntimeError: database went away"
-    assert first.answer_errored is True and first.score is None
+    harness = _harness_first(first)
+    assert (harness.get("stage"), harness.get("type")) == ("report", "RuntimeError")
+    assert "database went away" in harness.get("message", "")
+    assert first.answer_errored is False and first.score == 4
     assert second.error is None and second.outcome == "answer"  # the pass went on
 
 
@@ -150,15 +161,18 @@ def test_a_missing_audit_row_is_a_report_error_not_a_silent_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red when: a turn with no ``ask_question`` audit row is reported with
-    ``outcome`` None as if nothing were wrong."""
+    ``outcome`` None as if nothing were wrong. Changed by #598 Step 2b (REVISION 2,
+    B): it is a ``report`` harness error, not an answer error."""
 
     async def _no_audit(self: Any, **_: Any) -> None:
         return None
 
     monkeypatch.setattr(orchestrator_mod.Orchestrator, "_persist_audit", _no_audit)
     (case,) = _run(monkeypatch, [_golden()["claude_api_lit_ratelimit"]], _Model(ANSWERED))
-    assert case.answer_errored is True
-    assert case.error and case.error.startswith("report: LookupError: no ask_question audit row")
+    assert case.answer_errored is False
+    harness = _harness_first(case)
+    assert (harness.get("stage"), harness.get("type")) == ("report", "LookupError")
+    assert harness.get("message", "").startswith("no ask_question audit row")
 
 
 # --- 3. test gaps -----------------------------------------------------------------
