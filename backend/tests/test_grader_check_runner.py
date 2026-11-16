@@ -574,17 +574,20 @@ def test_the_probe_runs_once_before_the_first_case_and_is_saved_at_once(
 ) -> None:
     """Red when: the probe runs after a case (a cut-off run could lose the
     decision), runs once per pass, makes another number of calls than
-    2 answers x 2 modes x 3 repeats x (panel 1 + veto) = 24, or is first written
-    only with a case or at the end."""
+    2 answers x 2 modes x 3 repeats x (panel 1 + veto) = 24, is not saved after
+    EACH of its four cells in order (a run cut off mid-probe would lose the cells
+    already paid for), or its full save comes with or after a case."""
     log: list[str] = []
     grader = _Scripted(
         _probe_rule({"blind": 1, "passages": 1}, {"blind": 5, "passages": 5}), log=log
     )
     writes: list[dict[str, Any]] = []
+    answers_before: list[int] = []
     real_write = runner_mod.write_report
 
     def _capture(path: Any, summary: dict[str, Any], settings: Any, **kwargs: Any) -> None:
         writes.append(json.loads(json.dumps(summary, default=str)))
+        answers_before.append(log.count("answer"))
         real_write(path, summary, settings, **kwargs)
 
     monkeypatch.setattr(runner_mod, "write_report", _capture)
@@ -597,17 +600,60 @@ def test_the_probe_runs_once_before_the_first_case_and_is_saved_at_once(
     assert "answer" in log  # partner: cases were answered
     assert log.count("probe") == 24
     assert max(i for i, e in enumerate(log) if e == "probe") < log.index("answer")
-    first = writes[0]
-    assert first["judge"]["cases"] == []
-    cells = first["grader_check"]["probe"]["cells"]
-    assert {a: {m: len(v) for m, v in modes.items()} for a, modes in cells.items()} == {
-        "wrong": {"blind": 3, "passages": 3},
-        "correct": {"blind": 3, "passages": 3},
-    }
-    assert first["grader_check"]["decision"] == "keep"
-    assert first["grader_check"]["paired"]["main"]["coverage_label"] == "not available"
+    # One save after each probe cell, in the order the probe grades them.
+    order = [
+        ("wrong", "blind"),
+        ("wrong", "passages"),
+        ("correct", "blind"),
+        ("correct", "passages"),
+    ]
+    assert len(writes) >= 4
+    for n, write in enumerate(writes[:4], start=1):
+        cells = write["grader_check"]["probe"]["cells"]
+        lengths = {(a, m): len((cells.get(a) or {}).get(m) or []) for a, m in order}
+        assert lengths == {cell: (3 if i < n else 0) for i, cell in enumerate(order)}, (n, cells)
+        assert write["judge"]["cases"] == []
+    last_probe_save = writes[3]
+    assert answers_before[3] == 0  # no case had run before the full probe save
+    assert last_probe_save["grader_check"]["decision"] == "keep"
+    assert last_probe_save["grader_check"]["paired"]["main"]["coverage_label"] == "not available"
     # Every later save carries it too.
-    assert all(w.get("grader_check", {}).get("decision") == "keep" for w in writes)
+    assert all(w.get("grader_check", {}).get("decision") == "keep" for w in writes[3:])
+
+
+@pytest.mark.parametrize(
+    ("wrong_passages", "decision"),
+    [(3, "drop"), (1, "inconclusive")],
+    ids=["drop-established", "nothing-established"],
+)
+def test_a_probe_cut_off_after_the_wrong_answer_cells_keeps_them_and_their_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, wrong_passages: int, decision: str
+) -> None:
+    """Red when: a run cut off during the probe saves nothing (the wrong-answer
+    cells already paid for are lost), or the saved decision ignores a drop the
+    finished cells already establish, or a partial probe without one is saved as
+    anything but inconclusive with a "probe not finished" reason."""
+    wrong = {"blind": 1, "passages": wrong_passages}
+    correct_answer = _gc().CORRECT_ANSWER
+
+    def rule(system: str, user: str, mode: str) -> Any:
+        if PROBE_QUESTION in user and correct_answer in user:
+            return KeyboardInterrupt()  # the run is cut off at the first correct-answer call
+        return _probe_rule(wrong, {"blind": 5, "passages": 5})(system, user, mode)
+
+    report = tmp_path / "r.json"
+    with pytest.raises(KeyboardInterrupt):
+        _full_run(monkeypatch, _Scripted(rule), report=report)
+    assert report.exists(), "a probe cut off after two finished cells saved nothing"
+    written = json.loads(report.read_text(encoding="utf-8"))
+    check = written["grader_check"]
+    cells = check["probe"]["cells"]
+    assert cells["wrong"] == {"blind": [1, 1, 1], "passages": [wrong_passages] * 3}
+    assert not (cells.get("correct") or {}).get("blind")  # partner: really cut off there
+    assert written["judge"]["cases"] == []
+    assert check["decision"] == decision
+    if decision == "inconclusive":
+        assert any("probe not finished" in r for r in check["reasons"]), check["reasons"]
 
 
 def test_the_probe_grades_with_the_fixed_codex_passages(monkeypatch: pytest.MonkeyPatch) -> None:
