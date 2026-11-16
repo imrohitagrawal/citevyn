@@ -77,4 +77,17 @@ the top-level `backend/README.md` for the full command sequence.
 make seed    # seed_users, then seed_catalog (ingests the corpus), with backend/.env
 ```
 
-The script is safe to re-run; it skips rows that already exist.
+`seed_users` is safe to re-run; it skips rows that already exist. `seed_catalog` is too (it
+replaces each document's chunks), with one exception. Under the stub embedder, `seed_catalog`
+writes no vectors. If index `v1` already holds stored
+embeddings, `seed_catalog` stops before it writes anything, because re-seeding would replace
+them with NULL. Exit codes: 3 for this refusal, 1 for a failed seed, 2 for a bad argument.
+Then either set a real embedding provider (the seed re-embeds the shipped sources, a paid
+step; vectors on documents no shipped source owns are retired either way), skip the re-seed,
+or erase the vectors on purpose with
+
+```bash
+make seed SEED_CATALOG_ARGS=--discard-vectors
+```
+
+which acts on the same `DB_URL` and `backend/.env` as `make seed`.
