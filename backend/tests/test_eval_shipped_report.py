@@ -99,6 +99,51 @@ async def test_the_report_runs_on_the_real_recording_and_reaches_the_summary(
             job_summary.write(written)
 
 
+NEAR_GATE_CASE = "codex_par_listflags"
+
+
+async def test_a_real_question_near_the_global_gate_is_named(settings: Any) -> None:  # noqa: F811
+    """Red when: the gate is not recorded on the real global path, the near-the-gate
+    line stops naming a question whose recorded gap sits beside the margin, or the
+    recorded verdict is not the gate's real one (passed, at a gap of about 0.040).
+
+    Partner to the synthetic near-the-gate tests: on the recorded vectors this question's
+    gap to the runner-up is about 0.040, against a margin of 0.04.
+    """
+    embedder = _recorded()
+    case = next(c for c in shipped.all_shipped_cases() if c.id == NEAR_GATE_CASE)
+    identity = embedder.query_identity
+    async with shipped.shipped_corpus_session(settings, embedder, identity) as (session, _):
+        (outcome,) = await shipped.evaluate_cases(session, embedder, identity, [case], settings)
+    assert outcome.route == shipped.ROUTE_GLOBAL
+    assert (outcome.gate_min_top_score, outcome.gate_min_margin) == (
+        settings.retrieval_global_min_top_score,
+        settings.retrieval_global_min_margin,
+    )
+    report = shipped.build_report([outcome])
+    near = report["near_the_gate"]
+    assert near["checked"] == 1
+    assert [row["id"] for row in near["questions"]] == [NEAR_GATE_CASE]
+    (row,) = near["questions"]
+    assert row["margin"] is not None
+    assert abs(row["margin"] - settings.retrieval_global_min_margin) <= 0.01
+    # The real verdict: a recorded gap of about 0.040 clears the 0.04 margin.
+    assert row["margin"] >= settings.retrieval_global_min_margin
+    assert row["top_score"] >= settings.retrieval_global_min_top_score
+    assert row["passed"] is True
+    assert outcome.retrieved, "a passed global gate returns hits"
+    (line,) = [
+        line
+        for line in shipped.render_summary(report).splitlines()
+        if line.startswith("Near the gate")
+    ]
+    assert line.startswith("Near the gate (gap within "), line
+    assert "; 1 checked): " in line, line
+    assert line.endswith(f"): {NEAR_GATE_CASE} (gap 0.040, top {row['top_score']:.3f}, passed)."), (
+        line
+    )
+
+
 async def test_a_dead_vector_arm_fails_the_report(settings: Any) -> None:  # noqa: F811
     """Red when: a corpus with no live embeddings still produces a number."""
     embedder = _recorded()
