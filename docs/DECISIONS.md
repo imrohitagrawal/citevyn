@@ -18,6 +18,21 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-16 — The grader check runs once, under an approved cap
+Applies to #598 Step 3. The grader check (passage grading and the probe) runs once,
+by dispatching the judged job on its branch with `grader_check` ticked, never on a
+release tag. Its estimated cost is above the usual allowance for one judged run, so
+the owner approved a cap for this run. The judged job sets `CITEVYN_COST_HARD_DAILY_USD`
+to that cap, less one answer call's worst case, and only when `grader_check` is set.
+The cap is checked before each call and counted at the price book's rates. It is a
+backstop, not a guarantee: failed attempts and lost meter writes are not counted.
+
+### 2026-11-16 — Playwright bumps that move the pinned image wait for the owner's look
+Applies to Dependabot's Playwright updates (#622, #631). A `@playwright/test` bump
+also moves the pinned image and regenerates the visual baselines, and the owner looks
+at regenerated images before they are committed. Such a bump becomes its own work
+item; the Dependabot pull request is closed in its favour.
+
 ### 2026-11-13 — A judged run needs a separate grader model
 Applies to the judged eval (#598). A judged run refuses to start, before any paid
 call, unless `CITEVYN_EVAL_JUDGE_MODEL` (with its timeout) names a grader separate

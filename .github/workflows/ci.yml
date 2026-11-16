@@ -558,7 +558,7 @@ jobs:
         run: |
           if [ "${GRADER_CHECK}" = "true" ]; then
             export CITEVYN_EVAL_PASSAGE_GRADING=true
-            export CITEVYN_COST_HARD_DAILY_USD=1.00
+            export CITEVYN_COST_HARD_DAILY_USD=0.43
           fi
           uv run python -m tests.eval.runner --postgres --production-parity --report ../artifacts/eval_report.json
       - name: Export the recorded spend (grader check only)
