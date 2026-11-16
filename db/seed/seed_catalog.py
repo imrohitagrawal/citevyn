@@ -333,15 +333,19 @@ async def seed(database_url: str, *, discard_vectors: bool = False) -> dict[str,
         if not write_vectors:
             async with sessionmaker() as session:
                 discarded = await _stored_vector_count(session, INDEX_VERSION)
+                target = await session.get(IndexVersion, INDEX_VERSION)
             if discarded and not discard_vectors:
+                # Health reports only the active index, so "dead" is true only then.
+                is_active = target is not None and target.status is IndexStatus.active
+                consequence = " and the vector arm would then report dead" if is_active else ""
                 raise StoredVectorsError(
                     f"refusing to seed: index {INDEX_VERSION} holds {discarded} chunk(s) with a "
                     f"stored embedding. CITEVYN_EMBEDDING_PROVIDER is stub, which writes no "
-                    f"vectors, so this seed would erase all {discarded} of them and the vector "
-                    f"arm would then report dead. Either set CITEVYN_EMBEDDING_PROVIDER to a "
-                    f"real provider (the seed then re-embeds the whole corpus, a paid step), "
-                    f"or skip this re-seed, or pass {DISCARD_VECTORS_FLAG} to erase them on "
-                    f"purpose."
+                    f"vectors, so this seed would erase all {discarded} of them{consequence}. "
+                    f"Either set CITEVYN_EMBEDDING_PROVIDER to a real provider (the seed then "
+                    f"re-embeds the shipped sources, a paid step; vectors on documents no "
+                    f"shipped source owns are retired either way), or skip this re-seed, or "
+                    f"pass {DISCARD_VECTORS_FLAG} to erase them on purpose."
                 )
             if discarded:
                 # Said before the first write, so a run that then fails still said so.

@@ -54,7 +54,9 @@ async def _fresh_url(fh: tempfile._TemporaryFileWrapper[bytes]) -> str:
     return url
 
 
-async def _plant_v1_vector(url: str, index_version: str = "v1") -> None:
+async def _plant_v1_vector(
+    url: str, index_version: str = "v1", *, active: bool | None = None
+) -> None:
     """Give ``v1`` one active document whose single chunk has a stored embedding.
 
     ``claude_code`` is an allowlisted source, so the seed's replace path (not the
@@ -66,7 +68,9 @@ async def _plant_v1_vector(url: str, index_version: str = "v1") -> None:
         session.add(
             IndexVersion(
                 index_version=index_version,
-                status=IndexStatus.active if index_version == "v1" else IndexStatus.candidate,
+                status=IndexStatus.active
+                if (index_version == "v1" if active is None else active)
+                else IndexStatus.candidate,
                 source_version_hash="sha256:real",
                 embedding_provider="gemini",
                 embedding_model="gemini-embedding-001",
@@ -144,7 +148,8 @@ def _stub(url: str) -> Settings:
 async def test_stub_reseed_over_stored_vectors_stops_and_keeps_them(monkeypatch) -> None:
     """Red when: the seed no longer checks ``v1`` for stored vectors before its first
     write under the stub embedder (the planted embedding is replaced with NULL and
-    nothing is raised), or the check moves after the ingest."""
+    nothing is raised), or the check moves after the ingest, or the message stops
+    saying an ACTIVE v1's vector arm would report dead."""
     import db.seed.seed_catalog as seedmod
 
     with tempfile.NamedTemporaryFile(suffix=".db") as fh:
@@ -169,6 +174,10 @@ async def test_stub_reseed_over_stored_vectors_stops_and_keeps_them(monkeypatch)
     assert "paid" in message
     assert message.index("skip") < message.index("--discard-vectors")
     assert "keep" not in message.lower()
+    # v1 is the active index here, so health would report its vector arm dead.
+    assert "report dead" in message
+    # A real provider re-embeds only what a shipped source owns.
+    assert "shipped sources" in message and "retired either way" in message
     # Nothing was written: the planted chunk is the only one, embedding intact,
     # and no ingestion job ran.
     assert [c.chunk_text for c in chunks] == ["planted chunk"]
@@ -269,22 +278,44 @@ async def test_real_embedder_is_not_blocked(monkeypatch) -> None:
 
 
 async def test_override_announces_the_erase_before_writing(monkeypatch, capsys) -> None:
-    """Red when: the "erasing" line moves after the ingest (or goes), so a run that
-    fails part-way never said it had started erasing stored vectors."""
+    """Red when: the "erasing" line moves after the first write (for example to just
+    after ``drive`` returns), or goes, so a run that fails part-way never said it had
+    started erasing stored vectors."""
     import db.seed.seed_catalog as seedmod
 
-    async def _failing_drive(*_a, **_k) -> int:
-        return 1
+    seen_when_drive_began: list[str] = []
+
+    async def _drive_that_dies_part_way(*_a, **_k) -> int:
+        seen_when_drive_began.append(capsys.readouterr().out)
+        raise RuntimeError("ingest died part-way")
 
     with tempfile.NamedTemporaryFile(suffix=".db") as fh:
         url = await _fresh_url(fh)
         await _plant_v1_vector(url)
         monkeypatch.setattr(seedmod, "get_settings", lambda: _stub(url))
-        monkeypatch.setattr(seedmod, "drive", _failing_drive)
-        with pytest.raises(seedmod.SeedError):
+        monkeypatch.setattr(seedmod, "drive", _drive_that_dies_part_way)
+        with pytest.raises(RuntimeError, match="part-way"):
             await seedmod.seed(url, discard_vectors=True)
 
-    assert "--discard-vectors: erasing 1 stored vector(s) in v1" in capsys.readouterr().out
+    assert len(seen_when_drive_began) == 1
+    assert "--discard-vectors: erasing 1 stored vector(s) in v1" in seen_when_drive_began[0]
+
+
+async def test_refusal_on_an_inactive_v1_does_not_claim_a_dead_arm(monkeypatch) -> None:
+    """Red when: the refusal says the vector arm would "report dead" although v1 is
+    not the active index (health reports only the active index)."""
+    import db.seed.seed_catalog as seedmod
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as fh:
+        url = await _fresh_url(fh)
+        await _plant_v1_vector(url, active=False)
+        monkeypatch.setattr(seedmod, "get_settings", lambda: _stub(url))
+        with pytest.raises(seedmod.StoredVectorsError) as exc:
+            await seedmod.seed(url)
+
+    message = str(exc.value)
+    assert "1 chunk" in message and "--discard-vectors" in message
+    assert "dead" not in message
 
 
 async def test_an_abbreviated_flag_is_refused_and_erases_nothing(monkeypatch) -> None:
@@ -339,7 +370,8 @@ async def test_vectors_in_another_index_do_not_block_v1(monkeypatch) -> None:
 
 def test_make_seed_passes_catalog_args_to_the_catalog_seed_only() -> None:
     """Red when: ``SEED_CATALOG_ARGS`` stops reaching the ``seed_catalog`` line of
-    ``make seed``, or leaks onto ``seed_users`` (which takes no such flag)."""
+    ``make seed``, leaks onto ``seed_users`` (which takes no such flag), or is taken
+    from the environment (``?=``) instead of only the command line."""
     import shutil
     import subprocess
 
@@ -347,13 +379,13 @@ def test_make_seed_passes_catalog_args_to_the_catalog_seed_only() -> None:
     assert make, "this test needs make on PATH"
     env = {k: v for k, v in os.environ.items() if k not in {"MAKEFLAGS", "MAKELEVEL"}}
 
-    def dry(*extra: str) -> list[str]:
+    def dry(*extra: str, extra_env: dict[str, str] | None = None) -> list[str]:
         out = subprocess.run(
             [make, "--no-print-directory", "-n", "seed", *extra],
             cwd=_REPO_ROOT,
             capture_output=True,
             text=True,
-            env=env,
+            env={**env, **(extra_env or {})},
             check=True,
             timeout=60,
         ).stdout
@@ -367,6 +399,10 @@ def test_make_seed_passes_catalog_args_to_the_catalog_seed_only() -> None:
     assert "--discard-vectors" not in users[0]
     # Partner: without the variable the catalog line carries no flag.
     assert all("--discard-vectors" not in ln for ln in dry())
+    # An exported variable must not ride along on every later `make seed`/`make demo`:
+    # only the command line sets it.
+    exported = dry(extra_env={"SEED_CATALOG_ARGS": "--discard-vectors"})
+    assert exported and all("--discard-vectors" not in ln for ln in exported)
 
 
 async def _run_main(seedmod, argv: list[str] | None) -> None:

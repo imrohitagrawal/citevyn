@@ -301,7 +301,9 @@ migrate: ## Apply Alembic migrations to head against DB_URL
 # files) and free (stub embedder by default).
 # SEED_CATALOG_ARGS goes to seed_catalog only, e.g. `make seed SEED_CATALOG_ARGS=--discard-vectors`
 # (see db/README.md: under the stub embedder the seed refuses to erase stored vectors).
-SEED_CATALOG_ARGS ?=
+# ``:=`` not ``?=``: only the command line sets it, so an exported value cannot
+# ride along on every later `make seed` / `make demo`.
+SEED_CATALOG_ARGS :=
 seed: ## Seed demo users + ingest the shipped corpus into index v1 (idempotent; stored-vector refusal: db/README.md)
 	@echo "==> seeding demo users (DB_URL redacted)"
 	@CITEVYN_DATABASE_URL=$(DB_URL) uv run --project backend --no-env-file $(WITH_ENV) python -m db.seed.seed_users
