@@ -1095,3 +1095,33 @@ def test_a_probe_cell_stopped_by_the_cap_is_labelled_budget(
     errors = _run(monkeypatch, grader)["grader_check"]["probe"]["errors"]
     assert len(errors) == 6
     assert all(e["message"].startswith("budget: ") for e in errors), errors
+
+
+def test_the_spend_rows_are_read_again_before_each_case_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red when: the rows are read only at the probe saves, so a per-case save
+    carries a stale recorded spend that misses every answer since the probe."""
+    writes: list[dict[str, Any]] = []
+    real = runner_mod.write_report
+    reads: list[int] = []
+
+    def capture(path: Any, summary: dict[str, Any], settings: Any, **kwargs: Any) -> None:
+        writes.append(json.loads(json.dumps(summary, default=str)))
+        real(path, summary, settings, **kwargs)
+
+    async def growing(_settings: Any) -> list[Any]:
+        reads.append(1)
+        return [
+            build_call(kind="llm", provider="gemini", model="m", input_tokens=1, output_tokens=1)
+            for _ in reads
+        ]
+
+    monkeypatch.setattr(runner_mod, "write_report", capture)
+    monkeypatch.setattr(runner_mod, "_read_spend_rows", growing)
+    _run(monkeypatch, _Scripted(), report=tmp_path / "r.json")
+    rows = [w["grader_check"]["recorded_spend"]["totals"]["rows"] for w in writes]
+    # Four probe-cell saves and one per case in each pass, each after a fresh read;
+    # the save after the main pass (nothing paid since its last case) reuses its
+    # rows, and the final save reads again.
+    assert rows == [1, 2, 3, 4, 5, 6, 6, 7, 8, 9], rows
