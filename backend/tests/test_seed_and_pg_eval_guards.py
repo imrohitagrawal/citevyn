@@ -1010,19 +1010,20 @@ def test_seed_catalog_main_does_not_print_password(monkeypatch, capsys) -> None:
     real = Settings(database_url=_URL_WITH_PW, _env_file=None)
     monkeypatch.setattr(seedmod, "get_settings", lambda: real)
 
-    async def _fake_seed(_url: str) -> dict[str, int | str]:
+    async def _fake_seed(_url: str, *, discard_vectors: bool = False) -> dict[str, int | str]:
         return {
             "sources": 0,
             "documents": 0,
             "chunks": 0,
             "exact_terms": 0,
             "retired_documents": 0,
+            "discarded_vectors": 0,
             "index_version": "v1",
             "status": "promoted",
         }
 
     monkeypatch.setattr(seedmod, "seed", _fake_seed)
-    seedmod.main()
+    seedmod.main([])
     out = capsys.readouterr().out
     assert _SECRET_PW not in out
     assert "db:5432/citevyn" in out
@@ -1042,7 +1043,7 @@ def test_seed_catalog_names_the_embedder_before_ingesting(monkeypatch, capsys, p
     monkeypatch.setattr(seedmod, "get_settings", lambda: real)
     printed_before_ingest: list[str] = []
 
-    async def _fake_seed(_url: str) -> dict[str, int | str]:
+    async def _fake_seed(_url: str, *, discard_vectors: bool = False) -> dict[str, int | str]:
         printed_before_ingest.append(capsys.readouterr().out)
         return {
             "sources": 0,
@@ -1050,12 +1051,13 @@ def test_seed_catalog_names_the_embedder_before_ingesting(monkeypatch, capsys, p
             "chunks": 0,
             "exact_terms": 0,
             "retired_documents": 0,
+            "discarded_vectors": 0,
             "index_version": "v1",
             "status": "promoted",
         }
 
     monkeypatch.setattr(seedmod, "seed", _fake_seed)
-    seedmod.main()
+    seedmod.main([])
     assert printed_before_ingest == [f"Embedding provider: {provider}\n"]
 
 

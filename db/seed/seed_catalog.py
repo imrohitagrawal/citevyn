@@ -40,6 +40,7 @@ Two consequences worth knowing:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from datetime import UTC, datetime
@@ -75,6 +76,8 @@ from . import redact_database_url  # noqa: E402
 
 INDEX_VERSION: str = "v1"
 
+DISCARD_VECTORS_FLAG: str = "--discard-vectors"
+
 
 class SeedError(RuntimeError):
     """A source failed to ingest, so the demo catalog is incomplete.
@@ -83,6 +86,26 @@ class SeedError(RuntimeError):
     *some* questions and refuses others — which reads as a retrieval bug at
     demo time rather than as a broken bootstrap.
     """
+
+
+class StoredVectorsError(SeedError):
+    """A stub re-seed would replace stored embeddings with NULL (#626).
+
+    The runner replaces each document's chunks, and under the stub embedder the
+    new chunks carry no embedding. Over an index that holds real vectors that is
+    a silent erase, and getting them back means embedding the corpus again.
+    """
+
+
+async def _stored_vector_count(session: AsyncSession, index_version: str) -> int:
+    """How many chunks in ``index_version`` hold a non-NULL embedding."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Chunk)
+        .join(Document, Document.document_id == Chunk.document_id)
+        .where(Document.index_version == index_version, Chunk.embedding.is_not(None))
+    )
+    return int(count or 0)
 
 
 async def _retire_orphans(session: AsyncSession, index_version: str) -> int:
@@ -220,7 +243,7 @@ async def _tally(session: AsyncSession, index_version: str) -> dict[str, int]:
     }
 
 
-async def seed(database_url: str) -> dict[str, int | str]:
+async def seed(database_url: str, *, discard_vectors: bool = False) -> dict[str, int | str]:
     """Ingest the shipped corpus into ``database_url`` as index ``v1``.
 
     Returns a summary of what the index holds afterwards. Safe to re-run: the
@@ -234,7 +257,11 @@ async def seed(database_url: str) -> dict[str, int | str]:
     twice on any database bootstrapped before #178.
 
     Under the default stub embedder no vectors are written at all — see
-    ``write_vectors`` on :func:`app.worker.cli.build_runner`.
+    ``write_vectors`` on :func:`app.worker.cli.build_runner`. So before the
+    first write, a stub seed checks ``v1``: if any chunk there holds an
+    embedding it raises :class:`StoredVectorsError` and writes nothing, unless
+    ``discard_vectors`` is set (#626). The summary's ``discarded_vectors`` is
+    the number of stored embeddings the run replaced with NULL.
 
     **Failure path — what is and is not guaranteed.** If any source fails this
     raises :class:`SeedError`, having skipped retirement and activation. That
@@ -283,14 +310,29 @@ async def seed(database_url: str) -> dict[str, int | str]:
     # Not written, rather than written-then-stripped: ``drive`` commits each
     # source as it goes and a re-seed runs against an already-ACTIVE ``v1``, so
     # any after-the-fact strip leaves a window in which a live reader sees them.
+    write_vectors = settings.embedding_provider != "stub"
     runner = build_runner(
         settings,
         index_version=INDEX_VERSION,
-        write_vectors=settings.embedding_provider != "stub",
+        write_vectors=write_vectors,
     )
     engine = create_async_engine(database_url, future=True)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        # Before the first write (#626): ``drive`` commits source by source, so a
+        # check after it would leave the erase half-done.
+        discarded = 0
+        if not write_vectors:
+            async with sessionmaker() as session:
+                discarded = await _stored_vector_count(session, INDEX_VERSION)
+            if discarded and not discard_vectors:
+                raise StoredVectorsError(
+                    f"refusing to seed: index {INDEX_VERSION} holds {discarded} chunk(s) with a "
+                    f"stored embedding, and the stub embedder writes none, so this seed would "
+                    f"erase all {discarded} of them (the vector arm would then report dead). "
+                    f"Set a real embedding provider to keep vectors, or pass "
+                    f"{DISCARD_VECTORS_FLAG} to erase them on purpose."
+                )
         exit_code = await drive(runner, sessionmaker, list(MVP_SOURCES), INDEX_VERSION)
         if exit_code != 0:
             raise SeedError(
@@ -305,18 +347,40 @@ async def seed(database_url: str) -> dict[str, int | str]:
     finally:
         await engine.dispose()
     summary["retired_documents"] = retired
+    summary["discarded_vectors"] = discarded
     summary["index_version"] = INDEX_VERSION
     summary["status"] = status
     return summary
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI entry point: seed and print a one-line summary."""
+    parser = argparse.ArgumentParser(
+        prog="seed_catalog", description="Ingest the shipped corpus into index v1."
+    )
+    parser.add_argument(
+        DISCARD_VECTORS_FLAG,
+        action="store_true",
+        help=(
+            "under the stub embedder, allow the seed to replace stored embeddings in "
+            f"{INDEX_VERSION} with NULL (refused without this flag)"
+        ),
+    )
+    args = parser.parse_args(argv)
     settings = get_settings()
     # Before the ingest, while it can still be stopped: `make seed` loads
     # backend/.env, and a real embedder there makes this run spend money.
     print(f"Embedding provider: {settings.embedding_provider}", flush=True)
-    summary = asyncio.run(seed(settings.database_url))
+    try:
+        summary = asyncio.run(seed(settings.database_url, discard_vectors=args.discard_vectors))
+    except StoredVectorsError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if summary["discarded_vectors"]:
+        print(
+            f"{DISCARD_VECTORS_FLAG}: erased {summary['discarded_vectors']} stored vector(s) "
+            f"in {summary['index_version']}"
+        )
     # Redact the password: this line lands in deploy.sh / CI logs (#93).
     print(
         f"Seeded catalog into {redact_database_url(settings.database_url)}: "

@@ -78,3 +78,8 @@ make seed    # seed_users, then seed_catalog (ingests the corpus), with backend/
 ```
 
 The script is safe to re-run; it skips rows that already exist.
+
+Under the stub embedder, `seed_catalog` writes no vectors. If index `v1` already holds stored
+embeddings, it stops before writing anything, because re-seeding would replace them with
+NULL. To erase them on purpose, run it with `--discard-vectors`:
+`uv run --project backend python -m db.seed.seed_catalog --discard-vectors`.
