@@ -56,7 +56,7 @@ MIN_COVERAGE = 0.9
 # A grader-check run needs this much of the UTC day left: the daily spend cap
 # counts today's spend only, so a run crossing 00:00 UTC would reset it mid-run.
 MIN_MINUTES_BEFORE_UTC_MIDNIGHT = 250
-# The same rule for a switch-off dispatch, which ci.yml caps too (#598 Step 4):
+# The same rule for a capped baseline dispatch, which ci.yml caps too (#598 Step 4):
 # at least its job's 68-minute limit, rounded up.
 MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH = 70
 
@@ -377,20 +377,22 @@ def _minutes_before_utc_midnight(now: datetime) -> float:
 
 
 def capped_dispatch_window_end() -> str:
-    """The latest UTC start time (``HH:MM``) of a capped switch-off dispatch."""
+    """The latest UTC start time (``HH:MM``) of a capped baseline dispatch."""
     minutes = 24 * 60 - MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def capped_dispatch_refusal(*, event: str | None, ref: str | None, now: datetime) -> str | None:
+def capped_dispatch_refusal(*, capped: bool, now: datetime) -> str | None:
     """Why a switch-off run that ci.yml caps must not start, or ``None``.
 
-    ci.yml caps a ``workflow_dispatch`` run with the grader check off unless its ref is
-    a tag (#598 Step 4). The cap is the daily guard, which resets at 00:00 UTC, so such
-    a run needs ``MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH`` minutes of the UTC
-    day left. Push and tag runs, and a dispatch on a tag, are not capped and not held
-    to the window."""
-    if event != "workflow_dispatch" or (ref or "").startswith("refs/tags/"):
+    ci.yml caps a switch-off ``workflow_dispatch`` run only when it sets the
+    ``capped_baseline`` input, and then tells the runner so (``capped``, from
+    ``CITEVYN_EVAL_CAPPED_DISPATCH=true``; #598 Step 4). The cap is the daily guard,
+    which resets at 00:00 UTC, so such a run needs
+    ``MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH`` minutes of the UTC day left.
+    Every other run (push, tag, a dispatch without the input, such as a release
+    re-run) is not capped and not held to the window."""
+    if not capped:
         return None
     left = _minutes_before_utc_midnight(now)
     if left >= MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH:

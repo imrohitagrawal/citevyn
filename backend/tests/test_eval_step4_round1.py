@@ -78,9 +78,18 @@ def _at(monkeypatch: pytest.MonkeyPatch, hour: int, minute: int = 0) -> None:
     monkeypatch.setattr(gc, "utc_now", lambda: moment, raising=True)
 
 
-def _main(monkeypatch: pytest.MonkeyPatch, *, event: str, ref: str) -> int | None:
+def _main(
+    monkeypatch: pytest.MonkeyPatch, *, event: str, ref: str, capped: bool = False
+) -> int | None:
+    """``main()`` for one run. ``capped``: ci.yml marked it a capped baseline dispatch
+    (``CITEVYN_EVAL_CAPPED_DISPATCH=true``, round 2: only that mark holds a run to the
+    window, never the event or the ref)."""
     monkeypatch.setenv("GITHUB_EVENT_NAME", event)
     monkeypatch.setenv("GITHUB_REF", ref)
+    if capped:
+        monkeypatch.setenv("CITEVYN_EVAL_CAPPED_DISPATCH", "true")
+    else:
+        monkeypatch.delenv("CITEVYN_EVAL_CAPPED_DISPATCH", raising=False)
     try:
         return runner_mod.main(["--quiet"])
     except _Started:
@@ -90,12 +99,12 @@ def _main(monkeypatch: pytest.MonkeyPatch, *, event: str, ref: str) -> int | Non
 def test_a_capped_switch_off_dispatch_is_refused_too_close_to_utc_midnight(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], started: list[Any]
 ) -> None:
-    """Red when: a switch-off dispatch (capped by ci.yml's ``CAP_USD`` line) starts with
+    """Red when: a capped baseline dispatch (capped by ci.yml's ``CAP_USD`` line) starts with
     less of the UTC day left than its job may run, so the daily cap could reset
     mid-run; or the refusal comes after the eval started, is not one line, or does
     not name the reason and the UTC window."""
     _at(monkeypatch, 23, 0)
-    code = _main(monkeypatch, event="workflow_dispatch", ref=DISPATCH_REF)
+    code = _main(monkeypatch, event="workflow_dispatch", ref=DISPATCH_REF, capped=True)
     assert started == []
     assert code == 2
     out = capsys.readouterr().out.strip()
@@ -108,23 +117,29 @@ def test_a_capped_switch_off_dispatch_is_refused_too_close_to_utc_midnight(
 def test_a_capped_dispatch_runs_with_enough_of_the_day_left(
     monkeypatch: pytest.MonkeyPatch, started: list[Any]
 ) -> None:
-    """Partner of the refusal. Red when: a switch-off dispatch is refused at noon."""
+    """Partner of the refusal. Red when: a capped baseline dispatch is refused at noon."""
     _at(monkeypatch, 12, 0)
-    assert _main(monkeypatch, event="workflow_dispatch", ref=DISPATCH_REF) is None
+    assert _main(monkeypatch, event="workflow_dispatch", ref=DISPATCH_REF, capped=True) is None
     assert len(started) == 1
 
 
 @pytest.mark.parametrize(
     ("event", "ref"),
-    [("workflow_dispatch", TAG_REF), ("push", "refs/heads/main"), ("push", TAG_REF)],
-    ids=["dispatch-on-a-tag", "push-main", "tag-push"],
+    [
+        ("workflow_dispatch", DISPATCH_REF),
+        ("workflow_dispatch", TAG_REF),
+        ("push", "refs/heads/main"),
+        ("push", TAG_REF),
+    ],
+    ids=["dispatch-on-a-branch", "dispatch-on-a-tag", "push-main", "tag-push"],
 )
 def test_uncapped_runs_are_not_held_to_the_window(
     monkeypatch: pytest.MonkeyPatch, started: list[Any], event: str, ref: str
 ) -> None:
-    """Red when: the window refusal reaches a run ci.yml does not cap (a push, a tag
-    run, or a dispatch on a release tag, which the release gate accepts): release
-    gating would change beyond the corpus."""
+    """Red when: the window refusal reaches a run ci.yml does not mark capped (a push,
+    a tag run, or a dispatch without the ``capped_baseline`` input on a branch or a
+    tag, such as a release re-run the gate accepts): release gating would change
+    beyond the corpus."""
     _at(monkeypatch, 23, 30)
     assert _main(monkeypatch, event=event, ref=ref) is None
     assert len(started) == 1
@@ -137,10 +152,8 @@ def test_the_window_threshold_is_read_against_a_fixed_clock() -> None:
     edge = datetime(2026, 11, 17, tzinfo=UTC).timestamp() - need * 60
     at_edge = datetime.fromtimestamp(edge, tz=UTC)
     late = datetime.fromtimestamp(edge + 60, tz=UTC)
-    assert (
-        gc.capped_dispatch_refusal(event="workflow_dispatch", ref=DISPATCH_REF, now=at_edge) is None
-    )
-    refusal = gc.capped_dispatch_refusal(event="workflow_dispatch", ref=DISPATCH_REF, now=late)
+    assert gc.capped_dispatch_refusal(capped=True, now=at_edge) is None
+    refusal = gc.capped_dispatch_refusal(capped=True, now=late)
     assert refusal is not None and "00:00 UTC" in refusal
 
 

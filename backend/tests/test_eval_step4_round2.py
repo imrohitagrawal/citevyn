@@ -16,7 +16,7 @@ def test_the_capped_dispatch_refusal_rounds_the_minutes_left_down() -> None:
     """Red when: the minutes left are rounded to nearest, so 69.5 minutes left reads
     "only 70 minutes are left ... needs 70" (a refusal that contradicts itself)."""
     now = datetime(2026, 11, 16, 22, 50, 30, tzinfo=UTC)
-    refusal = gc.capped_dispatch_refusal(event="workflow_dispatch", ref=DISPATCH_REF, now=now)
+    refusal = gc.capped_dispatch_refusal(capped=True, now=now)
     assert refusal is not None  # partner: 69.5 minutes left is refused
     assert refusal.startswith("only 69 minutes are left before 00:00 UTC"), refusal
     assert "only 70 " not in refusal

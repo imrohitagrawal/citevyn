@@ -93,15 +93,6 @@ def _no_job_summary(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
         monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _no_dispatch_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove ``GITHUB_EVENT_NAME`` for every test. The runner refuses a capped
-    switch-off dispatch near 00:00 UTC (#598 Step 4), so a test job started by a
-    manual dispatch would otherwise refuse the runner tests late in the UTC day. A
-    test of that rule sets the variable itself."""
-    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
-
-
 @pytest.fixture
 def client() -> Generator[TestClient, None, None]:
     """Yield a :class:`TestClient` whose lifespan has fully started.

@@ -2680,11 +2680,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"GRADER CHECK REFUSED (nothing was run, nothing was spent): {refusal}")
             return 2
     else:
-        # A switch-off dispatch runs under ci.yml's daily-guard cap (#598 Step 4), so
-        # it too needs enough of the UTC day left; tag and push runs are not capped.
+        # A capped baseline dispatch runs under ci.yml's daily-guard cap (#598 Step 4),
+        # so it too needs enough of the UTC day left. ci.yml marks it explicitly; no
+        # other run (push, tag, a release re-run by hand) is capped or held.
         refusal = grader_check.capped_dispatch_refusal(
-            event=os.environ.get("GITHUB_EVENT_NAME"),
-            ref=os.environ.get("GITHUB_REF"),
+            capped=os.environ.get("CITEVYN_EVAL_CAPPED_DISPATCH") == "true",
             now=grader_check.utc_now(),
         )
         if refusal is not None:
