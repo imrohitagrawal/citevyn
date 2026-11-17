@@ -172,6 +172,21 @@ def test_answers_by_another_model_with_no_cause_are_counted_without_record(
     assert any(f"without record {n}" in ln for ln in runner_mod.pass_report_lines(judge))
 
 
+def test_a_failed_retry_is_recorded_on_the_retry_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red when: the #208 retry's failure is lost or lands on the first answer call."""
+    from tests.test_eval_report_fields import _exact_first_retriever  # pyright: ignore
+
+    _exact_first_retriever(monkeypatch)
+    answers = iter([None, _err("http_status", status_code=500)])
+    primary = _Gemini(
+        "No markers.", fail=lambda s, _u: next(answers) if s is CallSite.answer else None
+    )
+    secondary = _Model("Retry grounded [1].", provider="router", model=FALLBACK)
+    (judged,) = _judge_chain(monkeypatch, [_golden()["codex_lit_modelflag"]], primary, secondary)
+    calls = [c for _t, site, c in _causes(judged) if site == "answer"]
+    assert calls == [[], ["gemini http_status 500"]]  # partner: the retry really ran
+
+
 def test_when_both_providers_fail_the_failed_record_keeps_its_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
