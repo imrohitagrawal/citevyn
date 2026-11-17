@@ -750,10 +750,12 @@ def _steps() -> list[dict[str, Any]]:
 def test_the_cap_is_the_one_run_approved_amount() -> None:
     """Red when: the cap changes. It is the amount approved for one grader-check
     run (docs/DECISIONS.md, 2026-11-16), less one answer call's worst case; a
-    new value needs a new approval, and this line changes with it."""
+    new value needs a new approval, and this line changes with it. Since #598
+    Step 4 the script also caps a switch-off dispatch (its own value, pinned in
+    ``test_grader_check_ci.py``), so this pins the grader check's line only."""
     (step,) = [s for s in _steps() if "tests.eval.runner" in str(s.get("run", ""))]
     exports = re.findall(r"export CITEVYN_COST_HARD_DAILY_USD=(\S+)", str(step["run"]))
-    assert exports == ["0.43"]
+    assert exports.count("0.43") == 1, exports
 
 
 def test_the_export_step_runs_without_the_provider_keys() -> None:

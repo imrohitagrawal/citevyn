@@ -97,6 +97,9 @@ TODAY_TOP = {
     "passes_completed",
     "retrieval",
     "total_cases",
+    # #598 Step 4: which corpus each half ran on, and the answer index's size.
+    "corpus",
+    "index_chunks",
 }
 TODAY_CASE = {
     "adversarial_score",
@@ -133,6 +136,9 @@ TODAY_CASE = {
     "spread",
     "standard_median",
     "standard_scores",
+    # #598 Step 4: the must_say oracle (report only) and the shipped-retrieval check.
+    "must_say_missing",
+    "shipped_gold_in_evidence",
 }
 TODAY_GRADER_CALL = {"duration_seconds", "model", "provider", "rationale", "score"}
 BLIND_FIELDS = (
