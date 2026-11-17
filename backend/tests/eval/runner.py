@@ -63,6 +63,9 @@ from app.models import (
     MessageRole,
     RetrievedEvidence,
 )
+from app.retrieval.types import VectorDegrade
+
+from ..conftest import corpus_fixture_specs
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
@@ -71,10 +74,13 @@ from . import judge as judge_module
 from .cases import EvalCase, filter_cases, load_cases
 from .groundedness import fact_coverage, forbidden_present, missing_facts
 from .judge import JudgeParseError, parse_verdict, score_answer_panel_async
+from .latency import grader_latency, latency_line
 from .parity import _CREDENTIAL
 from .paths import DEFAULT_REPORT_PATH, GOLDEN_PATH
 from .probe import Probe, probe_retrieval
-from .retrieval import evaluate_retrieval, postgres_session, seeded_session
+from .recorded import ShippedEvalError
+from .retrieval import evaluate_retrieval, seeded_session
+from .shipped import check_shipped_judge_ready, shipped_heading_keys, shipped_judge_session
 from .subset import select_judge_subset
 from .thresholds import (
     MAX_REFUSAL_LEAKS,
@@ -115,6 +121,15 @@ class JudgedCase:
     contested: bool = False
     fact_coverage: float | None = None
     missing_facts: tuple[str, ...] = ()
+    # must_say (#598 Step 4), reported and gating nothing until #602 (Step 5): the
+    # entries (raw form, in order) the answer does not contain, by the groundedness
+    # matcher. ``None`` when the case declares no ``must_say`` (or no answer was seen).
+    must_say_missing: tuple[str, ...] | None = None
+    # Whether a passage the answer was made from is one of the case's
+    # ``shipped_gold`` passages (#598 Step 4): a retrieval miss on the shipped corpus
+    # tells apart from a bad answer. ``None`` when the case has no shipped gold, or
+    # its evidence is unknown.
+    shipped_gold_in_evidence: bool | None = None
     # Prompt-injection resistance (Item 2): forbidden substrings the answer emitted (a
     # non-empty tuple = the model complied with an injection → a leak). ``None`` when
     # the case declares no ``must_not_contain``.
@@ -210,9 +225,12 @@ PASSAGE_FIELDS = (
 async def _judge_session(settings: Settings, *, postgres: bool):
     """Yield the DB session the judge drives the orchestrator against.
 
-    Hermetic SQLite by default; the real Postgres+pgvector catalog (with a real
-    embedder, rolled back for zero CATALOG residue) when ``postgres=True`` so the
-    judged answers reflect the live semantic retrieval path.
+    Hermetic SQLite (the conftest fixture) by default. With ``postgres=True``, the
+    44 shipped passages production serves, with their recorded chunk vectors
+    (:func:`tests.eval.shipped.shipped_judge_session`, #598 Step 4), rolled back for
+    zero CATALOG residue; queries are embedded live, so the judged answers reflect
+    the live semantic retrieval path. The retrieval half keeps the fixture
+    (:func:`tests.eval.retrieval.postgres_session`).
 
     The rollback covers seeded catalog/session rows only. ``provider_calls`` rows
     written by the cost meter (#153 Layer 1) are committed on a separate session and
@@ -221,7 +239,7 @@ async def _judge_session(settings: Settings, *, postgres: bool):
     ``docs/COST_CONTROLS.md`` §1.
     """
     if postgres:
-        async with postgres_session(settings) as (session, _embedder):
+        async with shipped_judge_session(settings) as session:
             yield session
     else:
         async with seeded_session() as session:
@@ -487,6 +505,9 @@ async def _turn_evidence(session: AsyncSession, session_id: uuid.UUID) -> list[d
                 "type": row.retrieval_type.value,
                 "text": text,
                 "truncated": text != chunk.chunk_text,
+                # The chunk's identity, so a report can prove which passage this was
+                # (the text above may be cut) (#598 Step 4).
+                "content_checksum": chunk.content_checksum,
             }
         )
     return evidence
@@ -647,6 +668,36 @@ class _CaseState:
 
 
 _T = TypeVar("_T")
+
+
+def _shipped_gold_in_evidence(case: EvalCase, entry: JudgedCase, state: _CaseState) -> bool | None:
+    """Whether a passage the answer was made from is one of the case's shipped gold
+    passages; ``None`` when it has none or the passages are unknown (#598 Step 4)."""
+    if not case.shipped_gold:
+        return None
+    if entry.cache_origin is not None:
+        evidence = entry.cache_origin.get("evidence")
+    else:
+        evidence = entry.evidence if state.evidence_read else None
+    if evidence is None:
+        return None
+    keys = {f"{e.get('source')}#{e.get('heading')}" for e in evidence}
+    return not keys.isdisjoint(case.shipped_gold)
+
+
+def _degrade_entries(retrievals: list[Any]) -> list[dict[str, Any]]:
+    """A harness error for each retrieval of a case whose vector arm degraded."""
+    return [
+        {
+            "stage": "answer",
+            "type": "VectorDegrade",
+            "message": f"retrieval {r.tag} ({r.query!r}) ran with the vector arm degraded "
+            f"({VectorDegrade(r.vector_degrade).value}); its passages are not the live "
+            "vector arm's",
+        }
+        for r in retrievals
+        if r.vector_degrade is not None and r.vector_degrade is not VectorDegrade.none
+    ]
 
 
 async def _judge_cases(
@@ -1047,6 +1098,11 @@ async def _judge_cases(
             if case.expected_facts:
                 entry.fact_coverage = fact_coverage(answer, case.expected_facts)
                 entry.missing_facts = tuple(missing_facts(answer, case.expected_facts))
+            # must_say (#598 Step 4): the same matcher, kept apart from the facts so it
+            # moves no gate, no leak rule and no groundedness population.
+            if case.must_say:
+                entry.must_say_missing = tuple(missing_facts(answer, case.must_say))
+            entry.shipped_gold_in_evidence = _shipped_gold_in_evidence(case, entry, state)
             if entry.answer_errored:
                 return
             # Multi-turn echo oracle (#169) — judge-independent, and the single assertion
@@ -1139,6 +1195,7 @@ async def _judge_cases(
             state = _CaseState()
             writers_before = dict(ledger.writers)
             unusable = False
+            retrievals_from = len(probe.retrievals)
             try:
                 async with session.begin_nested():
                     await _drive(case, entry, state)
@@ -1177,6 +1234,11 @@ async def _judge_cases(
                     for record in answer_llm.records:
                         _budget(entry, record.cause)
                     answer_llm.records.clear()
+            if postgres:
+                # The judged half must answer from the live vector arm (#598 Step 4):
+                # a degraded retrieval served keyword-only passages, so it is a
+                # harness error on the case, never a silent answer.
+                state.harness.extend(_degrade_entries(probe.retrievals[retrievals_from:]))
             if checking:
                 stop = state_budget.pop(id(entry), None)
                 if stop is not None:
@@ -1417,6 +1479,29 @@ def _summarize(
     def _errored_entries(pool: list[JudgedCase]) -> list[dict[str, Any]]:
         return [{"case_id": j.case_id, "reason": j.error or ""} for j in pool if j.answer_errored]
 
+    # must_say (#598 Step 4): reported per pass, gating nothing until #602 (Step 5).
+    # ``declared`` is how many of the pass's cases carry it, so a silent oracle and a
+    # passing one do not look alike; ``not_observed`` names a declaring case whose
+    # answer was never seen.
+    declaring = {c.id for c in cases if c.must_say}
+    must_say_pool = [j for j in judged if j.case_id in declaring]
+    must_say = {
+        "declared": len(must_say_pool),
+        "missing": [
+            {"case_id": j.case_id, "entries": list(j.must_say_missing)}
+            for j in must_say_pool
+            if j.must_say_missing
+        ],
+        "not_observed": [j.case_id for j in must_say_pool if j.must_say_missing is None],
+    }
+    # Grader latency by kind (#598 Step 4): the blind panel always, the passage panel
+    # with the grader check on.
+    latency = {"blind": grader_latency(c for j in judged for c in j.grader_calls)}
+    if any(j.passage_grader_calls is not None for j in judged):
+        latency["passages"] = grader_latency(
+            c for j in judged for c in j.passage_grader_calls or []
+        )
+
     # Prompt-injection resistance (Item 2): a case OBEYED an injection only when the
     # forbidden sentinel is present AND the answer failed to actually answer (its hard
     # facts are not fully grounded). A resistant answer that names the sentinel while
@@ -1460,6 +1545,8 @@ def _summarize(
             "helper_fallbacks": helper_fallbacks,
             "helper_failures": helper_failures,
             "harness_errors": harness_errors,
+            "must_say": must_say,
+            "grader_latency": latency,
             "declines_by_reason": dict(
                 sorted(Counter(j.decline_reason for j in judged if j.decline_reason).items())
             ),
@@ -1828,9 +1915,14 @@ async def run_eval_async(
     ``report_path``: write the report there after each answer pass and at the end
     (#598), with every configured key value redacted.
 
-    ``postgres=True`` runs against a real Postgres+pgvector catalog with a real
-    embedder (opt-in; see :func:`tests.eval.retrieval.postgres_session`) so the
-    semantic/vector arm is actually exercised. Default is the hermetic SQLite path.
+    ``postgres=True`` runs against a real Postgres+pgvector catalog so the
+    semantic/vector arm is actually exercised (opt-in): the retrieval half on the
+    test fixture with a real embedder (:func:`tests.eval.retrieval.postgres_session`),
+    the judged answer half on the 44 shipped passages with their recorded vectors
+    (:func:`tests.eval.shipped.shipped_judge_session`, #598 Step 4), after a
+    preflight that refuses, before anything is spent, a recording that is not this
+    run's or production's embedder, a changed shipped chunk, or a non-empty catalog.
+    Default is the hermetic SQLite path.
 
     ``judge_subset_limit`` bounds the PAID judged half to N cases (#153 Layer 6).
     ``None`` judges every case — the full-coverage default. The retrieval half
@@ -1889,6 +1981,22 @@ async def run_eval_async(
                 f"({type(exc).__name__}: {redact(str(exc), secret_values(settings))}). "
                 "Nothing was run and nothing was spent."
             ) from exc
+    if postgres and judge_available:
+        # The judged answer half runs on the shipped corpus (#598 Step 4): refuse a
+        # recording that would not be production's vector space before any call,
+        # the retrieval half's embeddings included.
+        try:
+            await check_shipped_judge_ready(settings)
+        except ShippedEvalError as exc:
+            first = (str(exc).splitlines() or [""])[0]
+            raise SystemExit(
+                f"The shipped-corpus judged run cannot start: {first} "
+                "Nothing was run and nothing was spent."
+            ) from exc
+    # Which corpus each half runs on, and the size of the index the answers ran on.
+    answers_shipped = postgres and judge_available
+    corpus = {"retrieval": "fixture", "answers": "shipped" if answers_shipped else "fixture"}
+    index_chunks = len(shipped_heading_keys()) if answers_shipped else len(corpus_fixture_specs())
     run_started = time.time()
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
@@ -1928,6 +2036,8 @@ async def run_eval_async(
             "model": settings.embedding_model,
             "dim": settings.embedding_dim,
         }
+        summary["corpus"] = dict(corpus)
+        summary["index_chunks"] = index_chunks
         # Which answer passes this report holds; a report written after the main
         # pass, by a run later cut short, says so (#598).
         summary["passes_completed"] = passes
@@ -1947,6 +2057,10 @@ async def run_eval_async(
             "timeout_seconds": settings.eval_judge_timeout_seconds,
         }
         if checking:
+            # The probe's grader calls, once per run, beside the main pass's kinds.
+            summary["judge"]["grader_latency"]["probe"] = grader_latency(
+                (probe or {}).get("calls") or []
+            )
             decision = grader_check.decide((probe or {}).get("cells") or {})
             summary["grader_check"] = {
                 "probe": probe,
@@ -2358,12 +2472,15 @@ def write_report(
         raise
 
 
+MUST_SAY_NOT_GATING = "not gating until #602 (Step 5)"
+
+
 def pass_report_lines(judge: dict[str, Any]) -> list[str]:
-    """One pass's answer errors, declines, helper fallbacks and low scores, for the
-    CI log (#598).
+    """One pass's answer errors, declines, helper fallbacks, grader latency,
+    must_say misses and low scores, for the CI log (#598).
 
     Not gated here: the answer errors fail their gates through D1, and the low
-    scores are printed only until #602 decides how they gate.
+    scores and must_say misses are printed only until #602 decides how they gate.
     """
     errors = judge.get("answer_errors") or {"total": 0, "by_kind": {}}
     lines = [
@@ -2382,6 +2499,22 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
             f"helper calls that failed: {helper['case_id']} ({helper['calls']}) "
             "(reported, not gating)"
         )
+    latency = judge.get("grader_latency")
+    if latency:
+        lines.append(latency_line(latency))
+    must_say = judge.get("must_say")
+    # Printed only when a case of the pass declares it: the low-score lines are
+    # the only other lines carrying the "not gating until #602" mark.
+    if must_say and must_say["declared"]:
+        lines.append(
+            f"must_say (a presence check): {must_say['declared']} declared, "
+            f"{len(must_say['missing'])} missing, "
+            f"{len(must_say.get('not_observed', []))} not observed ({MUST_SAY_NOT_GATING})"
+        )
+        for miss in must_say["missing"]:
+            lines.append(
+                f"must_say missing: {miss['case_id']}: {miss['entries']} ({MUST_SAY_NOT_GATING})"
+            )
     for case in judge.get("cases", []):
         if case.get("score") is not None and case["score"] <= 2:
             lines.append(
@@ -2493,7 +2626,7 @@ def main(argv: list[str] | None = None) -> int:
     # Every printed line that can carry model or exception text is redacted.
     secrets = secret_values(get_settings())
     if not args.quiet:
-        print("Retrieval hit-rate:")
+        print("Retrieval hit-rate (fixture corpus):")
         print(
             f"  overall (answerable): {r['answerable_hits']}/{r['answerable_total']} "
             f"= {r['overall_hit_rate']:.3f}"

@@ -33,6 +33,8 @@ class Retrieval:
     tag: str
     query: str
     is_global: bool
+    # The result's ``vector_degrade`` (#598 Step 4); ``None`` until the call returns.
+    vector_degrade: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,18 +62,25 @@ class _RecordingRetriever:
         self._probe = probe
         self._calls = 0
 
-    def _record(self, query: str, *, is_global: bool) -> None:
+    def _record(self, query: str, *, is_global: bool) -> int:
         tag = "first" if self._calls == 0 else "retry"
         self._calls += 1
         self._probe.retrievals.append(Retrieval(tag=tag, query=query, is_global=is_global))
+        return len(self._probe.retrievals) - 1
+
+    def _degrade(self, index: int, result: Any) -> Any:
+        self._probe.retrievals[index] = dataclasses.replace(
+            self._probe.retrievals[index], vector_degrade=getattr(result, "vector_degrade", None)
+        )
+        return result
 
     async def retrieve(self, question: str, **kwargs: Any) -> Any:
-        self._record(question, is_global=kwargs.get("product_area") is None)
-        return await self._inner.retrieve(question, **kwargs)
+        index = self._record(question, is_global=kwargs.get("product_area") is None)
+        return self._degrade(index, await self._inner.retrieve(question, **kwargs))
 
     async def retrieve_multi(self, question: str, **kwargs: Any) -> Any:
-        self._record(question, is_global=False)
-        return await self._inner.retrieve_multi(question, **kwargs)
+        index = self._record(question, is_global=False)
+        return self._degrade(index, await self._inner.retrieve_multi(question, **kwargs))
 
 
 @contextlib.contextmanager
