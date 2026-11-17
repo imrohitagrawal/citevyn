@@ -165,15 +165,23 @@ model that served it (`grader_calls`). Each pass's `judge` section counts `answe
 by kind and `declines_by_reason`, and the log prints each case scoring 2 or less, not
 gating until #602.
 
-Each pass's `judge.grader_latency` gives, per kind (`blind` always; `passages` with the
-grader check on, and `probe` on the main pass), `calls`, `completed`, `failed`,
+Each pass's `judge.grader_latency` gives, per kind (`blind` always; with the grader
+check on, `passages`, and on the main pass, `probe`), `calls`, `completed`, `failed`,
 `failed_seconds`, `p50_seconds`, `p90_seconds` and `max_seconds`. A call that raised (a
 timeout included) is counted apart with its seconds and kept out of the percentiles; a
 malformed verdict is a completed call. The percentiles are
 `statistics.quantiles(method="inclusive")` over the completed calls; with none they are
 `null` and the log line says "not available". The log prints it once per pass. The report's
 top level also says which corpus each half ran on (`corpus`: `retrieval` and `answers`,
-each `fixture` or `shipped`) and `index_chunks`, the size of the index the answers ran on.
+each `fixture` or `shipped`) and `index_chunks`, the chunk rows counted in the main pass's
+judge session after its ingest (`null` when no judged pass ran). On the shipped corpus every
+evidence passage of a case must carry a content checksum of the 44 shipped passages; one that
+does not is a `ShippedProvenance` harness error naming the case. The log's judged block opens
+with one line naming the corpus and its size ("Judged answers: shipped corpus (44 passages);
+the retrieval lines above are on the fixture corpus. Not comparable with judged runs before
+#598 Step 4."), and the judged refusal-leak line sits under it, not under the
+"(fixture corpus)" retrieval heading. A case whose answer errored is listed under
+`must_say.not_observed`, never as a `must_say` miss.
 
 An errored case is one where an answer call failed or another model wrote an answer, on
 the final turn or on a history turn (a cache hit counts as written by whoever last wrote
@@ -257,7 +265,11 @@ leave `grader_check` unticked.
 **A switch-off dispatch is capped too (#598 Step 4).** A run started by hand with
 `grader_check` unticked exports only `CITEVYN_COST_HARD_DAILY_USD`, from the one `CAP_USD`
 line in the eval step's script (the approved per-run limit less one answer call at
-`max_tokens`); push and tag runs export neither setting. On such a run a cap stop does not
+`max_tokens`); push and tag runs export neither setting, and neither does a dispatch on a
+tag (`refs/tags/*`): the release gate accepts that run as its judged result, so it keeps the
+tag run's limits. The runner refuses a capped dispatch with fewer than 70 minutes left before
+00:00 UTC (the switch-off job may run 68), before any paid call, with one line naming the
+window. On such a run a cap stop does not
 stop the pass: each later metered call is refused, those cases error and the gates go red,
 and the spend export counts an unwrapped refusal as refused and a wrapped one as an observed
 failure.
