@@ -267,70 +267,39 @@ def test_the_command_writes_nothing_to_the_database(tmp_path: pathlib.Path) -> N
 # --- #576 part 1: the primary failures the fallback answered ----------------------------
 
 
-def _note(cause: dict[str, Any], seconds: float) -> dict[str, Any]:
-    return {
-        "provider": "gemini",
-        "model": GEMINI,
-        "error_type": "LLMUnavailable",
-        "kind": "http_status",
-        "status_code": None,
-        "provider_status": None,
-        "reason": None,
-        "duration_seconds": seconds,
-        "thoughts_tokens": None,
-        "answer_tokens": None,
-        "max_output_tokens": None,
-        **cause,
-    }
-
-
 def _report_with_notes() -> dict[str, Any]:
+    def note(seconds: float, **cause: Any) -> list[dict[str, Any]]:
+        return [{"provider": "gemini", "model": GEMINI, "duration_seconds": seconds, **cause}]
+
     report = _report()
-    report["judge"]["cases"][0]["model_calls"][1]["primary_failures"] = [
-        _note({"status_code": 429, "provider_status": "RESOURCE_EXHAUSTED"}, 1.5)
-    ]
-    report["fallback"]["judge"]["cases"][1]["model_calls"][0]["primary_failures"] = [
-        _note({"kind": "empty_answer", "reason": "MAX_TOKENS"}, 0.25)
-    ]
+    report["judge"]["cases"][0]["model_calls"][1]["primary_failures"] = note(
+        1.5, kind="http_status", status_code=429, provider_status="RESOURCE_EXHAUSTED"
+    )
+    report["fallback"]["judge"]["cases"][1]["model_calls"][0]["primary_failures"] = note(
+        0.25, kind="empty_answer", reason="MAX_TOKENS"
+    )
     return report
 
 
-def test_primary_failures_are_counted_per_model_with_their_causes_in_both_passes() -> None:
-    """Red when: one pass is skipped, or the ``primary_failures`` field is ignored."""
-    export = _export_module().summarize([], _report_with_notes())
-    assert export["primary_failures"] == {
-        GEMINI: {
-            "calls": 2,
-            "by_cause": {
-                "gemini empty_answer MAX_TOKENS": 1,
-                "gemini http_status 429 RESOURCE_EXHAUSTED": 1,
-            },
-            "seconds": 1.75,
-        }
-    }
+def test_primary_failures_are_counted_per_model_in_both_passes_and_never_folded_in() -> None:
+    """Red when: one pass or the field is ignored, or the records are double-counted
+    as observed failures."""
+    module = _export_module()
+    export, without = module.summarize([], _report_with_notes()), module.summarize([], _report())
+    causes = {"gemini empty_answer MAX_TOKENS": 1, "gemini http_status 429 RESOURCE_EXHAUSTED": 1}
+    assert export["primary_failures"] == {GEMINI: {"calls": 2, "by_cause": causes, "seconds": 1.75}}
+    for key in ("observed_failures", "observed_failure_seconds", "refused_by_cap"):
+        assert export[key] == without[key], key
 
 
 @pytest.mark.parametrize("report", [None, {}, {"judge": {"cases": [{"model_calls": [{}]}]}}])
 def test_an_old_report_has_no_primary_failures_and_does_not_crash(report: Any) -> None:
-    """Red when: a report written before this field (or none) crashes the export,
-    or the key goes missing."""
-    export = _export_module().summarize([], report)
-    assert export["primary_failures"] == {}
-
-
-def test_primary_failures_are_never_folded_into_the_observed_failures() -> None:
-    """Red when: the new records are double-counted as failed calls."""
-    module = _export_module()
-    with_notes = module.summarize([], _report_with_notes())
-    without = module.summarize([], _report())
-    assert with_notes["primary_failures"]  # partner: the notes were seen
-    for key in ("observed_failures", "observed_failure_seconds", "refused_by_cap"):
-        assert with_notes[key] == without[key], key
+    """Red when: a report without the field (or none) crashes the export or drops the key."""
+    assert _export_module().summarize([], report)["primary_failures"] == {}
 
 
 def test_the_first_gap_says_hidden_primary_calls_are_now_counted_but_not_costed() -> None:
-    """Red when: the gap text still says a primary call the fallback hid is unseen,
-    or stops naming the missing tokens (#496)."""
+    """Red when: the gap still says a hidden primary call is unseen, or drops #496."""
     first = _export_module().GAPS[0]
     assert "primary_failures" in first and "#496" in first
     assert "a primary call the fallback hid, and" not in first
