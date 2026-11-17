@@ -18,6 +18,15 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-17 — The per-run allowance for the next judged runs; the Step 4 baseline is re-run
+Applies to #598 Step 4 and #602. The owner raised the allowance for one judged run to
+the approved amount named in the capped-baseline ceiling comment in `ci.yml`, for the
+Step 4 baseline and the #602 runs; each dispatch is still approved one at a time. The
+first Step 4 baseline had answers served by the fallback model after the primary call
+failed, with no recorded cause (#576). The owner chose to re-run the baseline once,
+under the same ceiling, after the failure cause is recorded, rather than accept the
+fallback pass as the baseline.
+
 ### 2026-11-16 — The grader check runs once, under an approved cap
 Applies to #598 Step 3. The grader check (passage grading and the probe) runs once,
 by dispatching the judged job on its branch with `grader_check` ticked, never on a
