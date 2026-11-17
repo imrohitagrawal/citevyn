@@ -62,8 +62,35 @@ def _extract_text(candidates: list[dict[str, Any]]) -> str:
     return "".join(texts)
 
 
+def _field(obj: object, key: str) -> object:
+    """``obj[key]`` when ``obj`` is a dict, else ``None``."""
+    return cast(dict[str, object], obj).get(key) if isinstance(obj, dict) else None
+
+
+def _no_answer_details(data: dict[str, Any]) -> dict[str, object]:
+    """Why a 200 carried no answer, read without ever raising (#576): the first
+    candidate's ``finishReason``, ``promptFeedback.blockReason`` and the usage
+    counts, each as found (or ``None``). The values are held to a fixed shape where
+    they are recorded (:meth:`app.llm.attempts.PrimaryFailure.from_error`)."""
+    candidates = data.get("candidates")
+    first = (
+        cast(list[object], candidates)[0] if isinstance(candidates, list) and candidates else None
+    )
+    usage = data.get("usageMetadata")
+    return {
+        "finish_reason": _field(first, "finishReason"),
+        "block_reason": _field(data.get("promptFeedback"), "blockReason"),
+        "thoughts_tokens": _field(usage, "thoughtsTokenCount"),
+        "answer_tokens": _field(usage, "candidatesTokenCount"),
+    }
+
+
 class GeminiLLMClient:
     """Real HTTP client for the Gemini Generative Language API."""
+
+    # The provider label this client puts on every result, also read by the
+    # fallback client when it records why this client failed (#576).
+    _PROVIDER = LLMProvider.gemini.value
 
     def __init__(
         self,
@@ -144,7 +171,13 @@ class GeminiLLMClient:
 
         candidates = data.get("candidates")
         if not isinstance(candidates, list):
-            raise LLMUnavailable("Gemini response missing 'candidates' array")
+            details = _no_answer_details(data)
+            blocked = details["block_reason"] is not None
+            raise LLMUnavailable(
+                "Gemini response missing 'candidates' array",
+                kind="blocked" if blocked else "malformed_response",
+                reason=details["block_reason"],
+            )
         text = _extract_text(cast(list[dict[str, Any]], candidates))
         if not text.strip():
             # 200 OK but no usable text — e.g. finishReason SAFETY / RECITATION,
@@ -152,8 +185,17 @@ class GeminiLLMClient:
             # answer; raise so the factory's fallback provider is tried instead
             # of returning a blank answer that would slip past citation
             # validation as a silent empty response.
+            details = _no_answer_details(data)
+            blocked = details["block_reason"] is not None
             raise LLMUnavailable(
-                "Gemini returned an empty answer (candidates present, no text part)"
+                "Gemini returned an empty answer (candidates present, no text part)",
+                kind="blocked" if blocked else "empty_answer",
+                reason=details["block_reason"] if blocked else details["finish_reason"],
+                # Recorded only, never metered (#496 is separate): they tell thinking
+                # that used up the budget apart from any other empty answer.
+                thoughts_tokens=details["thoughts_tokens"],
+                answer_tokens=details["answer_tokens"],
+                max_output_tokens=max_output_tokens,
             )
 
         usage_raw: Any = data.get("usageMetadata") or {}

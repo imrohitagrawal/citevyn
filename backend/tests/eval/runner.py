@@ -49,8 +49,10 @@ from app.cache.answer_cache import CachedAnswer
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings, get_settings
 from app.cost.call_site import CallSite, get_call_site
+from app.llm.attempts import UNRECOGNIZED, PrimaryFailure, cause_key, collect_primary_failures
 from app.llm.errors import CostLimitReached, LLMUnavailable
 from app.llm.factory import build_metered_llm_client, get_llm_client
+from app.llm.fallback import FallbackLLMClient
 from app.llm.protocol import LLMClient
 from app.llm.stub import StubLLMClient
 from app.llm.types import LLMResult
@@ -188,8 +190,13 @@ class JudgedCase:
     # call site, provider, model, whether it was the expected model, and whether
     # it ``failed`` (with its ``error_type``). A failed answer call errors the
     # case; a helper call (not ``answer``) that failed or was made by another
-    # model is listed, never gated.
+    # model is listed, never gated. Each entry's ``primary_failures`` lists why the
+    # primary (Gemini) failed before the fallback served the call, as bounded
+    # records (``[]`` when it did not fail) (#576).
     model_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Each turn served from a cache entry another model wrote: the turn, the case
+    # and turn that wrote it, and the writer's ``primary_failures`` (#576).
+    cached_primary_failures: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     # The grader check (#598 Step 3), reported only: the same answer graded with
     # the passages it was made from. ``passage_grader_calls`` is ``None`` when the
     # check is off, and then none of these fields is in the report.
@@ -269,25 +276,35 @@ class AttributingLLM:
     ) -> LLMResult:
         site = get_call_site()
         start = time.perf_counter()
-        try:
-            result = await self._inner.complete(
-                system=system, user=user, max_tokens=max_tokens, temperature=temperature
-            )
-            record = _CallRecord(site, result.provider, result.model, text=result.text)
-        except BaseException as exc:
-            # Who served a failed call is unknown; the client may name its own.
-            self.records.append(
-                _CallRecord(
-                    site,
-                    getattr(self._inner, "provider", None),
-                    getattr(self._inner, "model", None),
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    cause=exc,
-                    duration_seconds=time.perf_counter() - start,
+        # Opened here, around the whole client (the meter and the fallback inside),
+        # so each record holds only its own call's primary failures (#576).
+        with collect_primary_failures() as notes:
+            try:
+                result = await self._inner.complete(
+                    system=system, user=user, max_tokens=max_tokens, temperature=temperature
                 )
-            )
-            raise
+                record = _CallRecord(
+                    site,
+                    result.provider,
+                    result.model,
+                    text=result.text,
+                    primary_failures=tuple(notes),
+                )
+            except BaseException as exc:
+                # Who served a failed call is unknown; the client may name its own.
+                self.records.append(
+                    _CallRecord(
+                        site,
+                        getattr(self._inner, "provider", None),
+                        getattr(self._inner, "model", None),
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                        cause=exc,
+                        duration_seconds=time.perf_counter() - start,
+                        primary_failures=tuple(notes),
+                    )
+                )
+                raise
         self.records.append(record)
         return result
 
@@ -310,6 +327,8 @@ class _CallRecord:
     cause: BaseException | None = dataclasses.field(default=None, compare=False, repr=False)
     # How long a failed call took (reported with the grader check on only).
     duration_seconds: float | None = dataclasses.field(default=None, compare=False)
+    # Why the primary failed before the fallback served (or failed) this call (#576).
+    primary_failures: tuple[PrimaryFailure, ...] = dataclasses.field(default=(), compare=False)
 
     @property
     def failed(self) -> bool:
@@ -613,10 +632,23 @@ def _helper_failures(case: JudgedCase) -> list[dict[str, Any]]:
     return [c for c in case.model_calls if c.get("failed") and c["site"] != CallSite.answer.value]
 
 
+def _causes(call: dict[str, Any]) -> list[str]:
+    """The call's primary-failure causes as short keys (#576)."""
+    return [cause_key(f) for f in call.get("primary_failures") or []]
+
+
 def _describe(call: dict[str, Any]) -> str:
     if call.get("failed"):
         return f"{call['site']} failed with {call['error_type']} ({call['turn']} turn)"
-    return f"{call['site']} by {call['provider']} {call['model']} ({call['turn']} turn)"
+    # Why the primary did not serve it, when that was recorded (#576).
+    why = "".join(f"; {c}" for c in _causes(call))
+    return f"{call['site']} by {call['provider']} {call['model']} ({call['turn']} turn{why})"
+
+
+def _failure_entries(record: _CallRecord, secrets: list[str]) -> list[dict[str, Any]]:
+    """A call's primary failures for the report: only the bounded record's fields,
+    with every string redacted."""
+    return [redact(f.as_dict(), secrets) for f in record.primary_failures]
 
 
 class _CacheLedger:
@@ -981,6 +1013,9 @@ async def _judge_cases(
                                 ]
                                 if record.failed
                                 else None,
+                                # Always present: ``[]`` reads as "the primary did not
+                                # fail", a missing key as a recording gap (#576).
+                                "primary_failures": _failure_entries(record, secrets),
                             }
                         )
                         if checking and record.failed:
@@ -1060,7 +1095,19 @@ async def _judge_cases(
                             "provider": "an earlier turn",
                             "model": f"written by another model ({writer['case_id']}, "
                             f"{writer['turn']} turn)",
+                            # The writer's own cause, so the replay is traced to it.
+                            "primary_failures": writer.get("primary_failures", []),
                         }
+                        entry.cached_primary_failures.append(
+                            {
+                                "turn": turn,
+                                "written_by": {
+                                    "case_id": writer["case_id"],
+                                    "turn": writer["turn"],
+                                },
+                                "primary_failures": list(writer.get("primary_failures", [])),
+                            }
+                        )
                         _mark_answer_error(
                             entry,
                             f"answered by [{_describe(fault)}], not {expect_answerer}; "
@@ -1068,12 +1115,20 @@ async def _judge_cases(
                         )
                         wrong_writer = True
             puts = ledger.puts[puts_from:]
+            # Why another model wrote this turn's answer, for a later replay (#576).
+            writer_failures = [
+                f
+                for c in calls
+                if not c["expected"] and not c["failed"] and c["site"] == CallSite.answer.value
+                for f in c["primary_failures"]
+            ]
             for key in puts:
                 ledger.writers[key] = {
                     "expected": not wrong_writer,
                     "case_id": case.id,
                     "turn": turn,
                     "evidence": None,
+                    "primary_failures": writer_failures,
                 }
             if puts and turn == "history":
                 evidence = await _guarded(
@@ -1473,8 +1528,13 @@ def _summarize(
     judge_available: bool,
     judgeable: list[EvalCase],
     judge_subset: dict[str, Any] | None = None,
+    primary_applicable: bool = False,
 ) -> dict[str, Any]:
     """Build the report.
+
+    ``primary_applicable``: the pass's answer client has a fallback behind its
+    primary (the main pass on production's Gemini client), so its primary
+    failures are counted (#576); ``False`` for the fallback pass.
 
     ``judgeable`` is the subset of ``cases`` the judged run could actually drive
     (``postgres_only`` cases drop out on a hermetic run). It is a REQUIRED
@@ -1598,6 +1658,9 @@ def _summarize(
             "helper_failures": helper_failures,
             "harness_errors": harness_errors,
             "must_say": must_say,
+            # Why the primary failed before the fallback served a call (#576).
+            # Reported only, never gated.
+            "primary_failures": _primary_failures(judged, applicable=primary_applicable),
             "grader_latency": latency,
             "declines_by_reason": dict(
                 sorted(Counter(j.decline_reason for j in judged if j.decline_reason).items())
@@ -1656,6 +1719,57 @@ def _summarize(
                 if (j.fact_coverage or 0.0) < 1.0
             ],
         },
+    }
+
+
+def _primary_failures(judged: list[JudgedCase], *, applicable: bool) -> dict[str, Any]:
+    """One pass's primary failures (#576), from the calls' bounded records.
+
+    ``count``, ``by_site`` and ``by_cause`` are over the calls this pass made;
+    ``answer_site`` sets the answers another model wrote (``fallback_answers``)
+    against those with a recorded cause (``explained``); ``without_record`` is the
+    rest, a gap in the recording. ``via_cache`` counts turns served from a cache
+    entry another model wrote, each carrying its writer's cause; they are not new
+    failures. ``vague`` counts causes that say little: an untagged kind, or a
+    provider value of another shape.
+    """
+    calls = [(j, c) for j in judged for c in j.model_calls]
+    notes = [(j, c, f) for j, c in calls for f in c.get("primary_failures") or []]
+    fallback_answers = [
+        c
+        for _j, c in calls
+        if not c["expected"] and not c["failed"] and c["site"] == CallSite.answer.value
+    ]
+    explained = sum(1 for c in fallback_answers if c.get("primary_failures"))
+    replays = [(j, r) for j in judged for r in j.cached_primary_failures]
+    cases = [
+        {"case_id": j.case_id, "turn": c["turn"], "site": c["site"], "cause": cause_key(f)}
+        for j, c, f in notes
+    ] + [
+        {"case_id": j.case_id, "turn": r["turn"], "site": "cache", "cause": cause_key(f)}
+        for j, r in replays
+        for f in r["primary_failures"]
+    ]
+    unrecognized = sum(
+        1 for _j, _c, f in notes if UNRECOGNIZED in (f.get("reason"), f.get("provider_status"))
+    )
+    return {
+        "applicable": applicable,
+        "calls": len(calls),
+        "count": len(notes),
+        "by_site": dict(sorted(Counter(c["site"] for _j, c, _f in notes).items())),
+        "by_cause": dict(sorted(Counter(cause_key(f) for _j, _c, f in notes).items())),
+        "answer_site": {
+            "fallback_answers": len(fallback_answers),
+            "explained": explained,
+            "without_record": len(fallback_answers) - explained,
+        },
+        "via_cache": len(replays),
+        "vague": {
+            "unknown_kind": sum(1 for _j, _c, f in notes if f.get("kind") == "unknown"),
+            "unrecognized": unrecognized,
+        },
+        "cases": cases,
     }
 
 
@@ -2073,6 +2187,9 @@ async def run_eval_async(
     budget_stops: list[BaseException] = []
     # The run's recorded spend, read before each save (``_refresh_spend``).
     spend: dict[str, Any] = {"rows": [], "unavailable": None, "noted": False}
+    # Whether the main pass's client has a fallback behind its primary, so its
+    # primary failures are counted (#576); set when the client is built.
+    main_fallback = {"applicable": False}
 
     def _assemble(
         judged: list[JudgedCase],
@@ -2092,6 +2209,7 @@ async def run_eval_async(
             # was never able to run (#450).
             judgeable=judgeable,
             judge_subset=judge_subset,
+            primary_applicable=main_fallback["applicable"],
         )
         # Record the embedder identity (provider/model/dim — never a key) so a report
         # can be read as "real semantic run" vs "hermetic/stub" without guessing.
@@ -2274,7 +2392,9 @@ async def run_eval_async(
         if judge_available:
             # The main pass answers through a client built like the process-wide
             # one, wrapped so every answer is attributed to the model that wrote it.
-            main_llm = AttributingLLM(build_metered_llm_client(settings))
+            main_client = build_metered_llm_client(settings)
+            main_fallback["applicable"] = _has_fallback(main_client)
+            main_llm = AttributingLLM(main_client)
             stack.push_async_callback(_close, main_llm, "main answer")
             saved = True
             if checking and judge_llm is not None:
@@ -2386,6 +2506,15 @@ async def run_eval_async(
         if not _write(lambda: summary, where="at the end, with the spend"):
             summary = _assemble(judged, fallback_judged, passes)
     return summary
+
+
+def _has_fallback(client: Any) -> bool:
+    """Whether ``client`` is, or wraps, a :class:`FallbackLLMClient` (#576)."""
+    for _depth in range(4):
+        if isinstance(client, FallbackLLMClient):
+            return True
+        client = getattr(client, "inner", None)
+    return False
 
 
 def _judge_plan(
@@ -2589,6 +2718,7 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
             f"helper calls that failed: {helper['case_id']} ({helper['calls']}) "
             "(reported, not gating)"
         )
+    lines += _primary_failure_lines(judge.get("primary_failures"))
     latency = judge.get("grader_latency")
     if latency:
         lines.append(latency_line(latency))
@@ -2614,6 +2744,30 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
                 f"low score {case['score']}: {case['case_id']}: {case.get('rationale', '')} "
                 f"(shipped_gold_in_evidence={gold}) (not gating until #602)"
             )
+    return lines
+
+
+def _primary_failure_lines(block: dict[str, Any] | None) -> list[str]:
+    """The pass's primary-failure count and one line per case cause (#576)."""
+    if not block:
+        return []
+    if not block["applicable"]:
+        return [
+            f"primary failures: not applicable (no fallback behind this pass's client); "
+            f"{block['count']} recorded over {block['calls']} call(s)"
+        ]
+    answers = block["answer_site"]
+    lines = [
+        f"primary failures: {block['count']} of {block['calls']} call(s) by site "
+        f"{block['by_site']} by cause {block['by_cause']}; answers by the fallback "
+        f"{answers['fallback_answers']}, explained {answers['explained']}, without record "
+        f"{answers['without_record']}; via cache {block['via_cache']}; vague "
+        f"{block['vague']} (reported, not gating)"
+    ]
+    lines += [
+        f"primary failure: {c['case_id']} ({c['turn']} turn, {c['site']}): {c['cause']}"
+        for c in block["cases"]
+    ]
     return lines
 
 

@@ -502,6 +502,27 @@ def _install_transport(
     monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: _Judge())
 
 
+def _meter_on(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
+    """The real meter, on the test's own database and settings (budget off), so
+    the run writes its rows where the spend export reads them."""
+    from app.core import config as config_mod
+    from app.core import db as db_mod
+
+    makers: list[async_sessionmaker[Any]] = []
+
+    def _maker() -> async_sessionmaker[Any]:
+        if not makers:
+            makers.append(
+                async_sessionmaker(
+                    create_async_engine(settings.database_url), expire_on_commit=False
+                )
+            )
+        return makers[0]
+
+    monkeypatch.setattr(config_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(db_mod, "get_sessionmaker", _maker)
+
+
 async def _seed(url: str) -> None:
     engine = create_async_engine(url)
     try:
@@ -543,6 +564,7 @@ def test_end_to_end_the_report_and_the_spend_export_carry_the_causes(
     db = tmp_path / "eval.db"
     asyncio.run(_seed(f"sqlite+aiosqlite:///{db}"))
     settings = _e2e_settings(db, "g-" + uuid.uuid4().hex)
+    _meter_on(monkeypatch, settings)
     monkeypatch.setattr(runner_mod, "get_settings", lambda: settings)
     monkeypatch.setattr(spend_export, "get_settings", lambda: settings)
     report = tmp_path / "eval_report.json"
@@ -617,6 +639,7 @@ def test_no_body_text_reaches_any_report_or_the_spend_export(
     db = tmp_path / "eval.db"
     asyncio.run(_seed(f"sqlite+aiosqlite:///{db}"))
     settings = _e2e_settings(db, gemini_key)
+    _meter_on(monkeypatch, settings)
     saved: list[str] = []
     real_write = runner_mod.write_report
 

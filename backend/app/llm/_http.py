@@ -45,6 +45,18 @@ _logger = logging.getLogger("citevyn.llm")
 _ERROR_BODY_LOG_LIMIT = 500
 
 
+def _error_status(response: httpx.Response) -> object:
+    """The ``error.status`` of a Google-style error body (``RESOURCE_EXHAUSTED``),
+    as found, or ``None``. Never raises: any other body shape gives ``None``. Nothing
+    else of the body is read."""
+    try:
+        data: Any = json.loads(response.content)
+        error: Any = data["error"]
+        return cast(object, error["status"])
+    except Exception:  # noqa: BLE001 - an odd body must never lose the status code
+        return None
+
+
 async def post_json(
     *,
     client: httpx.AsyncClient,
@@ -74,12 +86,16 @@ async def post_json(
         raise LLMUnavailable(
             f"{provider} request timed out after {timeout_seconds}s",
             cause=exc,
+            kind="timeout",
+            reason=exc.__class__.__name__,
         ) from exc
     except httpx.HTTPError as exc:
         # Covers connection errors, protocol errors, etc.
         raise LLMUnavailable(
             f"{provider} transport error: {exc.__class__.__name__}",
             cause=exc,
+            kind="transport",
+            reason=exc.__class__.__name__,
         ) from exc
 
     if response.status_code >= 400:
@@ -97,12 +113,24 @@ async def post_json(
                 "body": response.text[:_ERROR_BODY_LOG_LIMIT],
             },
         )
-        raise LLMUnavailable(f"{provider} returned {response.status_code}")
+        # Only the provider's short error code is kept from the body (#576), and it
+        # is held to a fixed shape where it is recorded; the message is unchanged.
+        raise LLMUnavailable(
+            f"{provider} returned {response.status_code}",
+            kind="http_status",
+            status_code=response.status_code,
+            provider_status=_error_status(response),
+        )
 
     try:
         raw_data: Any = json.loads(response.content)
     except json.JSONDecodeError as exc:
-        raise LLMUnavailable(f"{provider} returned non-JSON body", cause=exc) from exc
+        raise LLMUnavailable(
+            f"{provider} returned non-JSON body",
+            cause=exc,
+            kind="non_json",
+            reason=exc.__class__.__name__,
+        ) from exc
     # The provider JSON shapes are documented but the wire is not type-narrowed;
     # cast to a dict and let each client validate fields defensively as it reads.
     return cast(dict[str, Any], raw_data)
