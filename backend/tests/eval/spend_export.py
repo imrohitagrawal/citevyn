@@ -186,6 +186,9 @@ def summarize(rows: list[ProviderCall], report: dict[str, Any] | None = None) ->
         "refused_by_cap": refused,
         "attribution": ATTRIBUTION,
         "gaps": list(GAPS),
+        # The run's cap record, copied from the report (#598 Step 4): this step does
+        # not see the eval step's settings. ``None`` without a report or the record.
+        "spend_cap": ((report or {}).get("grader") or {}).get("spend_cap"),
     }
 
 

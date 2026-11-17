@@ -73,7 +73,11 @@ def clear_settings_cache() -> Generator[None, None, None]:
 # test run itself stays clean. Every other module sees the real value (the
 # shipped-corpus report test writes to it on purpose).
 JOB_SUMMARY_SHIELDED_MODULES = frozenset(
-    {"tests.test_grader_check_runner", "tests.test_grader_check_round1"}
+    {
+        "tests.test_grader_check_runner",
+        "tests.test_grader_check_round1",
+        "tests.test_eval_step4_round1",
+    }
 )
 
 

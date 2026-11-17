@@ -16,6 +16,10 @@ This is CiteVyn-specific (project-scoped skill).
   over the **conftest** seed corpus.
 - **LLM-as-judge** (opt-in): answer quality 1–5 vs the case's `expected_gist`. Needs a real
   provider key; returns "unavailable" under the stub — **never a faked score**.
+- **Corpus (#598 Step 4).** The judged answer half runs on the shipped corpus (the 44 shipped
+  passages, recorded vectors); retrieval-gate lines run on the test fixture and say so.
+  must_say rows are reported per case and gate nothing until #602 (Step 5). The hermetic run
+  keeps the fixture for both halves; the report's `corpus` field says which.
 
 ## Run it
 
@@ -33,8 +37,11 @@ This is CiteVyn-specific (project-scoped skill).
 ## Add a golden case
 
 Append one JSON object per line to `tests/eval/golden.jsonl` (full schema in
-`tests/eval/README.md`). It **must be answerable from the CONFTEST seed corpus**
-(`backend/tests/conftest.py::seed_catalog`) — not `db/seed`.
+`tests/eval/README.md`). Its retrieval labels (`gold_chunks`) are keyed to the CONFTEST
+fixture (`backend/tests/conftest.py::seed_catalog`) — not `db/seed` — so it must be
+answerable from that fixture; on `--postgres` its judged answer comes from the shipped
+passages, so write `expected_gist` (and any `must_say`, a presence check) against the
+shipped text in `backend/app/worker/sources/`.
 
 - `kind`: `literal` (shares vocab → keyword arm can hit) | `paraphrase` (near-zero overlap →
   isolates the vector arm, ~0 today) | `refusal` (out-of-corpus → must retrieve nothing).

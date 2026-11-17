@@ -236,6 +236,11 @@ def test_a_postgres_run_cut_off_mid_pass_keeps_its_finished_case(
             "eval_fallback_model": None,
             "eval_judge_model": JUDGE,
             "eval_judge_timeout_seconds": 60.0,
+            # Production's embedder, so the shipped-corpus preflight (#598 Step 4)
+            # accepts the committed recording; every embedder here is a fake.
+            "embedding_provider": "gemini",
+            "embedding_model": "gemini-embedding-001",
+            "embedding_dim": 1536,
         }
     )
     report = tmp_path / "eval_report.json"

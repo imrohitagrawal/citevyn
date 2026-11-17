@@ -25,6 +25,7 @@ Executor code lives in `backend/tests/eval/`; run it with `make eval` or
 | `expected_gist` | str | Short summary of the correct answer, scored by the judge. |
 | `expect_no_answer` | bool | `true` for refusal/out-of-corpus cases. |
 | `expected_facts` | list[str] | *(optional, answerable-only)* Hard facts a correct grounded answer MUST state — see **Groundedness** below. |
+| `must_say` | list[str] | *(optional, answerable-only)* Words a correct answer must contain, each entry a `\|`-separated list of alternatives — see **must_say** below. Reported only. |
 
 Blank lines and `#`-prefixed lines are skipped, so the file stays annotatable.
 
@@ -52,6 +53,25 @@ judged run (`--postgres`) therefore combines three signals:
    grounded** there, so a single wrong fact fails (an aggregate mean over binary
    single-fact cases would leak it). A golden-integrity test asserts each fact is
    groundable (at least one alternative appears in the seed corpus).
+
+### must_say (#598 Step 4): reported, not gating until #602 (Step 5)
+
+`must_say` is a **presence check**, not semantic correctness. Each entry lists
+`|`-separated alternatives; an answer satisfies the entry when one alternative is present,
+matched exactly like `expected_facts` (the groundedness matcher: casefold, whitespace runs
+collapsed, word boundaries, so `x-goog-api-key` does not satisfy `x-api-key` and `150
+requests` does not satisfy `50 requests`). A contraction with a curly apostrophe needs its
+own alternative. A wrong answer that happens to contain the words passes (a wrong claim
+with a true sentence appended, or two headers swapped), so a pass is not proof of a correct
+answer; the blind grade is still read beside it.
+
+It is kept apart from `expected_facts` on purpose: it moves no gate, no leak rule and no
+groundedness population. Each case reports `must_say_missing` (`null` when it declares
+none), each pass's `judge.must_say` counts `declared`, lists `missing` (case and entries)
+and `not_observed`, and the log prints it with "not gating until #602 (Step 5)". The loader
+rejects an empty list, a blank entry or alternative, a non-list, and `must_say` on a
+refusal. Every entry must be findable in the case's shipped passages, apart from pinned gap
+phrases on a case whose shipped gold is empty (`backend/tests/test_eval_step4_must_say.py`).
 
 ## Adversarial hardening (Item 2)
 
@@ -134,14 +154,34 @@ Each judged case records why it came out as it did: the `question`, `outcome` an
 has outcome `cache_hit` and no reply, evidence or query), the answer model's own
 `raw_reply` (and the #208 `retry_reply`, with `retry_kept`), `resolved_query`,
 `retrieval_global`, the `evidence` the answer was made from (source, heading, rank, score,
-type and text; the text is cut exactly as the prompt cuts it, with `truncated`; title and
-URL are not stored), `model_calls` (which model made each call, by call site and turn,
+type and text; the text is cut exactly as the prompt cuts it, with `truncated`, and the
+chunk's `content_checksum`; title and URL are not stored), `shipped_gold_in_evidence`
+(whether one of those passages is in the case's `shipped_gold`; `null` when the case has
+none), `must_say_missing`, `model_calls` (which model made each call, by call site and turn,
 and whether it `failed`, with its `error_type` and redacted `error_message`), the
 history turns' replies (`history_replies`), `answer_errored`, `harness_error`,
 `cache_origin`, and each grader call's score, rationale, duration and the provider and
 model that served it (`grader_calls`). Each pass's `judge` section counts `answer_errors`
 by kind and `declines_by_reason`, and the log prints each case scoring 2 or less, not
 gating until #602.
+
+Each pass's `judge.grader_latency` gives, per kind (`blind` always; with the grader
+check on, `passages`, and on the main pass, `probe`), `calls`, `completed`, `failed`,
+`failed_seconds`, `p50_seconds`, `p90_seconds` and `max_seconds`. A call that raised (a
+timeout included) is counted apart with its seconds and kept out of the percentiles; a
+malformed verdict is a completed call. The percentiles are
+`statistics.quantiles(method="inclusive")` over the completed calls; with none they are
+`null` and the log line says "not available". The log prints it once per pass. The report's
+top level also says which corpus each half ran on (`corpus`: `retrieval` and `answers`,
+each `fixture` or `shipped`) and `index_chunks`, the chunk rows counted in the main pass's
+judge session after its ingest (`null` when no judged pass ran). On the shipped corpus every
+evidence passage of a case must carry a content checksum of the 44 shipped passages; one that
+does not is a `ShippedProvenance` harness error naming the case. The log's judged block opens
+with one line naming the corpus and its size ("Judged answers: shipped corpus (44 passages);
+the retrieval lines above are on the fixture corpus. Not comparable with judged runs before
+#598 Step 4."), and the judged refusal-leak line sits under it, not under the
+"(fixture corpus)" retrieval heading. A case whose answer errored is listed under
+`must_say.not_observed`, never as a `must_say` miss.
 
 An errored case is one where an answer call failed or another model wrote an answer, on
 the final turn or on a history turn (a cache hit counts as written by whoever last wrote
@@ -222,6 +262,22 @@ longer limits are for the experiment only; release runs keep the short ones, and
 approval of the owner (`docs/DECISIONS.md`, 2026-11-16). When checking a release commit by hand,
 leave `grader_check` unticked.
 
+**A capped baseline dispatch (#598 Step 4).** The cap for a switch-off run is opt-in. A run
+started by hand with `grader_check` unticked and **`capped_baseline`** ticked exports
+`CITEVYN_COST_HARD_DAILY_USD`, from the one `CAP_USD` line in the eval step's script (the
+approved per-run limit less one answer call at `max_tokens`), and
+`CITEVYN_EVAL_CAPPED_DISPATCH=true`. The step reads the input from the event payload, never
+through `env:`. Only a paid baseline dispatch ticks it; a release re-run never does. Every
+other run exports neither setting: push and tag runs, and a dispatch without the input on a
+branch or a tag, which the release gate may accept as its judged result and which therefore
+keeps the tag run's limits. The runner refuses a run marked `CITEVYN_EVAL_CAPPED_DISPATCH=true`
+with fewer than 70 minutes left before 00:00 UTC (the switch-off job may run 68), before any
+paid call, with one line naming the
+window. On such a run a cap stop does not
+stop the pass: each later metered call is refused, those cases error and the gates go red,
+and the spend export counts an unwrapped refusal as refused and a wrapped one as an observed
+failure.
+
 **Refusals before any paid call.** With the switch on, the runner refuses to start when
 `CITEVYN_COST_HARD_DAILY_USD` is not finite and above 0 or the budget guard is off, and when fewer
 than 250 minutes are left before 00:00 UTC (the daily cap counts the UTC day, so a run must not
@@ -266,7 +322,8 @@ read; a failed read never fails a save), the measured commit, and `stopped` ("st
 spend cap", or "stopped: the spend meter could not be read"). One run makes up to 528 grader
 calls instead of 252; this run measures the time it takes.
 
-**The spend export.** After the eval, whatever its outcome, the job runs
+**The spend export.** On every `workflow_dispatch` run (switch on or off, never on push or
+tag runs), after the eval, whatever its outcome, the job runs
 `uv run python -m tests.eval.spend_export --out ../artifacts/spend.json --report
 ../artifacts/eval_report.json` from `backend/`, without the provider keys, and uploads `spend.json`
 with the report. It only reads `provider_calls` (the eval database is fresh, so its rows are this
@@ -274,7 +331,10 @@ run's) and groups them by provider, model and kind with tokens and the **recorde
 cost the meter stored, at the price book's rates), counting priced, unpriced and estimated-token
 rows. From the report it adds the **observed failures** per model, with their total duration, and apart from them the calls
 the cap refused (never sent); a failed grader call records no model, so it is counted under the
-configured grader model. A report that cannot be read is noted and skipped. It is a measurement,
+configured grader model. It also copies the report's cap record, `grader.spend_cap`
+(`capped_dispatch`: whether the run carried `CITEVYN_EVAL_CAPPED_DISPATCH=true`;
+`ceiling_usd`: the daily ceiling in force, `null` with the budget guard off), as `spend_cap`, so
+a baseline's evidence shows its cap. A report that cannot be read is noted and skipped. It is a measurement,
 not a guarantee. Its stated gaps: failed attempts that were never recorded (a primary failure the
 fallback hid, or both providers failing), meter writes that were silently lost (the meter never
 fails a call), rows with estimated tokens (their cost can read low), and unpriced rows (counted as
@@ -322,14 +382,25 @@ on merge to `main`. Label the PR `full-eval` to gate it before merge.
 
 ## Anchoring
 
-Cases are anchored to the **conftest** seed corpus (`backend/tests/conftest.py::seed_catalog`)
-— the corpus the hermetic harness and CI run against — **not** `db/seed` (whose Gemini chunk
-is about the API key, not streaming). Keep new cases answerable from that 5-chunk corpus, or
-the hit-rate metric loses meaning.
+The judged answer half runs on the shipped corpus (the 44 shipped passages, recorded
+vectors); retrieval-gate lines run on the test fixture and say so. must_say rows are
+reported per case and gate nothing until #602 (Step 5).
+
+In detail: the hermetic run (both halves) and the retrieval half of `--postgres` run on the
+**conftest** fixture (`backend/tests/conftest.py::seed_catalog`, 6 chunks), **not**
+`db/seed`; their `gold_chunks` are keyed to it, so keep new cases answerable from it, or the
+hit-rate metric loses meaning. With `--postgres`, the judged answer half runs on the 44
+shipped passages (`tests/eval/shipped.py::shipped_judge_session`): their chunk vectors come
+from the committed recording, queries are embedded live as production does, and the
+transaction is rolled back. Before anything is spent, the run refuses a chunk recording made
+with another embedder than the configured one or production's, a shipped chunk whose text no
+longer matches its recorded checksum (named), and a non-empty catalog. On that path a
+retrieval whose vector arm degraded is a harness error on the case. `expected_gist` and
+`must_say` are written against the shipped text.
 
 ## Shipped-corpus labels (#601)
 
-Two label sets measure search on the 44 shipped passages rather than the 5-chunk seed.
+Two label sets measure search on the 44 shipped passages rather than the 6-chunk fixture.
 Labels were written from the shipped text before any vector existed, and can be edited
 without re-recording, because a recorded vector depends only on the question text.
 

@@ -23,6 +23,12 @@ on:
         description: "Grader check: also grade every answer with its passages, and run the probe (reported only; up to 528 grader calls instead of 252)"
         type: boolean
         default: false
+      # The capped baseline (#598 Step 4): set only by a paid baseline dispatch, off by
+      # default. A release re-run never sets it, so it keeps the tag run's limits.
+      capped_baseline:
+        description: "Paid baseline run: apply the per-run spend ceiling and the UTC-midnight window"
+        type: boolean
+        default: false
   push:
     branches: [main]
     # Release tags run the full CI, which is what gives release.yml's
@@ -498,8 +504,8 @@ jobs:
       CITEVYN_EVAL_JUDGE_MODEL: anthropic/claude-haiku-5.5
       # The grader's own timeout, set with the grader model or not at all (#598).
       # Only the grader's client reads it; the answer clients keep production's
-      # 15 s. 60 s: completed grader calls measured p50 1.4 s, p90 12.0 s, max
-      # 13.5 s; the tail above 15 s is unknown, so re-set it from the next run.
+      # 15 s. 60 s. Measured on #598 Step 3 (126 blind grader calls, none
+      # failed): p50 1.04 s, p90 2.09 s, max 2.9 s.
       CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS: "60"
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
       # calls per case per pass.
@@ -546,7 +552,8 @@ jobs:
         # `if:` above), not by sampling cases — see the rationale there.
         #
         # The grader check's two settings are exported here, and only when the
-        # input is true, never through `env:`: an expression there renders empty
+        # input is true (a capped baseline dispatch gets only its own cap, below),
+        # never through `env:`: an expression there renders empty
         # on push and tag runs, and an empty value makes Settings refuse to load.
         # The cap is the existing per-call daily guard, in price-book dollars, set
         # to the approved amount less one answer call's worst case; it is approved
@@ -560,12 +567,48 @@ jobs:
           if [ "${GRADER_CHECK}" = "true" ]; then
             export CITEVYN_EVAL_PASSAGE_GRADING=true
             export CITEVYN_COST_HARD_DAILY_USD=0.43
+          else
+            # The capped baseline: only a dispatch that ticks the `capped_baseline`
+            # input, read once from the event payload (push and tag runs have no
+            # inputs and are not read). Only a paid baseline dispatch sets it; a
+            # release re-run never does, so the run the release gate accepts keeps
+            # the tag run's limits on a branch or a tag. The read fails closed: if
+            # jq or the payload fails, or the value is not true or false, the step
+            # stops here with one error line, before any call (the payload itself
+            # is never printed).
+            CAPPED_BASELINE=false
+            if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+              if ! CAPPED_BASELINE="$(jq -er '.inputs.capped_baseline // false | tostring | ascii_downcase' "${GITHUB_EVENT_PATH}" 2>/dev/null)"; then
+                echo "::error title=capped_baseline unreadable::the capped_baseline input could not be read from the event payload (jq missing or the payload unreadable); nothing was run"
+                exit 1
+              fi
+            fi
+            case "${CAPPED_BASELINE}" in
+              true)
+                # Per-run ceiling for the Step 4 baseline and the #602 runs;
+                # re-approve or remove after them. 0.14 is the approved 0.15 less a
+                # reserve of one answer call at max_tokens, rounded up to 0.01. The
+                # runner is told the run is capped (CITEVYN_EVAL_CAPPED_DISPATCH) and
+                # refuses it with under 70 minutes left before 00:00 UTC (the daily
+                # guard resets then), before any paid call.
+                CAP_USD=0.14
+                export CITEVYN_COST_HARD_DAILY_USD="${CAP_USD}"
+                export CITEVYN_EVAL_CAPPED_DISPATCH=true
+                ;;
+              false)
+                ;;
+              *)
+                echo "::error title=capped_baseline invalid::the capped_baseline input is neither true nor false; nothing was run"
+                exit 1
+                ;;
+            esac
           fi
           uv run python -m tests.eval.runner --postgres --production-parity --report ../artifacts/eval_report.json
-      - name: Export the recorded spend (grader check only)
+      - name: Export the recorded spend (every dispatch)
         # After the eval whatever its outcome, so a run that fails or is cut off
         # still keeps its measured spend. Reads provider_calls; makes no model call.
-        if: always() && inputs.grader_check && steps.guard.outputs.run == 'true'
+        # Every workflow_dispatch run, switch on or off; never push or tag runs.
+        if: always() && github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true'
         working-directory: backend
         # It reads the database only, so the provider keys are blanked here.
         env:

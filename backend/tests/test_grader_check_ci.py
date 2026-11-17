@@ -12,6 +12,12 @@ Written before the implementation (test designer). The contract for
   is still exactly the eval command. The input may reach the script as
   ``${{ inputs.grader_check }}``, directly or through a step ``env:`` entry that
   is not a CITEVYN_ setting.
+* #598 Step 4 (plan Revision 4): every ``workflow_dispatch`` run is capped. With
+  the input off, the eval step's own script exports ``CITEVYN_COST_HARD_DAILY_USD``
+  from a ``CAP_USD`` line (0.14, the approved per-run limit less one answer call);
+  with it on, the grader check's 0.43 as before. Push and tag runs export neither.
+  The spend export step runs on every dispatch (``github.event_name ==
+  'workflow_dispatch'``), never on push or tag runs. The limits are unchanged.
 * Limits on the input, as ``${{ inputs.grader_check && ON || OFF }}`` (the
   boolean ``inputs`` context: ``github.event.inputs`` is a string, and the
   string "false" is truthy): job ``timeout-minutes`` 245 on / 68 off, eval step
@@ -30,6 +36,7 @@ Each test names the change that turns it red.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import pathlib
@@ -143,20 +150,61 @@ _SCENARIOS = {
     "dispatch-off": ("false", "refs/heads/eval/598-grader-check"),
     "dispatch-on": ("true", "refs/heads/eval/598-grader-check"),
 }
+# The event behind each scenario (#598 Step 4: the switch-off dispatch is told apart
+# from push and tag runs by it). Tag runs are ``push`` events too.
+_EVENTS = {
+    "push-main": "push",
+    "tag": "push",
+    "dispatch-off": "workflow_dispatch",
+    "dispatch-on": "workflow_dispatch",
+}
+# The cap a switch-off dispatch runs under (plan Revision 4 item 2): the approved
+# per-run limit less one answer call at max_tokens. Changes only with a new approval.
+SWITCH_OFF_CAP_USD = "0.14"
+# The grader check's own cap, unchanged.
+SWITCH_ON_CAP_USD = "0.43"
+
+
+def _event(ref: str, grader_check: str) -> str:
+    return "workflow_dispatch" if grader_check else "push"
+
+
+# The capped baseline (#598 Step 4, round 2): the switch-off cap and the 70-minute
+# window apply only to a dispatch that sets the boolean ``capped_baseline`` input. The
+# eval step reads it from the event payload (``$GITHUB_EVENT_PATH``, ``.inputs``), never
+# through ``env:``, and accepts JSON ``true`` or the string "true". ``_ABSENT`` is a
+# dispatch that does not set it (and every push or tag run, which has no inputs).
+_ABSENT = object()
+
+
+def _payload(grader_check: str, ref: str, capped: Any) -> dict[str, Any]:
+    """The event payload Actions writes at ``$GITHUB_EVENT_PATH`` for one run."""
+    if _event(ref, grader_check) != "workflow_dispatch":
+        return {"ref": ref}
+    inputs: dict[str, Any] = {"grader_check": grader_check == "true"}
+    if capped is not _ABSENT:
+        inputs["capped_baseline"] = capped
+    return {"ref": ref, "inputs": inputs}
 
 
 def _render(text: str, *, grader_check: str, ref: str) -> str:
     text = re.sub(r"\$\{\{\s*inputs\.grader_check\s*\}\}", grader_check, text)
     text = re.sub(r"\$\{\{\s*github\.ref\s*\}\}", ref, text)
+    text = re.sub(r"\$\{\{\s*github\.event_name\s*\}\}", _event(ref, grader_check), text)
     text = re.sub(r"\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}", "placeholder-not-a-key", text)
     assert "${{" not in text, f"an expression this test cannot render: {text!r}"
     return text
 
 
-def _run_eval_step(tmp: pathlib.Path, grader_check: str, ref: str) -> tuple[dict[str, str], str]:
+def _run_eval_step(
+    tmp: pathlib.Path, grader_check: str, ref: str, *, capped: Any = _ABSENT
+) -> tuple[dict[str, str], str]:
     """Run the eval step's script as Actions would (bash -e), with a fake ``uv``
-    that records the environment and arguments it was started with."""
+    that records the environment and arguments it was started with, and the event
+    payload at ``$GITHUB_EVENT_PATH`` (``capped``: the ``capped_baseline`` input)."""
     step = _eval_step()
+    event_path = tmp / "event.json"
+    event_path.write_text(json.dumps(_payload(grader_check, ref, capped)), encoding="utf-8")
     bin_dir = tmp / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "uv"
@@ -169,6 +217,8 @@ def _run_eval_step(tmp: pathlib.Path, grader_check: str, ref: str) -> tuple[dict
         "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
         "HOME": str(tmp),
         "GITHUB_REF": ref,
+        "GITHUB_EVENT_NAME": _event(ref, grader_check),
+        "GITHUB_EVENT_PATH": str(event_path),
         "CAPTURE_ENV": str(tmp / "env.txt"),
         "CAPTURE_ARGS": str(tmp / "args.txt"),
     }
@@ -196,15 +246,33 @@ def _run_eval_step(tmp: pathlib.Path, grader_check: str, ref: str) -> tuple[dict
     return captured, (tmp / "args.txt").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("scenario", list(_SCENARIOS))
+BRANCH = "refs/heads/eval/598-grader-check"
+# name: (grader_check input, ref, capped_baseline input, the cap expected in the env).
+_RENDERINGS: dict[str, tuple[str, str, Any, str | None]] = {
+    "push-main": ("", "refs/heads/main", _ABSENT, None),
+    "tag": ("", "refs/tags/v0.12.0", _ABSENT, None),
+    "dispatch-off": ("false", BRANCH, _ABSENT, None),
+    "dispatch-off-input-false": ("false", BRANCH, False, None),
+    "dispatch-off-on-a-tag": ("false", "refs/tags/v0.12.0", _ABSENT, None),
+    "dispatch-off-capped": ("false", BRANCH, True, SWITCH_OFF_CAP_USD),
+    "dispatch-off-capped-string": ("false", BRANCH, "true", SWITCH_OFF_CAP_USD),
+    "dispatch-on": ("true", BRANCH, _ABSENT, SWITCH_ON_CAP_USD),
+}
+
+
+@pytest.mark.parametrize("rendering", list(_RENDERINGS))
 def test_each_rendering_of_the_eval_step_loads_settings_and_sets_the_switch_only_when_asked(
-    scenario: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    rendering: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Red when: a push, tag or dispatch-off run carries the switch or the cap (or
-    an empty value for either, which makes Settings refuse to load), or a
-    dispatch-on run does not set both, or the eval command changes."""
-    grader_check, ref = _SCENARIOS[scenario]
-    captured, args = _run_eval_step(tmp_path, grader_check, ref)
+    """Red when: a push or tag run carries the switch or a cap (or an empty value for
+    either, which makes Settings refuse to load); a switch-off dispatch WITHOUT the
+    ``capped_baseline`` input (on a branch or on a tag: a release re-run the gate
+    accepts) is capped or marked capped; a switch-off dispatch WITH it (JSON true or
+    the string "true") is not capped at the CAP_USD value or not marked
+    ``CITEVYN_EVAL_CAPPED_DISPATCH=true``; a dispatch-on run does not set both at the
+    grader check's cap; or the eval command changes."""
+    grader_check, ref, capped, expected = _RENDERINGS[rendering]
+    captured, args = _run_eval_step(tmp_path, grader_check, ref, capped=capped)
     assert args.split("\n")[:-1] == EVAL_COMMAND[1:]  # partner: the eval really started
     for name in list(os.environ):
         if name.upper().startswith(PREFIX):
@@ -213,17 +281,21 @@ def test_each_rendering_of_the_eval_step_loads_settings_and_sets_the_switch_only
         if name.upper().startswith(PREFIX):
             monkeypatch.setenv(name, value)
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
-    on = scenario == "dispatch-on"
+    on = rendering == "dispatch-on"
     assert ("CITEVYN_EVAL_PASSAGE_GRADING" in captured) is on, sorted(captured)
-    assert ("CITEVYN_COST_HARD_DAILY_USD" in captured) is on, sorted(captured)
+    assert captured.get("CITEVYN_COST_HARD_DAILY_USD") == expected, sorted(captured)
+    capped_run = expected == SWITCH_OFF_CAP_USD
+    assert (captured.get("CITEVYN_EVAL_CAPPED_DISPATCH") == "true") is capped_run, sorted(captured)
+    if not capped_run:
+        assert "CITEVYN_EVAL_CAPPED_DISPATCH" not in captured, sorted(captured)
     assert settings.eval_passage_grading is on  # type: ignore[attr-defined]
-    if on:
+    default = Settings.model_fields["cost_hard_daily_usd"].default
+    if expected is not None:
         cap = settings.cost_hard_daily_usd
-        assert (
-            math.isfinite(cap) and 0 < cap < Settings.model_fields["cost_hard_daily_usd"].default
-        ), cap
+        assert math.isfinite(cap) and 0 < cap < default, cap
+        assert settings.cost_budget_enabled is True
     else:
-        assert settings.cost_hard_daily_usd == Settings.model_fields["cost_hard_daily_usd"].default
+        assert settings.cost_hard_daily_usd == default
 
 
 def test_the_eval_steps_last_line_is_exactly_the_eval_command() -> None:
@@ -241,10 +313,36 @@ def test_the_eval_steps_last_line_is_exactly_the_eval_command() -> None:
 # --- the spend export step -----------------------------------------------------------------
 
 
-def test_a_spend_export_step_runs_after_the_eval_only_for_a_grader_check() -> None:
-    """Red when: the spend is not exported when the eval fails or is cut off
-    (``always()``), is exported on every tag run, runs before the eval, or runs
-    another command than the one its test runs."""
+def _evaluate_if(condition: str, *, scenario: str, guard: bool = True) -> bool:
+    """Evaluate a step's ``if:`` the way Actions would for one scenario. Only the
+    names this job's conditions use are known; anything else fails the test."""
+    grader_check, ref = _SCENARIOS[scenario]
+    names = {
+        "always()": "True",
+        "success()": "True",
+        "github.event_name": repr(_EVENTS[scenario]),
+        "github.ref": repr(ref),
+        "inputs.grader_check": {"true": "True", "false": "False", "": "None"}[grader_check],
+        "steps.guard.outputs.run": repr("true" if guard else "false"),
+    }
+    expr = condition.strip()
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2]
+    for name, value in names.items():
+        expr = expr.replace(name, value)
+    expr = expr.replace("&&", " and ").replace("||", " or ")
+    expr = re.sub(r"!(?!=)", " not ", expr)
+    expr = re.sub(r"startsWith\(", "_starts(", expr)
+    leftover = re.findall(r"[A-Za-z_][\w.]*\.[\w.]+", re.sub(r"'[^']*'", "''", expr))
+    assert not leftover, f"a name this test cannot evaluate: {leftover} in {condition!r}"
+    return bool(eval(expr, {"__builtins__": {}, "_starts": str.startswith}))  # noqa: S307
+
+
+def test_the_spend_export_step_runs_after_the_eval_on_every_dispatch() -> None:
+    """Red when (#598 Step 4, A8): a switch-off dispatch does not export its spend, a
+    tag or push run exports (they gain no step), the export no longer runs after a
+    failed or cut-off eval (``always()``), runs without the guard, runs before the
+    eval, or runs another command than the one its test runs."""
     steps = _job()["steps"]
     exports = [i for i, s in enumerate(steps) if "tests.eval.spend_export" in str(s.get("run", ""))]
     assert len(exports) == 1, exports
@@ -252,8 +350,16 @@ def test_a_spend_export_step_runs_after_the_eval_only_for_a_grader_check() -> No
     step = steps[index]
     assert index > steps.index(_eval_step())
     condition = str(step.get("if", ""))
-    for part in ("always()", "inputs.grader_check", "steps.guard.outputs.run == 'true'"):
-        assert part in condition, condition
+    assert "always()" in condition, condition
+    runs = {scenario: _evaluate_if(condition, scenario=scenario) for scenario in _SCENARIOS}
+    assert runs == {
+        "push-main": False,
+        "tag": False,
+        "dispatch-off": True,
+        "dispatch-on": True,
+    }, (condition, runs)
+    for scenario in _SCENARIOS:
+        assert _evaluate_if(condition, scenario=scenario, guard=False) is False, scenario
     assert step.get("working-directory") == "backend"
     tokens = str(step["run"]).split()
     assert tokens[: len(EXPORT_COMMAND)] == EXPORT_COMMAND
