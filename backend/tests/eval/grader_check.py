@@ -55,9 +55,11 @@ DISAGREEMENT = 2
 MIN_COVERAGE = 0.9
 # A grader-check run needs this much of the UTC day left: the daily spend cap
 # counts today's spend only, so a run crossing 00:00 UTC would reset it mid-run.
+# The rule is: at least the judged job's limit in ci.yml (55 minutes). 250 was set
+# for the old 245-minute limit and is kept: stricter than needed, never too short.
 MIN_MINUTES_BEFORE_UTC_MIDNIGHT = 250
 # The same rule for a capped baseline dispatch, which ci.yml caps too (#598 Step 4):
-# at least its job's 68-minute limit, rounded up.
+# at least its job's 55-minute limit, with margin.
 MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH = 70
 
 STOPPED_BY_CAP = "stopped by the spend cap"

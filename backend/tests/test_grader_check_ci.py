@@ -20,8 +20,8 @@ Written before the implementation (test designer). The contract for
   'workflow_dispatch'``), never on push or tag runs.
 * Limits on the input, as ``${{ inputs.grader_check && ON || OFF }}`` (the
   boolean ``inputs`` context: ``github.event.inputs`` is a string, and the
-  string "false" is truthy): job ``timeout-minutes`` 35 on / 35 off, eval step
-  30 on / 30 off. The release wait stays 4500 s (tag runs never set the input).
+  string "false" is truthy): job ``timeout-minutes`` 55 on / 55 off, eval step
+  50 on / 50 off. The release wait stays 4500 s (tag runs never set the input).
 * A step after the eval, ``if:`` on ``always()``, the input and the guard,
   ``working-directory: backend``, runs
   ``uv run python -m tests.eval.spend_export --out ../artifacts/spend.json``
@@ -114,10 +114,11 @@ def test_workflow_dispatch_has_a_boolean_grader_check_input_off_by_default() -> 
 
 def test_the_job_and_step_limits_depend_on_the_input() -> None:
     """Red when: a limit stops being read from the ``grader_check`` input, or either
-    path's value moves away from the measured one (job 35, eval step 30 on both
-    today: twice each path's measured duration, rounded up to 5 minutes)."""
-    assert _conditional(_job()["timeout-minutes"]) == (35, 35)
-    assert _conditional(_eval_step()["timeout-minutes"]) == (30, 30)
+    path's value moves away from the rule in ci.yml (twice the slowest counted run,
+    rounded up to 5 minutes, the job at least 5 above its step: job 55, eval step
+    50 on both paths)."""
+    assert _conditional(_job()["timeout-minutes"]) == (55, 55)
+    assert _conditional(_eval_step()["timeout-minutes"]) == (50, 50)
 
 
 def test_the_release_wait_is_unchanged_and_the_off_limit_fits_inside_it() -> None:

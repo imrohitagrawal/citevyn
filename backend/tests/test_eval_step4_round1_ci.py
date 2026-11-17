@@ -62,5 +62,5 @@ def test_the_capped_dispatch_window_covers_the_switch_off_job_limit() -> None:
     dispatch is below the job's switch-off limit, so a run that starts could still
     cross midnight and the daily cap would reset mid-run."""
     _on, off = _conditional(_job()["timeout-minutes"])
-    assert off == 68  # partner: the limit this window is held to
+    assert off == 55  # partner: the limit this window is held to
     assert off <= gc.MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH
