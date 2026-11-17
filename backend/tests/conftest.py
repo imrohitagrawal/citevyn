@@ -73,7 +73,11 @@ def clear_settings_cache() -> Generator[None, None, None]:
 # test run itself stays clean. Every other module sees the real value (the
 # shipped-corpus report test writes to it on purpose).
 JOB_SUMMARY_SHIELDED_MODULES = frozenset(
-    {"tests.test_grader_check_runner", "tests.test_grader_check_round1"}
+    {
+        "tests.test_grader_check_runner",
+        "tests.test_grader_check_round1",
+        "tests.test_eval_step4_round1",
+    }
 )
 
 
@@ -87,6 +91,15 @@ def _no_job_summary(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPa
     that checks the summary sets it to a file of its own."""
     if shields_job_summary(request.node.module.__name__):
         monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_dispatch_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove ``GITHUB_EVENT_NAME`` for every test. The runner refuses a capped
+    switch-off dispatch near 00:00 UTC (#598 Step 4), so a test job started by a
+    manual dispatch would otherwise refuse the runner tests late in the UTC day. A
+    test of that rule sets the variable itself."""
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
 
 
 @pytest.fixture

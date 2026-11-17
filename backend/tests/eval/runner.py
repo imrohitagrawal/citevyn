@@ -41,7 +41,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.answer.generate import _truncate_snippet
@@ -64,8 +64,6 @@ from app.models import (
     RetrievedEvidence,
 )
 from app.retrieval.types import VectorDegrade
-
-from ..conftest import corpus_fixture_specs
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
@@ -123,7 +121,8 @@ class JudgedCase:
     missing_facts: tuple[str, ...] = ()
     # must_say (#598 Step 4), reported and gating nothing until #602 (Step 5): the
     # entries (raw form, in order) the answer does not contain, by the groundedness
-    # matcher. ``None`` when the case declares no ``must_say`` (or no answer was seen).
+    # matcher. ``None`` when the case declares no ``must_say``, no answer was seen, or
+    # the answer errored.
     must_say_missing: tuple[str, ...] | None = None
     # Whether a passage the answer was made from is one of the case's
     # ``shipped_gold`` passages (#598 Step 4): a retrieval miss on the shipped corpus
@@ -700,6 +699,25 @@ def _degrade_entries(retrievals: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _provenance_entries(
+    case_id: str, evidence: list[dict[str, Any]], shipped: frozenset[str]
+) -> list[dict[str, Any]]:
+    """A harness error for each evidence passage of a case whose content checksum is
+    not one of the shipped passages' (#598 Step 4): the answer was not made from the
+    shipped corpus."""
+    return [
+        {
+            "stage": "report",
+            "type": "ShippedProvenance",
+            "message": f"case {case_id}: evidence passage {e.get('source')}#{e.get('heading')} "
+            f"has content checksum {e.get('content_checksum')!r}, which is not a shipped "
+            "passage's",
+        }
+        for e in evidence
+        if e.get("content_checksum") not in shipped
+    ]
+
+
 async def _judge_cases(
     cases: list[EvalCase],
     *,
@@ -713,6 +731,8 @@ async def _judge_cases(
     run_errors: list[dict[str, Any]] | None = None,
     budget_stops: list[BaseException] | None = None,
     after_save: Callable[[list[JudgedCase]], Awaitable[None]] | None = None,
+    index_counts: list[int] | None = None,
+    shipped_checksums: frozenset[str] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -742,6 +762,12 @@ async def _judge_cases(
     when it returns ``False`` the pass stops before any further paid call. A
     failure closing the pass's session or probe is appended to ``run_errors``
     (raised when it is ``None``), so it cannot drop the pass's results.
+
+    ``index_counts``: the number of chunk rows the pass's session holds after its
+    ingest is appended to it (#598 Step 4: the report's ``index_chunks`` is measured,
+    not stated). ``shipped_checksums`` (the run passes it when the answers run on the
+    shipped corpus): every evidence passage of a case must carry one of these content
+    checksums, else the case has a harness error naming it.
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -774,6 +800,10 @@ async def _judge_cases(
         # The probe is open only while this pass runs (#598).
         probe = stack.enter_context(probe_retrieval())
         session = await stack.enter_async_context(_judge_session(settings, postgres=postgres))
+        if index_counts is not None:
+            index_counts.append(
+                int(await session.scalar(select(func.count()).select_from(Chunk)) or 0)
+            )
         ledger = _CacheLedger(build_answer_cache_store(settings, session))
 
         async def _guarded(
@@ -1099,8 +1129,10 @@ async def _judge_cases(
                 entry.fact_coverage = fact_coverage(answer, case.expected_facts)
                 entry.missing_facts = tuple(missing_facts(answer, case.expected_facts))
             # must_say (#598 Step 4): the same matcher, kept apart from the facts so it
-            # moves no gate, no leak rule and no groundedness population.
-            if case.must_say:
+            # moves no gate, no leak rule and no groundedness population. An errored
+            # answer (a failed call, or another model's text) is not observed, never a
+            # miss: ``must_say_missing`` stays ``None``.
+            if case.must_say and not entry.answer_errored:
                 entry.must_say_missing = tuple(missing_facts(answer, case.must_say))
             entry.shipped_gold_in_evidence = _shipped_gold_in_evidence(case, entry, state)
             if entry.answer_errored:
@@ -1239,6 +1271,10 @@ async def _judge_cases(
                 # a degraded retrieval served keyword-only passages, so it is a
                 # harness error on the case, never a silent answer.
                 state.harness.extend(_degrade_entries(probe.retrievals[retrievals_from:]))
+            if shipped_checksums is not None:
+                state.harness.extend(
+                    _provenance_entries(case.id, entry.evidence or [], shipped_checksums)
+                )
             if checking:
                 stop = state_budget.pop(id(entry), None)
                 if stop is not None:
@@ -1993,10 +2029,14 @@ async def run_eval_async(
                 f"The shipped-corpus judged run cannot start: {first} "
                 "Nothing was run and nothing was spent."
             ) from exc
-    # Which corpus each half runs on, and the size of the index the answers ran on.
+    # Which corpus each half runs on; the size of the index the answers ran on is
+    # counted in each pass's judge session (``index_counts``, the main pass's first).
     answers_shipped = postgres and judge_available
     corpus = {"retrieval": "fixture", "answers": "shipped" if answers_shipped else "fixture"}
-    index_chunks = len(shipped_heading_keys()) if answers_shipped else len(corpus_fixture_specs())
+    index_counts: list[int] = []
+    # The shipped passages' identities: every judged answer's evidence must be one of
+    # them on the shipped corpus, checked per case in each pass.
+    shipped_checksums = frozenset(shipped_heading_keys().values()) if answers_shipped else None
     run_started = time.time()
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
@@ -2037,7 +2077,7 @@ async def run_eval_async(
             "dim": settings.embedding_dim,
         }
         summary["corpus"] = dict(corpus)
-        summary["index_chunks"] = index_chunks
+        summary["index_chunks"] = index_counts[0] if index_counts else None
         # Which answer passes this report holds; a report written after the main
         # pass, by a run later cut short, says so (#598).
         summary["passes_completed"] = passes
@@ -2252,6 +2292,8 @@ async def run_eval_async(
                     on_case=_main_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
+                    index_counts=index_counts,
+                    shipped_checksums=shipped_checksums,
                     after_save=_spend_resave(lambda done: _assemble(done, None, [], "main"))
                     if checking
                     else None,
@@ -2291,6 +2333,8 @@ async def run_eval_async(
                     on_case=_fallback_saved,
                     run_errors=run_errors,
                     budget_stops=budget_stops,
+                    index_counts=index_counts,
+                    shipped_checksums=shipped_checksums,
                     after_save=_spend_resave(
                         lambda done: _assemble(main_done, done, ["main"], "fallback")
                     )
@@ -2475,6 +2519,20 @@ def write_report(
 MUST_SAY_NOT_GATING = "not gating until #602 (Step 5)"
 
 
+def judged_corpus_line(summary: dict[str, Any]) -> str:
+    """The first line of the judged block in the CI log: which corpus the judged
+    answers ran on and the size of its index (``index_chunks``, counted in the judge
+    session), apart from the retrieval lines above it (#598 Step 4)."""
+    corpus = (summary.get("corpus") or {}).get("answers")
+    size = f"({summary.get('index_chunks')} passages)"
+    if corpus == "shipped":
+        return (
+            f"Judged answers: shipped corpus {size}; the retrieval lines above are on "
+            "the fixture corpus. Not comparable with judged runs before #598 Step 4."
+        )
+    return f"Judged answers: {corpus} corpus {size}, as the retrieval lines above."
+
+
 def pass_report_lines(judge: dict[str, Any]) -> list[str]:
     """One pass's answer errors, declines, helper fallbacks, grader latency,
     must_say misses and low scores, for the CI log (#598).
@@ -2517,9 +2575,12 @@ def pass_report_lines(judge: dict[str, Any]) -> list[str]:
             )
     for case in judge.get("cases", []):
         if case.get("score") is not None and case["score"] <= 2:
+            # Whether the case's shipped gold passage was in the evidence, so a retrieval
+            # miss reads apart from a bad answer (#598 Step 4).
+            gold = json.dumps(case.get("shipped_gold_in_evidence"))
             lines.append(
                 f"low score {case['score']}: {case['case_id']}: {case.get('rationale', '')} "
-                "(not gating until #602)"
+                f"(shipped_gold_in_evidence={gold}) (not gating until #602)"
             )
     return lines
 
@@ -2597,6 +2658,17 @@ def main(argv: list[str] | None = None) -> int:
         if refusal is not None:
             print(f"GRADER CHECK REFUSED (nothing was run, nothing was spent): {refusal}")
             return 2
+    else:
+        # A switch-off dispatch runs under ci.yml's daily-guard cap (#598 Step 4), so
+        # it too needs enough of the UTC day left; tag and push runs are not capped.
+        refusal = grader_check.capped_dispatch_refusal(
+            event=os.environ.get("GITHUB_EVENT_NAME"),
+            ref=os.environ.get("GITHUB_REF"),
+            now=grader_check.utc_now(),
+        )
+        if refusal is not None:
+            print(f"CAPPED DISPATCH REFUSED (nothing was run, nothing was spent): {refusal}")
+            return 2
 
     if args.production_parity:
         from .parity import parity_failures, production_settings
@@ -2649,15 +2721,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         if j["available"]:
             mean = j["mean_score"]
-            print(
-                f"  refusal leaks (judged, orchestrator answered): "
-                f"{j.get('refusal_leaks_judged', 0)}/{j.get('refusal_total', 0)}"
-            )
+            print(judged_corpus_line(summary))
             print(
                 f"Judge (panel min-vetoed): mean {mean:.2f} over {j['scored']} scored "
                 f"({len(j['errors'])} error(s)); contested: {j.get('contested_cases', [])}"
                 if mean is not None
                 else "Judge: no scores"
+            )
+            print(
+                f"  refusal leaks (judged, orchestrator answered): "
+                f"{j.get('refusal_leaks_judged', 0)}/{j.get('refusal_total', 0)}"
             )
             models = summary.get("models", {})
             print(
