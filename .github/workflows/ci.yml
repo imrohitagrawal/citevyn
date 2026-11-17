@@ -342,26 +342,23 @@ jobs:
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
     #
-    # 68 minutes (every run but the grader check, below) is an ESTIMATE of the
-    # worst case (#598), not a measurement. On the
-    # measured run (two answer passes) the eval step took 25.0 min, and 22 grader
-    # calls timed out at 15 s. With the grader at 60 s
-    # (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), those 22 calls can each wait
-    # 45 s more (16.5 min), and the 22 adversarial calls they skipped can each take
-    # up to 60 s (22.0 min): 25.0 + 16.5 + 22.0 = 63.5 min for the eval step,
-    # whose own limit is 64. The job gets 4 minutes more for setup and the report
-    # upload, so 68. Re-set both from the next counted run's durations. The job must
-    # stay at least 6 minutes (the `test` job before it) under the release wait in
-    # scripts/wait_for_judged_eval.sh (TOTAL_TIMEOUT_SECONDS, 75 min); raising it
-    # further needs the wait raised too.
-    #
-    # The grader check (#598 Step 3, the `grader_check` input) gets 245 minutes
-    # instead: it makes up to 528 grader calls instead of 252, and this run
-    # measures how long they take. Only a run dispatched with the input ticked
-    # gets the longer limits; push and tag runs keep 68 and 64, so the release
-    # wait is unchanged. 245 fits inside the 250 minutes of the UTC day the
-    # runner demands before it starts (the daily spend cap resets at 00:00 UTC).
-    timeout-minutes: ${{ inputs.grader_check && 245 || 68 }}
+    # The limits are set from measured runs (#598), by one rule: twice the
+    # slowest counted run's duration, rounded up to 5 minutes, with the job at
+    # least 5 minutes above its eval step so a step cut short still leaves time for
+    # the always() report upload. Counted runs (each ran every case to the end;
+    # the gates' verdict does not change the duration):
+    # - 2026-11-08, run 42460602450 (two answer passes, a slow provider day, the
+    #   grader then at 15 s): eval step 24 min 59 s, job 25 min 31 s. The slowest.
+    # - #598 Step 3 grader check, run 44052833740: step 13 min 33 s, job 14 min 6 s.
+    # - #598 Step 4 baseline, run 44124132238: step 12 min 53 s, job 13 min 22 s.
+    # Step: 2 x 25.0 = 50.0, so 50. Job: 2 x 25.5 = 51.0, so 55 (also 5 above the
+    # step). Both paths get the same limits: the grader-check path makes more
+    # grader calls, so it is held to the slowest run too. The expression keeps the
+    # input so a later re-measure can set them apart. Re-set them when a counted
+    # run is slower than half the step limit. The job must stay at least 6 minutes
+    # (the `test` job before it) under the release wait in
+    # scripts/wait_for_judged_eval.sh (TOTAL_TIMEOUT_SECONDS, 75 min): 55 + 6 = 61.
+    timeout-minutes: ${{ inputs.grader_check && 55 || 55 }}
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
@@ -540,11 +537,10 @@ jobs:
       - name: Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)
         if: steps.guard.outputs.run == 'true'
         working-directory: backend
-        # Above the 63.5 min worst-case estimate in the job's comment, and below the
-        # job's 68, so a run cut short still leaves time for the always() upload
-        # step to save the report written after each pass (#598). The grader check
-        # gets 240, below its job's 245.
-        timeout-minutes: ${{ inputs.grader_check && 240 || 64 }}
+        # Twice the slowest counted eval step, rounded up to 5 minutes (see the
+        # job's comment), and 5 below the job's 55, so a run cut short still leaves time
+        # for the always() upload step to save the report written after each pass.
+        timeout-minutes: ${{ inputs.grader_check && 50 || 50 }}
         # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
         # and rolls back (zero residue). Non-zero exit on any gate regression.
         #

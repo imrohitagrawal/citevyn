@@ -256,9 +256,10 @@ they stay empty there. `backend/tests/test_eval_report_fields_pg.py` proves they
 every push, tag and ordinary run. In CI, run the `answer-quality-eval` job by hand (Actions tab,
 *Run workflow*, on a branch) with **`grader_check`** ticked. Only then does the eval step export
 `CITEVYN_EVAL_PASSAGE_GRADING=true` and the spend cap `CITEVYN_COST_HARD_DAILY_USD` (set to
-the approved amount less one answer call's worst case), and only then do the job and step get 245 and 240 minutes instead of 68 and 64. These
-longer limits are for the experiment only; release runs keep the short ones, and the release wait
-(4500 s) is unchanged. The cap in `ci.yml` is approved for one run: each dispatch needs a fresh
+the approved amount less one answer call's worst case). The job and step limits (55 and 50 minutes,
+both paths) are twice the slowest counted run, rounded up to 5 minutes, with the job at least 5 above
+its step (the rule and the runs are in the job's comment in `ci.yml`); the release wait (4500 s) is
+unchanged. The cap in `ci.yml` is approved for one run: each dispatch needs a fresh
 approval of the owner (`docs/DECISIONS.md`, 2026-11-16). When checking a release commit by hand,
 leave `grader_check` unticked.
 
@@ -271,7 +272,7 @@ through `env:`. Only a paid baseline dispatch ticks it; a release re-run never d
 other run exports neither setting: push and tag runs, and a dispatch without the input on a
 branch or a tag, which the release gate may accept as its judged result and which therefore
 keeps the tag run's limits. The runner refuses a run marked `CITEVYN_EVAL_CAPPED_DISPATCH=true`
-with fewer than 70 minutes left before 00:00 UTC (the switch-off job may run 68), before any
+with fewer than 70 minutes left before 00:00 UTC (at least the switch-off job's 55-minute limit), before any
 paid call, with one line naming the
 window. On such a run a cap stop does not
 stop the pass: each later metered call is refused, those cases error and the gates go red,

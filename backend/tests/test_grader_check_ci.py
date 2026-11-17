@@ -17,11 +17,11 @@ Written before the implementation (test designer). The contract for
   from a ``CAP_USD`` line (0.14, the approved per-run limit less one answer call);
   with it on, the grader check's 0.43 as before. Push and tag runs export neither.
   The spend export step runs on every dispatch (``github.event_name ==
-  'workflow_dispatch'``), never on push or tag runs. The limits are unchanged.
+  'workflow_dispatch'``), never on push or tag runs.
 * Limits on the input, as ``${{ inputs.grader_check && ON || OFF }}`` (the
   boolean ``inputs`` context: ``github.event.inputs`` is a string, and the
-  string "false" is truthy): job ``timeout-minutes`` 245 on / 68 off, eval step
-  240 on / 64 off. The release wait stays 4500 s (tag runs never set the input).
+  string "false" is truthy): job ``timeout-minutes`` 55 on / 55 off, eval step
+  50 on / 50 off. The release wait stays 4500 s (tag runs never set the input).
 * A step after the eval, ``if:`` on ``always()``, the input and the guard,
   ``working-directory: backend``, runs
   ``uv run python -m tests.eval.spend_export --out ../artifacts/spend.json``
@@ -113,11 +113,12 @@ def test_workflow_dispatch_has_a_boolean_grader_check_input_off_by_default() -> 
 
 
 def test_the_job_and_step_limits_depend_on_the_input() -> None:
-    """Red when: the longer limits apply to every run (a release run could then
-    hang 4 hours), or the experiment run keeps the short ones (it would be cut
-    off), or the off values change."""
-    assert _conditional(_job()["timeout-minutes"]) == (245, 68)
-    assert _conditional(_eval_step()["timeout-minutes"]) == (240, 64)
+    """Red when: a limit stops being read from the ``grader_check`` input, or either
+    path's value moves away from the rule in ci.yml (twice the slowest counted run,
+    rounded up to 5 minutes, the job at least 5 above its step: job 55, eval step
+    50 on both paths)."""
+    assert _conditional(_job()["timeout-minutes"]) == (55, 55)
+    assert _conditional(_eval_step()["timeout-minutes"]) == (50, 50)
 
 
 def test_the_release_wait_is_unchanged_and_the_off_limit_fits_inside_it() -> None:
