@@ -23,6 +23,7 @@ table, the printed lines and the start refusals). The runner calls them.
 
 from __future__ import annotations
 
+import math
 import os
 import statistics
 from datetime import UTC, datetime, timedelta
@@ -395,7 +396,7 @@ def capped_dispatch_refusal(*, event: str | None, ref: str | None, now: datetime
     if left >= MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH:
         return None
     return (
-        f"only {left:.0f} minutes are left before 00:00 UTC, and a capped dispatch needs "
+        f"only {math.floor(left)} minutes are left before 00:00 UTC, and a capped dispatch needs "
         f"{MIN_MINUTES_BEFORE_UTC_MIDNIGHT_CAPPED_DISPATCH} (the daily spend cap resets at "
         f"00:00 UTC); dispatch it between 00:00 and {capped_dispatch_window_end()} UTC"
     )
@@ -410,7 +411,7 @@ def start_refusal(*, ref: str | None, now: datetime) -> str | None:
     left = _minutes_before_utc_midnight(now)
     if left < MIN_MINUTES_BEFORE_UTC_MIDNIGHT:
         return (
-            f"only {left:.0f} minutes are left before 00:00 UTC, and the grader check "
+            f"only {math.floor(left)} minutes are left before 00:00 UTC, and the grader check "
             f"needs {MIN_MINUTES_BEFORE_UTC_MIDNIGHT} (the daily spend cap resets at "
             "00:00 UTC)"
         )
