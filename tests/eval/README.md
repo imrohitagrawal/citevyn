@@ -331,7 +331,10 @@ run's) and groups them by provider, model and kind with tokens and the **recorde
 cost the meter stored, at the price book's rates), counting priced, unpriced and estimated-token
 rows. From the report it adds the **observed failures** per model, with their total duration, and apart from them the calls
 the cap refused (never sent); a failed grader call records no model, so it is counted under the
-configured grader model. A report that cannot be read is noted and skipped. It is a measurement,
+configured grader model. It also copies the report's cap record, `grader.spend_cap`
+(`capped_dispatch`: whether the run carried `CITEVYN_EVAL_CAPPED_DISPATCH=true`;
+`ceiling_usd`: the daily ceiling in force, `null` with the budget guard off), as `spend_cap`, so
+a baseline's evidence shows its cap. A report that cannot be read is noted and skipped. It is a measurement,
 not a guarantee. Its stated gaps: failed attempts that were never recorded (a primary failure the
 fallback hid, or both providers failing), meter writes that were silently lost (the meter never
 fails a call), rows with estimated tokens (their cost can read low), and unpriced rows (counted as

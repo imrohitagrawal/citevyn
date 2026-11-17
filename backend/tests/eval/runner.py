@@ -2057,6 +2057,12 @@ async def run_eval_async(
     # The judge session must hold exactly the shipped passages (one per map key).
     shipped_passages = len(shipped_keys) if shipped_keys is not None else None
     run_started = time.time()
+    spend_cap = {
+        "capped_dispatch": os.environ.get("CITEVYN_EVAL_CAPPED_DISPATCH") == "true",
+        "ceiling_usd": settings.cost_hard_daily_usd
+        if settings.cost_budget_enabled and math.isfinite(settings.cost_hard_daily_usd)
+        else None,
+    }
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
     run_errors: list[dict[str, Any]] = []
@@ -2114,6 +2120,11 @@ async def run_eval_async(
         summary["grader"] = {
             "model": judge_model,
             "timeout_seconds": settings.eval_judge_timeout_seconds,
+            # Whether ci.yml marked this a capped baseline dispatch, and the daily
+            # ceiling every metered call was held to (``None`` with the budget guard
+            # off), so a baseline's evidence shows its cap (#598 Step 4). Here, not
+            # top-level: the report's top-level keys are pinned.
+            "spend_cap": spend_cap,
         }
         if checking:
             # The probe's grader calls, once per run, beside the main pass's kinds.
