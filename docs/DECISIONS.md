@@ -18,6 +18,13 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-17 — The judged job's time limits come from the slowest counted run
+Applies to the judged eval job in `ci.yml`. Its limits are twice the slowest counted
+run's duration, rounded up to 5 minutes, with the job at least 5 minutes above its
+eval step. The owner chose the slowest counted run over the newest ones, so a slow
+provider day does not cut a paid run short. The runs and the arithmetic are in the
+job's comment.
+
 ### 2026-11-17 — The per-run allowance for the next judged runs; the Step 4 baseline is re-run
 Applies to #598 Step 4 and #602. The owner raised the allowance for one judged run to
 the approved amount named in the capped-baseline ceiling comment in `ci.yml`, for the
