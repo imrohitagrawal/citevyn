@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.answer.memory import build_contextual_query
 from app.answer.orchestrator import _retrieve_active_index  # pyright: ignore[reportPrivateUsage]
 from app.core.config import Settings, get_settings
-from app.embeddings.factory import EmbedderIdentity
+from app.embeddings.factory import EmbedderIdentity, configured_embedder_identity
 from app.embeddings.protocol import Embedder
 from app.guardrails.domain import (
     canonicalize_product_name,
@@ -55,7 +55,13 @@ from app.worker.parser import parse_markdown
 from app.worker.runner import IngestionRunner, ensure_index_version
 
 from .cases import load_cases
-from .paths import GOLDEN_PATH, REPO_ROOT, SHIPPED_QUESTIONS_PATH
+from .paths import (
+    GOLDEN_PATH,
+    RECORDED_CHUNKS_PATH,
+    RECORDED_QUESTIONS_PATH,
+    REPO_ROOT,
+    SHIPPED_QUESTIONS_PATH,
+)
 from .probe import Gate, probe_retrieval
 from .recorded import (
     RECORD_COMMAND,
@@ -69,6 +75,7 @@ from .recorded import (
     load_question_vectors,
     sha256_text,
 )
+from .retrieval import _seed_eval_users  # pyright: ignore[reportPrivateUsage]
 
 __all__ = [
     "RECORD_COMMAND",
@@ -83,6 +90,7 @@ __all__ = [
     "arm_label",
     "build_report",
     "check_production_identity",
+    "check_shipped_judge_ready",
     "check_chunk_vectors",
     "evaluate_cases",
     "identity_from_header",
@@ -98,6 +106,7 @@ __all__ = [
     "shipped_chunk_texts",
     "shipped_corpus_session",
     "shipped_heading_keys",
+    "shipped_judge_session",
     "single_gate",
     "write_report",
 ]
@@ -486,6 +495,69 @@ async def shipped_corpus_session(
                 await outer.rollback()
     finally:
         await engine.dispose()
+
+
+# --- The judged answer half on the shipped corpus (#598 Step 4) ----------------------
+
+
+def _recorded_embedder() -> RecordedEmbedder:
+    return RecordedEmbedder(
+        chunks=load_chunk_vectors(RECORDED_CHUNKS_PATH),
+        questions=load_question_vectors(RECORDED_QUESTIONS_PATH),
+    )
+
+
+async def check_shipped_judge_ready(settings: Settings) -> int:
+    """Refuse, before anything is spent, a judged run whose shipped corpus would not be
+    production's vector space: a chunk recording made with another embedder than the
+    configured one or than production's, a shipped chunk whose text no longer matches
+    its recorded checksum (named), or a catalog that is not empty. Returns the number of
+    shipped chunks. Each refusal is one ``ShippedEvalError`` line."""
+    chunks = load_chunk_vectors(RECORDED_CHUNKS_PATH)
+    questions = load_question_vectors(RECORDED_QUESTIONS_PATH)
+    recorded = identity_from_header(chunks.header)
+    configured = configured_embedder_identity(settings)
+    if tuple(recorded) != tuple(configured):
+        raise ShippedEvalError(
+            f"the chunk recording was made with {tuple(recorded)}; this run is configured "
+            f"to embed queries with {tuple(configured)}"
+        )
+    check_production_identity(chunks.header, questions.header)
+    matched = check_chunk_vectors(chunks, shipped_heading_keys())
+    if not settings.database_url.startswith(("postgresql", "postgres")):
+        raise ShippedEvalError("the shipped-corpus judged run needs a Postgres database")
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with engine.connect() as conn:
+            for model in (Chunk, IndexVersion):
+                existing = await conn.scalar(select(func.count()).select_from(model))
+                if existing:
+                    raise ShippedEvalError(
+                        f"the catalog is not empty ({existing} {model.__tablename__} rows)"
+                    )
+    finally:
+        await engine.dispose()
+    return matched
+
+
+@contextlib.asynccontextmanager
+async def shipped_judge_session(settings: Settings) -> AsyncGenerator[AsyncSession, None]:
+    """The judged answer half's session over the 44 shipped passages (#598 Step 4).
+
+    Chunk vectors come from the committed recording, through
+    :func:`shipped_corpus_session` (one outer transaction, rolled back: no catalog or
+    session row stays; the meter's ``provider_calls`` rows are committed on their own
+    session and survive). The recorded embedder only embeds documents at ingest:
+    the orchestrator embeds each query live through its own embedder, as production
+    does. The eval users the orchestrator needs are seeded in the same transaction.
+    """
+    recorded = _recorded_embedder()
+    async with shipped_corpus_session(settings, recorded, recorded.query_identity) as (
+        session,
+        _embedder,
+    ):
+        await _seed_eval_users(session)
+        yield session
 
 
 # --- Evaluation ---------------------------------------------------------------------
