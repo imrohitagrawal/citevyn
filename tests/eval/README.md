@@ -262,13 +262,17 @@ longer limits are for the experiment only; release runs keep the short ones, and
 approval of the owner (`docs/DECISIONS.md`, 2026-11-16). When checking a release commit by hand,
 leave `grader_check` unticked.
 
-**A switch-off dispatch is capped too (#598 Step 4).** A run started by hand with
-`grader_check` unticked exports only `CITEVYN_COST_HARD_DAILY_USD`, from the one `CAP_USD`
-line in the eval step's script (the approved per-run limit less one answer call at
-`max_tokens`); push and tag runs export neither setting, and neither does a dispatch on a
-tag (`refs/tags/*`): the release gate accepts that run as its judged result, so it keeps the
-tag run's limits. The runner refuses a capped dispatch with fewer than 70 minutes left before
-00:00 UTC (the switch-off job may run 68), before any paid call, with one line naming the
+**A capped baseline dispatch (#598 Step 4).** The cap for a switch-off run is opt-in. A run
+started by hand with `grader_check` unticked and **`capped_baseline`** ticked exports
+`CITEVYN_COST_HARD_DAILY_USD`, from the one `CAP_USD` line in the eval step's script (the
+approved per-run limit less one answer call at `max_tokens`), and
+`CITEVYN_EVAL_CAPPED_DISPATCH=true`. The step reads the input from the event payload, never
+through `env:`. Only a paid baseline dispatch ticks it; a release re-run never does. Every
+other run exports neither setting: push and tag runs, and a dispatch without the input on a
+branch or a tag, which the release gate may accept as its judged result and which therefore
+keeps the tag run's limits. The runner refuses a run marked `CITEVYN_EVAL_CAPPED_DISPATCH=true`
+with fewer than 70 minutes left before 00:00 UTC (the switch-off job may run 68), before any
+paid call, with one line naming the
 window. On such a run a cap stop does not
 stop the pass: each later metered call is refused, those cases error and the gates go red,
 and the spend export counts an unwrapped refusal as refused and a wrapped one as an observed
