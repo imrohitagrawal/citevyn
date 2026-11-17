@@ -498,8 +498,8 @@ jobs:
       CITEVYN_EVAL_JUDGE_MODEL: anthropic/claude-haiku-5.5
       # The grader's own timeout, set with the grader model or not at all (#598).
       # Only the grader's client reads it; the answer clients keep production's
-      # 15 s. 60 s: completed grader calls measured p50 1.4 s, p90 12.0 s, max
-      # 13.5 s; the tail above 15 s is unknown, so re-set it from the next run.
+      # 15 s. 60 s. Measured on #598 Step 3 (126 blind grader calls, none
+      # failed): p50 1.04 s, p90 2.09 s, max 2.9 s.
       CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS: "60"
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
       # calls per case per pass.
@@ -546,7 +546,8 @@ jobs:
         # `if:` above), not by sampling cases — see the rationale there.
         #
         # The grader check's two settings are exported here, and only when the
-        # input is true, never through `env:`: an expression there renders empty
+        # input is true (a switch-off dispatch gets only its own cap, below),
+        # never through `env:`: an expression there renders empty
         # on push and tag runs, and an empty value makes Settings refuse to load.
         # The cap is the existing per-call daily guard, in price-book dollars, set
         # to the approved amount less one answer call's worst case; it is approved
@@ -560,12 +561,19 @@ jobs:
           if [ "${GRADER_CHECK}" = "true" ]; then
             export CITEVYN_EVAL_PASSAGE_GRADING=true
             export CITEVYN_COST_HARD_DAILY_USD=0.43
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # Switch-off dispatch cap: limit $0.15 less one answer call at
+            # max_tokens (1,024 x $7.50/M + ~1,032 x $1.50/M = $0.0092, rounded
+            # up to $0.01).
+            CAP_USD=0.14
+            export CITEVYN_COST_HARD_DAILY_USD="${CAP_USD}"
           fi
           uv run python -m tests.eval.runner --postgres --production-parity --report ../artifacts/eval_report.json
-      - name: Export the recorded spend (grader check only)
+      - name: Export the recorded spend (every dispatch)
         # After the eval whatever its outcome, so a run that fails or is cut off
         # still keeps its measured spend. Reads provider_calls; makes no model call.
-        if: always() && inputs.grader_check && steps.guard.outputs.run == 'true'
+        # Every workflow_dispatch run, switch on or off; never push or tag runs.
+        if: always() && github.event_name == 'workflow_dispatch' && steps.guard.outputs.run == 'true'
         working-directory: backend
         # It reads the database only, so the provider keys are blanked here.
         env:
