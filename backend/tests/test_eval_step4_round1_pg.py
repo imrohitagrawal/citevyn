@@ -83,7 +83,8 @@ def test_index_chunks_is_the_count_of_chunk_rows_the_judge_session_holds(
 ) -> None:
     """Red when: ``index_chunks`` (and the printed corpus line) states the shipped
     map's size instead of counting the chunk rows of the session the answers ran on,
-    so an ingest that lost a passage still reads as 44."""
+    so an ingest that lost a passage still reads as 44. (Since round 2 such a run
+    also stops before its first case: ``test_eval_step4_round2_pg.py``.)"""
     source, heading = _other_key().split("#", 1)
 
     async def _drop_one(session: Any) -> None:
@@ -100,7 +101,8 @@ def test_index_chunks_is_the_count_of_chunk_rows_the_judge_session_holds(
     runner_mod.main(["--postgres", "--ids", "claude_api_lit_ratelimit", "--report", str(report)])
     out = capsys.readouterr().out
     summary = json.loads(report.read_text(encoding="utf-8"))
-    assert summary["passes_completed"] == ["main", "fallback"]  # partner: both passes ran
+    # Partner: the judge session was opened and counted (and refused the short index).
+    assert [h["stage"] for h in summary["harness_errors"]] == ["index"]
     assert summary["corpus"]["answers"] == "shipped"
     assert summary["index_chunks"] == SHIPPED_PASSAGES - 1
     assert "Judged answers: shipped corpus (43 passages)" in out, out

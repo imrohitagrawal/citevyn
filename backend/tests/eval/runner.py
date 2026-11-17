@@ -733,6 +733,7 @@ async def _judge_cases(
     after_save: Callable[[list[JudgedCase]], Awaitable[None]] | None = None,
     index_counts: list[int] | None = None,
     shipped_checksums: frozenset[str] | None = None,
+    shipped_passages: int | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -767,7 +768,10 @@ async def _judge_cases(
     ingest is appended to it (#598 Step 4: the report's ``index_chunks`` is measured,
     not stated). ``shipped_checksums`` (the run passes it when the answers run on the
     shipped corpus): every evidence passage of a case must carry one of these content
-    checksums, else the case has a harness error naming it.
+    checksums, else the case has a harness error naming it. ``shipped_passages``
+    (passed with it): the number of passages in the shipped checksum map; a session
+    holding any other number of chunk rows is a run-level ``index`` harness error
+    naming both counts, and the pass stops before any paid call.
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -800,10 +804,22 @@ async def _judge_cases(
         # The probe is open only while this pass runs (#598).
         probe = stack.enter_context(probe_retrieval())
         session = await stack.enter_async_context(_judge_session(settings, postgres=postgres))
+        held = int(await session.scalar(select(func.count()).select_from(Chunk)) or 0)
         if index_counts is not None:
-            index_counts.append(
-                int(await session.scalar(select(func.count()).select_from(Chunk)) or 0)
-            )
+            index_counts.append(held)
+        if shipped_passages is not None and held != shipped_passages:
+            # Answers on the wrong index would be paid for and graded as the shipped
+            # corpus's (#598 Step 4): stop before the first case.
+            stop = {
+                "stage": "index",
+                "type": "IndexSizeMismatch",
+                "message": f"the judge session holds {held} chunk rows; the shipped "
+                f"corpus has {shipped_passages} passages; {len(cases)} case(s) not run",
+            }
+            if run_errors is None:
+                raise RuntimeError(stop["message"])
+            run_errors.append(stop)
+            return judged
         ledger = _CacheLedger(build_answer_cache_store(settings, session))
 
         async def _guarded(
@@ -2036,7 +2052,10 @@ async def run_eval_async(
     index_counts: list[int] = []
     # The shipped passages' identities: every judged answer's evidence must be one of
     # them on the shipped corpus, checked per case in each pass.
-    shipped_checksums = frozenset(shipped_heading_keys().values()) if answers_shipped else None
+    shipped_keys = shipped_heading_keys() if answers_shipped else None
+    shipped_checksums = frozenset(shipped_keys.values()) if shipped_keys is not None else None
+    # The judge session must hold exactly the shipped passages (one per map key).
+    shipped_passages = len(shipped_keys) if shipped_keys is not None else None
     run_started = time.time()
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
@@ -2229,7 +2248,7 @@ async def run_eval_async(
             )
 
     def _session_stopped() -> bool:
-        return any(e.get("stage") == "session" for e in run_errors)
+        return any(e.get("stage") in ("session", "index") for e in run_errors)
 
     judged: list[JudgedCase] = []
     fallback_judged: list[JudgedCase] | None = None
@@ -2294,6 +2313,7 @@ async def run_eval_async(
                     budget_stops=budget_stops,
                     index_counts=index_counts,
                     shipped_checksums=shipped_checksums,
+                    shipped_passages=shipped_passages,
                     after_save=_spend_resave(lambda done: _assemble(done, None, [], "main"))
                     if checking
                     else None,
@@ -2335,6 +2355,7 @@ async def run_eval_async(
                     budget_stops=budget_stops,
                     index_counts=index_counts,
                     shipped_checksums=shipped_checksums,
+                    shipped_passages=shipped_passages,
                     after_save=_spend_resave(
                         lambda done: _assemble(main_done, done, ["main"], "fallback")
                     )
