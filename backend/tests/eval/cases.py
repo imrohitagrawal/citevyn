@@ -108,6 +108,12 @@ class EvalCase:
     # is keyed to the 44 shipped passages. ``None`` means the row was never reviewed, ``()``
     # means reviewed with no single passage answering it; only the shipped eval requires it.
     shipped_gold: tuple[str, ...] | None = None
+    # must_say oracles (#598 Step 4): words a correct answer must contain, each entry a
+    # ``|``-separated list of alternatives, matched like ``expected_facts`` (the
+    # groundedness matcher). A presence check, not semantic correctness. Reported per
+    # case and gating nothing until #602 (Step 5); kept apart from ``expected_facts``
+    # so the groundedness population and the leak rule do not move.
+    must_say: tuple[str, ...] = ()
 
     @property
     def is_refusal(self) -> bool:
@@ -193,6 +199,7 @@ class EvalCase:
         if raw_shipped is not None and kind == "refusal":
             raise ValueError(f"{origin}: refusal case {d['id']!r} must not set shipped_gold")
         shipped_gold = tuple(raw_shipped) if raw_shipped is not None else None
+        must_say = _parse_must_say(d, origin=origin, kind=kind)
         # A refusal has no correct chunk to retrieve, so it cannot declare a gold chunk. A
         # multihop case is multi-relevant (it is scored by ``expected_sources`` hit-rate, not
         # single-chunk rank) — labelling it with a single gold key would wrongly pull it into
@@ -272,7 +279,31 @@ class EvalCase:
             gold_chunks=gold_chunks,
             judge_only=judge_only,
             shipped_gold=shipped_gold,
+            must_say=must_say,
         )
+
+
+def _parse_must_say(d: dict[str, Any], *, origin: str, kind: str) -> tuple[str, ...]:
+    """The optional ``must_say`` list. When present it is a non-empty list of non-blank
+    strings (a blank entry is satisfied by nothing useful and a bare string would split
+    into letters), and a refusal may not declare it (there is no answer to require)."""
+    if "must_say" not in d:
+        return ()
+    raw = d["must_say"]
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or not all(
+            isinstance(entry, str) and all(alt.strip() for alt in entry.split("|")) for entry in raw
+        )
+    ):
+        raise ValueError(
+            f"{origin}: case {d['id']!r} must_say must be a non-empty list of non-empty "
+            "strings, with no blank '|' alternative"
+        )
+    if kind == "refusal":
+        raise ValueError(f"{origin}: refusal case {d['id']!r} must not set must_say")
+    return tuple(cast("list[str]", raw))
 
 
 def load_cases(path: pathlib.Path) -> list[EvalCase]:
