@@ -288,6 +288,14 @@ before this was written. A local `make eval` is ~2.5× a CI run (it defaults to 
 the larger lines. "CI is the largest spend line" was not borne out by measurement,
 and Layers 1–3 remain the controls that actually cap exposure.
 
+### The grader check run (#598 Step 3)
+
+The grader check (#598 Step 3) is off by default (`CITEVYN_EVAL_PASSAGE_GRADING`). Run it by
+dispatching the judged job on a branch with `grader_check` ticked; each dispatch needs a fresh
+approval, and the cap is the approved amount less one answer call's worst case. Passage grading is reported only: the mean and every gate use the
+blind grade. Its probe, decision rule, spend export and limits are described in full in
+[`tests/eval/README.md`](../tests/eval/README.md#grader-check-598-step-3-off-by-default).
+
 ### The bound: frequency, not sampling
 
 CI runs the judged eval **at full coverage, less often**:

@@ -102,12 +102,21 @@ FREE_TO_DIFFER = frozenset(
 _CREDENTIAL = re.compile(r"(_api_key|_secret|_token|_password)$")
 # Eval-only fields, unset in production, each with its own rule below.
 MAPPED = frozenset({"eval_fallback_model", "eval_judge_model", "eval_judge_timeout_seconds"})
+# Eval experiments, off in production. The judged run may hold either value;
+# production must hold the default (rule below). Not in ``MAPPED``: that rule
+# needs production to hold ``None``.
+EXPERIMENTS = frozenset({"eval_passage_grading"})
 # The family of production's answer model, called directly through Google.
 _ANSWER_FAMILY = "google"
 
 
 def _equal_by_default(name: str) -> bool:
-    return name not in FREE_TO_DIFFER and name not in MAPPED and not _CREDENTIAL.search(name)
+    return (
+        name not in FREE_TO_DIFFER
+        and name not in MAPPED
+        and name not in EXPERIMENTS
+        and not _CREDENTIAL.search(name)
+    )
 
 
 def parity_failures(judged: Settings, production: Settings) -> list[str]:
@@ -140,6 +149,13 @@ def parity_failures(judged: Settings, production: Settings) -> list[str]:
         all(getattr(production, name) is None for name in sorted(MAPPED)),
         "production sets an eval-only setting",
     )
+    for name in sorted(EXPERIMENTS):
+        default = Settings.model_fields[name].default
+        need(
+            getattr(production, name) == default,
+            f"production sets the eval experiment {name!r} to {getattr(production, name)!r}; "
+            f"it must keep the default {default!r}",
+        )
     # ``model_copy`` skips the pairing validator, so the grader's timeout has its
     # own rule here: without it the grader would wait production's 15 s (#598).
     need(

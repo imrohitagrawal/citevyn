@@ -57,6 +57,14 @@ in `backend/tests/eval/thresholds.py`.
   `test_paraphrase_baseline_is_dead` — it guards the hermetic SQLite path (vector arm
   short-circuits off-Postgres, so it stays 0 in CI by design).
 
+## Grader check (#598 Step 3), off by default
+
+The grader check (#598 Step 3) is off by default (`CITEVYN_EVAL_PASSAGE_GRADING`). Run it by
+dispatching the judged job on a branch with `grader_check` ticked; each dispatch needs a fresh
+approval, and the cap is the approved amount less one answer call's worst case. Passage grading is reported only: the mean and every gate use the
+blind grade. Its probe, decision rule, spend export and limits are described in full in
+[`tests/eval/README.md`](../../../tests/eval/README.md#grader-check-598-step-3-off-by-default).
+
 ## Provider / cost
 
 Production answers with `gemini-3.6-flash` (pinned, #492) and falls back to OpenRouter
@@ -68,7 +76,7 @@ failures prefixed `fallback answer model ...`), and grades both passes with a th
 (`CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS`, 60 s in CI; set with the grader model or not at all, and read only by
 the grader's client, so the answers keep production's 15 s). The runner's `--production-parity` flag (passed
 by the CI step) refuses to start when its effective settings drift from production's (every setting must be
-equal except the database, CORS, pool size, cost caps, credentials and the three eval-only fields;
+equal except the database, CORS, pool size, cost caps, credentials and the three eval-only fields, and the grader-check switch, which production must keep off;
 both keys must be present), and
 `backend/tests/test_eval_model_parity.py` applies the same rules (`tests/eval/parity.py`) to the
 job's `env:` block; change production and CI together. The report's

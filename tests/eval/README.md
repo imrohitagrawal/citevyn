@@ -210,6 +210,77 @@ The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_pass
 **only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so
 they stay empty there. `backend/tests/test_eval_report_fields_pg.py` proves they fill.
 
+### Grader check (#598 Step 3), off by default
+
+**How to run it.** `CITEVYN_EVAL_PASSAGE_GRADING` (default `false`) is the switch. It is off on
+every push, tag and ordinary run. In CI, run the `answer-quality-eval` job by hand (Actions tab,
+*Run workflow*, on a branch) with **`grader_check`** ticked. Only then does the eval step export
+`CITEVYN_EVAL_PASSAGE_GRADING=true` and the spend cap `CITEVYN_COST_HARD_DAILY_USD` (set to
+the approved amount less one answer call's worst case), and only then do the job and step get 245 and 240 minutes instead of 68 and 64. These
+longer limits are for the experiment only; release runs keep the short ones, and the release wait
+(4500 s) is unchanged. The cap in `ci.yml` is approved for one run: each dispatch needs a fresh
+approval of the owner (`docs/DECISIONS.md`, 2026-11-16). When checking a release commit by hand,
+leave `grader_check` unticked.
+
+**Refusals before any paid call.** With the switch on, the runner refuses to start when
+`CITEVYN_COST_HARD_DAILY_USD` is not finite and above 0 or the budget guard is off, and when fewer
+than 250 minutes are left before 00:00 UTC (the daily cap counts the UTC day, so a run must not
+cross midnight). In CI it also refuses on `main` and on a `v*` tag: it reads `GITHUB_REF`, so a
+local run is checked against midnight only.
+
+**Passage grading is reported only.** In each pass, every case with a blind score is graded a
+second time, after the blind panel, by a panel of the same size and veto that is also given the
+passages the answer was made from (the case's `evidence`, or on a cache hit its `cache_origin`'s;
+a turn that retrieved nothing gets the fixed block "No passages were retrieved for this answer.").
+The mean and every gate still use the blind grade, so the job may be red on a blind gate beside
+any decision. The new per-case fields are `passage_score`, `passage_standard_scores`,
+`passage_adversarial_score`, `passage_rationale`, `passage_grader_calls` and `passage_error`; any
+passage failure (unknown passages, a parse failure, a fractional score, a timeout, any exception,
+a spend-cap stop, self-grading) is a `passage_error` only, never an `error` or a harness error.
+Passage text, headers and the answer are data between `<<<PASSAGE n | source#heading>>>` and
+`<<<END PASSAGE n>>>`, with any delimiter text (look-alike brackets included) neutralised.
+
+**The probe and its decision.** The probe grades two fixed answers to "What models does Codex
+support?": WRONG (says `codex --help` lists the models) and CORRECT. Each is graded blind and with
+passages (the fixture's Codex chunks), three times each (median of the three); a fractional
+score, a failed panel or one served by an answer model is missing. Decision, in this order: DROP
+if the wrong answer's passage median is above 2, or above its blind median, or the correct
+answer's passage median is below 4. Otherwise INCONCLUSIVE if any of the four medians is missing,
+or if any of the three repeats of a cell disagree by 2 or more points. Otherwise KEEP. KEEP only
+makes passage grading a candidate for the later steps of #598; it changes no gate. If the
+decision is DROP, this code is removed in Step 4. The probe runs once, before the first case, and
+is saved when it is done; it is not a golden case and enters no answer figure.
+
+**Where to read it.** The `GRADER CHECK` line (the decision and its reasons, the probe's errors,
+any stop line) and the `GRADER PROBE` table are printed in the log and written to the job summary,
+once after the probe and again at the end; the end block adds each pass's blind-versus-passages
+counts and its per-case table (case, blind score, passage score, delta, or the reason a score is
+missing), the recorded spend so far, the cases not reached and every case at or below 2 on either score with both rationales.
+The report artifact's `grader_check` section holds all of it: the probe (cells, calls, errors),
+the decision, reasons and medians, a paired table per pass (split by whether all of the case's
+expected sources were among its passages, with refusals in their own bucket; "too thin to read"
+below 90% coverage), the grader calls and tokens by role (blind, passages, probe), `not_reached`
+(the case ids of each pass not run yet), `recorded_spend` (the spend export's summary of the
+run's `provider_calls` rows read before each save, with `unavailable` when they could not be
+read; a failed read never fails a save), the measured commit, and `stopped` ("stopped by the
+spend cap", or "stopped: the spend meter could not be read"). One run makes up to 528 grader
+calls instead of 252; this run measures the time it takes.
+
+**The spend export.** After the eval, whatever its outcome, the job runs
+`uv run python -m tests.eval.spend_export --out ../artifacts/spend.json --report
+../artifacts/eval_report.json` from `backend/`, without the provider keys, and uploads `spend.json`
+with the report. It only reads `provider_calls` (the eval database is fresh, so its rows are this
+run's) and groups them by provider, model and kind with tokens and the **recorded book cost** (the
+cost the meter stored, at the price book's rates), counting priced, unpriced and estimated-token
+rows. From the report it adds the **observed failures** per model, with their total duration, and apart from them the calls
+the cap refused (never sent); a failed grader call records no model, so it is counted under the
+configured grader model. A report that cannot be read is noted and skipped. It is a measurement,
+not a guarantee. Its stated gaps: failed attempts that were never recorded (a primary failure the
+fallback hid, or both providers failing), meter writes that were silently lost (the meter never
+fails a call), rows with estimated tokens (their cost can read low), and unpriced rows (counted as
+zero). The spend cap is the existing per-call daily guard, a best-effort backstop with the same
+gaps.
+
 ### Cost bounding (#153)
 
 The judged half is the harness's only meaningful spend line (call volume counted by

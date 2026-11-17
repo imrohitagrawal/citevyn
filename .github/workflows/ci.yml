@@ -16,6 +16,13 @@ on:
   # ``workflow_dispatch`` exists so the PAID judged eval can be run deliberately
   # from the Actions tab without pushing anything. See the answer-quality-eval job.
   workflow_dispatch:
+    inputs:
+      # The grader check (#598 Step 3): one experiment run, off by default. Push
+      # and tag runs have no inputs, so it is never on for a release.
+      grader_check:
+        description: "Grader check: also grade every answer with its passages, and run the probe (reported only; up to 528 grader calls instead of 252)"
+        type: boolean
+        default: false
   push:
     branches: [main]
     # Release tags run the full CI, which is what gives release.yml's
@@ -329,7 +336,8 @@ jobs:
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
     #
-    # 68 minutes is an ESTIMATE of the worst case (#598), not a measurement. On the
+    # 68 minutes (every run but the grader check, below) is an ESTIMATE of the
+    # worst case (#598), not a measurement. On the
     # measured run (two answer passes) the eval step took 25.0 min, and 22 grader
     # calls timed out at 15 s. With the grader at 60 s
     # (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), those 22 calls can each wait
@@ -339,9 +347,15 @@ jobs:
     # upload, so 68. Re-set both from the next counted run's durations. The job must
     # stay at least 6 minutes (the `test` job before it) under the release wait in
     # scripts/wait_for_judged_eval.sh (TOTAL_TIMEOUT_SECONDS, 75 min); raising it
-    # further needs the wait raised too. Double grading (#598 Step 3) needs this
-    # re-sized before its run.
-    timeout-minutes: 68
+    # further needs the wait raised too.
+    #
+    # The grader check (#598 Step 3, the `grader_check` input) gets 245 minutes
+    # instead: it makes up to 528 grader calls instead of 252, and this run
+    # measures how long they take. Only a run dispatched with the input ticked
+    # gets the longer limits; push and tag runs keep 68 and 64, so the release
+    # wait is unchanged. 245 fits inside the 250 minutes of the UTC day the
+    # runner demands before it starts (the daily spend cap resets at 00:00 UTC).
+    timeout-minutes: ${{ inputs.grader_check && 245 || 68 }}
     # ENFORCE the answer-quality gate in CI (issue: eval-hardening). The judged
     # ``--postgres`` run drives the orchestrator per golden case with a REAL LLM +
     # embedder and enforces MIN_MEAN_JUDGE + groundedness (per-case) + prompt-injection
@@ -522,22 +536,50 @@ jobs:
         working-directory: backend
         # Above the 63.5 min worst-case estimate in the job's comment, and below the
         # job's 68, so a run cut short still leaves time for the always() upload
-        # step to save the report written after each pass (#598).
-        timeout-minutes: 64
+        # step to save the report written after each pass (#598). The grader check
+        # gets 240, below its job's 245.
+        timeout-minutes: ${{ inputs.grader_check && 240 || 64 }}
         # A migrated-but-EMPTY catalog: the runner seeds under a unique index_version
         # and rolls back (zero residue). Non-zero exit on any gate regression.
         #
         # Always the FULL golden set. Cost is bounded by RUN FREQUENCY (the job's
         # `if:` above), not by sampling cases — see the rationale there.
-        run: >-
-          uv run python -m tests.eval.runner --postgres --production-parity
-          --report ../artifacts/eval_report.json
+        #
+        # The grader check's two settings are exported here, and only when the
+        # input is true, never through `env:`: an expression there renders empty
+        # on push and tag runs, and an empty value makes Settings refuse to load.
+        # The cap is the existing per-call daily guard, in price-book dollars, set
+        # to the approved amount less one answer call's worst case; it is approved
+        # for one run, so each dispatch needs a fresh approval (a best-effort
+        # backstop: see tests/eval/README.md for what it cannot see). The runner refuses a
+        # grader check on main or a v* tag, or with under 250 minutes left before
+        # 00:00 UTC, before any paid call.
+        env:
+          GRADER_CHECK: ${{ inputs.grader_check }}
+        run: |
+          if [ "${GRADER_CHECK}" = "true" ]; then
+            export CITEVYN_EVAL_PASSAGE_GRADING=true
+            export CITEVYN_COST_HARD_DAILY_USD=0.43
+          fi
+          uv run python -m tests.eval.runner --postgres --production-parity --report ../artifacts/eval_report.json
+      - name: Export the recorded spend (grader check only)
+        # After the eval whatever its outcome, so a run that fails or is cut off
+        # still keeps its measured spend. Reads provider_calls; makes no model call.
+        if: always() && inputs.grader_check && steps.guard.outputs.run == 'true'
+        working-directory: backend
+        # It reads the database only, so the provider keys are blanked here.
+        env:
+          CITEVYN_OPENROUTER_API_KEY: ""
+          CITEVYN_GEMINI_API_KEY: ""
+        run: uv run python -m tests.eval.spend_export --out ../artifacts/spend.json --report ../artifacts/eval_report.json
       - name: Upload the eval report
         if: steps.guard.outputs.run == 'true' && always()
         uses: actions/upload-artifact@v7
         with:
           name: answer-quality-eval-report
-          path: artifacts/eval_report.json
+          path: |
+            artifacts/eval_report.json
+            artifacts/spend.json
           if-no-files-found: ignore
 
   # ─────────────────────────────────────────────────────────────────────────

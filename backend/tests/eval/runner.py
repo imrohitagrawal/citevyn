@@ -29,6 +29,7 @@ import contextlib
 import dataclasses
 import glob
 import json
+import math
 import os
 import pathlib
 import re
@@ -48,7 +49,7 @@ from app.cache.answer_cache import CachedAnswer
 from app.cache.factory import build_answer_cache_store
 from app.core.config import Settings, get_settings
 from app.cost.call_site import CallSite, get_call_site
-from app.llm.errors import LLMUnavailable
+from app.llm.errors import CostLimitReached, LLMUnavailable
 from app.llm.factory import build_metered_llm_client, get_llm_client
 from app.llm.protocol import LLMClient
 from app.llm.stub import StubLLMClient
@@ -65,6 +66,7 @@ from app.models import (
 
 # Bare session ids per case: the harness wants the rows made for it (#511).
 from ..orchestrator_double import Orchestrator
+from . import grader_check, spend_export
 from . import judge as judge_module
 from .cases import EvalCase, filter_cases, load_cases
 from .groundedness import fact_coverage, forbidden_present, missing_facts
@@ -174,9 +176,34 @@ class JudgedCase:
     # case; a helper call (not ``answer``) that failed or was made by another
     # model is listed, never gated.
     model_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    # The grader check (#598 Step 3), reported only: the same answer graded with
+    # the passages it was made from. ``passage_grader_calls`` is ``None`` when the
+    # check is off, and then none of these fields is in the report.
+    passage_score: int | None = None
+    passage_standard_scores: tuple[int, ...] = ()
+    passage_adversarial_score: int | None = None
+    passage_rationale: str = ""
+    passage_grader_calls: list[dict[str, Any]] | None = None
+    # Why there is no passage grade. Never an ``error`` or a harness error.
+    passage_error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if self.passage_grader_calls is None:
+            for key in PASSAGE_FIELDS:
+                del data[key]
+        return data
+
+
+# The grader check's per-case fields, absent from the report when it is off.
+PASSAGE_FIELDS = (
+    "passage_score",
+    "passage_standard_scores",
+    "passage_adversarial_score",
+    "passage_rationale",
+    "passage_grader_calls",
+    "passage_error",
+)
 
 
 @contextlib.asynccontextmanager
@@ -224,6 +251,7 @@ class AttributingLLM:
         self, *, system: str, user: str, max_tokens: int, temperature: float
     ) -> LLMResult:
         site = get_call_site()
+        start = time.perf_counter()
         try:
             result = await self._inner.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
@@ -239,6 +267,7 @@ class AttributingLLM:
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                     cause=exc,
+                    duration_seconds=time.perf_counter() - start,
                 )
             )
             raise
@@ -262,6 +291,8 @@ class _CallRecord:
     # The failed call's own exception, so the runner can tell it escaping ``ask``
     # from an unrelated failure later in the turn. Not part of the report.
     cause: BaseException | None = dataclasses.field(default=None, compare=False, repr=False)
+    # How long a failed call took (reported with the grader check on only).
+    duration_seconds: float | None = dataclasses.field(default=None, compare=False)
 
     @property
     def failed(self) -> bool:
@@ -273,8 +304,15 @@ class _RecordingGrader:
     provider and model that served it (#598), so a stalled, disagreeing or
     self-graded call can be found in the report."""
 
-    def __init__(self, inner: LLMClient) -> None:
+    def __init__(
+        self, inner: LLMClient, *, tokens: bool = False, integer_only: bool = False
+    ) -> None:
         self._inner = inner
+        # With the grader check on, each entry also keeps its call's token counts.
+        self._tokens = tokens
+        # The grader check's passage and probe grades read a fractional score as a
+        # parse failure (see ``parse_verdict``); the blind grade does not.
+        self._integer_only = integer_only
         self.calls: list[dict[str, Any]] = []
 
     async def complete(
@@ -288,6 +326,8 @@ class _RecordingGrader:
             "provider": None,
             "model": None,
         }
+        if self._tokens:
+            entry["input_tokens"] = entry["output_tokens"] = None
         self.calls.append(entry)
         try:
             result = await self._inner.complete(
@@ -295,13 +335,22 @@ class _RecordingGrader:
             )
         except Exception as exc:
             entry["rationale"] = f"call failed: {type(exc).__name__}: {exc}"
+            if self._tokens:
+                # The grader check's export counts a call the cap refused (never
+                # sent) apart from a failure, however it was wrapped.
+                entry["refused_by_cap"] = grader_check.budget_stop(exc) is not None
             raise
         finally:
             entry["duration_seconds"] = time.perf_counter() - start
         # Stored before the verdict is read, so a malformed verdict keeps them.
         entry["provider"], entry["model"] = result.provider, result.model
+        if self._tokens:
+            entry["input_tokens"], entry["output_tokens"] = (
+                result.input_tokens,
+                result.output_tokens,
+            )
         try:
-            verdict = parse_verdict(result.text)
+            verdict = parse_verdict(result.text, integer_only=self._integer_only)
         except JudgeParseError as exc:
             entry["rationale"] = f"judge_parse: {exc}"
         except Exception as exc:
@@ -593,6 +642,8 @@ class _CaseState:
     final_puts: list[str] = dataclasses.field(default_factory=list)
     final_replies: list[tuple[CallSite, str]] = dataclasses.field(default_factory=list)
     final_marks: tuple[int, int] = (0, 0)
+    # Whether the final turn's evidence was read (an empty list is a real read).
+    evidence_read: bool = False
 
 
 _T = TypeVar("_T")
@@ -609,6 +660,8 @@ async def _judge_cases(
     answer_models: tuple[str, ...] = (),
     on_case: Callable[[list[JudgedCase]], bool] | None = None,
     run_errors: list[dict[str, Any]] | None = None,
+    budget_stops: list[BaseException] | None = None,
+    after_save: Callable[[list[JudgedCase]], Awaitable[None]] | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -622,7 +675,11 @@ async def _judge_cases(
 
     ``answer_llm`` answers instead of the process-wide client (the fallback pass,
     #596); ``judge_llm`` grades instead of it (the separate grader). ``None`` keeps
-    the process-wide client for that role. ``expect_answerer`` (provider, model):
+    the process-wide client for that role. With ``settings.eval_passage_grading``
+    (the grader check, #598 Step 3), each graded case is graded a second time with
+    its passages, after the blind panel; that grade is reported only, and every
+    ``CostLimitReached`` seen is appended to ``budget_stops`` and labelled
+    ``budget:`` on the case. ``expect_answerer`` (provider, model):
     when ``answer_llm`` is an :class:`AttributingLLM`, a case in which an answer
     call failed, or another model wrote an answer, on any turn, is recorded as an
     answer error, not graded (#596; owner rule 2026-11-12).
@@ -649,7 +706,17 @@ async def _judge_cases(
     # The grader, recorded per call, resolved exactly as the panel resolves it. A
     # stub is never wrapped: the panel's own stub check must still see it.
     grader = judge_llm or judge_module.get_llm_client(settings)
-    recording_grader = None if isinstance(grader, StubLLMClient) else _RecordingGrader(grader)
+    checking = settings.eval_passage_grading
+    stub_grader = isinstance(grader, StubLLMClient)
+    recording_grader = None if stub_grader else _RecordingGrader(grader, tokens=checking)
+    # The passage panel's calls are kept apart, so the blind grade's self-grading
+    # check and its ``grader_calls`` never see them.
+    passage_grader = (
+        _RecordingGrader(grader, tokens=True, integer_only=True)
+        if checking and not stub_grader
+        else None
+    )
+    stops = budget_stops if budget_stops is not None else []
 
     stack = contextlib.AsyncExitStack()
     try:
@@ -670,6 +737,86 @@ async def _judge_cases(
             except Exception as exc:
                 state.harness.append(_harness_entry(stage, exc, secrets))
                 return None
+
+        def _own_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            """The grader calls served by an answer model of this run."""
+            return [
+                c
+                for c in calls
+                if c.get("model") and any(_same_model(c["model"], m) for m in own_models)
+            ]
+
+        def _budget(
+            entry: JudgedCase, exc: BaseException | None, *, label: bool = True
+        ) -> CostLimitReached | None:
+            """Note a ``CostLimitReached`` behind ``exc`` for the grader check, and
+            (with ``label``) label the case's ``error`` with it. A passage call's
+            stop is not labelled there: passage grading never sets ``error``."""
+            stop = grader_check.budget_stop(exc)
+            if stop is not None and checking:
+                stops.append(stop)
+                if label:
+                    state_budget.setdefault(id(entry), stop)
+            return stop
+
+        # The first ``CostLimitReached`` each case saw, by its record's id.
+        state_budget: dict[int, CostLimitReached] = {}
+
+        async def _grade_with_passages(
+            case: EvalCase, entry: JudgedCase, state: _CaseState
+        ) -> None:
+            """The grader check's second grade (#598 Step 3), with the passages the
+            answer was made from. Report-only: any failure is ``passage_error``."""
+            try:
+                passages = grader_check.graded_passages(entry)
+                if entry.cache_origin is None and not state.evidence_read:
+                    passages = None
+                if passages is None:
+                    entry.passage_error = (
+                        "passages unknown: "
+                        + (
+                            "the cache origin's evidence was not read"
+                            if entry.cache_origin is not None
+                            else "the evidence read failed"
+                        )
+                        + "; not graded with passages"
+                    )
+                    return
+                verdict = await judge_module.score_answer_passage_panel_async(
+                    question=case.question,
+                    answer=entry.answer,
+                    expected_gist=case.expected_gist,
+                    passages=passages,
+                    settings=settings,
+                    client=passage_grader or judge_llm,
+                )
+            except JudgeParseError as exc:
+                entry.passage_error = f"judge_parse: {redact(str(exc), secrets)[:_MESSAGE_LIMIT]}"
+                verdict = None
+            except Exception as exc:
+                label = "budget: " if _budget(entry, exc, label=False) is not None else ""
+                entry.passage_error = (
+                    f"{label}{type(exc).__name__}: {redact(str(exc), secrets)[:_MESSAGE_LIMIT]}"
+                )
+                verdict = None
+            own = _own_calls(passage_grader.calls if passage_grader is not None else [])
+            if own:
+                text = (
+                    f"self-grading: {len(own)} passage grader call(s) served by an answer "
+                    f"model of this run ({sorted({c['model'] for c in own})}); "
+                    "passage grade discarded"
+                )
+                # The record only grows: an error already recorded stays.
+                entry.passage_error = (
+                    text if entry.passage_error is None else f"{entry.passage_error}; {text}"
+                )
+            elif verdict is not None:
+                entry.passage_score = verdict.score
+                entry.passage_standard_scores = verdict.standard_scores
+                entry.passage_adversarial_score = verdict.adversarial_score
+                entry.passage_rationale = verdict.rationale
+            elif entry.passage_error is None:
+                entry.passage_error = "judge_unavailable: the passage verdict was None"
 
         def _mark_answer_error(entry: JudgedCase, text: str) -> None:
             entry.answer_errored = True
@@ -739,6 +886,11 @@ async def _judge_cases(
                                 else None,
                             }
                         )
+                        if checking and record.failed:
+                            calls[-1]["refused_by_cap"] = (
+                                grader_check.budget_stop(record.cause) is not None
+                            )
+                            calls[-1]["duration_seconds"] = record.duration_seconds
                     entry.model_calls.extend(calls)
                     failed = [r for r in records if r.failed and r.site is CallSite.answer]
                     state.failed_causes.extend(r.cause for r in failed if r.cause is not None)
@@ -885,6 +1037,7 @@ async def _judge_cases(
             state.harness.extend(_harness_entry("report", exc, secrets) for exc in read_errors)
             for key, value in fields.items():
                 setattr(entry, key, value)
+            state.evidence_read = "evidence" in fields
             for key in state.final_puts:
                 ledger.writers[key]["evidence"] = fields.get("evidence")
             # Deterministic groundedness (Item 1c) — judge-independent. Computed for
@@ -930,8 +1083,10 @@ async def _judge_cases(
             except JudgeParseError as exc:
                 _add_error(entry, f"judge_parse: {exc}")
             except LLMUnavailable as exc:
+                _budget(entry, exc)
                 _add_error(entry, f"judge_unavailable: {exc}")
             except Exception as exc:
+                _budget(entry, exc)
                 state.harness.append(_harness_entry("grade", exc, secrets))
                 _add_error(entry, f"grade: {type(exc).__name__}")
             else:
@@ -945,11 +1100,7 @@ async def _judge_cases(
             # so the verdict (score, rationale, panel scores, contested) is applied only
             # after this check. A discarded verdict stays in ``grader_calls`` as observed.
             grader_calls = recording_grader.calls if recording_grader is not None else []
-            own = [
-                c
-                for c in grader_calls
-                if c.get("model") and any(_same_model(c["model"], m) for m in own_models)
-            ]
+            own = _own_calls(grader_calls)
             if own:
                 state.harness.append(
                     {
@@ -968,6 +1119,10 @@ async def _judge_cases(
                 entry.adversarial_score = verdict.adversarial_score
                 entry.spread = verdict.spread
                 entry.contested = verdict.contested
+            # Only a case with a blind score can be paired, so only it is paid for
+            # a second time; the others get their reason in the ``finally`` below.
+            if checking and entry.score is not None:
+                await _grade_with_passages(case, entry, state)
 
         for case in cases:
             # The case's one record, created before its savepoint and only ever added to.
@@ -979,6 +1134,7 @@ async def _judge_cases(
                 # never observed to decline (or to answer).
                 no_answer=None,
                 question=case.question,
+                passage_grader_calls=[] if checking else None,
             )
             state = _CaseState()
             writers_before = dict(ledger.writers)
@@ -1001,6 +1157,7 @@ async def _judge_cases(
                 unusable = state.stage == "savepoint"
                 # A failed answer call's own error escaping ``ask`` is that call's
                 # failure, already an answer error; anything else is the harness's.
+                _budget(entry, exc)
                 if not _explained_by(exc, state.failed_causes):
                     state.harness.append(_harness_entry(state.stage, exc, secrets))
                 _add_error(
@@ -1013,8 +1170,23 @@ async def _judge_cases(
                 if recording_grader is not None:
                     entry.grader_calls = list(recording_grader.calls)
                     recording_grader.calls.clear()
+                if passage_grader is not None:
+                    entry.passage_grader_calls = list(passage_grader.calls)
+                    passage_grader.calls.clear()
                 if isinstance(answer_llm, AttributingLLM):
+                    for record in answer_llm.records:
+                        _budget(entry, record.cause)
                     answer_llm.records.clear()
+            if checking:
+                stop = state_budget.pop(id(entry), None)
+                if stop is not None:
+                    _add_error(entry, f"budget: {redact(str(stop), secrets)[:_MESSAGE_LIMIT]}")
+                if (
+                    entry.score is None
+                    and entry.passage_error is None
+                    and entry.passage_score is None
+                ):
+                    entry.passage_error = "not graded with passages: the answer was not graded"
             entry.harness_error = state.harness or None
             judged.append(entry)
             if unusable:
@@ -1034,6 +1206,10 @@ async def _judge_cases(
                     run_errors.append(stop)
             if on_case is not None and on_case(list(judged)) is False:
                 break
+            if after_save is not None:
+                # The grader check's recorded spend, read only after the case is
+                # saved, so a slow read never holds a finished case back.
+                await after_save(list(judged))
             if unusable:
                 break
     finally:
@@ -1050,6 +1226,129 @@ async def _judge_cases(
                 )
             )
     return judged
+
+
+async def _run_probe(
+    grader: LLMClient,
+    *,
+    settings: Settings,
+    answer_models: tuple[str, ...],
+    stops: list[BaseException],
+    into: dict[str, Any],
+    on_cell: Callable[[], Awaitable[bool]],
+) -> bool:
+    """The grader check's probe (#598 Step 3): the two fixed answers, each graded
+    blind and with the fixture's Codex passages, three times each. A panel that
+    fails, or that an answer model served, leaves its score missing (``None``).
+    Its calls are kept, with their tokens, and enter no answer figure.
+
+    Filled into ``into`` (``cells``, ``calls``, ``errors``) as it runs, and
+    ``on_cell`` saves the report after each finished cell, so a run cut off
+    mid-probe keeps the cells already paid for. When a save fails (``on_cell``
+    returns ``False``) the probe stops before any further call and this returns
+    ``False``."""
+    probe_case = {c.id: c for c in load_cases(GOLDEN_PATH)}[grader_check.PROBE_CASE_ID]
+    recorder = _RecordingGrader(grader, tokens=True, integer_only=True)
+    cells = into.setdefault("cells", grader_check.empty_cells())
+    errors: list[dict[str, Any]] = into.setdefault("errors", [])
+    # The recorder's own list, so every save holds the calls made so far.
+    into["calls"] = recorder.calls
+    secrets = secret_values(settings)
+    passages = grader_check.probe_passages()
+    for answer_name, answer in grader_check.ANSWERS.items():
+        for mode in grader_check.MODES:
+            for repeat in range(1, grader_check.REPEATS + 1):
+                first_call = len(recorder.calls)
+                score: int | None = None
+                try:
+                    if mode == "blind":
+                        verdict = await score_answer_panel_async(
+                            question=probe_case.question,
+                            answer=answer,
+                            expected_gist=probe_case.expected_gist,
+                            settings=settings,
+                            client=recorder,
+                            integer_only=True,
+                        )
+                    else:
+                        verdict = await judge_module.score_answer_passage_panel_async(
+                            question=probe_case.question,
+                            answer=answer,
+                            expected_gist=probe_case.expected_gist,
+                            passages=passages,
+                            settings=settings,
+                            client=recorder,
+                        )
+                    score = verdict.score if verdict is not None else None
+                except Exception as exc:
+                    stop = grader_check.budget_stop(exc)
+                    if stop is not None:
+                        stops.append(stop)
+                    label = "budget: " if stop is not None else ""
+                    errors.append(
+                        {
+                            "answer": answer_name,
+                            "mode": mode,
+                            "repeat": repeat,
+                            "type": type(exc).__name__,
+                            "message": label + redact(str(exc), secrets)[:_MESSAGE_LIMIT],
+                        }
+                    )
+                served = [
+                    c["model"]
+                    for c in recorder.calls[first_call:]
+                    if c.get("model") and any(_same_model(c["model"], m) for m in answer_models)
+                ]
+                if served:
+                    errors.append(
+                        {
+                            "answer": answer_name,
+                            "mode": mode,
+                            "repeat": repeat,
+                            "type": "SelfGrading",
+                            "message": f"served by an answer model of this run ({sorted(served)})",
+                        }
+                    )
+                cells[answer_name][mode].append(None if served else score)
+            if not await on_cell():
+                return False
+    return True
+
+
+# How long a save waits for the recorded spend: a slow database connect must not
+# hold back the run (the case is saved before the read, whatever happens).
+SPEND_READ_TIMEOUT_SECONDS = 10.0
+
+
+async def _read_spend_rows(settings: Settings) -> list[Any]:
+    """This run's ``provider_calls`` rows, read only (no model call)."""
+    return await spend_export.read_rows(settings.database_url)
+
+
+def _not_reached(cases: list[EvalCase], done: list[JudgedCase] | None) -> list[str]:
+    """The ids of ``cases`` with no record in ``done`` (a pass not started: all)."""
+    ran = {c.case_id for c in done or []}
+    return [c.id for c in cases if c.id not in ran]
+
+
+def _grader_spend(
+    probe: dict[str, Any] | None, passes: list[list[JudgedCase] | None]
+) -> dict[str, dict[str, int]]:
+    """Grader calls and tokens by role (blind, passages, probe), from the records."""
+
+    def total(calls: list[dict[str, Any]]) -> dict[str, int]:
+        return {
+            "calls": len(calls),
+            "input_tokens": sum(c.get("input_tokens") or 0 for c in calls),
+            "output_tokens": sum(c.get("output_tokens") or 0 for c in calls),
+        }
+
+    cases = [case for judged in passes for case in judged or []]
+    return {
+        "blind": total([c for case in cases for c in case.grader_calls]),
+        "passages": total([c for case in cases for c in case.passage_grader_calls or []]),
+        "probe": total((probe or {}).get("calls") or []),
+    }
 
 
 def _summarize(
@@ -1567,6 +1866,18 @@ async def run_eval_async(
             judge_module.panel_size()
         except ValueError as exc:
             raise SystemExit(f"{exc}. Nothing was run and nothing was spent.") from exc
+        if settings.eval_passage_grading and not (
+            settings.cost_budget_enabled
+            and math.isfinite(settings.cost_hard_daily_usd)
+            and settings.cost_hard_daily_usd > 0
+        ):
+            # The grader check runs under the approved cap; without a working cap
+            # it does not start (#598 Step 3).
+            raise SystemExit(
+                "The grader check needs the spend cap: CITEVYN_COST_HARD_DAILY_USD must be "
+                "finite and above 0, with CITEVYN_COST_BUDGET_ENABLED on. "
+                "Nothing was run and nothing was spent."
+            )
         # Built now, so a missing timeout or OpenRouter key stops the run here.
         # Building a client makes no call.
         grader_settings = _grader_settings(settings, judge_model)
@@ -1582,6 +1893,13 @@ async def run_eval_async(
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
     run_errors: list[dict[str, Any]] = []
+    # The grader check (#598 Step 3): its probe, and every ``CostLimitReached``
+    # the run saw. Reported only.
+    checking = judge_available and settings.eval_passage_grading
+    probe: dict[str, Any] | None = None
+    budget_stops: list[BaseException] = []
+    # The run's recorded spend, read before each save (``_refresh_spend``).
+    spend: dict[str, Any] = {"rows": [], "unavailable": None, "noted": False}
 
     def _assemble(
         judged: list[JudgedCase],
@@ -1628,6 +1946,29 @@ async def run_eval_async(
             "model": judge_model,
             "timeout_seconds": settings.eval_judge_timeout_seconds,
         }
+        if checking:
+            decision = grader_check.decide((probe or {}).get("cells") or {})
+            summary["grader_check"] = {
+                "probe": probe,
+                "decision": decision["decision"],
+                "reasons": decision["reasons"],
+                "medians": decision["medians"],
+                "paired": {
+                    "main": grader_check.paired_table(judged, judge_cases),
+                    "fallback": grader_check.paired_table(fallback_judged or [], judge_cases),
+                },
+                "spend": _grader_spend(probe, [judged, fallback_judged]),
+                "stopped": grader_check.stopped_line(budget_stops),
+                "commit": os.environ.get("GITHUB_SHA"),
+                # The cases each pass has not run yet: on a run cut off, the ones
+                # it never reached.
+                "not_reached": {
+                    "main": _not_reached(judge_cases, judged),
+                    "fallback": _not_reached(judge_cases, fallback_judged)
+                    if fallback_model is not None
+                    else [],
+                },
+            }
         if fallback_judged is not None:
             fallback_summary = _summarize(
                 cases,
@@ -1641,7 +1982,61 @@ async def run_eval_async(
                 "model": fallback_model,
                 **{key: fallback_summary[key] for key in ANSWER_SECTIONS},
             }
+        if checking:
+            # Last, so the observed failures are counted over both passes.
+            summary["grader_check"]["recorded_spend"] = _recorded_spend(summary)
         return summary
+
+    def _recorded_spend(summary: dict[str, Any]) -> dict[str, Any]:
+        """The spend export's summary of the rows read so far, with the eval's own
+        failures; ``unavailable`` says why the rows could not be read."""
+        recorded = spend_export.summarize(spend["rows"], summary)
+        if spend["unavailable"] is not None:
+            recorded["unavailable"] = spend["unavailable"]
+        return recorded
+
+    async def _refresh_spend() -> bool:
+        """Read this run's ``provider_calls`` rows, within
+        ``SPEND_READ_TIMEOUT_SECONDS``. A failed or slow read is printed once and
+        recorded as one line, never raised; ``True`` when the rows were read."""
+        try:
+            spend["rows"] = await asyncio.wait_for(
+                _read_spend_rows(settings), timeout=SPEND_READ_TIMEOUT_SECONDS
+            )
+            spend["unavailable"] = None
+            return True
+        except Exception as exc:
+            # One line: a database error can carry its whole statement.
+            first = (str(exc).splitlines() or [""])[0]
+            message = redact(first, secret_values(settings))[:_MESSAGE_LIMIT]
+            spend["unavailable"] = f"{type(exc).__name__}: {message}".rstrip(": ")
+            if not spend["noted"]:
+                spend["noted"] = True
+                print(
+                    "GRADER CHECK: the recorded spend could not be read "
+                    f"({spend['unavailable']}); the saves go on without it"
+                )
+
+    def _spend_resave(
+        build: Callable[[list[JudgedCase]], dict[str, Any]],
+    ) -> Callable[[list[JudgedCase]], Awaitable[None]]:
+        """After a case's save: read the spend and, if it was read, save again."""
+
+        async def after(done: list[JudgedCase]) -> None:
+            if await _refresh_spend():
+                _write(lambda: build(done), where="mid-run, with the spend")
+
+        return after
+
+    def _assemble_probe() -> dict[str, Any]:
+        return _assemble([], None, [], "main")
+
+    async def _probe_cell_saved() -> bool:
+        # The cell is saved first; then the spend is read and, if it was, saved too.
+        saved = _write(_assemble_probe, where="after a probe cell")
+        if saved and await _refresh_spend():
+            saved = _write(_assemble_probe, where="after a probe cell, with the spend")
+        return saved
 
     def _write(build: Callable[[], dict[str, Any]], *, where: str) -> bool:
         """Build and write the report, retrying once. A write that still fails is a
@@ -1698,6 +2093,29 @@ async def run_eval_async(
             main_llm = AttributingLLM(build_metered_llm_client(settings))
             stack.push_async_callback(_close, main_llm, "main answer")
             saved = True
+            if checking and judge_llm is not None:
+                # Once, before the first case, and saved at once, so a run cut off
+                # later still holds the probe and its decision.
+                probe = {"cells": grader_check.empty_cells(), "calls": [], "errors": []}
+                saved = await _run_probe(
+                    judge_llm,
+                    settings=settings,
+                    answer_models=answer_models,
+                    stops=budget_stops,
+                    into=probe,
+                    on_cell=_probe_cell_saved,
+                )
+                probe_lines = [
+                    redact(line, secret_values(settings))
+                    for line in grader_check.report_lines(
+                        _assemble([], None, [], "main"), probe_only=True
+                    )
+                ]
+                # In the log and the job summary at once, so a run cut off later
+                # still shows the probe and its decision in both.
+                for line in probe_lines:
+                    print(line)
+                grader_check.write_step_summary(probe_lines)
 
             def _main_saved(done: list[JudgedCase]) -> bool:
                 nonlocal saved
@@ -1708,17 +2126,22 @@ async def run_eval_async(
             # cancelled task, a step timeout) keeps everything up to its last
             # finished case; a save that fails twice stops the pass before any
             # further paid call (#598 Step 2b).
-            judged = await _judge_cases(
-                judge_cases,
-                settings=settings,
-                postgres=postgres,
-                answer_llm=main_llm,
-                judge_llm=judge_llm,
-                expect_answerer=(settings.llm_provider, answer_model),
-                answer_models=answer_models,
-                on_case=_main_saved,
-                run_errors=run_errors,
-            )
+            if saved:
+                judged = await _judge_cases(
+                    judge_cases,
+                    settings=settings,
+                    postgres=postgres,
+                    answer_llm=main_llm,
+                    judge_llm=judge_llm,
+                    expect_answerer=(settings.llm_provider, answer_model),
+                    answer_models=answer_models,
+                    on_case=_main_saved,
+                    run_errors=run_errors,
+                    budget_stops=budget_stops,
+                    after_save=_spend_resave(lambda done: _assemble(done, None, [], "main"))
+                    if checking
+                    else None,
+                )
             if saved and _session_stopped():
                 saved = False
             if saved:
@@ -1753,6 +2176,12 @@ async def run_eval_async(
                     answer_models=answer_models,
                     on_case=_fallback_saved,
                     run_errors=run_errors,
+                    budget_stops=budget_stops,
+                    after_save=_spend_resave(
+                        lambda done: _assemble(main_done, done, ["main"], "fallback")
+                    )
+                    if checking
+                    else None,
                 )
                 if saved and not _session_stopped():
                     passes.append("fallback")
@@ -1761,6 +2190,11 @@ async def run_eval_async(
     # so (it is printed), and the run fails on its ``report_write`` line.
     if not _write(lambda: summary, where="at the end"):
         summary = _assemble(judged, fallback_judged, passes)
+    elif checking and await _refresh_spend():
+        # Saved first; then once more with the final recorded spend.
+        summary = _assemble(judged, fallback_judged, passes)
+        if not _write(lambda: summary, where="at the end, with the spend"):
+            summary = _assemble(judged, fallback_judged, passes)
     return summary
 
 
@@ -2020,6 +2454,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.judge_subset is not None and args.judge_subset < 1:
         parser.error("--judge-subset must be >= 1")
 
+    checking = get_settings().eval_passage_grading
+    if checking:
+        # The grader check runs only on a branch, with enough of the UTC day left
+        # for the daily spend cap to cover it (#598 Step 3).
+        refusal = grader_check.start_refusal(
+            ref=os.environ.get("GITHUB_REF"), now=grader_check.utc_now()
+        )
+        if refusal is not None:
+            print(f"GRADER CHECK REFUSED (nothing was run, nothing was spent): {refusal}")
+            return 2
+
     if args.production_parity:
         from .parity import parity_failures, production_settings
 
@@ -2127,6 +2572,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"Multi-turn echo: {len(mt.get('echoes', []))} echo(es) over "
                 f"{mt.get('cases', 0)} multi-turn case(s)"
             )
+
+    if checking and summary.get("grader_check"):
+        # In the log, and in the job summary (once after the probe, again here).
+        check_lines = [redact(line, secrets) for line in grader_check.report_lines(summary)]
+        for line in check_lines:
+            print(line)
+        grader_check.write_step_summary(check_lines)
 
     # Coverage warning, printed even under --quiet. A bounded run is still a PASS,
     # so the only thing standing between it and being mistaken for full coverage is

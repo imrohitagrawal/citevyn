@@ -389,6 +389,11 @@ class Settings(BaseSettings):
     # set together with ``eval_judge_model`` or not at all (validator below). The
     # upper bound also refuses inf, nan and 1e309.
     eval_judge_timeout_seconds: float | None = Field(default=None, gt=0.0, le=300.0)
+    # The grader check (#598 Step 3): grade every answer a second time with the
+    # passages it was made from, and grade two fixed probe answers. Reported only:
+    # the mean and every gate use the blind grade. Off by default; production
+    # must keep it off (tests/eval/parity.py).
+    eval_passage_grading: bool = False
 
     @model_validator(mode="after")
     def _pair_the_grader_model_with_its_timeout(self) -> "Settings":
