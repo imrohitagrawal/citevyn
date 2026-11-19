@@ -262,3 +262,46 @@ def test_the_command_writes_nothing_to_the_database(tmp_path: pathlib.Path) -> N
     assert done.returncode == 0, done.stdout + done.stderr
     assert (tmp_path / "spend.json").exists()  # partner: it really ran
     assert db.read_bytes() == before
+
+
+# --- #576 part 1: the primary failures the fallback answered ----------------------------
+
+
+def _report_with_notes() -> dict[str, Any]:
+    def note(seconds: float, **cause: Any) -> list[dict[str, Any]]:
+        return [{"provider": "gemini", "model": GEMINI, "duration_seconds": seconds, **cause}]
+
+    report = _report()
+    report["judge"]["cases"][0]["model_calls"][1]["primary_failures"] = note(
+        1.5, kind="http_status", status_code=429, provider_status="RESOURCE_EXHAUSTED"
+    )
+    report["fallback"]["judge"]["cases"][1]["model_calls"][0]["primary_failures"] = note(
+        0.25, kind="empty_answer", reason="MAX_TOKENS"
+    )
+    return report
+
+
+def test_primary_failures_are_counted_per_model_in_both_passes_and_never_folded_in() -> None:
+    """Red when: one pass or the field is ignored, the count is not named ``failures``
+    (the report's ``count``, 1:1), or the records are double-counted as observed failures."""
+    module = _export_module()
+    export, without = module.summarize([], _report_with_notes()), module.summarize([], _report())
+    causes = {"gemini empty_answer MAX_TOKENS": 1, "gemini http_status 429 RESOURCE_EXHAUSTED": 1}
+    found = {"failures": 2, "by_cause": causes, "seconds": 1.75}
+    assert export["primary_failures"] == {GEMINI: found}
+    for key in ("observed_failures", "observed_failure_seconds", "refused_by_cap"):
+        assert export[key] == without[key], key
+
+
+@pytest.mark.parametrize("report", [None, {}, {"judge": {"cases": [{"model_calls": [{}]}]}}])
+def test_an_old_report_has_no_primary_failures_and_does_not_crash(report: Any) -> None:
+    """Red when: a report without the field (or none) crashes the export or drops the key."""
+    assert _export_module().summarize([], report)["primary_failures"] == {}
+
+
+def test_the_first_gap_says_hidden_primary_calls_are_now_counted_but_not_costed() -> None:
+    """Red when: the gap still says a hidden primary call is unseen, or drops #496."""
+    first = _export_module().GAPS[0]
+    assert "primary_failures" in first and "#496" in first
+    assert "a primary call the fallback hid, and" not in first
+    assert first.lower().startswith("failed attempts")

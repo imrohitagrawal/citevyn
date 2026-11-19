@@ -11,7 +11,8 @@ run's), makes no model call and writes nothing to the database. Usage, from
 The figure is the RECORDED BOOK COST: the cost the meter stored for each row at
 the price book's rates. It is not a guaranteed total; ``gaps`` names what it
 cannot see. With ``--report``, the failed calls the eval itself recorded (which
-leave no row) are counted per model as ``observed_failures``.
+leave no row) are counted per model as ``observed_failures``, and the primary
+calls the fallback answered, with their causes, as ``primary_failures`` (#576).
 """
 
 from __future__ import annotations
@@ -28,12 +29,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
+from app.llm.attempts import cause_key
 from app.models.provider_calls import ProviderCall
 
 LABEL = "recorded book cost"
 GAPS = (
     "Failed attempts that were never recorded are not in the cost: a primary call "
-    "the fallback hid, and a turn on which both providers failed, leave no row.",
+    "the fallback hid is counted, with its cause, under primary_failures, but any "
+    "tokens it used are not in the cost (#496); a turn on which both providers "
+    "failed leaves no row.",
     "Meter writes that were lost are not in the cost: the meter never fails a call, "
     "so a row it could not write is silently missing.",
     "Rows with estimated tokens (the provider returned no usage) carry an estimated "
@@ -143,6 +147,32 @@ def _tally(
     )
 
 
+def primary_failures(report: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """The primary calls the fallback answered (or failed after), by primary model,
+    in both passes: ``failures`` (the number of records, as the report's
+    ``judge.primary_failures.count``), causes and total measured duration (#576).
+    Never folded into ``observed_failures``: those calls left no row and are
+    reported apart."""
+    found: dict[str, dict[str, Any]] = {}
+    sections = [(report or {}).get("judge") or {}]
+    sections.append((((report or {}).get("fallback") or {}).get("judge")) or {})
+    for section in sections:
+        for case in section.get("cases") or []:
+            for call in case.get("model_calls") or []:
+                for note in call.get("primary_failures") or []:
+                    model = str(note.get("model") or "unknown")
+                    entry = found.setdefault(
+                        model, {"failures": 0, "by_cause": Counter(), "seconds": 0.0}
+                    )
+                    entry["failures"] += 1
+                    entry["by_cause"][cause_key(note)] += 1
+                    entry["seconds"] += float(note.get("duration_seconds") or 0.0)
+    return {
+        model: {**entry, "by_cause": dict(sorted(entry["by_cause"].items()))}
+        for model, entry in sorted(found.items())
+    }
+
+
 def observed_failures(report: dict[str, Any] | None) -> dict[str, int]:
     """The failed calls the eval recorded, by model (cap refusals excluded)."""
     return failed_calls(report)[0]
@@ -184,6 +214,9 @@ def summarize(rows: list[ProviderCall], report: dict[str, Any] | None = None) ->
         "observed_failure_seconds": failure_seconds(report),
         # Calls the spend cap stopped before they were sent: not spend, not failures.
         "refused_by_cap": refused,
+        # Primary calls the fallback answered, with their causes (#576); their
+        # tokens are not in the cost (``gaps``).
+        "primary_failures": primary_failures(report),
         "attribution": ATTRIBUTION,
         "gaps": list(GAPS),
         # The run's cap record, copied from the report (#598 Step 4): this step does
@@ -238,8 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         f"{totals['output_tokens']} output token(s), ${totals['book_cost_usd']}; "
         f"unpriced rows {totals['unpriced_rows']}, estimated-token rows "
         f"{totals['tokens_estimated_rows']}; observed failures {export['observed_failures']}; "
-        f"refused by the cap {export['refused_by_cap']}"
+        f"refused by the cap {export['refused_by_cap']}; primary failures "
+        f"{ {m: p['failures'] for m, p in export['primary_failures'].items()} }"
     )
+    for model, found in export["primary_failures"].items():
+        print(f"  primary failures of {model}: {found['by_cause']}")
     print(f"  note: {ATTRIBUTION}")
     for gap in GAPS:
         print(f"  gap: {gap}")

@@ -15,11 +15,38 @@ class LLMUnavailable(RuntimeError):
 
     Carries the original cause so the orchestrator can log it. The
     client never swallows the underlying exception.
+
+    The other keyword fields are a structured cause, all optional (#576): the
+    failure ``kind``, the HTTP ``status_code``, the provider's short error code
+    (``provider_status``, Gemini's ``error.status``), a finish or block
+    ``reason``, and on an empty answer the token counts and the
+    ``max_output_tokens`` sent. They are stored as given; the one place they are
+    held to a fixed shape is :meth:`app.llm.attempts.PrimaryFailure.from_error`.
+    None of them is ever part of the message.
     """
 
-    def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        kind: str = "unknown",
+        status_code: int | None = None,
+        provider_status: object = None,
+        reason: object = None,
+        thoughts_tokens: object = None,
+        answer_tokens: object = None,
+        max_output_tokens: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.cause = cause
+        self.kind = kind
+        self.status_code = status_code
+        self.provider_status = provider_status
+        self.reason = reason
+        self.thoughts_tokens = thoughts_tokens
+        self.answer_tokens = answer_tokens
+        self.max_output_tokens = max_output_tokens
 
 
 class CostLimitReached(LLMUnavailable):

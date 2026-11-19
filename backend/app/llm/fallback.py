@@ -11,12 +11,18 @@ Only :class:`LLMUnavailable` is caught — any other exception (a programming
 error, a cancellation) propagates so it is not masked by a fallback attempt.
 If the secondary also fails, its :class:`LLMUnavailable` propagates to the
 orchestrator, which maps it to a 5xx.
+
+Before the secondary is called, the primary's failure is noted as a bounded
+:class:`~app.llm.attempts.PrimaryFailure` for a caller that installed a collector
+(the judged eval, #576). With none installed this does nothing.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
+from app.llm.attempts import PrimaryFailure, note_primary_failure
 from app.llm.errors import LLMUnavailable
 from app.llm.protocol import LLMClient
 from app.llm.types import LLMResult
@@ -49,6 +55,7 @@ class FallbackLLMClient:
         max_tokens: int,
         temperature: float,
     ) -> LLMResult:
+        start = time.perf_counter()
         try:
             return await self._primary.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
@@ -64,6 +71,24 @@ class FallbackLLMClient:
                 # suppressed to a shape summary (#361).
                 extra={"cause_type": exc.__class__.__name__},
             )
+            # Noted before the secondary is called, so it survives the secondary
+            # failing too. The labels are the primary's own: its result's provider
+            # and its configured model. Recording must never change the fallback, so
+            # a failure here is logged by class name only and the secondary still runs.
+            try:
+                note_primary_failure(
+                    PrimaryFailure.from_error(
+                        exc,
+                        provider=getattr(self._primary, "_PROVIDER", None),
+                        model=getattr(self._primary, "_model", None),
+                        duration_seconds=time.perf_counter() - start,
+                    )
+                )
+            except Exception as record_exc:  # noqa: BLE001 - see the comment above
+                _logger.warning(
+                    "llm_primary_failure_not_recorded",
+                    extra={"cause_type": record_exc.__class__.__name__},
+                )
             return await self._secondary.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
             )
