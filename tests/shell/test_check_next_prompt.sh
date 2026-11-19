@@ -71,6 +71,13 @@
 #                       instruction (verbatim-inside-a-path)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
+#   kickoff-warns-*   — kickoff_line_ok returning True always, reading a line other
+#                       than the last non-blank one (trailing-blank-lines,
+#                       trailing-fence, line-before-last), or dropping the "Read "
+#                       start or the phrase end (no-read, phrase-cut)
+#   kickoff-quiet-*   — kickoff_line_ok returning False always, or not stripping
+#                       spaces around the line (indented, trailing-spaces)
+#   any kickoff-* case — the warning made blocking (exit 1): it is a warning until every prompt passes
 
 set -euo pipefail
 
@@ -132,6 +139,21 @@ _without() {
 _with_item() {
   # _with_item <text> -> GOOD with its one Items entry replaced by <text>
   printf '%s\n' "$GOOD" | python3 -c 'import sys; print(sys.stdin.read().replace("1. Something.", sys.argv[1]), end="")' "$1"
+}
+
+KICKOFF='Read ~/notes/example/NEXT-SESSION-PROMPT.md and follow it exactly. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round.'
+
+_kickoff_case() {
+  # _kickoff_case <label> <expected warn|quiet> <prompt text>: the kickoff-line
+  # warning appears on stderr (or not), and never changes the exit code.
+  local label="$1" want="$2" text="$3" root err got
+  root="$(mktemp -d "${WORK}/kick.XXXXXX")"
+  printf '%s' "$text" > "${root}/NEXT-SESSION-PROMPT.md"
+  if ! python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null 2>"${root}/err"; then
+    _record "$label" "$want" "exit-1"; return
+  fi
+  if grep -q "kickoff line" "${root}/err"; then got=warn; else got=quiet; fi
+  _record "$label" "$want" "$got"
 }
 
 _names_line() {
@@ -310,6 +332,38 @@ _case "words-passes-entry-number" pass "$(_with_item "1. Tell the owner their an
 _names_line "words-names-line-not-text" '1. Record verbatim as the next change-log row.' 'next change-log row'
 _names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
    public change log verbatim." 'public change log verbatim'
+
+# The kickoff line: the last non-blank line the owner pastes to start the next session.
+_kickoff_case "kickoff-quiet-good" quiet "$GOOD
+$KICKOFF
+"
+_kickoff_case "kickoff-quiet-indented" quiet "$GOOD
+   $KICKOFF"
+_kickoff_case "kickoff-quiet-trailing-spaces" quiet "$GOOD
+$KICKOFF   "
+_kickoff_case "kickoff-quiet-trailing-blank-lines" quiet "$GOOD
+$KICKOFF
+
+
+
+"
+_kickoff_case "kickoff-warns-missing" warn "$GOOD
+"
+_kickoff_case "kickoff-warns-line-before-last" warn "$GOOD
+$KICKOFF
+Thanks."
+_kickoff_case "kickoff-warns-trailing-fence" warn "$GOOD
+\`\`\`
+$KICKOFF
+\`\`\`
+"
+_kickoff_case "kickoff-warns-no-read" warn "$GOOD
+Please read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round."
+_kickoff_case "kickoff-warns-phrase-cut" warn "$GOOD
+Read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem)."
+_kickoff_case "kickoff-warns-trailing-comment" warn "$GOOD
+$KICKOFF
+<!-- end -->"
 
 _root_case "root-passes-without-prompt-files" pass README.md AGENTS.md
 _root_case "root-fails-next-session-prompt" fail README.md NEXT-SESSION-PROMPT.md
