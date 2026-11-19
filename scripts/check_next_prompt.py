@@ -26,14 +26,13 @@ Markdown parser: it guards against a session forgetting a section, not against
 someone hiding one on purpose inside raw HTML. Setext headings (text underlined
 with `---`) are not recognised; write `## `.
 
-`--file` also WARNS (on stderr, exit code unchanged) when the prompt does not end
-with its kickoff line: the line the owner pastes to start the next session. The
-last non-blank line, stripped of surrounding spaces, must start with `Read ` and
-end with the sentence in `KICKOFF_END` ("Use a workflow for planning (independent
-drafts, plan review, pre-mortem) and for every review round."); a trailing fence,
-comment or any other line after it fails, because the owner pastes the last line.
-Raw text is read, so a line inside an unclosed fence still counts. It becomes a
-problem (exit 1) once every prompt in the owner's notes passes it.
+`--file` also requires the prompt to end with its kickoff line: the line the
+owner pastes to start the next session. The last non-blank line, stripped of
+surrounding spaces, must start with `Read ` and end with the sentence in
+`KICKOFF_END` ("Use a workflow for planning (independent drafts, plan review,
+pre-mortem) and for every review round."); a trailing fence, comment or any other
+line after it fails, because the owner pastes the last line. Raw text is read, so
+a line inside an unclosed fence still counts. The path in the line is not checked.
 
 Standard library only. Exit 1 on any problem.
 """
@@ -43,7 +42,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -272,6 +270,11 @@ def file_problems(path: Path) -> list[str]:
     for section in REQUIRED_SECTIONS:
         if not shows_section(shown, section):
             found.append(f"{path.name} has no visible '## {section}' heading")
+    if not kickoff_line_ok(text):
+        found.append(
+            f"{path.name} does not end with its kickoff line: the last non-blank line "
+            f"must start with 'Read ' and end with '{KICKOFF_END}'"
+        )
     found.extend(
         f"{path.name} line {number}: may tell a session to copy the owner's own words; "
         "restate the decision plainly, or use the one allowed sentence on its own: "
@@ -319,15 +322,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.file is not None:
         found, label = prompt_problems(args.file), f"Prompt check ({args.file.name})"
-        if args.file.is_file() and not kickoff_line_ok(
-            args.file.read_text(encoding="utf-8", errors="replace")
-        ):
-            print(
-                f"warning: {args.file.name} does not end with its kickoff line: the last "
-                "line must start with 'Read ' and end with "
-                f"'{KICKOFF_END}'",
-                file=sys.stderr,
-            )
     else:
         found, label = (
             root_prompts(args.root or ROOT),

@@ -71,17 +71,17 @@
 #                       instruction (verbatim-inside-a-path)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
-#   kickoff-warns-*   — kickoff_line_ok returning True always, matching a line other
+#   kickoff-fails-*   — kickoff_line_ok returning True always (or its problem not reported), matching a line other
 #                       than the last non-blank one (trailing-fence, line-before-last,
 #                       trailing-comment), loosening the "Read " start (no-read,
 #                       readme, lowercase-read), or checking less than the whole end
 #                       phrase or only that it appears (phrase-cut, phrase-start-changed,
 #                       text-after-phrase)
-#   kickoff-quiet-*   — kickoff_line_ok returning False always, not stripping spaces
+#   kickoff-passes-*  — kickoff_line_ok returning False always, not stripping spaces
 #                       around the line (indented, trailing-spaces), or reading the
 #                       literal last line instead of the last non-blank one
 #                       (trailing-blank-lines, crlf)
-#   any kickoff-* case — the warning made blocking (exit 1): it is a warning until every prompt passes
+#   passes-good-prompt and every other passing case — the kickoff rule not met by GOOD
 
 set -euo pipefail
 
@@ -91,7 +91,9 @@ FAIL=0
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-GOOD='# Session prompt: example
+KICKOFF='Read ~/notes/example/NEXT-SESSION-PROMPT.md and follow it exactly. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round.'
+
+BASE='# Session prompt: example
 
 **Process:** every item is built by .claude/skills/citevyn-delivery/SKILL.md.
 
@@ -106,6 +108,9 @@ Nothing paid.
 
 ## End of session
 1. Status block.'
+GOOD="${BASE}
+
+${KICKOFF}"
 
 _case() {
   # _case <label> <expected pass|fail> <prompt text, or "-" for no prompt file>
@@ -146,18 +151,20 @@ _with_item() {
   printf '%s\n' "$GOOD" | python3 -c 'import sys; print(sys.stdin.read().replace("1. Something.", sys.argv[1]), end="")' "$1"
 }
 
-KICKOFF='Read ~/notes/example/NEXT-SESSION-PROMPT.md and follow it exactly. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round.'
 
 _kickoff_case() {
-  # _kickoff_case <label> <expected warn|quiet> <prompt text>: the kickoff-line
-  # warning appears on stderr (or not), and never changes the exit code.
-  local label="$1" want="$2" text="$3" root err got
+  # _kickoff_case <label> <expected pass|fail> <prompt text>: a fail must name the
+  # kickoff line, so it cannot pass for another reason (a missing section).
+  local label="$1" want="$2" text="$3" root got
   root="$(mktemp -d "${WORK}/kick.XXXXXX")"
   printf '%s' "$text" > "${root}/NEXT-SESSION-PROMPT.md"
-  if ! python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null 2>"${root}/err"; then
-    _record "$label" "$want" "exit-1"; return
+  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >"${root}/out" 2>&1; then
+    got=pass
+  elif grep -q "kickoff line" "${root}/out"; then
+    got=fail
+  else
+    got=fail-other
   fi
-  if grep -q "kickoff line" "${root}/err"; then got=warn; else got=quiet; fi
   _record "$label" "$want" "$got"
 }
 
@@ -339,48 +346,48 @@ _names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
    public change log verbatim." 'public change log verbatim'
 
 # The kickoff line: the last non-blank line the owner pastes to start the next session.
-_kickoff_case "kickoff-quiet-good" quiet "$GOOD
+_kickoff_case "kickoff-passes-good" pass "$BASE
 $KICKOFF
 "
-_kickoff_case "kickoff-quiet-indented" quiet "$GOOD
+_kickoff_case "kickoff-passes-indented" pass "$BASE
    $KICKOFF"
-_kickoff_case "kickoff-quiet-trailing-spaces" quiet "$GOOD
+_kickoff_case "kickoff-passes-trailing-spaces" pass "$BASE
 $KICKOFF   "
-_kickoff_case "kickoff-quiet-trailing-blank-lines" quiet "$GOOD
+_kickoff_case "kickoff-passes-trailing-blank-lines" pass "$BASE
 $KICKOFF
 
 
 
 "
-_kickoff_case "kickoff-warns-missing" warn "$GOOD
+_kickoff_case "kickoff-fails-missing" fail "$BASE
 "
-_kickoff_case "kickoff-warns-line-before-last" warn "$GOOD
+_kickoff_case "kickoff-fails-line-before-last" fail "$BASE
 $KICKOFF
 Thanks."
-_kickoff_case "kickoff-warns-trailing-fence" warn "$GOOD
+_kickoff_case "kickoff-fails-trailing-fence" fail "$BASE
 \`\`\`
 $KICKOFF
 \`\`\`
 "
-_kickoff_case "kickoff-warns-no-read" warn "$GOOD
+_kickoff_case "kickoff-fails-no-read" fail "$BASE
 Please read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round."
-_kickoff_case "kickoff-warns-phrase-cut" warn "$GOOD
+_kickoff_case "kickoff-fails-phrase-cut" fail "$BASE
 Read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem)."
-_kickoff_case "kickoff-quiet-crlf" quiet "$(printf '%s\r\n%s\r\n' "$GOOD" "$KICKOFF")"
-_kickoff_case "kickoff-warns-readme" warn "$GOOD
+_kickoff_case "kickoff-passes-crlf" pass "$(printf '%s\r\n%s\r\n' "$BASE" "$KICKOFF")"
+_kickoff_case "kickoff-fails-readme" fail "$BASE
 Readme ${KICKOFF#Read }"
-_kickoff_case "kickoff-warns-lowercase-read" warn "$GOOD
+_kickoff_case "kickoff-fails-lowercase-read" fail "$BASE
 read ${KICKOFF#Read }"
-_kickoff_case "kickoff-warns-phrase-start-changed" warn "$GOOD
+_kickoff_case "kickoff-fails-phrase-start-changed" fail "$BASE
 ${KICKOFF/Use a workflow for planning/Use a plan for planning}"
-_kickoff_case "kickoff-warns-text-after-phrase" warn "$GOOD
+_kickoff_case "kickoff-fails-text-after-phrase" fail "$BASE
 $KICKOFF Thanks."
 # An unclosed fence: the rule reads raw text, so the line still counts (the owner
 # pastes the raw last line).
-_kickoff_case "kickoff-quiet-inside-unclosed-fence" quiet "$GOOD
+_kickoff_case "kickoff-passes-inside-unclosed-fence" pass "$BASE
 \`\`\`
 $KICKOFF"
-_kickoff_case "kickoff-warns-trailing-comment" warn "$GOOD
+_kickoff_case "kickoff-fails-trailing-comment" fail "$BASE
 $KICKOFF
 <!-- end -->"
 
