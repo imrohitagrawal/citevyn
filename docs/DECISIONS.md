@@ -18,6 +18,14 @@ asking the owner anything; the answer may already be here.
 
 ---
 
+### 2026-11-19 — The judged job's limits cover the slow day under today's grader timeout
+Replaces the 2026-11-17 rule below for the judged job's limits. A run measured under
+a shorter grader timeout understates how long the same day takes today, so the
+limits now cover the slowest measured day replayed under the grader timeout `ci.yml`
+sets (the estimate is in the job's comment), and a test fails if the timeout changes
+without the limits. The owner chose this as a stopgap; a deadline inside the runner,
+so that a run stops cleanly before the limit, is the next package.
+
 ### 2026-11-17 — The judged job's time limits come from the slowest counted run
 Applies to the judged eval job in `ci.yml`. Its limits are twice the slowest counted
 run's duration, rounded up to 5 minutes, with the job at least 5 minutes above its
