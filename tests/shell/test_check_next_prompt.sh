@@ -108,7 +108,8 @@ _case() {
   local label="$1" want="$2" text="$3" root got
   root="$(mktemp -d "${WORK}/root.XXXXXX")"
   if [ "$text" != "-" ]; then printf '%s\n' "$text" > "${root}/NEXT-SESSION-PROMPT.md"; fi
-  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null; then got=pass; else got=fail; fi
+  # stderr dropped: the kickoff-line warning is checked by _kickoff_case.
+  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null 2>&1; then got=pass; else got=fail; fi
   _record "$label" "$want" "$got"
 }
 
