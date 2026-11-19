@@ -81,7 +81,9 @@
 #                       around the line (indented, trailing-spaces), or reading the
 #                       literal last line instead of the last non-blank one
 #                       (trailing-blank-lines, crlf)
-#   passes-good-prompt and every other passing case — the kickoff rule not met by GOOD
+#   passes-good-prompt and every other passing case — the kickoff rule not met by GOOD;
+#                       every fails-* case — a failure caused only by the kickoff line
+#                       counted as the case's own failure (fail-kickoff-only)
 
 set -euo pipefail
 
@@ -117,8 +119,16 @@ _case() {
   local label="$1" want="$2" text="$3" root got
   root="$(mktemp -d "${WORK}/root.XXXXXX")"
   if [ "$text" != "-" ]; then printf '%s\n' "$text" > "${root}/NEXT-SESSION-PROMPT.md"; fi
-  # stderr dropped: the kickoff-line warning is checked by _kickoff_case.
-  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null 2>&1; then got=pass; else got=fail; fi
+  # A fail counts only when some problem other than the kickoff line is named, so
+  # appending text after GOOD (which pushes the kickoff line off the end) cannot
+  # make a case pass for the wrong reason. The kickoff rule has _kickoff_case.
+  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >"${root}/out" 2>&1; then
+    got=pass
+  elif grep '^  - ' "${root}/out" | grep -qv 'kickoff line'; then
+    got=fail
+  else
+    got=fail-kickoff-only
+  fi
   _record "$label" "$want" "$got"
 }
 
