@@ -164,7 +164,7 @@ _names_line() {
   root="$(mktemp -d "${WORK}/words.XXXXXX")"
   _with_item "$item" > "${root}/NEXT-SESSION-PROMPT.md"
   line="$(grep -nF -- "$marker" "${root}/NEXT-SESSION-PROMPT.md" | cut -d: -f1)"
-  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" || true)"
+  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" 2>/dev/null || true)"
   if printf '%s' "$out" | grep -q "line ${line}:" && ! printf '%s' "$out" | grep -qF -- "$marker"; then
     _record "$label" pass pass
   else
