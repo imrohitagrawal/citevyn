@@ -71,12 +71,16 @@
 #                       instruction (verbatim-inside-a-path)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
-#   kickoff-warns-*   — kickoff_line_ok returning True always, reading a line other
-#                       than the last non-blank one (trailing-blank-lines,
-#                       trailing-fence, line-before-last), or dropping the "Read "
-#                       start or the phrase end (no-read, phrase-cut)
-#   kickoff-quiet-*   — kickoff_line_ok returning False always, or not stripping
-#                       spaces around the line (indented, trailing-spaces)
+#   kickoff-warns-*   — kickoff_line_ok returning True always, matching a line other
+#                       than the last non-blank one (trailing-fence, line-before-last,
+#                       trailing-comment), loosening the "Read " start (no-read,
+#                       readme, lowercase-read), or checking less than the whole end
+#                       phrase or only that it appears (phrase-cut, phrase-start-changed,
+#                       text-after-phrase)
+#   kickoff-quiet-*   — kickoff_line_ok returning False always, not stripping spaces
+#                       around the line (indented, trailing-spaces), or reading the
+#                       literal last line instead of the last non-blank one
+#                       (trailing-blank-lines, crlf)
 #   any kickoff-* case — the warning made blocking (exit 1): it is a warning until every prompt passes
 
 set -euo pipefail
@@ -362,6 +366,20 @@ _kickoff_case "kickoff-warns-no-read" warn "$GOOD
 Please read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round."
 _kickoff_case "kickoff-warns-phrase-cut" warn "$GOOD
 Read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem)."
+_kickoff_case "kickoff-quiet-crlf" quiet "$(printf '%s\r\n%s\r\n' "$GOOD" "$KICKOFF")"
+_kickoff_case "kickoff-warns-readme" warn "$GOOD
+Readme ${KICKOFF#Read }"
+_kickoff_case "kickoff-warns-lowercase-read" warn "$GOOD
+read ${KICKOFF#Read }"
+_kickoff_case "kickoff-warns-phrase-start-changed" warn "$GOOD
+${KICKOFF/Use a workflow for planning/Use a plan for planning}"
+_kickoff_case "kickoff-warns-text-after-phrase" warn "$GOOD
+$KICKOFF Thanks."
+# An unclosed fence: the rule reads raw text, so the line still counts (the owner
+# pastes the raw last line).
+_kickoff_case "kickoff-quiet-inside-unclosed-fence" quiet "$GOOD
+\`\`\`
+$KICKOFF"
 _kickoff_case "kickoff-warns-trailing-comment" warn "$GOOD
 $KICKOFF
 <!-- end -->"

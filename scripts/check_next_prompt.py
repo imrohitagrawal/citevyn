@@ -29,9 +29,11 @@ with `---`) are not recognised; write `## `.
 `--file` also WARNS (on stderr, exit code unchanged) when the prompt does not end
 with its kickoff line: the line the owner pastes to start the next session. The
 last non-blank line, stripped of surrounding spaces, must start with `Read ` and
-end with `KICKOFF_END`; a trailing fence, comment or any other line after it
-fails, because the owner pastes the last line. It becomes a problem (exit 1) once
-every prompt in the owner's notes passes it.
+end with the sentence in `KICKOFF_END` ("Use a workflow for planning (independent
+drafts, plan review, pre-mortem) and for every review round."); a trailing fence,
+comment or any other line after it fails, because the owner pastes the last line.
+Raw text is read, so a line inside an unclosed fence still counts. It becomes a
+problem (exit 1) once every prompt in the owner's notes passes it.
 
 Standard library only. Exit 1 on any problem.
 """
