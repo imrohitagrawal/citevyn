@@ -113,7 +113,8 @@ def test_collectors_are_reset_on_exit_even_after_an_error() -> None:
 async def test_a_broken_recorder_never_changes_the_fallback(
     monkeypatch: pytest.MonkeyPatch, broken: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Red when: a failure while recording escapes, so the secondary is not asked."""
+    """Red when: a failure while recording escapes (the secondary is not asked), or
+    the bounded not-recorded event is not logged once with its class name."""
     from app.llm import fallback as fallback_mod
 
     def _boom(*_a: Any, **_k: Any) -> Any:
@@ -129,6 +130,8 @@ async def test_a_broken_recorder_never_changes_the_fallback(
     assert secondary.calls == 1 and notes == []
     assert "llm_primary_unavailable_falling_back" in caplog.text  # the existing flow
     assert "recorder down" not in caplog.text
+    events = [r for r in caplog.records if r.getMessage() == "llm_primary_failure_not_recorded"]
+    assert len(events) == 1 and getattr(events[0], "cause_type", None) == "RuntimeError"
 
 
 class _Slow(_Client):
