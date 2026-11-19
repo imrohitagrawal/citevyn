@@ -26,6 +26,13 @@ Markdown parser: it guards against a session forgetting a section, not against
 someone hiding one on purpose inside raw HTML. Setext headings (text underlined
 with `---`) are not recognised; write `## `.
 
+`--file` also WARNS (on stderr, exit code unchanged) when the prompt does not end
+with its kickoff line: the line the owner pastes to start the next session. The
+last non-blank line, stripped of surrounding spaces, must start with `Read ` and
+end with `KICKOFF_END`; a trailing fence, comment or any other line after it
+fails, because the owner pastes the last line. It becomes a problem (exit 1) once
+every prompt in the owner's notes passes it.
+
 Standard library only. Exit 1 on any problem.
 """
 
@@ -34,6 +41,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +52,12 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     "Items",
     "Approvals",
     "End of session",
+)
+
+#: How the kickoff line must end (it must also start with "Read ").
+KICKOFF_END = (
+    "Use a workflow for planning (independent drafts, plan review, pre-mortem) "
+    "and for every review round."
 )
 
 #: A fence opens at the start of a line, or right after a list marker
@@ -266,6 +280,13 @@ def file_problems(path: Path) -> list[str]:
     return found
 
 
+def kickoff_line_ok(text: str) -> bool:
+    """Whether the raw text's last non-blank line is the kickoff line."""
+    lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
+    last = next((line for line in reversed(lines) if line), "")
+    return last.startswith("Read ") and last.endswith(KICKOFF_END)
+
+
 def root_prompts(root: Path) -> list[str]:
     """Problems for a public repository root: any prompt file there."""
     if not root.is_dir():
@@ -296,6 +317,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.file is not None:
         found, label = prompt_problems(args.file), f"Prompt check ({args.file.name})"
+        if args.file.is_file() and not kickoff_line_ok(
+            args.file.read_text(encoding="utf-8", errors="replace")
+        ):
+            print(
+                f"warning: {args.file.name} does not end with its kickoff line: the last "
+                "line must start with 'Read ' and end with "
+                f"'{KICKOFF_END}'",
+                file=sys.stderr,
+            )
     else:
         found, label = (
             root_prompts(args.root or ROOT),
