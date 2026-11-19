@@ -282,12 +282,13 @@ def _report_with_notes() -> dict[str, Any]:
 
 
 def test_primary_failures_are_counted_per_model_in_both_passes_and_never_folded_in() -> None:
-    """Red when: one pass or the field is ignored, or the records are double-counted
-    as observed failures."""
+    """Red when: one pass or the field is ignored, the count is not named ``failures``
+    (the report's ``count``, 1:1), or the records are double-counted as observed failures."""
     module = _export_module()
     export, without = module.summarize([], _report_with_notes()), module.summarize([], _report())
     causes = {"gemini empty_answer MAX_TOKENS": 1, "gemini http_status 429 RESOURCE_EXHAUSTED": 1}
-    assert export["primary_failures"] == {GEMINI: {"calls": 2, "by_cause": causes, "seconds": 1.75}}
+    found = {"failures": 2, "by_cause": causes, "seconds": 1.75}
+    assert export["primary_failures"] == {GEMINI: found}
     for key in ("observed_failures", "observed_failure_seconds", "refused_by_cap"):
         assert export[key] == without[key], key
 

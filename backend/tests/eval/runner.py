@@ -1033,6 +1033,8 @@ async def _judge_cases(
                             + "; ".join(
                                 f"{turn}, {r.site.value}: {r.error_type}: "
                                 f"{redact(r.error_message or '', secrets)[:_MESSAGE_LIMIT]}"
+                                # Why the primary did not serve it either (#576).
+                                + "".join(f"; {cause_key(f)}" for f in _failure_entries(r, secrets))
                                 for r in failed
                             )
                             + ")",

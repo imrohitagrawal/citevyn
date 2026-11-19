@@ -107,3 +107,48 @@ def test_collectors_are_reset_on_exit_even_after_an_error() -> None:
     with collect_primary_failures() as second:
         pass
     assert len(first) == 1 and second == []
+
+
+@pytest.mark.parametrize("broken", ["from_error", "note_primary_failure"])
+async def test_a_broken_recorder_never_changes_the_fallback(
+    monkeypatch: pytest.MonkeyPatch, broken: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Red when: a failure while recording escapes, so the secondary is not asked."""
+    from app.llm import fallback as fallback_mod
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("recorder down")
+
+    if broken == "from_error":
+        monkeypatch.setattr(fallback_mod.PrimaryFailure, "from_error", _boom)
+    else:
+        monkeypatch.setattr(fallback_mod, "note_primary_failure", _boom)
+    secondary = _Client("router")
+    with collect_primary_failures() as notes, caplog.at_level("WARNING"):
+        assert (await _ask(_Client("gemini", _429()), secondary)).text == "router"
+    assert secondary.calls == 1 and notes == []
+    assert "llm_primary_unavailable_falling_back" in caplog.text  # the existing flow
+    assert "recorder down" not in caplog.text
+
+
+class _Slow(_Client):
+    async def complete(self, **kwargs: Any) -> LLMResult:
+        await asyncio.sleep(0.02)
+        return await super().complete(**kwargs)
+
+
+async def test_the_primarys_duration_is_carried() -> None:
+    """Red when: the recorded duration is a constant instead of the primary's own time."""
+    with collect_primary_failures() as notes:
+        await _ask(_Slow("gemini", _429()))
+    (note,) = notes
+    assert note.duration_seconds is not None and note.duration_seconds >= 0.02
+
+
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), -1.0, "x", True])
+def test_an_odd_duration_is_recorded_as_none_and_never_raises(seconds: Any) -> None:
+    """Red when: an odd duration raises or is recorded as a number."""
+    failure = PrimaryFailure.from_error(
+        LLMUnavailable("x"), provider="gemini", model=MODEL, duration_seconds=seconds
+    )
+    assert failure.duration_seconds is None

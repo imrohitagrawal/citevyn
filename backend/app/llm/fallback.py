@@ -73,15 +73,22 @@ class FallbackLLMClient:
             )
             # Noted before the secondary is called, so it survives the secondary
             # failing too. The labels are the primary's own: its result's provider
-            # and its configured model.
-            note_primary_failure(
-                PrimaryFailure.from_error(
-                    exc,
-                    provider=getattr(self._primary, "_PROVIDER", None),
-                    model=getattr(self._primary, "_model", None),
-                    duration_seconds=time.perf_counter() - start,
+            # and its configured model. Recording must never change the fallback, so
+            # a failure here is logged by class name only and the secondary still runs.
+            try:
+                note_primary_failure(
+                    PrimaryFailure.from_error(
+                        exc,
+                        provider=getattr(self._primary, "_PROVIDER", None),
+                        model=getattr(self._primary, "_model", None),
+                        duration_seconds=time.perf_counter() - start,
+                    )
                 )
-            )
+            except Exception as record_exc:  # noqa: BLE001 - see the comment above
+                _logger.warning(
+                    "llm_primary_failure_not_recorded",
+                    extra={"cause_type": record_exc.__class__.__name__},
+                )
             return await self._secondary.complete(
                 system=system, user=user, max_tokens=max_tokens, temperature=temperature
             )

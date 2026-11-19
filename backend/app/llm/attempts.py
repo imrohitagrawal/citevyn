@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import math
 import re
 from collections.abc import Generator, Mapping
 from contextvars import ContextVar
@@ -59,6 +60,16 @@ def _count(value: object) -> int | None:
     return None
 
 
+def _seconds(value: object) -> float | None:
+    """A duration: a finite, non-negative number (not a bool), else ``None`` (not
+    measured), never a made-up 0.0."""
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds >= 0.0:
+            return seconds
+    return None
+
+
 def _label(value: object) -> str | None:
     """Our own provider or model label: a string, else ``None``."""
     return value if isinstance(value, str) else None
@@ -77,14 +88,14 @@ class PrimaryFailure:
     status_code: int | None
     provider_status: str | None
     reason: str | None
-    duration_seconds: float
+    duration_seconds: float | None
     thoughts_tokens: int | None = None
     answer_tokens: int | None = None
     max_output_tokens: int | None = None
 
     @classmethod
     def from_error(
-        cls, exc: BaseException, *, provider: object, model: object, duration_seconds: float
+        cls, exc: BaseException, *, provider: object, model: object, duration_seconds: object
     ) -> PrimaryFailure:
         """The bounded record of ``exc``. Never raises: every field is read with a
         default and normalised here."""
@@ -100,7 +111,7 @@ class PrimaryFailure:
             else None,
             provider_status=_identifier(getattr(exc, "provider_status", None)),
             reason=_identifier(getattr(exc, "reason", None)),
-            duration_seconds=max(0.0, float(duration_seconds)),
+            duration_seconds=_seconds(duration_seconds),
             thoughts_tokens=_count(getattr(exc, "thoughts_tokens", None)),
             answer_tokens=_count(getattr(exc, "answer_tokens", None)),
             max_output_tokens=_count(getattr(exc, "max_output_tokens", None)),

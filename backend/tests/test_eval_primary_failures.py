@@ -190,7 +190,8 @@ def test_a_failed_retry_is_recorded_on_the_retry_call(monkeypatch: pytest.Monkey
 def test_when_both_providers_fail_the_failed_record_keeps_its_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red when: the failed path drops the note, or the case's answer error changes."""
+    """Red when: the failed path drops the note, or the errored-case reason does not
+    name the primary's cause as the wrong-answerer reason does."""
     case = _golden()["claude_api_lit_ratelimit"]
     primary = _Gemini(fail=lambda s, _u: _503() if s is CallSite.answer else None)
     (judged,) = _judge_chain(
@@ -201,9 +202,48 @@ def test_when_both_providers_fail_the_failed_record_keeps_its_note(
     )
     assert ("final", "answer", [UNAVAILABLE]) in _causes(judged)
     assert (judged.error or "").startswith(
-        "answer: answer call failed (final, answer: LLMUnavailable: OpenRouter returned 503)"
+        "answer: answer call failed (final, answer: LLMUnavailable: OpenRouter returned 503; "
+        f"{UNAVAILABLE})"
     )
-    assert "UNAVAILABLE" not in (judged.error or "")
+
+
+def test_the_recorded_strings_are_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red when: a configured secret in a recorded string (the model label) reaches the report."""
+    case = _golden()["claude_api_lit_ratelimit"]
+    primary = _fail_on(case.question)
+    primary._model = "placeholder-x"  # the run's configured Gemini key, as a model label
+    (judged,) = _judge_chain(monkeypatch, [case], primary)
+    (note,) = next(c["primary_failures"] for c in judged.model_calls if c["primary_failures"])
+    assert note["kind"] == "http_status"  # partner: the note was recorded
+    assert "placeholder-x" not in json.dumps(judged.model_calls)
+
+
+@pytest.mark.parametrize(("router_key", "applicable"), [("or-test", True), (None, False)])
+def test_applicable_follows_whether_the_main_client_has_a_fallback(
+    monkeypatch: pytest.MonkeyPatch, router_key: str | None, applicable: bool
+) -> None:
+    """Red when: ``applicable`` is constant, not read from the main client the run built."""
+    from app.llm.factory import build_metered_llm_client
+
+    def _build(settings: Settings) -> Any:
+        return build_metered_llm_client(settings) if settings.llm_provider == "gemini" else _Judge()
+
+    async def _no_cases(*_a: Any, **_k: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(runner_mod, "build_metered_llm_client", _build)
+    monkeypatch.setattr(runner_mod, "_judge_cases", _no_cases)
+    monkeypatch.setattr(runner_mod, "get_llm_client", lambda settings=None: _Judge())
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        llm_provider="gemini",
+        gemini_api_key="g-test",
+        openrouter_api_key=router_key,
+        eval_judge_model=GRADER,
+        eval_judge_timeout_seconds=60.0,
+    )
+    summary = asyncio.run(runner_mod.run_eval_async(ids=IDS[:1], settings=settings))
+    assert summary["judge"]["primary_failures"]["applicable"] is applicable
 
 
 def test_a_cache_replay_of_a_fallback_answer_carries_the_writers_cause(
@@ -344,7 +384,9 @@ def test_end_to_end_the_causes_reach_every_output_and_no_body_text_does(
     assert spend_export.main(["--out", str(out), "--report", str(report)]) == 0
     export = out.read_text(encoding="utf-8")
     per_model = json.loads(export)["primary_failures"][ANSWER_MODEL]
-    assert (per_model["by_cause"], per_model["calls"]) == (block["by_cause"], block["count"])
+    assert (per_model["by_cause"], per_model["failures"]) == (block["by_cause"], block["count"])
+    # Never folded into the failed calls: every answer here was served, none failed.
+    assert ANSWER_MODEL not in json.loads(export)["observed_failures"]
     assert f"primary failures of {ANSWER_MODEL}" in capsys.readouterr().out
 
     # The leak check, with its partners: the marker was in the body, saves were seen.

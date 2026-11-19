@@ -149,8 +149,10 @@ def _tally(
 
 def primary_failures(report: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """The primary calls the fallback answered (or failed after), by primary model,
-    in both passes: their count, causes and total duration (#576). Never folded
-    into ``observed_failures``: those calls left no row and are reported apart."""
+    in both passes: ``failures`` (the number of records, as the report's
+    ``judge.primary_failures.count``), causes and total measured duration (#576).
+    Never folded into ``observed_failures``: those calls left no row and are
+    reported apart."""
     found: dict[str, dict[str, Any]] = {}
     sections = [(report or {}).get("judge") or {}]
     sections.append((((report or {}).get("fallback") or {}).get("judge")) or {})
@@ -160,9 +162,9 @@ def primary_failures(report: dict[str, Any] | None) -> dict[str, dict[str, Any]]
                 for note in call.get("primary_failures") or []:
                     model = str(note.get("model") or "unknown")
                     entry = found.setdefault(
-                        model, {"calls": 0, "by_cause": Counter(), "seconds": 0.0}
+                        model, {"failures": 0, "by_cause": Counter(), "seconds": 0.0}
                     )
-                    entry["calls"] += 1
+                    entry["failures"] += 1
                     entry["by_cause"][cause_key(note)] += 1
                     entry["seconds"] += float(note.get("duration_seconds") or 0.0)
     return {
@@ -270,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         f"unpriced rows {totals['unpriced_rows']}, estimated-token rows "
         f"{totals['tokens_estimated_rows']}; observed failures {export['observed_failures']}; "
         f"refused by the cap {export['refused_by_cap']}; primary failures "
-        f"{ {m: p['calls'] for m, p in export['primary_failures'].items()} }"
+        f"{ {m: p['failures'] for m, p in export['primary_failures'].items()} }"
     )
     for model, found in export["primary_failures"].items():
         print(f"  primary failures of {model}: {found['by_cause']}")
