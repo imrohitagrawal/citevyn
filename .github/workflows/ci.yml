@@ -342,20 +342,25 @@ jobs:
     # Bound the whole job: an LLM-judged gate is inherently non-deterministic (transient
     # 429/5xx, per-call retries), so cap wall-clock rather than ride the 6h default.
     #
-    # The eval step's limit must cover the slowest measured day replayed under
-    # TODAY's grader timeout (CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS below), not that day's
-    # own duration: a run measured under a shorter grader timeout understates it.
-    # The slowest counted run (2026-11-08, run 42460602450) took 25.0 min with the
-    # grader at 15 s, and 22 grader calls timed out. At 60 s each of those calls can
-    # wait 45 s more (16.5 min), and the 22 second grading calls they skipped can each
-    # take up to 60 s (22.0 min): 25.0 + 16.5 + 22.0 = 63.5 min, so the step gets 64
-    # and the job 68 (4 more for setup and the report upload). The grader check
-    # (#598 Step 3, the `grader_check` input) makes up to 528 grader calls instead of
-    # 252 and keeps 240 and 245. backend/tests/test_eval_limits_cover_grader_timeout.py
-    # recomputes the estimate from the timeout, so changing one without the other
-    # fails. This is an estimate of one measured day, not a bound on every day; a
-    # runner deadline that stops before the step limit is the lasting fix. The
-    # switch-off job must fit the release wait in scripts/wait_for_judged_eval.sh
+    # The runner stops itself before the eval step's limit, so that limit is only a
+    # backstop. After its deadline D (CITEVYN_EVAL_DEADLINE_SECONDS below) it starts
+    # no new probe cell, case or pass; the case still running may grade for the
+    # budget G (CITEVYN_EVAL_GRADING_BUDGET_SECONDS); the report says stopped and the
+    # step exits 1. Every answer call is capped at 120 s
+    # (CITEVYN_EVAL_CALL_TOTAL_TIMEOUT_SECONDS) and every grader call at the grader
+    # timeout, so the overrun past D is one case plus teardown:
+    #   D = step x 60 - S - C - T
+    # S = 63 s of start-up before the runner's clock starts, C = 3 calls x 120 s + G
+    # = 540 s for the one case still running, T = 120 s of teardown (the constants and
+    # how each was measured are in backend/tests/eval/runner.py). G = 180 s: the
+    # largest grading panel, 2 calls x 60 s, + 60 s.
+    #   Switch-off path:   step 64 min:  D = 3840 - 63 - 540 - 120 = 3117 s.
+    #   Grader-check path: step 240 min: D = 14400 - 63 - 540 - 120 = 13677 s.
+    # The step gets 64 and the job 68 (4 more for setup and the report upload); the
+    # grader check (#598 Step 3, the `grader_check` input) keeps 240 and 245.
+    # backend/tests/test_eval_limits_cover_grader_timeout.py checks D + S + C + T
+    # against the step limit on every kind of run, with the values Settings loads.
+    # The switch-off job must fit the release wait in scripts/wait_for_judged_eval.sh
     # (TOTAL_TIMEOUT_SECONDS, 75 min) after the `test` job (6 min 57 s measured
     # 2026-11-17): 68 + 7 = 75, no margin; the grader-check job fits the 250 minutes
     # of the UTC day its runner demands.
@@ -508,6 +513,13 @@ jobs:
       # Bound CI cost: 1 standard rubric framing + the adversarial veto = 2 judge
       # calls per case per pass.
       CITEVYN_EVAL_JUDGE_PANEL: "1"
+      # The runner's own deadline, grading budget and answer-call total (derived in
+      # the job's header comment). The grader-check path exports its own deadline
+      # in the eval step. Literals only: an expression here renders empty on push
+      # and tag runs, and an empty value makes Settings refuse to load.
+      CITEVYN_EVAL_DEADLINE_SECONDS: "3117"
+      CITEVYN_EVAL_GRADING_BUDGET_SECONDS: "180"
+      CITEVYN_EVAL_CALL_TOTAL_TIMEOUT_SECONDS: "120"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -538,8 +550,8 @@ jobs:
       - name: Judged eval — MIN_MEAN_JUDGE + groundedness + injection gates (--postgres)
         if: steps.guard.outputs.run == 'true'
         working-directory: backend
-        # The slow-day estimate under today's grader timeout (see the job's comment),
-        # and below the job's 68 (245 with the grader check), so a run cut short still
+        # A backstop above the runner's own deadline (see the job's comment), and
+        # below the job's 68 (245 with the grader check), so a run cut short still
         # leaves time for the always() upload step to save the report written after
         # each case.
         timeout-minutes: ${{ inputs.grader_check && 240 || 64 }}
@@ -565,6 +577,8 @@ jobs:
           if [ "${GRADER_CHECK}" = "true" ]; then
             export CITEVYN_EVAL_PASSAGE_GRADING=true
             export CITEVYN_COST_HARD_DAILY_USD=0.43
+            # The grader-check step's own deadline (the job's header comment).
+            export CITEVYN_EVAL_DEADLINE_SECONDS=13677
           else
             # The capped baseline: only a dispatch that ticks the `capped_baseline`
             # input, read once from the event payload (push and tag runs have no

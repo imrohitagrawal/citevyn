@@ -1654,12 +1654,28 @@ class _Deadline:
         return False
 
 
-# Deadline sizing (Amendment A5 of the runner-deadline plan), pinned on every CI
-# rendering by tests/test_eval_limits_cover_grader_timeout.py:
-#   D + S + C + T <= the eval step's limit, C = calls x the call total + G.
-# MEASURED_PLACEHOLDER
-DEADLINE_STARTUP_SLACK_SECONDS = 120
-DEADLINE_MAX_ANSWER_CALLS_PER_CASE = 1
+# How ci.yml sizes the deadline D of each judged path: D + S + C + T must fit the
+# eval step's limit, where C = the most answer-client calls one case makes x the
+# per-call total + the grading budget G. Checked on every kind of CI run, with the
+# values Settings loads, by tests/test_eval_limits_cover_grader_timeout.py.
+#
+# S: start-up before the runner's clock starts (the step's shell, uv, imports,
+# Settings and the parity check), + 60 s. Measured on the #598 Step 4 run,
+# 2026-11-19, GitHub Actions run 44600158315, from its eval step's log timestamps:
+# the step started at 19:42:00.7 and the first embedding response (a call made
+# inside ``run_eval_async``, after its clock starts) was logged at 19:42:03.1, so
+# start-up took at most 2.4 s, rounded up to 3 s: 3 + 60 = 63.
+DEADLINE_STARTUP_SLACK_SECONDS = 63
+# The most calls through the answer client (answer and condense calls alike, each
+# capped by the same total) that one case made in that run's report: 3, by
+# case followup_gemini_credfile_contentnoun in both passes (2 answer calls and 1
+# condense call); every other case made at most 2. In the same log, no HTTP
+# response came more than 4.3 s after the line before it (Gemini answer calls at
+# most 2.6 s), so the 120 s per-call total sits far above every answer call seen.
+DEADLINE_MAX_ANSWER_CALLS_PER_CASE = 3
+# Teardown after the last case: the clients' and the session's close, the final
+# report writes and the recorded-spend read (SPEND_READ_TIMEOUT_SECONDS). Not
+# measured: the plan's fixed reserve of 120 s.
 DEADLINE_TEARDOWN_RESERVE_SECONDS = 120
 
 
