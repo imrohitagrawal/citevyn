@@ -4,8 +4,8 @@ grader timeout's measured latency.
 Written before the implementation (test designer). The rendered behaviour of every
 kind of run (which caps reach Settings, when the spend is exported) is in
 ``test_grader_check_ci.py``; this module pins the one line a new owner approval may
-change, and the comment's measured figures. The job and step limits are 55/50 on
-both paths, from measured runs (``test_the_limits_are_the_measured_ones``).
+change, and the comment's measured figures. The job and step limits are 68/64 off and
+245/240 on, from the slow-day estimate (``test_the_limits_are_the_measured_ones``).
 
 Each test names the change that turns it red.
 """
@@ -145,11 +145,10 @@ def test_the_cap_reaches_the_script_never_through_env() -> None:
 
 
 def test_the_limits_are_the_measured_ones() -> None:
-    """Red when: a limit moves away from the rule in the job's comment in ci.yml
-    (twice the slowest counted run, rounded up to 5 minutes, the job at least 5
-    above its step: job 55, eval step 50 on both paths)."""
-    assert _conditional(_job()["timeout-minutes"]) == (55, 55)
-    assert _conditional(_eval_step()["timeout-minutes"]) == (50, 50)
+    """Red when: a limit moves away from the slow-day estimate in the job's comment
+    in ci.yml (job 68 / step 64 off, 245 / 240 with the grader check)."""
+    assert _conditional(_job()["timeout-minutes"]) == (245, 68)
+    assert _conditional(_eval_step()["timeout-minutes"]) == (240, 64)
 
 
 def test_the_grader_timeout_comment_gives_step_3s_measured_latency() -> None:
