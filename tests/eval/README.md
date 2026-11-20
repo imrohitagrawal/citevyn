@@ -268,7 +268,11 @@ backstop. Three settings, all eval-only (production holds none of them, and
   each answer-client call. The production clients have only a per-read timeout, so a
   provider sending a byte now and then is never cut off; the eval's own wrapper
   (`AttributingLLM`) adds the total. Grader calls use the grader timeout as their total. A
-  call cut off raises `CallTotalTimeout` and is recorded as a failed call.
+  call cut off raises `CallTotalTimeout` and is recorded as a failed call. It is an
+  `LLMUnavailable` of kind `timeout`, so it is handled as the provider's own read timeout
+  would be: a cut grader call is `judge_unavailable` and counts against the judge-coverage
+  floor (not a harness error), and a cut #208 retry keeps the first refusal, as in
+  production.
 
 **A harness-only difference.** The answer call's total limit wraps the whole client, the
 spend meter and the fallback inside it included. So when it fires on an answer call, the
@@ -278,8 +282,11 @@ records it as an answer error.
 
 **Spend that may be unrecorded.** A call cut off by its total limit may already have been
 answered (and paid for) when the cut stopped the meter writing its spend row. Every such
-call carries `spend_may_be_unrecorded: true` in its `model_calls` or `grader_calls` entry,
-and each pass's `judge.spend_may_be_unrecorded` counts them.
+call carries `spend_may_be_unrecorded: true` in its `model_calls`, `grader_calls` or
+`passage_grader_calls` entry, and each pass's `judge.spend_may_be_unrecorded` counts them:
+that pass's answer-client calls, blind-grader calls and passage-grader calls. The grader
+check's probe calls are flagged the same way in `grader_check.probe.calls` but are not in
+any pass's count.
 
 **When it stops.** The report's top-level `stopped` says why (`reason: "deadline"`, the line,
 the deadline and budget, where it stopped, `not_run` per pass and the `over_budget` case
@@ -287,6 +294,8 @@ ids); it is `null` on a run that was not stopped, and top-level `deadline` holds
 it ran under (or `null`). The stop is also a run-level `deadline` harness error, the pass it
 stopped is not in `passes_completed`, the first gate failure is `runner deadline: ...`,
 `EVAL STOPPED AT THE RUNNER DEADLINE` is printed even under `--quiet`, and the run exits 1.
+A run whose last case finishes after the deadline, with every case of every pass done, is
+not marked stopped: nothing was cut.
 
 **How CI sizes it.** `ci.yml`'s judged job derives D from the step limit:
 D = step x 60 - S - C - T, with S the measured start-up before the runner's clock starts
@@ -300,7 +309,10 @@ the values Settings loads.
 **Known limits.** The embedder calls (the retrieval half and the judged half's query
 embeddings) have no total limit, and nothing bounds a hang there or in teardown (a client
 or session close, the final report write) except the CI step limit, as before. The sizing
-rests on one recorded run's start-up time and call counts.
+rests on one recorded run's start-up time and call counts. Outside CI a deadline can be set
+without `CITEVYN_EVAL_CALL_TOTAL_TIMEOUT_SECONDS`; that removes the bound on how far an
+answer call can run past the deadline. CI always sets both, and a test checks every judged
+rendering.
 
 The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
 **only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so

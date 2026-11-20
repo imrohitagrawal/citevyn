@@ -1688,7 +1688,7 @@ DEADLINE_STARTUP_SLACK_SECONDS = 63
 DEADLINE_MAX_ANSWER_CALLS_PER_CASE = 3
 # Teardown after the last case: the clients' and the session's close, the final
 # report writes and the recorded-spend read (SPEND_READ_TIMEOUT_SECONDS). Not
-# measured: the plan's fixed reserve of 120 s.
+# measured: a fixed reserve of 120 s.
 DEADLINE_TEARDOWN_RESERVE_SECONDS = 120
 
 

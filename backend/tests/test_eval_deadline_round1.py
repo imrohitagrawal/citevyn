@@ -272,7 +272,10 @@ def test_the_passage_panel_recorder_gets_the_judge_timeout_as_its_total(
     (case,) = summary["judge"]["cases"]
     assert case["score"] == 4  # partner: the blind panel graded
     assert "CallTotalTimeout" in (case["passage_error"] or ""), case["passage_error"]
-    assert any(c.get("spend_may_be_unrecorded") for c in case["passage_grader_calls"])
+    flagged = [c for c in case["passage_grader_calls"] if c.get("spend_may_be_unrecorded")]
+    assert flagged
+    # The pass's count includes passage-grader calls (tests/eval/README.md says so).
+    assert summary["judge"]["spend_may_be_unrecorded"] == len(flagged)
 
 
 def test_the_probe_recorder_gets_the_judge_timeout_as_its_total(

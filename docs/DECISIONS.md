@@ -19,9 +19,10 @@ asking the owner anything; the answer may already be here.
 ---
 
 ### 2026-11-20 — A judged run that reaches its deadline stops and fails
-The judged runner now has its own deadline, set a few minutes under the CI step
-limit. After it, no new paid case starts; the report keeps every finished case,
-is marked stopped, and the run exits non-zero. The owner chose stop-and-fail over
+The judged runner now has its own deadline, set about twelve minutes under the CI
+step limit, leaving room for start-up, one more case and teardown. After it, no new
+paid case starts; the report keeps every finished case, is marked stopped, and the
+run exits non-zero. The owner chose stop-and-fail over
 letting a stopped run pass on the cases it finished, and over no deadline, knowing
 that a run slow enough to reach the deadline is then cut short after spending on
 the cases it reached. The CI step limit stays as a backstop.
