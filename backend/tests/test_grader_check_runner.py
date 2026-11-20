@@ -100,6 +100,11 @@ TODAY_TOP = {
     # #598 Step 4: which corpus each half ran on, and the answer index's size.
     "corpus",
     "index_chunks",
+    # The runner's deadline: why the run stopped (None when it was not stopped),
+    # and the deadline it ran under (None without one).
+    # RED WHEN: a written report lacks either key (test_switch_off_report_keys_...).
+    "stopped",
+    "deadline",
 }
 TODAY_CASE = {
     "adversarial_score",
