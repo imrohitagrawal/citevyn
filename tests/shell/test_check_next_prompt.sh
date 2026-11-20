@@ -71,6 +71,19 @@
 #                       instruction (verbatim-inside-a-path)
 #   words-names-*     — the refusal echoing the line, naming no line, or naming
 #                       the block's first line instead of the phrase's line
+#   kickoff-fails-*   — kickoff_line_ok returning True always (or its problem not reported), matching a line other
+#                       than the last non-blank one (trailing-fence, line-before-last,
+#                       trailing-comment), loosening the "Read " start (no-read,
+#                       readme, lowercase-read), or checking less than the whole end
+#                       phrase or only that it appears (phrase-cut, phrase-start-changed,
+#                       text-after-phrase)
+#   kickoff-passes-*  — kickoff_line_ok returning False always, not stripping spaces
+#                       around the line (indented, trailing-spaces), or reading the
+#                       literal last line instead of the last non-blank one
+#                       (trailing-blank-lines, crlf)
+#   passes-good-prompt and every other passing case — the kickoff rule not met by GOOD;
+#                       every fails-* case — a failure caused only by the kickoff line
+#                       counted as the case's own failure (fail-kickoff-only)
 
 set -euo pipefail
 
@@ -80,7 +93,9 @@ FAIL=0
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
-GOOD='# Session prompt: example
+KICKOFF='Read ~/notes/example/NEXT-SESSION-PROMPT.md and follow it exactly. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round.'
+
+BASE='# Session prompt: example
 
 **Process:** every item is built by .claude/skills/citevyn-delivery/SKILL.md.
 
@@ -95,13 +110,25 @@ Nothing paid.
 
 ## End of session
 1. Status block.'
+GOOD="${BASE}
+
+${KICKOFF}"
 
 _case() {
   # _case <label> <expected pass|fail> <prompt text, or "-" for no prompt file>
   local label="$1" want="$2" text="$3" root got
   root="$(mktemp -d "${WORK}/root.XXXXXX")"
   if [ "$text" != "-" ]; then printf '%s\n' "$text" > "${root}/NEXT-SESSION-PROMPT.md"; fi
-  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >/dev/null; then got=pass; else got=fail; fi
+  # A fail counts only when some problem other than the kickoff line is named, so
+  # appending text after GOOD (which pushes the kickoff line off the end) cannot
+  # make a case pass for the wrong reason. The kickoff rule has _kickoff_case.
+  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >"${root}/out" 2>&1; then
+    got=pass
+  elif grep '^  - ' "${root}/out" | grep -qv 'kickoff line'; then
+    got=fail
+  else
+    got=fail-kickoff-only
+  fi
   _record "$label" "$want" "$got"
 }
 
@@ -134,6 +161,23 @@ _with_item() {
   printf '%s\n' "$GOOD" | python3 -c 'import sys; print(sys.stdin.read().replace("1. Something.", sys.argv[1]), end="")' "$1"
 }
 
+
+_kickoff_case() {
+  # _kickoff_case <label> <expected pass|fail> <prompt text>: a fail must name the
+  # kickoff line, so it cannot pass for another reason (a missing section).
+  local label="$1" want="$2" text="$3" root got
+  root="$(mktemp -d "${WORK}/kick.XXXXXX")"
+  printf '%s' "$text" > "${root}/NEXT-SESSION-PROMPT.md"
+  if python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" >"${root}/out" 2>&1; then
+    got=pass
+  elif grep -q "kickoff line" "${root}/out"; then
+    got=fail
+  else
+    got=fail-other
+  fi
+  _record "$label" "$want" "$got"
+}
+
 _names_line() {
   # _names_line <label> <item text> <text on the expected line>: the refusal names
   # that line's number and never echoes the item's words.
@@ -141,7 +185,7 @@ _names_line() {
   root="$(mktemp -d "${WORK}/words.XXXXXX")"
   _with_item "$item" > "${root}/NEXT-SESSION-PROMPT.md"
   line="$(grep -nF -- "$marker" "${root}/NEXT-SESSION-PROMPT.md" | cut -d: -f1)"
-  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" || true)"
+  out="$(python3 "$CHECK" --file "${root}/NEXT-SESSION-PROMPT.md" 2>/dev/null || true)"
   if printf '%s' "$out" | grep -q "line ${line}:" && ! printf '%s' "$out" | grep -qF -- "$marker"; then
     _record "$label" pass pass
   else
@@ -310,6 +354,52 @@ _case "words-passes-entry-number" pass "$(_with_item "1. Tell the owner their an
 _names_line "words-names-line-not-text" '1. Record verbatim as the next change-log row.' 'next change-log row'
 _names_line "words-names-wrapped-phrase-line" "1. Copy the text into the
    public change log verbatim." 'public change log verbatim'
+
+# The kickoff line: the last non-blank line the owner pastes to start the next session.
+_kickoff_case "kickoff-passes-good" pass "$BASE
+$KICKOFF
+"
+_kickoff_case "kickoff-passes-indented" pass "$BASE
+   $KICKOFF"
+_kickoff_case "kickoff-passes-trailing-spaces" pass "$BASE
+$KICKOFF   "
+_kickoff_case "kickoff-passes-trailing-blank-lines" pass "$BASE
+$KICKOFF
+
+
+
+"
+_kickoff_case "kickoff-fails-missing" fail "$BASE
+"
+_kickoff_case "kickoff-fails-line-before-last" fail "$BASE
+$KICKOFF
+Thanks."
+_kickoff_case "kickoff-fails-trailing-fence" fail "$BASE
+\`\`\`
+$KICKOFF
+\`\`\`
+"
+_kickoff_case "kickoff-fails-no-read" fail "$BASE
+Please read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem) and for every review round."
+_kickoff_case "kickoff-fails-phrase-cut" fail "$BASE
+Read the prompt. Use a workflow for planning (independent drafts, plan review, pre-mortem)."
+_kickoff_case "kickoff-passes-crlf" pass "$(printf '%s\r\n%s\r\n' "$BASE" "$KICKOFF")"
+_kickoff_case "kickoff-fails-readme" fail "$BASE
+Readme ${KICKOFF#Read }"
+_kickoff_case "kickoff-fails-lowercase-read" fail "$BASE
+read ${KICKOFF#Read }"
+_kickoff_case "kickoff-fails-phrase-start-changed" fail "$BASE
+${KICKOFF/Use a workflow for planning/Use a plan for planning}"
+_kickoff_case "kickoff-fails-text-after-phrase" fail "$BASE
+$KICKOFF Thanks."
+# An unclosed fence: the rule reads raw text, so the line still counts (the owner
+# pastes the raw last line).
+_kickoff_case "kickoff-passes-inside-unclosed-fence" pass "$BASE
+\`\`\`
+$KICKOFF"
+_kickoff_case "kickoff-fails-trailing-comment" fail "$BASE
+$KICKOFF
+<!-- end -->"
 
 _root_case "root-passes-without-prompt-files" pass README.md AGENTS.md
 _root_case "root-fails-next-session-prompt" fail README.md NEXT-SESSION-PROMPT.md

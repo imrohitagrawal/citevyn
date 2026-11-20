@@ -26,6 +26,14 @@ Markdown parser: it guards against a session forgetting a section, not against
 someone hiding one on purpose inside raw HTML. Setext headings (text underlined
 with `---`) are not recognised; write `## `.
 
+`--file` also requires the prompt to end with its kickoff line: the line the
+owner pastes to start the next session. The last non-blank line, stripped of
+surrounding spaces, must start with `Read ` and end with the sentence in
+`KICKOFF_END` ("Use a workflow for planning (independent drafts, plan review,
+pre-mortem) and for every review round."); a trailing fence, comment or any other
+line after it fails, because the owner pastes the last line. Raw text is read, so
+a line inside an unclosed fence still counts. The path in the line is not checked.
+
 Standard library only. Exit 1 on any problem.
 """
 
@@ -44,6 +52,12 @@ REQUIRED_SECTIONS: tuple[str, ...] = (
     "Items",
     "Approvals",
     "End of session",
+)
+
+#: How the kickoff line must end (it must also start with "Read ").
+KICKOFF_END = (
+    "Use a workflow for planning (independent drafts, plan review, pre-mortem) "
+    "and for every review round."
 )
 
 #: A fence opens at the start of a line, or right after a list marker
@@ -256,6 +270,11 @@ def file_problems(path: Path) -> list[str]:
     for section in REQUIRED_SECTIONS:
         if not shows_section(shown, section):
             found.append(f"{path.name} has no visible '## {section}' heading")
+    if not kickoff_line_ok(text):
+        found.append(
+            f"{path.name} does not end with its kickoff line: the last non-blank line "
+            f"must start with 'Read ' and end with '{KICKOFF_END}'"
+        )
     found.extend(
         f"{path.name} line {number}: may tell a session to copy the owner's own words; "
         "restate the decision plainly, or use the one allowed sentence on its own: "
@@ -264,6 +283,13 @@ def file_problems(path: Path) -> list[str]:
         for number in owner_words_lines(text)
     )
     return found
+
+
+def kickoff_line_ok(text: str) -> bool:
+    """Whether the raw text's last non-blank line is the kickoff line."""
+    lines = [line.strip() for line in text.replace("\r\n", "\n").split("\n")]
+    last = next((line for line in reversed(lines) if line), "")
+    return last.startswith("Read ") and last.endswith(KICKOFF_END)
 
 
 def root_prompts(root: Path) -> list[str]:
