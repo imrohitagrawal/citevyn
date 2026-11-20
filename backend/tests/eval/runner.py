@@ -252,7 +252,7 @@ async def _judge_session(settings: Settings, *, postgres: bool):
             yield session
 
 
-class CallTotalTimeout(Exception):
+class CallTotalTimeout(LLMUnavailable):
     """A judged-run call that ran past its own total time limit.
 
     The production clients have only a per-read timeout, so a provider that keeps
@@ -261,7 +261,19 @@ class CallTotalTimeout(Exception):
     ``eval_judge_timeout_seconds`` for the grader), so one call cannot hold the run
     past its deadline. An ``Exception``, never a ``CancelledError``: the case's own
     handler records it like any failed call.
+
+    An :class:`~app.llm.errors.LLMUnavailable` of kind ``timeout``, so it is handled
+    exactly as the provider's own read timeout it stands in for: a cut grader call
+    is ``judge_unavailable`` and counts against the judge-coverage floor, not a
+    harness error; a cut #208 retry keeps the first refusal, as in production.
     """
+
+    def __init__(self, total: float) -> None:
+        super().__init__(
+            f"the call ran past its total limit of {total:g} s (CallTotalTimeout)",
+            kind="timeout",
+            reason="CallTotalTimeout",
+        )
 
 
 async def _within_total(call: Awaitable[_T], total: float | None) -> _T:
@@ -275,7 +287,8 @@ async def _within_total(call: Awaitable[_T], total: float | None) -> _T:
             return await call
     except TimeoutError as exc:
         if limit.expired():
-            raise CallTotalTimeout(f"the call ran past its total limit of {total:g} s") from exc
+            assert total is not None  # only a set limit can expire
+            raise CallTotalTimeout(total) from exc
         raise
 
 
