@@ -246,6 +246,62 @@ half's embeddings included) unless `CITEVYN_EVAL_JUDGE_MODEL` is set with its
 and `CITEVYN_EVAL_JUDGE_PANEL` and a grader that is also an answer model are checked before
 then too. `--no-judge` runs without one.
 
+### The runner's own deadline
+
+A judged run can stop itself cleanly before the CI step limit, so that limit is only a
+backstop. Three settings, all eval-only (production holds none of them, and
+`tests/eval/parity.py` checks that):
+
+- **`CITEVYN_EVAL_DEADLINE_SECONDS`** (60 to 86400): the deadline D, measured from the start
+  of `run_eval_async`, so the retrieval half counts. Once D has passed the runner starts no
+  new paid unit: it checks before each probe cell, at the top of each case and before the
+  fallback pass is built. Unset means no deadline (a local `make eval`).
+- **`CITEVYN_EVAL_GRADING_BUDGET_SECONDS`** (1 to 3600, below the deadline; set with it or not
+  at all): the budget G. The case still running at D may grade until D + G, one panel at a
+  time: a panel (blind, then passage) starts only when the time left holds all its calls at
+  the grader timeout. Otherwise no grader call is made and the case says
+  `grade: not graded, over budget` (the passage panel:
+  `not graded with passages: not graded, over budget`); the run stops after that case. The
+  runner refuses, before anything runs, a budget below one panel (`panel_size() + 1` calls x
+  `CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS`).
+- **`CITEVYN_EVAL_CALL_TOTAL_TIMEOUT_SECONDS`** (above 0, at most 600): a total time limit on
+  each answer-client call. The production clients have only a per-read timeout, so a
+  provider sending a byte now and then is never cut off; the eval's own wrapper
+  (`AttributingLLM`) adds the total. Grader calls use the grader timeout as their total. A
+  call cut off raises `CallTotalTimeout` and is recorded as a failed call.
+
+**A harness-only difference.** The answer call's total limit wraps the whole client, the
+spend meter and the fallback inside it included. So when it fires on an answer call, the
+whole call ends there: the fallback does not get a turn, unlike production, where a Gemini
+call that fails falls over to the OpenRouter fallback. It is the harness's cap, and the case
+records it as an answer error.
+
+**Spend that may be unrecorded.** A call cut off by its total limit may already have been
+answered (and paid for) when the cut stopped the meter writing its spend row. Every such
+call carries `spend_may_be_unrecorded: true` in its `model_calls` or `grader_calls` entry,
+and each pass's `judge.spend_may_be_unrecorded` counts them.
+
+**When it stops.** The report's top-level `stopped` says why (`reason: "deadline"`, the line,
+the deadline and budget, where it stopped, `not_run` per pass and the `over_budget` case
+ids); it is `null` on a run that was not stopped, and top-level `deadline` holds the deadline
+it ran under (or `null`). The stop is also a run-level `deadline` harness error, the pass it
+stopped is not in `passes_completed`, the first gate failure is `runner deadline: ...`,
+`EVAL STOPPED AT THE RUNNER DEADLINE` is printed even under `--quiet`, and the run exits 1.
+
+**How CI sizes it.** `ci.yml`'s judged job derives D from the step limit:
+D = step x 60 - S - C - T, with S the measured start-up before the runner's clock starts
+(+ 60 s), C the one case still running at D (the most answer-client calls one case made in
+a recorded run x the call total, + G) and T a 120 s teardown reserve. The constants and how
+each was measured are beside `DEADLINE_STARTUP_SLACK_SECONDS` in `runner.py`; the derivation
+of each path's D is in the job's header comment, and
+`backend/tests/test_eval_limits_cover_grader_timeout.py` checks it on every kind of run with
+the values Settings loads.
+
+**Known limits.** The embedder calls (the retrieval half and the judged half's query
+embeddings) have no total limit, and nothing bounds a hang there or in teardown (a client
+or session close, the final report write) except the CI step limit, as before. The sizing
+rests on one recorded run's start-up time and call counts.
+
 The global confidence gate's fields (`gate_top_score`, `gate_margin`, `gate_passed`) fill
 **only on Postgres**: on the hermetic SQLite run the vector arm returns before the gate, so
 they stay empty there. `backend/tests/test_eval_report_fields_pg.py` proves they fill.
@@ -257,9 +313,8 @@ every push, tag and ordinary run. In CI, run the `answer-quality-eval` job by ha
 *Run workflow*, on a branch) with **`grader_check`** ticked. Only then does the eval step export
 `CITEVYN_EVAL_PASSAGE_GRADING=true` and the spend cap `CITEVYN_COST_HARD_DAILY_USD` (set to
 the approved amount less one answer call's worst case). The job and step limits (68 and 64 minutes, 245 and 240 with the grader check)
-cover the slowest measured day replayed under today's grader timeout (the estimate is in the job's
-comment in `ci.yml`, and a test recomputes it from the timeout); the release wait (4500 s) is
-unchanged. The cap in `ci.yml` is approved for one run: each dispatch needs a fresh
+are a backstop: the grader-check path exports its own, longer runner deadline (see "The
+runner's own deadline" above); the release wait (4500 s) is unchanged. The cap in `ci.yml` is approved for one run: each dispatch needs a fresh
 approval of the owner (`docs/DECISIONS.md`, 2026-11-16). When checking a release commit by hand,
 leave `grader_check` unticked.
 
