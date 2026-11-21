@@ -252,6 +252,46 @@ async def _judge_session(settings: Settings, *, postgres: bool):
             yield session
 
 
+class CallTotalTimeout(LLMUnavailable):
+    """A judged-run call that ran past its own total time limit.
+
+    The production clients have only a per-read timeout, so a provider that keeps
+    sending a byte now and then is never cut off. The eval wraps each answer and
+    grader call in its own total (``eval_call_total_timeout_seconds``, and
+    ``eval_judge_timeout_seconds`` for the grader), so one call cannot hold the run
+    past its deadline. An ``Exception``, never a ``CancelledError``: the case's own
+    handler records it like any failed call.
+
+    An :class:`~app.llm.errors.LLMUnavailable` of kind ``timeout``, so it is handled
+    exactly as the provider's own read timeout it stands in for: a cut grader call
+    is ``judge_unavailable`` and counts against the judge-coverage floor, not a
+    harness error; a cut #208 retry keeps the first refusal, as in production.
+    """
+
+    def __init__(self, total: float) -> None:
+        super().__init__(
+            f"the call ran past its total limit of {total:g} s (CallTotalTimeout)",
+            kind="timeout",
+            reason="CallTotalTimeout",
+        )
+
+
+async def _within_total(call: Awaitable[_T], total: float | None) -> _T:
+    """Await ``call`` under its total limit (``None``: no limit). Only this limit's
+    own expiry becomes :class:`CallTotalTimeout`: an outer cancel stays a cancel,
+    and a ``TimeoutError`` raised inside the call (or by an outer timeout) stays
+    what it was."""
+    limit = asyncio.timeout(total)
+    try:
+        async with limit:
+            return await call
+    except TimeoutError as exc:
+        if limit.expired():
+            assert total is not None  # only a set limit can expire
+            raise CallTotalTimeout(total) from exc
+        raise
+
+
 class AttributingLLM:
     """An answer client that records which provider and model produced each call.
 
@@ -263,10 +303,15 @@ class AttributingLLM:
     A call that raises is recorded too, as failed, and the error re-raised
     (#598 Step 2b): the orchestrator swallows some failures (the #208 retry,
     condense, the alias check), and without this record they would vanish.
+
+    ``total_timeout_seconds`` caps each whole call, the meter and the fallback
+    inside it included (:class:`CallTotalTimeout`). Unlike production, a call cut
+    off by it gets no fallback turn: the limit is the harness's, and recorded.
     """
 
-    def __init__(self, inner: LLMClient) -> None:
+    def __init__(self, inner: LLMClient, *, total_timeout_seconds: float | None = None) -> None:
         self._inner = inner
+        self._total = total_timeout_seconds
         # One record per call, in call order: a call that returned and one that
         # raised alike, so no pairing between two lists can drift.
         self.records: list[_CallRecord] = []
@@ -280,8 +325,11 @@ class AttributingLLM:
         # so each record holds only its own call's primary failures (#576).
         with collect_primary_failures() as notes:
             try:
-                result = await self._inner.complete(
-                    system=system, user=user, max_tokens=max_tokens, temperature=temperature
+                result = await _within_total(
+                    self._inner.complete(
+                        system=system, user=user, max_tokens=max_tokens, temperature=temperature
+                    ),
+                    self._total,
                 )
                 record = _CallRecord(
                     site,
@@ -302,6 +350,7 @@ class AttributingLLM:
                         cause=exc,
                         duration_seconds=time.perf_counter() - start,
                         primary_failures=tuple(notes),
+                        spend_may_be_unrecorded=isinstance(exc, CallTotalTimeout),
                     )
                 )
                 raise
@@ -329,6 +378,9 @@ class _CallRecord:
     duration_seconds: float | None = dataclasses.field(default=None, compare=False)
     # Why the primary failed before the fallback served (or failed) this call (#576).
     primary_failures: tuple[PrimaryFailure, ...] = dataclasses.field(default=(), compare=False)
+    # The call was cut off by its total limit, possibly after the provider had
+    # answered and before the meter wrote its spend row.
+    spend_may_be_unrecorded: bool = False
 
     @property
     def failed(self) -> bool:
@@ -338,12 +390,20 @@ class _CallRecord:
 class _RecordingGrader:
     """A grader client that keeps each call's score, rationale, duration and the
     provider and model that served it (#598), so a stalled, disagreeing or
-    self-graded call can be found in the report."""
+    self-graded call can be found in the report. ``total_timeout_seconds`` caps
+    each call, as :class:`AttributingLLM`'s does; an entry it cut off carries
+    ``spend_may_be_unrecorded`` (the key is absent on every other entry)."""
 
     def __init__(
-        self, inner: LLMClient, *, tokens: bool = False, integer_only: bool = False
+        self,
+        inner: LLMClient,
+        *,
+        tokens: bool = False,
+        integer_only: bool = False,
+        total_timeout_seconds: float | None = None,
     ) -> None:
         self._inner = inner
+        self._total = total_timeout_seconds
         # With the grader check on, each entry also keeps its call's token counts.
         self._tokens = tokens
         # The grader check's passage and probe grades read a fractional score as a
@@ -366,11 +426,16 @@ class _RecordingGrader:
             entry["input_tokens"] = entry["output_tokens"] = None
         self.calls.append(entry)
         try:
-            result = await self._inner.complete(
-                system=system, user=user, max_tokens=max_tokens, temperature=temperature
+            result = await _within_total(
+                self._inner.complete(
+                    system=system, user=user, max_tokens=max_tokens, temperature=temperature
+                ),
+                self._total,
             )
         except Exception as exc:
             entry["rationale"] = f"call failed: {type(exc).__name__}: {exc}"
+            if isinstance(exc, CallTotalTimeout):
+                entry["spend_may_be_unrecorded"] = True
             if self._tokens:
                 # The grader check's export counts a call the cap refused (never
                 # sent) apart from a failure, however it was wrapped.
@@ -766,6 +831,7 @@ async def _judge_cases(
     index_counts: list[int] | None = None,
     shipped_checksums: frozenset[str] | None = None,
     shipped_passages: int | None = None,
+    deadline: _Deadline | None = None,
 ) -> list[JudgedCase]:
     """Drive each case through the orchestrator and judge the produced answer.
 
@@ -804,6 +870,11 @@ async def _judge_cases(
     (passed with it): the number of passages in the shipped checksum map; a session
     holding any other number of chunk rows is a run-level ``index`` harness error
     naming both counts, and the pass stops before any paid call.
+
+    ``deadline``: the run's own deadline and grading budget. No case starts once
+    the deadline has passed, and no grading panel starts without the budget left
+    for all its calls (that case is marked ``not graded, over budget``); either
+    way the pass ends there, with ``deadline.stopped`` set.
     """
     if isinstance(get_llm_client(settings), StubLLMClient):
         return []
@@ -821,11 +892,17 @@ async def _judge_cases(
     grader = judge_llm or judge_module.get_llm_client(settings)
     checking = settings.eval_passage_grading
     stub_grader = isinstance(grader, StubLLMClient)
-    recording_grader = None if stub_grader else _RecordingGrader(grader, tokens=checking)
+    # Each grader call's total limit is the grader's own timeout.
+    grader_total = settings.eval_judge_timeout_seconds
+    recording_grader = (
+        None
+        if stub_grader
+        else _RecordingGrader(grader, tokens=checking, total_timeout_seconds=grader_total)
+    )
     # The passage panel's calls are kept apart, so the blind grade's self-grading
     # check and its ``grader_calls`` never see them.
     passage_grader = (
-        _RecordingGrader(grader, tokens=True, integer_only=True)
+        _RecordingGrader(grader, tokens=True, integer_only=True, total_timeout_seconds=grader_total)
         if checking and not stub_grader
         else None
     )
@@ -910,6 +987,9 @@ async def _judge_cases(
                         )
                         + "; not graded with passages"
                     )
+                    return
+                if deadline is not None and not deadline.panel_fits(case.id):
+                    entry.passage_error = f"not graded with passages: {OVER_BUDGET}"
                     return
                 verdict = await judge_module.score_answer_passage_panel_async(
                     question=case.question,
@@ -1018,6 +1098,8 @@ async def _judge_cases(
                                 "primary_failures": _failure_entries(record, secrets),
                             }
                         )
+                        if record.spend_may_be_unrecorded:
+                            calls[-1]["spend_may_be_unrecorded"] = True
                         if checking and record.failed:
                             calls[-1]["refused_by_cap"] = (
                                 grader_check.budget_stop(record.cause) is not None
@@ -1233,6 +1315,11 @@ async def _judge_cases(
             # judge-coverage floor. Any other grader failure is a ``grade`` harness error.
             state.stage = "grade"
             verdict = None
+            if deadline is not None and not deadline.panel_fits(case.id):
+                _add_error(entry, f"grade: {OVER_BUDGET}")
+                if checking:
+                    entry.passage_error = f"not graded with passages: {OVER_BUDGET}"
+                return
             try:
                 verdict = await score_answer_panel_async(
                     question=case.question,
@@ -1286,6 +1373,8 @@ async def _judge_cases(
                 await _grade_with_passages(case, entry, state)
 
         for case in cases:
+            if deadline is not None and deadline.reached(case.id):
+                break
             # The case's one record, created before its savepoint and only ever added to.
             entry = JudgedCase(
                 case_id=case.id,
@@ -1381,7 +1470,7 @@ async def _judge_cases(
                 # The grader check's recorded spend, read only after the case is
                 # saved, so a slow read never holds a finished case back.
                 await after_save(list(judged))
-            if unusable:
+            if unusable or (deadline is not None and deadline.stopped is not None):
                 break
     finally:
         # Every result is already collected (and saved through ``on_case``); a
@@ -1407,6 +1496,7 @@ async def _run_probe(
     stops: list[BaseException],
     into: dict[str, Any],
     on_cell: Callable[[], Awaitable[bool]],
+    stop_now: Callable[[], bool] = lambda: False,
 ) -> bool:
     """The grader check's probe (#598 Step 3): the two fixed answers, each graded
     blind and with the fixture's Codex passages, three times each. A panel that
@@ -1417,9 +1507,16 @@ async def _run_probe(
     ``on_cell`` saves the report after each finished cell, so a run cut off
     mid-probe keeps the cells already paid for. When a save fails (``on_cell``
     returns ``False``) the probe stops before any further call and this returns
-    ``False``."""
+    ``False``. ``stop_now`` is asked before each cell (the run's deadline); when it
+    says stop, no further cell starts and this returns ``True``: nothing failed to
+    save, and the stop is the deadline's own record."""
     probe_case = {c.id: c for c in load_cases(GOLDEN_PATH)}[grader_check.PROBE_CASE_ID]
-    recorder = _RecordingGrader(grader, tokens=True, integer_only=True)
+    recorder = _RecordingGrader(
+        grader,
+        tokens=True,
+        integer_only=True,
+        total_timeout_seconds=settings.eval_judge_timeout_seconds,
+    )
     cells = into.setdefault("cells", grader_check.empty_cells())
     errors: list[dict[str, Any]] = into.setdefault("errors", [])
     # The recorder's own list, so every save holds the calls made so far.
@@ -1428,6 +1525,8 @@ async def _run_probe(
     passages = grader_check.probe_passages()
     for answer_name, answer in grader_check.ANSWERS.items():
         for mode in grader_check.MODES:
+            if stop_now():
+                return True
             for repeat in range(1, grader_check.REPEATS + 1):
                 first_call = len(recorder.calls)
                 score: int | None = None
@@ -1484,6 +1583,113 @@ async def _run_probe(
             if not await on_cell():
                 return False
     return True
+
+
+# The runner's clock. Read at call time (never bound as a default argument), so a
+# test that patches ``runner._clock`` moves every deadline check at once.
+_clock: Callable[[], float] = time.monotonic
+
+# Why a grading panel was not started (the case's ``error``, ``passage_error``).
+OVER_BUDGET = "not graded, over budget"
+
+
+class _Deadline:
+    """The judged run's own deadline D and grading budget G, on :data:`_clock`
+    from the run's start (``Settings.eval_deadline_seconds`` and
+    ``eval_grading_budget_seconds``; ``None``: no deadline).
+
+    After D no new paid unit starts: a probe cell, a case, the fallback pass. The
+    case still running at D may grade until D + G, one panel at a time, and only
+    when the time left holds every call of that panel at the grader's timeout
+    (each call is capped at it). The first stop records ``stopped`` and one
+    run-level ``deadline`` harness error; the run then starts nothing more.
+    """
+
+    def __init__(
+        self, settings: Settings, *, start: float, run_errors: list[dict[str, Any]]
+    ) -> None:
+        self.start = start
+        self.seconds = settings.eval_deadline_seconds
+        self.budget = settings.eval_grading_budget_seconds
+        self._judge_timeout = settings.eval_judge_timeout_seconds or 0.0
+        self._run_errors = run_errors
+        # The pass now running: "probe", "main" or "fallback".
+        self.pass_name = "main"
+        self.stopped: dict[str, Any] | None = None
+        self.over_budget: list[str] = []
+
+    def _stop(self, line: str, case_id: str | None) -> None:
+        if self.stopped is not None:
+            return
+        self.stopped = {
+            "reason": "deadline",
+            "line": line,
+            "deadline_seconds": self.seconds,
+            "grading_budget_seconds": self.budget,
+            "elapsed_seconds": round(_clock() - self.start, 1),
+            "at": {"pass": self.pass_name, "case": case_id},
+        }
+        self._run_errors.append({"stage": "deadline", "type": "DeadlineReached", "message": line})
+
+    def reached(self, case_id: str | None = None) -> bool:
+        """Whether the run must start nothing more: it already stopped, or the
+        deadline has passed now (which records the stop, before ``case_id``)."""
+        if self.stopped is not None:
+            return True
+        if self.seconds is None or _clock() - self.start < self.seconds:
+            return False
+        where = f"case {case_id}" if case_id is not None else f"the {self.pass_name} pass"
+        self._stop(
+            f"the run reached its {self.seconds} s deadline before {where} "
+            f"({self.pass_name}); nothing further was started",
+            case_id,
+        )
+        return True
+
+    def panel_fits(self, case_id: str) -> bool:
+        """Whether one grading panel (``panel_size() + 1`` calls, each up to the
+        grader's timeout) fits in what is left of D + G. When it does not, the case
+        is listed over budget and the run stops after it."""
+        if self.seconds is None or self.budget is None:
+            return True
+        need = (judge_module.panel_size() + 1) * self._judge_timeout
+        left = self.start + self.seconds + self.budget - _clock()
+        if left >= need:
+            return True
+        if case_id not in self.over_budget:
+            self.over_budget.append(case_id)
+        self._stop(
+            f"case {case_id} ({self.pass_name}) was {OVER_BUDGET}: {max(left, 0.0):.0f} s "
+            f"were left of the {self.seconds} s deadline plus the {self.budget} s grading "
+            f"budget, under one panel's {need:g} s; the run stopped after it",
+            case_id,
+        )
+        return False
+
+
+# How ci.yml sizes the deadline D of each judged path: D + S + C + T must fit the
+# eval step's limit, where C = the most answer-client calls one case makes x the
+# per-call total + the grading budget G. Checked on every kind of CI run, with the
+# values Settings loads, by tests/test_eval_limits_cover_grader_timeout.py.
+#
+# S: start-up before the runner's clock starts (the step's shell, uv, imports,
+# Settings and the parity check), + 60 s. Measured on the #598 Step 4 run,
+# 2026-11-19, GitHub Actions run 44600158315, from its eval step's log timestamps:
+# the step started at 19:42:00.7 and the first embedding response (a call made
+# inside ``run_eval_async``, after its clock starts) was logged at 19:42:03.1, so
+# start-up took at most 2.4 s, rounded up to 3 s: 3 + 60 = 63.
+DEADLINE_STARTUP_SLACK_SECONDS = 63
+# The most calls through the answer client (answer and condense calls alike, each
+# capped by the same total) that one case made in that run's report: 3, by
+# case followup_gemini_credfile_contentnoun in both passes (2 answer calls and 1
+# condense call); every other case made at most 2. In the same log, no HTTP
+# response came more than 4.3 s after the line before it (Gemini answer calls at
+# most 2.6 s), so the 120 s per-call total sits far above every answer call seen.
+DEADLINE_MAX_ANSWER_CALLS_PER_CASE = 3
+# Teardown after the last case: the clients' and the session's close, the final
+# report writes and the recorded-spend read (SPEND_READ_TIMEOUT_SECONDS). Not
+# measured: a fixed reserve of 120 s.
+DEADLINE_TEARDOWN_RESERVE_SECONDS = 120
 
 
 # How long a save waits for the recorded spend: a slow database connect must not
@@ -1663,6 +1869,14 @@ def _summarize(
             # Why the primary failed before the fallback served a call (#576).
             # Reported only, never gated.
             "primary_failures": _primary_failures(judged, applicable=primary_applicable),
+            # Calls cut off by their total limit (``CallTotalTimeout``): each may have
+            # been paid for without its spend row being written.
+            "spend_may_be_unrecorded": sum(
+                1
+                for j in judged
+                for c in (*j.model_calls, *j.grader_calls, *(j.passage_grader_calls or []))
+                if c.get("spend_may_be_unrecorded")
+            ),
             "grader_latency": latency,
             "declines_by_reason": dict(
                 sorted(Counter(j.decline_reason for j in judged if j.decline_reason).items())
@@ -2042,6 +2256,11 @@ def gate_failures(summary: dict[str, Any]) -> list[str]:
     never hidden behind a main-pass failure with the same text.
     """
     failures = _gate(summary, retrieval=True, answers=True)
+    stopped = summary.get("stopped")
+    if stopped:
+        # First: a stopped run's population is partial, and could otherwise pass
+        # the mean and groundedness gates on the cases it did run.
+        failures.insert(0, f"runner deadline: {stopped.get('line')}")
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b). Recorded, not raised,
     # so they cannot drop results; they still fail the run.
@@ -2096,6 +2315,8 @@ async def run_eval_async(
     ``None`` judges every case — the full-coverage default. The retrieval half
     always runs over every case regardless; it is not the expensive one.
     """
+    # The run's start on the deadline's clock: the retrieval half counts.
+    started = _clock()
     settings = settings or get_settings()
     cases = filter_cases(load_cases(golden_path), ids=ids)
     if not cases:
@@ -2123,9 +2344,20 @@ async def run_eval_async(
                 "pass --no-judge. Nothing was run and nothing was spent."
             )
         try:
-            judge_module.panel_size()
+            panel_calls = judge_module.panel_size() + 1
         except ValueError as exc:
             raise SystemExit(f"{exc}. Nothing was run and nothing was spent.") from exc
+        budget = settings.eval_grading_budget_seconds
+        timeout = settings.eval_judge_timeout_seconds
+        if budget is not None and timeout is not None and budget < panel_calls * timeout:
+            # A budget that cannot hold one panel would mark the case running at the
+            # deadline over budget every time. Both panels are this size; they are
+            # checked one at a time, so the largest single panel is the floor.
+            raise SystemExit(
+                f"CITEVYN_EVAL_GRADING_BUDGET_SECONDS={budget} cannot hold one grading "
+                f"panel: {panel_calls} grader call(s) x the {timeout:g} s grader timeout "
+                f"= {panel_calls * timeout:g} s. Nothing was run and nothing was spent."
+            )
         if settings.eval_passage_grading and not (
             settings.cost_budget_enabled
             and math.isfinite(settings.cost_hard_daily_usd)
@@ -2182,6 +2414,7 @@ async def run_eval_async(
     # Run-level harness errors: a client or session that failed to close, a
     # per-case report write that failed (#598 Step 2b).
     run_errors: list[dict[str, Any]] = []
+    deadline = _Deadline(settings, start=started, run_errors=run_errors)
     # The grader check (#598 Step 3): its probe, and every ``CostLimitReached``
     # the run saw. Reported only.
     checking = judge_available and settings.eval_passage_grading
@@ -2230,6 +2463,23 @@ async def run_eval_async(
         # the run has finished (#598 Step 2b).
         summary["in_progress"] = in_progress
         summary["harness_errors"] = list(run_errors)
+        # The runner's own deadline (``None``: none), and why the run stopped at it
+        # (``None``: it did not), with the cases each pass did not run.
+        summary["deadline"] = settings.eval_deadline_seconds
+        summary["stopped"] = (
+            None
+            if deadline.stopped is None
+            else {
+                **deadline.stopped,
+                "not_run": {
+                    "main": _not_reached(judge_cases, judged),
+                    "fallback": _not_reached(judge_cases, fallback_judged)
+                    if fallback_model is not None
+                    else [],
+                },
+                "over_budget": list(deadline.over_budget),
+            }
+        )
         summary["models"] = {
             "answer": answer_model,
             "fallback": fallback_model,
@@ -2379,7 +2629,8 @@ async def run_eval_async(
             )
 
     def _session_stopped() -> bool:
-        return any(e.get("stage") in ("session", "index") for e in run_errors)
+        # A pass the deadline stopped is not complete either.
+        return any(e.get("stage") in ("session", "index", "deadline") for e in run_errors)
 
     judged: list[JudgedCase] = []
     fallback_judged: list[JudgedCase] | None = None
@@ -2396,13 +2647,16 @@ async def run_eval_async(
             # one, wrapped so every answer is attributed to the model that wrote it.
             main_client = build_metered_llm_client(settings)
             main_fallback["applicable"] = _has_fallback(main_client)
-            main_llm = AttributingLLM(main_client)
+            main_llm = AttributingLLM(
+                main_client, total_timeout_seconds=settings.eval_call_total_timeout_seconds
+            )
             stack.push_async_callback(_close, main_llm, "main answer")
             saved = True
             if checking and judge_llm is not None:
                 # Once, before the first case, and saved at once, so a run cut off
                 # later still holds the probe and its decision.
                 probe = {"cells": grader_check.empty_cells(), "calls": [], "errors": []}
+                deadline.pass_name = "probe"
                 saved = await _run_probe(
                     judge_llm,
                     settings=settings,
@@ -2410,7 +2664,9 @@ async def run_eval_async(
                     stops=budget_stops,
                     into=probe,
                     on_cell=_probe_cell_saved,
+                    stop_now=deadline.reached,
                 )
+                deadline.pass_name = "main"
                 probe_lines = [
                     redact(line, secret_values(settings))
                     for line in grader_check.report_lines(
@@ -2432,7 +2688,7 @@ async def run_eval_async(
             # cancelled task, a step timeout) keeps everything up to its last
             # finished case; a save that fails twice stops the pass before any
             # further paid call (#598 Step 2b).
-            if saved:
+            if saved and deadline.stopped is None:
                 judged = await _judge_cases(
                     judge_cases,
                     settings=settings,
@@ -2450,6 +2706,7 @@ async def run_eval_async(
                     after_save=_spend_resave(lambda done: _assemble(done, None, [], "main"))
                     if checking
                     else None,
+                    deadline=deadline,
                 )
             if saved and _session_stopped():
                 saved = False
@@ -2462,9 +2719,14 @@ async def run_eval_async(
                     lambda: _assemble(main_done, None, ["main"]), where="after the main pass"
                 )
             if saved and fallback_model is not None:
+                deadline.pass_name = "fallback"
+                # Checked before the pass is built: after the deadline it never starts.
+                saved = not deadline.reached()
+            if saved and fallback_model is not None:
                 main_done = judged
                 fallback_llm = AttributingLLM(
-                    build_metered_llm_client(_router_settings(settings, fallback_model))
+                    build_metered_llm_client(_router_settings(settings, fallback_model)),
+                    total_timeout_seconds=settings.eval_call_total_timeout_seconds,
                 )
                 stack.push_async_callback(_close, fallback_llm, "fallback answer")
 
@@ -2494,6 +2756,7 @@ async def run_eval_async(
                     )
                     if checking
                     else None,
+                    deadline=deadline,
                 )
                 if saved and not _session_stopped():
                     passes.append("fallback")
@@ -2986,6 +3249,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{subset['limit']}). NOT judged: {', '.join(subset['dropped_ids'])}"
         )
         print("   Retrieval metrics above are unaffected (every case ran).")
+
+    # Printed even under --quiet: a stopped run is partial, whatever its scores.
+    stopped = summary.get("stopped")
+    if stopped:
+        print(redact(f"\n!! EVAL STOPPED AT THE RUNNER DEADLINE: {stopped['line']}", secrets))
 
     failures = gate_failures(summary)
     if failures:

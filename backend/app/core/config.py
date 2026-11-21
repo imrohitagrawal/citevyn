@@ -394,6 +394,19 @@ class Settings(BaseSettings):
     # the mean and every gate use the blind grade. Off by default; production
     # must keep it off (tests/eval/parity.py).
     eval_passage_grading: bool = False
+    # The judged runner's own deadline: no new paid unit (probe cell, case, the
+    # fallback pass) starts once this many seconds have passed since the run
+    # began. None: no deadline (a local run). The grading budget is how long the
+    # case still running at the deadline may keep grading after it. Set together
+    # or not at all (validator below); the runner, not Settings, refuses a budget
+    # too small for one grading panel, because the panel size is not a setting.
+    eval_deadline_seconds: int | None = Field(default=None, ge=60, le=86400)
+    eval_grading_budget_seconds: int | None = Field(default=None, ge=1, le=3600)
+    # A total time limit on each answer call in the judged run (the eval's own
+    # wrapper, not the production clients, which keep only their per-read
+    # timeout). The grader's calls use ``eval_judge_timeout_seconds`` as theirs.
+    # The upper bound also refuses inf and nan.
+    eval_call_total_timeout_seconds: float | None = Field(default=None, gt=0.0, le=600.0)
 
     @model_validator(mode="after")
     def _pair_the_grader_model_with_its_timeout(self) -> "Settings":
@@ -403,6 +416,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CITEVYN_EVAL_JUDGE_MODEL and CITEVYN_EVAL_JUDGE_TIMEOUT_SECONDS must be "
                 "set together or not at all."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _pair_the_eval_deadline_with_its_grading_budget(self) -> "Settings":
+        deadline, budget = self.eval_deadline_seconds, self.eval_grading_budget_seconds
+        if (deadline is None) != (budget is None):
+            raise ValueError(
+                "CITEVYN_EVAL_DEADLINE_SECONDS and CITEVYN_EVAL_GRADING_BUDGET_SECONDS "
+                "must be set together or not at all."
+            )
+        if deadline is not None and budget is not None and budget >= deadline:
+            raise ValueError(
+                "CITEVYN_EVAL_GRADING_BUDGET_SECONDS must be less than "
+                "CITEVYN_EVAL_DEADLINE_SECONDS."
             )
         return self
 

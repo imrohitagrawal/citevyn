@@ -101,7 +101,16 @@ FREE_TO_DIFFER = frozenset(
 # alone without a Gemini key), so presence has its own rule below.
 _CREDENTIAL = re.compile(r"(_api_key|_secret|_token|_password)$")
 # Eval-only fields, unset in production, each with its own rule below.
-MAPPED = frozenset({"eval_fallback_model", "eval_judge_model", "eval_judge_timeout_seconds"})
+MAPPED = frozenset(
+    {
+        "eval_fallback_model",
+        "eval_judge_model",
+        "eval_judge_timeout_seconds",
+        "eval_deadline_seconds",
+        "eval_grading_budget_seconds",
+        "eval_call_total_timeout_seconds",
+    }
+)
 # Eval experiments, off in production. The judged run may hold either value;
 # production must hold the default (rule below). Not in ``MAPPED``: that rule
 # needs production to hold ``None``.
